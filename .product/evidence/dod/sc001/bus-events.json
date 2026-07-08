@@ -1,0 +1,14 @@
+{
+  "db_path": "/var/folders/h9/54gktm4j4kxfd0r55wwh2phr0000gn/T/crew-sc001-bus-z1NN1o/test.db",
+  "total_events": 14,
+  "oldest_event_id": 1,
+  "newest_event_id": 14,
+  "events_by_type": {
+    "wicked.crew.dispatch.started": 6,
+    "wicked.crew.phase.gate.approved": 6,
+    "wicked.crew.session.completed": 1,
+    "wicked.crew.session.started": 1
+  },
+  "subscribers": [],
+  "providers": []
+}

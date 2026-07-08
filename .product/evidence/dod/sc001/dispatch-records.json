@@ -1,0 +1,74 @@
+[
+  {
+    "id": "38826ccf-f155-42b2-a6d8-4f434b6323dc",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "clarify",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: clarify",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:48.963Z",
+    "completed_at": "2026-07-08T00:26:49.070Z"
+  },
+  {
+    "id": "f2350f4c-4670-46d6-8a14-c15379cf26d7",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "design",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: design",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:49.073Z",
+    "completed_at": "2026-07-08T00:26:49.171Z"
+  },
+  {
+    "id": "2963a5ac-6624-4670-8cce-dd16d6cda3bf",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "test-strategy",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: test-strategy",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:49.172Z",
+    "completed_at": "2026-07-08T00:26:49.257Z"
+  },
+  {
+    "id": "d28ba771-73a1-4633-bb5e-984e7591372c",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "build",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: build",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:49.258Z",
+    "completed_at": "2026-07-08T00:26:49.400Z"
+  },
+  {
+    "id": "0e4684b0-4257-47a3-8a12-ae0616cb6356",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "test",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: test",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:49.401Z",
+    "completed_at": "2026-07-08T00:26:49.510Z"
+  },
+  {
+    "id": "156faeb1-aba1-426b-b58a-f4e331870830",
+    "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "phase_id": "ship",
+    "worker_id": "mock-worker",
+    "prompt": "Phase: ship",
+    "exit_code": 0,
+    "stdout": "{\"status\":\"ok\",\"artifact\":{\"acceptance_criteria\":[{\"id\":\"AC-001\",\"text\":\"fixture criterion\"}],\"raid_items\":[]},\"test_verdict\":\"PASS\"}",
+    "stderr": "",
+    "started_at": "2026-07-08T00:26:49.511Z",
+    "completed_at": "2026-07-08T00:26:49.679Z"
+  }
+]

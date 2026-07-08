@@ -1,0 +1,18 @@
+{
+  "cli_status": {
+    "clarify": "Approved",
+    "design": "Approved",
+    "test-strategy": "Approved",
+    "build": "Approved",
+    "test": "Approved",
+    "ship": "Approved"
+  },
+  "sqlite": {
+    "clarify": "Approved",
+    "design": "Approved",
+    "test-strategy": "Approved",
+    "build": "Approved",
+    "test": "Approved",
+    "ship": "Approved"
+  }
+}

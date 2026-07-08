@@ -1,0 +1,69 @@
+{
+  "scenario": "startup-under-3s",
+  "maps_to": [
+    "SC-007"
+  ],
+  "runs": [
+    {
+      "iteration": 0,
+      "internalStartupMs": 86,
+      "spawnToReadyMs": 362,
+      "cold": true
+    },
+    {
+      "iteration": 1,
+      "internalStartupMs": 95,
+      "spawnToReadyMs": 387,
+      "cold": false
+    },
+    {
+      "iteration": 2,
+      "internalStartupMs": 106,
+      "spawnToReadyMs": 410,
+      "cold": false
+    },
+    {
+      "iteration": 3,
+      "internalStartupMs": 123,
+      "spawnToReadyMs": 570,
+      "cold": false
+    },
+    {
+      "iteration": 4,
+      "internalStartupMs": 154,
+      "spawnToReadyMs": 596,
+      "cold": false
+    },
+    {
+      "iteration": 5,
+      "internalStartupMs": 120,
+      "spawnToReadyMs": 652,
+      "cold": false
+    },
+    {
+      "iteration": 6,
+      "internalStartupMs": 90,
+      "spawnToReadyMs": 364,
+      "cold": false
+    }
+  ],
+  "warm_median_wall_ms": 570,
+  "warm_max_wall_ms": 652,
+  "warm_median_internal_ms": 120,
+  "note": "First (cold) run pays one-time Node native-addon load + cold FS cache; steady-state is the warm median. Internal startupMs = main() start → server listening + session created.",
+  "assertions": {
+    "A_warm_median_under_3s": {
+      "pass": true,
+      "actual_ms": 570
+    },
+    "A_warm_max_under_3s": {
+      "pass": true,
+      "actual_ms": 652
+    },
+    "A_internal_under_3s": {
+      "pass": true,
+      "actual_ms": 120
+    }
+  },
+  "verdict": "PASS"
+}

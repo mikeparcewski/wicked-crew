@@ -1,0 +1,25 @@
+[
+  {
+    "id": "mock-worker",
+    "command": "node",
+    "args": [
+      "/Users/michael.parcewski/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
+      "--verdict",
+      "PASS"
+    ],
+    "timeout_ms": 10000,
+    "council_capable": true
+  },
+  {
+    "id": "mock-worker-2",
+    "command": "node",
+    "args": [
+      "/Users/michael.parcewski/Projects/wicked/wicked-crew/packages/crew/tests/fixtures/mock-worker.mjs",
+      "--verdict",
+      "PASS",
+      "--council"
+    ],
+    "timeout_ms": 10000,
+    "council_capable": true
+  }
+]

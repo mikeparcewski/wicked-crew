@@ -1,0 +1,127 @@
+[
+  {
+    "type": "wicked.crew.session.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "type": "feature"
+    },
+    "ts": "2026-07-08T00:26:48.960Z",
+    "_rxOrder": 0
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "clarify"
+    },
+    "ts": "2026-07-08T00:26:48.963Z",
+    "_rxOrder": 1
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "clarify"
+    },
+    "ts": "2026-07-08T00:26:49.072Z",
+    "_rxOrder": 2
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "design"
+    },
+    "ts": "2026-07-08T00:26:49.073Z",
+    "_rxOrder": 3
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "design"
+    },
+    "ts": "2026-07-08T00:26:49.171Z",
+    "_rxOrder": 4
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test-strategy"
+    },
+    "ts": "2026-07-08T00:26:49.172Z",
+    "_rxOrder": 5
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test-strategy"
+    },
+    "ts": "2026-07-08T00:26:49.258Z",
+    "_rxOrder": 6
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "build"
+    },
+    "ts": "2026-07-08T00:26:49.258Z",
+    "_rxOrder": 7
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "build"
+    },
+    "ts": "2026-07-08T00:26:49.400Z",
+    "_rxOrder": 8
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test"
+    },
+    "ts": "2026-07-08T00:26:49.401Z",
+    "_rxOrder": 9
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test"
+    },
+    "ts": "2026-07-08T00:26:49.511Z",
+    "_rxOrder": 10
+  },
+  {
+    "type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "ship"
+    },
+    "ts": "2026-07-08T00:26:49.511Z",
+    "_rxOrder": 11
+  },
+  {
+    "type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "ship"
+    },
+    "ts": "2026-07-08T00:26:49.679Z",
+    "_rxOrder": 12
+  },
+  {
+    "type": "wicked.crew.session.completed",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091"
+    },
+    "ts": "2026-07-08T00:26:49.680Z",
+    "_rxOrder": 13
+  }
+]

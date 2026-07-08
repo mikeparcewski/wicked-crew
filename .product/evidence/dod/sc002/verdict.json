@@ -1,0 +1,68 @@
+{
+  "scenario": "crash-and-resume",
+  "maps_to": [
+    "SC-002"
+  ],
+  "startedAt": "2026-07-08T00:27:32.312Z",
+  "assertions": {
+    "A1_pre_design_identical": {
+      "pass": true,
+      "clarify_before": [
+        {
+          "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+          "phase_id": "clarify",
+          "state": "Approved",
+          "gate_kind": "auto",
+          "blocking_raid_ids": "[]"
+        }
+      ],
+      "clarify_after": [
+        {
+          "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+          "phase_id": "clarify",
+          "state": "Approved",
+          "gate_kind": "auto",
+          "blocking_raid_ids": "[]"
+        }
+      ]
+    },
+    "A2_design_approved": {
+      "pass": true,
+      "actual": "Approved"
+    },
+    "A3_test_strategy_inprogress": {
+      "pass": true,
+      "actual": "InProgress"
+    },
+    "A4_no_duplicate_clarify": {
+      "pass": true,
+      "count": 1
+    },
+    "behavior5_resumed": {
+      "pass": true,
+      "resumed": [
+        "d252acaa-c980-42ee-a26b-aec5abe07529"
+      ]
+    },
+    "real_sigkill": {
+      "pass": true,
+      "signalCode": "SIGKILL",
+      "exitCode": null
+    }
+  },
+  "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+  "daemon1_pid": 55503,
+  "kill": {
+    "signal": "SIGKILL",
+    "exitCode": null,
+    "signalCode": "SIGKILL",
+    "at": "2026-07-08T00:27:36.000Z"
+  },
+  "daemon2_pid": 55749,
+  "daemon2_resumed": [
+    "d252acaa-c980-42ee-a26b-aec5abe07529"
+  ],
+  "approve_status": 200,
+  "verdict": "PASS",
+  "finishedAt": "2026-07-08T00:27:38.767Z"
+}

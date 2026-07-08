@@ -1,0 +1,75 @@
+{
+  "session": {
+    "id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+    "type": "feature",
+    "goal": "e2e acceptance test run",
+    "status": "completed",
+    "workers": [
+      "mock-worker"
+    ],
+    "created_at": "2026-07-08T00:26:48.957Z",
+    "updated_at": "2026-07-08T00:26:49.680Z"
+  },
+  "phases": [
+    {
+      "id": "980617e0-03d5-4cdb-935c-f91ea9722030",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "clarify",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.072Z"
+    },
+    {
+      "id": "bcd34bc2-c1d7-4b44-ba2c-78639594a4f4",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "design",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.171Z"
+    },
+    {
+      "id": "db4a111c-2f24-4a21-8eac-27a1a57d523b",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test-strategy",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.258Z"
+    },
+    {
+      "id": "ea40d827-de8d-4b1a-b3bc-8b6dbeb71140",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "build",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.400Z"
+    },
+    {
+      "id": "2ec5b70b-155b-4984-bd34-477e7cf11e30",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.511Z"
+    },
+    {
+      "id": "1e4a4e0d-6e16-4e39-bf27-b8131bf4c39b",
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "ship",
+      "state": "Approved",
+      "gate_kind": "auto",
+      "blocking_raid_ids": [],
+      "created_at": "2026-07-08T00:26:48.959Z",
+      "updated_at": "2026-07-08T00:26:49.679Z"
+    }
+  ]
+}

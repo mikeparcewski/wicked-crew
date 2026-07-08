@@ -1,0 +1,54 @@
+{
+  "scenario": "studio-connectivity",
+  "maps_to": [
+    "SC-006",
+    "SC-S01",
+    "SC-S05",
+    "SC-S06"
+  ],
+  "startedAt": "2026-07-08T00:35:11.966Z",
+  "assertions": {
+    "SC006_connect_within_5s": {
+      "pass": true,
+      "actual_ms": 68
+    },
+    "SC006_ws_open_within_5s": {
+      "pass": true,
+      "actual_ms": 17.5
+    },
+    "behavior4_first_ws_event_within_5s": {
+      "pass": true,
+      "actual_ms": 33.80000001192093
+    },
+    "SC006_live_session_visible_within_5s": {
+      "pass": true,
+      "actual_ms": 96,
+      "session_id": "78bec6b5-2d3d-4350-ac1b-bcdad13a243c"
+    },
+    "SCS06_no_horizontal_scroll_1280": {
+      "pass": true,
+      "hscroll": false
+    },
+    "SCS05_disconnected_graceful": {
+      "pass": true,
+      "reconnecting_text": "Daemon not reachable — reconnecting…"
+    },
+    "SCS05_no_react_error": {
+      "pass": true,
+      "react_errors": [],
+      "all_console_errors": []
+    }
+  },
+  "timings": {
+    "connectWallMs": 68,
+    "wsOpenMs": 17.5,
+    "wsFirstMsgMs": 33.80000001192093,
+    "sessionVisibleMs": 96
+  },
+  "screenshots": {
+    "connected": "/Users/michael.parcewski/Projects/wicked/wicked-crew/.product/evidence/dod/sc006/studio-connected-1280.png",
+    "disconnected": "/Users/michael.parcewski/Projects/wicked/wicked-crew/.product/evidence/dod/sc006/studio-disconnected.png"
+  },
+  "verdict": "PASS",
+  "finishedAt": "2026-07-08T00:35:13.395Z"
+}

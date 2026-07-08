@@ -1,0 +1,53 @@
+{
+  "scenario": "workers-hot-reload",
+  "maps_to": [
+    "SC-008"
+  ],
+  "before_worker_ids": [
+    "mock-worker"
+  ],
+  "reloadMs": 10,
+  "session_status": "completed",
+  "dispatches": [
+    {
+      "worker_id": "hot-added-worker",
+      "exit_code": 0
+    },
+    {
+      "worker_id": "hot-added-worker",
+      "exit_code": 0
+    },
+    {
+      "worker_id": "hot-added-worker",
+      "exit_code": 0
+    }
+  ],
+  "assertions": {
+    "A_reload_within_30s": {
+      "pass": true,
+      "actual_ms": 10
+    },
+    "A_dispatched_to_new_worker": {
+      "pass": true,
+      "dispatches": [
+        {
+          "worker_id": "hot-added-worker",
+          "exit_code": 0
+        },
+        {
+          "worker_id": "hot-added-worker",
+          "exit_code": 0
+        },
+        {
+          "worker_id": "hot-added-worker",
+          "exit_code": 0
+        }
+      ]
+    },
+    "A_session_completed": {
+      "pass": true,
+      "actual": "completed"
+    }
+  },
+  "verdict": "PASS"
+}

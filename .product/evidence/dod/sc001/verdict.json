@@ -1,0 +1,110 @@
+{
+  "scenario": "feature-workflow-end-to-end",
+  "maps_to": [
+    "SC-001"
+  ],
+  "startedAt": "2026-07-08T00:26:48.249Z",
+  "assertions": {
+    "A1_completed": {
+      "pass": true,
+      "actual": "completed"
+    },
+    "A2_gate_approved_per_phase_ws_ordered": {
+      "pass": true,
+      "expected": [
+        "clarify",
+        "design",
+        "test-strategy",
+        "build",
+        "test",
+        "ship"
+      ],
+      "actual_ws_order": [
+        "clarify",
+        "design",
+        "test-strategy",
+        "build",
+        "test",
+        "ship"
+      ]
+    },
+    "A2b_gate_approved_reached_bus": {
+      "pass": true,
+      "bus_phase_set": [
+        "build",
+        "clarify",
+        "design",
+        "ship",
+        "test",
+        "test-strategy"
+      ],
+      "bus_gate_approved_count": 6,
+      "note": "Set/count check — bus ordering is not asserted (async fire-and-forget emit); WS stream is ordering-authoritative."
+    },
+    "A3_no_rejected": {
+      "pass": true,
+      "states": [
+        "Approved",
+        "Approved",
+        "Approved",
+        "Approved",
+        "Approved",
+        "Approved"
+      ]
+    },
+    "A4_all_approved": {
+      "pass": true,
+      "states": {
+        "clarify": "Approved",
+        "design": "Approved",
+        "test-strategy": "Approved",
+        "build": "Approved",
+        "test": "Approved",
+        "ship": "Approved"
+      }
+    },
+    "behavior1_session_start": {
+      "pass": true,
+      "ws_event": true,
+      "sqlite_row": true,
+      "bus_count": 1
+    },
+    "behavior2_dispatch": {
+      "pass": true,
+      "count": 6,
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "behavior3_auto_gate": {
+      "pass": true,
+      "bus_gate_approved": 6
+    },
+    "behavior6_status_accuracy": {
+      "pass": true,
+      "cli": {
+        "clarify": "Approved",
+        "design": "Approved",
+        "test-strategy": "Approved",
+        "build": "Approved",
+        "test": "Approved",
+        "ship": "Approved"
+      },
+      "sqlite": {
+        "clarify": "Approved",
+        "design": "Approved",
+        "test-strategy": "Approved",
+        "build": "Approved",
+        "test": "Approved",
+        "ship": "Approved"
+      }
+    }
+  },
+  "verdict": "PASS",
+  "finishedAt": "2026-07-08T00:26:51.388Z"
+}

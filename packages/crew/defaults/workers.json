@@ -1,0 +1,9 @@
+[
+  {
+    "id": "claude",
+    "command": "claude",
+    "args": ["--print"],
+    "timeout_ms": 120000,
+    "council_capable": true
+  }
+]

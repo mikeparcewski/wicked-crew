@@ -1,0 +1,62 @@
+[
+  {
+    "id": "2964ae05-ec83-45d1-98e6-a89195dcffa6",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "clarify",
+    "state": "Approved",
+    "gate_kind": "auto",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:34.343Z"
+  },
+  {
+    "id": "5b7be5aa-3cfc-4281-b2d1-9f411943c4d9",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "design",
+    "state": "AwaitingHuman",
+    "gate_kind": "human",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:35.953Z"
+  },
+  {
+    "id": "45c5861f-a125-4d68-88b2-c06f593c3260",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "test-strategy",
+    "state": "Pending",
+    "gate_kind": "auto",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:32.742Z"
+  },
+  {
+    "id": "e3fb55d6-1222-4651-8beb-a3a47dfc397f",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "build",
+    "state": "Pending",
+    "gate_kind": "auto",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:32.742Z"
+  },
+  {
+    "id": "e90c4924-5f57-4afe-b351-d3ecf739c0ab",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "test",
+    "state": "Pending",
+    "gate_kind": "auto",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:32.742Z"
+  },
+  {
+    "id": "86cbbbaa-735b-4176-891d-4ff5a108d04d",
+    "session_id": "d252acaa-c980-42ee-a26b-aec5abe07529",
+    "phase_id": "ship",
+    "state": "Pending",
+    "gate_kind": "auto",
+    "blocking_raid_ids": "[]",
+    "created_at": "2026-07-08T00:27:32.742Z",
+    "updated_at": "2026-07-08T00:27:32.742Z"
+  }
+]

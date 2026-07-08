@@ -1,0 +1,127 @@
+[
+  {
+    "event_id": 1,
+    "event_type": "wicked.crew.session.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "type": "feature"
+    },
+    "emitted_at": 1783470410462
+  },
+  {
+    "event_id": 2,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "clarify"
+    },
+    "emitted_at": 1783470410471
+  },
+  {
+    "event_id": 3,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "clarify"
+    },
+    "emitted_at": 1783470410659
+  },
+  {
+    "event_id": 4,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "design"
+    },
+    "emitted_at": 1783470410663
+  },
+  {
+    "event_id": 5,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "design"
+    },
+    "emitted_at": 1783470410873
+  },
+  {
+    "event_id": 6,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test-strategy"
+    },
+    "emitted_at": 1783470410972
+  },
+  {
+    "event_id": 7,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test-strategy"
+    },
+    "emitted_at": 1783470411064
+  },
+  {
+    "event_id": 8,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "build"
+    },
+    "emitted_at": 1783470411085
+  },
+  {
+    "event_id": 9,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "build"
+    },
+    "emitted_at": 1783470411104
+  },
+  {
+    "event_id": 10,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test"
+    },
+    "emitted_at": 1783470411159
+  },
+  {
+    "event_id": 11,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "test"
+    },
+    "emitted_at": 1783470411186
+  },
+  {
+    "event_id": 12,
+    "event_type": "wicked.crew.dispatch.started",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "ship"
+    },
+    "emitted_at": 1783470411198
+  },
+  {
+    "event_id": 13,
+    "event_type": "wicked.crew.phase.gate.approved",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091",
+      "phase_id": "ship"
+    },
+    "emitted_at": 1783470411228
+  },
+  {
+    "event_id": 14,
+    "event_type": "wicked.crew.session.completed",
+    "payload": {
+      "session_id": "6b64ad25-6f3d-4127-a058-049d7b995091"
+    },
+    "emitted_at": 1783470411243
+  }
+]

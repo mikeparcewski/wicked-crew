@@ -1,0 +1,35 @@
+{
+  "scenario": "studio-hitl-flow",
+  "maps_to": [
+    "SC-S02",
+    "SC-S03"
+  ],
+  "startedAt": "2026-07-08T00:33:42.713Z",
+  "assertions": {
+    "SCS02_notification_within_2s": {
+      "pass": true,
+      "actual_ms": 124,
+      "gate_msg_ms": 5451.800000011921,
+      "badge_ms": 5576
+    },
+    "SCS03_approve_advances_within_3s": {
+      "pass": true,
+      "actual_ms": 11
+    },
+    "SCS03_next_phase_started": {
+      "pass": true,
+      "actual": "InProgress"
+    },
+    "no_react_error": {
+      "pass": true,
+      "console_errors": []
+    }
+  },
+  "timings": {
+    "notifyDeltaMs": 124,
+    "advanceMs": 11
+  },
+  "session_id": "f37b03b8-e83c-4f72-a642-14c1da948620",
+  "verdict": "PASS",
+  "finishedAt": "2026-07-08T00:33:49.552Z"
+}
