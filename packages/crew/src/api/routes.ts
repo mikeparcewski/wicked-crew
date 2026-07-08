@@ -1,11 +1,23 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 
 const V = '/api/v1';
+
+// Daemon version reported by /health — read from package.json so it never drifts
+// from the shipped version across releases. Resolves the package root from the
+// compiled module location (dist/api/routes.js → ../../package.json) and works the
+// same under the src layout (src/api/routes.ts → ../../package.json).
+const PKG_VERSION = (
+  JSON.parse(
+    readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
+  ) as { version: string }
+).version;
 
 // Actionable-first ordering for the run list (DES-STUDIO-001 §11.6): a run
 // awaiting a human sorts to the top; terminal runs sink.
@@ -71,7 +83,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   // Liveness — also proves the actor + event pump are up.
   app.get(`${V}/health`, async () => {
     const ping = await adapter.ping();
-    return { status: 'ok', version: '0.1.0', ping };
+    return { status: 'ok', version: PKG_VERSION, ping };
   });
 
   // Report the actually-bound port/host (honours --port / CREW_PORT / port 0).
