@@ -9,7 +9,10 @@
 #   2. packages/crew's core-ts dep is flipped `file:../../../wicked-core/crates/wicked-core-ts` → `^0.1`
 #      so a clean CI checkout resolves the native addon (+ its platform package) from npm.
 #   3. wicked-ci `@v1` is re-tagged to include `publish_working_dir` (merge feat/publish-working-dir).
-#   4. packages/crew bundles the built studio dist (packages/studio `dist/`) into its published tarball.
+#   4. DONE (v0.2.0, DES-STUDIO-SERVING-001): crew's `build` runs `scripts/bundle-studio.mjs`, which
+#      builds packages/studio and copies its `dist/` → `packages/crew/dist/studio/`. Nested under
+#      `dist/`, so the existing `files: ["dist"]` carries it in the published tarball. Because the
+#      bundle step builds studio itself, `build_cmd` stays the single crew build below (no CI change).
 #
 # os_matrix is narrowed to ubuntu+macos: the PTY terminal path is unix-first (Windows ConPTY parity is
 # a wicked-core follow-up), so crew's terminal tests aren't Windows-clean yet. Widen when it is.

@@ -1,5 +1,8 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
+import fastifyStatic from '@fastify/static';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
 import { GateCache } from './gate-cache.js';
@@ -12,7 +15,24 @@ import type { CoreAdapter } from '../core/adapter.js';
 // 127.0.0.1, so this never widens exposure beyond the local machine.
 const LOOPBACK_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
-export async function createServer(adapter: CoreAdapter): Promise<ReturnType<typeof Fastify>> {
+/**
+ * The bundled studio SPA lives at `dist/studio` next to the compiled server
+ * (`dist/api/server.js` → `../studio`). See DES-STUDIO-SERVING-001 §2.3/§3.1
+ * and `scripts/bundle-studio.mjs` which copies `packages/studio/dist` there.
+ */
+export function defaultStudioRoot(): string {
+  return fileURLToPath(new URL('../studio', import.meta.url));
+}
+
+export interface CreateServerOptions {
+  /** Override the studio asset root (tests point this at a temp fixture dir). */
+  studioRoot?: string;
+}
+
+export async function createServer(
+  adapter: CoreAdapter,
+  options?: CreateServerOptions,
+): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
   const gateCache = new GateCache();
   const terminals = new TerminalHub();
@@ -61,6 +81,54 @@ export async function createServer(adapter: CoreAdapter): Promise<ReturnType<typ
   registerTerminalWs(app, adapter, terminals);
 
   registerRoutes(app, adapter, gateCache);
+
+  // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
+  // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:
+  // static uses `wildcard: false` (only serves files that physically exist),
+  // and the SPA fallback below explicitly excludes `/api/` and `/ws`.
+  const studioRoot = options?.studioRoot ?? defaultStudioRoot();
+  if (existsSync(studioRoot)) {
+    await app.register(fastifyStatic, {
+      root: studioRoot,
+      wildcard: false,
+      // We own every Cache-Control value via setHeaders (§4.3) — disable the
+      // plugin's automatic header so it can't override us.
+      cacheControl: false,
+      index: ['index.html'],
+      setHeaders: (res, pathName) => {
+        const p = pathName.replace(/\\/g, '/');
+        if (p.endsWith('/index.html')) {
+          // HTML must revalidate so a redeploy's new asset hashes are picked up.
+          res.setHeader('Cache-Control', 'no-cache');
+        } else if (p.includes('/assets/')) {
+          // Content-addressed (hashed) assets are immutable.
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    });
+
+    // SPA deep-link fallback (§3.2): a GET that is NOT under /api/ or /ws and
+    // matched no static file returns the index.html shell (200) so client-side
+    // routes resolve. Everything else keeps normal 404/JSON behavior.
+    app.setNotFoundHandler((req, reply) => {
+      if (
+        req.method === 'GET' &&
+        !req.url.startsWith('/api/') &&
+        !req.url.startsWith('/ws')
+      ) {
+        reply.header('Cache-Control', 'no-cache');
+        // `root` is dist/studio, so the shell is at 'index.html' (not
+        // 'studio/index.html'): sendFile resolves relative to root.
+        return reply.type('text/html').sendFile('index.html');
+      }
+      return reply.code(404).send({ error: 'not found' });
+    });
+  } else {
+    // Dev / headless run without a built bundle: degrade gracefully (§3.1).
+    app.log.warn(
+      `studio bundle not found at ${studioRoot} — serving API + WS only (headless)`,
+    );
+  }
 
   return app;
 }
