@@ -7,6 +7,9 @@
   "bin": {
     "wicked-crew": "dist/cli/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
@@ -19,7 +22,7 @@
   "dependencies": {
     "@fastify/websocket": "^11.2.0",
     "fastify": "^5.0.0",
-    "wicked-core-ts": "file:../../../wicked-core/crates/wicked-core-ts",
+    "wicked-core-ts": "^0.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {
