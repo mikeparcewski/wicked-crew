@@ -1,0 +1,319 @@
+---
+/**
+ * index.astro — the wicked-crew landing page (wc.wickedagile.com).
+ * Markets wicked-crew: the external orchestration daemon that governs
+ * multi-phase AI development workflows, PLUS the browser console
+ * (wicked-studio) it serves same-origin on localhost. This site REPLACES the
+ * former standalone wicked-studio marketing site — crew is the product; studio
+ * is the browser console it serves.
+ *
+ * Consumes the shared wicked-web chrome (Base + Topbar + Footer + SameGarden);
+ * this page owns only its own content + crew.css.
+ *
+ * Honesty (per CANONICAL-MESSAGING.md, resolved 2026-07-08):
+ *  - crew = an EXTERNAL daemon + CLI; it never runs inside a coding agent and
+ *    never writes code. As of v0.2.0 the orchestration engine lives in
+ *    wicked-core; the daemon is a thin REST + WebSocket bridge over
+ *    wicked-core-ts that also bundles + serves the studio browser console.
+ *  - the studio console is a crew-served React SPA, NOT separately published
+ *    (the egui/Tauri desktop app is RETIRED — no such references here).
+ *  - v0.2.0, published to npm as `wicked-crew`.
+ */
+import Base from 'wicked-web/layouts/Base.astro';
+import Topbar from 'wicked-web/components/Topbar.astro';
+import Footer from 'wicked-web/components/Footer.astro';
+import SameGarden from 'wicked-web/components/SameGarden.astro';
+import '../styles/crew.css';
+
+const title = 'wicked-crew — the daemon that governs multi-phase AI workflows';
+const description = 'wicked-crew is a standalone external orchestrator — a daemon plus CLI — for governed, multi-phase AI development. It runs above your coding agents, never inside them, treating AI CLIs as stateless worker subprocesses while it owns the phase lifecycle (clarify → design → test-strategy → build → test → ship), deterministic deny-dominates gates with no LLM on the gate path, SQLite crash-checkpointing, and evidence. Drive it headless over CLI + REST/WS, or through the browser console it serves same-origin on localhost. Local-first, no cloud, no accounts.';
+const repo = 'https://github.com/mikeparcewski/wicked-crew';
+---
+
+<Base title={title} description={description}>
+  <Topbar pkg="wicked-crew" repo={repo} />
+
+  <!-- ── Hero ──────────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="grid-floor" aria-hidden="true"></div>
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <div class="kicker">External orchestration daemon · governed multi-phase workflows</div>
+        <h1>Own the workflow.<br><span class="y">Not the work.</span></h1>
+        <p class="lede">
+          wicked-crew is a standalone external orchestrator &mdash; a <b>daemon plus CLI</b> &mdash; for
+          governed, multi-phase AI development. It runs <b>above</b> your coding agents, never inside them,
+          and never writes code. It treats AI CLIs (<code>claude --print</code>, <code>codex run</code>,
+          wicked-testing, wicked-garden, bash) as stateless worker subprocesses while it owns the phase
+          lifecycle, the deterministic gates, the human approvals, and the evidence.
+        </p>
+        <div class="hero-tags" role="list">
+          <span role="listitem">external daemon + CLI</span>
+          <span role="listitem">deny-dominates gates</span>
+          <span role="listitem">crash-resumable</span>
+          <span role="listitem">local-first</span>
+        </div>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="#get">Run the daemon</a>
+          <a class="btn btn-ghost" href="https://github.com/mikeparcewski/wicked-crew#readme" target="_blank" rel="noopener">Read the docs &rarr;</a>
+        </div>
+      </div>
+
+      <!-- Daemon mock: goal → phase lifecycle → deterministic gate evaluation -->
+      <div class="console" aria-label="wicked-crew daemon, illustrative">
+        <div class="console-chrome">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="console-url">localhost:7701 · wicked-crew daemon</span>
+          <span class="console-conn"><span class="conn-dot"></span>running</span>
+        </div>
+        <div class="console-body daemon-body">
+          <div class="cm-head">
+            <span class="cm-goal">Migrate auth to OAuth 2.1</span>
+            <span class="cm-meta">feature · <span class="cm-status">test-strategy</span></span>
+          </div>
+
+          <div class="phase-graph" aria-hidden="true">
+            <span class="ph done">clarify</span><span class="ph-arr">→</span>
+            <span class="ph done">design</span><span class="ph-arr">→</span>
+            <span class="ph now">test-strategy</span><span class="ph-arr">→</span>
+            <span class="ph">build</span><span class="ph-arr">→</span>
+            <span class="ph">test</span><span class="ph-arr">→</span>
+            <span class="ph">ship</span>
+          </div>
+
+          <div class="gate">
+            <div class="gate-head">
+              <span class="gate-badge">gate · deny-dominates</span>
+              <span class="gate-phase">design → test-strategy · no LLM on the gate path</span>
+            </div>
+            <div class="gate-findings">
+              <span class="find pass">✓ contract</span>
+              <span class="find pass">✓ security-policy</span>
+              <span class="find pass">✓ coverage-floor</span>
+              <span class="find deny">✕ schema-drift</span>
+            </div>
+            <div class="gate-verdict">
+              <span class="gv-k">verdict</span>
+              <span class="gv-deny">DENY</span>
+              <span class="gv-note">one failing policy blocks the transition — held for human review</span>
+            </div>
+          </div>
+
+          <div class="daemon-log" aria-hidden="true">
+            <div class="dl-line"><span class="dl-arr">→</span>checkpoint written · sqlite · phase=test-strategy</div>
+            <div class="dl-line"><span class="dl-arr">→</span>worker dispatched · <span class="dl-cli">claude --print</span> · captured stdout as evidence</div>
+            <div class="dl-line dl-hi"><span class="dl-arr">→</span>council · 3 CLIs · agreement 2/3 · divergence recorded</div>
+            <div class="dl-line dl-dim"><span class="dl-arr">→</span>awaiting HITL decision<span class="dl-caret"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── The differentiator ────────────────────────────────────────────── -->
+  <section class="band">
+    <div class="wrap band-grid">
+      <div class="band-copy">
+        <div class="kicker">Why it exists</div>
+        <h2>It owns the workflow structure without owning the work.</h2>
+        <p>
+          Coding agents can plan, write, and ship &mdash; but they run alone, forget between sessions,
+          and grade their own homework. wicked-crew sits <b>above</b> them: an external, headless,
+          <b>deterministic</b> phase-gate lifecycle you can crash and resume, driving stateless AI CLIs
+          it does not embed. The gates never call an LLM, deny always dominates, and every phase leaves
+          evidence behind.
+        </p>
+      </div>
+      <ul class="band-list">
+        <li><span class="bl-k">Not</span> a plugin, a library, or an in-agent hook.</li>
+        <li><span class="bl-k">Not</span> a workflow that trusts a model to say "done."</li>
+        <li><span class="bl-k">Is</span> an external daemon + CLI on <code>localhost:7701</code>, binding <code>127.0.0.1</code> only.</li>
+        <li><span class="bl-k">Is</span> deterministic on the gate path &mdash; deny-dominates, SQLite-checkpointed, crash-resumable to the exact pre-crash phase.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ── Two ways to drive it ──────────────────────────────────────────── -->
+  <section class="ways">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">One daemon, two ways to drive it</div>
+        <h2>Same governed lifecycle. Headless, or through the browser console it serves.</h2>
+        <p class="sec-sub">
+          Every run is the same crash-resumable, deny-dominates lifecycle. Drive it from scripts and CI
+          over the CLI and REST/WS API, or open the browser console the daemon serves same-origin on
+          localhost. Nothing changes underneath &mdash; only how you reach in.
+        </p>
+      </div>
+
+      <div class="ways-grid">
+        <!-- Way 1: Headless -->
+        <article class="way">
+          <div class="way-head">
+            <span class="way-num">01</span>
+            <div>
+              <div class="way-kind">Headless</div>
+              <h3>The daemon, CLI &amp; REST/WS API</h3>
+            </div>
+          </div>
+          <p class="way-lede">
+            The engine, from a terminal or a pipeline. Start the daemon and drive the whole lifecycle
+            over the CLI or the REST + WebSocket API &mdash; no UI required.
+          </p>
+          <ul class="way-list">
+            <li><b>Governed phase lifecycle</b> &mdash; clarify → design → test-strategy → build → test → ship, one shared structure across sessions.</li>
+            <li><b>Deterministic deny-dominates gates</b> &mdash; policies evaluate with <b>no LLM on the gate path</b>; any failing policy blocks the transition.</li>
+            <li><b>SQLite crash-checkpointing</b> &mdash; kill the daemon and resume to the exact pre-crash phase.</li>
+            <li><b>Worker &amp; council dispatch</b> &mdash; spawn AI CLIs as subprocesses and capture stdout as evidence, or fan one prompt to N CLIs and synthesize agreement / divergence.</li>
+            <li><b>wicked-testing <code>verdict.json</code></b> gates the test phase &mdash; the acceptance pipeline is the test-phase worker.</li>
+          </ul>
+          <div class="way-io" aria-hidden="true">
+            <span class="io-chip">CLI</span>
+            <span class="io-chip">REST</span>
+            <span class="io-chip">WebSocket</span>
+          </div>
+        </article>
+
+        <!-- Way 2: Browser console -->
+        <article class="way">
+          <div class="way-head">
+            <span class="way-num">02</span>
+            <div>
+              <div class="way-kind">Browser console · wicked-studio</div>
+              <h3>The console the daemon serves</h3>
+            </div>
+          </div>
+          <p class="way-lede">
+            And it ships a browser console. The same daemon bundles and serves <b>wicked-studio</b>,
+            a React SPA, <b>same-origin</b> on localhost &mdash; the operator's real interface for the
+            decisions a session can't make alone.
+          </p>
+          <ul class="way-list">
+            <li><b>HITL gate approvals</b> &mdash; when a session pauses at a hard gate, the console shows the artifact and findings with <b>approve / reject / modify-with-conditions</b>.</li>
+            <li><b>Live session monitoring</b> &mdash; phase state, status badges, and a last-event feed across every session, off the live event stream.</li>
+            <li><b>Evidence browser</b> &mdash; read phase artifacts, worker output, gate decisions, and approvals for any session.</li>
+            <li><b>PTY-backed terminal</b> &mdash; a real interactive terminal attached to the running agent, not a log tail.</li>
+            <li><b>Explicit response state machine</b> &mdash; <code>PendingResponse → Submitted → Acknowledged</code>, with <code>TimedOut / Expired / Failed</code> transitions.</li>
+          </ul>
+          <div class="way-io" aria-hidden="true">
+            <span class="io-chip">served same-origin</span>
+            <span class="io-chip">localhost SPA</span>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Governance deep-dive ──────────────────────────────────────────── -->
+  <section class="features">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">How the governance works</div>
+        <h2>Structure the daemon enforces — so a model never gets to wave it through.</h2>
+      </div>
+      <div class="feat-grid">
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">⛔</div>
+          <h3>Deny-dominates gates</h3>
+          <p>Gates evaluate with <b>no LLM on the gate path</b>. Deny dominates &mdash; any one failing policy blocks the phase transition. Governance is deterministic, not a judgment call.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">⟳</div>
+          <h3>SQLite crash-checkpointing</h3>
+          <p>Every phase transition is checkpointed to SQLite. Crash the daemon and resume to the exact pre-crash phase &mdash; no lost state, no re-run from the top.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">⊟</div>
+          <h3>Worker dispatcher</h3>
+          <p>Spawns AI CLIs &mdash; <code>claude --print</code>, <code>codex run</code>, wicked-testing, wicked-garden, bash &mdash; as <b>stateless subprocesses</b>, capturing their stdout as evidence.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">⋔</div>
+          <h3>Council dispatch</h3>
+          <p>Fan the same prompt to N CLIs and synthesize <b>agreement and divergence</b> &mdash; a real multi-model panel instead of one model's self-report.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">✓</div>
+          <h3>verdict.json test gate</h3>
+          <p>wicked-testing's 3-agent acceptance pipeline runs as the test-phase worker; its <code>verdict.json</code> is what gates the test phase &mdash; the agent that runs tests never grades them.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ic" aria-hidden="true">◱</div>
+          <h3>Local-first, no cloud</h3>
+          <p>Binds <code>127.0.0.1</code> only &mdash; no cloud, no accounts, no telemetry. Everything stays on your machine, and durable state lives in SQLite.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How it's wired ────────────────────────────────────────────────── -->
+  <section class="wired">
+    <div class="wrap wired-grid">
+      <div class="wired-copy">
+        <div class="kicker">How it's wired</div>
+        <h2>A thin bridge over the engine. A console over the bridge.</h2>
+        <p>
+          As of v0.2.0 the orchestration engine lives in <b>wicked-core</b>. The crew daemon is a thin
+          <b>REST + WebSocket bridge</b> over <code>wicked-core-ts</code> &mdash; it owns the process, the
+          API surface, and the bundled console, while core owns the state machine and the live event
+          stream. Drive it headless, or through the studio SPA the same daemon serves.
+        </p>
+      </div>
+      <ol class="wired-flow" aria-label="how crew is wired">
+        <li><span class="wf-n">1</span><div><b>wicked-crew</b> daemon runs on <code>localhost:7701</code> — CLI + REST/WS in, studio console served out.</div></li>
+        <li><span class="wf-n">2</span><div><b>wicked-core</b> owns the phase state machine, deny-dominates gates, and emits <code>CoreEvent</code>s over a live stream.</div></li>
+        <li><span class="wf-n">3</span><div><b>workers</b> — AI CLIs dispatched as subprocesses — do the work; their stdout and <code>verdict.json</code> become evidence.</div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ── Get it ────────────────────────────────────────────────────────── -->
+  <div class="finale">
+    <section class="get" id="get">
+      <div class="wrap get-grid">
+        <div class="get-intro">
+          <div class="kicker">Run the daemon</div>
+          <h2>One npm install. The console comes with it.</h2>
+          <p>
+            wicked-crew is <b>published to npm</b> (v0.2.0). Install it, start the daemon, and drive the
+            lifecycle headless over the CLI &mdash; or open <code>localhost:7701</code> for the browser
+            console the daemon serves. The console SPA isn't a separate package; it ships inside crew.
+          </p>
+        </div>
+        <div class="install" role="group" aria-label="Run the wicked-crew daemon">
+          <div class="install__bar">
+            <span class="install__label">Install &amp; run</span>
+            <button class="install__copy" type="button" aria-label="Copy install commands"
+              onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g wicked-crew\nwicked-crew daemon start').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
+          </div>
+          <pre class="install__code"><code>npm install -g wicked-crew
+wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localhost:7701</span></code></pre>
+        </div>
+        <a class="gh-pill" href="https://github.com/mikeparcewski/wicked-crew#readme" target="_blank" rel="noopener" aria-label="View wicked-crew on GitHub">
+          <svg viewBox="0 0 16 16" width="42" height="42" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span>View on GitHub</span>
+        </a>
+      </div>
+    </section>
+
+    <SameGarden current="wicked-crew" />
+
+    <Footer repo={repo} />
+  </div>
+
+  <!-- Optional enhancement: cycle the daemon "awaiting HITL" caret + council line (reduced-motion safe). -->
+  <script is:inline>
+    (function () {
+      var log = document.querySelector('.daemon-log');
+      if (!log) return;
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var hi = log.querySelector('.dl-hi');
+      if (!hi) return;
+      var on = true;
+      setInterval(function () {
+        on = !on;
+        hi.style.opacity = on ? '1' : '0.45';
+      }, 1600);
+    })();
+  </script>
+</Base>

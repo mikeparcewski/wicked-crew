@@ -1,0 +1,16 @@
+{
+  "name": "wicked-crew-site",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "astro": "^6.0.0",
+    "wicked-web": "github:mikeparcewski/wicked-web"
+  }
+}
