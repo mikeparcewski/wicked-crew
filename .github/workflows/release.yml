@@ -38,8 +38,7 @@ jobs:
         .
         packages/crew
         packages/studio
-      pre_publish_install_dirs: |
-        packages/crew
+      build_cmd: 'npm install && npm run -w packages/crew build'
       test_cmd: 'npm run -w packages/crew test && npm run -w packages/studio test'
       enable_sync_pr: true
     secrets: inherit
