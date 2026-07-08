@@ -134,6 +134,43 @@ export class CoreAdapter {
     return JSON.parse(await this.core.listRepos()) as RepoEntry[];
   }
 
+  // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
+  // Thin wrappers over the four core-ts terminal methods. Output does NOT return
+  // here — it arrives as `terminalOutput` CoreEvents on the single subscription
+  // (routed to the owning browser socket by the WS layer, keyed on the id these
+  // resolve). Callers must already be attached via onEvent to catch the bytes.
+
+  /**
+   * Open a PTY terminal session in `cwd` running `cmd` (or the login shell when
+   * omitted), sized `cols`x`rows`. `governed:true` keeps tool-calls routed through
+   * the gate-hook (the default); `governed:false` is the loud, opt-in **ungoverned
+   * operator shell** (DES-TERMINAL-001 §7). Resolves the new terminal id.
+   */
+  openTerminal(
+    cwd: string,
+    cmd: string[] | undefined,
+    cols: number,
+    rows: number,
+    governed: boolean,
+  ): Promise<string> {
+    return this.core.openTerminal(cwd, cmd ?? null, cols, rows, governed);
+  }
+
+  /** Write raw input bytes (keystrokes) to a terminal → `"ok"`. Rejects on an unknown id. */
+  writeTerminal(id: string, bytes: Buffer): Promise<string> {
+    return this.core.writeTerminal(id, bytes);
+  }
+
+  /** Resize a terminal's PTY to `cols`x`rows` → `"ok"`. Rejects on an unknown id. */
+  resizeTerminal(id: string, cols: number, rows: number): Promise<string> {
+    return this.core.resizeTerminal(id, cols, rows);
+  }
+
+  /** Close a terminal (kill child, join reader) → `"ok"` after a `terminalExited` event. */
+  closeTerminal(id: string): Promise<string> {
+    return this.core.closeTerminal(id);
+  }
+
   /**
    * Tear down the single subscription (stop delivery, release the pump thread +
    * callback) so the process can exit cleanly. Idempotent.

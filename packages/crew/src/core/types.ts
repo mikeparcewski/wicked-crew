@@ -123,5 +123,13 @@ export interface CoreEvent {
   description?: string;
   problem?: string;
   message?: string;
+  /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
+  id?: string;
+  /** `terminalOutput`: monotonic per-terminal sequence number. */
+  seq?: number;
+  /** `terminalOutput`: raw PTY bytes, base64-encoded (decode → send to the owning socket). */
+  bytesB64?: string;
+  /** `terminalOpened`: the working directory the PTY was opened in. */
+  cwd?: string;
   [k: string]: unknown;
 }

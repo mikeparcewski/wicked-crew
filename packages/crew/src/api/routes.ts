@@ -48,6 +48,21 @@ const GateSchema = z.object({
   amend: z.string().optional(),
 });
 
+const OpenTerminalSchema = z.object({
+  cwd: z.string().min(1),
+  cmd: z.array(z.string().min(1)).min(1).optional(),
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive(),
+  // Optional so omission is the SAFE governed default (§7 — `false` is never a
+  // default; the ungoverned operator shell must opt in explicitly).
+  governed: z.boolean().optional(),
+});
+
+const ResizeTerminalSchema = z.object({
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive(),
+});
+
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
  * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
@@ -198,5 +213,52 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const entry = gateCache.get(id);
     if (!entry) return reply.code(404).send({ error: 'No open gate for this run' });
     return { runId: id, ...entry };
+  });
+
+  // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
+  // Open a PTY → its id. Drive it over the per-terminal WS `/ws/terminals/:id`;
+  // raw output arrives there. `governed` defaults to `true` (the gate-hook-routed
+  // default, §7) — an ungoverned operator shell must pass `governed:false` EXPLICITLY.
+  app.post(`${V}/terminals`, async (req, reply) => {
+    const parsed = OpenTerminalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    const b = parsed.data;
+    try {
+      const id = await adapter.openTerminal(b.cwd, b.cmd, b.cols, b.rows, b.governed ?? true);
+      return reply.code(201).send({ id });
+    } catch (err) {
+      // Core rejects a bad cwd / spawn failure — a client error, not a 500.
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  // Resize a live terminal's PTY.
+  app.post(`${V}/terminals/:id/resize`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = ResizeTerminalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    try {
+      const status = await adapter.resizeTerminal(id, parsed.data.cols, parsed.data.rows);
+      return reply.send({ status });
+    } catch (err) {
+      // Unknown / already-closed terminal id → 404, not 500.
+      return reply.code(404).send({ error: message(err) });
+    }
+  });
+
+  // Close a live terminal (kill child, join reader). A second close of an
+  // already-gone terminal 404s rather than 500s.
+  app.post(`${V}/terminals/:id/close`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const status = await adapter.closeTerminal(id);
+      return reply.send({ status });
+    } catch (err) {
+      return reply.code(404).send({ error: message(err) });
+    }
   });
 }

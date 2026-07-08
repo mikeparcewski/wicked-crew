@@ -4,6 +4,7 @@ import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
 import { GateCache } from './gate-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
+import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import type { CoreAdapter } from '../core/adapter.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
@@ -14,11 +15,14 @@ const LOOPBACK_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 export async function createServer(adapter: CoreAdapter): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
   const gateCache = new GateCache();
+  const terminals = new TerminalHub();
 
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts
-  // (§3.3) then forward every frame verbatim to all browser WS clients (§2.1).
+  // (§3.3), route terminal frames to their owning per-terminal socket (by id,
+  // DES-TERMINAL-001 §6), then forward every frame verbatim to all `/ws` clients (§2.1).
   adapter.onEvent((event) => {
     gateCache.ingest(event);
+    terminals.route(event);
     broadcast(event);
   });
 
@@ -52,6 +56,9 @@ export async function createServer(adapter: CoreAdapter): Promise<ReturnType<typ
     // Late-join gets no replay; the studio reconciles with a one-shot GET /runs.
     registerClient(socket as unknown as WebSocket);
   });
+
+  // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
+  registerTerminalWs(app, adapter, terminals);
 
   registerRoutes(app, adapter, gateCache);
 
