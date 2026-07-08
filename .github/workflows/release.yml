@@ -40,5 +40,8 @@ jobs:
         packages/studio
       build_cmd: 'npm install && npm run -w packages/crew build'
       test_cmd: 'npm run -w packages/crew test && npm run -w packages/studio test'
-      enable_sync_pr: true
+      # enable_sync_pr requires the repo setting "Allow GitHub Actions to create and approve
+      # pull requests" (Settings → Actions → General). Off until that's enabled; version on main
+      # is bumped manually on release instead.
+      enable_sync_pr: false
     secrets: inherit
