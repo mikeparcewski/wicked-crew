@@ -1,0 +1,44 @@
+# wicked-crew — npm release caller (DES-RELEASE-001 §2.3D + §9.4).
+#
+# This repo is an npm WORKSPACE: the root package `wicked-crew-workspace` is private and the
+# publishable `wicked-crew` daemon lives in packages/crew — hence `publish_working_dir: packages/crew`
+# (added to wicked-ci's node-release.yml on branch feat/publish-working-dir).
+#
+# PREREQUISITES — this is staged prep; a tag push will NOT go green until ALL of these land:
+#   1. wicked-core-ts is on npm (push tag `core-ts-v0.1.0` in the wicked-core repo → napi-release.yml).
+#   2. packages/crew's core-ts dep is flipped `file:../../../wicked-core/crates/wicked-core-ts` → `^0.1`
+#      so a clean CI checkout resolves the native addon (+ its platform package) from npm.
+#   3. wicked-ci `@v1` is re-tagged to include `publish_working_dir` (merge feat/publish-working-dir).
+#   4. packages/crew bundles the built studio dist (packages/studio `dist/`) into its published tarball.
+#
+# os_matrix is narrowed to ubuntu+macos: the PTY terminal path is unix-first (Windows ConPTY parity is
+# a wicked-core follow-up), so crew's terminal tests aren't Windows-clean yet. Widen when it is.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  release:
+    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@v1
+    with:
+      package_name: wicked-crew
+      publish_working_dir: packages/crew
+      os_matrix: '["ubuntu-latest", "macos-latest"]'
+      version_dirs: |
+        .
+        packages/crew
+        packages/studio
+      pre_publish_install_dirs: |
+        packages/crew
+      test_cmd: 'npm run -w packages/crew test && npm run -w packages/studio test'
+      enable_sync_pr: true
+    secrets: inherit
