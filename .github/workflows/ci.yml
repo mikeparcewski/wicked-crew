@@ -1,0 +1,50 @@
+# PR + main gate for wicked-crew (lint · typecheck · build · test).
+#
+# Until this existed, wicked-crew had NO build/test on PRs — only GitGuardian. Merges rode on
+# locally-run tests. Unlike wicked-core (Rust path deps), crew's `wicked-core-ts` dep resolves from
+# npm (^0.1), so a plain `npm ci` is enough — no sibling checkout.
+#
+# `build` runs crew's build, which runs scripts/bundle-studio.mjs (builds the studio SPA + copies its
+# dist into packages/crew/dist/studio) — so this also proves the v0.2.0 serving bundle assembles.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · typecheck · build · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      - name: Lint (eslint — both packages)
+        run: npm run -w packages/crew lint && npm run -w packages/studio lint
+
+      - name: Typecheck (tsc --noEmit — both packages)
+        run: npm run -w packages/crew typecheck && npm run -w packages/studio typecheck
+
+      # Builds the studio SPA and bundles it into packages/crew/dist/studio (the v0.2.0 serving artifact).
+      - name: Build (crew + studio bundle)
+        run: npm run -w packages/crew build
+
+      - name: Test (both packages)
+        run: npm run -w packages/crew test && npm run -w packages/studio test
