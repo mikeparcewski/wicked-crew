@@ -110,6 +110,36 @@ const repo = 'https://github.com/mikeparcewski/wicked-crew';
     </div>
   </section>
 
+  <!-- ── Live orchestration graph ──────────────────────────────────────── -->
+  <!-- Adapted (not lifted) from the anti-legacy code→graph build viz: a living
+       canvas graph with flowing transit particles. Retold for crew's story —
+       the daemon at the hub, the phase lifecycle as a spine, gates, workers and
+       the council dispatched as satellites. Family tokens only (accent/ink/
+       link/muted/hairline resolved at mount); vanilla JS; reduced-motion safe. -->
+  <section class="orch" aria-labelledby="orch-h">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">The daemon, drawn live</div>
+        <h2 id="orch-h">One daemon orchestrating the whole run.</h2>
+        <p class="sec-sub">
+          Not a diagram of boxes &mdash; the live shape of a governed run. The daemon holds the phase
+          spine, evaluates the deny-dominates gate, and dispatches stateless AI CLIs as workers and as a
+          council. Hover any node to trace what it touches.
+        </p>
+      </div>
+      <figure class="orch-stage" aria-label="Live orchestration graph: the wicked-crew daemon driving a phase lifecycle, a deny-dominates gate, dispatched workers, and a council.">
+        <canvas class="orch-canvas" id="orch-canvas"></canvas>
+        <figcaption class="orch-cap" id="orch-cap" aria-live="polite"></figcaption>
+        <div class="orch-legend" aria-hidden="true">
+          <span class="ol"><i class="ol-hub"></i>daemon</span>
+          <span class="ol"><i class="ol-now"></i>active phase</span>
+          <span class="ol"><i class="ol-gate"></i>gate</span>
+          <span class="ol"><i class="ol-worker"></i>worker · council</span>
+        </div>
+      </figure>
+    </div>
+  </section>
+
   <!-- ── The differentiator ────────────────────────────────────────────── -->
   <section class="band">
     <div class="wrap band-grid">
@@ -273,21 +303,37 @@ const repo = 'https://github.com/mikeparcewski/wicked-crew';
       <div class="wrap get-grid">
         <div class="get-intro">
           <div class="kicker">Run the daemon</div>
-          <h2>One npm install. The console comes with it.</h2>
+          <h2>Start with the family installer. The console comes with it.</h2>
           <p>
-            wicked-crew is <b>published to npm</b> (v0.2.0). Install it, start the daemon, and drive the
-            lifecycle headless over the CLI &mdash; or open <code>localhost:7701</code> for the browser
-            console the daemon serves. The console SPA isn't a separate package; it ships inside crew.
+            The simplest way in is <b><code>npx wicked-installer</code></b> &mdash; the interactive,
+            cross-CLI installer for the whole wicked-* family. Pick the products you want, and it wires
+            up the <code>wicked</code> CLI for you. Already know you only want this one? Install
+            <b>wicked-crew</b> directly &mdash; either way you get the daemon, and the browser console
+            ships <b>inside it</b>, served on <code>localhost:7701</code>.
           </p>
         </div>
-        <div class="install" role="group" aria-label="Run the wicked-crew daemon">
-          <div class="install__bar">
-            <span class="install__label">Install &amp; run</span>
-            <button class="install__copy" type="button" aria-label="Copy install commands"
-              onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g wicked-crew\nwicked-crew daemon start').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
+        <div class="install-stack">
+          <div class="install install--primary" role="group" aria-label="Install with the wicked family installer">
+            <div class="install__bar">
+              <span class="install__label"><span class="install__star" aria-hidden="true">★</span> Recommended · family installer</span>
+              <button class="install__copy" type="button" aria-label="Copy family installer command"
+                onclick="navigator.clipboard&&navigator.clipboard.writeText('npx wicked-installer').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
+            </div>
+            <pre class="install__code"><code>npx wicked-installer   <span class="c"># interactive · picks products · ships the `wicked` CLI</span></code></pre>
+            <p class="install__note">Cross-CLI, cross-product. Choose wicked-crew (and anything else in the family) from one prompt. <span class="install__ver">npm v0.2.0</span></p>
           </div>
-          <pre class="install__code"><code>npm install -g wicked-crew
+
+          <div class="install-or" aria-hidden="true"><span>or install just this directly</span></div>
+
+          <div class="install install--secondary" role="group" aria-label="Install wicked-crew directly">
+            <div class="install__bar">
+              <span class="install__label">Direct · wicked-crew only</span>
+              <button class="install__copy" type="button" aria-label="Copy direct install commands"
+                onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g wicked-crew\nwicked-crew daemon start').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
+            </div>
+            <pre class="install__code"><code>npm install -g wicked-crew
 wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localhost:7701</span></code></pre>
+          </div>
         </div>
         <a class="gh-pill" href="https://github.com/mikeparcewski/wicked-crew#readme" target="_blank" rel="noopener" aria-label="View wicked-crew on GitHub">
           <svg viewBox="0 0 16 16" width="42" height="42" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -300,6 +346,284 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
 
     <Footer repo={repo} />
   </div>
+
+  <!-- Live orchestration graph — vanilla canvas, family tokens only, reduced-motion safe.
+       DNA adapted from anti-legacy's code→graph viz (flowing transit particles on a living
+       graph), retold as crew's daemon orchestrating phases / gate / workers / council. -->
+  <script is:inline>
+    (function () {
+      var cv = document.getElementById('orch-canvas');
+      if (!cv || !cv.getContext) return;
+      var ctx = cv.getContext('2d');
+      var cap = document.getElementById('orch-cap');
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      function tok(name, fb) {
+        var v = getComputedStyle(cv).getPropertyValue(name);
+        return (v && v.trim()) ? v.trim() : fb;
+      }
+      var C = {};
+      function readTokens() {
+        C = {
+          accent: tok('--accent', '#ffda19'),
+          accentInk: tok('--accent-ink', '#0d1117'),
+          ink: tok('--ink', '#e6edf3'),
+          muted: tok('--muted', 'rgba(230,237,243,.55)'),
+          faint: tok('--faint', 'rgba(230,237,243,.24)'),
+          hair: tok('--hairline-strong', 'rgba(230,237,243,.14)'),
+          surface: tok('--surface', '#1b222e'),
+          ok: tok('--ok', '#3fb950'),
+          run: tok('--run', '#79c0ff'),
+          deny: tok('--deny', '#f85149')
+        };
+      }
+
+      // normalized layout (x→, y↓)
+      var PHASES = [
+        { id: 'clarify', label: 'clarify', x: 0.28, y: 0.20 },
+        { id: 'design', label: 'design', x: 0.40, y: 0.20 },
+        { id: 'test-strategy', label: 'test-strategy', x: 0.535, y: 0.20 },
+        { id: 'build', label: 'build', x: 0.68, y: 0.20 },
+        { id: 'test', label: 'test', x: 0.80, y: 0.20 },
+        { id: 'ship', label: 'ship', x: 0.905, y: 0.20 }
+      ];
+      var NODES = [
+        { id: 'daemon', label: 'wicked-crew daemon', kind: 'hub', x: 0.10, y: 0.52,
+          desc: 'The daemon on localhost:7701 — owns the run, dispatches everything below.' },
+        { id: 'gate', label: 'gate · deny-dominates', kind: 'gate', x: 0.535, y: 0.55,
+          desc: 'Deterministic gate — no LLM on the path. One failing policy blocks the transition.' },
+        { id: 'w-claude', label: 'claude --print', kind: 'worker', x: 0.30, y: 0.86,
+          desc: 'Worker: a stateless AI CLI subprocess. Its stdout is captured as evidence.' },
+        { id: 'w-codex', label: 'codex run', kind: 'worker', x: 0.45, y: 0.90,
+          desc: 'Worker: another CLI, same contract — spawned, captured, never embedded.' },
+        { id: 'w-testing', label: 'wicked-testing', kind: 'worker', x: 0.61, y: 0.88,
+          desc: 'The test-phase worker — its verdict.json gates the test phase.' },
+        { id: 'w-bash', label: 'bash', kind: 'worker', x: 0.20, y: 0.80,
+          desc: 'Worker: plain bash, dispatched like any other stateless subprocess.' },
+        { id: 'c-a', label: 'CLI', kind: 'council', x: 0.83, y: 0.60,
+          desc: 'Council: the same prompt fanned to N CLIs; agreement and divergence recorded.' },
+        { id: 'c-b', label: 'CLI', kind: 'council', x: 0.92, y: 0.66,
+          desc: 'Council: a real multi-model panel instead of one model self-reporting.' },
+        { id: 'c-c', label: 'CLI', kind: 'council', x: 0.86, y: 0.80,
+          desc: 'Council: divergence is synthesized, not averaged away.' }
+      ];
+      PHASES.forEach(function (p) {
+        NODES.push({ id: p.id, label: p.label, kind: 'phase', x: p.x, y: p.y,
+          desc: 'Phase "' + p.label + '" — part of the crash-resumable, SQLite-checkpointed lifecycle.' });
+      });
+      var byId = {}; NODES.forEach(function (n) { byId[n.id] = n; });
+
+      // edges: [from, to, class]
+      var EDGES = [];
+      EDGES.push(['daemon', 'clarify', 'spine']);
+      for (var i = 0; i < PHASES.length - 1; i++) EDGES.push([PHASES[i].id, PHASES[i + 1].id, 'chain']);
+      EDGES.push(['daemon', 'gate', 'gate']);
+      EDGES.push(['gate', 'test-strategy', 'gate']);
+      ['w-claude', 'w-codex', 'w-testing', 'w-bash'].forEach(function (w) { EDGES.push(['daemon', w, 'worker']); });
+      ['c-a', 'c-b', 'c-c'].forEach(function (c) { EDGES.push(['daemon', c, 'council']); });
+
+      var W = 0, H = 0, dpr = 1;
+      function resize() {
+        var r = cv.getBoundingClientRect();
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        W = r.width; H = r.height;
+        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function px(n) { return { x: n.x * W, y: n.y * H }; }
+      function ctrl(a, b) {
+        // gentle perpendicular bow for a graph-like curve
+        var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        var dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+        var off = Math.min(len * 0.12, 26);
+        return { x: mx + (-dy / len) * off, y: my + (dx / len) * off };
+      }
+      function qpt(a, c, b, t) {
+        var u = 1 - t;
+        return { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
+                 y: u * u * a.y + 2 * u * t * c.y + t * t * b.y };
+      }
+
+      // dispatch particles ride worker/council/spine edges
+      var particles = [];
+      function seedParticles() {
+        particles = [];
+        EDGES.forEach(function (e, idx) {
+          if (e[2] === 'worker' || e[2] === 'council' || e[2] === 'spine') {
+            particles.push({ e: idx, t: Math.random(), sp: 0.32 + Math.random() * 0.22 });
+          }
+        });
+      }
+
+      var t0 = performance.now();
+      var PHASE_MS = 1650;
+      var hovered = null, mouse = null;
+
+      function activeIndex(now) { return Math.floor(((now - t0) / PHASE_MS)) % PHASES.length; }
+
+      function nodeRect(n) {
+        var p = px(n);
+        ctx.font = (n.kind === 'hub' ? '700 ' : '') + (n.kind === 'council' ? 11 : n.kind === 'hub' ? 13 : 12) + 'px "JetBrains Mono", ui-monospace, monospace';
+        var tw = ctx.measureText(n.label).width;
+        var padX = n.kind === 'hub' ? 15 : n.kind === 'council' ? 9 : 12;
+        var h = n.kind === 'hub' ? 34 : n.kind === 'council' ? 22 : 26;
+        var w = tw + padX * 2;
+        return { x: p.x - w / 2, y: p.y - h / 2, w: w, h: h, cx: p.x, cy: p.y };
+      }
+
+      function rr(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function connected(id) {
+        var s = {};
+        EDGES.forEach(function (e) { if (e[0] === id || e[1] === id) { s[e[0]] = 1; s[e[1]] = 1; } });
+        return s;
+      }
+
+      function draw(now) {
+        var ai = reduced ? 2 : activeIndex(now);
+        var gateDeny = (PHASES[ai].id === 'test-strategy');
+        ctx.clearRect(0, 0, W, H);
+
+        // hover hit-test
+        hovered = null;
+        if (mouse) {
+          for (var k = 0; k < NODES.length; k++) {
+            var R = nodeRect(NODES[k]);
+            if (mouse.x >= R.x && mouse.x <= R.x + R.w && mouse.y >= R.y && mouse.y <= R.y + R.h) { hovered = NODES[k]; break; }
+          }
+        }
+        var hiSet = hovered ? connected(hovered.id) : null;
+
+        // ---- edges ----
+        EDGES.forEach(function (e) {
+          var a = px(byId[e[0]]), b = px(byId[e[1]]), c = ctrl(a, b);
+          var activeEdge = (e[2] === 'chain' && byId[e[1]].id === PHASES[ai].id) ||
+                           (e[2] === 'spine' && ai === 0) ||
+                           (e[2] === 'gate' && gateDeny);
+          var hot = hiSet && hiSet[e[0]] && hiSet[e[1]];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(c.x, c.y, b.x, b.y);
+          ctx.lineWidth = hot ? 2 : activeEdge ? 1.6 : 1;
+          ctx.strokeStyle = hot ? C.accent
+            : activeEdge ? (e[2] === 'gate' && gateDeny ? C.deny : C.accent)
+            : C.hair;
+          ctx.globalAlpha = hot ? 0.95 : activeEdge ? 0.7 : (hiSet ? 0.18 : 0.4);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        });
+
+        // ---- particles ----
+        if (!reduced) {
+          particles.forEach(function (pt) {
+            pt.t += (pt.sp * 16.7) / 1000;
+            if (pt.t > 1) pt.t -= 1;
+            var e = EDGES[pt.e];
+            var a = px(byId[e[0]]), b = px(byId[e[1]]), c = ctrl(a, b);
+            var pos = qpt(a, c, b, pt.t);
+            var dim = hiSet && !(hiSet[e[0]] && hiSet[e[1]]);
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 2.4, 0, Math.PI * 2);
+            ctx.fillStyle = e[2] === 'council' ? C.run : C.accent;
+            ctx.globalAlpha = dim ? 0.15 : 0.9;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          });
+        }
+
+        // ---- nodes ----
+        NODES.forEach(function (n) {
+          var R = nodeRect(n);
+          var isHover = hovered === n;
+          var dim = hiSet && !hiSet[n.id] && !isHover;
+          var phaseIdx = n.kind === 'phase' ? PHASES.map(function (p) { return p.id; }).indexOf(n.id) : -1;
+          var isNow = phaseIdx === ai;
+          var isDone = phaseIdx > -1 && phaseIdx < ai;
+
+          ctx.globalAlpha = dim ? 0.32 : 1;
+          rr(R.x, R.y, R.w, R.h, n.kind === 'hub' ? 9 : 7);
+
+          // fill
+          if (isNow) { ctx.fillStyle = C.accent; }
+          else { ctx.fillStyle = C.surface; ctx.globalAlpha = dim ? 0.2 : 0.72; }
+          ctx.fill();
+          ctx.globalAlpha = dim ? 0.32 : 1;
+
+          // border
+          var border = C.hair, bw = 1;
+          if (n.kind === 'hub') { border = C.accent; bw = 1.6; }
+          else if (n.kind === 'gate') { border = gateDeny ? C.deny : C.accent; bw = 1.4; }
+          else if (isNow) { border = C.accent; bw = 1.4; }
+          else if (isDone) { border = C.ok; bw = 1.2; }
+          else if (n.kind === 'council') { border = C.run; }
+          if (isHover) { border = C.accent; bw = 2; }
+          ctx.lineWidth = bw; ctx.strokeStyle = border; ctx.stroke();
+
+          // label
+          ctx.font = (n.kind === 'hub' ? '700 ' : '') + (n.kind === 'council' ? 11 : n.kind === 'hub' ? 13 : 12) + 'px "JetBrains Mono", ui-monospace, monospace';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = isNow ? C.accentInk
+            : n.kind === 'hub' ? C.ink
+            : isDone ? C.ok
+            : n.kind === 'council' ? C.run
+            : C.muted;
+          ctx.fillText(n.label, R.cx, R.cy + 0.5);
+
+          // hub pulse dot
+          if (n.kind === 'hub' && !reduced) {
+            var pulse = 3 + Math.sin(now / 400) * 1.2;
+            ctx.beginPath(); ctx.arc(R.x + 9, R.cy, pulse, 0, Math.PI * 2);
+            ctx.fillStyle = C.accent; ctx.globalAlpha = 0.8; ctx.fill(); ctx.globalAlpha = 1;
+          }
+          // gate verdict tick
+          if (n.kind === 'gate') {
+            ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+            ctx.fillStyle = gateDeny ? C.deny : C.ok;
+            ctx.fillText(gateDeny ? '✕ DENY' : '✓ PASS', R.cx, R.y + R.h + 11);
+          }
+          ctx.globalAlpha = 1;
+        });
+
+        // caption
+        if (cap) {
+          if (hovered) cap.textContent = hovered.desc;
+          else cap.textContent = 'Active phase: ' + PHASES[ai].label + (gateDeny ? ' — gate holds the transition for review.' : ' — advancing.');
+        }
+      }
+
+      var raf = null;
+      function loop(now) { draw(now); raf = requestAnimationFrame(loop); }
+
+      cv.addEventListener('pointermove', function (ev) {
+        var r = cv.getBoundingClientRect();
+        mouse = { x: ev.clientX - r.left, y: ev.clientY - r.top };
+        if (reduced) draw(performance.now());
+      });
+      cv.addEventListener('pointerleave', function () { mouse = null; if (reduced) draw(performance.now()); });
+
+      function start() {
+        readTokens(); resize(); seedParticles();
+        if (reduced) { draw(performance.now()); }
+        else { if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(loop); }
+      }
+      var rt;
+      window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { readTokens(); resize(); draw(performance.now()); }, 120); });
+      // redraw on theme flip (data-theme changes token values)
+      if (window.MutationObserver) {
+        new MutationObserver(function () { readTokens(); draw(performance.now()); })
+          .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      }
+      start();
+    })();
+  </script>
 
   <!-- Optional enhancement: cycle the daemon "awaiting HITL" caret + council line (reduced-motion safe). -->
   <script is:inline>

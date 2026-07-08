@@ -179,6 +179,39 @@ code {
 .way-io { margin-top: auto; padding-top: 18px; display: flex; flex-wrap: wrap; gap: 7px; }
 .io-chip { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em; color: var(--muted); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 4px 11px; }
 
+/* ── Live orchestration graph ────────────────────────────────────────── */
+.orch { border-top: 1px solid var(--hairline); padding: clamp(48px, 8vh, 96px) 0; scroll-snap-align: start; }
+.orch-stage {
+  position: relative; margin: clamp(20px, 4vh, 40px) auto 0;
+  border: 1px solid var(--hairline-strong); border-radius: 16px; overflow: hidden;
+  background:
+    radial-gradient(ellipse 70% 90% at 12% 52%, color-mix(in oklab, var(--accent) 12%, transparent), transparent 60%),
+    color-mix(in oklab, var(--surface) 55%, transparent);
+  box-shadow: 0 40px 80px -48px rgba(0,0,0,.65);
+}
+.orch-canvas {
+  display: block; width: 100%; height: clamp(320px, 46vw, 480px);
+  touch-action: pan-y;
+}
+.orch-cap {
+  min-height: 1.5em; margin: 0; padding: 12px 16px 14px;
+  border-top: 1px solid var(--hairline);
+  font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.5; letter-spacing: 0.01em;
+  color: var(--muted); background: color-mix(in oklab, var(--canvas) 40%, transparent);
+}
+.orch-legend {
+  position: absolute; top: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px 12px;
+  padding: 8px 12px; border: 1px solid var(--hairline); border-radius: 10px;
+  background: color-mix(in oklab, var(--canvas) 72%, transparent); backdrop-filter: blur(3px);
+}
+.ol { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.06em; color: var(--muted); }
+.ol i { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
+.ol-hub { background: var(--accent); }
+.ol-now { background: var(--accent); border-radius: 50% !important; }
+.ol-gate { background: transparent; border: 1.5px solid var(--deny); }
+.ol-worker { background: var(--run); }
+@media (max-width: 620px) { .orch-legend { display: none; } }
+
 /* ── Governance features ─────────────────────────────────────────────── */
 .features { border-top: 1px solid var(--hairline); padding: clamp(48px, 8vh, 96px) 0; scroll-snap-align: start; }
 .feat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
@@ -219,6 +252,18 @@ code {
 .install__code { margin: 0; padding: 16px; overflow-x: auto; }
 .install__code code { display: block; background: none; border: none; padding: 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.8; color: var(--ink); white-space: pre; }
 .install__code .c { color: var(--faint); }
+
+.install-stack { display: flex; flex-direction: column; gap: 12px; }
+.install--primary { border-color: color-mix(in oklab, var(--accent) 55%, var(--hairline-strong)); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent), 0 24px 48px -34px rgba(0,0,0,.6); }
+.install--primary .install__bar { background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.install--primary .install__label { color: var(--ink); }
+.install__star { color: var(--accent); }
+.install__note { margin: 0; padding: 10px 16px 14px; font-family: var(--font-mono); font-size: 0.68rem; line-height: 1.5; color: var(--muted); border-top: 1px solid var(--hairline); }
+.install__ver { color: var(--accent); }
+.install--secondary { background: color-mix(in oklab, var(--surface-2) 70%, transparent); }
+.install-or { display: flex; align-items: center; gap: 12px; margin: 2px 0; }
+.install-or::before, .install-or::after { content: ''; flex: 1; height: 1px; background: var(--hairline-strong); }
+.install-or span { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
 
 .gh-pill { grid-column: 1 / -1; justify-self: start; display: inline-flex; align-items: center; gap: 14px; margin-top: 8px; padding: 12px 22px 12px 14px; border: 1px solid var(--hairline-strong); border-radius: 999px; color: var(--ink); text-decoration: none; transition: border-color .22s var(--ease), color .22s var(--ease), transform .22s var(--ease); }
 .gh-pill:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-2px); }
