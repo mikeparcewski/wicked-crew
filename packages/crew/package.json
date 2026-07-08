@@ -1,5 +1,5 @@
 {
-  "name": "@wicked/crew",
+  "name": "wicked-crew",
   "version": "0.1.0",
   "description": "wicked-crew daemon — thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
   "type": "module",
@@ -32,5 +32,6 @@
   },
   "engines": {
     "node": ">=20.0.0"
-  }
+  },
+  "license": "MIT"
 }
