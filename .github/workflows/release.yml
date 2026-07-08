@@ -32,6 +32,7 @@ jobs:
     with:
       package_name: wicked-crew
       publish_working_dir: packages/crew
+      use_npm_token: true
       os_matrix: '["ubuntu-latest", "macos-latest"]'
       version_dirs: |
         .
