@@ -1,16 +1,26 @@
 import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
-import type Database from 'better-sqlite3';
+import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
-import { registerClient } from '../events/bus.js';
+import { GateCache } from './gate-cache.js';
+import { registerClient, broadcast } from '../events/bus.js';
+import type { CoreAdapter } from '../core/adapter.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
 // 127.0.0.1, so this never widens exposure beyond the local machine.
 const LOOPBACK_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 
-export async function createServer(db: Database.Database): Promise<ReturnType<typeof Fastify>> {
+export async function createServer(adapter: CoreAdapter): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
+  const gateCache = new GateCache();
+
+  // The daemon's single CoreEvent subscription fans out here: cache gate prompts
+  // (§3.3) then forward every frame verbatim to all browser WS clients (§2.1).
+  adapter.onEvent((event) => {
+    gateCache.ingest(event);
+    broadcast(event);
+  });
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
@@ -25,20 +35,25 @@ export async function createServer(db: Database.Database): Promise<ReturnType<ty
     }
   });
 
-  // Tolerate an empty body on application/json POSTs (approve / reject take no
-  // body). Default Fastify v5 rejects "" with FST_ERR_CTP_EMPTY_JSON_BODY.
+  // Tolerate an empty body on application/json POSTs (some actions take no body).
+  // Default Fastify v5 rejects "" with FST_ERR_CTP_EMPTY_JSON_BODY.
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (body === '' || body === undefined || body === null) return done(null, undefined);
-    try { done(null, JSON.parse(body as string)); } catch (err) { done(err as Error); }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error);
+    }
   });
 
   await app.register(fastifyWebsocket);
 
   app.get('/ws', { websocket: true }, (socket) => {
-    registerClient(socket as unknown as import('ws').WebSocket);
+    // Late-join gets no replay; the studio reconciles with a one-shot GET /runs.
+    registerClient(socket as unknown as WebSocket);
   });
 
-  registerRoutes(app, db);
+  registerRoutes(app, adapter, gateCache);
 
   return app;
 }
@@ -50,14 +65,15 @@ export interface StartedServer {
 }
 
 export async function startServer(
-  db: Database.Database,
+  adapter: CoreAdapter,
   port = 7701,
   host = '127.0.0.1',
 ): Promise<StartedServer> {
-  const app = await createServer(db);
+  const app = await createServer(adapter);
   await app.listen({ port, host });
   const addr = app.server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
-  app.log.info(`wicked-crew daemon listening on ${host}:${boundPort}`);
-  return { app, port: boundPort, host };
+  const boundHost = typeof addr === 'object' && addr ? addr.address : host;
+  app.log.info(`wicked-crew daemon listening on ${boundHost}:${boundPort}`);
+  return { app, port: boundPort, host: boundHost };
 }

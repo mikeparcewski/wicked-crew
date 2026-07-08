@@ -1,7 +1,7 @@
 {
   "name": "@wicked/crew",
   "version": "0.1.0",
-  "description": "wicked-crew daemon — external orchestrator for AI CLI workers",
+  "description": "wicked-crew daemon — thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,25 +11,18 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "npm run test:unit && npm run test:integration && npm run test:api",
-    "test:unit": "vitest run tests/unit",
+    "test": "vitest run",
     "test:integration": "vitest run tests/integration",
-    "test:api": "vitest run tests/api",
-    "dev": "tsx watch src/cli/index.ts",
-    "start": "node dist/cli/index.js"
+    "dev": "tsx watch src/cli/index.ts serve",
+    "start": "node dist/cli/index.js serve"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",
-    "better-sqlite3": "^12.11.1",
-    "chalk": "^5.3.0",
-    "execa": "^9.3.0",
     "fastify": "^5.0.0",
-    "json-rules-engine": "^6.5.0",
-    "xstate": "^5.18.0",
+    "wicked-core-ts": "file:../../../wicked-core/crates/wicked-core-ts",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "tsx": "^4.16.0",

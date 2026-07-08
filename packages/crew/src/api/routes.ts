@@ -1,154 +1,202 @@
 import type { FastifyInstance } from 'fastify';
-import type Database from 'better-sqlite3';
 import { z } from 'zod';
-import { startSession, resolveHumanGate, pauseSession, resumeSession } from '../fsm/runner.js';
-import { getSession, listPhases, listSessions, updatePhaseState } from '../store/sessions.js';
-import { listWorkers } from '../dispatch/workers.js';
-import { emit } from '../events/bus.js';
 import { randomUUID } from 'node:crypto';
+import { CoreAdapter } from '../core/adapter.js';
+import type { GateCache } from './gate-cache.js';
+import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 
-const CreateSessionSchema = z.object({
-  type: z.string(),
-  goal: z.string(),
-  workers: z.array(z.string()).optional(),
-  phase_gate_overrides: z.record(z.enum(['auto', 'human', 'council'])).optional(),
+const V = '/api/v1';
+
+// Actionable-first ordering for the run list (DES-STUDIO-001 §11.6): a run
+// awaiting a human sorts to the top; terminal runs sink.
+const STATUS_ORDER: Record<SessionStatus, number> = {
+  awaiting_human: 0,
+  executing: 1,
+  distributing: 2,
+  planning: 3,
+  failed: 4,
+  completed: 5,
+  cancelled: 6,
+};
+
+function sortActionableFirst(views: SessionView[]): SessionView[] {
+  return [...views].sort(
+    (a, b) => (STATUS_ORDER[a.session.status] ?? 9) - (STATUS_ORDER[b.session.status] ?? 9),
+  );
+}
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+const RegisterRepoSchema = z.object({
+  name: z.string().min(1),
+  rootPath: z.string().min(1),
 });
 
-const ApproveWithConditionsSchema = z.object({
-  conditions: z.string(),
+const LaunchSchema = z.object({
+  problem: z.string().min(1),
+  sessionId: z.string().min(1).optional(),
+  clisJson: z.string().min(1).optional(),
+  entityMode: z.enum(['shared', 'isolated']).optional(),
+  humanConfirm: z.string().min(1).optional(),
+  repoRef: z.string().min(1).optional(),
 });
 
-export function registerRoutes(app: FastifyInstance, db: Database.Database): void {
-  app.get('/api/v1/health', async () => ({ status: 'ok', version: '0.1.0' }));
+const GateSchema = z.object({
+  approve: z.boolean(),
+  amend: z.string().optional(),
+});
 
-  app.get('/api/v1/config', async () => {
-    // Report the actually-bound port/host (honours --port / CREW_PORT / port 0).
+/**
+ * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
+ * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
+ */
+export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateCache: GateCache): void {
+  // Liveness — also proves the actor + event pump are up.
+  app.get(`${V}/health`, async () => {
+    const ping = await adapter.ping();
+    return { status: 'ok', version: '0.1.0', ping };
+  });
+
+  // Report the actually-bound port/host (honours --port / CREW_PORT / port 0).
+  app.get(`${V}/config`, async () => {
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 7701;
     const host = typeof addr === 'object' && addr ? addr.address : '127.0.0.1';
-    return { port, host, workers_config: 'workers.json' };
+    return { port, host };
   });
 
-  app.get('/api/v1/workers', async () => ({ workers: listWorkers() }));
+  // The council seats for the launch form (static production roster).
+  app.get(`${V}/roster`, async () => ({ roster: CoreAdapter.roster() }));
 
-  app.post('/api/v1/sessions', async (req, reply) => {
-    const parsed = CreateSessionSchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
-    const body = parsed.data;
-    const opts: import('../fsm/runner.js').StartSessionOpts = {
-      type: body.type,
-      goal: body.goal,
-      ...(body.workers !== undefined ? { workers: body.workers } : {}),
-      ...(body.phase_gate_overrides !== undefined ? { phaseGateOverrides: body.phase_gate_overrides } : {}),
+  // Registered repos → target-repo picker.
+  app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));
+
+  app.post(`${V}/repos`, async (req, reply) => {
+    const parsed = RegisterRepoSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    try {
+      const repo = await adapter.registerRepo(parsed.data.name, parsed.data.rootPath);
+      return reply.code(201).send({ repo });
+    } catch (err) {
+      // Core rejects a non-git / zero-commit path — a client error, not a 500.
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
+  // `sessionId` is minted if the client omits it.
+  app.post(`${V}/runs`, async (req, reply) => {
+    const parsed = LaunchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    const b = parsed.data;
+    const input: LaunchRunInput = {
+      problem: b.problem,
+      sessionId: b.sessionId ?? randomUUID(),
+      clisJson: b.clisJson ?? JSON.stringify(CoreAdapter.roster()),
     };
-    const sessionId = await startSession(db, opts);
-    const session = getSession(db, sessionId);
-    const phases = listPhases(db, sessionId);
-    return reply.code(201).send({ session, phases });
-  });
-
-  // List all sessions (most-recent first) with their phases — powers the studio list.
-  app.get('/api/v1/sessions', async () => {
-    const sessions = listSessions(db);
-    return { sessions: sessions.map((session) => ({ session, phases: listPhases(db, session.id) })) };
-  });
-
-  app.get('/api/v1/sessions/:id', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-    const phases = listPhases(db, id);
-    return { session, phases };
-  });
-
-  app.get('/api/v1/sessions/:id/phases', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-    return { phases: listPhases(db, id) };
-  });
-
-  // Gate actions — resolve the deferred promise driving the FSM actor
-  app.post('/api/v1/sessions/:id/gates/:phase/approve', async (req, reply) => {
-    const { id, phase } = req.params as { id: string; phase: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-
-    const resolved = resolveHumanGate(id, phase, 'approved');
-
-    // Fallback: if no deferred promise (phase already auto-gated or gate already resolved),
-    // write the approval directly to SQLite so the API stays usable for manual overrides.
-    if (!resolved) {
-      updatePhaseState(db, id, phase, 'Approved');
-      db.prepare(`
-        INSERT INTO gates (id, session_id, phase_id, result, blocking_policies, council_score, conditions, evaluated_at, created_at)
-        VALUES (?, ?, ?, 'approved', '[]', NULL, NULL, ?, ?)
-      `).run(randomUUID(), id, phase, new Date().toISOString(), new Date().toISOString());
-      void emit('wicked.crew.phase.gate.approved', { session_id: id, phase_id: phase, human_override: true });
+    if (b.entityMode !== undefined) input.entityMode = b.entityMode;
+    if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
+    if (b.repoRef !== undefined) input.repoRef = b.repoRef;
+    try {
+      const runId = await adapter.launchRun(input);
+      return reply.code(201).send({ runId });
+    } catch (err) {
+      const msg = message(err);
+      const busy = /busy|in flight|already/i.test(msg);
+      return reply.code(busy ? 409 : 400).send({ error: msg });
     }
-
-    return { ok: true };
   });
 
-  app.post('/api/v1/sessions/:id/gates/:phase/reject', async (req, reply) => {
-    const { id, phase } = req.params as { id: string; phase: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-
-    const resolved = resolveHumanGate(id, phase, 'rejected');
-
-    if (!resolved) {
-      updatePhaseState(db, id, phase, 'Rejected');
-      void emit('wicked.crew.phase.gate.rejected', { session_id: id, phase_id: phase, human_override: true });
-    }
-
-    return { ok: true };
+  // Run list (replaces GET /sessions). Actionable-first; reconciles the gate cache.
+  app.get(`${V}/runs`, async () => {
+    const views = await adapter.sessionsDetail();
+    gateCache.reconcile(views);
+    return { runs: sortActionableFirst(views) };
   });
 
-  app.post('/api/v1/sessions/:id/pause', async (req, reply) => {
+  // One run's detail.
+  app.get(`${V}/runs/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-    if (session.status !== 'running') return reply.code(409).send({ error: 'Session is not running' });
-    pauseSession(id);
-    return { ok: true };
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return { run };
   });
 
-  app.post('/api/v1/sessions/:id/resume', async (req, reply) => {
+  // A unit's captured transcript. Unit id convention: `<run>:u<ord>`.
+  app.get(`${V}/runs/:id/units/:ord/output`, async (req, reply) => {
+    const { id, ord } = req.params as { id: string; ord: string };
+    const output = await adapter.workOutput(`${id}:u${ord}`);
+    return reply.send({ output });
+  });
+
+  // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
+  app.post(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-    if (session.status !== 'paused') return reply.code(409).send({ error: 'Session is not paused' });
-    await resumeSession(db, id);
-    return { ok: true };
+    const parsed = GateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    if (run.session.status !== 'awaiting_human') {
+      return reply
+        .code(409)
+        .send({ error: `Run is not awaiting a human gate (status: ${run.session.status})` });
+    }
+    try {
+      const status = await adapter.confirmGate(id, parsed.data.approve, parsed.data.amend);
+      return reply.send({ status });
+    } catch (err) {
+      return reply.code(409).send({ error: message(err) });
+    }
   });
 
-  app.post('/api/v1/sessions/:id/gates/:phase/approve-with-conditions', async (req, reply) => {
-    const { id, phase } = req.params as { id: string; phase: string };
-    const session = getSession(db, id);
-    if (!session) return reply.code(404).send({ error: 'Session not found' });
-
-    const parsed = ApproveWithConditionsSchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
-    const body = parsed.data;
-
-    // Store conditions as RAID assumption regardless of gate path
-    db.prepare(`
-      INSERT INTO raid_items (id, session_id, phase_id, kind, title, description, blocking, created_at)
-      VALUES (?, ?, ?, 'assumption', 'Gate conditions', ?, 0, ?)
-    `).run(randomUUID(), id, phase, body.conditions, new Date().toISOString());
-
-    const resolved = resolveHumanGate(id, phase, 'approved', body.conditions);
-
-    if (!resolved) {
-      updatePhaseState(db, id, phase, 'Approved');
-      db.prepare(`
-        INSERT INTO gates (id, session_id, phase_id, result, blocking_policies, council_score, conditions, evaluated_at, created_at)
-        VALUES (?, ?, ?, 'approved-with-conditions', '[]', NULL, ?, ?, ?)
-      `).run(randomUUID(), id, phase, body.conditions, new Date().toISOString(), new Date().toISOString());
+  // Cancel a running or paused run (distinct third action, §11.1).
+  app.post(`${V}/runs/:id/cancel`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    try {
+      const status = await adapter.cancelRun(id);
+      return reply.send({ status });
+    } catch (err) {
+      return reply.code(409).send({ error: message(err) });
     }
+  });
 
-    void emit('wicked.crew.phase.gate.approved', { session_id: id, phase_id: phase, human_override: true, conditions: body.conditions });
-    return { ok: true };
+  // Advance semantics (§11.8): a gated run advances via confirmGate; otherwise
+  // resumeRun re-enters the cursor. Never resumeRun a gated run (it would re-pause).
+  app.post(`${V}/runs/:id/resume`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    try {
+      const status =
+        run.session.status === 'awaiting_human'
+          ? await adapter.confirmGate(id, true)
+          : await adapter.resumeRun(id);
+      return reply.send({ status });
+    } catch (err) {
+      return reply.code(409).send({ error: message(err) });
+    }
+  });
+
+  // The daemon-cached gate prompt for a paused run (not a core call) so a fresh
+  // browser can render the gate after a late join.
+  app.get(`${V}/runs/:id/gate`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const entry = gateCache.get(id);
+    if (!entry) return reply.code(404).send({ error: 'No open gate for this run' });
+    return { runId: id, ...entry };
   });
 }
