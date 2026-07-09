@@ -53,11 +53,14 @@ phase runs are all **data** on the workflow definition.
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
 grounded validation script** for that specific phase/task — stored as the phase's **evidence
 evaluator**, versioned and approved; when the spec changes the script is regenerated and re-approved, so
-validation always tracks the spec. The evaluator is a **pair authored by two independent strategists**:
+validation always tracks the spec. The evaluator is a **complementary pair**:
 
 - a **deterministic** validator (structural/factual: files, config keys, doc sections, code shape,
   patterns — auditable, cheap), and
 - an **agent-based** validator (semantic judgment: does this meet the *intent*?).
+
+*(As built, the two are distinct prompts/framing on the same runner — genuinely distinct council seats,
+for real uncorrelated independence, is a tracked follow-up.)*
 
 Combined so that **Approve requires the deterministic piece to PASS; the agent piece can REJECT but is
 never the sole approver** — a model may fail a gate, never solely approve one.
