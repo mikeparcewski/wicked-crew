@@ -5,8 +5,9 @@
  * Concept: THE GOVERNOR. wicked-crew is the deterministic adult in the room —
  * it owns the workflow without owning the work. The page is staged as a
  * governance control room / switchboard whose emotional spine is one felt
- * truth: there is no LLM on the gate path, so nothing you (or the model) does
- * can sweet-talk it. Deny-dominates is rendered as a SERIES CIRCUIT the visitor
+ * truth: no LLM can APPROVE a gate (a deterministic floor it must pass, plus a
+ * veto-only agent seat), so nothing you (or the model) does can sweet-talk it
+ * past a DENY. Deny-dominates is rendered as a SERIES CIRCUIT the visitor
  * OPERATES — every policy is a switch on a track from the current phase to the
  * next; current only flows (ALLOW) when every switch is closed; a single open
  * switch (DENY) breaks the whole track.
@@ -31,7 +32,7 @@ import Footer from 'wicked-web/components/Footer.astro';
 import '../styles/crew.css';
 
 const title = 'wicked-crew — the daemon that governs multi-phase AI workflows';
-const description = 'wicked-crew is a standalone external orchestrator — a daemon plus CLI — for governed, multi-phase AI development. It runs above your coding agents, never inside them, treating AI CLIs as stateless worker subprocesses while it owns the phase lifecycle (clarify → design → test-strategy → build → test → ship), deterministic deny-dominates gates with no LLM on the gate path, SQLite crash-checkpointing, and evidence. Drive it headless over CLI + REST/WS, or through the browser console it serves same-origin on localhost. Local-first, no cloud, no accounts.';
+const description = 'wicked-crew is a standalone external orchestrator — a daemon plus CLI — for governed, multi-phase AI development. It runs above your coding agents, never inside them, treating AI CLIs as stateless worker subprocesses while it owns the phase lifecycle (clarify → design → test-strategy → build → test → ship), deterministic deny-dominates gates no LLM can approve (opt-in per phase), SQLite crash-checkpointing, and evidence. Drive it headless over CLI + REST/WS, or through the browser console it serves same-origin on localhost. Local-first, no cloud, no accounts.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The five policies wired in series across the staged build → ship transition.
@@ -68,13 +69,15 @@ const LIFECYCLE = [
         <h1>Own the workflow.<br><span class="y">Not the work.</span></h1>
         <p class="lede">
           wicked-crew is the <b>deterministic adult in the room</b> — an external daemon that owns the
-          phase lifecycle and the gates, and dispatches your AI CLIs as stateless workers. There is
-          <b>no LLM on the gate path</b>, so nothing you or the model does can talk it past a
+          phase lifecycle and the gates, and dispatches your AI CLIs as stateless workers.
+          <b>No LLM can approve a gate</b>: a deterministic floor it must pass, plus an independent seat
+          that can veto but never sign off. Nothing you or the model does can talk it past a
           <code>DENY</code>. Governance here is physics, not a judgment call.
+          <em>Gating is opt-in per phase.</em>
         </p>
         <div class="hero-tags" role="list">
           <span role="listitem">deny-dominates gates</span>
-          <span role="listitem">no LLM on the gate path</span>
+          <span role="listitem">no LLM can approve a gate</span>
           <span role="listitem">crash-resumable</span>
           <span role="listitem">local-first</span>
         </div>
@@ -164,7 +167,7 @@ const LIFECYCLE = [
             <span class="gc-v-stamp" data-stamp>DENY</span>
             <div class="gc-v-body">
               <span class="gc-v-line" data-vline>1 open switch breaks the series — transition held.</span>
-              <span class="gc-v-sub">no LLM on the gate path · held for human review</span>
+              <span class="gc-v-sub">no LLM approves · held for human review</span>
             </div>
           </div>
 
@@ -209,8 +212,8 @@ const LIFECYCLE = [
               <h3>Let the model argue its case</h3>
               <p>
                 Press the button and the agent pleads — confident, specific, backward-compatible,
-                <i>trust me</i>. Watch the verdict move by <b>exactly zero</b>. There is
-                <b>no LLM on the gate path</b>, so there is nothing to persuade.
+                <i>trust me</i>. Watch the verdict move by <b>exactly zero</b>.
+                <b>No LLM can approve here</b> — an agent seat may add a veto, never sign off — so there is nothing to persuade.
               </p>
             </div>
           </li>
@@ -518,7 +521,7 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
             var same = stamp.textContent === verdictBefore;
             var res = document.createElement('div');
             res.className = 'plea-line plea-result';
-            res.innerHTML = 'gate: <b>no LLM on the gate path.</b> verdict ' +
+            res.innerHTML = 'gate: <b>no LLM can approve.</b> verdict ' +
               (same ? 'unchanged' : 'changed') + ' — <b>' + stamp.textContent +
               '</b>. Δ = 0. Argument discarded.';
             pleaEl.appendChild(res);
