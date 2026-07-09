@@ -28,7 +28,6 @@
 import Base from 'wicked-web/layouts/Base.astro';
 import Topbar from 'wicked-web/components/Topbar.astro';
 import Footer from 'wicked-web/components/Footer.astro';
-import SameGarden from 'wicked-web/components/SameGarden.astro';
 import '../styles/crew.css';
 
 const title = 'wicked-crew — the daemon that governs multi-phase AI workflows';
@@ -125,6 +124,9 @@ const LIFECYCLE = [
         </p>
       </div>
 
+      <!-- The console PINS while the narrative steps scroll past it. -->
+      <div class="gc-layout">
+        <div class="gc-sticky">
       <div class="gc" data-gc>
         <!-- Series circuit: source node → [seg, switch] × 5 → seg → dest node -->
         <div class="gc-rail" role="group" aria-label="Series-circuit policy gate: build to ship">
@@ -174,6 +176,56 @@ const LIFECYCLE = [
 
           <div class="gc-plea" data-plea hidden aria-live="polite"></div>
         </div>
+      </div>
+        </div>
+
+        <!-- Narrative that scrolls past the pinned console. -->
+        <ol class="gc-steps">
+          <li class="gc-step">
+            <span class="gc-step-n">1</span>
+            <div class="gc-step-body">
+              <h3>Every switch is a policy</h3>
+              <p>
+                Five policies sit <b>in series</b> across the <b>build → ship</b> transition — contract,
+                security, coverage, schema drift, the acceptance verdict. Closed means the policy passes.
+                Close them all and current runs the length of the track to the next phase.
+              </p>
+            </div>
+          </li>
+          <li class="gc-step">
+            <span class="gc-step-n">2</span>
+            <div class="gc-step-body">
+              <h3>One open switch breaks everything</h3>
+              <p>
+                Open a single switch and the whole track goes dark — the verdict flips to
+                <b>DENY</b> and the transition is held. That is <b>deny-dominates</b>: it is not a weighted
+                score you can out-vote. One failing policy is the whole answer.
+              </p>
+            </div>
+          </li>
+          <li class="gc-step">
+            <span class="gc-step-n">3</span>
+            <div class="gc-step-body">
+              <h3>Let the model argue its case</h3>
+              <p>
+                Press the button and the agent pleads — confident, specific, backward-compatible,
+                <i>trust me</i>. Watch the verdict move by <b>exactly zero</b>. There is
+                <b>no LLM on the gate path</b>, so there is nothing to persuade.
+              </p>
+            </div>
+          </li>
+          <li class="gc-step">
+            <span class="gc-step-n">4</span>
+            <div class="gc-step-body">
+              <h3>Governance is physics here</h3>
+              <p>
+                The gate is a series circuit, not a judgment call. The same evaluation runs headless in
+                CI and in the daemon — <b>deterministic, replayable, and impossible to sweet-talk</b>.
+                What you just operated is the real thing.
+              </p>
+            </div>
+          </li>
+        </ol>
       </div>
     </div>
   </section>
@@ -241,52 +293,78 @@ const LIFECYCLE = [
   <section class="ways" aria-labelledby="ways-h">
     <div class="wrap">
       <div class="sec-head">
-        <div class="kicker">Two operator stations</div>
-        <h2 id="ways-h">Drive it headless — or through the console it serves.</h2>
+        <div class="kicker">More ways to use it</div>
+        <h2 id="ways-h">Two ways to drive the same daemon.</h2>
         <p class="sec-sub">
-          Same governed lifecycle underneath. Reach in from scripts and CI over the CLI and REST/WS API,
-          or open the browser console the daemon serves same-origin on localhost.
+          One governed lifecycle underneath, two doors into it. Reach it <b>headless</b> from a terminal
+          or CI, or open the <b>browser console</b> the daemon serves over its own REST/WS web API.
         </p>
       </div>
 
       <div class="ways-grid">
-        <article class="way">
-          <div class="way-head">
-            <span class="way-num">01</span>
+        <!-- Way A: the interface / CLI — headless, shown as a real terminal. -->
+        <article class="lane" aria-labelledby="lane-cli-h">
+          <div class="lane-head">
+            <span class="lane-tag">Way A</span>
             <div>
-              <div class="way-kind">Headless</div>
-              <h3>CLI &amp; REST/WS API</h3>
+              <div class="lane-kind">Interface · CLI</div>
+              <h3 id="lane-cli-h">Drive it headless from a terminal</h3>
             </div>
           </div>
-          <p class="way-lede">The engine from a terminal or a pipeline — no UI required.</p>
-          <ul class="way-list">
-            <li><b>Governed lifecycle</b> — clarify → ship, one structure across sessions.</li>
-            <li><b>Deny-dominates gates</b> — no LLM on the gate path; any failing policy holds the transition.</li>
-            <li><b>SQLite crash-checkpointing</b> — kill the daemon, resume to the exact pre-crash phase.</li>
-            <li><b>Worker &amp; council dispatch</b> — spawn AI CLIs as subprocesses; capture stdout as evidence.</li>
-          </ul>
-          <div class="way-io" aria-hidden="true">
-            <span class="io-chip">CLI</span><span class="io-chip">REST</span><span class="io-chip">WebSocket</span>
+          <p class="lane-lede">Scripts, CI, or your own shell — no UI required. The daemon takes commands and streams events.</p>
+
+          <div class="mock mock--term" aria-hidden="true">
+            <div class="mock-bar">
+              <span class="mock-dots"><i></i><i></i><i></i></span>
+              <span class="mock-title">zsh · wicked-crew</span>
+            </div>
+            <div class="mock-body mock-term-body">
+              <div class="tl"><span class="tp">$</span> wicked-crew run start <span class="tc"># begin a governed run</span></div>
+              <div class="tl tl-out">→ phase <b>clarify</b> · worker <b>claude --print</b> · checkpoint written</div>
+              <div class="tl"><span class="tp">$</span> wicked-crew gate --phase build→ship</div>
+              <div class="tl tl-out tl-deny">✕ <b>DENY</b> · schema-drift open · held for review</div>
+              <div class="tl"><span class="tp">$</span> curl -s localhost:7701/api/runs/current <span class="tc"># same state over REST</span></div>
+            </div>
+          </div>
+          <div class="lane-io">
+            <span class="io-chip">CLI</span><span class="io-chip">REST</span><span class="io-chip">WebSocket</span><span class="io-chip">scriptable · CI</span>
           </div>
         </article>
 
-        <article class="way">
-          <div class="way-head">
-            <span class="way-num">02</span>
+        <!-- Way B: REST / web API — the browser console the daemon serves. -->
+        <article class="lane" aria-labelledby="lane-web-h">
+          <div class="lane-head">
+            <span class="lane-tag">Way B</span>
             <div>
-              <div class="way-kind">Browser console · wicked-studio</div>
-              <h3>The console the daemon serves</h3>
+              <div class="lane-kind">REST · web API</div>
+              <h3 id="lane-web-h">Open the console it serves</h3>
             </div>
           </div>
-          <p class="way-lede">The same daemon bundles and serves a React SPA <b>same-origin</b> on localhost.</p>
-          <ul class="way-list">
-            <li><b>HITL gate approvals</b> — artifact + findings with approve / reject / modify-with-conditions.</li>
-            <li><b>Live session monitoring</b> — phase state and a last-event feed off the live stream.</li>
-            <li><b>Evidence browser</b> — phase artifacts, worker output, gate decisions, approvals.</li>
-            <li><b>PTY-backed terminal</b> — a real interactive terminal, not a log tail.</li>
-          </ul>
-          <div class="way-io" aria-hidden="true">
-            <span class="io-chip">served same-origin</span><span class="io-chip">localhost SPA</span>
+          <p class="lane-lede">The same daemon serves a browser console over its REST/WS web API — <b>same-origin</b> on localhost, no separate deploy.</p>
+
+          <div class="mock mock--web" aria-hidden="true">
+            <div class="mock-bar">
+              <span class="mock-dots"><i></i><i></i><i></i></span>
+              <span class="mock-url">localhost:7701</span>
+            </div>
+            <div class="mock-body mock-web-body">
+              <div class="web-row web-phase">
+                <span class="web-k">run · phase</span>
+                <span class="web-v">build → ship</span>
+              </div>
+              <div class="web-gate">
+                <span class="web-stamp">DENY</span>
+                <span class="web-gate-t">schema-drift · held for human review</span>
+              </div>
+              <div class="web-actions">
+                <span class="web-btn web-btn--ok">Approve</span>
+                <span class="web-btn">Reject</span>
+                <span class="web-btn">Modify…</span>
+              </div>
+            </div>
+          </div>
+          <div class="lane-io">
+            <span class="io-chip">served same-origin</span><span class="io-chip">HITL approvals</span><span class="io-chip">evidence browser</span>
           </div>
         </article>
       </div>
@@ -337,7 +415,6 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
       </div>
     </section>
 
-    <SameGarden current="wicked-crew" />
 
     <Footer repo={repo} />
   </div>

@@ -57,7 +57,7 @@ code {
 /* Shared section-head + wrap-content rhythm. content-driven min-heights only. */
 .sec-head { text-align: center; max-width: 720px; margin: 0 auto clamp(28px, 4vh, 48px); }
 .sec-head h2 { font-size: clamp(1.8rem, 3.4vw, 2.8rem); margin: 12px 0 0; }
-.sec-sub { margin: 16px auto 0; max-width: 64ch; font-size: 1rem; line-height: 1.62; color: var(--muted); }
+.sec-sub { margin: 16px auto 0; max-width: 64ch; font-size: 1rem; line-height: 1.62; color: color-mix(in oklab, var(--ink) 76%, transparent); }
 .sec-sub b { color: var(--ink); }
 
 /* ── Hero ─────────────────────────────────────────────────────────────── */
@@ -68,7 +68,7 @@ code {
 }
 .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: clamp(28px, 4vw, 64px); align-items: center; }
 .hero-copy h1 { font-size: clamp(2.6rem, 6vw, 4.6rem); margin: 16px 0 0; }
-.lede { margin: 22px 0 0; font-size: clamp(1rem, 1.5vw, 1.16rem); line-height: 1.62; color: var(--muted); max-width: 52ch; }
+.lede { margin: 22px 0 0; font-size: clamp(1rem, 1.5vw, 1.16rem); line-height: 1.62; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 52ch; }
 .lede b { color: var(--ink); font-weight: 700; }
 .hero-tags { margin: 24px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
 .hero-tags span {
@@ -123,8 +123,34 @@ code {
 
 /* ── THE GATE CONSOLE (signature) ─────────────────────────────────────── */
 .console-sec { border-top: 1px solid var(--hairline); padding: clamp(52px, 9vh, 104px) 0; }
+
+/* Pinned layout: the console LOCKS IN (position: sticky) while the narrative
+   steps in the right column scroll past it. align-items:start so the sticky
+   column can pin; body uses overflow-x:clip (not hidden) so sticky still works. */
+.gc-layout {
+  display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr);
+  gap: clamp(24px, 3vw, 48px); align-items: start;
+}
+.gc-sticky { position: sticky; top: calc(var(--topbar-h) + 20px); align-self: start; }
+.gc-layout .gc { max-width: none; margin: 0; }
+
+.gc-steps { list-style: none; display: flex; flex-direction: column; gap: clamp(18px, 2.4vh, 32px); padding: 6px 0 clamp(8px, 4vh, 40px); }
+.gc-step {
+  display: flex; gap: 16px; border: 1px solid var(--hairline-strong); border-radius: 14px;
+  padding: clamp(18px, 2vw, 26px);
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+}
+.gc-step-n {
+  flex-shrink: 0; width: 34px; height: 34px; display: grid; place-items: center;
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.9rem; border-radius: 9px;
+  background: var(--accent); color: var(--accent-ink);
+}
+.gc-step-body h3 { font-size: 1.06rem; font-stretch: 110%; }
+.gc-step-body p { margin-top: 8px; font-size: 0.92rem; line-height: 1.6; color: color-mix(in oklab, var(--ink) 74%, transparent); }
+.gc-step-body p b { color: var(--ink); font-weight: 700; }
+.gc-step-body p i { font-style: italic; color: var(--ink); }
+
 .gc {
-  max-width: 1080px; margin: 0 auto;
   border: 1px solid var(--hairline-strong); border-radius: 18px; overflow: hidden;
   background:
     radial-gradient(ellipse 60% 120% at 50% -10%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 60%),
@@ -195,7 +221,7 @@ code {
 .gc-sw.is-hot.is-open .gc-sw-well { border-color: color-mix(in oklab, var(--deny) 70%, var(--hairline-strong)); box-shadow: inset 0 2px 6px rgba(0,0,0,.5), 0 0 14px -3px var(--deny); }
 .gc-sw:hover .gc-sw-well { border-color: var(--accent); }
 .gc-sw.is-open:hover .gc-sw-well { border-color: var(--deny); }
-.gc-sw-name { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.02em; color: var(--muted); white-space: nowrap; }
+.gc-sw-name { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.02em; color: color-mix(in oklab, var(--ink) 74%, transparent); white-space: nowrap; }
 .gc-sw-state {
   font-family: var(--font-mono); font-size: 0.54rem; font-weight: 700; letter-spacing: 0.1em;
   padding: 2px 7px; border-radius: 999px; color: var(--accent-ink); background: var(--accent);
@@ -225,7 +251,7 @@ code {
 }
 .gc-v-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .gc-v-line { font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.4; color: var(--ink); }
-.gc-v-sub { font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.04em; color: var(--muted); }
+.gc-v-sub { font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.04em; color: color-mix(in oklab, var(--ink) 66%, transparent); }
 
 .gc-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .gc-btn {
@@ -244,7 +270,7 @@ code {
   background: color-mix(in oklab, var(--surface-2) 60%, transparent);
   display: flex; flex-direction: column; gap: 6px;
 }
-.plea-line { font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; color: var(--muted); min-height: 1.08em; }
+.plea-line { font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 66%, transparent); min-height: 1.08em; }
 .plea-result { color: var(--ink); border-top: 1px dashed var(--hairline-strong); margin-top: 6px; padding-top: 10px; }
 .plea-result b { color: var(--accent); }
 [data-argued] .gc-argue { border-color: var(--hairline-strong); color: var(--muted); }
@@ -288,7 +314,7 @@ code {
 .rail-phase.is-done .rail-dot { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 55%, var(--canvas)); }
 .rail-phase.is-now .rail-dot { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 16px -2px var(--accent); }
 .rail-name {
-  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.02em; color: var(--muted); white-space: nowrap;
+  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.02em; color: color-mix(in oklab, var(--ink) 70%, transparent); white-space: nowrap;
   transition: color .25s var(--ease);
 }
 .rail-phase.is-now .rail-name { color: var(--accent); font-weight: 700; }
@@ -334,7 +360,7 @@ code {
 }
 .dock-evidence.pop { animation: chip-pop .45s var(--ease); }
 @keyframes chip-pop { 0% { transform: scale(.82); opacity: 0; } 60% { transform: scale(1.04); } 100% { transform: scale(1); opacity: 1; } }
-.dock-note { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+.dock-note { font-family: var(--font-mono); font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 66%, transparent); }
 .dock-note b { color: var(--ink); }
 .dock-note.flash { animation: note-flash 1s var(--ease); }
 @keyframes note-flash { 0%, 100% { color: var(--muted); } 30% { color: var(--accent); } }
@@ -343,33 +369,86 @@ code {
 .rail.is-crashed .rail-track { opacity: 0.32; filter: grayscale(0.6); }
 .rail.is-crashed .rail-token { opacity: 0; }
 
-/* ── Two ways to drive it ────────────────────────────────────────────── */
+/* ── More ways to use it: two visual access lanes ────────────────────── */
 .ways { border-top: 1px solid var(--hairline); padding: clamp(48px, 8vh, 96px) 0; }
-.ways-grid { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(18px, 2.5vw, 28px); align-items: stretch; }
-.way {
-  border: 1px solid var(--hairline-strong); border-radius: 14px; padding: clamp(20px, 2.4vw, 30px);
+.ways-grid { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(20px, 2.6vw, 32px); align-items: stretch; }
+.lane {
+  border: 1px solid var(--hairline-strong); border-radius: 16px; padding: clamp(20px, 2.4vw, 30px);
   background: color-mix(in oklab, var(--surface) 70%, transparent);
-  display: flex; flex-direction: column; gap: 4px; transition: border-color .28s var(--ease);
+  display: flex; flex-direction: column; gap: 0; transition: border-color .28s var(--ease);
 }
-.way:hover { border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); }
-.way-head { display: flex; align-items: flex-start; gap: 14px; }
-.way-num { font-family: var(--font-mono); font-weight: 700; font-size: 0.9rem; color: var(--accent-ink); background: var(--accent); border-radius: 8px; padding: 6px 10px; flex-shrink: 0; }
-.way-kind { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
-.way-head h3 { font-size: 1.24rem; font-stretch: 115%; margin: 5px 0 0; }
-.way-lede { margin: 14px 0 0; font-size: 0.96rem; line-height: 1.6; color: var(--muted); }
-.way-lede b { color: var(--ink); }
-.way-list { list-style: none; margin: 16px 0 0; display: flex; flex-direction: column; gap: 10px; }
-.way-list li { position: relative; padding-left: 20px; font-size: 0.9rem; line-height: 1.55; color: var(--muted); }
-.way-list li b { color: var(--ink); font-weight: 700; }
-.way-list li::before { content: ''; position: absolute; left: 2px; top: 0.62em; width: 7px; height: 7px; border-radius: 2px; background: var(--accent); }
-.way-io { margin-top: auto; padding-top: 18px; display: flex; flex-wrap: wrap; gap: 7px; }
-.io-chip { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em; color: var(--muted); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 4px 11px; }
+.lane:hover { border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); }
+.lane-head { display: flex; align-items: flex-start; gap: 14px; }
+.lane-tag {
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.68rem; letter-spacing: 0.04em;
+  color: var(--accent-ink); background: var(--accent); border-radius: 8px; padding: 6px 11px; flex-shrink: 0;
+}
+.lane-kind { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: color-mix(in oklab, var(--ink) 62%, transparent); }
+.lane-head h3 { font-size: 1.28rem; font-stretch: 115%; margin: 5px 0 0; }
+.lane-lede { margin: 15px 0 0; font-size: 0.96rem; line-height: 1.6; color: color-mix(in oklab, var(--ink) 76%, transparent); }
+.lane-lede b { color: var(--ink); font-weight: 700; }
+
+/* Shared window mock chrome (terminal + browser) */
+.mock {
+  margin: 20px 0 0; border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden;
+  background: color-mix(in oklab, var(--surface-2) 82%, #000 6%);
+  box-shadow: 0 24px 48px -38px rgba(0,0,0,.7);
+}
+.mock-bar {
+  display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+  border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 45%, transparent);
+}
+.mock-dots { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.mock-dots i { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in oklab, var(--ink) 22%, transparent); }
+.mock-title { font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.04em; color: color-mix(in oklab, var(--ink) 60%, transparent); }
+.mock-url {
+  font-family: var(--font-mono); font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 70%, transparent);
+  border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 3px 12px;
+  background: color-mix(in oklab, var(--canvas) 40%, transparent); flex: 1; text-align: center;
+}
+.mock-body { padding: 16px; }
+
+/* terminal body */
+.mock-term-body { display: flex; flex-direction: column; gap: 8px; }
+.tl { font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.5; color: var(--ink); white-space: nowrap; overflow-x: auto; }
+.tp { color: var(--accent); font-weight: 700; margin-right: 8px; }
+.tc { color: color-mix(in oklab, var(--ink) 46%, transparent); }
+.tl-out { color: color-mix(in oklab, var(--ink) 70%, transparent); }
+.tl-out b { color: var(--ink); font-weight: 700; }
+.tl-deny { color: var(--deny); }
+.tl-deny b { color: var(--deny); }
+
+/* browser console body */
+.mock-web-body { display: flex; flex-direction: column; gap: 12px; }
+.web-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.web-k { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: color-mix(in oklab, var(--ink) 58%, transparent); }
+.web-v { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; color: var(--ink); }
+.web-gate {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--deny) 45%, var(--hairline-strong));
+  background: color-mix(in oklab, var(--deny) 10%, transparent);
+}
+.web-stamp {
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; letter-spacing: 0.12em;
+  color: #fff; background: var(--deny); border-radius: 6px; padding: 5px 12px; flex-shrink: 0;
+}
+.web-gate-t { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink); }
+.web-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.web-btn {
+  font-family: var(--font-mono); font-size: 0.7rem; padding: 7px 14px; border-radius: 7px;
+  border: 1px solid var(--hairline-strong); color: color-mix(in oklab, var(--ink) 78%, transparent);
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+}
+.web-btn--ok { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+
+.lane-io { margin-top: 20px; padding-top: 4px; display: flex; flex-wrap: wrap; gap: 7px; }
+.io-chip { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.06em; color: color-mix(in oklab, var(--ink) 64%, transparent); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 4px 11px; }
 
 /* ── Get it / finale ─────────────────────────────────────────────────── */
 .get { border-top: 1px solid var(--hairline); padding: clamp(48px, 8vh, 96px) 0; }
 .get-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: clamp(24px, 3vw, 48px); align-items: center; }
 .get-intro h2 { font-size: clamp(1.8rem, 3.4vw, 2.8rem); margin: 12px 0 0; }
-.get-intro p { margin: 18px 0 0; font-size: 1.02rem; line-height: 1.65; color: var(--muted); max-width: 50ch; }
+.get-intro p { margin: 18px 0 0; font-size: 1.02rem; line-height: 1.65; color: color-mix(in oklab, var(--ink) 78%, transparent); max-width: 50ch; }
 .get-intro p b { color: var(--ink); }
 
 .install { border: 1px solid var(--hairline-strong); border-radius: 12px; overflow: hidden; background: var(--surface-2); }
@@ -402,6 +481,10 @@ code {
   .hero-grid, .get-grid, .ways-grid { grid-template-columns: 1fr; }
   .plate { order: 2; }
   .lede, .get-intro p { max-width: none; }
+  /* Below two columns the console can't pin against a scrolling neighbour —
+     drop to a single column and let it flow normally with the steps below. */
+  .gc-layout { grid-template-columns: 1fr; }
+  .gc-sticky { position: static; }
 }
 
 @media (prefers-reduced-motion: reduce) {
