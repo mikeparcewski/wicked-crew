@@ -39,10 +39,16 @@ Each phase is executed by a **skill** (a fixed, versioned capability contract) i
 CLI — consistent control instead of an ad-hoc prompt every run. Phases, gates, roles, and the skill a
 phase runs are all **data** on the workflow definition.
 
-## Gates: generated, grounded, dual validators *(design — DES-EXEC-001 rev0.4)*
+## Gates: generated, grounded, dual validators *(built — `wicked-core`, DES-EXEC-001 rev0.4)*
 
-> **Today** a gate is the deterministic, deny-dominates check (no model on the gate path). The model
-> below is the designed evolution — generated grounded validators — not yet shipped.
+> **Built + live-verified** in the [`wicked-core`](../wicked-core) engine: a test-strategy skill authors
+> a grounded deterministic check (`provision-validator`), a human/council approves it (`approve-validator`,
+> distinct content-hash pin), and the gate re-verifies that pinned script against the worktree
+> (deny-dominates, no LLM at gate time) alongside an independent agent judge that can reject but never
+> lone-approve. The security controls (approval gate, fail-closed parse, denylist) survived a 14-finding
+> adversarial review. **Caveat:** the shipped feature/bug/migration workflows ship *ungated*
+> (`validator_pin: null`) — a phase engages the gate only once an operator authors, approves, and pins a
+> validator into the def.
 
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
 grounded validation script** for that specific phase/task — stored as the phase's **evidence
@@ -60,15 +66,17 @@ never the sole approver** — a model may fail a gate, never solely approve one.
 human escalation above a threshold. A green run means "diverse seats + the escalation policy agreed,"
 not "proven."
 
-## Event-driven, with sidecars *(design — DES-EXEC-001 §2/§4.2)*
-
-> The `wicked.*` bus seam and event-provisioned skills below are designed, not yet shipped. Today's
-> `events/bus.ts` is a browser WebSocket fan-out, not the inter-component bus described here.
+## Event-driven, with sidecars *(built substrate — DES-EXEC-001 §2/§4.2)*
 
 Components publish and subscribe; they don't call each other. Standard event types (`wicked.*`) mean you
 can attach **sidecars** — audit, extra processing, skill provisioning/refresh — to any workflow without
-touching it. Skills the engine needs are provisioned by event (`wicked.skill.needed` / `.refresh` →
-`.ready`), never a synchronous fetch.
+touching it.
+
+> **Built:** the `wicked-core` engine has a Rust↔`wicked-bus` bridge (`src/bus.rs`) — it emits/polls the
+> real wicked-bus SQLite log and turns `wicked.run.requested` into a launch (cross-language round-trip
+> verified, at-least-once with retry). The reducer + skill-provisioner **sidecars** (poll-loops with
+> idempotent, correlation-aware handlers) run on it (`wicked-bus/examples/crew-sidecars`, smoke-verified).
+> Wiring the bridge into the studio's browser feed is a follow-up.
 
 ## Where things are
 
@@ -83,7 +91,9 @@ touching it. Skills the engine needs are provisioned by event (`wicked.skill.nee
 
 ## Status
 
-Active build. The engine spine (workflows-as-data → data-driven planning → skills-driven invocation) is
-built and tested in `wicked-core`; the gate mechanism (generated dual validators), the event bus seam,
-and the studio bridge are designed and in progress. See `wicked-core/README.md` for the engine's
-per-layer status.
+Active build. **Built + verified in `wicked-core`** (each layer adversarially reviewed): workflows-as-data
+→ data-driven planning → per-phase gate + role/artifact-passing → skills-driven invocation → the
+dual-validator gate (author→approve→pin→re-verify) → the validator vault → the Rust↔wicked-bus bridge →
+a napi bridge (`../wicked-core-ts`). Remaining: wiring the napi addon into the studio UI, an OS sandbox
+around validator execution, and (honestly) the shipped workflows gate only once an operator pins a
+validator. See `wicked-core/README.md` for the per-layer status.
