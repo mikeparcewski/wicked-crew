@@ -59,8 +59,10 @@ validation always tracks the spec. The evaluator is a **complementary pair**:
   patterns — auditable, cheap), and
 - an **agent-based** validator (semantic judgment: does this meet the *intent*?).
 
-*(As built, the two are distinct prompts/framing on the same runner — genuinely distinct council seats,
-for real uncorrelated independence, is a tracked follow-up.)*
+*(As built, the agent validator now runs under a **genuinely distinct council seat** — identity-distinct
+from both the deterministic-validator author and the work author, by resolved binary (no self-grading),
+with a single-runner fallback when the roster is too small. An adversarial review caught an early
+self-grade hole here — the judge excluded the wrong author — since fixed and dispatch-proven.)*
 
 Combined so that **Approve requires the deterministic piece to PASS; the agent piece can REJECT but is
 never the sole approver** — a model may fail a gate, never solely approve one.
