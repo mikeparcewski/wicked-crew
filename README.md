@@ -60,7 +60,10 @@ never the sole approver** — a model may fail a gate, never solely approve one.
 human escalation above a threshold. A green run means "diverse seats + the escalation policy agreed,"
 not "proven."
 
-## Event-driven, with sidecars
+## Event-driven, with sidecars *(design — DES-EXEC-001 §2/§4.2)*
+
+> The `wicked.*` bus seam and event-provisioned skills below are designed, not yet shipped. Today's
+> `events/bus.ts` is a browser WebSocket fan-out, not the inter-component bus described here.
 
 Components publish and subscribe; they don't call each other. Standard event types (`wicked.*`) mean you
 can attach **sidecars** — audit, extra processing, skill provisioning/refresh — to any workflow without
