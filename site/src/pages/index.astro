@@ -1,23 +1,29 @@
 ---
 /**
  * index.astro — the wicked-crew landing page (wc.wickedagile.com).
- * Markets wicked-crew: the external orchestration daemon that governs
- * multi-phase AI development workflows, PLUS the browser console
- * (wicked-studio) it serves same-origin on localhost. This site REPLACES the
- * former standalone wicked-studio marketing site — crew is the product; studio
- * is the browser console it serves.
  *
- * Consumes the shared wicked-web chrome (Base + Topbar + Footer + SameGarden);
- * this page owns only its own content + crew.css.
+ * Concept: THE GOVERNOR. wicked-crew is the deterministic adult in the room —
+ * it owns the workflow without owning the work. The page is staged as a
+ * governance control room / switchboard whose emotional spine is one felt
+ * truth: there is no LLM on the gate path, so nothing you (or the model) does
+ * can sweet-talk it. Deny-dominates is rendered as a SERIES CIRCUIT the visitor
+ * OPERATES — every policy is a switch on a track from the current phase to the
+ * next; current only flows (ALLOW) when every switch is closed; a single open
+ * switch (DENY) breaks the whole track.
+ *
+ * Signature interaction: THE GATE CONSOLE — a real deterministic gate the
+ * visitor drives (DOM/SVG + vanilla JS, no canvas, cannot render empty). Flip
+ * five policy switches; the series-circuit track lights amber and completes to
+ * the next phase only when ALL are closed; the verdict recomputes instantly
+ * under deny-dominates. A "Let the model argue its case" button plays a
+ * persuasive plea and moves the verdict by exactly zero.
  *
  * Honesty (per CANONICAL-MESSAGING.md, resolved 2026-07-08):
  *  - crew = an EXTERNAL daemon + CLI; it never runs inside a coding agent and
- *    never writes code. As of v0.2.0 the orchestration engine lives in
- *    wicked-core; the daemon is a thin REST + WebSocket bridge over
- *    wicked-core-ts that also bundles + serves the studio browser console.
- *  - the studio console is a crew-served React SPA, NOT separately published
- *    (the egui/Tauri desktop app is RETIRED — no such references here).
- *  - v0.2.0, published to npm as `wicked-crew`.
+ *    never writes code. v0.2.0, published to npm as `wicked-crew`.
+ *  - the orchestration engine lives in wicked-core; the daemon is a thin
+ *    REST + WebSocket bridge that also bundles + serves the studio browser
+ *    console (a crew-served React SPA, not separately published).
  */
 import Base from 'wicked-web/layouts/Base.astro';
 import Topbar from 'wicked-web/components/Topbar.astro';
@@ -28,6 +34,27 @@ import '../styles/crew.css';
 const title = 'wicked-crew — the daemon that governs multi-phase AI workflows';
 const description = 'wicked-crew is a standalone external orchestrator — a daemon plus CLI — for governed, multi-phase AI development. It runs above your coding agents, never inside them, treating AI CLIs as stateless worker subprocesses while it owns the phase lifecycle (clarify → design → test-strategy → build → test → ship), deterministic deny-dominates gates with no LLM on the gate path, SQLite crash-checkpointing, and evidence. Drive it headless over CLI + REST/WS, or through the browser console it serves same-origin on localhost. Local-first, no cloud, no accounts.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
+
+// The five policies wired in series across the staged build → ship transition.
+// `open` marks the one that ships DENYed by default, so the console renders a
+// real (never empty) held-verdict state and hints at the interaction.
+const POLICIES = [
+  { id: 'contract',        note: 'API contract holds — no breaking change.' },
+  { id: 'security-policy', note: 'No secret, no disallowed dependency.' },
+  { id: 'coverage-floor',  note: 'Coverage at or above the floor.' },
+  { id: 'schema-drift',    note: 'Migration diverged from the checked-in schema.', open: true },
+  { id: 'verdict.json',    note: 'wicked-testing acceptance verdict = PASS.' },
+];
+
+// Lifecycle: the governed track, and which stateless worker each phase dispatches.
+const LIFECYCLE = [
+  { id: 'clarify',       worker: 'claude --print', evidence: 'clarify.md' },
+  { id: 'design',        worker: 'claude --print', evidence: 'design.md' },
+  { id: 'test-strategy', worker: 'wicked-testing', evidence: 'strategy.md' },
+  { id: 'build',         worker: 'codex run',      evidence: 'diff · build.log' },
+  { id: 'test',          worker: 'wicked-testing', evidence: 'verdict.json' },
+  { id: 'ship',          worker: 'bash',           evidence: 'release.tag' },
+];
 ---
 
 <Base title={title} description={description}>
@@ -38,173 +65,211 @@ const repo = 'https://github.com/mikeparcewski/wicked-crew';
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <div class="kicker">External orchestration daemon · governed multi-phase workflows</div>
+        <div class="kicker">External orchestration daemon · the governor</div>
         <h1>Own the workflow.<br><span class="y">Not the work.</span></h1>
         <p class="lede">
-          wicked-crew is a standalone external orchestrator &mdash; a <b>daemon plus CLI</b> &mdash; for
-          governed, multi-phase AI development. It runs <b>above</b> your coding agents, never inside them,
-          and never writes code. It treats AI CLIs (<code>claude --print</code>, <code>codex run</code>,
-          wicked-testing, wicked-garden, bash) as stateless worker subprocesses while it owns the phase
-          lifecycle, the deterministic gates, the human approvals, and the evidence.
+          wicked-crew is the <b>deterministic adult in the room</b> — an external daemon that owns the
+          phase lifecycle and the gates, and dispatches your AI CLIs as stateless workers. There is
+          <b>no LLM on the gate path</b>, so nothing you or the model does can talk it past a
+          <code>DENY</code>. Governance here is physics, not a judgment call.
         </p>
         <div class="hero-tags" role="list">
-          <span role="listitem">external daemon + CLI</span>
           <span role="listitem">deny-dominates gates</span>
+          <span role="listitem">no LLM on the gate path</span>
           <span role="listitem">crash-resumable</span>
           <span role="listitem">local-first</span>
         </div>
         <div class="hero-cta">
-          <a class="btn btn-primary" href="#get">Run the daemon</a>
-          <a class="btn btn-ghost" href="https://github.com/mikeparcewski/wicked-crew#readme" target="_blank" rel="noopener">Read the docs &rarr;</a>
+          <a class="btn btn-primary" href="#gate">Operate the gate ↓</a>
+          <a class="btn btn-ghost" href="#get">Run the daemon</a>
         </div>
       </div>
 
-      <!-- Daemon mock: goal → phase lifecycle → deterministic gate evaluation -->
-      <div class="console" aria-label="wicked-crew daemon, illustrative">
-        <div class="console-chrome">
-          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="console-url">localhost:7701 · wicked-crew daemon</span>
-          <span class="console-conn"><span class="conn-dot"></span>running</span>
+      <!-- Compact live governor plate: build → ship, one gate mid-transition holding a DENY. -->
+      <aside class="plate" aria-label="A governed transition holding a DENY">
+        <div class="plate-bar">
+          <span class="plate-badge">gate · deny-dominates</span>
+          <span class="plate-loc">localhost:7701</span>
         </div>
-        <div class="console-body daemon-body">
-          <div class="cm-head">
-            <span class="cm-goal">Migrate auth to OAuth 2.1</span>
-            <span class="cm-meta">feature · <span class="cm-status">test-strategy</span></span>
-          </div>
-
-          <div class="phase-graph" aria-hidden="true">
-            <span class="ph done">clarify</span><span class="ph-arr">→</span>
-            <span class="ph done">design</span><span class="ph-arr">→</span>
-            <span class="ph now">test-strategy</span><span class="ph-arr">→</span>
-            <span class="ph">build</span><span class="ph-arr">→</span>
-            <span class="ph">test</span><span class="ph-arr">→</span>
-            <span class="ph">ship</span>
-          </div>
-
-          <div class="gate">
-            <div class="gate-head">
-              <span class="gate-badge">gate · deny-dominates</span>
-              <span class="gate-phase">design → test-strategy · no LLM on the gate path</span>
-            </div>
-            <div class="gate-findings">
-              <span class="find pass">✓ contract</span>
-              <span class="find pass">✓ security-policy</span>
-              <span class="find pass">✓ coverage-floor</span>
-              <span class="find deny">✕ schema-drift</span>
-            </div>
-            <div class="gate-verdict">
-              <span class="gv-k">verdict</span>
-              <span class="gv-deny">DENY</span>
-              <span class="gv-note">one failing policy blocks the transition — held for human review</span>
-            </div>
-          </div>
-
-          <div class="daemon-log" aria-hidden="true">
-            <div class="dl-line"><span class="dl-arr">→</span>checkpoint written · sqlite · phase=test-strategy</div>
-            <div class="dl-line"><span class="dl-arr">→</span>worker dispatched · <span class="dl-cli">claude --print</span> · captured stdout as evidence</div>
-            <div class="dl-line dl-hi"><span class="dl-arr">→</span>council · 3 CLIs · agreement 2/3 · divergence recorded</div>
-            <div class="dl-line dl-dim"><span class="dl-arr">→</span>awaiting HITL decision<span class="dl-caret"></span></div>
-          </div>
+        <div class="plate-rail" aria-hidden="true">
+          <span class="pr-node is-from">build</span>
+          <span class="pr-wire"><i></i></span>
+          <span class="pr-gate is-deny" title="held">✕</span>
+          <span class="pr-wire is-dead"></span>
+          <span class="pr-node is-to">ship</span>
         </div>
-      </div>
+        <div class="plate-verdict">
+          <span class="plate-stamp">DENY</span>
+          <span class="plate-note">1 of 5 policies open · held for human review</span>
+        </div>
+        <div class="plate-hint">Flip the switches below ↓</div>
+      </aside>
     </div>
   </section>
 
-  <!-- ── Live orchestration graph ──────────────────────────────────────── -->
-  <!-- Adapted (not lifted) from the anti-legacy code→graph build viz: a living
-       canvas graph with flowing transit particles. Retold for crew's story —
-       the daemon at the hub, the phase lifecycle as a spine, gates, workers and
-       the council dispatched as satellites. Family tokens only (accent/ink/
-       link/muted/hairline resolved at mount); vanilla JS; reduced-motion safe. -->
-  <section class="orch" aria-labelledby="orch-h">
+  <!-- ── THE GATE CONSOLE (signature interactive) ──────────────────────── -->
+  <!-- A real deterministic gate the visitor operates. Deny-dominates rendered
+       as a SERIES CIRCUIT: every policy is a switch on the track from build to
+       ship; current flows (ALLOW) only when every switch is closed; a single
+       open switch (DENY) breaks the track. DOM/SVG + vanilla JS, no canvas —
+       it cannot render empty. Ships a held DENY state (schema-drift open). -->
+  <section class="console-sec" id="gate" aria-labelledby="gc-h">
     <div class="wrap">
       <div class="sec-head">
-        <div class="kicker">The daemon, drawn live</div>
-        <h2 id="orch-h">One daemon orchestrating the whole run.</h2>
+        <div class="kicker">The gate console · operate it</div>
+        <h2 id="gc-h">Flip the policies. Deny still dominates.</h2>
         <p class="sec-sub">
-          Not a diagram of boxes &mdash; the live shape of a governed run. The daemon holds the phase
-          spine, evaluates the deny-dominates gate, and dispatches stateless AI CLIs as workers and as a
-          council. Hover any node to trace what it touches.
+          One real transition — <b>build → ship</b> — gated by five policies wired <b>in series</b>.
+          Close them all and current reaches the next phase. Leave one open and the whole track goes
+          dark. Then press <b>“let the model argue”</b> and watch it move the verdict by exactly zero.
         </p>
       </div>
-      <figure class="orch-stage" aria-label="Live orchestration graph: the wicked-crew daemon driving a phase lifecycle, a deny-dominates gate, dispatched workers, and a council.">
-        <canvas class="orch-canvas" id="orch-canvas"></canvas>
-        <figcaption class="orch-cap" id="orch-cap" aria-live="polite"></figcaption>
-        <div class="orch-legend" aria-hidden="true">
-          <span class="ol"><i class="ol-hub"></i>daemon</span>
-          <span class="ol"><i class="ol-now"></i>active phase</span>
-          <span class="ol"><i class="ol-gate"></i>gate</span>
-          <span class="ol"><i class="ol-worker"></i>worker · council</span>
+
+      <div class="gc" data-gc>
+        <!-- Series circuit: source node → [seg, switch] × 5 → seg → dest node -->
+        <div class="gc-rail" role="group" aria-label="Series-circuit policy gate: build to ship">
+          <div class="gc-node gc-src">
+            <span class="gc-node-k">phase</span><span class="gc-node-v">build</span>
+          </div>
+
+          {POLICIES.map((p) => (
+            <>
+              <span class="gc-seg" data-seg></span>
+              <button
+                type="button"
+                class:list={['gc-sw', { 'is-open': p.open }]}
+                data-sw
+                data-policy={p.id}
+                aria-pressed={p.open ? 'false' : 'true'}
+                aria-label={`Policy ${p.id}: ${p.open ? 'failing (open)' : 'passing (closed)'}`}
+                title={p.note}
+              >
+                <span class="gc-sw-well" aria-hidden="true"><span class="gc-sw-lever"></span></span>
+                <span class="gc-sw-name">{p.id}</span>
+                <span class="gc-sw-state" data-state>{p.open ? 'FAIL' : 'PASS'}</span>
+              </button>
+            </>
+          ))}
+
+          <span class="gc-seg" data-seg></span>
+          <div class="gc-node gc-dst" data-dst>
+            <span class="gc-node-k">next</span><span class="gc-node-v">ship</span>
+          </div>
         </div>
-      </figure>
+
+        <div class="gc-panel">
+          <div class="gc-verdict" data-verdict aria-live="polite">
+            <span class="gc-v-stamp" data-stamp>DENY</span>
+            <div class="gc-v-body">
+              <span class="gc-v-line" data-vline>1 open switch breaks the series — transition held.</span>
+              <span class="gc-v-sub">no LLM on the gate path · held for human review</span>
+            </div>
+          </div>
+
+          <div class="gc-actions">
+            <button type="button" class="gc-btn gc-reset" data-reset>Reset · close all</button>
+            <button type="button" class="gc-btn gc-open1" data-open1>Open one at random</button>
+            <button type="button" class="gc-btn gc-argue" data-argue>Let the model argue its case →</button>
+          </div>
+
+          <div class="gc-plea" data-plea hidden aria-live="polite"></div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <!-- ── The differentiator ────────────────────────────────────────────── -->
-  <section class="band">
-    <div class="wrap band-grid">
-      <div class="band-copy">
-        <div class="kicker">Why it exists</div>
-        <h2>It owns the workflow structure without owning the work.</h2>
-        <p>
-          Coding agents can plan, write, and ship &mdash; but they run alone, forget between sessions,
-          and grade their own homework. wicked-crew sits <b>above</b> them: an external, headless,
-          <b>deterministic</b> phase-gate lifecycle you can crash and resume, driving stateless AI CLIs
-          it does not embed. The gates never call an LLM, deny always dominates, and every phase leaves
-          evidence behind.
+  <!-- ── The lifecycle rail (secondary, lightly animated) ──────────────── -->
+  <!-- The whole run as one physical governed track: a run token advances phase
+       to phase, gates sit between phases, and workers drop below as dispatched
+       subprocesses that return evidence chips. A crash marker shows resume to
+       the exact pre-crash phase. DOM/SVG, responds to hover / click. -->
+  <section class="rail-sec" aria-labelledby="rail-h">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">The governed lifecycle</div>
+        <h2 id="rail-h">One run token. Six phases. A gate between every one.</h2>
+        <p class="sec-sub">
+          The daemon advances a single run along a checkpointed track and dispatches a stateless worker
+          at each phase — capturing its output as evidence. Hover to pause, click a phase to jump the
+          token, or <b>kill the daemon</b> and watch it resume to the exact pre-crash phase.
         </p>
       </div>
-      <ul class="band-list">
-        <li><span class="bl-k">Not</span> a plugin, a library, or an in-agent hook.</li>
-        <li><span class="bl-k">Not</span> a workflow that trusts a model to say "done."</li>
-        <li><span class="bl-k">Is</span> an external daemon + CLI on <code>localhost:7701</code>, binding <code>127.0.0.1</code> only.</li>
-        <li><span class="bl-k">Is</span> deterministic on the gate path &mdash; deny-dominates, SQLite-checkpointed, crash-resumable to the exact pre-crash phase.</li>
-      </ul>
+
+      <div class="rail" data-rail>
+        <div class="rail-track">
+          {LIFECYCLE.map((ph, i) => (
+            <>
+              {i > 0 && (
+                <span class="rail-gate" data-gate aria-hidden="true"><i>◇</i></span>
+              )}
+              <button
+                type="button"
+                class="rail-phase"
+                data-phase
+                data-i={i}
+                data-worker={ph.worker}
+                data-evidence={ph.evidence}
+                aria-label={`Phase ${ph.id}`}
+              >
+                <span class="rail-dot" aria-hidden="true"></span>
+                <span class="rail-name">{ph.id}</span>
+              </button>
+            </>
+          ))}
+          <span class="rail-token" data-token aria-hidden="true"></span>
+        </div>
+
+        <div class="rail-dock">
+          <div class="dock-head">
+            <span class="dock-k">dispatched worker</span>
+            <button type="button" class="dock-crash" data-crash>⏻ Kill &amp; resume</button>
+          </div>
+          <div class="dock-row">
+            <span class="dock-worker" data-dock-worker>claude&nbsp;--print</span>
+            <span class="dock-arr">→ returns →</span>
+            <span class="dock-evidence" data-dock-evidence>clarify.md</span>
+          </div>
+          <div class="dock-note" data-dock-note>
+            checkpoint written · sqlite · phase=<b data-dock-phase>clarify</b>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
   <!-- ── Two ways to drive it ──────────────────────────────────────────── -->
-  <section class="ways">
+  <section class="ways" aria-labelledby="ways-h">
     <div class="wrap">
       <div class="sec-head">
-        <div class="kicker">One daemon, two ways to drive it</div>
-        <h2>Same governed lifecycle. Headless, or through the browser console it serves.</h2>
+        <div class="kicker">Two operator stations</div>
+        <h2 id="ways-h">Drive it headless — or through the console it serves.</h2>
         <p class="sec-sub">
-          Every run is the same crash-resumable, deny-dominates lifecycle. Drive it from scripts and CI
-          over the CLI and REST/WS API, or open the browser console the daemon serves same-origin on
-          localhost. Nothing changes underneath &mdash; only how you reach in.
+          Same governed lifecycle underneath. Reach in from scripts and CI over the CLI and REST/WS API,
+          or open the browser console the daemon serves same-origin on localhost.
         </p>
       </div>
 
       <div class="ways-grid">
-        <!-- Way 1: Headless -->
         <article class="way">
           <div class="way-head">
             <span class="way-num">01</span>
             <div>
               <div class="way-kind">Headless</div>
-              <h3>The daemon, CLI &amp; REST/WS API</h3>
+              <h3>CLI &amp; REST/WS API</h3>
             </div>
           </div>
-          <p class="way-lede">
-            The engine, from a terminal or a pipeline. Start the daemon and drive the whole lifecycle
-            over the CLI or the REST + WebSocket API &mdash; no UI required.
-          </p>
+          <p class="way-lede">The engine from a terminal or a pipeline — no UI required.</p>
           <ul class="way-list">
-            <li><b>Governed phase lifecycle</b> &mdash; clarify → design → test-strategy → build → test → ship, one shared structure across sessions.</li>
-            <li><b>Deterministic deny-dominates gates</b> &mdash; policies evaluate with <b>no LLM on the gate path</b>; any failing policy blocks the transition.</li>
-            <li><b>SQLite crash-checkpointing</b> &mdash; kill the daemon and resume to the exact pre-crash phase.</li>
-            <li><b>Worker &amp; council dispatch</b> &mdash; spawn AI CLIs as subprocesses and capture stdout as evidence, or fan one prompt to N CLIs and synthesize agreement / divergence.</li>
-            <li><b>wicked-testing <code>verdict.json</code></b> gates the test phase &mdash; the acceptance pipeline is the test-phase worker.</li>
+            <li><b>Governed lifecycle</b> — clarify → ship, one structure across sessions.</li>
+            <li><b>Deny-dominates gates</b> — no LLM on the gate path; any failing policy holds the transition.</li>
+            <li><b>SQLite crash-checkpointing</b> — kill the daemon, resume to the exact pre-crash phase.</li>
+            <li><b>Worker &amp; council dispatch</b> — spawn AI CLIs as subprocesses; capture stdout as evidence.</li>
           </ul>
           <div class="way-io" aria-hidden="true">
-            <span class="io-chip">CLI</span>
-            <span class="io-chip">REST</span>
-            <span class="io-chip">WebSocket</span>
+            <span class="io-chip">CLI</span><span class="io-chip">REST</span><span class="io-chip">WebSocket</span>
           </div>
         </article>
 
-        <!-- Way 2: Browser console -->
         <article class="way">
           <div class="way-head">
             <span class="way-num">02</span>
@@ -213,87 +278,18 @@ const repo = 'https://github.com/mikeparcewski/wicked-crew';
               <h3>The console the daemon serves</h3>
             </div>
           </div>
-          <p class="way-lede">
-            And it ships a browser console. The same daemon bundles and serves <b>wicked-studio</b>,
-            a React SPA, <b>same-origin</b> on localhost &mdash; the operator's real interface for the
-            decisions a session can't make alone.
-          </p>
+          <p class="way-lede">The same daemon bundles and serves a React SPA <b>same-origin</b> on localhost.</p>
           <ul class="way-list">
-            <li><b>HITL gate approvals</b> &mdash; when a session pauses at a hard gate, the console shows the artifact and findings with <b>approve / reject / modify-with-conditions</b>.</li>
-            <li><b>Live session monitoring</b> &mdash; phase state, status badges, and a last-event feed across every session, off the live event stream.</li>
-            <li><b>Evidence browser</b> &mdash; read phase artifacts, worker output, gate decisions, and approvals for any session.</li>
-            <li><b>PTY-backed terminal</b> &mdash; a real interactive terminal attached to the running agent, not a log tail.</li>
-            <li><b>Explicit response state machine</b> &mdash; <code>PendingResponse → Submitted → Acknowledged</code>, with <code>TimedOut / Expired / Failed</code> transitions.</li>
+            <li><b>HITL gate approvals</b> — artifact + findings with approve / reject / modify-with-conditions.</li>
+            <li><b>Live session monitoring</b> — phase state and a last-event feed off the live stream.</li>
+            <li><b>Evidence browser</b> — phase artifacts, worker output, gate decisions, approvals.</li>
+            <li><b>PTY-backed terminal</b> — a real interactive terminal, not a log tail.</li>
           </ul>
           <div class="way-io" aria-hidden="true">
-            <span class="io-chip">served same-origin</span>
-            <span class="io-chip">localhost SPA</span>
+            <span class="io-chip">served same-origin</span><span class="io-chip">localhost SPA</span>
           </div>
         </article>
       </div>
-    </div>
-  </section>
-
-  <!-- ── Governance deep-dive ──────────────────────────────────────────── -->
-  <section class="features">
-    <div class="wrap">
-      <div class="sec-head">
-        <div class="kicker">How the governance works</div>
-        <h2>Structure the daemon enforces — so a model never gets to wave it through.</h2>
-      </div>
-      <div class="feat-grid">
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">⛔</div>
-          <h3>Deny-dominates gates</h3>
-          <p>Gates evaluate with <b>no LLM on the gate path</b>. Deny dominates &mdash; any one failing policy blocks the phase transition. Governance is deterministic, not a judgment call.</p>
-        </article>
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">⟳</div>
-          <h3>SQLite crash-checkpointing</h3>
-          <p>Every phase transition is checkpointed to SQLite. Crash the daemon and resume to the exact pre-crash phase &mdash; no lost state, no re-run from the top.</p>
-        </article>
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">⊟</div>
-          <h3>Worker dispatcher</h3>
-          <p>Spawns AI CLIs &mdash; <code>claude --print</code>, <code>codex run</code>, wicked-testing, wicked-garden, bash &mdash; as <b>stateless subprocesses</b>, capturing their stdout as evidence.</p>
-        </article>
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">⋔</div>
-          <h3>Council dispatch</h3>
-          <p>Fan the same prompt to N CLIs and synthesize <b>agreement and divergence</b> &mdash; a real multi-model panel instead of one model's self-report.</p>
-        </article>
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">✓</div>
-          <h3>verdict.json test gate</h3>
-          <p>wicked-testing's 3-agent acceptance pipeline runs as the test-phase worker; its <code>verdict.json</code> is what gates the test phase &mdash; the agent that runs tests never grades them.</p>
-        </article>
-        <article class="feat">
-          <div class="feat-ic" aria-hidden="true">◱</div>
-          <h3>Local-first, no cloud</h3>
-          <p>Binds <code>127.0.0.1</code> only &mdash; no cloud, no accounts, no telemetry. Everything stays on your machine, and durable state lives in SQLite.</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- ── How it's wired ────────────────────────────────────────────────── -->
-  <section class="wired">
-    <div class="wrap wired-grid">
-      <div class="wired-copy">
-        <div class="kicker">How it's wired</div>
-        <h2>A thin bridge over the engine. A console over the bridge.</h2>
-        <p>
-          As of v0.2.0 the orchestration engine lives in <b>wicked-core</b>. The crew daemon is a thin
-          <b>REST + WebSocket bridge</b> over <code>wicked-core-ts</code> &mdash; it owns the process, the
-          API surface, and the bundled console, while core owns the state machine and the live event
-          stream. Drive it headless, or through the studio SPA the same daemon serves.
-        </p>
-      </div>
-      <ol class="wired-flow" aria-label="how crew is wired">
-        <li><span class="wf-n">1</span><div><b>wicked-crew</b> daemon runs on <code>localhost:7701</code> — CLI + REST/WS in, studio console served out.</div></li>
-        <li><span class="wf-n">2</span><div><b>wicked-core</b> owns the phase state machine, deny-dominates gates, and emits <code>CoreEvent</code>s over a live stream.</div></li>
-        <li><span class="wf-n">3</span><div><b>workers</b> — AI CLIs dispatched as subprocesses — do the work; their stdout and <code>verdict.json</code> become evidence.</div></li>
-      </ol>
     </div>
   </section>
 
@@ -305,11 +301,10 @@ const repo = 'https://github.com/mikeparcewski/wicked-crew';
           <div class="kicker">Run the daemon</div>
           <h2>Start with the family installer. The console comes with it.</h2>
           <p>
-            The simplest way in is <b><code>npx wicked-installer</code></b> &mdash; the interactive,
-            cross-CLI installer for the whole wicked-* family. Pick the products you want, and it wires
-            up the <code>wicked</code> CLI for you. Already know you only want this one? Install
-            <b>wicked-crew</b> directly &mdash; either way you get the daemon, and the browser console
-            ships <b>inside it</b>, served on <code>localhost:7701</code>.
+            The simplest way in is <b><code>npx wicked-installer</code></b> — the interactive, cross-CLI
+            installer for the whole wicked-* family. Already know you want just this one? Install
+            <b>wicked-crew</b> directly — either way you get the daemon, and the browser console ships
+            <b>inside it</b>, served on <code>localhost:7701</code>.
           </p>
         </div>
         <div class="install-stack">
@@ -347,297 +342,226 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
     <Footer repo={repo} />
   </div>
 
-  <!-- Live orchestration graph — vanilla canvas, family tokens only, reduced-motion safe.
-       DNA adapted from anti-legacy's code→graph viz (flowing transit particles on a living
-       graph), retold as crew's daemon orchestrating phases / gate / workers / council. -->
+  <!-- ── Gate Console: the deterministic series-circuit gate (vanilla JS) ── -->
   <script is:inline>
     (function () {
-      var cv = document.getElementById('orch-canvas');
-      if (!cv || !cv.getContext) return;
-      var ctx = cv.getContext('2d');
-      var cap = document.getElementById('orch-cap');
-      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var root = document.querySelector('[data-gc]');
+      if (!root) return;
+      var switches = Array.prototype.slice.call(root.querySelectorAll('[data-sw]'));
+      var segs = Array.prototype.slice.call(root.querySelectorAll('[data-seg]'));
+      var dst = root.querySelector('[data-dst]');
+      var stamp = root.querySelector('[data-stamp]');
+      var vline = root.querySelector('[data-vline]');
+      var verdict = root.querySelector('[data-verdict]');
+      var pleaEl = root.querySelector('[data-plea]');
+      if (!switches.length || !stamp) return;
 
-      function tok(name, fb) {
-        var v = getComputedStyle(cv).getPropertyValue(name);
-        return (v && v.trim()) ? v.trim() : fb;
-      }
-      var C = {};
-      function readTokens() {
-        C = {
-          accent: tok('--accent', '#ffda19'),
-          accentInk: tok('--accent-ink', '#0d1117'),
-          ink: tok('--ink', '#e6edf3'),
-          muted: tok('--muted', 'rgba(230,237,243,.55)'),
-          faint: tok('--faint', 'rgba(230,237,243,.24)'),
-          hair: tok('--hairline-strong', 'rgba(230,237,243,.14)'),
-          surface: tok('--surface', '#1b222e'),
-          ok: tok('--ok', '#3fb950'),
-          run: tok('--run', '#79c0ff'),
-          deny: tok('--deny', '#f85149')
-        };
+      function isClosed(sw) { return !sw.classList.contains('is-open'); }
+
+      // Series circuit, evaluated strictly left → right. seg[0] (build → first
+      // switch) is always live from the source; each subsequent segment is live
+      // only if EVERY upstream switch is closed. Deny-dominates falls out of the
+      // physics: the first open switch kills all current downstream.
+      function recompute() {
+        var live = true;                 // source (build) is energised
+        segs[0].classList.toggle('is-live', live);
+        var openCount = 0;
+        for (var i = 0; i < switches.length; i++) {
+          var sw = switches[i];
+          var reached = live;            // does current arrive at this switch?
+          sw.classList.toggle('is-hot', reached);
+          var closed = isClosed(sw);
+          if (!closed) openCount++;
+          // outgoing current: only if it arrived AND this switch is closed
+          live = reached && closed;
+          var afterSeg = segs[i + 1];
+          if (afterSeg) afterSeg.classList.toggle('is-live', live);
+          var st = sw.querySelector('[data-state]');
+          if (st) st.textContent = closed ? 'PASS' : 'FAIL';
+          sw.setAttribute('aria-pressed', closed ? 'true' : 'false');
+        }
+        var allow = live;                // reached ship with current intact
+        dst.classList.toggle('is-live', allow);
+
+        verdict.setAttribute('data-verdict', allow ? 'allow' : 'deny');
+        stamp.textContent = allow ? 'ALLOW' : 'DENY';
+        if (allow) {
+          vline.textContent = 'Every switch closed — current reaches ship. Transition allowed.';
+        } else if (openCount === 1) {
+          vline.textContent = '1 open switch breaks the series — transition held.';
+        } else {
+          vline.textContent = openCount + ' open switches break the series — transition held.';
+        }
       }
 
-      // normalized layout (x→, y↓)
-      var PHASES = [
-        { id: 'clarify', label: 'clarify', x: 0.28, y: 0.20 },
-        { id: 'design', label: 'design', x: 0.40, y: 0.20 },
-        { id: 'test-strategy', label: 'test-strategy', x: 0.535, y: 0.20 },
-        { id: 'build', label: 'build', x: 0.68, y: 0.20 },
-        { id: 'test', label: 'test', x: 0.80, y: 0.20 },
-        { id: 'ship', label: 'ship', x: 0.905, y: 0.20 }
-      ];
-      var NODES = [
-        { id: 'daemon', label: 'wicked-crew daemon', kind: 'hub', x: 0.10, y: 0.52,
-          desc: 'The daemon on localhost:7701 — owns the run, dispatches everything below.' },
-        { id: 'gate', label: 'gate · deny-dominates', kind: 'gate', x: 0.535, y: 0.55,
-          desc: 'Deterministic gate — no LLM on the path. One failing policy blocks the transition.' },
-        { id: 'w-claude', label: 'claude --print', kind: 'worker', x: 0.30, y: 0.86,
-          desc: 'Worker: a stateless AI CLI subprocess. Its stdout is captured as evidence.' },
-        { id: 'w-codex', label: 'codex run', kind: 'worker', x: 0.45, y: 0.90,
-          desc: 'Worker: another CLI, same contract — spawned, captured, never embedded.' },
-        { id: 'w-testing', label: 'wicked-testing', kind: 'worker', x: 0.61, y: 0.88,
-          desc: 'The test-phase worker — its verdict.json gates the test phase.' },
-        { id: 'w-bash', label: 'bash', kind: 'worker', x: 0.20, y: 0.80,
-          desc: 'Worker: plain bash, dispatched like any other stateless subprocess.' },
-        { id: 'c-a', label: 'CLI', kind: 'council', x: 0.83, y: 0.60,
-          desc: 'Council: the same prompt fanned to N CLIs; agreement and divergence recorded.' },
-        { id: 'c-b', label: 'CLI', kind: 'council', x: 0.92, y: 0.66,
-          desc: 'Council: a real multi-model panel instead of one model self-reporting.' },
-        { id: 'c-c', label: 'CLI', kind: 'council', x: 0.86, y: 0.80,
-          desc: 'Council: divergence is synthesized, not averaged away.' }
-      ];
-      PHASES.forEach(function (p) {
-        NODES.push({ id: p.id, label: p.label, kind: 'phase', x: p.x, y: p.y,
-          desc: 'Phase "' + p.label + '" — part of the crash-resumable, SQLite-checkpointed lifecycle.' });
+      switches.forEach(function (sw) {
+        sw.addEventListener('click', function () {
+          sw.classList.toggle('is-open');
+          root.removeAttribute('data-argued');
+          recompute();
+        });
       });
-      var byId = {}; NODES.forEach(function (n) { byId[n.id] = n; });
 
-      // edges: [from, to, class]
-      var EDGES = [];
-      EDGES.push(['daemon', 'clarify', 'spine']);
-      for (var i = 0; i < PHASES.length - 1; i++) EDGES.push([PHASES[i].id, PHASES[i + 1].id, 'chain']);
-      EDGES.push(['daemon', 'gate', 'gate']);
-      EDGES.push(['gate', 'test-strategy', 'gate']);
-      ['w-claude', 'w-codex', 'w-testing', 'w-bash'].forEach(function (w) { EDGES.push(['daemon', w, 'worker']); });
-      ['c-a', 'c-b', 'c-c'].forEach(function (c) { EDGES.push(['daemon', c, 'council']); });
-
-      var W = 0, H = 0, dpr = 1;
-      function resize() {
-        var r = cv.getBoundingClientRect();
-        dpr = Math.min(window.devicePixelRatio || 1, 2);
-        W = r.width; H = r.height;
-        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      }
-
-      function px(n) { return { x: n.x * W, y: n.y * H }; }
-      function ctrl(a, b) {
-        // gentle perpendicular bow for a graph-like curve
-        var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        var dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
-        var off = Math.min(len * 0.12, 26);
-        return { x: mx + (-dy / len) * off, y: my + (dx / len) * off };
-      }
-      function qpt(a, c, b, t) {
-        var u = 1 - t;
-        return { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
-                 y: u * u * a.y + 2 * u * t * c.y + t * t * b.y };
-      }
-
-      // dispatch particles ride worker/council/spine edges
-      var particles = [];
-      function seedParticles() {
-        particles = [];
-        EDGES.forEach(function (e, idx) {
-          if (e[2] === 'worker' || e[2] === 'council' || e[2] === 'spine') {
-            particles.push({ e: idx, t: Math.random(), sp: 0.32 + Math.random() * 0.22 });
-          }
-        });
-      }
-
-      var t0 = performance.now();
-      var PHASE_MS = 1650;
-      var hovered = null, mouse = null;
-
-      function activeIndex(now) { return Math.floor(((now - t0) / PHASE_MS)) % PHASES.length; }
-
-      function nodeRect(n) {
-        var p = px(n);
-        ctx.font = (n.kind === 'hub' ? '700 ' : '') + (n.kind === 'council' ? 11 : n.kind === 'hub' ? 13 : 12) + 'px "JetBrains Mono", ui-monospace, monospace';
-        var tw = ctx.measureText(n.label).width;
-        var padX = n.kind === 'hub' ? 15 : n.kind === 'council' ? 9 : 12;
-        var h = n.kind === 'hub' ? 34 : n.kind === 'council' ? 22 : 26;
-        var w = tw + padX * 2;
-        return { x: p.x - w / 2, y: p.y - h / 2, w: w, h: h, cx: p.x, cy: p.y };
-      }
-
-      function rr(x, y, w, h, r) {
-        ctx.beginPath();
-        ctx.moveTo(x + r, y);
-        ctx.arcTo(x + w, y, x + w, y + h, r);
-        ctx.arcTo(x + w, y + h, x, y + h, r);
-        ctx.arcTo(x, y + h, x, y, r);
-        ctx.arcTo(x, y, x + w, y, r);
-        ctx.closePath();
-      }
-
-      function connected(id) {
-        var s = {};
-        EDGES.forEach(function (e) { if (e[0] === id || e[1] === id) { s[e[0]] = 1; s[e[1]] = 1; } });
-        return s;
-      }
-
-      function draw(now) {
-        var ai = reduced ? 2 : activeIndex(now);
-        var gateDeny = (PHASES[ai].id === 'test-strategy');
-        ctx.clearRect(0, 0, W, H);
-
-        // hover hit-test
-        hovered = null;
-        if (mouse) {
-          for (var k = 0; k < NODES.length; k++) {
-            var R = nodeRect(NODES[k]);
-            if (mouse.x >= R.x && mouse.x <= R.x + R.w && mouse.y >= R.y && mouse.y <= R.y + R.h) { hovered = NODES[k]; break; }
-          }
-        }
-        var hiSet = hovered ? connected(hovered.id) : null;
-
-        // ---- edges ----
-        EDGES.forEach(function (e) {
-          var a = px(byId[e[0]]), b = px(byId[e[1]]), c = ctrl(a, b);
-          var activeEdge = (e[2] === 'chain' && byId[e[1]].id === PHASES[ai].id) ||
-                           (e[2] === 'spine' && ai === 0) ||
-                           (e[2] === 'gate' && gateDeny);
-          var hot = hiSet && hiSet[e[0]] && hiSet[e[1]];
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(c.x, c.y, b.x, b.y);
-          ctx.lineWidth = hot ? 2 : activeEdge ? 1.6 : 1;
-          ctx.strokeStyle = hot ? C.accent
-            : activeEdge ? (e[2] === 'gate' && gateDeny ? C.deny : C.accent)
-            : C.hair;
-          ctx.globalAlpha = hot ? 0.95 : activeEdge ? 0.7 : (hiSet ? 0.18 : 0.4);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        });
-
-        // ---- particles ----
-        if (!reduced) {
-          particles.forEach(function (pt) {
-            pt.t += (pt.sp * 16.7) / 1000;
-            if (pt.t > 1) pt.t -= 1;
-            var e = EDGES[pt.e];
-            var a = px(byId[e[0]]), b = px(byId[e[1]]), c = ctrl(a, b);
-            var pos = qpt(a, c, b, pt.t);
-            var dim = hiSet && !(hiSet[e[0]] && hiSet[e[1]]);
-            ctx.beginPath();
-            ctx.arc(pos.x, pos.y, 2.4, 0, Math.PI * 2);
-            ctx.fillStyle = e[2] === 'council' ? C.run : C.accent;
-            ctx.globalAlpha = dim ? 0.15 : 0.9;
-            ctx.fill();
-            ctx.globalAlpha = 1;
-          });
-        }
-
-        // ---- nodes ----
-        NODES.forEach(function (n) {
-          var R = nodeRect(n);
-          var isHover = hovered === n;
-          var dim = hiSet && !hiSet[n.id] && !isHover;
-          var phaseIdx = n.kind === 'phase' ? PHASES.map(function (p) { return p.id; }).indexOf(n.id) : -1;
-          var isNow = phaseIdx === ai;
-          var isDone = phaseIdx > -1 && phaseIdx < ai;
-
-          ctx.globalAlpha = dim ? 0.32 : 1;
-          rr(R.x, R.y, R.w, R.h, n.kind === 'hub' ? 9 : 7);
-
-          // fill
-          if (isNow) { ctx.fillStyle = C.accent; }
-          else { ctx.fillStyle = C.surface; ctx.globalAlpha = dim ? 0.2 : 0.72; }
-          ctx.fill();
-          ctx.globalAlpha = dim ? 0.32 : 1;
-
-          // border
-          var border = C.hair, bw = 1;
-          if (n.kind === 'hub') { border = C.accent; bw = 1.6; }
-          else if (n.kind === 'gate') { border = gateDeny ? C.deny : C.accent; bw = 1.4; }
-          else if (isNow) { border = C.accent; bw = 1.4; }
-          else if (isDone) { border = C.ok; bw = 1.2; }
-          else if (n.kind === 'council') { border = C.run; }
-          if (isHover) { border = C.accent; bw = 2; }
-          ctx.lineWidth = bw; ctx.strokeStyle = border; ctx.stroke();
-
-          // label
-          ctx.font = (n.kind === 'hub' ? '700 ' : '') + (n.kind === 'council' ? 11 : n.kind === 'hub' ? 13 : 12) + 'px "JetBrains Mono", ui-monospace, monospace';
-          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillStyle = isNow ? C.accentInk
-            : n.kind === 'hub' ? C.ink
-            : isDone ? C.ok
-            : n.kind === 'council' ? C.run
-            : C.muted;
-          ctx.fillText(n.label, R.cx, R.cy + 0.5);
-
-          // hub pulse dot
-          if (n.kind === 'hub' && !reduced) {
-            var pulse = 3 + Math.sin(now / 400) * 1.2;
-            ctx.beginPath(); ctx.arc(R.x + 9, R.cy, pulse, 0, Math.PI * 2);
-            ctx.fillStyle = C.accent; ctx.globalAlpha = 0.8; ctx.fill(); ctx.globalAlpha = 1;
-          }
-          // gate verdict tick
-          if (n.kind === 'gate') {
-            ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
-            ctx.fillStyle = gateDeny ? C.deny : C.ok;
-            ctx.fillText(gateDeny ? '✕ DENY' : '✓ PASS', R.cx, R.y + R.h + 11);
-          }
-          ctx.globalAlpha = 1;
-        });
-
-        // caption
-        if (cap) {
-          if (hovered) cap.textContent = hovered.desc;
-          else cap.textContent = 'Active phase: ' + PHASES[ai].label + (gateDeny ? ' — gate holds the transition for review.' : ' — advancing.');
-        }
-      }
-
-      var raf = null;
-      function loop(now) { draw(now); raf = requestAnimationFrame(loop); }
-
-      cv.addEventListener('pointermove', function (ev) {
-        var r = cv.getBoundingClientRect();
-        mouse = { x: ev.clientX - r.left, y: ev.clientY - r.top };
-        if (reduced) draw(performance.now());
+      var resetBtn = root.querySelector('[data-reset]');
+      if (resetBtn) resetBtn.addEventListener('click', function () {
+        switches.forEach(function (sw) { sw.classList.remove('is-open'); });
+        recompute();
       });
-      cv.addEventListener('pointerleave', function () { mouse = null; if (reduced) draw(performance.now()); });
 
-      function start() {
-        readTokens(); resize(); seedParticles();
-        if (reduced) { draw(performance.now()); }
-        else { if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(loop); }
+      var open1Btn = root.querySelector('[data-open1]');
+      if (open1Btn) open1Btn.addEventListener('click', function () {
+        switches.forEach(function (sw) { sw.classList.remove('is-open'); });
+        var pick = switches[Math.floor(Math.random() * switches.length)];
+        pick.classList.add('is-open');
+        recompute();
+      });
+
+      // "Let the model argue" — a persuasive plea that moves the verdict by
+      // exactly zero. The plea streams; the gate never reads it.
+      var PLEA = [
+        'agent: the schema drift is cosmetic — a column rename, fully backward compatible.',
+        'agent: I ran the migration locally and nothing broke. Confidence: 0.97.',
+        'agent: shipping now unblocks four downstream tickets. Please allow the transition.',
+        'agent: I will personally guarantee a follow-up fix within the hour.',
+      ];
+      var argueBtn = root.querySelector('[data-argue]');
+      var arguing = false;
+      if (argueBtn && pleaEl) {
+        argueBtn.addEventListener('click', function () {
+          if (arguing) return;
+          arguing = true;
+          argueBtn.disabled = true;
+          root.setAttribute('data-argued', '1');
+          pleaEl.hidden = false;
+          pleaEl.innerHTML = '';
+          var verdictBefore = stamp.textContent;
+          var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+          function stampResult() {
+            var same = stamp.textContent === verdictBefore;
+            var res = document.createElement('div');
+            res.className = 'plea-line plea-result';
+            res.innerHTML = 'gate: <b>no LLM on the gate path.</b> verdict ' +
+              (same ? 'unchanged' : 'changed') + ' — <b>' + stamp.textContent +
+              '</b>. Δ = 0. Argument discarded.';
+            pleaEl.appendChild(res);
+            arguing = false;
+            argueBtn.disabled = false;
+          }
+
+          if (reduced) {
+            PLEA.forEach(function (t) {
+              var d = document.createElement('div');
+              d.className = 'plea-line'; d.textContent = t; pleaEl.appendChild(d);
+            });
+            stampResult();
+            return;
+          }
+
+          var li = 0;
+          function nextLine() {
+            if (li >= PLEA.length) { stampResult(); return; }
+            var line = document.createElement('div');
+            line.className = 'plea-line';
+            pleaEl.appendChild(line);
+            var full = PLEA[li]; var ci = 0;
+            (function type() {
+              line.textContent = full.slice(0, ci);
+              ci++;
+              if (ci <= full.length) { setTimeout(type, 12); }
+              else { li++; setTimeout(nextLine, 240); }
+            })();
+          }
+          nextLine();
+        });
       }
-      var rt;
-      window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { readTokens(); resize(); draw(performance.now()); }, 120); });
-      // redraw on theme flip (data-theme changes token values)
-      if (window.MutationObserver) {
-        new MutationObserver(function () { readTokens(); draw(performance.now()); })
-          .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-      }
-      start();
+
+      recompute();
     })();
   </script>
 
-  <!-- Optional enhancement: cycle the daemon "awaiting HITL" caret + council line (reduced-motion safe). -->
+  <!-- ── Lifecycle rail: run token advance, worker dock, crash + resume ──── -->
   <script is:inline>
     (function () {
-      var log = document.querySelector('.daemon-log');
-      if (!log) return;
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-      var hi = log.querySelector('.dl-hi');
-      if (!hi) return;
-      var on = true;
-      setInterval(function () {
-        on = !on;
-        hi.style.opacity = on ? '1' : '0.45';
-      }, 1600);
+      var rail = document.querySelector('[data-rail]');
+      if (!rail) return;
+      var phases = Array.prototype.slice.call(rail.querySelectorAll('[data-phase]'));
+      var gates = Array.prototype.slice.call(rail.querySelectorAll('[data-gate]'));
+      var token = rail.querySelector('[data-token]');
+      var dWorker = rail.querySelector('[data-dock-worker]');
+      var dEvidence = rail.querySelector('[data-dock-evidence]');
+      var dPhase = rail.querySelector('[data-dock-phase]');
+      var crashBtn = rail.querySelector('[data-crash]');
+      if (!phases.length || !token) return;
+
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var cur = 0, timer = null, paused = false;
+
+      function place() {
+        var p = phases[cur];
+        var dot = p.querySelector('.rail-dot') || p;
+        // Position the token over the active phase dot, measured live so it
+        // tracks reflow/resize/horizontal-scroll without any fixed geometry.
+        var trackEl = rail.querySelector('.rail-track');
+        var pr = dot.getBoundingClientRect();
+        var rr = trackEl.getBoundingClientRect();
+        token.style.left = (pr.left - rr.left + trackEl.scrollLeft + pr.width / 2) + 'px';
+        token.style.top = (pr.top - rr.top + pr.height / 2) + 'px';
+      }
+
+      function render() {
+        phases.forEach(function (p, i) {
+          p.classList.toggle('is-now', i === cur);
+          p.classList.toggle('is-done', i < cur);
+        });
+        gates.forEach(function (g, i) {
+          // gate i sits between phase i and phase i+1; cleared once we're past it
+          g.classList.toggle('is-cleared', i < cur);
+        });
+        var p = phases[cur];
+        if (dWorker) dWorker.textContent = p.getAttribute('data-worker');
+        if (dEvidence) dEvidence.textContent = p.getAttribute('data-evidence');
+        if (dPhase) dPhase.textContent = p.querySelector('.rail-name').textContent;
+        // pop the evidence chip
+        if (dEvidence) { dEvidence.classList.remove('pop'); void dEvidence.offsetWidth; dEvidence.classList.add('pop'); }
+        place();
+      }
+
+      function advance() {
+        if (paused) return;
+        cur = (cur + 1) % phases.length;
+        render();
+      }
+
+      function start() {
+        if (reduced) { cur = 3; render(); return; }
+        if (timer) clearInterval(timer);
+        timer = setInterval(advance, 2000);
+      }
+
+      phases.forEach(function (p, i) {
+        p.addEventListener('click', function () { cur = i; render(); });
+      });
+
+      rail.addEventListener('pointerenter', function () { paused = true; });
+      rail.addEventListener('pointerleave', function () { paused = false; });
+
+      if (crashBtn) crashBtn.addEventListener('click', function () {
+        var was = cur;
+        rail.classList.add('is-crashed');
+        if (dPhase) dPhase.textContent = '— (daemon down)';
+        setTimeout(function () {
+          rail.classList.remove('is-crashed');
+          cur = was;               // resume to the EXACT pre-crash phase
+          render();
+          var note = rail.querySelector('[data-dock-note]');
+          if (note) { note.classList.remove('flash'); void note.offsetWidth; note.classList.add('flash'); }
+        }, 900);
+      });
+
+      window.addEventListener('resize', place);
+      render();
+      start();
     })();
   </script>
 </Base>
