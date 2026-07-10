@@ -73,6 +73,12 @@ export interface WorkUnit {
   phase_status: string | null;
   collection_scope: string | null;
   status: UnitStatus;
+  /**
+   * The skill that drives this unit's work (DES-STUDIO-COCKPIT-001 A7 / DES-EXEC-001 §4.1) —
+   * `null` for the authored-prompt path. Serialized verbatim from wicked-core `WorkUnit.skill_ref`
+   * (snake_case, `#[serde(default)]`) through `sessions_detail`; passes straight into `SessionView`.
+   */
+  skill_ref?: string | null;
 }
 
 /** A run plus its ordered units — the read a UI builds its project list from (`SessionView`). */
@@ -131,5 +137,32 @@ export interface CoreEvent {
   bytesB64?: string;
   /** `terminalOpened`: the working directory the PTY was opened in. */
   cwd?: string;
+  // ── DES-STUDIO-COCKPIT-001 §3 B-events (Phase B insight wires; fanned out verbatim) ──
+  /** `unitDispatched`/`cliUsage`: 0-based dispatch attempt (`>0` = a re-dispatch / rework). */
+  attempt?: number;
+  /** `cliUsage`: prompt/input tokens for the unit run. */
+  inputTokens?: number;
+  /** `cliUsage`: completion/output tokens for the unit run. */
+  outputTokens?: number;
+  /** `cliUsage`: dollar cost when the CLI reports it (claude) or a price table resolves it; else `null`. */
+  costUsd?: number | null;
+  /** `dataUsed`: the data files the unit's CLI touched. */
+  files?: string[];
+  /** `gateEvaluated`: the gated criterion — `null` when the phase was UNGATED. */
+  criterion?: string | null;
+  /** `gateEvaluated`: `true` iff a pinned validator gated this unit. */
+  hasDeterministicFloor?: boolean;
+  /** `gateEvaluated`: whether the deterministic (layer-1) floor passed. */
+  deterministicPass?: boolean;
+  /** `gateEvaluated`: the agent (layer-2) judge's verdict when one ran, else `null`. */
+  agentVerdict?: string | null;
+  /** `gateEvaluated`: the agent judge's reasoning when one ran, else `null`. */
+  agentReasoning?: string | null;
+  /** `gateEvaluated`: the evaluator≠creator second-pass result — `null` when it did not run. */
+  evaluatorPass?: boolean | null;
+  /** `gateEvaluated`: the WINNING denial's reason when `combined === false`, else `null`. */
+  denialReason?: string | null;
+  /** `gateEvaluated`: the final deny-dominant decision over all layers. */
+  combined?: boolean;
   [k: string]: unknown;
 }
