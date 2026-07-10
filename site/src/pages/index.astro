@@ -321,7 +321,7 @@ const GATE_CARDS = [
         <p class="sec-sub">
           feature, bug, migration — each ships as <b>validated JSON</b>. Add or override one by dropping a
           file in; the plan is <b>acyclic-validated</b> with <b>loud, per-file errors</b>. No recompile, no
-          plugin. Click one to see its phases.
+          plugin. It auto-cycles the defs below — click one to pin it.
         </p>
       </div>
 
@@ -344,6 +344,13 @@ const GATE_CARDS = [
           </div>
           <div class="wf-phases" data-wf-phases></div>
         </div>
+      </div>
+
+      <div class="wf-status" data-wf-status>
+        <button type="button" class="wf-status-btn is-playing" data-wf-toggle aria-live="polite">
+          <span class="wf-status-ic" aria-hidden="true">▶</span>
+          <span class="wf-status-txt" data-wf-status-txt>auto-playing · click a workflow to pin it</span>
+        </button>
       </div>
     </div>
   </section>
@@ -782,7 +789,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
     })();
   </script>
 
-  <!-- ── Workflows-as-data: click a definition, render its phases ───────── -->
+  <!-- ── Workflows-as-data: AUTO-PLAY the defs, click one to pin ────────── -->
   <script is:inline>
     (function () {
       var root = document.querySelector('[data-wf]');
@@ -791,12 +798,21 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var files = Array.prototype.slice.call(root.querySelectorAll('[data-wf-file]'));
       var nameEl = preview.querySelector('[data-wf-name]');
       var phasesEl = preview.querySelector('[data-wf-phases]');
+      var wfSection = root.closest('.wf') || root;
+      var toggle = wfSection.querySelector('[data-wf-toggle]');
+      var toggleTxt = wfSection.querySelector('[data-wf-status-txt]');
+      var toggleIc = toggle && toggle.querySelector('.wf-status-ic');
       var DEFS = [
         { id: 'feature.json',   phases: ['clarify', 'design', 'test-strategy', 'build', 'test', 'ship'] },
         { id: 'bug.json',       phases: ['reproduce', 'fix', 'test', 'ship'] },
         { id: 'migration.json', phases: ['plan', 'migrate', 'verify', 'ship'] },
       ];
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var STEP = 3000;
+      var cur = 0, timer = null, pinned = false, started = false;
+
       function render(i) {
+        cur = i;
         var d = DEFS[i] || DEFS[0];
         files.forEach(function (f, j) { f.classList.toggle('is-active', j === i); f.setAttribute('aria-selected', j === i ? 'true' : 'false'); });
         if (nameEl) nameEl.textContent = d.id;
@@ -815,8 +831,48 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
           phasesEl.appendChild(chip);
         });
       }
-      files.forEach(function (f, i) { f.addEventListener('click', function () { render(i); }); });
-      render(0);
+      function setStatus() {
+        if (!toggle) return;
+        toggle.classList.toggle('is-playing', !pinned);
+        toggle.classList.toggle('is-pinned', pinned);
+        if (toggleIc) toggleIc.textContent = pinned ? '⏸' : '▶';
+        if (toggleTxt) toggleTxt.textContent = pinned
+          ? 'pinned ' + (DEFS[cur] || DEFS[0]).id + ' · click to resume auto-play'
+          : 'auto-playing · click a workflow to pin it';
+      }
+      function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+      function play() {
+        pinned = false; setStatus();
+        stopTimer();
+        if (reduced) return; // honor reduced-motion: no auto-advance
+        timer = setInterval(function () { render((cur + 1) % DEFS.length); }, STEP);
+      }
+      function pin(i) {
+        pinned = true; stopTimer(); render(i); setStatus();
+      }
+      function startOnce() {
+        if (started) return; started = true;
+        render(0); setStatus();
+        if (!pinned) play();
+      }
+
+      files.forEach(function (f, i) { f.addEventListener('click', function () { pin(i); }); });
+      if (toggle) toggle.addEventListener('click', function () {
+        if (pinned) play(); else pin(cur);
+      });
+
+      // Start when the section scrolls into view (animate-then-pause signature).
+      render(0); setStatus();
+      if ('IntersectionObserver' in window) {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { startOnce(); io.disconnect(); }
+          });
+        }, { threshold: 0.35 });
+        io.observe(wfSection);
+      } else {
+        startOnce();
+      }
     })();
   </script>
 

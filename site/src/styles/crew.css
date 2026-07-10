@@ -12,8 +12,8 @@
    The shared wicked-web chrome (Base/Topbar/Footer + tokens.css) owns theming
    via [data-theme]; the family palette is inherited. Only crew-specific rules
    live here. Each major section is viewport-sized and the document scroll
-   LOCKS section-to-section (scroll-snap, proximity — a taller-than-viewport
-   section never traps the user; mobile falls back to natural scroll). */
+   LOCKS section-to-section (scroll-snap, mandatory — every section fits the
+   viewport, so the hard lock never traps; mobile falls back to natural scroll). */
 
 body { padding-top: var(--topbar-h); }
 
@@ -24,10 +24,11 @@ body { padding-top: var(--topbar-h); }
 @media (max-width: 560px) { .wrap { padding-inline: 18px; } }
 
 /* ── Scroll-lock to section + per-section viewport sizing ──────────────────
-   Each major section fills the viewport and the document snaps section-to-
-   section. `proximity` (not mandatory) so a section taller than the viewport
-   is never a trap; scroll-padding offsets the fixed topbar. */
-html { scroll-snap-type: y proximity; scroll-padding-top: var(--topbar-h); }
+   Each major section fills the viewport and the document hard-locks section-to-
+   section. `mandatory` so a partial wheel snaps fully to a section boundary;
+   every crew section fits the viewport, so this never traps. Mobile falls back
+   to natural scroll (scroll-snap-type: none). scroll-padding offsets the topbar. */
+html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
 .hero, .idd, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
   min-height: 100vh;
   scroll-snap-align: start;
@@ -513,6 +514,23 @@ code {
 }
 .wf-arr { font-family: var(--font-mono); color: var(--faint); font-size: 0.8rem; }
 @keyframes wf-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Auto-play affordance — a live status pill that doubles as the pin/resume
+   control. Playing state pulses the ▶ glyph; pinned state swaps copy + icon. */
+.wf-status { margin-top: 14px; display: flex; justify-content: center; }
+.wf-status-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.03em;
+  color: var(--muted); background: color-mix(in oklab, var(--surface-2) 60%, transparent);
+  border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 7px 14px;
+  cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease);
+}
+.wf-status-btn:hover { border-color: color-mix(in oklab, var(--accent) 42%, var(--hairline-strong)); color: var(--ink); }
+.wf-status-ic { color: var(--accent); font-size: 0.72rem; }
+.wf-status-btn.is-playing .wf-status-ic { animation: wf-pulse 1.6s var(--ease) infinite; }
+.wf-status-btn.is-pinned { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 34%, var(--hairline-strong)); }
+@keyframes wf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .wf-status-btn.is-playing .wf-status-ic { animation: none; } }
 
 /* ── The governed lifecycle rail ──────────────────────────────────────── */
 .rail-sec { border-top: 1px solid var(--hairline); padding: clamp(48px, 8vh, 96px) 0; }
