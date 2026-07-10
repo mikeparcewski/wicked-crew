@@ -2,51 +2,60 @@
 /**
  * index.astro — the wicked-crew landing page (wc.wickedagile.com).
  *
- * Concept: THE GOVERNOR. wicked-crew is the deterministic adult in the room —
- * it owns the workflow without owning the work. The page is staged as a
- * governance control room / switchboard whose emotional spine is one felt
- * truth: no LLM can APPROVE a gate (a deterministic floor it must pass, plus a
- * veto-only agent seat), so nothing you (or the model) does can sweet-talk it
- * past a DENY. Deny-dominates is rendered as a SERIES CIRCUIT the visitor
- * OPERATES — every policy is a switch on a track from the current phase to the
- * next; current only flows (ALLOW) when every switch is closed; a single open
- * switch (DENY) breaks the whole track.
+ * POSITIONING (Wave-4, code-grounded): crew is "the harness for your agent
+ * harnesses." The coding agents you already run are harnesses around a model;
+ * wicked-crew is the harness around THEM — it drives your own installed CLIs as
+ * governed workers through durable, multi-agent workflows where "done" is
+ * re-derived from evidence, never self-graded. Intent in, verified work out.
+ * North star: the IDE of the future. Philosophy: intent-driven development.
  *
- * Signature interaction: THE GATE CONSOLE — a real deterministic gate the
- * visitor drives (DOM/SVG + vanilla JS, no canvas, cannot render empty). Flip
- * five policy switches; the series-circuit track lights amber and completes to
- * the next phase only when ALL are closed; the verdict recomputes instantly
- * under deny-dominates. A "Let the model argue its case" button plays a
- * persuasive plea and moves the verdict by exactly zero.
+ * The daemon (`wicked-crew serve`) is the SUBSTRATE, never the pitch.
  *
- * Honesty (per CANONICAL-MESSAGING.md, resolved 2026-07-08):
- *  - crew = an EXTERNAL daemon + CLI; it never runs inside a coding agent and
- *    never writes code. v0.2.0, published to npm as `wicked-crew`.
- *  - the orchestration engine lives in wicked-core; the daemon is a thin
- *    REST + WebSocket bridge that also bundles + serves the studio browser
- *    console (a crew-served React SPA, not separately published).
+ * HONEST BOUNDARIES honored on this page:
+ *  - Local-first today (loopback, in-process engine, local workers/bus). The
+ *    execution seam is built for a remote runner — gestured, never claimed as
+ *    shipped. No remote/cluster/horizontal-scale claim.
+ *  - No workflow SELECTOR in the UI yet: the console launches from a free-text
+ *    problem. Workflows are data you author + drop in.
+ *  - Campaign DAG is engine-real but not a product action — not featured.
+ *  - BYO-CLI: crew runs whatever CLI you've authed, under your plan. It has no
+ *    billing and manages no subscriptions.
  */
 import Base from 'wicked-web/layouts/Base.astro';
 import Topbar from 'wicked-web/components/Topbar.astro';
 import Footer from 'wicked-web/components/Footer.astro';
 import '../styles/crew.css';
 
-const title = 'wicked-crew — the daemon that governs multi-phase AI workflows';
-const description = 'wicked-crew is a standalone external orchestrator — a daemon plus CLI — for governed, multi-phase AI development. It runs above your coding agents, never inside them, treating AI CLIs as stateless worker subprocesses while it owns the phase lifecycle (clarify → design → test-strategy → build → test → ship), deterministic deny-dominates gates no LLM can approve (opt-in per phase), SQLite crash-checkpointing, and evidence. Drive it headless over CLI + REST/WS, or through the browser console it serves same-origin on localhost. Local-first, no cloud, no accounts.';
+const title = 'wicked-crew — the harness for your agent harnesses';
+const description =
+  'wicked-crew is an agentic execution platform — the harness around your coding agents. It drives your own installed CLIs (Claude Code, Codex, local models, any binary) as governed workers in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. A dual gate deny-dominates: an approved deterministic check re-verified against the worktree, plus an LLM judge that can fail a gate but can never approve one. Workflows are data you drop in. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
-// The five policies wired in series across the staged build → ship transition.
-// `open` marks the one that ships DENYed by default, so the console renders a
-// real (never empty) held-verdict state and hints at the interaction.
+// The deterministic floor: policies wired in series across a build → ship gate.
 const POLICIES = [
-  { id: 'contract',        note: 'API contract holds — no breaking change.' },
-  { id: 'security-policy', note: 'No secret, no disallowed dependency.' },
-  { id: 'coverage-floor',  note: 'Coverage at or above the floor.' },
-  { id: 'schema-drift',    note: 'Migration diverged from the checked-in schema.', open: true },
-  { id: 'verdict.json',    note: 'wicked-testing acceptance verdict = PASS.' },
+  { id: 'contract',      note: 'API contract holds — no breaking change.' },
+  { id: 'security',      note: 'No secret, no disallowed dependency.' },
+  { id: 'coverage',      note: 'Coverage at or above the approved floor.' },
+  { id: 'schema-drift',  note: 'Migration matches the checked-in schema.' },
+  { id: 'verdict.json',  note: 'wicked-testing acceptance verdict = PASS.' },
 ];
 
-// Lifecycle: the governed track, and which stateless worker each phase dispatches.
+// The bring-your-own roster. crew runs whatever CLI you've installed + authed.
+const WORKERS = [
+  { name: 'Claude Code', cli: 'claude --print', tag: 'your auth' },
+  { name: 'Codex',       cli: 'codex run',      tag: 'your plan' },
+  { name: 'local model', cli: 'ollama run …',   tag: 'offline' },
+  { name: 'any binary',  cli: './my-agent',     tag: 'your TOML' },
+];
+
+// Workflows are DATA — validated JSON, dropped in. Distinct shapes prove it.
+const WORKFLOWS = [
+  { id: 'feature.json',   phases: ['clarify', 'design', 'test-strategy', 'build', 'test', 'ship'] },
+  { id: 'bug.json',       phases: ['reproduce', 'fix', 'test', 'ship'] },
+  { id: 'migration.json', phases: ['plan', 'migrate', 'verify', 'ship'] },
+];
+
+// Durable lifecycle: the governed track + the stateless worker each phase dispatches.
 const LIFECYCLE = [
   { id: 'clarify',       worker: 'claude --print', evidence: 'clarify.md' },
   { id: 'design',        worker: 'claude --print', evidence: 'design.md' },
@@ -54,6 +63,21 @@ const LIFECYCLE = [
   { id: 'build',         worker: 'codex run',      evidence: 'diff · build.log' },
   { id: 'test',          worker: 'wicked-testing', evidence: 'verdict.json' },
   { id: 'ship',          worker: 'bash',           evidence: 'release.tag' },
+];
+
+// A council: heterogeneous CLIs, each answering in its own sandbox.
+const COUNCIL = [
+  { cli: 'claude --print', vote: 'REWORK', note: 'contract break in the delta' },
+  { cli: 'codex run',      vote: 'PASS',   note: 'tests green, diff scoped' },
+  { cli: 'local model',    vote: 'REWORK', note: 'missing rollback path' },
+];
+
+// Gate-console explainer cards. Each card drives the console animation (below).
+const GATE_CARDS = [
+  { k: 'series',  title: 'Every check is a switch',   line: 'Policies sit in series across a phase gate. Close them all and current reaches the next phase.' },
+  { k: 'deny',    title: 'Deny dominates',            line: 'Open one switch and the whole track goes dark. One failing check is the whole answer — not a score you out-vote.' },
+  { k: 'agent',   title: 'The judge can veto only',   line: 'An LLM seat sits on the track. It can break it (fail the gate) — it can never be the thing that closes it. No model approves.' },
+  { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated. Turn the gate off and the transition passes without evaluation — gating is a choice you make per phase.' },
 ];
 ---
 
@@ -65,74 +89,145 @@ const LIFECYCLE = [
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <div class="kicker">External orchestration daemon · the governor</div>
-        <h1>Own the workflow.<br><span class="y">Not the work.</span></h1>
+        <div class="kicker">Agentic execution platform · the IDE of the future</div>
+        <h1>The harness for<br><span class="y">your agent harnesses.</span></h1>
         <p class="lede">
-          wicked-crew is the <b>deterministic adult in the room</b> — an external daemon that owns the
-          phase lifecycle and the gates, and dispatches your AI CLIs as stateless workers.
-          <b>No LLM can approve a gate</b>: a deterministic floor it must pass, plus an independent seat
-          that can veto but never sign off. Nothing you or the model does can talk it past a
-          <code>DENY</code>. Governance here is physics, not a judgment call.
-          <em>Gating is opt-in per phase.</em>
+          The coding agents you already run are harnesses around a model. <b>wicked-crew is the harness
+          around them</b> — it drives your own CLIs as governed workers through durable, multi-agent
+          workflows where <b>“done” is re-derived from evidence</b>, never self-graded.
+          Intent in, verified work out. Runs on the agents and plans you already pay for.
         </p>
         <div class="hero-tags" role="list">
-          <span role="listitem">deny-dominates gates</span>
-          <span role="listitem">no LLM can approve a gate</span>
+          <span role="listitem">bring your own CLI</span>
+          <span role="listitem">can’t self-grade</span>
+          <span role="listitem">workflows are data</span>
           <span role="listitem">crash-resumable</span>
           <span role="listitem">local-first</span>
         </div>
         <div class="hero-cta">
           <a class="btn btn-primary" href="#gate">Operate the gate ↓</a>
-          <a class="btn btn-ghost" href="#get">Run the daemon</a>
+          <a class="btn btn-ghost" href="#get">Install it</a>
         </div>
       </div>
 
-      <!-- Compact live governor plate: build → ship, one gate mid-transition holding a DENY. -->
-      <aside class="plate" aria-label="A governed transition holding a DENY">
+      <!-- Harness plate: crew wraps YOUR CLIs as governed workers → verified out. -->
+      <aside class="plate" aria-label="Intent in, governed workers, verified work out">
         <div class="plate-bar">
-          <span class="plate-badge">gate · deny-dominates</span>
-          <span class="plate-loc">localhost:7701</span>
+          <span class="plate-badge">wicked-crew</span>
+          <span class="plate-loc">the harness</span>
         </div>
-        <div class="plate-rail" aria-hidden="true">
-          <span class="pr-node is-from">build</span>
-          <span class="pr-wire"><i></i></span>
-          <span class="pr-gate is-deny" title="held">✕</span>
-          <span class="pr-wire is-dead"></span>
-          <span class="pr-node is-to">ship</span>
+        <div class="plate-flow">
+          <div class="pf-in"><span class="pf-k">intent</span><span class="pf-v">“add rate-limiting to the API”</span></div>
+          <div class="pf-workers" aria-hidden="true">
+            <span class="pf-worker"><i class="pf-dot"></i>claude --print<span class="pf-wt">worktree</span></span>
+            <span class="pf-worker"><i class="pf-dot"></i>codex run<span class="pf-wt">worktree</span></span>
+            <span class="pf-worker"><i class="pf-dot"></i>local model<span class="pf-wt">worktree</span></span>
+          </div>
+          <div class="pf-your">your CLIs · your auth · no shell · isolated worktrees</div>
+          <div class="pf-gate" aria-hidden="true">
+            <span class="pf-gate-node">gate</span>
+            <span class="pf-gate-t">done re-derived from evidence</span>
+          </div>
+          <div class="pf-out"><span class="pf-stamp">VERIFIED</span><span class="pf-out-t">work out — nothing self-graded</span></div>
         </div>
-        <div class="plate-verdict">
-          <span class="plate-stamp">DENY</span>
-          <span class="plate-note">1 of 5 policies open · held for human review</span>
-        </div>
-        <div class="plate-hint">Flip the switches below ↓</div>
       </aside>
     </div>
   </section>
 
-  <!-- ── THE GATE CONSOLE (signature interactive) ──────────────────────── -->
-  <!-- A real deterministic gate the visitor operates. Deny-dominates rendered
-       as a SERIES CIRCUIT: every policy is a switch on the track from build to
-       ship; current flows (ALLOW) only when every switch is closed; a single
-       open switch (DENY) breaks the track. DOM/SVG + vanilla JS, no canvas —
-       it cannot render empty. Ships a held DENY state (schema-drift open). -->
-  <section class="console-sec" id="gate" aria-labelledby="gc-h">
+  <!-- ── Intent-driven development beat ────────────────────────────────── -->
+  <section class="idd" aria-labelledby="idd-h">
     <div class="wrap">
-      <div class="sec-head">
-        <div class="kicker">The gate console · operate it</div>
-        <h2 id="gc-h">Flip the policies. Deny still dominates.</h2>
+      <div class="idd-grid">
+        <div class="idd-copy">
+          <div class="kicker">Intent-driven development</div>
+          <h2 id="idd-h">Spec-driven development’s outcome — without the theater of specs nobody reads.</h2>
+          <p>
+            You state <b>intent</b>. crew drives a governed workflow to a <b>verified result</b> — deriving
+            “done” from evidence at every gate instead of trusting a claim. No ceremony, no shelfware spec.
+          </p>
+        </div>
+        <div class="idd-flow" aria-hidden="true">
+          <span class="idd-chip idd-chip--in">intent</span>
+          <span class="idd-arrow">→</span>
+          <span class="idd-chip idd-chip--mid">governed workflow</span>
+          <span class="idd-arrow">→</span>
+          <span class="idd-chip idd-chip--out">verified result</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Bring your own agent (BYO-CLI) ────────────────────────────────── -->
+  <section class="byo" aria-labelledby="byo-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">Bring your own agent</div>
+        <h2 id="byo-h">crew runs the CLIs you already have.</h2>
         <p class="sec-sub">
-          One real transition — <b>build → ship</b> — gated by five policies wired <b>in series</b>.
-          Close them all and current reaches the next phase. Leave one open and the whole track goes
-          dark. Then press <b>“let the model argue”</b> and watch it move the verdict by exactly zero.
+          Not a new model, not a subscription. crew dispatches your <b>installed</b> coding CLIs — Claude
+          Code, Codex, a local model, or any binary — as <b>no-shell workers in isolated git worktrees</b>,
+          under <b>your own auth and plan</b>. The roster is data: a manifest plus a
+          <code>workers.toml</code> you own.
         </p>
       </div>
 
-      <!-- The console PINS while the narrative steps scroll past it. -->
-      <div class="gc-layout">
-        <div class="gc-sticky">
+      <div class="byo-grid" data-byo>
+        {WORKERS.map((w, i) => (
+          <button type="button" class:list={['byo-card', { 'is-active': i === 0 }]} data-byo-card data-i={i}>
+            <span class="byo-dot" aria-hidden="true"></span>
+            <span class="byo-name">{w.name}</span>
+            <span class="byo-cli">{w.cli}</span>
+            <span class="byo-tag">{w.tag}</span>
+          </button>
+        ))}
+      </div>
+
+      <div class="byo-stage" data-byo-stage>
+        <div class="byo-stage-head">
+          <span class="byo-stage-k">dispatched as a governed worker</span>
+          <span class="byo-stage-badge" data-byo-badge>Claude Code</span>
+        </div>
+        <div class="byo-stage-row">
+          <code data-byo-cmd>claude --print</code>
+          <span class="byo-stage-arr">→ runs in →</span>
+          <span class="byo-stage-wt">.worktrees/run-4f2a · no shell · read-scoped</span>
+        </div>
+        <p class="byo-stage-note">
+          Same governed lifecycle wraps every worker. Swap the roster in <code>workers.toml</code> —
+          crew treats them all as stateless subprocesses it owns.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── THE GATE CONSOLE (signature) ──────────────────────────────────── -->
+  <!-- ONE thing: a deterministic series-circuit gate that AUTO-ANIMATES, driven
+       by whichever explainer card is active (the animation flips the switches
+       that card describes). Clicking a switch STOPS the animation so the visitor
+       can play manually. Full-width — no sticky subscroll, no cutoff.
+       True idea preserved: deny-dominates series circuit; an LLM seat can veto
+       but never approve (deterministic floor + veto-only agent seat); gating is
+       opt-in per phase. -->
+  <section class="console-sec" id="gate" aria-labelledby="gc-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">The gate console · watch it, then drive it</div>
+        <h2 id="gc-h">“Done” is re-derived — and no model can approve it.</h2>
+        <p class="sec-sub">
+          A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>: an
+          approved deterministic check re-verified against the worktree, plus an LLM judge that can
+          <b>fail</b> a gate but can <b>never approve</b> one. It plays itself. Click a switch to take over.
+        </p>
+      </div>
+
       <div class="gc" data-gc>
-        <!-- Series circuit: source node → [seg, switch] × 5 → seg → dest node -->
-        <div class="gc-rail" role="group" aria-label="Series-circuit policy gate: build to ship">
+        <div class="gc-topbar">
+          <span class="gc-phase" data-gc-phase>gate · build → ship · <b>enabled</b></span>
+          <span class="gc-mode" data-gc-mode>▶ demo playing</span>
+        </div>
+
+        <!-- Series circuit: source → [seg, switch] × N → agent seat → seg → dest -->
+        <div class="gc-rail" role="group" aria-label="Series-circuit dual gate: build to ship">
           <div class="gc-node gc-src">
             <span class="gc-node-k">phase</span><span class="gc-node-v">build</span>
           </div>
@@ -142,19 +237,36 @@ const LIFECYCLE = [
               <span class="gc-seg" data-seg></span>
               <button
                 type="button"
-                class:list={['gc-sw', { 'is-open': p.open }]}
+                class="gc-sw"
                 data-sw
                 data-policy={p.id}
-                aria-pressed={p.open ? 'false' : 'true'}
-                aria-label={`Policy ${p.id}: ${p.open ? 'failing (open)' : 'passing (closed)'}`}
+                data-kind="floor"
+                aria-pressed="true"
+                aria-label={`Deterministic policy ${p.id}`}
                 title={p.note}
               >
                 <span class="gc-sw-well" aria-hidden="true"><span class="gc-sw-lever"></span></span>
                 <span class="gc-sw-name">{p.id}</span>
-                <span class="gc-sw-state" data-state>{p.open ? 'FAIL' : 'PASS'}</span>
+                <span class="gc-sw-state" data-state>PASS</span>
               </button>
             </>
           ))}
+
+          <span class="gc-seg" data-seg></span>
+          <button
+            type="button"
+            class="gc-sw gc-sw--agent"
+            data-sw
+            data-policy="llm-judge"
+            data-kind="agent"
+            aria-pressed="true"
+            aria-label="LLM judge seat: veto only, can never approve"
+            title="An LLM judge — it can veto (fail the gate), never approve."
+          >
+            <span class="gc-sw-well" aria-hidden="true"><span class="gc-sw-lever"></span></span>
+            <span class="gc-sw-name">llm-judge</span>
+            <span class="gc-sw-state" data-state>ABSTAIN</span>
+          </button>
 
           <span class="gc-seg" data-seg></span>
           <div class="gc-node gc-dst" data-dst>
@@ -164,89 +276,82 @@ const LIFECYCLE = [
 
         <div class="gc-panel">
           <div class="gc-verdict" data-verdict aria-live="polite">
-            <span class="gc-v-stamp" data-stamp>DENY</span>
+            <span class="gc-v-stamp" data-stamp>ALLOW</span>
             <div class="gc-v-body">
-              <span class="gc-v-line" data-vline>1 open switch breaks the series — transition held.</span>
-              <span class="gc-v-sub">no LLM approves · held for human review</span>
+              <span class="gc-v-line" data-vline>Every check closed — current reaches ship. Transition allowed.</span>
+              <span class="gc-v-sub">deterministic floor re-verified · no LLM approves · held for human on any DENY</span>
             </div>
           </div>
 
           <div class="gc-actions">
-            <button type="button" class="gc-btn gc-reset" data-reset>Reset · close all</button>
-            <button type="button" class="gc-btn gc-open1" data-open1>Open one at random</button>
             <button type="button" class="gc-btn gc-argue" data-argue>Let the model argue its case →</button>
           </div>
 
           <div class="gc-plea" data-plea hidden aria-live="polite"></div>
         </div>
       </div>
+
+      <!-- Explainer cards drive the console. Click one to play its point. -->
+      <ol class="gc-cards" data-gc-cards>
+        {GATE_CARDS.map((c, i) => (
+          <li>
+            <button type="button" class:list={['gc-card', { 'is-active': i === 0 }]} data-gc-card data-card={c.k} data-i={i}>
+              <span class="gc-card-n">{i + 1}</span>
+              <span class="gc-card-t">{c.title}</span>
+              <span class="gc-card-l">{c.line}</span>
+            </button>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <!-- ── Workflows are data ────────────────────────────────────────────── -->
+  <section class="wf" aria-labelledby="wf-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">Workflows are data, not code</div>
+        <h2 id="wf-h">Drop a <code>*.json</code>. It’s a workflow.</h2>
+        <p class="sec-sub">
+          feature, bug, migration — each ships as <b>validated JSON</b>. Add or override one by dropping a
+          file in; the plan is <b>acyclic-validated</b> with <b>loud, per-file errors</b>. No recompile, no
+          plugin. Click one to see its phases.
+        </p>
+      </div>
+
+      <div class="wf-layout">
+        <div class="wf-files" data-wf role="tablist" aria-label="Workflow definitions">
+          {WORKFLOWS.map((w, i) => (
+            <button type="button" role="tab" class:list={['wf-file', { 'is-active': i === 0 }]} data-wf-file data-i={i} aria-selected={i === 0 ? 'true' : 'false'}>
+              <span class="wf-file-ic" aria-hidden="true">{'{ }'}</span>
+              <span class="wf-file-name">{w.id}</span>
+              <span class="wf-file-count">{w.phases.length} phases</span>
+            </button>
+          ))}
+          <div class="wf-drop" aria-hidden="true">+ drop <code>your-flow.json</code></div>
         </div>
 
-        <!-- Narrative that scrolls past the pinned console. -->
-        <ol class="gc-steps">
-          <li class="gc-step">
-            <span class="gc-step-n">1</span>
-            <div class="gc-step-body">
-              <h3>Every switch is a policy</h3>
-              <p>
-                Five policies sit <b>in series</b> across the <b>build → ship</b> transition — contract,
-                security, coverage, schema drift, the acceptance verdict. Closed means the policy passes.
-                Close them all and current runs the length of the track to the next phase.
-              </p>
-            </div>
-          </li>
-          <li class="gc-step">
-            <span class="gc-step-n">2</span>
-            <div class="gc-step-body">
-              <h3>One open switch breaks everything</h3>
-              <p>
-                Open a single switch and the whole track goes dark — the verdict flips to
-                <b>DENY</b> and the transition is held. That is <b>deny-dominates</b>: it is not a weighted
-                score you can out-vote. One failing policy is the whole answer.
-              </p>
-            </div>
-          </li>
-          <li class="gc-step">
-            <span class="gc-step-n">3</span>
-            <div class="gc-step-body">
-              <h3>Let the model argue its case</h3>
-              <p>
-                Press the button and the agent pleads — confident, specific, backward-compatible,
-                <i>trust me</i>. Watch the verdict move by <b>exactly zero</b>.
-                <b>No LLM can approve here</b> — an agent seat may add a veto, never sign off — so there is nothing to persuade.
-              </p>
-            </div>
-          </li>
-          <li class="gc-step">
-            <span class="gc-step-n">4</span>
-            <div class="gc-step-body">
-              <h3>Governance is physics here</h3>
-              <p>
-                The gate is a series circuit, not a judgment call. The same evaluation runs headless in
-                CI and in the daemon — <b>deterministic, replayable, and impossible to sweet-talk</b>.
-                What you just operated is the real thing.
-              </p>
-            </div>
-          </li>
-        </ol>
+        <div class="wf-preview" data-wf-preview>
+          <div class="wf-preview-bar">
+            <span class="wf-preview-name" data-wf-name>feature.json</span>
+            <span class="wf-preview-ok" data-wf-ok>✓ acyclic · validated</span>
+          </div>
+          <div class="wf-phases" data-wf-phases></div>
+        </div>
       </div>
     </div>
   </section>
 
-  <!-- ── The lifecycle rail (secondary, lightly animated) ──────────────── -->
-  <!-- The whole run as one physical governed track: a run token advances phase
-       to phase, gates sit between phases, and workers drop below as dispatched
-       subprocesses that return evidence chips. A crash marker shows resume to
-       the exact pre-crash phase. DOM/SVG, responds to hover / click. -->
+  <!-- ── Durable lifecycle rail — crash-resumable by construction ──────── -->
   <section class="rail-sec" aria-labelledby="rail-h">
     <div class="wrap">
-      <div class="sec-head">
-        <div class="kicker">The governed lifecycle</div>
-        <h2 id="rail-h">One run token. Six phases. A gate between every one.</h2>
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">Durable by construction</div>
+        <h2 id="rail-h">Crash it mid-run. It resumes to the exact phase.</h2>
         <p class="sec-sub">
-          The daemon advances a single run along a checkpointed track and dispatches a stateless worker
-          at each phase — capturing its output as evidence. Hover to pause, click a phase to jump the
-          token, or <b>kill the daemon</b> and watch it resume to the exact pre-crash phase.
+          A <b>single-writer store</b> and <b>durable cursors</b> give <b>exactly-once effect over
+          at-least-once delivery</b>. Interrupted runs are <b>automatically re-driven on restart</b>. Hover
+          to pause, click a phase to jump, or <b>kill the engine</b> and watch it come back where it left off.
         </p>
       </div>
 
@@ -285,92 +390,98 @@ const LIFECYCLE = [
             <span class="dock-evidence" data-dock-evidence>clarify.md</span>
           </div>
           <div class="dock-note" data-dock-note>
-            checkpoint written · sqlite · phase=<b data-dock-phase>clarify</b>
+            checkpoint written · single-writer store · phase=<b data-dock-phase>clarify</b>
           </div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ── Two ways to drive it ──────────────────────────────────────────── -->
-  <section class="ways" aria-labelledby="ways-h">
+  <!-- ── The council — heterogeneous CLIs, deliberating in isolation ───── -->
+  <section class="council" aria-labelledby="council-h">
     <div class="wrap">
-      <div class="sec-head">
-        <div class="kicker">More ways to use it</div>
-        <h2 id="ways-h">Two ways to drive the same daemon.</h2>
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">The council</div>
+        <h2 id="council-h">Many CLIs. Separate sandboxes. One synthesis.</h2>
         <p class="sec-sub">
-          One governed lifecycle underneath, two doors into it. Reach it <b>headless</b> from a terminal
-          or CI, or open the <b>browser console</b> the daemon serves over its own REST/WS web API.
+          Fan the same question to heterogeneous CLIs — each answers in <b>its own isolated sandbox</b>, blind
+          to the others. crew parses the votes and synthesizes agreement and divergence. That seat diversity
+          is the machinery behind <b>evaluator ≠ creator</b>.
         </p>
       </div>
 
-      <div class="ways-grid">
-        <!-- Way A: the interface / CLI — headless, shown as a real terminal. -->
-        <article class="lane" aria-labelledby="lane-cli-h">
-          <div class="lane-head">
-            <span class="lane-tag">Way A</span>
-            <div>
-              <div class="lane-kind">Interface · CLI</div>
-              <h3 id="lane-cli-h">Drive it headless from a terminal</h3>
+      <div class="council-stage" data-council>
+        <div class="council-seats">
+          {COUNCIL.map((m, i) => (
+            <div class:list={['council-seat', `is-${m.vote.toLowerCase()}`]} data-seat data-i={i}>
+              <span class="cs-cli">{m.cli}</span>
+              <span class="cs-vote">{m.vote}</span>
+              <span class="cs-note">{m.note}</span>
             </div>
-          </div>
-          <p class="lane-lede">Scripts, CI, or your own shell — no UI required. The daemon takes commands and streams events.</p>
-
-          <div class="mock mock--term" aria-hidden="true">
-            <div class="mock-bar">
-              <span class="mock-dots"><i></i><i></i><i></i></span>
-              <span class="mock-title">zsh · wicked-crew</span>
-            </div>
-            <div class="mock-body mock-term-body">
-              <div class="tl"><span class="tp">$</span> wicked-crew run start <span class="tc"># begin a governed run</span></div>
-              <div class="tl tl-out">→ phase <b>clarify</b> · worker <b>claude --print</b> · checkpoint written</div>
-              <div class="tl"><span class="tp">$</span> wicked-crew gate --phase build→ship</div>
-              <div class="tl tl-out tl-deny">✕ <b>DENY</b> · schema-drift open · held for review</div>
-              <div class="tl"><span class="tp">$</span> curl -s localhost:7701/api/runs/current <span class="tc"># same state over REST</span></div>
-            </div>
-          </div>
-          <div class="lane-io">
-            <span class="io-chip">CLI</span><span class="io-chip">REST</span><span class="io-chip">WebSocket</span><span class="io-chip">scriptable · CI</span>
-          </div>
-        </article>
-
-        <!-- Way B: REST / web API — the browser console the daemon serves. -->
-        <article class="lane" aria-labelledby="lane-web-h">
-          <div class="lane-head">
-            <span class="lane-tag">Way B</span>
-            <div>
-              <div class="lane-kind">REST · web API</div>
-              <h3 id="lane-web-h">Open the console it serves</h3>
-            </div>
-          </div>
-          <p class="lane-lede">The same daemon serves a browser console over its REST/WS web API — <b>same-origin</b> on localhost, no separate deploy.</p>
-
-          <div class="mock mock--web" aria-hidden="true">
-            <div class="mock-bar">
-              <span class="mock-dots"><i></i><i></i><i></i></span>
-              <span class="mock-url">localhost:7701</span>
-            </div>
-            <div class="mock-body mock-web-body">
-              <div class="web-row web-phase">
-                <span class="web-k">run · phase</span>
-                <span class="web-v">build → ship</span>
-              </div>
-              <div class="web-gate">
-                <span class="web-stamp">DENY</span>
-                <span class="web-gate-t">schema-drift · held for human review</span>
-              </div>
-              <div class="web-actions">
-                <span class="web-btn web-btn--ok">Approve</span>
-                <span class="web-btn">Reject</span>
-                <span class="web-btn">Modify…</span>
-              </div>
-            </div>
-          </div>
-          <div class="lane-io">
-            <span class="io-chip">served same-origin</span><span class="io-chip">HITL approvals</span><span class="io-chip">evidence browser</span>
-          </div>
-        </article>
+          ))}
+        </div>
+        <div class="council-synth" data-council-synth>
+          <span class="cy-k">synthesized</span>
+          <span class="cy-v">2 of 3 → <b>REWORK</b></span>
+          <span class="cy-t">divergence flagged · contract break + missing rollback carried forward</span>
+        </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ── The driving interface — the studio, built into crew ───────────── -->
+  <section class="studio" aria-labelledby="studio-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">A real driving interface</div>
+        <h2 id="studio-h">The studio — launch, watch, and steer a run.</h2>
+        <p class="sec-sub">
+          A browser console built into crew. Launch a run from a <b>free-text problem</b>, watch a
+          <b>live event feed</b> and <b>per-unit transcript</b>, drive an <b>embedded governed terminal</b>,
+          and resolve steering gates — <b>approve</b>, <b>steer with an amendment</b>, or <b>reject</b>.
+        </p>
+      </div>
+
+      <div class="studio-mock" aria-hidden="true">
+        <div class="mock-bar">
+          <span class="mock-dots"><i></i><i></i><i></i></span>
+          <span class="mock-url">the studio · served locally</span>
+        </div>
+        <div class="studio-body">
+          <div class="studio-launch">
+            <span class="sl-k">start a run</span>
+            <span class="sl-input">add rate-limiting to the public API<span class="sl-caret"></span></span>
+            <span class="sl-go">Launch ↵</span>
+          </div>
+          <div class="studio-cols">
+            <div class="studio-feed">
+              <span class="sf-k">live event feed</span>
+              <span class="sf-row">phase <b>build</b> · worker <b>codex run</b></span>
+              <span class="sf-row">unit 3/5 · diff captured</span>
+              <span class="sf-row sf-row--gate">gate build→ship · <b>held</b></span>
+            </div>
+            <div class="studio-gate">
+              <span class="sg-k">steering gate</span>
+              <span class="sg-stamp">DENY</span>
+              <span class="sg-t">schema-drift · re-verified against worktree</span>
+              <div class="sg-actions">
+                <span class="sg-btn sg-btn--ok">Approve</span>
+                <span class="sg-btn">Steer + amend</span>
+                <span class="sg-btn">Reject</span>
+              </div>
+            </div>
+          </div>
+          <div class="studio-term">
+            <span class="st-line"><span class="st-p">crew ›</span> attach --unit 3 <span class="st-c"># governed terminal</span></span>
+            <span class="st-line st-out">streaming transcript · read-scoped · no host shell</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="honest-note">
+        <b>Local-first today</b> — the engine runs in-process, workers are local subprocesses, the bus is
+        local. The execution seam is built for a remote runner; that’s the direction, not a shipped claim.
+      </p>
     </div>
   </section>
 
@@ -379,13 +490,13 @@ const LIFECYCLE = [
     <section class="get" id="get">
       <div class="wrap get-grid">
         <div class="get-intro">
-          <div class="kicker">Run the daemon</div>
-          <h2>Start with the family installer. The console comes with it.</h2>
+          <div class="kicker">Get it</div>
+          <h2>Start with the family installer. The studio comes with it.</h2>
           <p>
             The simplest way in is <b><code>npx wicked-installer</code></b> — the interactive, cross-CLI
             installer for the whole wicked-* family. Already know you want just this one? Install
-            <b>wicked-crew</b> directly — either way you get the daemon, and the browser console ships
-            <b>inside it</b>, served on <code>localhost:7701</code>.
+            <b>wicked-crew</b> directly — either way you get crew and the <b>studio console ships inside it</b>,
+            served on your machine.
           </p>
         </div>
         <div class="install-stack">
@@ -405,10 +516,10 @@ const LIFECYCLE = [
             <div class="install__bar">
               <span class="install__label">Direct · wicked-crew only</span>
               <button class="install__copy" type="button" aria-label="Copy direct install commands"
-                onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g wicked-crew\nwicked-crew daemon start').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
+                onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g wicked-crew\nwicked-crew serve').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
             </div>
             <pre class="install__code"><code>npm install -g wicked-crew
-wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localhost:7701</span></code></pre>
+wicked-crew serve   <span class="c"># the studio console, served on your machine</span></code></pre>
           </div>
         </div>
         <a class="gh-pill" href="https://github.com/mikeparcewski/wicked-crew#readme" target="_blank" rel="noopener" aria-label="View wicked-crew on GitHub">
@@ -418,11 +529,10 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
       </div>
     </section>
 
-
     <Footer repo={repo} />
   </div>
 
-  <!-- ── Gate Console: the deterministic series-circuit gate (vanilla JS) ── -->
+  <!-- ── Gate Console: auto-animating series-circuit dual gate (vanilla JS) ── -->
   <script is:inline>
     (function () {
       var root = document.querySelector('[data-gc]');
@@ -434,67 +544,143 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
       var vline = root.querySelector('[data-vline]');
       var verdict = root.querySelector('[data-verdict]');
       var pleaEl = root.querySelector('[data-plea]');
+      var phaseEl = root.querySelector('[data-gc-phase]');
+      var modeEl = root.querySelector('[data-gc-mode]');
+      var cards = Array.prototype.slice.call(document.querySelectorAll('[data-gc-card]'));
       if (!switches.length || !stamp) return;
 
-      function isClosed(sw) { return !sw.classList.contains('is-open'); }
+      var gated = true;
+      var timer = null;   // auto-cycle timer; null = not auto-playing
+      var manual = false; // user has taken hands-on control of the switches
+      var scene = 0;
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-      // Series circuit, evaluated strictly left → right. seg[0] (build → first
-      // switch) is always live from the source; each subsequent segment is live
-      // only if EVERY upstream switch is closed. Deny-dominates falls out of the
-      // physics: the first open switch kills all current downstream.
+      function byId(id) {
+        for (var i = 0; i < switches.length; i++) {
+          if (switches[i].getAttribute('data-policy') === id) return switches[i];
+        }
+        return null;
+      }
+      function isClosed(sw) { return !sw.classList.contains('is-open'); }
+      function isAgent(sw) { return sw.getAttribute('data-kind') === 'agent'; }
+
+      // Series circuit, left → right. Deny-dominates falls out of the physics:
+      // the first open switch kills all current downstream. The agent seat is
+      // just another switch in series — it can BREAK the track (veto) but can
+      // never be the reason current flows, so no model can approve.
       function recompute() {
-        var live = true;                 // source (build) is energised
+        // Ungated phase: the gate is bypassed, transition passes without evaluation.
+        if (!gated) {
+          root.classList.add('is-ungated');
+          switches.forEach(function (sw) {
+            sw.classList.remove('is-hot');
+            var st = sw.querySelector('[data-state]');
+            if (st) st.textContent = isAgent(sw) ? 'ABSTAIN' : 'PASS';
+          });
+          segs.forEach(function (s) { s.classList.remove('is-live'); });
+          dst.classList.remove('is-live');
+          verdict.setAttribute('data-verdict', 'ungated');
+          stamp.textContent = 'OPEN';
+          vline.textContent = 'This phase is not gated — the transition passes without evaluation.';
+          if (phaseEl) phaseEl.innerHTML = 'gate · build → ship · <b>off</b>';
+          return;
+        }
+
+        root.classList.remove('is-ungated');
+        if (phaseEl) phaseEl.innerHTML = 'gate · build → ship · <b>enabled</b>';
+
+        var live = true;
         segs[0].classList.toggle('is-live', live);
-        var openCount = 0;
+        var openCount = 0, agentVeto = false;
         for (var i = 0; i < switches.length; i++) {
           var sw = switches[i];
-          var reached = live;            // does current arrive at this switch?
+          var reached = live;
           sw.classList.toggle('is-hot', reached);
           var closed = isClosed(sw);
-          if (!closed) openCount++;
-          // outgoing current: only if it arrived AND this switch is closed
+          if (!closed) { openCount++; if (isAgent(sw)) agentVeto = true; }
           live = reached && closed;
           var afterSeg = segs[i + 1];
           if (afterSeg) afterSeg.classList.toggle('is-live', live);
           var st = sw.querySelector('[data-state]');
-          if (st) st.textContent = closed ? 'PASS' : 'FAIL';
+          if (st) st.textContent = isAgent(sw) ? (closed ? 'ABSTAIN' : 'VETO') : (closed ? 'PASS' : 'FAIL');
           sw.setAttribute('aria-pressed', closed ? 'true' : 'false');
         }
-        var allow = live;                // reached ship with current intact
+        var allow = live;
         dst.classList.toggle('is-live', allow);
-
         verdict.setAttribute('data-verdict', allow ? 'allow' : 'deny');
         stamp.textContent = allow ? 'ALLOW' : 'DENY';
         if (allow) {
-          vline.textContent = 'Every switch closed — current reaches ship. Transition allowed.';
+          vline.textContent = 'Every check closed — current reaches ship. Transition allowed.';
+        } else if (agentVeto && openCount === 1) {
+          vline.textContent = 'The LLM judge vetoed — gate failed. A model can fail, never approve.';
         } else if (openCount === 1) {
-          vline.textContent = '1 open switch breaks the series — transition held.';
+          vline.textContent = '1 check failed — the series breaks. Transition held for a human.';
         } else {
-          vline.textContent = openCount + ' open switches break the series — transition held.';
+          vline.textContent = openCount + ' checks failed — the series breaks. Transition held.';
         }
       }
 
+      // A scene = full state the console is set to. Each card owns one scene.
+      var SCENES = [
+        { gated: true,  open: [] },                 // series: all closed → ALLOW
+        { gated: true,  open: ['schema-drift'] },   // deny-dominates
+        { gated: true,  open: ['llm-judge'] },      // veto-only agent seat
+        { gated: false, open: [] },                 // opt-in per phase (ungated)
+      ];
+
+      function applyScene(idx) {
+        var sc = SCENES[idx] || SCENES[0];
+        gated = sc.gated;
+        switches.forEach(function (sw) {
+          var id = sw.getAttribute('data-policy');
+          sw.classList.toggle('is-open', sc.open.indexOf(id) !== -1);
+        });
+        cards.forEach(function (c, i) { c.classList.toggle('is-active', i === idx); });
+        recompute();
+      }
+
+      function stopAuto() { if (timer) { clearInterval(timer); timer = null; } }
+      function startAuto() {
+        manual = false;
+        root.classList.remove('is-manual');
+        stopAuto();
+        scene = 0; applyScene(0);
+        if (modeEl) modeEl.textContent = '▶ demo playing';
+        if (!reduced) timer = setInterval(function () { scene = (scene + 1) % SCENES.length; applyScene(scene); }, 2800);
+      }
+      function takeControl() {
+        stopAuto();
+        manual = true;
+        root.classList.add('is-manual');
+        if (modeEl) modeEl.textContent = '✋ you’re driving · ▶ replay';
+      }
+
+      // Clicking a switch stops the animation and hands the console to the user.
+      // Taking control always re-gates the phase, so switches are never inert.
       switches.forEach(function (sw) {
         sw.addEventListener('click', function () {
-          sw.classList.toggle('is-open');
+          takeControl();
           root.removeAttribute('data-argued');
+          if (!gated) gated = true;
+          sw.classList.toggle('is-open');
           recompute();
         });
       });
 
-      var resetBtn = root.querySelector('[data-reset]');
-      if (resetBtn) resetBtn.addEventListener('click', function () {
-        switches.forEach(function (sw) { sw.classList.remove('is-open'); });
-        recompute();
+      // Clicking a card settles the animation on that card's scene (stops the
+      // auto-advance so it doesn't jump away) — read it, then drive the switches.
+      cards.forEach(function (c, i) {
+        c.addEventListener('click', function () {
+          stopAuto();
+          manual = false;
+          root.classList.remove('is-manual');
+          scene = i; applyScene(i);
+          if (modeEl) modeEl.textContent = '▶ replay demo';
+        });
       });
 
-      var open1Btn = root.querySelector('[data-open1]');
-      if (open1Btn) open1Btn.addEventListener('click', function () {
-        switches.forEach(function (sw) { sw.classList.remove('is-open'); });
-        var pick = switches[Math.floor(Math.random() * switches.length)];
-        pick.classList.add('is-open');
-        recompute();
-      });
+      // The mode chip replays the full auto-demo from the top.
+      if (modeEl) modeEl.addEventListener('click', function () { startAuto(); });
 
       // "Let the model argue" — a persuasive plea that moves the verdict by
       // exactly zero. The plea streams; the gate never reads it.
@@ -509,13 +695,13 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
       if (argueBtn && pleaEl) {
         argueBtn.addEventListener('click', function () {
           if (arguing) return;
+          takeControl();
           arguing = true;
           argueBtn.disabled = true;
           root.setAttribute('data-argued', '1');
           pleaEl.hidden = false;
           pleaEl.innerHTML = '';
           var verdictBefore = stamp.textContent;
-          var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
           function stampResult() {
             var same = stamp.textContent === verdictBefore;
@@ -556,7 +742,72 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
         });
       }
 
-      recompute();
+      if (reduced) { scene = 1; applyScene(1); manual = true; root.classList.add('is-manual'); if (modeEl) modeEl.textContent = '✋ drive it'; }
+      else { startAuto(); }
+    })();
+  </script>
+
+  <!-- ── BYO-CLI roster: click a CLI, see it dispatched as a worker ─────── -->
+  <script is:inline>
+    (function () {
+      var root = document.querySelector('[data-byo]');
+      var stage = document.querySelector('[data-byo-stage]');
+      if (!root || !stage) return;
+      var cards = Array.prototype.slice.call(root.querySelectorAll('[data-byo-card]'));
+      var badge = stage.querySelector('[data-byo-badge]');
+      var cmd = stage.querySelector('[data-byo-cmd]');
+      var wt = stage.querySelector('.byo-stage-wt');
+      var WT = ['.worktrees/run-4f2a · no shell · read-scoped',
+                '.worktrees/run-8b19 · no shell · read-scoped',
+                '.worktrees/run-c3d0 · offline · read-scoped',
+                '.worktrees/run-e77a · sandboxed · read-scoped'];
+      cards.forEach(function (c, i) {
+        c.addEventListener('click', function () {
+          cards.forEach(function (x) { x.classList.remove('is-active'); });
+          c.classList.add('is-active');
+          if (badge) badge.textContent = c.querySelector('.byo-name').textContent;
+          if (cmd) cmd.textContent = c.querySelector('.byo-cli').textContent;
+          if (wt) { wt.textContent = WT[i] || WT[0]; wt.classList.remove('pop'); void wt.offsetWidth; wt.classList.add('pop'); }
+        });
+      });
+    })();
+  </script>
+
+  <!-- ── Workflows-as-data: click a definition, render its phases ───────── -->
+  <script is:inline>
+    (function () {
+      var root = document.querySelector('[data-wf]');
+      var preview = document.querySelector('[data-wf-preview]');
+      if (!root || !preview) return;
+      var files = Array.prototype.slice.call(root.querySelectorAll('[data-wf-file]'));
+      var nameEl = preview.querySelector('[data-wf-name]');
+      var phasesEl = preview.querySelector('[data-wf-phases]');
+      var DEFS = [
+        { id: 'feature.json',   phases: ['clarify', 'design', 'test-strategy', 'build', 'test', 'ship'] },
+        { id: 'bug.json',       phases: ['reproduce', 'fix', 'test', 'ship'] },
+        { id: 'migration.json', phases: ['plan', 'migrate', 'verify', 'ship'] },
+      ];
+      function render(i) {
+        var d = DEFS[i] || DEFS[0];
+        files.forEach(function (f, j) { f.classList.toggle('is-active', j === i); f.setAttribute('aria-selected', j === i ? 'true' : 'false'); });
+        if (nameEl) nameEl.textContent = d.id;
+        if (!phasesEl) return;
+        phasesEl.innerHTML = '';
+        d.phases.forEach(function (p, k) {
+          if (k > 0) {
+            var arr = document.createElement('span');
+            arr.className = 'wf-arr'; arr.setAttribute('aria-hidden', 'true'); arr.textContent = '→';
+            phasesEl.appendChild(arr);
+          }
+          var chip = document.createElement('span');
+          chip.className = 'wf-phase';
+          chip.textContent = p;
+          chip.style.animationDelay = (k * 55) + 'ms';
+          phasesEl.appendChild(chip);
+        });
+      }
+      files.forEach(function (f, i) { f.addEventListener('click', function () { render(i); }); });
+      render(0);
     })();
   </script>
 
@@ -580,65 +831,46 @@ wicked-crew daemon start   <span class="c"># CLI + REST/WS · console on localho
       function place() {
         var p = phases[cur];
         var dot = p.querySelector('.rail-dot') || p;
-        // Position the token over the active phase dot, measured live so it
-        // tracks reflow/resize/horizontal-scroll without any fixed geometry.
         var trackEl = rail.querySelector('.rail-track');
         var pr = dot.getBoundingClientRect();
         var rr = trackEl.getBoundingClientRect();
         token.style.left = (pr.left - rr.left + trackEl.scrollLeft + pr.width / 2) + 'px';
         token.style.top = (pr.top - rr.top + pr.height / 2) + 'px';
       }
-
       function render() {
         phases.forEach(function (p, i) {
           p.classList.toggle('is-now', i === cur);
           p.classList.toggle('is-done', i < cur);
         });
-        gates.forEach(function (g, i) {
-          // gate i sits between phase i and phase i+1; cleared once we're past it
-          g.classList.toggle('is-cleared', i < cur);
-        });
+        gates.forEach(function (g, i) { g.classList.toggle('is-cleared', i < cur); });
         var p = phases[cur];
         if (dWorker) dWorker.textContent = p.getAttribute('data-worker');
         if (dEvidence) dEvidence.textContent = p.getAttribute('data-evidence');
         if (dPhase) dPhase.textContent = p.querySelector('.rail-name').textContent;
-        // pop the evidence chip
         if (dEvidence) { dEvidence.classList.remove('pop'); void dEvidence.offsetWidth; dEvidence.classList.add('pop'); }
         place();
       }
-
-      function advance() {
-        if (paused) return;
-        cur = (cur + 1) % phases.length;
-        render();
-      }
-
+      function advance() { if (paused) return; cur = (cur + 1) % phases.length; render(); }
       function start() {
         if (reduced) { cur = 3; render(); return; }
         if (timer) clearInterval(timer);
         timer = setInterval(advance, 2000);
       }
-
-      phases.forEach(function (p, i) {
-        p.addEventListener('click', function () { cur = i; render(); });
-      });
-
+      phases.forEach(function (p, i) { p.addEventListener('click', function () { cur = i; render(); }); });
       rail.addEventListener('pointerenter', function () { paused = true; });
       rail.addEventListener('pointerleave', function () { paused = false; });
-
       if (crashBtn) crashBtn.addEventListener('click', function () {
         var was = cur;
         rail.classList.add('is-crashed');
-        if (dPhase) dPhase.textContent = '— (daemon down)';
+        if (dPhase) dPhase.textContent = '— (engine down)';
         setTimeout(function () {
           rail.classList.remove('is-crashed');
-          cur = was;               // resume to the EXACT pre-crash phase
+          cur = was;
           render();
           var note = rail.querySelector('[data-dock-note]');
           if (note) { note.classList.remove('flash'); void note.offsetWidth; note.classList.add('flash'); }
         }, 900);
       });
-
       window.addEventListener('resize', place);
       render();
       start();

@@ -2,12 +2,23 @@
 
 **Own the workflow. Not the work.**
 
-wicked-crew is a standalone **external orchestrator** — a daemon plus CLI (and a browser console it
-serves same-origin on localhost) — for governed, multi-phase AI development. It runs **above** your
-coding agents, never inside them: it treats AI CLIs (Claude Code, and others) as stateless worker
-subprocesses while *it* owns the phase lifecycle, the gates, the evidence, and the crash-safe state.
+wicked-crew is an **agentic execution platform — the harness for your agent harnesses.** It runs the
+coding-agent CLIs you already use (Claude Code, Codex, and others) as governed workers through
+**durable, multi-agent workflows**: state your intent, get verified work out. Bring your own CLI and
+your own subscription — crew drives the agents *you* already pay for, on *your* auth and *your* plan.
+There's no billing, no accounts, no model reselling.
 
-Local-first. No cloud, no accounts.
+Under the hood it's a daemon (`wicked-crew serve`) plus CLI and a same-origin browser console — but
+the daemon is the **mechanism, not the pitch.** What you actually get: an evaluator that is
+structurally not the creator (it can't self-grade), a deny-dominates dual gate, "done" **re-derived
+from evidence** instead of asserted, and **workflows-as-data** you can add without touching code. The
+harness owns the phase lifecycle, the gates, the evidence, and the crash-safe state; the agent does
+the coding inside a phase.
+
+> **Local-first today.** Loopback only, in-process engine, local workers and local bus — no cloud, no
+> accounts, nothing leaves your machine. The execution seam is built for a remote runner, but
+> remote/distributed execution is **not shipped**: crew runs on a single host. No cluster, no
+> horizontal scale.
 
 ## The idea
 
