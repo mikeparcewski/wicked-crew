@@ -25,6 +25,21 @@ export interface CoreAdapterOptions {
   dbPath: string;
   /** `true` → deterministic offline stub engine (tests); `false` → production engine. */
   stub?: boolean;
+  /**
+   * Arm the Law 1 EVENT-DRIVEN execution-mediation seam (DES-EXEC-001 §2.3). When `true` (and NOT
+   * stub), the actor PUBLISHES `wicked.task.dispatched` and an off-actor `cli-runner` subscriber
+   * executes the CLI over events, publishing `wicked.task.completed` back — instead of the default
+   * in-process stdin/stdout subprocess path. OFF by default: existing callers keep the in-process path.
+   *
+   * Mechanism: the Rust actor honours `WICKED_BUS_EXEC` + `WICKED_BUS_DB` from the process
+   * environment even on the plain `Core.spawn()` path (wicked-core `actor::run`), so we set those two
+   * env vars BEFORE constructing the Core (the actor thread reads them at spawn time). If the
+   * `cli-runner` cannot initialize (bus db unopenable / cursor unreadable) the engine logs and falls
+   * back to the in-process path — it never silently wedges (wicked-core seam finding #4).
+   */
+  engineExec?: boolean;
+  /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
+  busDbPath?: string;
 }
 
 /**
@@ -40,7 +55,29 @@ export class CoreAdapter {
   private readonly listeners = new Set<CoreEventListener>();
   private closed = false;
 
+  /** `true` when this adapter armed the event-driven exec seam (for readiness/reporting). */
+  readonly engineExec: boolean;
+  /** The bus db the exec seam runs over when armed (else `undefined`). */
+  readonly busDbPath: string | undefined;
+
   constructor(opts: CoreAdapterOptions) {
+    // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
+    // `WICKED_BUS_EXEC` + `WICKED_BUS_DB` from the process env at spawn time (wicked-core actor::run),
+    // so they must be set before `Core.spawn()`/`Core.spawnStub()`. The seam is ENGINE-INDEPENDENT —
+    // it publishes `task.dispatched` / consumes `task.completed` around WHATEVER step runner the engine
+    // wires (the production wrapped-CLI runner OR the deterministic stub), so a stub engine can arm it
+    // for a fast, offline, deterministic proof of the event path.
+    const armExec = opts.engineExec === true;
+    if (armExec) {
+      if (!opts.busDbPath || opts.busDbPath.length === 0) {
+        throw new Error('engineExec requires busDbPath (the wicked-bus db to mediate execution over)');
+      }
+      process.env['WICKED_BUS_EXEC'] = '1';
+      process.env['WICKED_BUS_DB'] = opts.busDbPath;
+    }
+    this.engineExec = armExec;
+    this.busDbPath = armExec ? opts.busDbPath : undefined;
+
     this.core = opts.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is

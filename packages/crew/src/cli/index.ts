@@ -22,6 +22,8 @@ interface BootstrapOpts {
   dbPath: string;
   port: number;
   stub: boolean;
+  engineExec: boolean;
+  busDbPath: string;
 }
 
 function parseBootstrap(args: string[]): BootstrapOpts {
@@ -29,13 +31,27 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
   const port = portStr !== undefined ? Number(portStr) : 7701;
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
-  return { dbPath, port, stub };
+  // OPT-IN: arm the event-driven execution-mediation seam (default OFF → in-process path).
+  // `--engine-exec` flag or WICKED_BUS_EXEC env turns it on; `--bus-db` / WICKED_BUS_DB sets the bus db.
+  const engineExec =
+    hasFlag(args, '--engine-exec') ||
+    (process.env['WICKED_BUS_EXEC'] !== undefined && process.env['WICKED_BUS_EXEC'] !== '');
+  const busDbPath =
+    flag(args, '--bus-db') ??
+    process.env['WICKED_BUS_DB'] ??
+    join(tmpdir(), 'wicked-crew-bus.db');
+  return { dbPath, port, stub, engineExec, busDbPath };
 }
 
 let adapterRef: CoreAdapter | undefined;
 
 async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; port: number }> {
-  const adapter = new CoreAdapter({ dbPath: opts.dbPath, stub: opts.stub });
+  const adapter = new CoreAdapter({
+    dbPath: opts.dbPath,
+    stub: opts.stub,
+    engineExec: opts.engineExec,
+    busDbPath: opts.busDbPath,
+  });
   adapterRef = adapter;
   const { port } = await startServer(adapter, opts.port);
   installShutdownHandlers();
@@ -70,8 +86,16 @@ async function main(): Promise<void> {
 
   if (command === 'serve') {
     const opts = parseBootstrap(argv);
-    const { port } = await bootstrap(opts);
-    printReady({ mode: 'serve', port, db: opts.dbPath, stub: opts.stub, startupMs: Math.round(performance.now() - t0) });
+    const { adapter, port } = await bootstrap(opts);
+    printReady({
+      mode: 'serve',
+      port,
+      db: opts.dbPath,
+      stub: opts.stub,
+      engineExec: adapter.engineExec,
+      busDb: adapter.engineExec ? adapter.busDbPath : undefined,
+      startupMs: Math.round(performance.now() - t0),
+    });
   } else if (command === 'start') {
     const opts = parseBootstrap(argv);
     const problem = flag(argv, '--problem') ?? 'No problem specified';
