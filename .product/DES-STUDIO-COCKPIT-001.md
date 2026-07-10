@@ -94,7 +94,10 @@ assert a dollar figure the CLI didn't imply.
 
 ### B-rework math (studio side, B2+B3)
 Per unit, accumulate `attempt`s from `UnitDispatched` and tokens from `CliUsage` keyed by
-`(ord, attempt)`. rework_tokens = Σ tokens where attempt>1; rework_% = rework_tokens/total.
+`(ord, attempt)`. The engine numbers a unit's FIRST dispatch `attempt=0`. rework_tokens = Σ tokens on
+usage beyond the unit's EARLIEST recorded attempt (NOT a blanket `attempt>0`) — this is robust to the
+engine bumping `attempt` for wedge-key freshness on a gate approval, so a once-dispatched unit books zero
+rework regardless of its attempt number; rework_% = rework_tokens/total.
 Burn panel: total tokens/cost, per-CLI split, and the rework slice with the causal link
 (which gate rejection triggered the re-dispatch, from the ledger).
 

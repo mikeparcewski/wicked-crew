@@ -168,8 +168,14 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
     });
   }
 
+  // MAJOR fix (cockpit adversarial review): `session.unit_ix` is a 0-based cursor INDEX; a gate's `ord`
+  // is 1-based (`ord = index + 1`). A client that rehydrates DURING a pause (snapshot says awaiting_human)
+  // has no live `awaitingHuman` event to override this fallback, so resolve the cursor index to the real
+  // unit ord from the snapshot — else the HITL panel highlights a phantom ord no unit has.
   let pendingGate: PendingGate | null =
-    session.status === 'awaiting_human' ? { ord: session.unit_ix, prompt: null } : null;
+    session.status === 'awaiting_human'
+      ? { ord: snapshot.units[session.unit_ix]?.ord ?? session.unit_ix + 1, prompt: null }
+      : null;
 
   const ensureUnit = (ord: number): UnitModel => {
     let u = units.get(ord);
@@ -334,12 +340,34 @@ export interface BurnSummary {
   hasUsage: boolean;
 }
 
-/** claude reports token/cost directly; every other seat is treated as adapter-less for usage. */
-function isClaudeCli(cli: string): boolean {
-  return cli.toLowerCase().includes('claude');
+/** The file stem of an argv[0] (posix/windows basename, extension stripped, lowercased). */
+function binaryStem(argv0: string): string {
+  const base = argv0.split(/[\\/]/).pop() ?? argv0;
+  return base.replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 }
 
-/** Rework = any burn on `attempt>0` (a re-dispatch), per the event contract. */
+/**
+ * Whether a unit's worker is the claude binary — matching the ENGINE's adapter selection
+ * (`execute_wrapped.rs` `binary_is_claude`: resolved binary stem === "claude"). HONESTY (cockpit
+ * adversarial review): classify by the unit's INVOCATION (argv[0] stem), NOT the seat name — a seat
+ * aliased to the claude binary but keyed e.g. `opus` would else be mislabeled "usage unavailable", and a
+ * non-claude seat keyed `claude-*` would sit "pending" forever. Falls back to the seat-key stem only when
+ * no invocation is recorded. Only a true claude worker emits `cliUsage`, so this is what decides whether
+ * an absent record is transient ("pending") or a genuine adapter gap ("unavailable").
+ */
+function unitIsClaude(assignedInvocation: string | null, assignedCli: string | null): boolean {
+  const inv = assignedInvocation?.trim();
+  if (inv) return binaryStem(inv.split(/\s+/)[0] ?? '') === 'claude';
+  return assignedCli !== null && binaryStem(assignedCli) === 'claude';
+}
+
+/**
+ * Rework = burn on a genuine RE-RUN of a unit. HONESTY (cockpit adversarial review): computed per unit as
+ * usage beyond that unit's EARLIEST recorded attempt — NOT a blanket `attempt>0`. The engine bumps
+ * `attempt` for wedge-key freshness on some gate approvals, so a unit's FIRST dispatch can carry a nonzero
+ * attempt; keying rework off the per-unit minimum makes a once-dispatched unit contribute zero rework
+ * regardless of its attempt number, and only a truly re-run unit (usage at >1 attempt) books rework.
+ */
 export function burnSummary(model: RunModel): BurnSummary {
   let totalInput = 0;
   let totalOutput = 0;
@@ -355,12 +383,16 @@ export function burnSummary(model: RunModel): BurnSummary {
     const dispatched =
       u.status === 'distributed' || u.status === 'done' || u.status === 'rejected';
     if (u.usage.length === 0 && u.assignedCli !== null && dispatched) {
-      // Derive the reason PER seat. claude emits `cliUsage`, so an absent record is transient
-      // (lagging / late-join), never "unavailable". Only a non-claude seat is truly adapter-less.
-      if (isClaudeCli(u.assignedCli)) pending.add(u.assignedCli);
+      // Derive the reason PER seat, by the resolved binary (not the seat name). A true claude worker
+      // emits `cliUsage`, so an absent record is transient (lagging / late-join), never "unavailable".
+      // Only a non-claude worker is truly adapter-less.
+      if (unitIsClaude(u.assignedInvocation, u.assignedCli)) pending.add(u.assignedCli);
       else noAdapter.add(u.assignedCli);
     }
     const cli = u.assignedCli ?? 'unknown';
+    // Rework is burn on a re-run of THIS unit: usage beyond the unit's earliest recorded attempt.
+    const firstAttempt =
+      u.usage.length > 0 ? Math.min(...u.usage.map((r) => r.attempt)) : 0;
     for (const r of u.usage) {
       usageCount += 1;
       totalInput += r.inputTokens;
@@ -369,7 +401,7 @@ export function burnSummary(model: RunModel): BurnSummary {
         costSum += r.costUsd;
         costCount += 1;
       }
-      if (r.attempt > 0) reworkTokens += r.inputTokens + r.outputTokens;
+      if (r.attempt > firstAttempt) reworkTokens += r.inputTokens + r.outputTokens;
       const e = perCli.get(cli) ?? { cli, input: 0, output: 0, cost: null };
       e.input += r.inputTokens;
       e.output += r.outputTokens;

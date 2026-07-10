@@ -5,8 +5,24 @@ interface Props {
   model: RunModel;
 }
 
-/** Who owned a decision — deterministic floor, agent judge, council, or human. */
+/**
+ * Who owned a decision. HONESTY (cockpit adversarial review): under deny-dominance the DENIER is the
+ * layer that FAILED, not the deepest layer that ran. On a DENY (`combined === false`) attribute to the
+ * failing layer(s); a naive "deepest layer" read would blame the agent judge for a denial the agent
+ * actually PASSED (e.g. the deterministic floor failed while the semantic judge approved). On an ALLOW
+ * every layer that ran approved, so the deepest layer that ran owns the (approving) decision.
+ */
 function gateDecider(g: UnitModel['gateEvals'][number]): string {
+  if (!g.combined) {
+    const deniers: string[] = [];
+    if (g.hasDeterministicFloor && !g.deterministicPass) deniers.push('deterministic floor');
+    if (g.evaluatorPass === false) deniers.push('evaluator (2nd pass)');
+    // The agent event carries only a verdict string (no boolean), so the agent is named a denier only
+    // by ELIMINATION — when no provable floor/evaluator failure explains the DENY, the agent must have
+    // rejected. This never blames the agent while a concrete floor/evaluator denial is present.
+    if (deniers.length === 0 && g.agentVerdict !== null) deniers.push('agent judge');
+    return deniers.length > 0 ? deniers.join(' + ') : 'governance';
+  }
   if (g.evaluatorPass !== null) return 'evaluator (2nd pass)';
   if (g.agentVerdict !== null) return 'agent judge';
   if (g.hasDeterministicFloor) return 'deterministic floor';
