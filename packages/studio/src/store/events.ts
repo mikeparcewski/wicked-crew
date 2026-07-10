@@ -11,8 +11,16 @@ import type { CoreEvent } from '../api/types.js';
  * dropped here — they carry no structured insight and would flood the buffer.
  */
 
-/** Ring-buffer cap per run (keep the most recent). */
-const CAP = 4000;
+/**
+ * Ring-buffer cap per run (keep the most recent). Set well above any realistic run's STRUCTURED-frame
+ * count: the high-volume `cliOutputDelta` + `heartbeat` are excluded (see `IGNORED`), so what remains is
+ * lifecycle + the low-volume insight events (tens per unit). The cap is only a pathological-spam backstop;
+ * a normal run never approaches it, so the burn/data totals (which fold these frames) never silently lose
+ * an early `cliUsage`/`dataUsed` to eviction. If a run ever DID exceed this, only the oldest lifecycle
+ * frames drop first (appended-newest), and Burn already captions totals "(partial)" for any non-terminal
+ * or pending/no-adapter seat.
+ */
+const CAP = 50000;
 
 const IGNORED: ReadonlySet<string> = new Set(['cliOutputDelta', 'heartbeat']);
 

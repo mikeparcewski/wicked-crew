@@ -87,6 +87,31 @@ describe('DecisionsLedger (FR-5)', () => {
     expect(ledger).toHaveTextContent('ALLOW');
     expect(ledger).toHaveTextContent('tests pass');
   });
+
+  // Cockpit adversarial review — deny-dominance attribution. A DENY where the deterministic floor FAILED
+  // but the agent judge PASSED must blame the DETERMINISTIC FLOOR, never the agent that actually passed.
+  it('attributes a deny-dominant DENY to the failing layer, not the deepest that ran', () => {
+    const model = modelWith([
+      {
+        type: 'gateEvaluated',
+        session: 'run-1',
+        ord: 0,
+        criterion: 'tests pass',
+        hasDeterministicFloor: true,
+        deterministicPass: false, // the floor FAILED
+        agentVerdict: 'PASS', //     the agent judge PASSED
+        agentReasoning: 'looks correct',
+        evaluatorPass: null,
+        denialReason: 'pinned validator failed: tests pass',
+        combined: false, //          deny-dominance: floor failure denies
+      },
+    ]);
+    render(<DecisionsLedger model={model} />);
+    const row = screen.getByTestId('ledger-row');
+    expect(row).toHaveTextContent('DENY');
+    expect(row).toHaveTextContent('deterministic floor'); // the real denier
+    expect(row.textContent).not.toMatch(/DENY\s*·\s*agent judge/); // NEVER blames the passing agent
+  });
 });
 
 describe('Burn (FR-7)', () => {

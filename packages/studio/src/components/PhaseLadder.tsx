@@ -6,7 +6,10 @@ interface Props {
 
 const STATUS_DOT: Record<UnitModel['status'], { ring: string; label: string }> = {
   pending: { ring: 'border-gray-300 bg-white text-gray-400', label: 'pending' },
-  distributed: { ring: 'border-blue-400 bg-blue-50 text-blue-600', label: 'executing' },
+  // HONESTY (cockpit review): the engine collapses distribute + execute into one `distributed` status,
+  // so a unit here is dispatched and may or may not have started running — label it the lower-bound truth
+  // ("dispatched"), never the overstated "executing".
+  distributed: { ring: 'border-blue-400 bg-blue-50 text-blue-600', label: 'dispatched' },
   done: { ring: 'border-green-500 bg-green-50 text-green-700', label: 'done' },
   rejected: { ring: 'border-red-500 bg-red-50 text-red-700', label: 'rejected' },
 };

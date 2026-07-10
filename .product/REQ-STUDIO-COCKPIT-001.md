@@ -60,8 +60,10 @@ it drive their coding-agent CLIs through a governed workflow, and needs to (a) w
   assumptions**; proto version: derive from council `CHANGE_MY_MIND`/dissent + clarify
   output. Boundary: labeled "proto" until the skill convention lands.
 - **FR-7 Burn + rework-cost.** Per unit + running **tokens + cost + time**, with burn
-  attributed to **rework** (any `attempt > 1` re-dispatch). Show "N% of tokens went to
-  rework." Requires the usage wire (FR-9). Time-per-attempt is derivable now.
+  attributed to **rework** — burn on a genuine RE-RUN of a unit, i.e. usage beyond that unit's
+  FIRST dispatch. (The engine numbers a unit's first dispatch `attempt=0`; rework is keyed off the
+  per-unit earliest attempt, robust to a wedge-key attempt bump on gate approval — see DES §3.) Show
+  "N% of tokens went to rework." Requires the usage wire (FR-9). Time-per-attempt is derivable now.
 - **FR-8 Data-in-use.** Per unit: the intent, the repo/worktree, the evidence handed to
   the evaluator (cold), the roster; and *which files/symbols the agent read* (from CLI
   tool-use). Boundary: memory/knowledge recall labeled "disabled pending core-ts binding".

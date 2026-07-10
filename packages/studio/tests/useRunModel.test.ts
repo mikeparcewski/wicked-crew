@@ -204,4 +204,65 @@ describe('useRunModel — burnSummary (T-D8 rework math)', () => {
     expect(b.totalCost).toBeCloseTo(0.1, 5);
     expect(b.costComplete).toBe(false);
   });
+
+  // Cockpit adversarial review — a gated FIRST dispatch is NOT rework, even when the engine bumped its
+  // attempt for wedge-key freshness. Rework is keyed off the unit's EARLIEST attempt, not a blanket >0.
+  it('does not book a gated first dispatch (single usage at attempt=1) as rework', () => {
+    const view = makeView({ status: 'executing', human_confirm: 'all' }, [
+      makeUnit({ id: 'run-1:u0', ord: 0, status: 'done', assigned_cli: 'claude' }),
+    ]);
+    const events: CoreEvent[] = [
+      // human_confirm gate approval → the unit's FIRST and ONLY dispatch happens to carry attempt=1.
+      { type: 'unitDispatched', session: 'run-1', ord: 0, attempt: 1 },
+      { type: 'cliUsage', session: 'run-1', ord: 0, attempt: 1, inputTokens: 100, outputTokens: 40, costUsd: 0.5 },
+    ];
+    const b = burnSummary(mergeRunModel(view, events));
+    expect(b.totalTokens).toBe(140);
+    expect(b.reworkTokens).toBe(0); // one dispatch → zero rework, regardless of the attempt number
+    expect(b.reworkPct).toBe(0);
+  });
+
+  it('classifies a claude worker by INVOCATION binary, not the seat name (aliased seat)', () => {
+    // Seat keyed `opus` but its resolved binary is claude → it DOES emit cliUsage → "pending", not "unavailable".
+    const view = makeView({ status: 'executing' }, [
+      makeUnit({
+        id: 'run-1:u0',
+        ord: 0,
+        status: 'done',
+        assigned_cli: 'opus',
+        assigned_invocation: 'claude -p "{PROMPT}"',
+      }),
+    ]);
+    const b = burnSummary(mergeRunModel(view, []));
+    expect(b.pendingUsageClis).toEqual(['opus']);
+    expect(b.noAdapterClis).toEqual([]);
+  });
+
+  it('does NOT treat a non-claude seat named "claude-*" as a claude worker (invocation decides)', () => {
+    // Seat key contains "claude" but the resolved binary is opencode → genuinely adapter-less → "unavailable".
+    const view = makeView({ status: 'executing' }, [
+      makeUnit({
+        id: 'run-1:u0',
+        ord: 0,
+        status: 'done',
+        assigned_cli: 'claude-mini',
+        assigned_invocation: 'opencode run "{PROMPT}"',
+      }),
+    ]);
+    const b = burnSummary(mergeRunModel(view, []));
+    expect(b.noAdapterClis).toEqual(['claude-mini']);
+    expect(b.pendingUsageClis).toEqual([]);
+  });
+});
+
+describe('useRunModel — pendingGate rehydrate (cockpit adversarial review)', () => {
+  it('maps the 0-based cursor index to the real 1-based unit ord when no live event replays', () => {
+    // A client that rehydrates DURING a pause has the snapshot (awaiting_human) but no awaitingHuman event.
+    // The cursor index (unit_ix=0) must resolve to the paused unit's real ord (1), not the phantom ord 0.
+    const view = makeView({ status: 'awaiting_human', unit_ix: 0 }, [
+      makeUnit({ id: 'run-1:u1', ord: 1, status: 'pending' }),
+    ]);
+    const model = mergeRunModel(view, []);
+    expect(model.pendingGate).toEqual({ ord: 1, prompt: null });
+  });
 });
