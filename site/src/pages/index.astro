@@ -41,11 +41,16 @@ const POLICIES = [
 ];
 
 // The bring-your-own roster. crew runs whatever CLI you've installed + authed.
+// The named set mirrors the engine's real worker registry (claude, codex,
+// copilot, opencode, pi) + the two catch-alls that make the roster open-ended.
 const WORKERS = [
-  { name: 'Claude Code', cli: 'claude --print', tag: 'your auth' },
-  { name: 'Codex',       cli: 'codex run',      tag: 'your plan' },
-  { name: 'local model', cli: 'ollama run …',   tag: 'offline' },
-  { name: 'any binary',  cli: './my-agent',     tag: 'your TOML' },
+  { name: 'Claude Code',    cli: 'claude --print', tag: 'your auth' },
+  { name: 'Codex',          cli: 'codex run',      tag: 'your plan' },
+  { name: 'GitHub Copilot', cli: 'copilot -p',     tag: 'your seat' },
+  { name: 'opencode',       cli: 'opencode run',   tag: 'your keys' },
+  { name: 'Pi',             cli: 'pi -p',          tag: 'your host' },
+  { name: 'local model',    cli: 'ollama run …',   tag: 'offline' },
+  { name: 'any binary',     cli: './my-agent',     tag: 'your TOML' },
 ];
 
 // Workflows are DATA — validated JSON, dropped in. Distinct shapes prove it.
@@ -90,7 +95,7 @@ const GATE_CARDS = [
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <div class="kicker">Agentic execution platform · the IDE of the future</div>
-        <h1>The harness for<br><span class="y">your agent harnesses.</span></h1>
+        <h1>The harness<br>for <span class="y">your agent harnesses.</span></h1>
         <p class="lede">
           The coding agents you already run are harnesses around a model. <b>wicked-crew is the harness
           around them</b> — it drives your own CLIs as governed workers through durable, multi-agent
@@ -165,7 +170,7 @@ const GATE_CARDS = [
         <h2 id="byo-h">crew runs the CLIs you already have.</h2>
         <p class="sec-sub">
           Not a new model, not a subscription. crew dispatches your <b>installed</b> coding CLIs — Claude
-          Code, Codex, a local model, or any binary — as <b>no-shell workers in isolated git worktrees</b>,
+          Code, Codex, Copilot, opencode, Pi, a local model, or any binary — as <b>no-shell workers in isolated git worktrees</b>,
           under <b>your own auth and plan</b>. The roster is data: a manifest plus a
           <code>workers.toml</code> you own.
         </p>
@@ -223,6 +228,7 @@ const GATE_CARDS = [
       <div class="gc" data-gc>
         <div class="gc-topbar">
           <span class="gc-phase" data-gc-phase>gate · build → ship · <b>enabled</b></span>
+          <span class="gc-hint" data-gc-hint aria-hidden="true">☝ Click any switch to drive it</span>
           <span class="gc-mode" data-gc-mode>▶ demo playing</span>
         </div>
 
@@ -759,8 +765,11 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var wt = stage.querySelector('.byo-stage-wt');
       var WT = ['.worktrees/run-4f2a · no shell · read-scoped',
                 '.worktrees/run-8b19 · no shell · read-scoped',
-                '.worktrees/run-c3d0 · offline · read-scoped',
-                '.worktrees/run-e77a · sandboxed · read-scoped'];
+                '.worktrees/run-c3d0 · no shell · read-scoped',
+                '.worktrees/run-e77a · no shell · read-scoped',
+                '.worktrees/run-1a5c · no shell · read-scoped',
+                '.worktrees/run-2f90 · offline · read-scoped',
+                '.worktrees/run-b3e7 · sandboxed · read-scoped'];
       cards.forEach(function (c, i) {
         c.addEventListener('click', function () {
           cards.forEach(function (x) { x.classList.remove('is-active'); });
