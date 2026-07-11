@@ -12,7 +12,8 @@
     "wicked-crew": "dist/cli/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
