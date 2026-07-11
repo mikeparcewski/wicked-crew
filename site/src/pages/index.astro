@@ -70,11 +70,30 @@ const LIFECYCLE = [
   { id: 'ship',          worker: 'bash',           evidence: 'release.tag' },
 ];
 
-// A council: heterogeneous CLIs, each answering in its own sandbox.
-const COUNCIL = [
-  { cli: 'claude --print', vote: 'REWORK', note: 'contract break in the delta' },
-  { cli: 'codex run',      vote: 'PASS',   note: 'tests green, diff scoped' },
-  { cli: 'local model',    vote: 'REWORK', note: 'missing rollback path' },
+// A council: heterogeneous CLIs, each answering in its own isolated sandbox,
+// blind to the others. crew fans the SAME question out, parses the votes, and
+// synthesizes agreement + divergence. Three real, distinct rounds prove the
+// board is heterogeneous — the seats disagree, and deny-dominates the synthesis.
+// CLI names mirror the worker registry (WORKERS) so the page stays consistent.
+const COUNCIL_ROUNDS = [
+  { label: 'contract break', synth: 'rework', line: '2 of 3 → REWORK',
+    tail: 'divergence flagged · contract break + missing rollback carried forward',
+    seats: [
+      { cli: 'claude --print', vote: 'REWORK', note: 'contract break in the delta' },
+      { cli: 'codex run',      vote: 'PASS',   note: 'tests green, diff scoped' },
+      { cli: 'local model',    vote: 'REWORK', note: 'missing rollback path' } ] },
+  { label: 'all clear', synth: 'pass', line: '3 of 3 → PASS',
+    tail: 'unanimous · types intact, coverage +3%, rollback present',
+    seats: [
+      { cli: 'claude --print', vote: 'PASS', note: 'types check, contract intact' },
+      { cli: 'codex run',      vote: 'PASS', note: 'coverage +3%, diff scoped' },
+      { cli: 'local model',    vote: 'PASS', note: 'rollback path present' } ] },
+  { label: 'split + abstain', synth: 'rework', line: 'split · 1 REWORK carried',
+    tail: 'no majority · one REWORK dominates · one seat abstained on low context',
+    seats: [
+      { cli: 'claude --print', vote: 'REWORK',  note: 'perf regression in hot path' },
+      { cli: 'codex run',      vote: 'ABSTAIN', note: 'insufficient context to judge' },
+      { cli: 'local model',    vote: 'PASS',    note: 'meets the stated spec' } ] },
 ];
 
 // Gate-console explainer cards. Each card drives the console animation (below).
@@ -425,7 +444,7 @@ const GATE_CARDS = [
 
       <div class="council-stage" data-council>
         <div class="council-seats">
-          {COUNCIL.map((m, i) => (
+          {COUNCIL_ROUNDS[0].seats.map((m, i) => (
             <div class:list={['council-seat', `is-${m.vote.toLowerCase()}`]} data-seat data-i={i}>
               <span class="cs-cli">{m.cli}</span>
               <span class="cs-vote">{m.vote}</span>
@@ -433,11 +452,20 @@ const GATE_CARDS = [
             </div>
           ))}
         </div>
-        <div class="council-synth" data-council-synth>
+        <div class="council-synth" data-council-synth data-synth="rework">
           <span class="cy-k">synthesized</span>
-          <span class="cy-v">2 of 3 → <b>REWORK</b></span>
-          <span class="cy-t">divergence flagged · contract break + missing rollback carried forward</span>
+          <span class="cy-v" data-cy-line>2 of 3 → <b>REWORK</b></span>
+          <span class="cy-t" data-cy-tail>divergence flagged · contract break + missing rollback carried forward</span>
         </div>
+      </div>
+
+      <!-- Round selector — the board auto-cycles three real, distinct rounds;
+           click one (or any seat) to pin it, click again to resume. -->
+      <div class="council-rounds" data-council-rounds role="tablist" aria-label="Council rounds">
+        {COUNCIL_ROUNDS.map((r, i) => (
+          <button type="button" role="tab" class:list={['council-round', { 'is-active': i === 0 }]} data-round data-i={i} aria-selected={i === 0 ? 'true' : 'false'}>{i + 1} · {r.label}</button>
+        ))}
+        <span class="council-status" data-council-status>auto-cycling · click a round to pin</span>
       </div>
     </div>
   </section>
@@ -455,38 +483,40 @@ const GATE_CARDS = [
         </p>
       </div>
 
-      <div class="studio-mock" aria-hidden="true">
+      <!-- The studio ships inside crew (dist/studio). This is a hands-on mirror of
+           the real SPA: LaunchForm → the free-text input, LiveOutput → the feed,
+           SteeringGate → the gate buttons, Terminal → the governed term line. It
+           auto-runs on scroll-in, then hands you the wheel at the gate. -->
+      <div class="studio-mock" data-studio aria-label="wicked-crew studio — launch, watch, and steer a run">
         <div class="mock-bar">
           <span class="mock-dots"><i></i><i></i><i></i></span>
           <span class="mock-url">the studio · served locally</span>
         </div>
         <div class="studio-body">
-          <div class="studio-launch">
-            <span class="sl-k">start a run</span>
-            <span class="sl-input">add rate-limiting to the public API<span class="sl-caret"></span></span>
-            <span class="sl-go">Launch ↵</span>
-          </div>
+          <form class="studio-launch" data-studio-launch>
+            <label class="sl-k" for="studio-intent">start a run</label>
+            <input id="studio-intent" class="sl-input" data-studio-input type="text"
+                   value="add rate-limiting to the public API" autocomplete="off" spellcheck="false"
+                   aria-label="Problem statement — launch a run from a free-text problem" />
+            <button type="submit" class="sl-go" data-studio-go>Launch ↵</button>
+          </form>
           <div class="studio-cols">
-            <div class="studio-feed">
+            <div class="studio-feed" data-studio-feed role="log" aria-live="polite" aria-label="live event feed">
               <span class="sf-k">live event feed</span>
-              <span class="sf-row">phase <b>build</b> · worker <b>codex run</b></span>
-              <span class="sf-row">unit 3/5 · diff captured</span>
-              <span class="sf-row sf-row--gate">gate build→ship · <b>held</b></span>
             </div>
-            <div class="studio-gate">
-              <span class="sg-k">steering gate</span>
-              <span class="sg-stamp">DENY</span>
-              <span class="sg-t">schema-drift · re-verified against worktree</span>
+            <div class="studio-gate" data-studio-gate hidden>
+              <span class="sg-k">steering gate · awaiting human decision</span>
+              <span class="sg-stamp" data-sg-stamp>DENY</span>
+              <span class="sg-t" data-sg-t>schema-drift · re-verified against worktree</span>
               <div class="sg-actions">
-                <span class="sg-btn sg-btn--ok">Approve</span>
-                <span class="sg-btn">Steer + amend</span>
-                <span class="sg-btn">Reject</span>
+                <button type="button" class="sg-btn sg-btn--ok" data-sg-action="approve">Approve</button>
+                <button type="button" class="sg-btn" data-sg-action="steer">Approve with steer</button>
+                <button type="button" class="sg-btn" data-sg-action="reject">Reject</button>
               </div>
             </div>
           </div>
           <div class="studio-term">
-            <span class="st-line"><span class="st-p">crew ›</span> attach --unit 3 <span class="st-c"># governed terminal</span></span>
-            <span class="st-line st-out">streaming transcript · read-scoped · no host shell</span>
+            <span class="st-line" data-studio-term><span class="st-p">crew ›</span> attach --run r-4f2a <span class="st-c"># governed terminal</span></span>
           </div>
         </div>
       </div>
@@ -939,6 +969,342 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       window.addEventListener('resize', place);
       render();
       start();
+    })();
+  </script>
+
+  <!-- ── The council: AUTO-CYCLE heterogeneous rounds, click one to pin ──── -->
+  <script is:inline>
+    (function () {
+      var stage = document.querySelector('[data-council]');
+      if (!stage) return;
+      var section = stage.closest('.council') || stage;
+      var seats = Array.prototype.slice.call(stage.querySelectorAll('[data-seat]'));
+      var synthEl = stage.querySelector('[data-council-synth]');
+      var lineEl = stage.querySelector('[data-cy-line]');
+      var tailEl = stage.querySelector('[data-cy-tail]');
+      var rounds = Array.prototype.slice.call(section.querySelectorAll('[data-round]'));
+      var statusEl = section.querySelector('[data-council-status]');
+      if (!seats.length || !rounds.length) return;
+
+      // Three real, distinct rounds — mirrors COUNCIL_ROUNDS in the frontmatter.
+      // CLI names match the worker registry so the board stays consistent.
+      var ROUNDS = [
+        { synth: 'rework', line: '2 of 3 → REWORK',
+          tail: 'divergence flagged · contract break + missing rollback carried forward',
+          seats: [
+            { vote: 'REWORK', note: 'contract break in the delta' },
+            { vote: 'PASS',   note: 'tests green, diff scoped' },
+            { vote: 'REWORK', note: 'missing rollback path' } ] },
+        { synth: 'pass', line: '3 of 3 → PASS',
+          tail: 'unanimous · types intact, coverage +3%, rollback present',
+          seats: [
+            { vote: 'PASS', note: 'types check, contract intact' },
+            { vote: 'PASS', note: 'coverage +3%, diff scoped' },
+            { vote: 'PASS', note: 'rollback path present' } ] },
+        { synth: 'rework', line: 'split · 1 REWORK carried',
+          tail: 'no majority · one REWORK dominates · one seat abstained on low context',
+          seats: [
+            { vote: 'REWORK',  note: 'perf regression in hot path' },
+            { vote: 'ABSTAIN', note: 'insufficient context to judge' },
+            { vote: 'PASS',    note: 'meets the stated spec' } ] },
+      ];
+
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var STEP = 3200;
+      var cur = 0, timer = null, pinned = false, started = false;
+
+      function boldVerdict(txt) {
+        return txt.replace(/REWORK/g, '<b>REWORK</b>').replace(/PASS/g, '<b>PASS</b>');
+      }
+
+      function render(i, animate) {
+        var r = ROUNDS[i] || ROUNDS[0];
+        cur = i;
+        seats.forEach(function (seatEl, j) {
+          var s = r.seats[j];
+          if (!s) return;
+          seatEl.className = 'council-seat is-' + s.vote.toLowerCase(); // border/bg swaps via CSS transition
+          var voteEl = seatEl.querySelector('.cs-vote');
+          var noteEl = seatEl.querySelector('.cs-note');
+          if (animate && !reduced) {
+            if (voteEl) voteEl.style.opacity = '0';
+            if (noteEl) noteEl.style.opacity = '0';
+            setTimeout(function () {
+              if (voteEl) { voteEl.textContent = s.vote; voteEl.style.opacity = '1'; }
+              if (noteEl) { noteEl.textContent = s.note; noteEl.style.opacity = '1'; }
+            }, 120);
+          } else {
+            if (voteEl) { voteEl.textContent = s.vote; voteEl.style.opacity = '1'; }
+            if (noteEl) { noteEl.textContent = s.note; noteEl.style.opacity = '1'; }
+          }
+        });
+        if (synthEl) synthEl.setAttribute('data-synth', r.synth);
+        if (lineEl) lineEl.innerHTML = boldVerdict(r.line);
+        if (tailEl) tailEl.textContent = r.tail;
+        rounds.forEach(function (b, j) {
+          b.classList.toggle('is-active', j === i);
+          b.setAttribute('aria-selected', j === i ? 'true' : 'false');
+        });
+      }
+
+      function setStatus() {
+        if (!statusEl) return;
+        if (reduced && !pinned) { statusEl.textContent = 'reduced motion · click a round to view'; return; }
+        statusEl.textContent = pinned
+          ? 'pinned round ' + (cur + 1) + ' · click it again to resume'
+          : 'auto-cycling · click a round to pin';
+      }
+      function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+      function play() {
+        pinned = false; stopTimer(); setStatus();
+        if (reduced) return; // honor reduced-motion: no auto-advance
+        timer = setInterval(function () { render((cur + 1) % ROUNDS.length, true); }, STEP);
+      }
+      function pin(i) { pinned = true; stopTimer(); render(i, true); setStatus(); }
+      function startOnce() {
+        if (started) return; started = true;
+        render(0, false); setStatus();
+        if (!pinned && !reduced) play();
+      }
+
+      // Click a round to pin it; click the pinned round again to resume cycling.
+      rounds.forEach(function (b, i) {
+        b.addEventListener('click', function () {
+          if (reduced) { render(i, false); setStatus(); return; }
+          if (pinned && cur === i) play(); else pin(i);
+        });
+      });
+      // Click any seat to freeze the board on the current round (inspect it).
+      seats.forEach(function (seatEl) {
+        seatEl.addEventListener('click', function () { if (!reduced) pin(cur); });
+      });
+
+      // Start the auto-cycle when the section scrolls into view.
+      render(0, false); setStatus();
+      if ('IntersectionObserver' in window) {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { startOnce(); io.disconnect(); }
+          });
+        }, { threshold: 0.35 });
+        io.observe(section);
+      } else {
+        startOnce();
+      }
+    })();
+  </script>
+
+  <!-- ── The studio: hands-on console — launch, watch the feed, resolve the gate ── -->
+  <script is:inline>
+    (function () {
+      var root = document.querySelector('[data-studio]');
+      if (!root) return;
+      var feed = root.querySelector('[data-studio-feed]');
+      var gate = root.querySelector('[data-studio-gate]');
+      var stamp = root.querySelector('[data-sg-stamp]');
+      var gateT = root.querySelector('[data-sg-t]');
+      var termEl = root.querySelector('[data-studio-term]');
+      var form = root.querySelector('[data-studio-launch]');
+      var input = root.querySelector('[data-studio-input]');
+      if (!feed || !gate || !stamp) return;
+
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var STEP = 700;
+      var timer = null;
+      var resolved = false;
+      var runSeq = 0;      // guards a stale stream after a relaunch
+      var workerFlip = 0;  // cycles the dispatched worker on relaunch
+
+      function escapeHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      function clearFeed() {
+        var rows = feed.querySelectorAll('.sf-row');
+        for (var i = 0; i < rows.length; i++) rows[i].parentNode.removeChild(rows[i]);
+      }
+      function addRow(html, cls) {
+        var row = document.createElement('span');
+        row.className = 'sf-row' + (cls ? ' ' + cls : '');
+        row.innerHTML = html;
+        feed.appendChild(row);
+        feed.scrollTop = feed.scrollHeight;
+        return row;
+      }
+      function setTerm(cmd, comment) {
+        if (!termEl) return;
+        termEl.innerHTML = '<span class="st-p">crew ›</span> ' + cmd +
+          (comment ? ' <span class="st-c"># ' + comment + '</span>' : '');
+      }
+      function setButtons(enabled) {
+        var btns = gate.querySelectorAll('[data-sg-action]');
+        for (var i = 0; i < btns.length; i++) btns[i].disabled = !enabled;
+      }
+      function hideCue() {
+        var cue = gate.querySelector('[data-sg-cue]');
+        if (cue) cue.parentNode.removeChild(cue);
+      }
+      function dropAmend() {
+        var amend = gate.querySelector('.sg-amend');
+        if (amend) amend.parentNode.removeChild(amend);
+      }
+      function hideGate() {
+        hideCue(); dropAmend();
+        gate.hidden = true;
+        gate.removeAttribute('data-verdict');
+        stamp.textContent = 'DENY';
+        if (gateT) gateT.textContent = 'schema-drift · re-verified against worktree';
+        setButtons(true);
+        resolved = false;
+      }
+      function showGate() {
+        gate.hidden = false;
+        gate.setAttribute('data-verdict', 'deny');
+        stamp.textContent = 'DENY';
+        if (gateT) gateT.textContent = 'schema-drift · re-verified against worktree';
+        setButtons(true);
+        resolved = false;
+        hideCue();
+        var cue = document.createElement('span');
+        cue.className = 'sg-cue';
+        cue.setAttribute('data-sg-cue', '');
+        cue.textContent = '☝ Resolve the gate';
+        gate.appendChild(cue);
+      }
+
+      // Feed steps grounded in the real lifecycle (build → ship) + policy floor.
+      function steps(worker) {
+        return [
+          { h: 'run <b>r-4f2a</b> launched · workflow <b>feature.json</b>' },
+          { h: 'phase <b>build</b> · worker <b>' + worker + '</b> · .worktrees/run-4f2a' },
+          { h: 'unit <b>3/5</b> · diff captured · build.log green' },
+          { h: 'gate <b>build → ship</b> · re-verifying against worktree' },
+          { h: 'policy <b>schema-drift</b> · <b>FAIL</b> — migration ≠ checked-in schema', c: 'sf-row--gate' },
+          { h: 'gate held · <b>steering decision required</b>', c: 'sf-row--gate' }
+        ];
+      }
+      function stream(worker) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        runSeq++;
+        var seq = runSeq;
+        clearFeed();
+        hideGate();
+        setTerm('attach --run r-4f2a', 'governed terminal');
+        var list = steps(worker);
+        if (reduced) {
+          for (var i = 0; i < list.length; i++) addRow(list[i].h, list[i].c);
+          showGate();
+          return;
+        }
+        var idx = 0;
+        (function tick() {
+          if (seq !== runSeq) return;
+          if (idx >= list.length) { showGate(); return; }
+          addRow(list[idx].h, list[idx].c);
+          idx++;
+          timer = setTimeout(tick, STEP);
+        })();
+      }
+
+      // --- gate resolutions: the human takes the wheel (no model approves) ---
+      function resolveApprove() {
+        if (resolved) return;
+        resolved = true; setButtons(false); hideCue(); dropAmend();
+        addRow('operator approved · deny overridden (logged)', 'sf-row--ok');
+        addRow('transition <b>allowed</b> → ship', 'sf-row--ok');
+        gate.setAttribute('data-verdict', 'allow');
+        stamp.textContent = 'ALLOW';
+        if (gateT) gateT.textContent = 'human override · recorded in the steering timeline';
+        setTerm('ship --run r-4f2a', 'release.tag written');
+      }
+      function resolveReject() {
+        if (resolved) return;
+        resolved = true; setButtons(false); hideCue(); dropAmend();
+        addRow('run <b>rejected</b> · returned to build', 'sf-row--gate');
+        addRow('unit 3 reopened · awaiting a new diff');
+        gate.setAttribute('data-verdict', 'deny');
+        stamp.textContent = 'DENY';
+        if (gateT) gateT.textContent = 'gate stands · nothing shipped';
+        setTerm('hold --run r-4f2a', 'held at build');
+      }
+      function resolveSteer(text) {
+        if (resolved) return;
+        resolved = true; setButtons(false); hideCue(); dropAmend();
+        addRow('amendment applied · <b>' + escapeHtml(text) + '</b>');
+        addRow('re-running build · worker codex run');
+        addRow('policy <b>schema-drift</b> · <b>PASS</b>', 'sf-row--ok');
+        addRow('gate <b>build → ship</b> · <b>PASS</b>', 'sf-row--ok');
+        gate.setAttribute('data-verdict', 'allow');
+        stamp.textContent = 'ALLOW';
+        if (gateT) gateT.textContent = 'steered · re-verified against worktree · PASS';
+        setTerm('resume --run r-4f2a', 'steered · re-running build');
+      }
+      function openAmend() {
+        if (resolved) return;
+        var existing = gate.querySelector('.sg-amend input');
+        if (existing) { existing.focus(); existing.select(); return; }
+        hideCue();
+        var wrap = document.createElement('div');
+        wrap.className = 'sg-amend';
+        var amInput = document.createElement('input');
+        amInput.type = 'text';
+        amInput.value = 'add rollback migration + regen schema';
+        amInput.setAttribute('aria-label', 'Amendment to steer the next unit');
+        var apply = document.createElement('button');
+        apply.type = 'button';
+        apply.className = 'sg-btn sg-btn--ok';
+        apply.textContent = 'Apply ↵';
+        wrap.appendChild(amInput);
+        wrap.appendChild(apply);
+        gate.appendChild(wrap);
+        amInput.focus();
+        amInput.select();
+        function submit() {
+          var text = amInput.value.trim();
+          if (text) resolveSteer(text);
+        }
+        apply.addEventListener('click', submit);
+        amInput.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        });
+      }
+
+      gate.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-sg-action]') : null;
+        if (!btn || btn.disabled) return;
+        var action = btn.getAttribute('data-sg-action');
+        if (action === 'approve') resolveApprove();
+        else if (action === 'reject') resolveReject();
+        else if (action === 'steer') openAmend();
+      });
+
+      // Relaunch from the free-text problem — reset + re-stream a fresh run that
+      // ends again at the gate, so a visitor can drive their own problem in.
+      if (form) {
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          workerFlip = (workerFlip + 1) % 2;
+          stream(workerFlip === 0 ? 'codex run' : 'claude --print');
+          if (input) input.blur();
+        });
+      }
+
+      // Auto-play the run when the studio scrolls into view (the signature the
+      // gate console + workflows sections share). Reduced-motion renders it static.
+      var started = false;
+      function startOnce() {
+        if (started) return; started = true;
+        stream('codex run');
+      }
+      if ('IntersectionObserver' in window) {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (en.isIntersecting) { startOnce(); io.disconnect(); }
+          });
+        }, { threshold: 0.3 });
+        io.observe(root);
+      } else {
+        startOnce();
+      }
     })();
   </script>
 </Base>
