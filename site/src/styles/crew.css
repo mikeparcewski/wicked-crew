@@ -17,6 +17,14 @@
 
 body { padding-top: var(--topbar-h); }
 
+/* Base reset: the `hidden` attribute must win over any component `display`.
+   Several panels (.studio-gate, .gc-plea) use `display: flex` AND ship with the
+   `hidden` attribute, toggled from JS via `.hidden = true/false`. Without this,
+   `display: flex` overrides the UA default `[hidden]{display:none}` and the DENY
+   steering-gate panel renders VISIBLE on load. `!important` guarantees the
+   attribute beats the class rule regardless of specificity/order. */
+[hidden] { display: none !important; }
+
 /* Width container. crew's sections all use .wrap; the shared token .wrap rule
    is not reliably applied here, so define it explicitly (canonical values) —
    without it, hero + install content runs full-viewport-width and clips. */
