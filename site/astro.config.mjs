@@ -11,8 +11,10 @@ const alias = existsSync(localUI) ? { 'wicked-web': localUI } : {};
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://wc.wickedagile.com',
-  base: '/',
+  // wc.wickedagile.com isn't live yet — serve from GitHub Pages for now.
+  // Restore site:'https://wc.wickedagile.com' + base:'/' when the subdomain is up.
+  site: 'https://mikeparcewski.github.io',
+  base: '/wicked-crew',
   output: 'static',
   vite: { resolve: { alias } },
 });
