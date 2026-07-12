@@ -1,3 +1,11 @@
+```
+          _      _            _
+__      _(_) ___| | _____  __| |       ___ _ __ _____      __
+\ \ /\ / / |/ __| |/ / _ \/ _` |_____ / __| '__/ _ \ \ /\ / /
+ \ V  V /| | (__|   <  __/ (_| |_____| (__| | |  __/\ V  V /
+  \_/\_/ |_|\___|_|\_\___|\__,_|      \___|_|  \___| \_/\_/
+```
+
 # wicked-crew
 
 **The control room for governed agent delivery — drive, gate, and audit the work; the human stays in
@@ -94,7 +102,7 @@ can attach **sidecars** — audit, extra processing, skill provisioning/refresh 
 touching it.
 
 > **Built:** the `wicked-core` engine has a Rust↔`wicked-bus` bridge (`src/bus.rs`) — it emits/polls the
-> real wicked-bus SQLite log and turns `wicked.run.requested` into a launch (cross-language round-trip
+> real wicked-bus SQLite log and turns `wicked.crew.run.requested` into a launch (cross-language round-trip
 > verified, at-least-once with retry). The reducer + skill-provisioner **sidecars** (poll-loops with
 > idempotent, correlation-aware handlers) run on it (`wicked-bus/examples/crew-sidecars`, smoke-verified).
 > Wiring the bridge into the studio's browser feed is a follow-up.
