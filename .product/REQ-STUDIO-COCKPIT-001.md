@@ -10,7 +10,7 @@ phase: define
 ## Overview
 
 wicked-studio is the operator console for wicked-crew — the Govern/control-room arc that
-drives your coding-agent CLIs (the harness) as governed workers. Today it is basic: a runs
+drives your coding-agent CLIs (the harnesses) as governed workers. Today it is basic: a runs
 list, a run detail with work units, a live-output pane, an event log, and a governed
 terminal. This requirement elevates it into a **glass cockpit** for builders and doers: not
 just *that* the run is executing, but the
