@@ -2,12 +2,14 @@
 /**
  * index.astro — the wicked-crew landing page (wc.wickedagile.com).
  *
- * POSITIONING (Wave-4, code-grounded): crew is "the harness for your agent
- * harnesses." The coding agents you already run are harnesses around a model;
- * wicked-crew is the harness around THEM — it drives your own installed CLIs as
- * governed workers through durable, multi-agent workflows where "done" is
- * re-derived from evidence, never self-graded. Intent in, verified work out.
- * North star: the IDE of the future. Philosophy: intent-driven development.
+ * POSITIONING (canonical loop, code-grounded): crew is the GOVERN arc — "the
+ * control room for governed agent delivery." You cannot stabilize the harness;
+ * crew is the durable system around it. You drive, the gates decide, every
+ * decision is audited, and the human stays in command. It drives your own
+ * installed CLIs as governed workers through durable, multi-agent workflows
+ * where "done" is re-derived from evidence, never self-graded. Intent in,
+ * verified work out — on the wicked-core engine. Philosophy: intent-driven
+ * development.
  *
  * The daemon (`wicked-crew serve`) is the SUBSTRATE, never the pitch.
  *
@@ -26,9 +28,9 @@ import Topbar from 'wicked-web/components/Topbar.astro';
 import Footer from 'wicked-web/components/Footer.astro';
 import '../styles/crew.css';
 
-const title = 'wicked-crew — the harness for your agent harnesses';
+const title = 'wicked-crew — the control room for governed agent delivery';
 const description =
-  'wicked-crew is an agentic execution platform — the harness around your coding agents. It drives your own installed CLIs (Claude Code, Antigravity, Codex, local models, any binary) as governed workers in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. A dual gate deny-dominates: an approved deterministic check re-verified against the worktree, plus an LLM judge that can fail a gate but can never approve one. Workflows are data you drop in. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the Govern arc of the wicked loop: the control room for governed agent delivery. Drive, gate, and audit the work; the human stays in command. It drives your own installed CLIs (Claude Code, Antigravity, Codex, local models, any binary) as governed workers in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. A dual gate deny-dominates: an approved deterministic check re-verified against the worktree, plus an LLM judge that can fail a gate but can never approve one. Workflows are data you drop in. Crash-resumable by construction. The engine underneath is wicked-core. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -117,13 +119,14 @@ const GATE_CARDS = [
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <div class="kicker">Agentic execution platform · the IDE of the future</div>
-        <h1>The harness<br>for <span class="y">your agent harnesses.</span></h1>
+        <div class="kicker">Govern · the wicked loop</div>
+        <h1>The control room<br>for <span class="y">governed agent delivery.</span></h1>
         <p class="lede">
-          The coding agents you already run are harnesses around a model. <b>wicked-crew is the harness
-          around them</b> — it drives your own CLIs as governed workers through durable, multi-agent
-          workflows where <b>“done” is re-derived from evidence</b>, never self-graded.
-          Intent in, verified work out. Runs on the agents and plans you already pay for.
+          You cannot stabilize the harness — the agents and their models keep changing. <b>wicked-crew is
+          the durable control room around them</b>: you <b>drive</b>, the <b>gates</b> decide, every
+          decision is <b>audited</b>, and the <b>human stays in command</b>. It runs your own CLIs as
+          governed workers through durable, multi-agent workflows where <b>“done” is re-derived from
+          evidence</b>, never self-graded. Intent in, verified work out — on the wicked-core engine.
         </p>
         <div class="hero-tags" role="list">
           <span role="listitem">bring your own CLI</span>
@@ -142,7 +145,7 @@ const GATE_CARDS = [
       <aside class="plate" aria-label="Intent in, governed workers, verified work out">
         <div class="plate-bar">
           <span class="plate-badge">wicked-crew</span>
-          <span class="plate-loc">the harness</span>
+          <span class="plate-loc">the control room</span>
         </div>
         <div class="plate-flow">
           <div class="pf-in"><span class="pf-k">intent</span><span class="pf-v">“add rate-limiting to the API”</span></div>
