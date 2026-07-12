@@ -28,7 +28,7 @@ import '../styles/crew.css';
 
 const title = 'wicked-crew — the harness for your agent harnesses';
 const description =
-  'wicked-crew is an agentic execution platform — the harness around your coding agents. It drives your own installed CLIs (Claude Code, Codex, local models, any binary) as governed workers in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. A dual gate deny-dominates: an approved deterministic check re-verified against the worktree, plus an LLM judge that can fail a gate but can never approve one. Workflows are data you drop in. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is an agentic execution platform — the harness around your coding agents. It drives your own installed CLIs (Claude Code, Antigravity, Codex, local models, any binary) as governed workers in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. A dual gate deny-dominates: an approved deterministic check re-verified against the worktree, plus an LLM judge that can fail a gate but can never approve one. Workflows are data you drop in. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -41,11 +41,15 @@ const POLICIES = [
 ];
 
 // The bring-your-own roster. crew runs whatever CLI you've installed + authed.
-// The named set mirrors the engine's real worker registry (claude, codex,
-// copilot, opencode, pi) + the two catch-alls that make the roster open-ended.
+// Mirrors the engine's built-in worker registry (claude, agy, codex, copilot,
+// opencode, pi — wicked-council/src/registry.rs), plus the two catch-alls that
+// keep the roster open-ended. Each is dispatched as a headless CLI subprocess:
+// the prompt is substituted into argv ({PROMPT}) and the result is read from
+// stdout (wicked-council/src/dispatch.rs).
 const WORKERS = [
-  { name: 'Claude Code',    cli: 'claude --print', tag: 'your auth' },
-  { name: 'Codex',          cli: 'codex run',      tag: 'your plan' },
+  { name: 'Claude Code',    cli: 'claude -p',      tag: 'your auth' },
+  { name: 'Antigravity',    cli: 'agy run',        tag: 'your login' },
+  { name: 'Codex',          cli: 'codex exec',     tag: 'your plan' },
   { name: 'GitHub Copilot', cli: 'copilot -p',     tag: 'your seat' },
   { name: 'opencode',       cli: 'opencode run',   tag: 'your keys' },
   { name: 'Pi',             cli: 'pi -p',          tag: 'your host' },
@@ -189,7 +193,7 @@ const GATE_CARDS = [
         <h2 id="byo-h">crew runs the CLIs you already have.</h2>
         <p class="sec-sub">
           Not a new model, not a subscription. crew dispatches your <b>installed</b> coding CLIs — Claude
-          Code, Codex, Copilot, opencode, Pi, a local model, or any binary — as <b>no-shell workers in isolated git worktrees</b>,
+          Code, Antigravity, Codex, Copilot, opencode, Pi, a local model, or any binary — as <b>no-shell workers in isolated git worktrees</b>,
           under <b>your own auth and plan</b>. The roster is data: a manifest plus a
           <code>workers.toml</code> you own.
         </p>
