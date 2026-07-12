@@ -16,8 +16,8 @@ auth and *your* plan. There's no billing, no accounts, no model reselling.
 Under the hood it's a daemon (`wicked-crew serve`) plus CLI and a same-origin browser console — but
 the daemon is the **mechanism, not the pitch.** What you actually get: an evaluator that is
 structurally not the creator (it can't self-grade), a deny-dominates dual gate, "done" **re-derived
-from evidence** instead of asserted, and **workflows-as-data** you can add without touching code. The
-harness owns the phase lifecycle, the gates, the evidence, and the crash-safe state; the agent does
+from evidence** instead of asserted, and **workflows-as-data** you can add without touching code. crew
+owns the phase lifecycle, the gates, the evidence, and the crash-safe state; the agent does
 the coding inside a phase.
 
 > **Local-first today.** Loopback only, in-process engine, local workers and local bus — no cloud, no
