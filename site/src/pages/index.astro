@@ -66,10 +66,10 @@ const WORKFLOWS = [
 
 // Durable lifecycle: the governed track + the stateless worker each phase dispatches.
 const LIFECYCLE = [
-  { id: 'clarify',       worker: 'claude --print', evidence: 'clarify.md' },
-  { id: 'design',        worker: 'claude --print', evidence: 'design.md' },
+  { id: 'clarify',       worker: 'claude -p', evidence: 'clarify.md' },
+  { id: 'design',        worker: 'claude -p', evidence: 'design.md' },
   { id: 'test-strategy', worker: 'wicked-testing', evidence: 'strategy.md' },
-  { id: 'build',         worker: 'codex run',      evidence: 'diff · build.log' },
+  { id: 'build',         worker: 'codex exec',      evidence: 'diff · build.log' },
   { id: 'test',          worker: 'wicked-testing', evidence: 'verdict.json' },
   { id: 'ship',          worker: 'bash',           evidence: 'release.tag' },
 ];
@@ -83,20 +83,20 @@ const COUNCIL_ROUNDS = [
   { label: 'contract break', synth: 'rework', line: '2 of 3 → REWORK',
     tail: 'divergence flagged · contract break + missing rollback carried forward',
     seats: [
-      { cli: 'claude --print', vote: 'REWORK', note: 'contract break in the delta' },
-      { cli: 'codex run',      vote: 'PASS',   note: 'tests green, diff scoped' },
+      { cli: 'claude -p', vote: 'REWORK', note: 'contract break in the delta' },
+      { cli: 'codex exec',      vote: 'PASS',   note: 'tests green, diff scoped' },
       { cli: 'local model',    vote: 'REWORK', note: 'missing rollback path' } ] },
   { label: 'all clear', synth: 'pass', line: '3 of 3 → PASS',
     tail: 'unanimous · types intact, coverage +3%, rollback present',
     seats: [
-      { cli: 'claude --print', vote: 'PASS', note: 'types check, contract intact' },
-      { cli: 'codex run',      vote: 'PASS', note: 'coverage +3%, diff scoped' },
+      { cli: 'claude -p', vote: 'PASS', note: 'types check, contract intact' },
+      { cli: 'codex exec',      vote: 'PASS', note: 'coverage +3%, diff scoped' },
       { cli: 'local model',    vote: 'PASS', note: 'rollback path present' } ] },
   { label: 'split + abstain', synth: 'rework', line: 'split · 1 REWORK carried',
     tail: 'no majority · one REWORK dominates · one seat abstained on low context',
     seats: [
-      { cli: 'claude --print', vote: 'REWORK',  note: 'perf regression in hot path' },
-      { cli: 'codex run',      vote: 'ABSTAIN', note: 'insufficient context to judge' },
+      { cli: 'claude -p', vote: 'REWORK',  note: 'perf regression in hot path' },
+      { cli: 'codex exec',      vote: 'ABSTAIN', note: 'insufficient context to judge' },
       { cli: 'local model',    vote: 'PASS',    note: 'meets the stated spec' } ] },
 ];
 
@@ -147,8 +147,8 @@ const GATE_CARDS = [
         <div class="plate-flow">
           <div class="pf-in"><span class="pf-k">intent</span><span class="pf-v">“add rate-limiting to the API”</span></div>
           <div class="pf-workers" aria-hidden="true">
-            <span class="pf-worker"><i class="pf-dot"></i>claude --print<span class="pf-wt">worktree</span></span>
-            <span class="pf-worker"><i class="pf-dot"></i>codex run<span class="pf-wt">worktree</span></span>
+            <span class="pf-worker"><i class="pf-dot"></i>claude -p<span class="pf-wt">worktree</span></span>
+            <span class="pf-worker"><i class="pf-dot"></i>codex exec<span class="pf-wt">worktree</span></span>
             <span class="pf-worker"><i class="pf-dot"></i>local model<span class="pf-wt">worktree</span></span>
           </div>
           <div class="pf-your">your CLIs · your auth · no shell · isolated worktrees</div>
@@ -216,7 +216,7 @@ const GATE_CARDS = [
           <span class="byo-stage-badge" data-byo-badge>Claude Code</span>
         </div>
         <div class="byo-stage-row">
-          <code data-byo-cmd>claude --print</code>
+          <code data-byo-cmd>claude -p</code>
           <span class="byo-stage-arr">→ runs in →</span>
           <span class="byo-stage-wt">.worktrees/run-4f2a · no shell · read-scoped</span>
         </div>
@@ -1234,7 +1234,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         if (resolved) return;
         resolved = true; setButtons(false); hideCue(); dropAmend();
         addRow('amendment applied · <b>' + escapeHtml(text) + '</b>');
-        addRow('re-running build · worker codex run');
+        addRow('re-running build · worker codex exec');
         addRow('policy <b>schema-drift</b> · <b>PASS</b>', 'sf-row--ok');
         addRow('gate <b>build → ship</b> · <b>PASS</b>', 'sf-row--ok');
         gate.setAttribute('data-verdict', 'allow');
@@ -1287,7 +1287,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         form.addEventListener('submit', function (e) {
           e.preventDefault();
           workerFlip = (workerFlip + 1) % 2;
-          stream(workerFlip === 0 ? 'codex run' : 'claude --print');
+          stream(workerFlip === 0 ? 'codex exec' : 'claude -p');
           if (input) input.blur();
         });
       }
@@ -1297,7 +1297,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var started = false;
       function startOnce() {
         if (started) return; started = true;
-        stream('codex run');
+        stream('codex exec');
       }
       if ('IntersectionObserver' in window) {
         var io = new IntersectionObserver(function (entries) {
