@@ -115,7 +115,15 @@ Worker CLIs are registered in `~/.wicked-crew/workers.json`. Adding a new worker
 
 ## 6. wicked-studio Relationship
 
-wicked-studio is the React control plane UI for wicked-crew. It is NOT embedded in wicked-crew — it is a separate application that connects to the daemon's REST + WebSocket endpoints.
+wicked-studio is the React control plane UI for wicked-crew. ~~It is NOT embedded in wicked-crew — it is a separate application that connects to the daemon's REST + WebSocket endpoints.~~
+
+> **⚠ Reconciled — see DES-STUDIO-SERVING-001 (bundled-in-crew).** The struck
+> "NOT embedded… separate application" framing is stale as a *distribution* claim.
+> Studio remains a separate SPA **package** in the monorepo (its own source,
+> consuming REST/WS), but its built `dist/` is **bundled into the `wicked-crew`
+> tarball** (`packages/crew/dist/studio/`) and **served by the daemon same-origin**
+> — not published or run as an independent npm binary. The daemon still runs fully
+> headless without a browser attached (see below).
 
 | wicked-crew provides | wicked-studio consumes |
 |---|---|

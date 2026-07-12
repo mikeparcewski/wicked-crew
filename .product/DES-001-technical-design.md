@@ -1029,7 +1029,15 @@ Fields not present use the defaults shown above.
 
 ## 15. Build + Publish
 
-Both packages published on npm via OIDC trusted publishing:
+> **⚠ Partially SUPERSEDED — see DES-STUDIO-SERVING-001 (bundled-in-crew).** Only
+> **`wicked-crew`** is published to npm. The studio is **not** independently
+> published or runnable; the crew build bundles `packages/studio/dist/` into
+> `packages/crew/dist/studio/` and the daemon serves it same-origin. Disregard the
+> `packages/studio` `npm publish` step and the `npm install -g wicked-studio`
+> install path below. (An assets-only `wicked-studio` package MAY be published as a
+> convenience, but it is never runnable standalone.)
+
+~~Both packages published on npm via OIDC trusted publishing:~~ **SUPERSEDED:** `wicked-crew` is the only published/runnable package; the studio ships inside its tarball.
 
 ```yaml
 # .github/workflows/release.yml
@@ -1041,13 +1049,15 @@ steps:
   - run: npm ci && npm run build --workspaces
   - run: npm publish --provenance --access public
     working-directory: packages/crew
-  - run: npm publish --provenance --access public
-    working-directory: packages/studio
+  # SUPERSEDED (DES-STUDIO-SERVING-001): the studio is bundled into the crew
+  # tarball, not published standalone. This publish step does not run.
+  # - run: npm publish --provenance --access public
+  #   working-directory: packages/studio
 ```
 
 Install paths:
-- `npm install -g wicked-crew` → `wicked-crew` binary available
-- `npm install -g wicked-studio` → `wicked-studio` binary (serves static build)
+- `npm install -g wicked-crew` → `wicked-crew` binary available (studio bundled in, served by the daemon)
+- ~~`npm install -g wicked-studio` → `wicked-studio` binary (serves static build)~~ — **SUPERSEDED:** no standalone studio binary; the crew daemon serves the bundled SPA.
 - `npx wicked-crew start` → no global install required
 
 ---
@@ -1060,4 +1070,4 @@ Install paths:
 | wicked-testing worker integration | `npx wicked-testing run <plan>` output format: confirm verdict.json location and schema. |
 | FSM replay vs snapshot | Use snapshot (XState `actor.getSnapshot()`) — not event replay. Simpler and faster for resume. |
 | workers.json poll vs inotify | Use `node:fs` `watch()` (inotify on Linux, FSEvents on macOS, polling on Windows). Already handles cross-platform. |
-| Studio build artifacts | Vite output goes to `packages/studio/dist/`. `wicked-studio` binary serves this with `@fastify/static`. |
+| Studio build artifacts | Vite output goes to `packages/studio/dist/`. **SUPERSEDED (DES-STUDIO-SERVING-001):** there is no `wicked-studio` binary — the crew build copies this into `packages/crew/dist/studio/` and the **crew daemon** serves it with `@fastify/static` same-origin. |

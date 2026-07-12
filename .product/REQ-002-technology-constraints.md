@@ -89,9 +89,21 @@ Avoided:
 - Install: `npm install -g wicked-crew` or `npx wicked-crew`
 
 **wicked-studio:**
-- Published on npm as `wicked-studio`
-- Binary entrypoint: `wicked-studio` (starts the React app via a local static server on port 4200)
-- Build output: `dist/` (Vite build, static HTML/JS/CSS)
+
+> **⚠ SUPERSEDED (bundled-in-crew) — see DES-STUDIO-SERVING-001.** The
+> standalone-publish assertions below are stale. Resolved reality: the studio is
+> **not** independently published or runnable — the daemon is the only process
+> that holds the `Core` handle, so a standalone SPA has nothing to talk to. The
+> crew build bundles the studio's Vite `dist/` into `packages/crew/dist/studio/`,
+> and the **daemon serves it same-origin** via `@fastify/static` on the daemon
+> port (default 7701). Dev keeps the split — `vite` on `:4200` for HMR. An
+> assets-only `wicked-studio` npm package MAY be published as a convenience but is
+> never runnable standalone; the bundle inside the `wicked-crew` tarball is the
+> canonical artifact.
+
+- ~~Published on npm as `wicked-studio`~~ — **SUPERSEDED:** bundled into the `wicked-crew` tarball at `dist/studio/`; a standalone assets-only publish is optional, not independently runnable.
+- ~~Binary entrypoint: `wicked-studio` (starts the React app via a local static server on port 4200)~~ — **SUPERSEDED:** no separate `wicked-studio` binary; the crew daemon serves the built SPA same-origin. `:4200` is dev-only (`vite`).
+- Build output: `dist/` (Vite build, static HTML/JS/CSS) — copied into `packages/crew/dist/studio/` at crew build time.
 - wicked-crew can auto-launch wicked-studio (`wicked-crew start --ui` opens the browser)
 - Alternatively: `wicked-installer` handles both via registry
 
