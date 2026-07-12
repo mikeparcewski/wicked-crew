@@ -9,14 +9,15 @@ phase: define
 
 ## Overview
 
-wicked-studio is the operator console for wicked-crew — the harness for your agent
-harnesses. Today it is basic: a runs list, a run detail with work units, a live-output
-pane, an event log, and a governed terminal. This requirement elevates it into a **glass
-cockpit** for builders and doers: not just *that* the harness is running, but the
+wicked-studio is the operator console for wicked-crew — the Govern/control-room arc that
+drives your coding-agent CLIs (the harness) as governed workers. Today it is basic: a runs
+list, a run detail with work units, a live-output pane, an event log, and a governed
+terminal. This requirement elevates it into a **glass cockpit** for builders and doers: not
+just *that* the run is executing, but the
 reasoning, the economics, and the causality — so an operator can trust the machine and
 intervene intelligently, early.
 
-The product principle: **a harness people trust shows its work.** Every claim on screen
+The product principle: **a control room people trust shows its work.** Every claim on screen
 is backed by a real engine event; anything not yet wired is labeled, never faked.
 
 ## User
