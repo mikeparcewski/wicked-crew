@@ -1,8 +1,8 @@
-/* wicked-crew content styles (wc.wickedagile.com) — THE HARNESS.
-   Positioning: crew is the harness around your agent harnesses — an agentic
-   execution platform (the IDE of the future) that drives YOUR installed CLIs as
-   governed workers through durable, data-driven workflows. Intent in, verified
-   work out.
+/* wicked-crew content styles (wc.wickedagile.com) — THE CONTROL ROOM.
+   Positioning: crew is the control room for governed agent delivery — an agentic
+   execution platform (the IDE of the future) that DRIVES your agent harnesses
+   (YOUR installed CLIs) as governed workers through durable, data-driven
+   workflows. Intent in, verified work out.
 
    Aesthetic: an execution control surface. Two signal colors — amber
    (--accent) = pass / current-flowing / verified, and terracotta (--deny) =
@@ -57,7 +57,7 @@ html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
    Same engine + spirit as garden's TRELLIS (estate/wickedagile too): ONE fixed,
    low-opacity, --ink-tinted MASKED layer of faint, recognizable ICON line-art
    scattered like garden's tool cards — NOT abstract gradients or a plain grid.
-   Themed to what crew IS (the harness for your agent harnesses): a CLI/terminal,
+   Themed to what crew IS (the control room for governed agent delivery): a CLI/terminal,
    a robot AGENT, a barrier GATE + pass-check, a gear, a series toggle/lever
    SWITCH, a WORKTREE box holding a git-branch worker, a shield-CHECK (verified),
    a workflow node CHAIN, and a WorkflowDef JSON file — wired together by dashed
