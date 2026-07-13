@@ -943,8 +943,37 @@ code {
   .studio-cols { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
-  .byo-grid { grid-template-columns: 1fr; }
   .council-seats { grid-template-columns: 1fr; }
+}
+
+/* ── Phone DENSITY (<=600px) ───────────────────────────────────────────────
+   The vertical stacks fit the width but blow past a phone's HEIGHT: 8 CLI cards
+   stacked = 1044px, the gate ladder = 837px, the durable rail = 964px — each is
+   1–2.5 screens. This block compresses them so a section reads in ~one screen.
+   Placed last so it wins over the structural collapse blocks above. */
+@media (max-width: 600px) {
+  /* BYO: 8 CLIs → a compact 2-col tile grid (4 rows), not 8 full-width cards.
+     Drop the auth badge + active dot (cards aren't interactive on a phone). */
+  .byo-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .byo-card { padding: 10px 11px; gap: 2px; border-radius: 10px; }
+  .byo-name { font-size: 0.84rem; }
+  .byo-cli { font-size: 0.64rem; }
+  .byo-tag { display: none; }
+  .byo-dot { display: none; }
+
+  /* Gate console: compress the ladder — tight connectors, smaller caps + rows —
+     so all 6 switches + verdict fit the screen (don't touch the toggle geometry). */
+  .gc-rail { padding: 12px 12px; }
+  .gc-node { padding: 6px 12px; }
+  .gc-seg { height: 9px; }
+  .gc-sw { padding: 4px 10px; }
+  .gc-sw-name { font-size: 0.74rem; }
+
+  /* Durable: compress the timeline — tight phase rows + short gates + dock. */
+  .rail-track { padding: 14px 18px 16px; }
+  .rail-phase { padding: 3px 0; }
+  .rail-gate { height: 9px; }
+  .rail-dock { padding: 12px 16px 14px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
