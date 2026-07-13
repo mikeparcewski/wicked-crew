@@ -881,6 +881,10 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var root = document.querySelector('[data-byo]');
       var stage = document.querySelector('[data-byo-stage]');
       if (!root || !stage) return;
+      // Phones: the card→stage update happens below the fold and reads as broken.
+      // Leave the cards as static display (no click wiring); the stage shows the
+      // representative default. (CSS also drops the click affordance ≤600px.)
+      if (window.matchMedia && window.matchMedia('(max-width: 600px)').matches) return;
       var cards = Array.prototype.slice.call(root.querySelectorAll('[data-byo-card]'));
       var badge = stage.querySelector('[data-byo-badge]');
       var cmd = stage.querySelector('[data-byo-cmd]');
@@ -971,7 +975,14 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         if (!pinned) play();
       }
 
-      files.forEach(function (f, i) { f.addEventListener('click', function () { pin(i); }); });
+      files.forEach(function (f, i) { f.addEventListener('click', function () {
+        pin(i);
+        // Phones: the preview + status update below the tapped file — bring the
+        // updating view into sight so the tap doesn't feel like it did nothing.
+        if (window.matchMedia && window.matchMedia('(max-width: 760px)').matches && preview.scrollIntoView) {
+          preview.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }); });
       if (toggle) toggle.addEventListener('click', function () {
         if (pinned) play(); else pin(cur);
       });
