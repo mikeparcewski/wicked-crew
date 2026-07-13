@@ -179,7 +179,7 @@ code {
    the gate re-derives "done" from evidence (and can refuse) → verified out.
    Self-playing left→right; the gate cycles PASS, then REJECT→rerun→PASS. ─── */
 .hero-line-wrap { margin-top: clamp(24px, 4.2svh, 46px); }
-.line { display: flex; align-items: center; justify-content: center; gap: 0; }
+.ln-line { display: flex; align-items: center; justify-content: center; gap: 0; }
 .ln-stage {
   min-width: 0;
   border: 1px solid var(--hairline-strong); border-radius: 14px;
@@ -195,7 +195,9 @@ code {
 .ln-out { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 
 /* crew — the governed box, the centerpiece */
-.ln-crew { padding: 0; overflow: hidden; border-color: color-mix(in oklab, var(--accent) 38%, var(--hairline-strong)); }
+/* fixed width so the cycling gate text (default → REJECTED → re-derived) can
+   never resize the box and jog the centered line. */
+.ln-crew { padding: 0; overflow: hidden; width: 400px; max-width: 100%; border-color: color-mix(in oklab, var(--accent) 38%, var(--hairline-strong)); }
 .ln-crew-bar {
   display: flex; align-items: center; gap: 10px; justify-content: space-between;
   padding: 9px 14px; border-bottom: 1px solid var(--hairline);
@@ -217,7 +219,7 @@ code {
 .ln-worker.is-on .ln-dot { background: var(--accent); box-shadow: 0 0 8px -1px var(--accent); }
 
 .ln-gate {
-  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 9px;
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 9px; min-height: 50px;
   border: 1px dashed color-mix(in oklab, var(--accent) 45%, var(--hairline-strong));
   background: color-mix(in oklab, var(--accent) 6%, transparent);
   transition: border-color .3s var(--ease), background .3s var(--ease);
@@ -248,7 +250,7 @@ code {
 
 /* stack the line vertically on narrow screens */
 @media (max-width: 900px) {
-  .line { flex-direction: column; }
+  .ln-line { flex-direction: column; }
   .ln-stage, .ln-intent, .ln-out { max-width: 340px; width: 100%; align-items: stretch; }
   .ln-flow { flex-basis: 26px; width: 2px; height: 26px; align-self: center; }
   .ln-flow.is-live { background: linear-gradient(180deg, var(--accent), color-mix(in oklab, var(--accent) 20%, var(--hairline-strong))); }
@@ -834,6 +836,9 @@ code {
 
 @media (prefers-reduced-motion: reduce) {
   .btn, .gh-pill, .gc-node, .gc-seg, .rail-dot, .rail-name, .rail-token, .gc-v-stamp, .byo-card, .gc-card, .wf-file { transition: none; }
+  /* hero line: the JS paints a static verified end-state under reduced motion,
+     but these transitions (esp. the .ln-stamp scale/opacity) would still animate. */
+  .ln-worker, .ln-dot, .ln-gate, .ln-gate-node, .ln-stamp { transition: none; }
   .btn-primary:hover, .gh-pill:hover { transform: none; }
   .gc-seg.is-live::after, .dock-evidence.pop, .dock-note.flash, .ln-flow.is-live .ln-pip, .sl-caret, .wf-phase, .byo-stage-wt.pop, .gc-hint, .gc-sw-well, .sf-row, .sg-cue { animation: none; }
   .gc-seg.is-live::after { display: none; }
