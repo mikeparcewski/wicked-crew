@@ -314,9 +314,8 @@ code {
   .byo-stage-head { flex-wrap: wrap; gap: 6px 12px; }
   .byo-stage-row { flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 16px 6px; }
   .byo-stage-row code { width: max-content; max-width: 100%; }
-  .byo-stage-arr { align-self: flex-start; font-size: 0.6rem; }
   /* re-point the inline "→ runs in →" arrows downward for the vertical stack */
-  .byo-stage-arr { position: relative; padding-left: 16px; }
+  .byo-stage-arr { align-self: flex-start; font-size: 0.6rem; position: relative; padding-left: 16px; }
   .byo-stage-arr::before { content: '↓'; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
   .byo-stage-wt { width: 100%; text-align: center; overflow-wrap: anywhere; }
 }
@@ -549,7 +548,7 @@ code {
   .gc-v-stamp { font-size: clamp(1.15rem, 5.6vw, 1.6rem); }
   .gc-panel { padding: 16px; }
   .gc-actions { flex-direction: column; }
-  .gc-argue { margin-left: 0; width: 100%; text-align: center; }
+  .gc-argue { width: 100%; text-align: center; }
   .gc-rail { padding: 26px 14px 22px; }
 }
 @keyframes gc-flow-v { from { transform: translateY(-100%); } to { transform: translateY(350%); } }
@@ -758,7 +757,7 @@ code {
   .council-seat { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 13px 15px; }
   .cs-cli { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   .cs-vote { order: 2; flex-shrink: 0; }
-  .cs-note { flex-basis: 100%; min-height: 0; }
+  .cs-note { order: 3; flex-basis: 100%; min-height: 0; }
   .council-synth { min-height: 0; padding: 16px; }
   .council-rounds { gap: 6px; }
   .council-status { flex-basis: 100%; margin-left: 0; text-align: center; }
