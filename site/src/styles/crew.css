@@ -806,14 +806,28 @@ code {
    wrap. min-heights that lock the desktop board against reflow are released so
    the stacked cards don't leave dead space. Desktop layout is untouched. */
 @media (max-width: 600px) {
-  .council-stage { grid-template-columns: 1fr; gap: 14px; }
-  .council-seats { grid-template-columns: 1fr; gap: 10px; }
-  .council-seat { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 13px 15px; }
-  .cs-cli { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-  .cs-vote { order: 2; flex-shrink: 0; }
-  .cs-note { order: 3; flex-basis: 100%; min-height: 0; }
-  .council-synth { min-height: 0; padding: 16px; }
-  .council-rounds { gap: 6px; }
+  /* Council on a phone → a compact "ballot" shape: each CLI is a tight vote row
+     with a verdict-colored LEFT RAIL (scan pass/rework at a glance), and the
+     synthesis is the prominent card beneath = many sandboxes → one verdict. */
+  .council-stage { grid-template-columns: 1fr; gap: 9px; }
+  .council-seats { grid-template-columns: 1fr; gap: 6px; }
+  .council-seat {
+    flex-direction: row; flex-wrap: wrap; align-items: center; gap: 2px 10px;
+    padding: 9px 12px 9px 13px; border-radius: 10px;
+    border-left: 3px solid var(--hairline-strong);
+  }
+  .council-seat.is-pass { border-left-color: var(--accent); }
+  .council-seat.is-rework { border-left-color: var(--deny); }
+  .cs-cli { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 0.74rem; }
+  .cs-vote { order: 2; flex-shrink: 0; font-size: 0.7rem; padding: 3px 9px; }
+  .cs-note { order: 3; flex-basis: 100%; min-height: 0; font-size: 0.64rem; margin-top: 1px; }
+  .council-synth {
+    min-height: 0; padding: 13px 15px; gap: 4px;
+    border-color: color-mix(in oklab, var(--accent) 48%, var(--hairline-strong));
+  }
+  .cy-v { font-size: 1.05rem; }
+  .council-rounds { gap: 6px; margin-top: 2px; }
+  .council-round { font-size: 0.62rem; padding: 5px 9px; }
   .council-status { flex-basis: 100%; margin-left: 0; text-align: center; }
 }
 
