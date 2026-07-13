@@ -311,6 +311,18 @@ code {
    the head keeps the badge, the row becomes a vertical chain with a DOWN arrow,
    and the worktree chip wraps instead of overflowing. Desktop is untouched. */
 @media (max-width: 600px) {
+  /* hero: drop the operate-gate / install CTAs on phones */
+  .hero-cta { display: none; }
+  /* intent-driven graph: stack top-to-bottom so the chips never wrap; arrows point DOWN */
+  .idd-flow { flex-direction: column; gap: 8px; }
+  .idd-chip { width: 100%; text-align: center; }
+  .idd-arrow { transform: rotate(90deg); color: var(--accent); font-weight: 700; }
+  /* BYO on phones: the card→hidden-stage click is invisible and reads as broken.
+     Make the cards STATIC display (no click affordance; JS also skips wiring them
+     on mobile) and keep the representative stage always visible below. */
+  .byo-card { cursor: default; }
+  .byo-card:hover { transform: none; border-color: var(--hairline-strong); }
+  .byo-card::after { content: none; }
   .byo-stage-head { flex-wrap: wrap; gap: 6px 12px; }
   .byo-stage-row { flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 16px 6px; }
   .byo-stage-row code { width: max-content; max-width: 100%; }
@@ -319,6 +331,35 @@ code {
   .byo-stage-arr::before { content: '↓'; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
   .byo-stage-wt { width: 100%; text-align: center; overflow-wrap: anywhere; }
 }
+
+/* ── Gate console on phones: the horizontal series rail can't fit, so STAND THE
+   CIRCUIT UP — current flows DOWN through the stacked switches (same deny-
+   dominates series metaphor, vertical). Switches become full-width rows. ── */
+@media (max-width: 640px) {
+  .gc-rail { flex-direction: column; align-items: stretch; gap: 0; padding: 18px 14px; }
+  /* build/ship end-caps: centered pill rows */
+  .gc-node { height: auto; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 10px 14px; align-self: center; min-width: 150px; }
+  /* segments: vertical connectors — the current flows downward */
+  .gc-seg { flex: 0 0 20px; width: 4px; height: 20px; min-width: 0; margin: 0 auto; align-self: center; }
+  .gc-seg.is-live::after { inset: 0; width: 100%; height: 45%; background: linear-gradient(180deg, transparent, var(--accent), transparent); animation: gc-flow-v 1.1s linear infinite; }
+  /* each switch = a full-width row: [toggle] policy-name … STATE */
+  .gc-sw { flex-direction: row; align-items: center; gap: 12px; width: 100%; padding: 9px 13px; border: 1px solid var(--hairline); border-radius: 11px; background: color-mix(in oklab, var(--surface) 55%, transparent); }
+  .gc-sw-well { flex-shrink: 0; }
+  .gc-sw-name { flex: 1; text-align: left; }
+  .gc-sw-state { margin-left: auto; }
+  /* the horizontal "bob" invite doesn't read in a vertical stack — drop it */
+  .gc:not(.is-manual) .gc-sw-well { animation: none; }
+
+  /* studio console on phones: stack the launch form, let the terminal scroll
+     instead of overflowing, and let the steering-gate buttons flex full-width */
+  .studio-launch { align-items: stretch; }
+  .sl-input { min-width: 0; width: 100%; }
+  .sl-go { width: 100%; }
+  .studio-term { overflow-x: auto; }
+  .studio-term .st-line { white-space: nowrap; }
+  .sg-actions .sg-btn { flex: 1 1 auto; }
+}
+@keyframes gc-flow-v { from { transform: translateY(-100%); } to { transform: translateY(350%); } }
 
 /* ── THE GATE CONSOLE (signature) ─────────────────────────────────────── */
 /* The console is designed to fit within ONE viewport (100svh − topbar): it is a
