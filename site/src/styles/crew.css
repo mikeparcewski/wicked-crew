@@ -305,6 +305,21 @@ code {
 .byo-stage-note { margin: 12px 16px 16px; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.55; color: color-mix(in oklab, var(--ink) 66%, transparent); }
 .byo-stage-note code { font-size: 0.9em; }
 
+/* ── BYO mobile: the horizontal "CLI → runs in → worktree" flow loses its
+   framing when the cards collapse. Restack the stage as a top-to-bottom flow so
+   "your CLI → dispatched as a governed worker → same lifecycle" stays readable:
+   the head keeps the badge, the row becomes a vertical chain with a DOWN arrow,
+   and the worktree chip wraps instead of overflowing. Desktop is untouched. */
+@media (max-width: 600px) {
+  .byo-stage-head { flex-wrap: wrap; gap: 6px 12px; }
+  .byo-stage-row { flex-direction: column; align-items: stretch; gap: 8px; padding: 14px 16px 6px; }
+  .byo-stage-row code { width: max-content; max-width: 100%; }
+  /* re-point the inline "→ runs in →" arrows downward for the vertical stack */
+  .byo-stage-arr { align-self: flex-start; font-size: 0.6rem; position: relative; padding-left: 16px; }
+  .byo-stage-arr::before { content: '↓'; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
+  .byo-stage-wt { width: 100%; text-align: center; overflow-wrap: anywhere; }
+}
+
 /* ── THE GATE CONSOLE (signature) ─────────────────────────────────────── */
 /* The console is designed to fit within ONE viewport (100svh − topbar): it is a
    centered flex column with compacted internal spacing so the switches, verdict,
@@ -524,6 +539,17 @@ code {
 }
 @media (max-width: 560px) {
   .gc-cards { grid-template-columns: 1fr; }
+  /* console topbar: three inline chips overflow a phone — stack them left. */
+  .gc-topbar { flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 16px; }
+  .gc-mode, .gc-hint { white-space: normal; }
+  /* verdict plate: stack the stamp above its explanation and let the stamp scale
+     to the viewport (upper bound = the tuned desktop 1.6rem). */
+  .gc-verdict { gap: 10px; }
+  .gc-v-stamp { font-size: clamp(1.15rem, 5.6vw, 1.6rem); }
+  .gc-panel { padding: 16px; }
+  .gc-actions { flex-direction: column; }
+  .gc-argue { width: 100%; text-align: center; }
+  .gc-rail { padding: 26px 14px 22px; }
 }
 @keyframes gc-flow-v { from { transform: translateY(-100%); } to { transform: translateY(350%); } }
 
@@ -653,6 +679,22 @@ code {
 .rail.is-crashed .rail-track { opacity: 0.32; filter: grayscale(0.6); }
 .rail.is-crashed .rail-token { opacity: 0; }
 
+/* ── Rail mobile: the horizontal 6-phase track is wider than a phone, so it
+   overflows / demands an awkward sideways scroll and the run token animates off
+   screen. Rotate the whole track to a VERTICAL rail — phases become left-aligned
+   rows with the diamond gates as connectors — so it fits the viewport and the
+   token travels straight down the left edge. JS places the token from each dot's
+   rect (re-run on resize), so it follows the vertical layout automatically. */
+@media (max-width: 640px) {
+  .rail-track {
+    flex-direction: column; align-items: flex-start; justify-content: flex-start;
+    gap: 0; overflow-x: visible; padding: 22px clamp(18px, 6vw, 28px) 24px;
+  }
+  .rail-phase { flex-direction: row; align-items: center; gap: 12px; width: 100%; padding: 7px 0; }
+  .rail-name { white-space: normal; }
+  .rail-gate { flex: 0 0 auto; width: 16px; height: 18px; min-width: 16px; margin: 0; align-self: flex-start; }
+}
+
 /* ── The council ──────────────────────────────────────────────────────── */
 .council { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
 .council-stage { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.9fr); gap: clamp(16px, 2.4vw, 28px); align-items: stretch; }
@@ -703,6 +745,23 @@ code {
 .council-round.is-active { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 8%, transparent); }
 .council-status { font-family: var(--font-mono); font-size: 0.6rem; color: var(--faint); margin-left: 6px; }
 @media (prefers-reduced-motion: reduce) { .council-seat, .cs-vote, .cs-note, .council-round { transition: none; } }
+
+/* ── Council mobile: three seats side-by-side crush on a phone. Stack the board
+   — seats become full-width compact rows (cli + vote on one line, the note
+   beneath), the synthesis panel drops below at full width, and the round pills
+   wrap. min-heights that lock the desktop board against reflow are released so
+   the stacked cards don't leave dead space. Desktop layout is untouched. */
+@media (max-width: 600px) {
+  .council-stage { grid-template-columns: 1fr; gap: 14px; }
+  .council-seats { grid-template-columns: 1fr; gap: 10px; }
+  .council-seat { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 13px 15px; }
+  .cs-cli { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .cs-vote { order: 2; flex-shrink: 0; }
+  .cs-note { order: 3; flex-basis: 100%; min-height: 0; }
+  .council-synth { min-height: 0; padding: 16px; }
+  .council-rounds { gap: 6px; }
+  .council-status { flex-basis: 100%; margin-left: 0; text-align: center; }
+}
 
 /* ── The driving interface — the studio ───────────────────────────────── */
 .studio { border-top: 1px solid var(--hairline); padding: clamp(48px, 8svh, 96px) 0; }
