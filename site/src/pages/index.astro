@@ -1076,13 +1076,17 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       }
       function advance() { if (paused) return; cur = (cur + 1) % phases.length; render(); }
       function start() {
-        if (reduced) { cur = 3; render(); return; }
+        // Auto-play on every device (owner ask). Under reduced-motion the token's
+        // slide is already disabled (CSS), so phases advance as discrete jumps —
+        // gentle, but still moving, rather than frozen on one phase.
         if (timer) clearInterval(timer);
-        timer = setInterval(advance, 2000);
+        timer = setInterval(advance, reduced ? 2600 : 2000);
       }
       phases.forEach(function (p, i) { p.addEventListener('click', function () { cur = i; render(); }); });
-      rail.addEventListener('pointerenter', function () { paused = true; });
-      rail.addEventListener('pointerleave', function () { paused = false; });
+      // Pause on MOUSE hover only. On touch, a scroll gesture fires pointerenter and
+      // would otherwise freeze the auto-play — so touch never pauses it.
+      rail.addEventListener('pointerenter', function (e) { if (e.pointerType === 'mouse') paused = true; });
+      rail.addEventListener('pointerleave', function (e) { if (e.pointerType === 'mouse') paused = false; });
       if (crashBtn) crashBtn.addEventListener('click', function () {
         var was = cur;
         rail.classList.add('is-crashed');
