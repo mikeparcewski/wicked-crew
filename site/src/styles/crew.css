@@ -332,9 +332,13 @@ code {
   .byo-stage-wt { width: 100%; text-align: center; overflow-wrap: anywhere; }
 }
 
-/* ── Gate console on phones: the horizontal series rail can't fit, so STAND THE
-   CIRCUIT UP — current flows DOWN through the stacked switches (same deny-
-   dominates series metaphor, vertical). Switches become full-width rows. ── */
+/* ── Gate console — narrow mode (<=900px): the horizontal series rail can't fit,
+   so STAND THE CIRCUIT UP — current flows DOWN through the stacked switches (same
+   deny-dominates series metaphor, vertical). This is the BASE narrow block; a
+   second <=900px block further down (search "Narrow mode: the series circuit")
+   layers the toggle-lever geometry and centers the switches to <=260px pills.
+   The two are split by ~200 lines of desktop rules and the source order is load-
+   bearing — keep them separate. ── */
 @media (max-width: 900px) {
   .gc-rail { flex-direction: column; align-items: stretch; gap: 0; padding: 18px 14px; }
   /* build/ship end-caps: centered pill rows */
@@ -342,7 +346,8 @@ code {
   /* segments: vertical connectors — the current flows downward */
   .gc-seg { flex: 0 0 20px; width: 4px; height: 20px; min-width: 0; margin: 0 auto; align-self: center; }
   .gc-seg.is-live::after { inset: 0; width: 100%; height: 45%; background: linear-gradient(180deg, transparent, var(--accent), transparent); animation: gc-flow-v 1.1s linear infinite; }
-  /* each switch = a full-width row: [toggle] policy-name … STATE */
+  /* each switch = a row [toggle] policy-name … STATE (the later block caps it to
+     260px and centers it — this sets the pill chrome) */
   .gc-sw { flex-direction: row; align-items: center; gap: 12px; width: 100%; padding: 9px 13px; border: 1px solid var(--hairline); border-radius: 11px; background: color-mix(in oklab, var(--surface) 55%, transparent); }
   .gc-sw-well { flex-shrink: 0; }
   .gc-sw-name { flex: 1; text-align: left; }
@@ -350,9 +355,11 @@ code {
   /* the horizontal "bob" invite doesn't read in a vertical stack — drop it */
   .gc:not(.is-manual) .gc-sw-well { animation: none; }
 
-  /* studio console on phones: stack the launch form, drop the feed|gate pair to a
-     single column (side-by-side is unreadable below ~560px and cramped up to the
-     narrow-mode ceiling), let the terminal scroll, and flex the gate buttons */
+  /* studio console in narrow mode: stack the launch form and drop the feed|gate
+     pair to ONE column. NOTE: this is the *only* .studio-cols stacking rule in the
+     file — the desktop default is 1fr 1fr and nothing else collapses it, so 2-up
+     was cramming feed+gate side-by-side even at 386px. Also scroll the terminal
+     and flex the gate buttons. */
   .studio-cols { grid-template-columns: 1fr; }
   .studio-launch { align-items: stretch; }
   .sl-input { min-width: 0; width: 100%; }
@@ -567,7 +574,11 @@ code {
   .gc-cards { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 900px) {
-  /* Narrow mode: the series circuit rotates to a vertical stack. */
+  /* Narrow mode: the series circuit — REFINEMENT block. Layers onto the BASE
+     narrow block above (~200 lines up) plus the desktop rules between them, so it
+     centers the rail and constrains the nodes/switches to <=260px pills and sets
+     the toggle-lever geometry. Sits after the desktop rules on purpose: source
+     order means these win. Do not fold into the base block. */
   .gc-rail { flex-direction: column; align-items: center; gap: 0; padding: 30px 18px 24px; }
   .gc-node { width: 100%; max-width: 260px; align-items: center; height: auto; padding: 12px; }
   .gc-node-v, .gc-node-k { text-align: center; }

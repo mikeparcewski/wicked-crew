@@ -881,9 +881,10 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var root = document.querySelector('[data-byo]');
       var stage = document.querySelector('[data-byo-stage]');
       if (!root || !stage) return;
-      // Phones: the card→stage update happens below the fold and reads as broken.
-      // Leave the cards as static display (no click wiring); the stage shows the
-      // representative default. (CSS also drops the click affordance ≤600px.)
+      // Narrow mode (≤900px): the card→stage update happens below the fold and
+      // reads as broken. Leave the cards as static display (no click wiring); the
+      // stage shows the representative default. Matches the CSS, which drops the
+      // click affordance across the same ≤900px narrow range.
       if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) return;
       var cards = Array.prototype.slice.call(root.querySelectorAll('[data-byo-card]'));
       var badge = stage.querySelector('[data-byo-badge]');
@@ -977,8 +978,9 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
 
       files.forEach(function (f, i) { f.addEventListener('click', function () {
         pin(i);
-        // Phones: the preview + status update below the tapped file — bring the
-        // updating view into sight so the tap doesn't feel like it did nothing.
+        // Narrow mode (≤940px, where wf-layout stacks the preview below the files):
+        // the preview + status update below the tapped file — bring the updating
+        // view into sight so the tap doesn't feel like it did nothing.
         if (window.matchMedia && window.matchMedia('(max-width: 940px)').matches && preview.scrollIntoView) {
           preview.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
