@@ -401,6 +401,26 @@ const GATE_CARDS = [
         </div>
       </div>
 
+      <!-- Phone-native gate: the interactive series-circuit ladder is a desktop
+           affordance. On a phone we hide it and render a compact static verdict of
+           the same run — a checklist + the held outcome — that fits one screen. -->
+      <div class="gc-static" aria-hidden="true">
+        <div class="gcs-flow"><b>build</b><span class="gcs-arr">→</span><b>ship</b><span class="gcs-tag">dual gate · deny-dominates</span></div>
+        <ul class="gcs-list">
+          {POLICIES.map((p) => (
+            <li class={p.id === 'schema-drift' ? 'is-fail' : 'is-ok'}>
+              <span class="gcs-name">{p.id}</span>
+              <span class="gcs-state">{p.id === 'schema-drift' ? 'FAIL' : 'PASS'}</span>
+            </li>
+          ))}
+          <li class="is-abstain"><span class="gcs-name">llm-judge</span><span class="gcs-state">ABSTAIN</span></li>
+        </ul>
+        <div class="gcs-verdict">
+          <span class="gcs-stamp">HELD</span>
+          <span class="gcs-vtext">1 check failed — the series breaks, held for a human. An LLM judge can <b>fail</b> a gate, never <b>approve</b> one.</span>
+        </div>
+      </div>
+
       <!-- Explainer cards drive the console. Click one to play its point. -->
       <ol class="gc-cards" data-gc-cards>
         {GATE_CARDS.map((c, i) => (
@@ -604,6 +624,17 @@ const GATE_CARDS = [
             <span class="st-line" data-studio-term><span class="st-p">crew ›</span> attach --run r-4f2a <span class="st-c"># governed terminal</span></span>
           </div>
         </div>
+      </div>
+
+      <!-- Phone-native studio: the live console is a desktop affordance. On a phone
+           we hide the mock and tell the same launch → watch → steer story as a
+           compact static list. -->
+      <div class="studio-static" aria-hidden="true">
+        <ol class="sts-steps">
+          <li><span class="sts-n">1</span><div><b>Launch</b> a run from a plain-text problem<code>add rate-limiting to the public API</code></div></li>
+          <li><span class="sts-n">2</span><div><b>Watch</b> the live event feed stream unit-by-unit, with a per-unit transcript</div></li>
+          <li><span class="sts-n">3</span><div><b>Steer</b> the gate — approve, amend, or reject<span class="sts-chip">schema-drift · DENY → held for you</span></div></li>
+        </ol>
       </div>
 
       <p class="honest-note">
