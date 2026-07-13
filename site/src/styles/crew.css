@@ -161,66 +161,101 @@ code {
   position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background: radial-gradient(ellipse 60% 60% at 82% 8%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 60%);
 }
-/* minmax(0,…) lets both columns shrink below their min-content, so the huge H1
-   in the left column can never force the plate column to overflow the wrap. */
-.hero-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: clamp(28px, 4vw, 64px); align-items: center; }
-.hero-copy { min-width: 0; }
-.hero-copy h1 { font-size: clamp(2.5rem, 5.6vw, 4.4rem); margin: 16px 0 0; }
-.lede { margin: 22px 0 0; font-size: clamp(1rem, 1.5vw, 1.16rem); line-height: 1.62; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 54ch; }
+/* Centered hero: headline + short lede span the full container width, then the
+   self-playing line, then tags + CTA. */
+.hero-head { text-align: center; }
+.hero-head h1 { font-size: clamp(2.4rem, 5.4vw, 4.2rem); margin: 14px 0 0; }
+.lede { margin: 20px auto 0; font-size: clamp(1rem, 1.4vw, 1.12rem); line-height: 1.6; color: color-mix(in oklab, var(--ink) 80%, transparent); max-width: 60%; }
 .lede b { color: var(--ink); font-weight: 700; }
-.hero-tags { margin: 24px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.hero-foot { margin-top: clamp(20px, 3.4svh, 34px); display: flex; flex-direction: column; align-items: center; gap: 15px; }
+.hero-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .hero-tags span {
-  font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
+  font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--muted); border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 5px 12px;
 }
-.hero-cta { margin: 28px 0 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.hero-cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
 
-/* ── Hero harness plate: intent in → your CLIs as workers → verified out ─ */
-.plate {
-  min-width: 0; max-width: 100%;
-  border: 1px solid var(--hairline-strong); border-radius: 16px; overflow: hidden;
+/* ── The governed assembly line ── intent → your CLIs as governed workers →
+   the gate re-derives "done" from evidence (and can refuse) → verified out.
+   Self-playing left→right; the gate cycles PASS, then REJECT→rerun→PASS. ─── */
+.hero-line-wrap { margin-top: clamp(24px, 4.2svh, 46px); }
+.line { display: flex; align-items: center; justify-content: center; gap: 0; }
+.ln-stage {
+  min-width: 0;
+  border: 1px solid var(--hairline-strong); border-radius: 14px;
   background: color-mix(in oklab, var(--surface) 82%, transparent);
-  box-shadow: 0 40px 80px -44px rgba(0,0,0,.72);
+  box-shadow: 0 30px 66px -46px rgba(0,0,0,.72);
 }
-/* plate inner text must be free to wrap/shrink — never force intrinsic width. */
-.pf-v, .pf-your, .pf-out-t, .pf-gate-t { min-width: 0; overflow-wrap: anywhere; }
-.pf-worker { min-width: 0; }
-.plate-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 12px 16px; border-bottom: 1px solid var(--hairline);
+.ln-k { display: block; font-family: var(--font-mono); font-size: 0.54rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
+.ln-sub { display: block; font-family: var(--font-mono); font-size: 0.58rem; color: var(--muted); overflow-wrap: anywhere; }
+
+/* end-caps: intent + verified */
+.ln-intent { padding: 13px 15px; display: flex; flex-direction: column; gap: 6px; max-width: 220px; }
+.ln-intent-v { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
+.ln-out { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+
+/* crew — the governed box, the centerpiece */
+.ln-crew { padding: 0; overflow: hidden; border-color: color-mix(in oklab, var(--accent) 38%, var(--hairline-strong)); }
+.ln-crew-bar {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  padding: 9px 14px; border-bottom: 1px solid var(--hairline);
   background: color-mix(in oklab, var(--canvas) 40%, transparent);
 }
-.plate-badge {
-  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase;
-  background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 3px 10px; font-weight: 700;
-}
-.plate-loc { font-family: var(--font-mono); font-size: 0.64rem; color: var(--muted); }
-.plate-flow { padding: 18px 18px 20px; display: flex; flex-direction: column; gap: 12px; }
-.pf-in, .pf-out { display: flex; flex-direction: column; gap: 4px; }
-.pf-k { font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
-.pf-v { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); }
-.pf-workers { display: flex; flex-direction: column; gap: 6px; }
-.pf-worker {
-  display: flex; align-items: center; gap: 9px; font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink);
-  border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 8px 11px;
+.ln-badge { font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 3px 10px; font-weight: 700; }
+.ln-crew-loc { font-family: var(--font-mono); font-size: 0.6rem; color: var(--muted); }
+.ln-crew-body { padding: 13px 15px 15px; display: flex; flex-direction: column; gap: 10px; }
+.ln-crew-label { font-family: var(--font-mono); font-size: 0.58rem; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
+.ln-workers { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.ln-worker {
+  display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink);
+  border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 6px 11px;
   background: color-mix(in oklab, var(--canvas) 35%, transparent);
+  transition: border-color .25s var(--ease), background .25s var(--ease);
 }
-.pf-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; box-shadow: 0 0 8px -1px var(--accent); animation: pf-pulse 2.4s var(--ease) infinite; }
-.pf-worker:nth-child(2) .pf-dot { animation-delay: .5s; }
-.pf-worker:nth-child(3) .pf-dot { animation-delay: 1s; }
-@keyframes pf-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
-.pf-wt { margin-left: auto; font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); border: 1px solid var(--hairline); border-radius: 999px; padding: 2px 8px; }
-.pf-your { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.02em; color: var(--muted); text-align: center; }
-.pf-gate { display: flex; align-items: center; gap: 10px; padding: 8px 11px; border-radius: 9px; border: 1px dashed color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 6%, transparent); }
-.pf-gate-node { font-family: var(--font-mono); font-size: 0.64rem; font-weight: 700; color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 3px 9px; }
-.pf-gate-t { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink); }
-.pf-out { flex-direction: row; align-items: center; gap: 12px; }
-.pf-stamp {
-  font-family: var(--font-mono); font-weight: 700; font-size: 0.82rem; letter-spacing: 0.14em;
-  color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 6px 13px;
-  border: 1px solid color-mix(in oklab, var(--accent) 70%, #000); transform: rotate(-1.5deg);
+.ln-worker.is-on { border-color: color-mix(in oklab, var(--accent) 60%, var(--hairline-strong)); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.ln-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background .25s var(--ease), box-shadow .25s var(--ease); }
+.ln-worker.is-on .ln-dot { background: var(--accent); box-shadow: 0 0 8px -1px var(--accent); }
+
+.ln-gate {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 9px;
+  border: 1px dashed color-mix(in oklab, var(--accent) 45%, var(--hairline-strong));
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  transition: border-color .3s var(--ease), background .3s var(--ease);
 }
-.pf-out-t { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+.ln-gate-node { flex-shrink: 0; font-family: var(--font-mono); font-size: 0.6rem; font-weight: 700; letter-spacing: .06em; color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 3px 9px; transition: background .3s var(--ease), color .3s var(--ease); }
+.ln-gate-t { font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink); line-height: 1.4; overflow-wrap: anywhere; }
+.ln-gate-t b { color: var(--ink); font-weight: 700; }
+.ln-gate.is-deny { border-style: solid; border-color: color-mix(in oklab, var(--deny) 55%, var(--hairline-strong)); background: color-mix(in oklab, var(--deny) 9%, transparent); }
+.ln-gate.is-deny .ln-gate-node { background: var(--deny); color: #fff; }
+.ln-gate.is-pass { border-style: solid; border-color: color-mix(in oklab, var(--accent) 60%, var(--hairline-strong)); }
+
+/* flow connectors — animated current between the stages */
+.ln-flow { position: relative; flex: 0 0 clamp(30px, 5vw, 78px); height: 2px; background: var(--hairline-strong); align-self: center; }
+.ln-flow.is-live { background: linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 20%, var(--hairline-strong))); }
+.ln-pip { position: absolute; top: 50%; left: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px -1px var(--accent); transform: translate(-50%, -50%); opacity: 0; }
+.ln-flow.is-live .ln-pip { animation: ln-travel 0.7s var(--ease); }
+@keyframes ln-travel { 0% { left: 0; opacity: 1; } 100% { left: 100%; opacity: 0; } }
+
+/* verified stamp — lands when a run passes */
+.ln-stamp {
+  align-self: flex-start;
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.82rem; letter-spacing: 0.1em;
+  color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 6px 12px;
+  border: 1px solid color-mix(in oklab, var(--accent) 70%, #000); transform: rotate(-1.5deg) scale(.9);
+  opacity: 0; transition: opacity .3s var(--ease), transform .3s var(--ease);
+}
+.ln-out.is-done .ln-stamp { opacity: 1; transform: rotate(-1.5deg) scale(1); }
+
+/* stack the line vertically on narrow screens */
+@media (max-width: 900px) {
+  .line { flex-direction: column; }
+  .ln-stage, .ln-intent, .ln-out { max-width: 340px; width: 100%; align-items: stretch; }
+  .ln-flow { flex-basis: 26px; width: 2px; height: 26px; align-self: center; }
+  .ln-flow.is-live { background: linear-gradient(180deg, var(--accent), color-mix(in oklab, var(--accent) 20%, var(--hairline-strong))); }
+  .ln-pip { top: 0; left: 50%; }
+  .ln-flow.is-live .ln-pip { animation: ln-travel-v 0.7s var(--ease); }
+}
+@keyframes ln-travel-v { 0% { top: 0; opacity: 1; } 100% { top: 100%; opacity: 0; } }
 
 /* ── Intent-driven development beat ───────────────────────────────────── */
 .idd { border-top: 1px solid var(--hairline); padding: clamp(40px, 7svh, 84px) 0; }
@@ -787,8 +822,7 @@ code {
 
 /* ── Responsive ──────────────────────────────────────────────────────── */
 @media (max-width: 940px) {
-  .hero-grid, .get-grid, .ways-grid, .idd-grid, .wf-layout, .council-stage { grid-template-columns: 1fr; }
-  .plate { order: 2; }
+  .get-grid, .ways-grid, .idd-grid, .wf-layout, .council-stage { grid-template-columns: 1fr; }
   .lede, .get-intro p, .idd-copy p { max-width: none; }
   .byo-grid { grid-template-columns: repeat(2, 1fr); }
   .studio-cols { grid-template-columns: 1fr; }
@@ -801,6 +835,6 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .btn, .gh-pill, .gc-node, .gc-seg, .rail-dot, .rail-name, .rail-token, .gc-v-stamp, .byo-card, .gc-card, .wf-file { transition: none; }
   .btn-primary:hover, .gh-pill:hover { transform: none; }
-  .gc-seg.is-live::after, .dock-evidence.pop, .dock-note.flash, .pf-dot, .sl-caret, .wf-phase, .byo-stage-wt.pop, .gc-hint, .gc-sw-well, .sf-row, .sg-cue { animation: none; }
+  .gc-seg.is-live::after, .dock-evidence.pop, .dock-note.flash, .ln-flow.is-live .ln-pip, .sl-caret, .wf-phase, .byo-stage-wt.pop, .gc-hint, .gc-sw-well, .sf-row, .sg-cue { animation: none; }
   .gc-seg.is-live::after { display: none; }
 }

@@ -114,56 +114,134 @@ const GATE_CARDS = [
 <Base title={title} description={description}>
   <Topbar pkg="wicked-crew" repo={repo} />
 
-  <!-- ── Hero ──────────────────────────────────────────────────────────── -->
+  <!-- ── Hero: the governed assembly line ────────────────────────────────── -->
   <section class="hero">
     <div class="grid-floor" aria-hidden="true"></div>
-    <div class="wrap hero-grid">
-      <div class="hero-copy">
-        <div class="kicker">Govern · the wicked loop</div>
-        <h1>The control room<br>for <span class="y">governed agent delivery.</span></h1>
-        <p class="lede">
-          You cannot stabilize the harness — the agents and their models keep changing. <b>wicked-crew is
-          the durable control room around them</b>: you <b>drive</b>, the <b>gates</b> decide, every
-          decision is <b>audited</b>, and the <b>human stays in command</b>. It runs your own CLIs as
-          governed workers through durable, multi-agent workflows where <b>“done” is re-derived from
-          evidence</b>, never self-graded. Intent in, verified work out — on the wicked-core engine.
-        </p>
-        <div class="hero-tags" role="list">
-          <span role="listitem">bring your own CLI</span>
-          <span role="listitem">can’t self-grade</span>
-          <span role="listitem">workflows are data</span>
-          <span role="listitem">crash-resumable</span>
-          <span role="listitem">local-first</span>
+    <div class="wrap hero-head">
+      <div class="kicker">Govern · the wicked loop</div>
+      <h1>The control room that<br>runs <span class="y">your agents.</span></h1>
+      <p class="lede">
+        Point crew at the coding agents you already run — <b>Claude Code, Antigravity, Codex, OSS CLIs</b>.
+        Intent goes in; <b>governed, verified work</b> comes out. And the thing that
+        grades the work is <b>never</b> the thing that did it.
+      </p>
+    </div>
+
+    <!-- Self-playing line: intent → your CLIs run as governed workers → the gate
+         re-derives "done" from evidence (and can refuse) → verified work out. -->
+    <div class="wrap hero-line-wrap">
+      <div class="line" data-line aria-label="Intent in; your agents run as governed workers in isolated worktrees; the gate re-derives done from evidence and can refuse; verified work out">
+        <div class="ln-stage ln-intent">
+          <span class="ln-k">intent</span>
+          <span class="ln-intent-v">“add rate-limiting to the API”</span>
+          <span class="ln-sub">plain English in</span>
         </div>
-        <div class="hero-cta">
-          <a class="btn btn-primary" href="#gate">Operate the gate ↓</a>
-          <a class="btn btn-ghost" href="#get">Install it</a>
+
+        <div class="ln-flow" data-flow aria-hidden="true"><span class="ln-pip"></span></div>
+
+        <div class="ln-stage ln-crew">
+          <div class="ln-crew-bar"><span class="ln-badge">wicked-crew</span><span class="ln-crew-loc">the control room</span></div>
+          <div class="ln-crew-body">
+            <span class="ln-crew-label">your CLIs, dispatched as governed workers · isolated git worktrees</span>
+            <div class="ln-workers">
+              <span class="ln-worker" data-w><i class="ln-dot"></i>claude</span>
+              <span class="ln-worker" data-w><i class="ln-dot"></i>antigravity</span>
+              <span class="ln-worker" data-w><i class="ln-dot"></i>codex</span>
+            </div>
+            <div class="ln-gate" data-gate>
+              <span class="ln-gate-node" data-gate-node>GATE</span>
+              <span class="ln-gate-t" data-gate-t>the grader is never the doer — <b>done is re-derived from evidence</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ln-flow" data-flow aria-hidden="true"><span class="ln-pip"></span></div>
+
+        <div class="ln-stage ln-out" data-out>
+          <span class="ln-stamp" data-stamp>✓ VERIFIED</span>
+          <span class="ln-sub">work out — nothing self-graded</span>
         </div>
       </div>
+    </div>
 
-      <!-- Control-room plate: crew DRIVES YOUR CLIs as governed workers → verified out. -->
-      <aside class="plate" aria-label="Intent in, governed workers, verified work out">
-        <div class="plate-bar">
-          <span class="plate-badge">wicked-crew</span>
-          <span class="plate-loc">the control room</span>
-        </div>
-        <div class="plate-flow">
-          <div class="pf-in"><span class="pf-k">intent</span><span class="pf-v">“add rate-limiting to the API”</span></div>
-          <div class="pf-workers" aria-hidden="true">
-            <span class="pf-worker"><i class="pf-dot"></i>claude -p<span class="pf-wt">worktree</span></span>
-            <span class="pf-worker"><i class="pf-dot"></i>codex exec<span class="pf-wt">worktree</span></span>
-            <span class="pf-worker"><i class="pf-dot"></i>local model<span class="pf-wt">worktree</span></span>
-          </div>
-          <div class="pf-your">your CLIs · your auth · no shell · isolated worktrees</div>
-          <div class="pf-gate" aria-hidden="true">
-            <span class="pf-gate-node">gate</span>
-            <span class="pf-gate-t">done re-derived from evidence</span>
-          </div>
-          <div class="pf-out"><span class="pf-stamp">VERIFIED</span><span class="pf-out-t">work out — nothing self-graded</span></div>
-        </div>
-      </aside>
+    <div class="wrap hero-foot">
+      <div class="hero-tags" role="list">
+        <span role="listitem">bring your own CLI</span>
+        <span role="listitem">can’t self-grade</span>
+        <span role="listitem">workflows are data</span>
+        <span role="listitem">crash-resumable</span>
+        <span role="listitem">local-first</span>
+      </div>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#gate">Operate the gate ↓</a>
+        <a class="btn btn-ghost" href="#get">Install it</a>
+      </div>
     </div>
   </section>
+
+  <script is:inline>
+    (function () {
+      var line = document.querySelector('[data-line]');
+      if (!line) return;
+      var flows = Array.prototype.slice.call(line.querySelectorAll('[data-flow]'));
+      var workers = Array.prototype.slice.call(line.querySelectorAll('[data-w]'));
+      var gate = line.querySelector('[data-gate]');
+      var gateT = line.querySelector('[data-gate-t]');
+      var out = line.querySelector('[data-out]');
+      if (flows.length < 2 || !gate || !out) return;
+      var DEFAULT = gateT ? gateT.innerHTML : '';
+      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var timers = [];
+      function at(fn, ms) { timers.push(setTimeout(fn, ms)); }
+      function clear() { for (var i = 0; i < timers.length; i++) clearTimeout(timers[i]); timers = []; }
+      function workersOn(on) { for (var i = 0; i < workers.length; i++) workers[i].classList.toggle('is-on', on); }
+      function reset() {
+        for (var i = 0; i < flows.length; i++) flows[i].classList.remove('is-live');
+        workersOn(false);
+        gate.classList.remove('is-deny', 'is-pass');
+        if (gateT) gateT.innerHTML = DEFAULT;
+        out.classList.remove('is-done');
+      }
+      function pass() {
+        gate.classList.remove('is-deny'); gate.classList.add('is-pass');
+        if (gateT) gateT.innerHTML = '<b>re-derived</b> — verifier re-ran, evidence re-hashed';
+      }
+      // one run through the line. deny=true first shows the gate REFUSING, the
+      // work re-running, and only then passing — that's "can't self-grade".
+      function run(deny) {
+        clear(); reset();
+        at(function () { flows[0].classList.add('is-live'); }, 250);
+        at(function () { if (workers[0]) workers[0].classList.add('is-on'); }, 950);
+        at(function () { if (workers[1]) workers[1].classList.add('is-on'); }, 1180);
+        at(function () { if (workers[2]) workers[2].classList.add('is-on'); }, 1410);
+        if (deny) {
+          at(function () {
+            gate.classList.add('is-deny');
+            if (gateT) gateT.innerHTML = '<b>REJECTED</b> — evidence didn’t hold; sent back to rerun';
+          }, 2200);
+          at(function () { gate.classList.remove('is-deny'); workersOn(false); }, 3300);
+          at(function () { if (workers[0]) workers[0].classList.add('is-on'); }, 3600);
+          at(function () { if (workers[1]) workers[1].classList.add('is-on'); }, 3800);
+          at(function () { if (workers[2]) workers[2].classList.add('is-on'); }, 4000);
+          at(pass, 4700);
+          at(function () { flows[1].classList.add('is-live'); }, 5050);
+          at(function () { out.classList.add('is-done'); }, 5450);
+          at(function () { run(false); }, 8000);
+        } else {
+          at(pass, 2300);
+          at(function () { flows[1].classList.add('is-live'); }, 2650);
+          at(function () { out.classList.add('is-done'); }, 3050);
+          at(function () { run(true); }, 5600);
+        }
+      }
+      if (reduced) {
+        for (var i = 0; i < flows.length; i++) flows[i].classList.add('is-live');
+        workersOn(true); pass(); out.classList.add('is-done');
+        return;
+      }
+      run(false);
+    })();
+  </script>
 
   <!-- ── Intent-driven development beat ────────────────────────────────── -->
   <section class="idd" aria-labelledby="idd-h">
