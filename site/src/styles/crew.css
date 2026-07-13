@@ -953,28 +953,76 @@ code {
    Placed last so it wins over the structural collapse blocks above. */
 @media (max-width: 600px) {
   /* BYO: 8 CLIs → a compact 2-col tile grid (4 rows), not 8 full-width cards.
-     Drop the auth badge + active dot (cards aren't interactive on a phone). */
+     Drop the auth badge, active dot, AND the interactive "dispatched worker"
+     stage — the grid alone tells the story and now fits one screen. */
   .byo-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
   .byo-card { padding: 10px 11px; gap: 2px; border-radius: 10px; }
   .byo-name { font-size: 0.84rem; }
   .byo-cli { font-size: 0.64rem; }
   .byo-tag { display: none; }
   .byo-dot { display: none; }
+  .byo-stage { display: none; }
+  /* no stage to drive on a phone → neutralize the "selected" tile so all 8 read uniformly */
+  .byo-card.is-active { border-color: var(--hairline-strong); background: color-mix(in oklab, var(--surface) 60%, transparent); box-shadow: none; }
+  .byo-card.is-active .byo-name { color: var(--ink); }
 
-  /* Gate console: compress the ladder — tight connectors, smaller caps + rows —
-     so all 6 switches + verdict fit the screen (don't touch the toggle geometry). */
-  .gc-rail { padding: 12px 12px; }
-  .gc-node { padding: 6px 12px; }
-  .gc-seg { height: 9px; }
-  .gc-sw { padding: 4px 10px; }
-  .gc-sw-name { font-size: 0.74rem; }
+  /* Gate console: the interactive series-circuit ladder is a DESKTOP affordance —
+     shrinking it never fit. Hide it (and the switch-referencing explainer cards)
+     and render the phone-native static verdict panel instead. */
+  .gc, .gc-cards { display: none; }
+  .gc-static { display: block; }
 
-  /* Durable: compress the timeline — tight phase rows + short gates + dock. */
+  /* Studio: same move — hide the live console mock, show the static
+     launch → watch → steer story. */
+  .studio-mock { display: none; }
+  .studio-static { display: block; }
+
+  /* Durable: a vertical phase timeline reads fine on a phone; keep it tight. */
   .rail-track { padding: 14px 18px 16px; }
   .rail-phase { padding: 3px 0; }
   .rail-gate { height: 9px; }
   .rail-dock { padding: 12px 16px 14px; }
 }
+
+/* ── Phone-native static panels ────────────────────────────────────────────
+   Hidden on desktop (min-width guard so the ≤600px `display:block` above wins on
+   phones — a plain `display:none` here would lose on source order); shown ≤600px
+   in place of the interactive gate console and studio (desktop-only experiences). */
+@media (min-width: 601px) { .gc-static, .studio-static { display: none; } }
+
+.gc-static {
+  border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+}
+.gcs-flow {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 14px;
+  border-bottom: 1px solid var(--hairline); background: color-mix(in oklab, var(--canvas) 40%, transparent);
+  font-family: var(--font-mono); font-size: 0.9rem; color: var(--ink);
+}
+.gcs-flow b { color: var(--accent); }
+.gcs-arr { color: var(--faint); }
+.gcs-tag { margin-left: auto; font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+.gcs-list { list-style: none; margin: 0; padding: 6px 0; }
+.gcs-list li { display: flex; align-items: center; gap: 10px; padding: 7px 14px; font-family: var(--font-mono); font-size: 0.78rem; }
+.gcs-list li::before { content: ''; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.gcs-list li.is-fail::before { background: var(--deny); }
+.gcs-list li.is-abstain::before { background: color-mix(in oklab, var(--ink) 38%, transparent); }
+.gcs-name { flex: 1; color: var(--ink); }
+.gcs-state { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.06em; color: var(--accent); }
+.gcs-list li.is-fail .gcs-state { color: var(--deny); }
+.gcs-list li.is-abstain .gcs-state { color: var(--faint); }
+.gcs-verdict { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--hairline); background: color-mix(in oklab, var(--deny) 8%, transparent); }
+.gcs-stamp { flex: 0 0 auto; font-family: var(--font-mono); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.08em; color: #fff; background: var(--deny); border-radius: 6px; padding: 4px 10px; }
+.gcs-vtext { font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 78%, transparent); }
+.gcs-vtext b { color: var(--ink); }
+
+.sts-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.sts-steps li { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--hairline-strong); border-radius: 12px; padding: 13px 14px; background: color-mix(in oklab, var(--surface) 58%, transparent); }
+.sts-n { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; color: var(--accent-ink); background: var(--accent); }
+.sts-steps li > div { font-size: 0.86rem; line-height: 1.45; color: color-mix(in oklab, var(--ink) 82%, transparent); }
+.sts-steps li b { color: var(--ink); }
+.sts-steps code { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, transparent); border: 1px solid color-mix(in oklab, var(--accent) 25%, var(--hairline-strong)); border-radius: 6px; padding: 5px 9px; width: max-content; max-width: 100%; overflow-wrap: anywhere; }
+.sts-chip { display: inline-block; margin-top: 6px; font-family: var(--font-mono); font-size: 0.66rem; color: var(--deny); background: color-mix(in oklab, var(--deny) 10%, transparent); border: 1px solid color-mix(in oklab, var(--deny) 35%, var(--hairline-strong)); border-radius: 999px; padding: 3px 10px; }
 
 @media (prefers-reduced-motion: reduce) {
   .btn, .gh-pill, .gc-node, .gc-seg, .rail-dot, .rail-name, .rail-token, .gc-v-stamp, .byo-card, .gc-card, .wf-file { transition: none; }
