@@ -203,6 +203,28 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     expect(gateRes.status).toBe(404);
   });
 
+  it('POST /runs threads the workflow field through the schema to the core', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        problem: 'Extract domain rules from the payments service',
+        sessionId: 'it-workflow-field',
+        clisJson: SEATS,
+        workflow: 'domain-extraction',
+      }),
+    });
+    const body = (await res.json()) as { runId?: string; error?: string };
+    // The schema accepted the field when the response is NOT a schema rejection.
+    // 201 = workflow found; 400 = workflow def not in the stub store (still schema-OK).
+    expect(body.error).not.toBe('Invalid request body');
+    if (res.status === 201) {
+      expect(body.runId).toBe('it-workflow-field');
+    } else {
+      expect([400, 409]).toContain(res.status);
+    }
+  });
+
   it('unknown run ids 404 on gate/cancel/resume', async () => {
     const gate = await fetch(`${baseUrl}/api/v1/runs/nope/gate`, {
       method: 'POST',

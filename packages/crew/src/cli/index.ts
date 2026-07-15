@@ -101,13 +101,13 @@ async function main(): Promise<void> {
     const problem = flag(argv, '--problem') ?? 'No problem specified';
     const humanConfirm = flag(argv, '--human-confirm'); // none | all | before:<ord>
     const workflow = flag(argv, '--workflow'); // e.g. domain-extraction
-    if (workflow?.startsWith('-')) {
-      console.error(`--workflow value "${workflow}" looks like a flag — did you forget to supply a value?`);
+    if (hasFlag(argv, '--workflow') && (workflow === undefined || workflow.startsWith('-'))) {
+      console.error(`--workflow requires a value (got: ${workflow ?? '(missing)'})`);
       process.exit(1);
     }
     const repoRef = flag(argv, '--repo'); // id of a registered repo
-    if (repoRef?.startsWith('-')) {
-      console.error(`--repo value "${repoRef}" looks like a flag — did you forget to supply a value?`);
+    if (hasFlag(argv, '--repo') && (repoRef === undefined || repoRef.startsWith('-'))) {
+      console.error(`--repo requires a value (got: ${repoRef ?? '(missing)'})`);
       process.exit(1);
     }
     const { adapter, port } = await bootstrap(opts);
