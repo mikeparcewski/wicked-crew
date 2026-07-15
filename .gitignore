@@ -10,3 +10,7 @@ coverage/
 *.log
 .wicked-testing/evidence/
 packages/*/.wicked-vault/
+coverage-report.json
+wicked-estate.coverage.json
+*.db.knowledge
+.product/domain-model.json
