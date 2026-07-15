@@ -128,6 +128,7 @@ export class CoreAdapter {
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
+    if (input.workflow !== undefined) opts.workflow = input.workflow;
     return this.core.launchRun(opts);
   }
 

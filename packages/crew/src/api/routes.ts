@@ -53,6 +53,7 @@ const LaunchSchema = z.object({
   entityMode: z.enum(['shared', 'isolated']).optional(),
   humanConfirm: z.string().min(1).optional(),
   repoRef: z.string().min(1).optional(),
+  workflow: z.string().min(1).optional(),
 });
 
 const GateSchema = z.object({
@@ -130,6 +131,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
+    if (b.workflow !== undefined) input.workflow = b.workflow;
     try {
       const runId = await adapter.launchRun(input);
       return reply.code(201).send({ runId });

@@ -110,6 +110,8 @@ export interface LaunchRunInput {
   humanConfirm?: string;
   /** Id of a registered repo to run within. Omit for a repo-less run. */
   repoRef?: string;
+  /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
+  workflow?: string;
 }
 
 /**
