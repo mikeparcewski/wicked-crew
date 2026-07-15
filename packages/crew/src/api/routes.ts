@@ -159,10 +159,12 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   });
 
   // A unit's captured transcript. unitKey is the suffix after `<run>:` — `u<ord>` for free-text
-  // runs, `<phase_id>` for workflow runs (e.g. "survey", "coverage").
+  // runs, `<phase_id>` for workflow runs (e.g. "survey", "coverage"). Strip any accidental
+  // `<id>:` prefix so both `survey` and `run-1:survey` resolve to the same key.
   app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
     const { id, unitKey } = req.params as { id: string; unitKey: string };
-    const output = await adapter.workOutput(`${id}:${unitKey}`);
+    const suffix = unitKey.startsWith(`${id}:`) ? unitKey.slice(id.length + 1) : unitKey;
+    const output = await adapter.workOutput(`${id}:${suffix}`);
     return reply.send({ output });
   });
 

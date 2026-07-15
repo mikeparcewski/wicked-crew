@@ -20,7 +20,7 @@ function routingSummary(r: NonNullable<UnitModel['routing']>): string {
  * assumptions surface (toolchain, no-rollback constraints, …) awaits a skill convention.
  */
 export function AssumptionsPanel({ model }: Props): React.ReactElement {
-  const routed = model.units.filter((u) => u.resolved && u.routing !== null);
+  const routed = model.units.filter((u) => u.resolved && u.routing != null);
 
   return (
     <div data-testid="assumptions" className="flex flex-col gap-2 text-[11px]">

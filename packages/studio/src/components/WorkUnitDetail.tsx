@@ -52,7 +52,7 @@ export function WorkUnitDetail({ runId, unit, isGated, onResolved }: Props): Rea
       setLoadingTranscript(true);
       try {
         // unit.id is `<session>:<phase_id>` for workflow runs, `<session>:u<ord>` for free-text.
-        // The store key is the suffix after the session prefix (e.g. "survey" or "u1").
+        // unitKey is the REST path suffix (e.g. "survey" or "u1") used in GET /units/:unitKey/output.
         const unitKey = unit.id.startsWith(`${runId}:`) ? unit.id.slice(runId.length + 1) : `u${unit.ord}`;
         const { output } = await api.getUnitOutput(runId, unitKey);
         // If REST returns null (e.g. unit still executing or id mismatch), use the buffered
@@ -86,18 +86,21 @@ export function WorkUnitDetail({ runId, unit, isGated, onResolved }: Props): Rea
         </span>
         {/* For workflow runs, description is "<phase> — <problem>". Show the phase label
             prominently; the problem suffix is identical across all units and adds no signal. */}
-        {unit.description.includes(' — ') ? (
-          <span className="flex-1 min-w-0 flex items-baseline gap-1">
-            <span className="text-xs font-medium text-gray-800 shrink-0">
-              {unit.description.split(' — ')[0]}
+        {(() => {
+          const sep = unit.description.indexOf(' — ');
+          return sep === -1 ? (
+            <span className="flex-1 truncate text-xs text-gray-700">{unit.description}</span>
+          ) : (
+            <span className="flex-1 min-w-0 flex items-baseline gap-1">
+              <span className="text-xs font-medium text-gray-800 shrink-0">
+                {unit.description.slice(0, sep)}
+              </span>
+              <span className="truncate text-[10px] text-gray-400">
+                {unit.description.slice(sep + 3)}
+              </span>
             </span>
-            <span className="truncate text-[10px] text-gray-400">
-              {unit.description.split(' — ').slice(1).join(' — ')}
-            </span>
-          </span>
-        ) : (
-          <span className="flex-1 truncate text-xs text-gray-700">{unit.description}</span>
-        )}
+          );
+        })()}
         <span className={`text-[11px] font-medium ${UNIT_STATUS_STYLE[unit.status] ?? 'text-gray-500'}`}>
           {unit.status}
         </span>
