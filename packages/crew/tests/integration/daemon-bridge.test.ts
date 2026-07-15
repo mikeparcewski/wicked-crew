@@ -185,8 +185,8 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     expect(count('unitDone')).toBe(2);
   });
 
-  it('GET /runs/:id/units/1/output returns the captured stub transcript', async () => {
-    const res = await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/units/1/output`);
+  it('GET /runs/:id/units/u1/output returns the captured stub transcript', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/units/u1/output`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { output: string | null };
     expect(typeof body.output).toBe('string');

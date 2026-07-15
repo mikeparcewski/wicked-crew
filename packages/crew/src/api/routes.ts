@@ -158,10 +158,13 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return { run };
   });
 
-  // A unit's captured transcript. Unit id convention: `<run>:u<ord>`.
-  app.get(`${V}/runs/:id/units/:ord/output`, async (req, reply) => {
-    const { id, ord } = req.params as { id: string; ord: string };
-    const output = await adapter.workOutput(`${id}:u${ord}`);
+  // A unit's captured transcript. unitKey is the suffix after `<run>:` — `u<ord>` for free-text
+  // runs, `<phase_id>` for workflow runs (e.g. "survey", "coverage"). Strip any accidental
+  // `<id>:` prefix so both `survey` and `run-1:survey` resolve to the same key.
+  app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
+    const { id, unitKey } = req.params as { id: string; unitKey: string };
+    const suffix = unitKey.startsWith(`${id}:`) ? unitKey.slice(id.length + 1) : unitKey;
+    const output = await adapter.workOutput(`${id}:${suffix}`);
     return reply.send({ output });
   });
 
