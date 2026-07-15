@@ -100,6 +100,8 @@ async function main(): Promise<void> {
     const opts = parseBootstrap(argv);
     const problem = flag(argv, '--problem') ?? 'No problem specified';
     const humanConfirm = flag(argv, '--human-confirm'); // none | all | before:<ord>
+    const workflow = flag(argv, '--workflow'); // e.g. domain-extraction
+    const repoRef = flag(argv, '--repo'); // id of a registered repo
     const { adapter, port } = await bootstrap(opts);
     const input: LaunchRunInput = {
       problem,
@@ -107,6 +109,8 @@ async function main(): Promise<void> {
       clisJson: JSON.stringify(CoreAdapter.roster()),
     };
     if (humanConfirm !== undefined) input.humanConfirm = humanConfirm;
+    if (workflow !== undefined) input.workflow = workflow;
+    if (repoRef !== undefined) input.repoRef = repoRef;
     const runId = await adapter.launchRun(input);
     printReady({ mode: 'start', port, db: opts.dbPath, run: runId, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'resume') {
