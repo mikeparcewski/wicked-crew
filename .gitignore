@@ -14,3 +14,5 @@ coverage-report.json
 wicked-estate.coverage.json
 *.db.knowledge
 .product/domain-model.json
+scripts/domain/__pycache__/
+.product/
