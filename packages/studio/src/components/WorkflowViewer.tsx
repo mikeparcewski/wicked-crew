@@ -4,7 +4,9 @@ import type { WorkflowDef, PhaseDef, GateSpec } from '../api/types.js';
 
 function gateLabel(gate: GateSpec): string {
   if (gate === 'auto') return 'Auto';
-  if ('human_confirm' in gate) return gate.human_confirm.unconditional ? 'Human (unconditional)' : 'Human';
+  if (gate && typeof gate === 'object' && 'human_confirm' in gate) {
+    return gate.human_confirm.unconditional ? 'Human (unconditional)' : 'Human';
+  }
   return 'Human if not PASS';
 }
 

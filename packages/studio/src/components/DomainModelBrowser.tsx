@@ -37,7 +37,7 @@ function RequirementRow({ id, req }: { id: string; req: DomainGraphRequirement }
           )}
         </div>
         <span className="shrink-0 text-[10px] text-gray-300">
-          {req.business_rules.length}br · {req.validations.length}val
+          {req.business_rules?.length ?? 0}br · {req.validations?.length ?? 0}val
         </span>
       </button>
 
@@ -45,11 +45,11 @@ function RequirementRow({ id, req }: { id: string; req: DomainGraphRequirement }
         <div className="px-4 pb-3 flex flex-col gap-2 text-[10px]">
           {req.description && <p className="text-gray-600">{req.description}</p>}
 
-          {req.business_rules.length > 0 && (
+          {(req.business_rules?.length ?? 0) > 0 && (
             <div>
               <p className="font-semibold text-gray-500 uppercase tracking-wider mb-1">Business rules</p>
               <ul className="flex flex-col gap-0.5">
-                {req.business_rules.map((br) => (
+                {(req.business_rules ?? []).map((br) => (
                   <li key={br.id} className="flex items-start gap-1.5">
                     <span className="font-mono text-gray-300 shrink-0">{br.id}</span>
                     <span className="text-gray-700">{br.statement}</span>
@@ -60,11 +60,11 @@ function RequirementRow({ id, req }: { id: string; req: DomainGraphRequirement }
             </div>
           )}
 
-          {req.validations.length > 0 && (
+          {(req.validations?.length ?? 0) > 0 && (
             <div>
               <p className="font-semibold text-gray-500 uppercase tracking-wider mb-1">Validations</p>
               <ul className="flex flex-col gap-0.5">
-                {req.validations.map((v) => (
+                {(req.validations ?? []).map((v) => (
                   <li key={v.id} className="flex items-start gap-1.5">
                     <span className="font-mono text-gray-300 shrink-0">{v.id}</span>
                     <span className="text-gray-700">{v.statement}</span>
@@ -74,11 +74,11 @@ function RequirementRow({ id, req }: { id: string; req: DomainGraphRequirement }
             </div>
           )}
 
-          {req.error_paths.length > 0 && (
+          {(req.error_paths?.length ?? 0) > 0 && (
             <div>
               <p className="font-semibold text-red-400 uppercase tracking-wider mb-1">Error paths</p>
               <ul className="flex flex-col gap-0.5">
-                {req.error_paths.map((ep) => (
+                {(req.error_paths ?? []).map((ep) => (
                   <li key={ep.id} className="flex items-start gap-1.5">
                     <span className="font-mono text-gray-300 shrink-0">{ep.id}</span>
                     <span className="text-red-700">{ep.statement}</span>
@@ -95,8 +95,8 @@ function RequirementRow({ id, req }: { id: string; req: DomainGraphRequirement }
 
 function DomainSection({ name, domain }: { name: string; domain: DomainGraphDomain }): React.ReactElement {
   const [open, setOpen] = useState(true);
-  const reqIds = Object.keys(domain.requirements);
-  const entityIds = Object.keys(domain.entities);
+  const reqIds = Object.keys(domain.requirements ?? {});
+  const entityIds = Object.keys(domain.entities ?? {});
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
       <button
@@ -190,16 +190,16 @@ export function DomainModelBrowser(): React.ReactElement {
   }
 
   const lc = search.toLowerCase();
-  const domainNames = Object.keys(graph.domains).filter((name) => {
+  const domainNames = Object.keys(graph.domains ?? {}).filter((name) => {
     if (!lc) return true;
     const d = graph.domains[name]!;
     if (name.toLowerCase().includes(lc)) return true;
     if (d.description?.toLowerCase().includes(lc)) return true;
-    return Object.entries(d.requirements).some(
+    return Object.entries(d.requirements ?? {}).some(
       ([rid, r]) =>
         rid.toLowerCase().includes(lc) ||
-        r.title.toLowerCase().includes(lc) ||
-        r.description.toLowerCase().includes(lc),
+        r.title?.toLowerCase().includes(lc) ||
+        r.description?.toLowerCase().includes(lc),
     );
   });
 
