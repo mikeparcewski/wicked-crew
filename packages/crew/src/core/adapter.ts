@@ -18,15 +18,19 @@ import type {
 // `subscribe` seam has a blast radius of exactly one file.
 const require = createRequire(import.meta.url);
 
-// ── Governance methods (crew#40) ─────────────────────────────────────────────
+// ── Governance methods (crew#40/42) ──────────────────────────────────────────
 // These instance methods are present on the napi `Core` class after the Rust
-// crate is rebuilt with the crew#40 governance seam. The intersection type
+// crate is rebuilt with the crew#40/42 governance seam. The intersection type
 // below satisfies the TypeScript compiler until node_modules is updated.
 type GovernanceMethods = {
   listPolicies(): Promise<string>;
   listConformanceRules(): Promise<string>;
   listConformanceClaims(): Promise<string>;
   getCoverageReport(): Promise<string>;
+  // crew#42 write seam
+  upsertPolicy(policyJson: string): Promise<string>;
+  upsertConformanceRule(ruleJson: string): Promise<string>;
+  recallRulesPreview(queryJson: string): Promise<string>;
 };
 
 type CoreHandleFull = CoreHandle & GovernanceMethods;
@@ -252,6 +256,28 @@ export class CoreAdapter {
   /** Front-half coverage gate report; null when the store has no graph nodes. */
   async getCoverageReport(): Promise<CoverageReport | null> {
     return JSON.parse(await this.core.getCoverageReport()) as CoverageReport | null;
+  }
+
+  // ── Governance writes (crew#42) ────────────────────────────────────────────
+
+  /** Upsert a governance policy via the single-writer actor. */
+  async upsertPolicy(policy: GovernancePolicy): Promise<void> {
+    await this.core.upsertPolicy(JSON.stringify(policy));
+  }
+
+  /** Upsert a conformance rule via the single-writer actor. */
+  async upsertConformanceRule(rule: ConformanceRule): Promise<void> {
+    await this.core.upsertConformanceRule(JSON.stringify(rule));
+  }
+
+  /** Recall conformance rules matching a facet query (read-only, does not block actor). */
+  async recallRulesPreview(query: Record<string, string | undefined>): Promise<ConformanceRule[]> {
+    const cleanQuery: Record<string, string> = {};
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v.length > 0) cleanQuery[k] = v;
+    }
+    const json = await this.core.recallRulesPreview(JSON.stringify(cleanQuery));
+    return JSON.parse(json) as ConformanceRule[];
   }
 
   // ── Workflow viewer (crew#44) ───────────────────────────────────────────────
