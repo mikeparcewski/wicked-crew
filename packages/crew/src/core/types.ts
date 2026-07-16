@@ -168,3 +168,90 @@ export interface CoreEvent {
   combined?: boolean;
   [k: string]: unknown;
 }
+
+// ── Governance types (crew#40) ──────────────────────────────────────────────
+
+/**
+ * A registered governance policy (`wicked-governance::Policy`).
+ * Serialized via serde snake_case — `effect` values are `deny` | `allow_with_conditions` | `allow`;
+ * `severity` values are `high` | `medium` | `low`.
+ */
+export interface GovernancePolicy {
+  id: string;
+  kind: string;
+  applies_to: string[];
+  effect: 'deny' | 'allow_with_conditions' | 'allow';
+  trigger: { contains?: string };
+  obligations: string[];
+  criteria: string;
+  severity: 'high' | 'medium' | 'low';
+  rule: string;
+}
+
+/**
+ * A prescriptive conformance rule (`wicked-governance::ConformanceRule`).
+ * `rule_type` is `pattern` | `policy`; `severity` is `info` | `warn` | `error` | `critical`.
+ */
+export interface ConformanceRule {
+  id: string;
+  rule_type: 'pattern' | 'policy';
+  statement: string;
+  severity: 'info' | 'warn' | 'error' | 'critical';
+  confidence: number;
+  targets: { language?: string; layer?: string; framework?: string };
+  symbol_ref?: string;
+  compliance?: { framework: string; control_id: string };
+  provenance: { source: string; ref?: string; source_kinds: string[] };
+}
+
+/**
+ * A recorded conformance claim / evaluation result (`wicked-apps-core::ConformanceClaim`).
+ * `decision` values are `allow` | `deny` | `allow_with_conditions` (serde snake_case).
+ */
+export interface GovernanceClaim {
+  claim_id: string;
+  scope: string;
+  phase: string;
+  policy_ids: string[];
+  decision: 'allow' | 'deny' | 'allow_with_conditions';
+  obligations: string[];
+  evaluated_context_ref: string;
+  criteria: string;
+  evaluator_identity: string;
+  /** Unix-seconds timestamp. */
+  evaluated_at: number;
+}
+
+/** Per-app breakdown within a `CoverageReport`. */
+export interface CoveragePerApp {
+  app: string;
+  behavior_bearing: number;
+  resolved: number;
+  risk_flagged: number;
+  unaccounted: number;
+  coverage: number;
+}
+
+/** A behavior-bearing graph node without a coverage annotation (a coverage hole). */
+export interface UnaccountedNode {
+  symbol_id: string;
+  name?: string;
+  kind?: string;
+  file?: string;
+  app?: string;
+}
+
+/** Front-half coverage gate report (`wicked-governance::CoverageReport`). Null on empty store. */
+export interface CoverageReport {
+  total: number;
+  behavior_bearing: number;
+  resolved: number;
+  risk_flagged: number;
+  unaccounted: number;
+  coverage: number;
+  resolved_rate: number;
+  mean_confidence: number;
+  resolve_threshold: number;
+  per_app: CoveragePerApp[];
+  unaccounted_nodes: UnaccountedNode[];
+}

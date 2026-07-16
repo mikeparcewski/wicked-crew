@@ -232,6 +232,28 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return { runId: id, ...entry };
   });
 
+  // ── Governance reads (crew#40) ──────────────────────────────────────────────
+
+  app.get(`${V}/governance/policies`, async () => {
+    const policies = await adapter.listPolicies();
+    return { policies };
+  });
+
+  app.get(`${V}/governance/rules`, async () => {
+    const rules = await adapter.listConformanceRules();
+    return { rules };
+  });
+
+  app.get(`${V}/governance/claims`, async () => {
+    const claims = await adapter.listConformanceClaims();
+    return { claims };
+  });
+
+  app.get(`${V}/governance/coverage`, async () => {
+    const report = await adapter.getCoverageReport();
+    return { report };
+  });
+
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
   // Open a PTY → its id. Drive it over the per-terminal WS `/ws/terminals/:id`;
   // raw output arrives there. `governed` defaults to `true` (the gate-hook-routed
