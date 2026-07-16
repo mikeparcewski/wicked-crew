@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { CoverageView } from './components/CoverageView.js';
 import { DomainModelBrowser } from './components/DomainModelBrowser.js';
@@ -10,13 +10,13 @@ import { LaunchForm } from './components/LaunchForm.js';
 import { RuleManager } from './components/RuleManager.js';
 import { WorkflowViewer } from './components/WorkflowViewer.js';
 import { useEventStream } from './hooks/useEventStream.js';
+import { useRoute } from './hooks/useRoute.js';
 import { useRuns } from './hooks/useRuns.js';
 import { useGateStore } from './store/gates.js';
 import { useRuntimeStore } from './store/runtime.js';
 import { useRunEventStore } from './store/events.js';
 import type { CoreEvent } from './api/types.js';
-
-type Panel = 'runs' | 'coverage' | 'workflows' | 'domain' | 'policies' | 'rules';
+import type { Panel } from './hooks/useRoute.js';
 
 /** Frames that change run-list / unit state → trigger a `GET /runs` reconcile. */
 const LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
@@ -35,20 +35,14 @@ const LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 export function App(): React.ReactElement {
+  const { panel, runId, showLaunch, navigate, panelPath } = useRoute();
   const { runs, refresh } = useRuns();
   const ingestGate = useGateStore((s) => s.ingest);
   const ingestRuntime = useRuntimeStore((s) => s.ingest);
   const ingestRunEvent = useRunEventStore((s) => s.ingest);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [showLaunch, setShowLaunch] = useState(false);
-  const [panel, setPanel] = useState<Panel>('runs');
 
   const handleEvent = useCallback(
     (event: CoreEvent) => {
-      // Fold each frame into the gate cache + the live-output/event-log store + the
-      // per-run structured append log (the useRunModel merge source), then reconcile
-      // the run list on any lifecycle transition. Unknown types are folded harmlessly
-      // and never trigger a refresh (additive-safe).
       ingestGate(event);
       ingestRuntime(event);
       ingestRunEvent(event);
@@ -59,21 +53,18 @@ export function App(): React.ReactElement {
 
   useEventStream(handleEvent);
 
-  const selectRun = useCallback((runId: string) => {
-    setSelectedRunId(runId);
-    setShowLaunch(false);
-  }, []);
+  const selectRun = useCallback((id: string) => {
+    navigate(`/runs/${encodeURIComponent(id)}`);
+  }, [navigate]);
 
-  const onLaunched = useCallback(
-    (runId: string) => {
-      setSelectedRunId(runId);
-      setShowLaunch(false);
-      refresh();
-    },
-    [refresh],
-  );
+  const onLaunched = useCallback((id: string) => {
+    refresh();
+    navigate(`/runs/${encodeURIComponent(id)}`);
+  }, [navigate, refresh]);
 
-  const selected = runs.find((v) => v.session.id === selectedRunId) ?? null;
+  const selected = runs.find((v) => v.session.id === runId) ?? null;
+
+  const NAV_PANELS: Panel[] = ['runs', 'coverage', 'workflows', 'domain', 'policies', 'rules'];
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -81,11 +72,11 @@ export function App(): React.ReactElement {
         <div className="flex items-center gap-3">
           <span className="font-bold text-sm tracking-tight">wicked-studio</span>
           <nav className="flex gap-1">
-            {(['runs', 'coverage', 'workflows', 'domain', 'policies', 'rules'] as Panel[]).map((p) => (
-              <button
+            {NAV_PANELS.map((p) => (
+              <a
                 key={p}
-                type="button"
-                onClick={() => setPanel(p)}
+                href={panelPath(p)}
+                onClick={(e) => { e.preventDefault(); navigate(panelPath(p)); }}
                 className={`rounded px-2 py-0.5 text-[11px] font-medium capitalize ${
                   panel === p
                     ? 'bg-gray-100 text-gray-900'
@@ -93,7 +84,7 @@ export function App(): React.ReactElement {
                 }`}
               >
                 {p}
-              </button>
+              </a>
             ))}
           </nav>
         </div>
@@ -138,21 +129,18 @@ export function App(): React.ReactElement {
               <button
                 type="button"
                 data-testid="new-run"
-                onClick={() => {
-                  setShowLaunch(true);
-                  setSelectedRunId(null);
-                }}
+                onClick={() => navigate('/runs/new')}
                 className="rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
               >
                 New run
               </button>
             </div>
-            <RunList runs={runs} selectedRunId={selectedRunId} onSelect={selectRun} />
+            <RunList runs={runs} selectedRunId={runId} onSelect={selectRun} />
           </aside>
 
           <main className="flex-1 overflow-y-auto p-6">
             {showLaunch ? (
-              <LaunchForm onLaunched={onLaunched} onCancel={() => setShowLaunch(false)} />
+              <LaunchForm onLaunched={onLaunched} onCancel={() => navigate('/')} />
             ) : selected ? (
               <RunDetail key={selected.session.id} view={selected} onRefresh={refresh} />
             ) : (
