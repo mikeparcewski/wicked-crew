@@ -83,8 +83,10 @@ def _write_node(estate: _clients.CliEstateClient, sid: str, name: str,
     else:
         stmt = (rule or {}).get("statement") or ""
         risk_req = f"[RISK] {name}: {reason}" + (f" — {stmt}" if stmt else "")
+        _conf_raw = (rule or {}).get("confidence", 0.0)
+        _conf = float(_conf_raw) if isinstance(_conf_raw, (int, float)) and not isinstance(_conf_raw, bool) else 0.0
         estate.annotate(sid, type="risk", key=rid, value=risk_req[:500],
-                        confidence=float((rule or {}).get("confidence", 0.0)),
+                        confidence=_conf,
                         provenance="extract-loop:risk", replace=True)
         estate.set_requirement(sid, requirement=risk_req, validated=False)
     # Read-back: verify the write is durable.
@@ -110,16 +112,10 @@ def _update_coverage_json(coverage_path: str, newly_accounted: int,
     old_resolved = int(doc.get("resolved", 0))
     old_risk = int(doc.get("risk_flagged", 0))
     behavior_bearing = int(doc.get("behavior_bearing", 1))
-    threshold = float(doc.get("resolve_threshold", 0.75))
 
     new_unaccounted = max(0, old_unaccounted - newly_accounted)
     new_risk = old_risk + (newly_accounted - newly_resolved)
     new_resolved = old_resolved + newly_resolved
-
-    # Remove the nodes we just annotated from unaccounted_nodes list.
-    nodes_list = doc.get("unaccounted_nodes", [])
-    # (We don't have a precise per-node list here, so leave it; the loop re-derives
-    # it by checking annotations directly on the next pass.)
 
     doc["unaccounted"] = new_unaccounted
     doc["risk_flagged"] = new_risk

@@ -236,17 +236,17 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
 
   app.get(`${V}/governance/policies`, async () => {
     const policies = await adapter.listPolicies();
-    return policies;
+    return { policies };
   });
 
   app.get(`${V}/governance/rules`, async () => {
     const rules = await adapter.listConformanceRules();
-    return rules;
+    return { rules };
   });
 
   app.get(`${V}/governance/claims`, async () => {
     const claims = await adapter.listConformanceClaims();
-    return claims;
+    return { claims };
   });
 
   app.get(`${V}/governance/coverage`, async () => {

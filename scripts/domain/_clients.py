@@ -63,7 +63,7 @@ def _invoke(argv: list[str]) -> subprocess.CompletedProcess:
     """Run ``argv`` bounded and fail-loud."""
     try:
         return subprocess.run(
-            argv, capture_output=True, text=True, encoding="utf-8",
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, timeout=_DEFAULT_TIMEOUT,
         )
     except FileNotFoundError as e:

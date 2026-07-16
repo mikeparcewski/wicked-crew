@@ -72,29 +72,24 @@ def _build_prompt(batch: list[dict[str, Any]]) -> str:
 
 def _extract_json_array(text: str) -> list[Any]:
     """Pull the outermost JSON array from the model's stdout (it may wrap it in
-    prose or a code fence). Uses bracket-matching from the last ']' to avoid being
-    fooled by conversational brackets in prefix prose. Fail-loud if none is parseable."""
+    prose or a code fence). Uses JSONDecoder.raw_decode to handle brackets inside
+    string literals correctly. Fail-loud if no parseable array is found."""
     s = text.strip()
     if s.startswith("```"):
         parts = s.split("```")
         if len(parts) >= 2:
             inner = parts[1]
             s = inner[4:] if inner.startswith("json") else inner
-    end = s.rfind("]")
-    if end == -1:
-        raise RuntimeError(f"model output has no JSON array: {text[:200]!r}")
-    depth, start = 0, -1
-    for i in range(end, -1, -1):
-        if s[i] == "]":
-            depth += 1
-        elif s[i] == "[":
-            depth -= 1
-            if depth == 0:
-                start = i
-                break
-    if start == -1:
-        raise RuntimeError(f"model output has no matched JSON array: {text[:200]!r}")
-    return json.loads(s[start:end + 1])
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(s):
+        if ch == "[":
+            try:
+                arr, _ = decoder.raw_decode(s, i)
+                if isinstance(arr, list):
+                    return arr
+            except json.JSONDecodeError:
+                continue
+    raise RuntimeError(f"model output has no JSON array: {text[:200]!r}")
 
 
 def _looks_like_symbol_id(value: Any) -> bool:

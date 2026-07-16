@@ -180,11 +180,11 @@ export interface GovernancePolicy {
   id: string;
   kind: string;
   applies_to: string[];
-  effect: string;
+  effect: 'deny' | 'allow_with_conditions' | 'allow';
   trigger: { contains?: string };
   obligations: string[];
   criteria: string;
-  severity: string;
+  severity: 'high' | 'medium' | 'low';
   rule: string;
 }
 
@@ -194,9 +194,9 @@ export interface GovernancePolicy {
  */
 export interface ConformanceRule {
   id: string;
-  rule_type: string;
+  rule_type: 'pattern' | 'policy';
   statement: string;
-  severity: string;
+  severity: 'info' | 'warn' | 'error' | 'critical';
   confidence: number;
   targets: { language?: string; layer?: string; framework?: string };
   symbol_ref?: string;
@@ -213,7 +213,7 @@ export interface GovernanceClaim {
   scope: string;
   phase: string;
   policy_ids: string[];
-  decision: string;
+  decision: 'allow' | 'deny' | 'allow_with_conditions';
   obligations: string[];
   evaluated_context_ref: string;
   criteria: string;
