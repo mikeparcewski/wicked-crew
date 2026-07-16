@@ -9,6 +9,7 @@ import type {
   ConformanceRule,
   GovernanceClaim,
   CoverageReport,
+  WorkflowDef,
 } from './types.js';
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -38,6 +39,43 @@ interface CoreConstructor {
 }
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
+
+// ── Built-in workflow definitions (crew#44) ──────────────────────────────────
+// Static mirrors of workflow.rs feature_def / bug_def / migration_def.
+// Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
+// the wicked-core-ts NAPI methods land.
+const BUILTIN_WORKFLOWS: WorkflowDef[] = [
+  {
+    id: 'feature',
+    phases: [
+      { id: 'clarify', kind: 'recon', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'design', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['clarify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'build', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['design'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'adversarial-review', kind: 'review', gate_type: 'execution', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['build'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'test', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['build'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'review', kind: 'review', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['test'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
+    id: 'bug',
+    phases: [
+      { id: 'triage', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'reproduce', kind: 'test', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['triage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'fix', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
+    id: 'migration',
+    phases: [
+      { id: 'plan', kind: 'recon', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'execute', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['plan'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'cutover', kind: 'build', gate_type: 'execution', gate: { human_confirm: { unconditional: true } }, executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['execute'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+];
 
 /** A parsed-CoreEvent listener. */
 export type CoreEventListener = (event: CoreEvent) => void;
@@ -214,6 +252,19 @@ export class CoreAdapter {
   /** Front-half coverage gate report; null when the store has no graph nodes. */
   async getCoverageReport(): Promise<CoverageReport | null> {
     return JSON.parse(await this.core.getCoverageReport()) as CoverageReport | null;
+  }
+
+  // ── Workflow viewer (crew#44) ───────────────────────────────────────────────
+  // The three built-in workflows are expressed as static data mirroring workflow.rs.
+  // When wicked-core-ts gains list_workflows_json / get_workflow_json NAPI methods,
+  // swap these stubs for NAPI calls — the route surface is identical.
+
+  listWorkflows(): WorkflowDef[] {
+    return BUILTIN_WORKFLOWS;
+  }
+
+  getWorkflow(id: string): WorkflowDef | null {
+    return BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
   }
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────

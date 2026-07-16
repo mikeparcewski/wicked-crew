@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
@@ -252,6 +254,35 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   app.get(`${V}/governance/coverage`, async () => {
     const report = await adapter.getCoverageReport();
     return { report };
+  });
+
+  // ── Workflow viewer (crew#44) ──────────────────────────────────────────────
+
+  app.get(`${V}/workflows`, async () => {
+    const workflows = adapter.listWorkflows();
+    return { workflows };
+  });
+
+  app.get(`${V}/workflows/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const workflow = adapter.getWorkflow(id);
+    if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
+    return { workflow };
+  });
+
+  // ── Domain-model browser (crew#44) ────────────────────────────────────────
+  // Reads the `requirements_graph.json` artifact produced by `wicked-core domain-graph`.
+  // Path: `.wicked-estate/requirements/requirements_graph.json` relative to cwd.
+
+  app.get(`${V}/domain-graph`, async (_req, reply) => {
+    const path = join(process.cwd(), '.wicked-estate', 'requirements', 'requirements_graph.json');
+    try {
+      const content = await fsp.readFile(path, 'utf8');
+      return { graph: JSON.parse(content) as unknown };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
+      return reply.code(500).send({ error: message(err) });
+    }
   });
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────

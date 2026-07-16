@@ -255,3 +255,42 @@ export interface CoverageReport {
   per_app: CoveragePerApp[];
   unaccounted_nodes: UnaccountedNode[];
 }
+
+// ── Workflow viewer types (crew#44) ────────────────────────────────────────────
+
+/** Gate position in the value→strategy→execution ladder. */
+export type GateType = 'value' | 'strategy' | 'execution';
+
+/** Human-confirm spec for a phase gate. */
+export type GateSpec =
+  | 'auto'
+  | { human_confirm: { unconditional: boolean } }
+  | { human_confirm_if: 'verdict_not_pass' };
+
+/** Evaluator≠creator role. */
+export type PhaseRole = 'neutral' | 'creator' | 'evaluator';
+
+/** Methodology stage for a phase. */
+export type StageKindPhase = 'recon' | 'build' | 'review' | 'test';
+
+/** One ordered phase of a workflow — pure data. */
+export interface PhaseDef {
+  id: string;
+  kind: StageKindPhase;
+  gate_type: GateType | null;
+  gate: GateSpec;
+  executes_code: boolean;
+  verified_evidence: boolean;
+  required_deliverables: string[];
+  depends_on: string[];
+  role: PhaseRole;
+  skill_ref: string | null;
+  allowed_skills: string[];
+  validator_pin: string | null;
+}
+
+/** A workflow — id + ordered phases. */
+export interface WorkflowDef {
+  id: string;
+  phases: PhaseDef[];
+}
