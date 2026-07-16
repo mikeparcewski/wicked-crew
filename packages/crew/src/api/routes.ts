@@ -249,6 +249,11 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return claims;
   });
 
+  app.get(`${V}/governance/coverage`, async () => {
+    const report = await adapter.getCoverageReport();
+    return { report };
+  });
+
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
   // Open a PTY → its id. Drive it over the per-terminal WS `/ws/terminals/:id`;
   // raw output arrives there. `governed` defaults to `true` (the gate-hook-routed

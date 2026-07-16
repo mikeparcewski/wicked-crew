@@ -8,6 +8,7 @@ import type {
   GovernancePolicy,
   ConformanceRule,
   GovernanceClaim,
+  CoverageReport,
 } from './types.js';
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -24,6 +25,7 @@ type GovernanceMethods = {
   listPolicies(): Promise<string>;
   listConformanceRules(): Promise<string>;
   listConformanceClaims(): Promise<string>;
+  getCoverageReport(): Promise<string>;
 };
 
 type CoreHandleFull = CoreHandle & GovernanceMethods;
@@ -207,6 +209,11 @@ export class CoreAdapter {
   /** All recorded conformance claims (governance decisions). */
   async listConformanceClaims(): Promise<GovernanceClaim[]> {
     return JSON.parse(await this.core.listConformanceClaims()) as GovernanceClaim[];
+  }
+
+  /** Front-half coverage gate report; null when the store has no graph nodes. */
+  async getCoverageReport(): Promise<CoverageReport | null> {
+    return JSON.parse(await this.core.getCoverageReport()) as CoverageReport | null;
   }
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
