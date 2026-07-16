@@ -37,7 +37,7 @@ function RuleRow({
       </td>
       <td className="px-3 py-2 text-gray-600 truncate max-w-xs">{rule.statement}</td>
       <td className="px-3 py-2 text-gray-400 text-[10px]">
-        {[rule.targets.language, rule.targets.layer, rule.targets.framework]
+        {[rule.targets?.language, rule.targets?.layer, rule.targets?.framework]
           .filter(Boolean)
           .join(' / ') || '—'}
       </td>

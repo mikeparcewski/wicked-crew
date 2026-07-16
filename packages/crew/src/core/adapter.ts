@@ -271,10 +271,12 @@ export class CoreAdapter {
   }
 
   /** Recall conformance rules matching a facet query (read-only, does not block actor). */
-  async recallRulesPreview(query: Record<string, string | undefined>): Promise<ConformanceRule[]> {
+  async recallRulesPreview(query: Record<string, string | string[] | undefined>): Promise<ConformanceRule[]> {
     const cleanQuery: Record<string, string> = {};
     for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v.length > 0) cleanQuery[k] = v;
+      // Fastify may parse duplicate params as arrays — take the first string value only.
+      const scalar = Array.isArray(v) ? v[0] : v;
+      if (typeof scalar === 'string' && scalar.length > 0) cleanQuery[k] = scalar;
     }
     const json = await this.core.recallRulesPreview(JSON.stringify(cleanQuery));
     return JSON.parse(json) as ConformanceRule[];

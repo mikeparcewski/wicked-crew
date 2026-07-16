@@ -277,7 +277,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   });
 
   app.get(`${V}/governance/rules/preview`, async (req, reply) => {
-    const q = req.query as Record<string, string | undefined>;
+    const q = req.query as Record<string, string | string[] | undefined>;
     try {
       const rules = await adapter.recallRulesPreview(q);
       return { rules };

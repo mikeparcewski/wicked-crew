@@ -187,7 +187,8 @@ export const api = {
     for (const [k, v] of Object.entries(query)) {
       if (v) params.set(k, v);
     }
-    const qs = params.size > 0 ? `?${params.toString()}` : '';
+    const queryString = params.toString();
+    const qs = queryString ? `?${queryString}` : '';
     return apiFetch<{ rules: import('./types.js').ConformanceRule[] }>(`/governance/rules/preview${qs}`);
   },
 };
