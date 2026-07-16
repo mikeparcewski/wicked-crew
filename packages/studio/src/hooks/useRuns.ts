@@ -35,6 +35,14 @@ export function useRuns(): { runs: SessionView[]; refresh: () => void } {
     }, 400);
   }, []);
 
+  // Clear any pending debounce timeout on unmount so setTick is never called
+  // on an unmounted component.
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current !== null) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     if (status !== 'connected') return;
     let cancelled = false;
