@@ -123,8 +123,8 @@ export function App(): React.ReactElement {
         </div>
       ) : (
         <div className="flex flex-1 overflow-hidden">
-          <aside className="w-80 border-r bg-white overflow-y-auto flex flex-col">
-            <div className="flex items-center justify-between px-4 pt-4 pb-2">
+          <aside className="w-80 border-r bg-white flex flex-col">
+            <div className="flex items-center justify-between px-4 pt-4 pb-2 shrink-0">
               <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Runs</p>
               <button
                 type="button"
@@ -135,7 +135,9 @@ export function App(): React.ReactElement {
                 New run
               </button>
             </div>
-            <RunList runs={runs} selectedRunId={runId} onSelect={selectRun} />
+            <div className="flex-1 overflow-y-auto">
+              <RunList runs={runs} selectedRunId={runId} onSelect={selectRun} />
+            </div>
           </aside>
 
           <main className="flex-1 overflow-y-auto p-6">
