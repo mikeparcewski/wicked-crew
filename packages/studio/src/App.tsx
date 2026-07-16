@@ -121,6 +121,22 @@ export function App(): React.ReactElement {
             <RuleManager />
           </main>
         </div>
+      ) : showLaunch ? (
+        <div className="flex flex-1 overflow-y-auto p-6">
+          <div className="mx-auto w-full max-w-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-gray-800">New run</h2>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                ← Back to runs
+              </button>
+            </div>
+            <LaunchForm onLaunched={onLaunched} onCancel={() => navigate('/')} />
+          </div>
+        </div>
       ) : (
         <div className="flex flex-1 overflow-hidden">
           <aside className="w-80 border-r bg-white flex flex-col">
@@ -141,9 +157,7 @@ export function App(): React.ReactElement {
           </aside>
 
           <main className="flex-1 overflow-y-auto p-6">
-            {showLaunch ? (
-              <LaunchForm onLaunched={onLaunched} onCancel={() => navigate('/')} />
-            ) : selected ? (
+            {selected ? (
               <RunDetail key={selected.session.id} view={selected} onRefresh={refresh} />
             ) : (
               <p className="text-sm text-gray-400">Select a run, or launch a new one.</p>
