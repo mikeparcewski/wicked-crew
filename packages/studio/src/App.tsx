@@ -157,7 +157,9 @@ export function App(): React.ReactElement {
           </aside>
 
           <main className="flex-1 overflow-y-auto p-6">
-            {selected ? (
+            {showLaunch ? (
+              <LaunchForm onLaunched={onLaunched} onCancel={() => navigate('/')} />
+            ) : selected ? (
               <RunDetail key={selected.session.id} view={selected} onRefresh={refresh} />
             ) : (
               <p className="text-sm text-gray-400">Select a run, or launch a new one.</p>
