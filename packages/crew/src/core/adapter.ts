@@ -1,6 +1,14 @@
 import { createRequire } from 'node:module';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
-import type { CoreEvent, LaunchRunInput, RepoEntry, SessionView } from './types.js';
+import type {
+  CoreEvent,
+  LaunchRunInput,
+  RepoEntry,
+  SessionView,
+  GovernancePolicy,
+  ConformanceRule,
+  GovernanceClaim,
+} from './types.js';
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
@@ -8,10 +16,22 @@ import type { CoreEvent, LaunchRunInput, RepoEntry, SessionView } from './types.
 // `subscribe` seam has a blast radius of exactly one file.
 const require = createRequire(import.meta.url);
 
+// ── Governance methods (crew#40) ─────────────────────────────────────────────
+// These instance methods are present on the napi `Core` class after the Rust
+// crate is rebuilt with the crew#40 governance seam. The intersection type
+// below satisfies the TypeScript compiler until node_modules is updated.
+type GovernanceMethods = {
+  listPolicies(): Promise<string>;
+  listConformanceRules(): Promise<string>;
+  listConformanceClaims(): Promise<string>;
+};
+
+type CoreHandleFull = CoreHandle & GovernanceMethods;
+
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
-  spawn(path: string): CoreHandle;
-  spawnStub(path: string): CoreHandle;
+  spawn(path: string): CoreHandleFull;
+  spawnStub(path: string): CoreHandleFull;
   registryRoster(): string;
 }
 
@@ -50,7 +70,7 @@ export interface CoreAdapterOptions {
  * in-flight core-ts subscribe/teardown signature lands, only this file changes.
  */
 export class CoreAdapter {
-  private readonly core: CoreHandle;
+  private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
   private closed = false;
@@ -170,6 +190,23 @@ export class CoreAdapter {
   /** List every registered repo. */
   async listRepos(): Promise<RepoEntry[]> {
     return JSON.parse(await this.core.listRepos()) as RepoEntry[];
+  }
+
+  // ── Governance reads (crew#40) ──────────────────────────────────────────────
+
+  /** All registered governance policies. */
+  async listPolicies(): Promise<GovernancePolicy[]> {
+    return JSON.parse(await this.core.listPolicies()) as GovernancePolicy[];
+  }
+
+  /** All conformance rules on the store. */
+  async listConformanceRules(): Promise<ConformanceRule[]> {
+    return JSON.parse(await this.core.listConformanceRules()) as ConformanceRule[];
+  }
+
+  /** All recorded conformance claims (governance decisions). */
+  async listConformanceClaims(): Promise<GovernanceClaim[]> {
+    return JSON.parse(await this.core.listConformanceClaims()) as GovernanceClaim[];
   }
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────

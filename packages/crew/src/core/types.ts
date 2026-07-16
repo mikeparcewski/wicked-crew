@@ -168,3 +168,56 @@ export interface CoreEvent {
   combined?: boolean;
   [k: string]: unknown;
 }
+
+// ── Governance types (crew#40) ──────────────────────────────────────────────
+
+/**
+ * A registered governance policy (`wicked-governance::Policy`).
+ * Serialized via serde snake_case — `effect` values are `deny` | `allow_with_conditions` | `allow`;
+ * `severity` values are `high` | `medium` | `low`.
+ */
+export interface GovernancePolicy {
+  id: string;
+  kind: string;
+  applies_to: string[];
+  effect: string;
+  trigger: { contains?: string };
+  obligations: string[];
+  criteria: string;
+  severity: string;
+  rule: string;
+}
+
+/**
+ * A prescriptive conformance rule (`wicked-governance::ConformanceRule`).
+ * `rule_type` is `pattern` | `policy`; `severity` is `info` | `warn` | `error` | `critical`.
+ */
+export interface ConformanceRule {
+  id: string;
+  rule_type: string;
+  statement: string;
+  severity: string;
+  confidence: number;
+  targets: { language?: string; layer?: string; framework?: string };
+  symbol_ref?: string;
+  compliance?: { framework: string; control_id: string };
+  provenance: { source: string; ref?: string; source_kinds: string[] };
+}
+
+/**
+ * A recorded conformance claim / evaluation result (`wicked-apps-core::ConformanceClaim`).
+ * `decision` values are `allow` | `deny` | `allow_with_conditions` (serde snake_case).
+ */
+export interface GovernanceClaim {
+  claim_id: string;
+  scope: string;
+  phase: string;
+  policy_ids: string[];
+  decision: string;
+  obligations: string[];
+  evaluated_context_ref: string;
+  criteria: string;
+  evaluator_identity: string;
+  /** Unix-seconds timestamp. */
+  evaluated_at: number;
+}
