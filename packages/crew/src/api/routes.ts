@@ -256,6 +256,36 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return { report };
   });
 
+  // ── Governance writes (crew#42) ────────────────────────────────────────────
+
+  app.post(`${V}/governance/policies`, async (req, reply) => {
+    try {
+      await adapter.upsertPolicy(req.body as import('../core/types.js').GovernancePolicy);
+      return { status: 'ok' };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  app.post(`${V}/governance/rules`, async (req, reply) => {
+    try {
+      await adapter.upsertConformanceRule(req.body as import('../core/types.js').ConformanceRule);
+      return { status: 'ok' };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  app.get(`${V}/governance/rules/preview`, async (req, reply) => {
+    const q = req.query as Record<string, string | string[] | undefined>;
+    try {
+      const rules = await adapter.recallRulesPreview(q);
+      return { rules };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
   // ── Workflow viewer (crew#44) ──────────────────────────────────────────────
 
   app.get(`${V}/workflows`, async () => {
