@@ -427,11 +427,19 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     const graphPath = join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
+    const coveragePath = join(repo.root_path, '.codegraph', 'estate.coverage.json');
+
+    // Try to read coverage stats for "not yet available" informational state.
+    let coverage: unknown = null;
+    try {
+      coverage = JSON.parse(await fsp.readFile(coveragePath, 'utf8'));
+    } catch { /* no coverage file — stays null */ }
+
     try {
       const content = await fsp.readFile(graphPath, 'utf8');
-      return { graph: JSON.parse(content) as unknown };
+      return { graph: JSON.parse(content) as unknown, coverage };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null, coverage };
       return reply.code(500).send({ error: message(err) });
     }
   });

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client.js';
-import type { RepoEntry, CodeGraphNode, CodeGraphEdge, CodeGraphData, DomainGraph } from '../api/types.js';
+import type { RepoEntry, CodeGraphNode, CodeGraphEdge, CodeGraphData, DomainGraph, DomainCoverage } from '../api/types.js';
 import { ForceGraph } from './ForceGraph.js';
 import { HotspotsView } from './HotspotsView.js';
 
@@ -211,6 +211,7 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
   const [loading, setLoading] = useState(true);
   const [codeData, setCodeData] = useState<CodeGraphData | null>(null);
   const [domainData, setDomainData] = useState<DomainGraph | null>(null);
+  const [domainCoverage, setDomainCoverage] = useState<DomainCoverage | null>(null);
   const [domainLoading, setDomainLoading] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<CodeGraphNode | null>(null);
@@ -229,8 +230,8 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
     setDomainLoading(true);
     api
       .getRepoDomainGraph(repo.id)
-      .then(({ graph }) => setDomainData(graph))
-      .catch(() => setDomainData(null))
+      .then(({ graph, coverage }) => { setDomainData(graph); setDomainCoverage(coverage); })
+      .catch(() => { setDomainData(null); setDomainCoverage(null); })
       .finally(() => setDomainLoading(false));
   }, [graphType, domainData, repo.id]);
 
@@ -323,9 +324,39 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
               </div>
             ) : !domainData ? (
               <div className="flex items-center justify-center h-full">
-                <p className="text-sm text-gray-400">
-                  Domain graph not available — run a governed workflow to generate it.
-                </p>
+                <div className="max-w-sm w-full mx-auto p-6 flex flex-col gap-4">
+                  <p className="text-sm font-semibold text-gray-700">Domain graph not yet generated</p>
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    The domain model requires full annotation coverage — every behavior-bearing
+                    node in the code graph must be linked to a requirement. Onboarding indexes
+                    the code graph; annotation is a separate domain-extraction workflow.
+                  </p>
+                  {domainCoverage ? (
+                    <div className="border rounded-lg p-4 flex flex-col gap-2">
+                      <div className="flex justify-between items-baseline">
+                        <span className="text-[11px] font-medium text-gray-600">Annotation coverage</span>
+                        <span className="text-[11px] font-mono text-gray-800">
+                          {(domainCoverage.coverage * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 rounded-full"
+                          style={{ width: `${Math.max(domainCoverage.coverage * 100, 0.5)}%` }}
+                        />
+                      </div>
+                      <div className="flex gap-4 mt-1 text-[10px] text-gray-400 tabular-nums">
+                        <span>{domainCoverage.resolved.toLocaleString()} resolved</span>
+                        <span>{domainCoverage.behavior_bearing.toLocaleString()} behavior-bearing</span>
+                        <span>{domainCoverage.total.toLocaleString()} total nodes</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-400">
+                      No coverage data — run onboarding first to index the code graph.
+                    </p>
+                  )}
+                </div>
               </div>
             ) : (
               <DomainGraphView graph={domainData} />

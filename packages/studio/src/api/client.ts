@@ -192,9 +192,10 @@ export const api = {
   getRepoGraph: (repoId: string) =>
     apiFetch<{ graph: import('./types.js').CodeGraphData | null }>(`/repos/${encodeURIComponent(repoId)}/graph`),
 
-  /** Per-repo domain graph from <repo>/.wicked-estate/requirements/requirements_graph.json. */
+  /** Per-repo domain graph from <repo>/.wicked-estate/requirements/requirements_graph.json.
+   *  Also returns coverage stats (if available) so the UI can show annotation progress. */
   getRepoDomainGraph: (repoId: string) =>
-    apiFetch<{ graph: import('./types.js').DomainGraph | null }>(`/repos/${encodeURIComponent(repoId)}/domain-graph`),
+    apiFetch<{ graph: import('./types.js').DomainGraph | null; coverage: import('./types.js').DomainCoverage | null }>(`/repos/${encodeURIComponent(repoId)}/domain-graph`),
 
   // ── Governance reads (crew#40/41/43) ────────────────────────────────────────
 

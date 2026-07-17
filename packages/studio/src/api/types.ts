@@ -407,6 +407,14 @@ export interface DomainGraphRequirement {
   error_paths: Array<{ id: string; statement: string }>;
 }
 
+/** Coverage stats from estate.coverage.json — present when code is indexed but not yet annotated. */
+export interface DomainCoverage {
+  coverage: number;
+  total: number;
+  behavior_bearing: number;
+  resolved: number;
+}
+
 /** The open-terminal request body (`POST /terminals`, DES-TERMINAL-001 §6). */
 export interface OpenTerminalBody {
   /** Working directory the PTY opens in. */
