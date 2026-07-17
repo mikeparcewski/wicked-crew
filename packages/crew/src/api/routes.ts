@@ -313,7 +313,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
-  // ── Workflow viewer (crew#44) ──────────────────────────────────────────────
+  // ── Workflow viewer + builder (crew#44) ───────────────────────────────────
 
   app.get(`${V}/workflows`, async () => {
     const workflows = adapter.listWorkflows();
@@ -325,6 +325,41 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const workflow = adapter.getWorkflow(id);
     if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
     return { workflow };
+  });
+
+  // Register (or replace) a user-authored workflow definition.
+  // Validates, persists to ~/.wicked/workflows/<id>.json, hot-registers in the
+  // Rust actor when registerWorkflow NAPI is available.
+  app.post(`${V}/workflows`, async (req, reply) => {
+    const body = req.body as { id?: unknown };
+    if (!body || typeof body.id !== 'string' || !body.id) {
+      return reply.code(400).send({ error: 'workflow must have a string `id` field' });
+    }
+    try {
+      const id = await adapter.registerWorkflow(body as import('../core/types.js').WorkflowDef);
+      return reply.code(201).send({ id, status: 'registered' });
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  // Save an inline script to ~/.wicked/scripts/ and return its path.
+  // Tool-executor phases use the returned path as their command.
+  app.post(`${V}/scripts`, async (req, reply) => {
+    const body = req.body as { name?: unknown; content?: unknown; lang?: unknown };
+    if (typeof body.name !== 'string' || typeof body.content !== 'string') {
+      return reply.code(400).send({ error: '`name` and `content` are required strings' });
+    }
+    const lang = (body.lang as string | undefined) ?? 'bash';
+    if (!['bash', 'python', 'sh'].includes(lang)) {
+      return reply.code(400).send({ error: '`lang` must be bash | python | sh' });
+    }
+    try {
+      const path = await adapter.saveScript(body.name, body.content, lang as 'bash' | 'python' | 'sh');
+      return reply.code(201).send({ path });
+    } catch (err) {
+      return reply.code(500).send({ error: message(err) });
+    }
   });
 
   // ── Domain-model browser (crew#44) ────────────────────────────────────────

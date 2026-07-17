@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
-import { mkdir, access } from 'node:fs/promises';
+import { mkdir, access, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -348,17 +348,56 @@ export class CoreAdapter {
     return JSON.parse(json) as ConformanceRule[];
   }
 
-  // ── Workflow viewer (crew#44) ───────────────────────────────────────────────
-  // The three built-in workflows are expressed as static data mirroring workflow.rs.
-  // When wicked-core-ts gains list_workflows_json / get_workflow_json NAPI methods,
-  // swap these stubs for NAPI calls — the route surface is identical.
+  // ── Workflow viewer + builder (crew#44) ────────────────────────────────────
+  // Built-ins are static TypeScript mirrors of workflow.rs. User-registered
+  // workflows are added to `userWorkflows` and persisted to disk; the Rust actor
+  // picks them up via `register_workflow` NAPI (when available) for immediate use.
+
+  private readonly userWorkflows = new Map<string, WorkflowDef>();
 
   listWorkflows(): WorkflowDef[] {
-    return BUILTIN_WORKFLOWS;
+    return [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()];
   }
 
   getWorkflow(id: string): WorkflowDef | null {
-    return BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+    return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+  }
+
+  /**
+   * Register a user-authored workflow: persist to `~/.wicked/workflows/<id>.json`,
+   * update the in-memory registry, and (when core supports it) register in the
+   * Rust actor so runs using this workflow work immediately without a restart.
+   */
+  async registerWorkflow(def: WorkflowDef): Promise<string> {
+    const dir = wickedDir('workflows');
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${def.id}.json`);
+    await writeFile(path, JSON.stringify(def, null, 2), 'utf8');
+    this.userWorkflows.set(def.id, def);
+
+    // Hot-register in the Rust actor when the NAPI method is available.
+    // Falls back gracefully if running against an older core build.
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['registerWorkflow'] === 'function') {
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(def));
+    }
+    return def.id;
+  }
+
+  /**
+   * Save an inline script to `~/.wicked/scripts/<name>.<ext>`, make it executable,
+   * and return the absolute path. Tool-executor phases use this path as their command.
+   */
+  async saveScript(name: string, content: string, lang: 'bash' | 'python' | 'sh'): Promise<string> {
+    const ext = lang === 'python' ? 'py' : 'sh';
+    const dir = wickedDir('scripts');
+    await mkdir(dir, { recursive: true });
+    const filename = `${name.replace(/[^a-z0-9_-]/gi, '_')}.${ext}`;
+    const path = join(dir, filename);
+    const shebang = lang === 'python' ? '#!/usr/bin/env python3\n' : '#!/usr/bin/env bash\n';
+    await writeFile(path, shebang + content, 'utf8');
+    await chmod(path, 0o755);
+    return path;
   }
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────

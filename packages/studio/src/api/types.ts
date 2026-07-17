@@ -353,6 +353,11 @@ export type GateSpec =
 /** Evaluator≠creator role for a phase. */
 export type PhaseRole = 'neutral' | 'creator' | 'evaluator';
 
+/** How a phase executes — agent (council-routed CLI) or tool (direct command). */
+export type PhaseExecutor =
+  | { type: 'agent' }
+  | { type: 'tool'; cmd: string[] };
+
 /** One ordered phase of a workflow. */
 export interface PhaseDef {
   id: string;
@@ -367,6 +372,8 @@ export interface PhaseDef {
   skill_ref: string | null;
   allowed_skills: string[];
   validator_pin: string | null;
+  /** How the phase executes. Omitted = Agent (default). */
+  executor?: PhaseExecutor;
 }
 
 /** A workflow — id + ordered phases. */
