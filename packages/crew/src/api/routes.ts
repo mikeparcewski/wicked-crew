@@ -43,10 +43,20 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const RegisterRepoSchema = z.object({
-  name: z.string().min(1),
-  rootPath: z.string().min(1),
-});
+const RegisterRepoSchema = z
+  .object({
+    name: z.string().min(1),
+    rootPath: z.string().optional(),
+    gitUrl: z.string().optional(),
+  })
+  .refine(
+    (d) => {
+      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
+      const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
+      return hasLocal !== hasRemote; // exactly one
+    },
+    { message: 'Provide exactly one of rootPath (local path) or gitUrl (remote clone URL).' },
+  );
 
 const LaunchSchema = z.object({
   problem: z.string().min(1),
@@ -108,13 +118,40 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
+    const { name, rootPath, gitUrl } = parsed.data;
     try {
-      const repo = await adapter.registerRepo(parsed.data.name, parsed.data.rootPath);
-      return reply.code(201).send({ repo });
+      let repo;
+      if (gitUrl) {
+        // Remote: clone then register; onboarding kicks off automatically.
+        repo = await adapter.cloneAndRegisterRepo(name, gitUrl);
+      } else {
+        // Local: register immediately, then kick off onboarding in the background.
+        repo = await adapter.registerRepo(name, rootPath!);
+        void adapter.startOnboarding(repo.id, rootPath!, name);
+      }
+      return reply.code(201).send({ repo, onboardingStarted: true });
     } catch (err) {
       // Core rejects a non-git / zero-commit path — a client error, not a 500.
       return reply.code(400).send({ error: message(err) });
     }
+  });
+
+  // Onboarding pipeline status for a registered repo.
+  app.get(`${V}/repos/:id/onboard`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const state = adapter.getOnboardState(id);
+    if (!state) {
+      // No record means onboarding hasn't run in this daemon session (restarted).
+      return reply.code(200).send({ status: 'unknown', steps: [] });
+    }
+    return {
+      status: state.status,
+      steps: state.steps,
+      estateDb: state.estateDb,
+      error: state.error,
+      startedAt: state.startedAt,
+      completedAt: state.completedAt,
+    };
   });
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;

@@ -1,9 +1,15 @@
 import { createRequire } from 'node:module';
+import { execFile } from 'node:child_process';
+import { mkdir, access } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { promisify } from 'node:util';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type {
   CoreEvent,
   LaunchRunInput,
   RepoEntry,
+  RepoOnboardState,
+  OnboardStep,
   SessionView,
   GovernancePolicy,
   ConformanceRule,
@@ -11,6 +17,19 @@ import type {
   CoverageReport,
   WorkflowDef,
 } from './types.js';
+import { broadcast } from '../events/bus.js';
+
+const execFileAsync = promisify(execFile);
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Resolved path under the user's home directory. */
+function wickedDir(...parts: string[]): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+  return join(home, '.wicked', ...parts);
+}
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
@@ -226,9 +245,95 @@ export class CoreAdapter {
     return JSON.parse(await this.core.workOutput(unitId)) as string | null;
   }
 
-  /** Register a git repo → the persisted `RepoEntry`. */
+  /** In-memory onboarding state (reset on daemon restart — intentional; the graph persists). */
+  private readonly onboardStates = new Map<string, RepoOnboardState>();
+
+  /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
     return JSON.parse(await this.core.registerRepo(name, rootPath)) as RepoEntry;
+  }
+
+  /**
+   * Clone a remote git URL into `~/.wicked/repos/<name>`, register it with
+   * core, then kick off the async onboarding pipeline (code graph + domain).
+   * Resolves immediately with the `RepoEntry`; onboarding runs in the background
+   * and broadcasts progress events to all WS clients.
+   */
+  async cloneAndRegisterRepo(name: string, gitUrl: string): Promise<RepoEntry> {
+    const cloneDir = wickedDir('repos', name);
+    await mkdir(cloneDir, { recursive: true });
+
+    // Skip clone if the target already looks like a git repo (idempotent re-register).
+    let needsClone = true;
+    try {
+      await access(join(cloneDir, '.git'));
+      needsClone = false;
+    } catch { /* not yet cloned */ }
+
+    if (needsClone) {
+      await execFileAsync('git', ['clone', '--', gitUrl, cloneDir], {
+        timeout: 5 * 60 * 1000,
+      });
+    }
+
+    const entry = await this.registerRepo(name, cloneDir);
+    void this.startOnboarding(entry.id, cloneDir, name, needsClone ? gitUrl : undefined);
+    return entry;
+  }
+
+  /** Kick off the estate onboarding pipeline for an already-registered repo. */
+  async startOnboarding(
+    repoId: string,
+    repoPath: string,
+    repoName: string,
+    clonedFrom?: string,
+  ): Promise<void> {
+    const estateDb = wickedDir('estate', `${repoName}.db`);
+    await mkdir(dirname(estateDb), { recursive: true });
+
+    const state: RepoOnboardState = {
+      repoId,
+      status: 'running',
+      steps: [],
+      estateDb,
+      startedAt: Date.now(),
+    };
+    this.onboardStates.set(repoId, state);
+    broadcast({ type: 'repoOnboardStarted', repoId, name: repoName, estateDb, clonedFrom });
+
+    const pipeline: { step: OnboardStep; args: string[] }[] = [
+      { step: { id: 'index',    label: 'Code graph',         status: 'pending' }, args: ['index', repoPath, '--db', estateDb] },
+      { step: { id: 'annotate', label: 'Community detection', status: 'pending' }, args: ['clusters', '--annotate', '--db', estateDb] },
+      { step: { id: 'domain',   label: 'Domain nodes',        status: 'pending' }, args: ['nodes', '--json', '--db', estateDb] },
+    ];
+    state.steps = pipeline.map((p) => p.step);
+
+    for (const { step, args } of pipeline) {
+      step.status = 'running';
+      broadcast({ type: 'repoOnboardStep', repoId, step: step.id, stepStatus: 'started', label: step.label });
+      try {
+        await execFileAsync('wicked-estate', args, { timeout: 10 * 60 * 1000 });
+        step.status = 'done';
+        broadcast({ type: 'repoOnboardStep', repoId, step: step.id, stepStatus: 'done', label: step.label });
+      } catch (err) {
+        step.status = 'failed';
+        step.detail = errMsg(err);
+        state.status = 'failed';
+        state.error = `Step "${step.label}" failed: ${step.detail}`;
+        state.completedAt = Date.now();
+        broadcast({ type: 'repoOnboardFailed', repoId, step: step.id, error: state.error });
+        return;
+      }
+    }
+
+    state.status = 'completed';
+    state.completedAt = Date.now();
+    broadcast({ type: 'repoOnboardCompleted', repoId, estateDb });
+  }
+
+  /** Return the current onboarding state for a repo (undefined if never started). */
+  getOnboardState(repoId: string): RepoOnboardState | undefined {
+    return this.onboardStates.get(repoId);
   }
 
   /** List every registered repo. */

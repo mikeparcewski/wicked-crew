@@ -93,6 +93,25 @@ export interface RepoEntry {
   root_path: string;
   default_branch: string;
   registered_at: number;
+  git_url?: string;
+}
+
+export type OnboardStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+export interface OnboardStep {
+  id: 'clone' | 'index' | 'annotate' | 'domain';
+  label: string;
+  status: OnboardStepStatus;
+  detail?: string;
+}
+
+export interface OnboardStatus {
+  status: 'unknown' | 'pending' | 'running' | 'completed' | 'failed';
+  steps: OnboardStep[];
+  estateDb?: string;
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 /**

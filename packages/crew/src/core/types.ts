@@ -94,6 +94,30 @@ export interface RepoEntry {
   root_path: string;
   default_branch: string;
   registered_at: number;
+  /** Remote git URL the repo was cloned from (undefined for locally-registered repos). */
+  git_url?: string;
+}
+
+/** Status of one onboarding step. */
+export type OnboardStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+/** One onboarding pipeline step. */
+export interface OnboardStep {
+  id: 'clone' | 'index' | 'annotate' | 'domain';
+  label: string;
+  status: OnboardStepStatus;
+  detail?: string;
+}
+
+/** The full onboarding state for one repo (in-memory, reset on daemon restart). */
+export interface RepoOnboardState {
+  repoId: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  steps: OnboardStep[];
+  estateDb: string;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
 }
 
 /** The daemon's launch-run input (mapped by the adapter onto the addon's `LaunchOptions`). */

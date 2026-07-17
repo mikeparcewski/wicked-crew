@@ -1,6 +1,7 @@
 import type {
   GateInfo,
   LaunchRunBody,
+  OnboardStatus,
   OpenTerminalBody,
   RepoEntry,
   RosterSeat,
@@ -114,12 +115,23 @@ export const api = {
   /** Registered repos → the target-repo picker. */
   listRepos: () => apiFetch<{ repos: RepoEntry[] }>('/repos'),
 
-  /** Register a git repo (validated: real git repo, >=1 commit). */
+  /** Register a local git repo and start onboarding. */
   registerRepo: (name: string, rootPath: string) =>
-    apiFetch<{ repo: RepoEntry }>('/repos', {
+    apiFetch<{ repo: RepoEntry; onboardingStarted: boolean }>('/repos', {
       method: 'POST',
       body: JSON.stringify({ name, rootPath }),
     }),
+
+  /** Clone a remote git URL, register it, and start onboarding. */
+  cloneAndRegisterRepo: (name: string, gitUrl: string) =>
+    apiFetch<{ repo: RepoEntry; onboardingStarted: boolean }>('/repos', {
+      method: 'POST',
+      body: JSON.stringify({ name, gitUrl }),
+    }),
+
+  /** Poll the onboarding pipeline status for a repo. */
+  getOnboardStatus: (repoId: string) =>
+    apiFetch<OnboardStatus>(`/repos/${encodeURIComponent(repoId)}/onboard`),
 
   /** Liveness (also proves the actor + event pump are up). */
   getHealth: () => apiFetch<{ status: string; version: string; ping: string }>('/health'),
