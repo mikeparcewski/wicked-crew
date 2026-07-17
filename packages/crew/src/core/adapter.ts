@@ -311,6 +311,10 @@ export class CoreAdapter {
     this.onboardingInFlight.add(repoId);
     const runId = randomUUID();
     try {
+      // Ensure the onboarding workflow is registered in the Rust actor. It is a TS-only
+      // built-in (not in workflow.rs), so the actor won't find it unless we register it
+      // via NAPI before the first launch. Idempotent — safe to call every time.
+      await this.registerWorkflow(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
