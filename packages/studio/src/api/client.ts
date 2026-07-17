@@ -1,7 +1,7 @@
 import type {
   GateInfo,
   LaunchRunBody,
-  OnboardStatus,
+  OnboardRef,
   OpenTerminalBody,
   RepoEntry,
   RosterSeat,
@@ -115,23 +115,23 @@ export const api = {
   /** Registered repos → the target-repo picker. */
   listRepos: () => apiFetch<{ repos: RepoEntry[] }>('/repos'),
 
-  /** Register a local git repo and start onboarding. */
+  /** Register a local git repo and launch an onboarding run. Returns the repo and run id. */
   registerRepo: (name: string, rootPath: string) =>
-    apiFetch<{ repo: RepoEntry; onboardingStarted: boolean }>('/repos', {
+    apiFetch<{ repo: RepoEntry; onboardRunId: string }>('/repos', {
       method: 'POST',
       body: JSON.stringify({ name, rootPath }),
     }),
 
-  /** Clone a remote git URL, register it, and start onboarding. */
+  /** Clone a remote git URL, register it, and launch an onboarding run. */
   cloneAndRegisterRepo: (name: string, gitUrl: string) =>
-    apiFetch<{ repo: RepoEntry; onboardingStarted: boolean }>('/repos', {
+    apiFetch<{ repo: RepoEntry; onboardRunId: string }>('/repos', {
       method: 'POST',
       body: JSON.stringify({ name, gitUrl }),
     }),
 
-  /** Poll the onboarding pipeline status for a repo. */
-  getOnboardStatus: (repoId: string) =>
-    apiFetch<OnboardStatus>(`/repos/${encodeURIComponent(repoId)}/onboard`),
+  /** Get the onboarding run id for a repo (null if not launched this daemon session). */
+  getOnboardRun: (repoId: string) =>
+    apiFetch<OnboardRef>(`/repos/${encodeURIComponent(repoId)}/onboard`),
 
   /** Liveness (also proves the actor + event pump are up). */
   getHealth: () => apiFetch<{ status: string; version: string; ping: string }>('/health'),

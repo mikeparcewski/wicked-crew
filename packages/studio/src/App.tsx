@@ -151,7 +151,7 @@ export function App(): React.ReactElement {
     if (panel === 'repos') {
       return (
         <div className="flex-1 overflow-hidden bg-white">
-          <RepositoriesPanel />
+          <RepositoriesPanel onSelectRun={selectRun} />
         </div>
       );
     }

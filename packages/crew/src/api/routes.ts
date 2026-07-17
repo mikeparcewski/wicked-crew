@@ -120,38 +120,28 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
     const { name, rootPath, gitUrl } = parsed.data;
     try {
-      let repo;
       if (gitUrl) {
-        // Remote: clone then register; onboarding kicks off automatically.
-        repo = await adapter.cloneAndRegisterRepo(name, gitUrl);
+        // Remote: clone, register, launch onboarding run.
+        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl);
+        const repos = await adapter.listRepos();
+        const repo = repos.find((r) => r.id === repoId);
+        return reply.code(201).send({ repo, onboardRunId: runId });
       } else {
-        // Local: register immediately, then kick off onboarding in the background.
-        repo = await adapter.registerRepo(name, rootPath!);
-        void adapter.startOnboarding(repo.id, rootPath!, name);
+        // Local: register then launch onboarding run.
+        const repo = await adapter.registerRepo(name, rootPath!);
+        const runId = await adapter.launchOnboardingRun(repo.id, name);
+        return reply.code(201).send({ repo, onboardRunId: runId });
       }
-      return reply.code(201).send({ repo, onboardingStarted: true });
     } catch (err) {
-      // Core rejects a non-git / zero-commit path — a client error, not a 500.
       return reply.code(400).send({ error: message(err) });
     }
   });
 
-  // Onboarding pipeline status for a registered repo.
+  // Return the onboarding run id for a repo (so the UI can navigate to it).
   app.get(`${V}/repos/:id/onboard`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const state = adapter.getOnboardState(id);
-    if (!state) {
-      // No record means onboarding hasn't run in this daemon session (restarted).
-      return reply.code(200).send({ status: 'unknown', steps: [] });
-    }
-    return {
-      status: state.status,
-      steps: state.steps,
-      estateDb: state.estateDb,
-      error: state.error,
-      startedAt: state.startedAt,
-      completedAt: state.completedAt,
-    };
+    const runId = adapter.getOnboardRunId(id) ?? null;
+    return reply.code(200).send({ runId });
   });
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
