@@ -331,7 +331,7 @@ export class CoreAdapter {
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
-        clisJson: '[]',
+        clisJson: JSON.stringify(CoreAdapter.roster()),
         workflow: 'onboarding',
         repoRef: repoId,
       });
