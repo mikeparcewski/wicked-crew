@@ -20,6 +20,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
   const [newName, setNewName] = useState('');
   const [newPath, setNewPath] = useState('');
   const [newGitUrl, setNewGitUrl] = useState('');
+  const [checkoutPath, setCheckoutPath] = useState('');
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
   const nameEditedRef = useRef(false);
@@ -52,7 +53,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
     setRegistering(true);
     try {
       const { repo, onboardRunId } = isRemote
-        ? await api.cloneAndRegisterRepo(name, target)
+        ? await api.cloneAndRegisterRepo(name, target, checkoutPath.trim() || undefined)
         : await api.registerRepo(name, target);
 
       setRepos((prev) => [...prev, repo]);
@@ -61,6 +62,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
       setNewName('');
       setNewPath('');
       setNewGitUrl('');
+      setCheckoutPath('');
       setSourceMode('local');
       nameEditedRef.current = false;
 
@@ -128,17 +130,28 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
                 onChange={(e) => { setNewPath(e.target.value); deriveName(e.target.value); }}
               />
             ) : (
-              <input
-                className="rounded border p-2 text-xs font-mono"
-                placeholder="https://github.com/org/repo or git@github.com:org/repo"
-                value={newGitUrl}
-                onChange={(e) => { setNewGitUrl(e.target.value); deriveName(e.target.value); }}
-              />
+              <>
+                <input
+                  className="rounded border p-2 text-xs font-mono"
+                  placeholder="https://github.com/org/repo or git@github.com:org/repo"
+                  value={newGitUrl}
+                  onChange={(e) => { setNewGitUrl(e.target.value); deriveName(e.target.value); }}
+                />
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-[10px] text-zinc-500 font-medium">Clone to (optional)</label>
+                  <input
+                    className="rounded border p-2 text-xs font-mono"
+                    placeholder={`~/.wicked/repos/${newName || '<name>'}`}
+                    value={checkoutPath}
+                    onChange={(e) => setCheckoutPath(e.target.value)}
+                  />
+                </div>
+              </>
             )}
 
             <p className="text-[10px] text-zinc-500">
               {sourceMode === 'remote'
-                ? 'Clones to ~/.wicked/repos/<name>, then runs the onboarding workflow (index → annotate → domain) as a governed run — visible in the run list.'
+                ? `Clones to ${checkoutPath.trim() || `~/.wicked/repos/${newName || '<name>'}`}, then runs the onboarding workflow as a governed run — visible in the run list.`
                 : 'Runs the onboarding workflow (index → annotate → domain) as a governed run — visible in the run list.'}
             </p>
 

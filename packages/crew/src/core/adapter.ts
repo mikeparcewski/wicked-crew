@@ -252,16 +252,18 @@ export class CoreAdapter {
   }
 
   /**
-   * Clone a remote git URL into `~/.wicked/repos/<name>`, register it, then
-   * launch an `onboarding` workflow run so progress is visible in the run list.
+   * Clone a remote git URL, register it, then launch an `onboarding` workflow run.
+   * `checkoutPath` overrides the default clone destination (`~/.wicked/repos/<name>`).
    */
-  async cloneAndRegisterRepo(name: string, gitUrl: string): Promise<RepoOnboardRef> {
+  async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
     const reposRoot = wickedDir('repos');
-    const cloneDir = join(reposRoot, name);
-    // Defense-in-depth: confirm the resolved path is inside the repos root
-    // (the name was already validated by the route schema, but verify here too).
-    if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
-      throw new Error(`Unsafe repo name: would escape the repos directory`);
+    const cloneDir = checkoutPath ?? join(reposRoot, name);
+    if (!checkoutPath) {
+      // Default path: must stay inside repos root (name validated by schema, but
+      // apply defense-in-depth for direct calls).
+      if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+        throw new Error(`Unsafe repo name: would escape the repos directory`);
+      }
     }
     await mkdir(cloneDir, { recursive: true });
 

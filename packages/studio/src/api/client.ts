@@ -122,11 +122,12 @@ export const api = {
       body: JSON.stringify({ name, rootPath }),
     }),
 
-  /** Clone a remote git URL, register it, and launch an onboarding run. */
-  cloneAndRegisterRepo: (name: string, gitUrl: string) =>
+  /** Clone a remote git URL, register it, and launch an onboarding run.
+   *  `checkoutPath` (absolute) overrides the default ~/.wicked/repos/<name>. */
+  cloneAndRegisterRepo: (name: string, gitUrl: string, checkoutPath?: string) =>
     apiFetch<{ repo: RepoEntry; onboardRunId: string }>('/repos', {
       method: 'POST',
-      body: JSON.stringify({ name, gitUrl }),
+      body: JSON.stringify({ name, gitUrl, ...(checkoutPath ? { rootPath: checkoutPath } : {}) }),
     }),
 
   /** Get the onboarding run id for a repo (null if not launched this daemon session). */

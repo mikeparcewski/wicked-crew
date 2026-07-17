@@ -54,16 +54,21 @@ const RegisterRepoSchema = z
       .min(1)
       .max(128)
       .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
+    // For local registration: path to an existing git repo on disk.
+    // For remote clone: optional clone destination (absolute path); if omitted,
+    // defaults to ~/.wicked/repos/<name>.
     rootPath: z.string().optional(),
     gitUrl: z.string().optional(),
   })
   .refine(
     (d) => {
-      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
       const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
-      return hasLocal !== hasRemote; // exactly one
+      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
+      // gitUrl alone (clone to default path), gitUrl + rootPath (clone to custom path),
+      // or rootPath alone (register existing local repo) — all valid.
+      return hasRemote || hasLocal;
     },
-    { message: 'Provide exactly one of rootPath (local path) or gitUrl (remote clone URL).' },
+    { message: 'Provide gitUrl (remote clone) or rootPath (local registration), or both.' },
   );
 
 const LaunchSchema = z.object({
@@ -129,8 +134,9 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { name, rootPath, gitUrl } = parsed.data;
     try {
       if (gitUrl) {
-        // Remote: clone, register, launch onboarding run.
-        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl);
+        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
+        // register, and launch onboarding run.
+        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
         const repos = await adapter.listRepos();
         const repo = repos.find((r) => r.id === repoId);
         if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
