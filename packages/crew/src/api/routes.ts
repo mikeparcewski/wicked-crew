@@ -159,6 +159,20 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return reply.code(200).send({ runId });
   });
 
+  // Re-run (or run for the first time) the onboarding workflow for a registered repo.
+  app.post(`${V}/repos/:id/onboard`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    try {
+      const runId = await adapter.launchOnboardingRun(repo.id, repo.name);
+      return reply.code(201).send({ runId });
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
   // `sessionId` is minted if the client omits it.
   app.post(`${V}/runs`, async (req, reply) => {

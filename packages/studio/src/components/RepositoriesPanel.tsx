@@ -15,6 +15,8 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>('all');
 
+  const [rerunning, setRerunning] = useState<Record<string, boolean>>({});
+  const [rerunError, setRerunError] = useState<Record<string, string>>({});
   const [showRegister, setShowRegister] = useState(false);
   const [sourceMode, setSourceMode] = useState<SourceMode>('local');
   const [newName, setNewName] = useState('');
@@ -41,6 +43,20 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
     if (nameEditedRef.current) return;
     const segment = value.replace(/\.git$/, '').split(/[/\\:]/).filter(Boolean).pop() ?? '';
     if (segment) setNewName(segment);
+  }
+
+  async function rerunOnboarding(repoId: string): Promise<void> {
+    setRerunning((prev) => ({ ...prev, [repoId]: true }));
+    setRerunError((prev) => ({ ...prev, [repoId]: '' }));
+    try {
+      const { runId } = await api.rerunOnboarding(repoId);
+      setOnboardRunIds((prev) => ({ ...prev, [repoId]: runId }));
+      onSelectRun?.(runId);
+    } catch (err) {
+      setRerunError((prev) => ({ ...prev, [repoId]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      setRerunning((prev) => ({ ...prev, [repoId]: false }));
+    }
   }
 
   async function registerRepo(): Promise<void> {
@@ -214,14 +230,27 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
                     <span>branch: {r.default_branch}</span>
                     <span>registered: {new Date(r.registered_at * 1000).toLocaleDateString()}</span>
                   </div>
-                  {runId && onSelectRun && (
+                  <div className="mt-2 flex items-center gap-3 flex-wrap">
+                    {runId && onSelectRun && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectRun(runId)}
+                        className="text-[11px] text-emerald-600 hover:underline"
+                      >
+                        View onboarding run →
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => onSelectRun(runId)}
-                      className="mt-2 text-[11px] text-emerald-600 hover:underline"
+                      disabled={rerunning[r.id]}
+                      onClick={() => void rerunOnboarding(r.id)}
+                      className="text-[11px] text-zinc-500 hover:text-zinc-700 hover:underline disabled:opacity-50"
                     >
-                      View onboarding run →
+                      {rerunning[r.id] ? 'Starting…' : '↺ Re-run onboarding'}
                     </button>
+                  </div>
+                  {rerunError[r.id] && (
+                    <p className="mt-1 text-[11px] text-red-600">{rerunError[r.id]}</p>
                   )}
                 </div>
               );

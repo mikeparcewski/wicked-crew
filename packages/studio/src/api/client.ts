@@ -134,6 +134,10 @@ export const api = {
   getOnboardRun: (repoId: string) =>
     apiFetch<OnboardRef>(`/repos/${encodeURIComponent(repoId)}/onboard`),
 
+  /** (Re-)launch the onboarding workflow for an already-registered repo. */
+  rerunOnboarding: (repoId: string) =>
+    apiFetch<{ runId: string }>(`/repos/${encodeURIComponent(repoId)}/onboard`, { method: 'POST' }),
+
   /** Liveness (also proves the actor + event pump are up). */
   getHealth: () => apiFetch<{ status: string; version: string; ping: string }>('/health'),
 
