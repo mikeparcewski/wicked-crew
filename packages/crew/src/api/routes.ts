@@ -43,10 +43,28 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const RegisterRepoSchema = z.object({
-  name: z.string().min(1),
-  rootPath: z.string().min(1),
-});
+// Repo names become directory components under ~/.wicked/repos/ — reject anything
+// that would allow path traversal (slashes, dots-only segments, control chars).
+const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+const RegisterRepoSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
+    rootPath: z.string().optional(),
+    gitUrl: z.string().optional(),
+  })
+  .refine(
+    (d) => {
+      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
+      const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
+      return hasLocal !== hasRemote; // exactly one
+    },
+    { message: 'Provide exactly one of rootPath (local path) or gitUrl (remote clone URL).' },
+  );
 
 const LaunchSchema = z.object({
   problem: z.string().min(1),
@@ -108,13 +126,31 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
+    const { name, rootPath, gitUrl } = parsed.data;
     try {
-      const repo = await adapter.registerRepo(parsed.data.name, parsed.data.rootPath);
-      return reply.code(201).send({ repo });
+      if (gitUrl) {
+        // Remote: clone, register, launch onboarding run.
+        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl);
+        const repos = await adapter.listRepos();
+        const repo = repos.find((r) => r.id === repoId);
+        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
+        return reply.code(201).send({ repo, onboardRunId: runId });
+      } else {
+        // Local: register then launch onboarding run.
+        const repo = await adapter.registerRepo(name, rootPath!);
+        const runId = await adapter.launchOnboardingRun(repo.id, name);
+        return reply.code(201).send({ repo, onboardRunId: runId });
+      }
     } catch (err) {
-      // Core rejects a non-git / zero-commit path — a client error, not a 500.
       return reply.code(400).send({ error: message(err) });
     }
+  });
+
+  // Return the onboarding run id for a repo (so the UI can navigate to it).
+  app.get(`${V}/repos/:id/onboard`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const runId = adapter.getOnboardRunId(id) ?? null;
+    return reply.code(200).send({ runId });
   });
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
@@ -286,7 +322,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
-  // ── Workflow viewer (crew#44) ──────────────────────────────────────────────
+  // ── Workflow viewer + builder (crew#44) ───────────────────────────────────
 
   app.get(`${V}/workflows`, async () => {
     const workflows = adapter.listWorkflows();
@@ -298,6 +334,47 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const workflow = adapter.getWorkflow(id);
     if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
     return { workflow };
+  });
+
+  // Register (or replace) a user-authored workflow definition.
+  // Validates, persists to ~/.wicked/workflows/<id>.json, hot-registers in the
+  // Rust actor when registerWorkflow NAPI is available.
+  app.post(`${V}/workflows`, async (req, reply) => {
+    const body = req.body as { id?: unknown };
+    if (!body || typeof body.id !== 'string' || !body.id) {
+      return reply.code(400).send({ error: 'workflow must have a string `id` field' });
+    }
+    if (!SAFE_REPO_NAME.test(body.id) || body.id.length > 128) {
+      return reply.code(400).send({ error: 'workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores' });
+    }
+    try {
+      const id = await adapter.registerWorkflow(body as import('../core/types.js').WorkflowDef);
+      return reply.code(201).send({ id, status: 'registered' });
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  // Save an inline script to ~/.wicked/scripts/ and return its path.
+  // Tool-executor phases use the returned path as their command.
+  app.post(`${V}/scripts`, async (req, reply) => {
+    const body = req.body as { name?: unknown; content?: unknown; lang?: unknown };
+    if (typeof body.name !== 'string' || typeof body.content !== 'string') {
+      return reply.code(400).send({ error: '`name` and `content` are required strings' });
+    }
+    if (!SAFE_REPO_NAME.test(body.name) || body.name.length > 128) {
+      return reply.code(400).send({ error: 'Script name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores' });
+    }
+    const lang = (body.lang as string | undefined) ?? 'bash';
+    if (!['bash', 'python', 'sh'].includes(lang)) {
+      return reply.code(400).send({ error: '`lang` must be bash | python | sh' });
+    }
+    try {
+      const path = await adapter.saveScript(body.name, body.content, lang as 'bash' | 'python' | 'sh');
+      return reply.code(201).send({ path });
+    } catch (err) {
+      return reply.code(500).send({ error: message(err) });
+    }
   });
 
   // ── Domain-model browser (crew#44) ────────────────────────────────────────

@@ -1,9 +1,15 @@
 import { createRequire } from 'node:module';
+import { execFile } from 'node:child_process';
+import { mkdir, access, writeFile, chmod, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type {
   CoreEvent,
   LaunchRunInput,
   RepoEntry,
+  RepoOnboardRef,
   SessionView,
   GovernancePolicy,
   ConformanceRule,
@@ -11,6 +17,15 @@ import type {
   CoverageReport,
   WorkflowDef,
 } from './types.js';
+
+const execFileAsync = promisify(execFile);
+
+
+/** Resolved path under the user's home directory. */
+function wickedDir(...parts: string[]): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+  return join(home, '.wicked', ...parts);
+}
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
@@ -226,9 +241,83 @@ export class CoreAdapter {
     return JSON.parse(await this.core.workOutput(unitId)) as string | null;
   }
 
-  /** Register a git repo → the persisted `RepoEntry`. */
+  /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
+  private readonly repoOnboardRunIds = new Map<string, string>();
+  /** repo ids with an onboarding run in flight — guards against concurrent double-launch. */
+  private readonly onboardingInFlight = new Set<string>();
+
+  /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
     return JSON.parse(await this.core.registerRepo(name, rootPath)) as RepoEntry;
+  }
+
+  /**
+   * Clone a remote git URL into `~/.wicked/repos/<name>`, register it, then
+   * launch an `onboarding` workflow run so progress is visible in the run list.
+   */
+  async cloneAndRegisterRepo(name: string, gitUrl: string): Promise<RepoOnboardRef> {
+    const reposRoot = wickedDir('repos');
+    const cloneDir = join(reposRoot, name);
+    // Defense-in-depth: confirm the resolved path is inside the repos root
+    // (the name was already validated by the route schema, but verify here too).
+    if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+      throw new Error(`Unsafe repo name: would escape the repos directory`);
+    }
+    await mkdir(cloneDir, { recursive: true });
+
+    let needsClone = true;
+    try {
+      await access(join(cloneDir, '.git'));
+      needsClone = false;
+    } catch { /* not yet cloned */ }
+
+    if (needsClone) {
+      try {
+        await execFileAsync('git', ['clone', '--', gitUrl, cloneDir], {
+          timeout: 5 * 60 * 1000,
+        });
+      } catch (err) {
+        // Clean up the partial clone so a retry starts fresh.
+        await rm(cloneDir, { recursive: true, force: true });
+        throw err;
+      }
+    }
+
+    const entry = await this.registerRepo(name, cloneDir);
+    const runId = await this.launchOnboardingRun(entry.id, name);
+    return { repoId: entry.id, runId };
+  }
+
+  /**
+   * Launch the built-in `onboarding` workflow for a registered repo.
+   * The run's `workdir` = the repo root; Tool phases run estate commands there.
+   * Returns the run id so the UI can navigate directly to it.
+   */
+  async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
+    if (this.onboardingInFlight.has(repoId)) {
+      const existing = this.repoOnboardRunIds.get(repoId);
+      if (existing) return existing;
+    }
+    this.onboardingInFlight.add(repoId);
+    const runId = randomUUID();
+    try {
+      await this.launchRun({
+        problem: `Onboard repository: ${repoName}`,
+        sessionId: runId,
+        clisJson: '[]',
+        workflow: 'onboarding',
+        repoRef: repoId,
+      });
+    } finally {
+      this.onboardingInFlight.delete(repoId);
+    }
+    this.repoOnboardRunIds.set(repoId, runId);
+    return runId;
+  }
+
+  /** Return the onboarding run id for a repo (undefined if not launched this session). */
+  getOnboardRunId(repoId: string): string | undefined {
+    return this.repoOnboardRunIds.get(repoId);
   }
 
   /** List every registered repo. */
@@ -282,17 +371,60 @@ export class CoreAdapter {
     return JSON.parse(json) as ConformanceRule[];
   }
 
-  // ── Workflow viewer (crew#44) ───────────────────────────────────────────────
-  // The three built-in workflows are expressed as static data mirroring workflow.rs.
-  // When wicked-core-ts gains list_workflows_json / get_workflow_json NAPI methods,
-  // swap these stubs for NAPI calls — the route surface is identical.
+  // ── Workflow viewer + builder (crew#44) ────────────────────────────────────
+  // Built-ins are static TypeScript mirrors of workflow.rs. User-registered
+  // workflows are added to `userWorkflows` and persisted to disk; the Rust actor
+  // picks them up via `register_workflow` NAPI (when available) for immediate use.
+
+  private readonly userWorkflows = new Map<string, WorkflowDef>();
 
   listWorkflows(): WorkflowDef[] {
-    return BUILTIN_WORKFLOWS;
+    return [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()];
   }
 
   getWorkflow(id: string): WorkflowDef | null {
-    return BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+    return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+  }
+
+  /**
+   * Register a user-authored workflow: persist to `~/.wicked/workflows/<id>.json`,
+   * update the in-memory registry, and (when core supports it) register in the
+   * Rust actor so runs using this workflow work immediately without a restart.
+   */
+  async registerWorkflow(def: WorkflowDef): Promise<string> {
+    const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+    if (!SAFE_ID.test(def.id) || def.id.length > 128) {
+      throw new Error('workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores');
+    }
+    const dir = wickedDir('workflows');
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${def.id}.json`);
+    await writeFile(path, JSON.stringify(def, null, 2), 'utf8');
+    this.userWorkflows.set(def.id, def);
+
+    // Hot-register in the Rust actor when the NAPI method is available.
+    // Falls back gracefully if running against an older core build.
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['registerWorkflow'] === 'function') {
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(def));
+    }
+    return def.id;
+  }
+
+  /**
+   * Save an inline script to `~/.wicked/scripts/<name>.<ext>`, make it executable,
+   * and return the absolute path. Tool-executor phases use this path as their command.
+   */
+  async saveScript(name: string, content: string, lang: 'bash' | 'python' | 'sh'): Promise<string> {
+    const ext = lang === 'python' ? 'py' : 'sh';
+    const dir = wickedDir('scripts');
+    await mkdir(dir, { recursive: true });
+    const filename = `${name.replace(/[^a-z0-9_-]/gi, '_')}.${ext}`;
+    const path = join(dir, filename);
+    const shebang = lang === 'python' ? '#!/usr/bin/env python3\n' : '#!/usr/bin/env bash\n';
+    await writeFile(path, shebang + content, 'utf8');
+    await chmod(path, 0o755);
+    return path;
   }
 
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
