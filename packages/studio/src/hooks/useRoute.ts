@@ -17,8 +17,12 @@ function parse(pathname: string): Route {
   if ((PANELS as string[]).includes(first) && first !== 'runs') {
     return { panel: first as Panel, runId: null, showLaunch: false };
   }
-  if (second === 'new') return { panel: 'runs', runId: null, showLaunch: true };
-  if (second) return { panel: 'runs', runId: decodeURIComponent(second), showLaunch: false };
+  // Only treat second segment as a run selector when the path is explicitly
+  // /runs/* or / — unknown first segments must not be misinterpreted as run IDs.
+  if (first === '' || first === 'runs') {
+    if (second === 'new') return { panel: 'runs', runId: null, showLaunch: true };
+    if (second) return { panel: 'runs', runId: decodeURIComponent(second), showLaunch: false };
+  }
   return { panel: 'runs', runId: null, showLaunch: false };
 }
 
