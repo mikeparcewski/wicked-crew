@@ -296,6 +296,7 @@ export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh }: Props
   if (view) {
     return (
       <RunChat
+        key={view.session.id}
         view={view}
         onLaunched={onLaunched}
         onNavigateBack={onNavigateBack}

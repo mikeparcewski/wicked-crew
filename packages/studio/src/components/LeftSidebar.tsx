@@ -131,6 +131,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           <button
             type="button"
             onClick={() => setSettingsOpen((v) => !v)}
+            onMouseDown={(e) => e.stopPropagation()}
             aria-label="Settings"
             className={`rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors ${
               collapsed

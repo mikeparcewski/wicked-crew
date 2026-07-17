@@ -57,6 +57,9 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
     try {
       await api.cancelRun(session.id);
       onRefresh();
+    } catch {
+      // Cancel is best-effort — the run may already be terminal; refresh to sync state.
+      onRefresh();
     } finally {
       setCancelling(false);
     }
