@@ -99,8 +99,9 @@ async function resolveExecutor(p: BuilderPhase): Promise<PhaseExecutor> {
     const cmd = p.cmd.trim().split(/\s+/).filter(Boolean);
     return { type: 'tool', cmd };
   }
-  // script mode — save and get path
-  const { path } = await api.saveScript(p.id || 'script', p.script, p.scriptLang);
+  // script mode — save and get path; use _key as unique fallback when id is blank
+  const scriptName = p.id.trim() || `script-${p._key}`;
+  const { path } = await api.saveScript(scriptName, p.script, p.scriptLang);
   const interp = p.scriptLang === 'python' ? 'python3' : p.scriptLang === 'sh' ? 'sh' : 'bash';
   return { type: 'tool', cmd: [interp, path] };
 }

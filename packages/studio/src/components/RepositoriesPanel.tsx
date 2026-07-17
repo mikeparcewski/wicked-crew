@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { RepoEntry } from '../api/types.js';
 
@@ -22,6 +22,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
   const [newGitUrl, setNewGitUrl] = useState('');
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
+  const nameEditedRef = useRef(false);
 
   // repo id → onboard run id; shown as a link after registration
   const [onboardRunIds, setOnboardRunIds] = useState<Record<string, string>>({});
@@ -36,7 +37,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
   }, []);
 
   function deriveName(value: string): void {
-    if (newName) return;
+    if (nameEditedRef.current) return;
     const segment = value.replace(/\.git$/, '').split(/[/\\:]/).filter(Boolean).pop() ?? '';
     if (segment) setNewName(segment);
   }
@@ -61,6 +62,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
       setNewPath('');
       setNewGitUrl('');
       setSourceMode('local');
+      nameEditedRef.current = false;
 
       // Navigate straight to the onboarding run so the user can watch it
       onSelectRun?.(onboardRunId);
@@ -112,7 +114,10 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
               className="rounded border p-2 text-xs"
               placeholder="Repo name"
               value={newName}
-              onChange={(e) => setNewName(e.target.value)}
+              onChange={(e) => {
+                setNewName(e.target.value);
+                nameEditedRef.current = Boolean(e.target.value.trim());
+              }}
             />
 
             {sourceMode === 'local' ? (

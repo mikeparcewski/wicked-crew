@@ -47,12 +47,15 @@ function useKillShortcut(
     if (!runId) return;
     function handler(e: KeyboardEvent): void {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k' && runId) {
+        const tag = (e.target as HTMLElement).tagName.toLowerCase();
+        const editable = (e.target as HTMLElement).isContentEditable;
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || editable) return;
         const run = runs.find((r) => r.session.id === runId);
         if (!run) return;
         const terminal = ['completed', 'cancelled', 'failed'].includes(run.session.status);
         if (!terminal) {
           e.preventDefault();
-          onKill(runId);
+          void onKill(runId);
         }
       }
     }

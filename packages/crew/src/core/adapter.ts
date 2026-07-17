@@ -243,6 +243,8 @@ export class CoreAdapter {
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
   private readonly repoOnboardRunIds = new Map<string, string>();
+  /** repo ids with an onboarding run in flight — guards against concurrent double-launch. */
+  private readonly onboardingInFlight = new Set<string>();
 
   /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
@@ -292,14 +294,23 @@ export class CoreAdapter {
    * Returns the run id so the UI can navigate directly to it.
    */
   async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
+    if (this.onboardingInFlight.has(repoId)) {
+      const existing = this.repoOnboardRunIds.get(repoId);
+      if (existing) return existing;
+    }
+    this.onboardingInFlight.add(repoId);
     const runId = randomUUID();
-    await this.launchRun({
-      problem: `Onboard repository: ${repoName}`,
-      sessionId: runId,
-      clisJson: '[]',
-      workflow: 'onboarding',
-      repoRef: repoId,
-    });
+    try {
+      await this.launchRun({
+        problem: `Onboard repository: ${repoName}`,
+        sessionId: runId,
+        clisJson: '[]',
+        workflow: 'onboarding',
+        repoRef: repoId,
+      });
+    } finally {
+      this.onboardingInFlight.delete(repoId);
+    }
     this.repoOnboardRunIds.set(repoId, runId);
     return runId;
   }
@@ -381,6 +392,10 @@ export class CoreAdapter {
    * Rust actor so runs using this workflow work immediately without a restart.
    */
   async registerWorkflow(def: WorkflowDef): Promise<string> {
+    const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+    if (!SAFE_ID.test(def.id) || def.id.length > 128) {
+      throw new Error('workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores');
+    }
     const dir = wickedDir('workflows');
     await mkdir(dir, { recursive: true });
     const path = join(dir, `${def.id}.json`);

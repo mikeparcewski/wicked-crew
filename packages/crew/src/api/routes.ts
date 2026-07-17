@@ -133,6 +133,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
         const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl);
         const repos = await adapter.listRepos();
         const repo = repos.find((r) => r.id === repoId);
+        if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
         return reply.code(201).send({ repo, onboardRunId: runId });
       } else {
         // Local: register then launch onboarding run.
@@ -342,6 +343,9 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const body = req.body as { id?: unknown };
     if (!body || typeof body.id !== 'string' || !body.id) {
       return reply.code(400).send({ error: 'workflow must have a string `id` field' });
+    }
+    if (!SAFE_REPO_NAME.test(body.id) || body.id.length > 128) {
+      return reply.code(400).send({ error: 'workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores' });
     }
     try {
       const id = await adapter.registerWorkflow(body as import('../core/types.js').WorkflowDef);
