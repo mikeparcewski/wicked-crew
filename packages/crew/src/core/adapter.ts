@@ -27,6 +27,20 @@ function wickedDir(...parts: string[]): string {
   return join(home, '.wicked', ...parts);
 }
 
+/**
+ * Workflow overlay directory — mirrors the Rust `workflow_overlay_dir()` logic in
+ * `pipeline.rs`. The Rust actor reads drop-in workflow JSONs from this path at startup
+ * and (with registerWorkflow NAPI) at runtime. TS must write to the same location so
+ * the files are picked up on the next daemon start.
+ *   • `$WICKED_WORKFLOWS_DIR`  — explicit override (matches Rust env check)
+ *   • `~/.config/wicked-core/workflows`  — default (matches Rust default)
+ */
+function workflowOverlayDir(): string {
+  if (process.env.WICKED_WORKFLOWS_DIR) return process.env.WICKED_WORKFLOWS_DIR;
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+  return join(home, '.config', 'wicked-core', 'workflows');
+}
+
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
 // touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
@@ -311,9 +325,8 @@ export class CoreAdapter {
     this.onboardingInFlight.add(repoId);
     const runId = randomUUID();
     try {
-      // Ensure the onboarding workflow is registered in the Rust actor. It is a TS-only
-      // built-in (not in workflow.rs), so the actor won't find it unless we register it
-      // via NAPI before the first launch. Idempotent — safe to call every time.
+      // Write onboarding.json to the Rust overlay dir so the actor picks it up on (re)start.
+      // When registerWorkflow NAPI is present, also hot-registers it for immediate use.
       await this.registerWorkflow(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
@@ -401,7 +414,8 @@ export class CoreAdapter {
   }
 
   /**
-   * Register a user-authored workflow: persist to `~/.wicked/workflows/<id>.json`,
+   * Register a user-authored workflow: persist to the Rust workflow overlay dir
+   * (`~/.config/wicked-core/workflows/<id>.json` or `$WICKED_WORKFLOWS_DIR`),
    * update the in-memory registry, and (when core supports it) register in the
    * Rust actor so runs using this workflow work immediately without a restart.
    */
@@ -410,7 +424,7 @@ export class CoreAdapter {
     if (!SAFE_ID.test(def.id) || def.id.length > 128) {
       throw new Error('workflow id must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores');
     }
-    const dir = wickedDir('workflows');
+    const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });
     const path = join(dir, `${def.id}.json`);
     await writeFile(path, JSON.stringify(def, null, 2), 'utf8');
