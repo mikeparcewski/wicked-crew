@@ -228,16 +228,16 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
     if (graphType !== 'domain' || domainData !== null) return;
     setDomainLoading(true);
     api
-      .getDomainGraph()
+      .getRepoDomainGraph(repo.id)
       .then(({ graph }) => setDomainData(graph))
       .catch(() => setDomainData(null))
       .finally(() => setDomainLoading(false));
-  }, [graphType, domainData]);
+  }, [graphType, domainData, repo.id]);
 
   function handleHotspotSelect(node: CodeGraphNode): void {
     setHighlightId(node.id);
     setSelectedNode(node);
-    setTab('graph');
+    // Stay on hotspots tab — detail panel appears on the right
   }
 
   function handleNodeSelect(node: CodeGraphNode | null): void {
@@ -337,32 +337,42 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
               </p>
             </div>
           ) : (
-            /* Keep both tabs mounted; use inline style to guarantee display wins over Tailwind. */
-            <div className="h-full flex flex-col">
-              <div
-                className="flex-1 overflow-hidden flex"
-                style={{ display: tab === 'graph' ? 'flex' : 'none' }}
-              >
-                <ForceGraphContainer
-                  nodes={codeData!.nodes}
-                  edges={codeData!.edges}
-                  highlightId={highlightId}
-                  onNodeSelect={handleNodeSelect}
-                />
-                {selectedNode && (
-                  <NodeDetailPanel
-                    node={selectedNode}
+            /* NodeDetailPanel is shared between both tabs — sits on the right. */
+            <div className="h-full flex">
+              <div className="flex-1 overflow-hidden">
+                {/* Graph tab — stays mounted; inline style beats Tailwind class order. */}
+                <div
+                  className="h-full overflow-hidden"
+                  style={{ display: tab === 'graph' ? 'flex' : 'none' }}
+                >
+                  <ForceGraphContainer
+                    nodes={codeData!.nodes}
                     edges={codeData!.edges}
-                    onClose={() => setSelectedNode(null)}
+                    highlightId={highlightId}
+                    onNodeSelect={handleNodeSelect}
                   />
-                )}
+                </div>
+                {/* Hotspots tab */}
+                <div
+                  className="h-full overflow-hidden"
+                  style={{ display: tab === 'hotspots' ? 'block' : 'none' }}
+                >
+                  <HotspotsView
+                    nodes={codeData!.nodes}
+                    selectedId={selectedNode?.id ?? null}
+                    onSelect={handleHotspotSelect}
+                  />
+                </div>
               </div>
-              <div
-                className="flex-1 overflow-hidden"
-                style={{ display: tab === 'hotspots' ? 'block' : 'none' }}
-              >
-                <HotspotsView nodes={codeData!.nodes} onSelect={handleHotspotSelect} />
-              </div>
+
+              {/* Shared node detail panel */}
+              {selectedNode && (
+                <NodeDetailPanel
+                  node={selectedNode}
+                  edges={codeData!.edges}
+                  onClose={() => setSelectedNode(null)}
+                />
+              )}
             </div>
           )}
         </div>

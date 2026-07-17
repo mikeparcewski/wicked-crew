@@ -416,6 +416,26 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
+  // ── Per-repo domain graph ─────────────────────────────────────────────────
+  // Reads the requirements_graph.json from the repo's own root_path, not from
+  // the daemon's cwd. Falls back to null when the file hasn't been generated yet.
+
+  app.get(`${V}/repos/:id/domain-graph`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    const graphPath = join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
+    try {
+      const content = await fsp.readFile(graphPath, 'utf8');
+      return { graph: JSON.parse(content) as unknown };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
+
   // ── Repo code graph (estate DB → file-level nodes + import edges) ──────────
   // Queries the estate SQLite at <root>/.codegraph/estate.db via Python (no new
   // Node deps). Returns file-level graph capped at 80 nodes / 200 edges.

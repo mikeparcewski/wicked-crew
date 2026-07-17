@@ -1,8 +1,8 @@
-import { useState } from 'react';
 import type { CodeGraphNode } from '../api/types.js';
 
 interface Props {
   nodes: CodeGraphNode[];
+  selectedId?: string | null;
   onSelect?: (node: CodeGraphNode) => void;
 }
 
@@ -14,71 +14,62 @@ const LANG_COLORS: Record<string, string> = {
   go: '#06b6d4',
 };
 
-export function HotspotsView({ nodes, onSelect }: Props): React.ReactElement {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const top30 = [...nodes].sort((a, b) => b.inDeg - a.inDeg).slice(0, 30);
-  const maxInDeg = top30[0]?.inDeg ?? 1;
-
-  // Group by first path segment, preserving inDeg-sorted order within each group.
-  const groups = new Map<string, CodeGraphNode[]>();
-  for (const n of top30) {
-    const seg = n.id.split('/')[0] ?? '';
-    let arr = groups.get(seg);
-    if (!arr) { arr = []; groups.set(seg, arr); }
-    arr.push(n);
-  }
+export function HotspotsView({ nodes, selectedId, onSelect }: Props): React.ReactElement {
+  const top40 = [...nodes].sort((a, b) => b.inDeg - a.inDeg).slice(0, 40);
+  const maxInDeg = top40[0]?.inDeg ?? 1;
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto">
-      {Array.from(groups.entries()).map(([seg, groupNodes]) => (
-        <div key={seg}>
-          <div className="sticky top-0 z-10 bg-gray-100 border-b border-gray-200 px-3 py-1 flex items-center gap-1.5">
-            <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
-              {seg || '(root)'}
-            </span>
-            <span className="text-[10px] text-gray-400">{groupNodes.length}</span>
-          </div>
-          {groupNodes.map((n) => {
-            const color = LANG_COLORS[n.lang.toLowerCase()] ?? '#9ca3af';
-            const barPct = maxInDeg > 0 ? (n.inDeg / maxInDeg) * 100 : 0;
-            const isSelected = n.id === selectedId;
-            return (
-              <button
-                key={n.id}
-                type="button"
-                onClick={() => {
-                  setSelectedId(n.id);
-                  onSelect?.(n);
-                }}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left transition-colors ${
-                  isSelected ? 'bg-emerald-50' : 'hover:bg-gray-50'
-                }`}
-              >
+    <div className="h-full flex flex-col overflow-hidden">
+      <div className="px-4 py-2 border-b bg-gray-50 shrink-0">
+        <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wide">
+          Files by import count — click to inspect
+        </p>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {top40.map((n, i) => {
+          const barPct = maxInDeg > 0 ? (n.inDeg / maxInDeg) * 100 : 0;
+          const color = LANG_COLORS[n.lang.toLowerCase()] ?? '#9ca3af';
+          const isSelected = n.id === selectedId;
+
+          return (
+            <button
+              key={n.id}
+              type="button"
+              onClick={() => onSelect?.(n)}
+              className={`w-full text-left px-4 py-2.5 border-b border-gray-100 relative transition-colors ${
+                isSelected ? 'bg-emerald-50' : 'hover:bg-gray-50'
+              }`}
+            >
+              {/* Horizontal bar — fills from the left proportionally */}
+              <div
+                className="absolute inset-y-0 left-0 pointer-events-none"
+                style={{ width: `${barPct}%`, backgroundColor: color, opacity: isSelected ? 0.18 : 0.1 }}
+              />
+
+              {/* Row content overlaid on bar */}
+              <div className="relative flex items-center gap-2">
+                <span className="text-[10px] text-gray-400 tabular-nums w-5 text-right shrink-0">
+                  {i + 1}
+                </span>
                 <span
                   className="w-2 h-2 rounded-full shrink-0"
                   style={{ backgroundColor: color }}
                 />
                 <span
-                  className="flex-1 font-mono truncate text-gray-700 min-w-0"
+                  className="flex-1 font-mono text-[11px] text-gray-700 truncate"
                   title={n.id}
                 >
                   {n.id}
                 </span>
-                <span className="w-24 shrink-0">
-                  <span
-                    className="block h-1.5 rounded bg-emerald-400"
-                    style={{ width: `${barPct}%` }}
-                  />
-                </span>
-                <span className="shrink-0 text-[10px] text-gray-400 w-6 text-right tabular-nums">
+                <span className="shrink-0 text-[11px] font-semibold text-gray-600 tabular-nums ml-2">
                   {n.inDeg}
                 </span>
-              </button>
-            );
-          })}
-        </div>
-      ))}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
