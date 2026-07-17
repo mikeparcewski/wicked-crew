@@ -8,6 +8,7 @@ interface Props {
   height?: number;
   externalSelectedId?: string;
   onNodeClick?: (node: CodeGraphNode) => void;
+  onNodeSelect?: (node: CodeGraphNode | null) => void;
 }
 
 const LANG_COLORS: Record<string, string> = {
@@ -40,6 +41,7 @@ export function ForceGraph({
   height = 600,
   externalSelectedId,
   onNodeClick,
+  onNodeSelect,
 }: Props): React.ReactElement {
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -53,8 +55,13 @@ export function ForceGraph({
   const [nodePosOverride, setNodePosOverride] = useState<Record<string, { x: number; y: number }>>({});
 
   useEffect(() => {
-    if (externalSelectedId !== undefined) setSelectedId(externalSelectedId);
-  }, [externalSelectedId]);
+    if (externalSelectedId === undefined) return;
+    setSelectedId(externalSelectedId);
+    const pos = mergedPosRef.current[externalSelectedId];
+    if (pos && width > 0 && height > 0) {
+      setView({ ox: width / 2 - pos.x, oy: height / 2 - pos.y, s: 1 });
+    }
+  }, [externalSelectedId, width, height]);
 
   const draggingRef = useRef<{
     id: string;
@@ -175,6 +182,10 @@ export function ForceGraph({
     return merged;
   }, [simPositions, nodePosOverride]);
 
+  // Stable ref so the selection-pan effect can read current positions without adding them to deps.
+  const mergedPosRef = useRef(mergedPos);
+  mergedPosRef.current = mergedPos;
+
   const adjacentIds = useMemo(() => {
     if (!selectedId) return null;
     const adj = new Set<string>([selectedId]);
@@ -271,7 +282,7 @@ export function ForceGraph({
         height={height}
         fill="transparent"
         onMouseDown={handleBgMouseDown}
-        onClick={() => setSelectedId(null)}
+        onClick={() => { setSelectedId(null); onNodeSelect?.(null); }}
       />
       <g transform={`translate(${view.ox},${view.oy}) scale(${view.s})`}>
         {displayEdges.map((e, i) => {
@@ -318,7 +329,12 @@ export function ForceGraph({
                 e.stopPropagation();
                 const next = isSelected ? null : n.id;
                 setSelectedId(next);
-                if (!isSelected) onNodeClick?.(n);
+                if (!isSelected) {
+                  onNodeClick?.(n);
+                  onNodeSelect?.(n);
+                } else {
+                  onNodeSelect?.(null);
+                }
               }}
             />
           );
