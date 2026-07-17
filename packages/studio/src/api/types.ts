@@ -421,3 +421,17 @@ export interface OpenTerminalBody {
    */
   governed?: boolean;
 }
+
+/** File-level code graph from estate (GET /repos/:id/graph). */
+export interface CodeGraphNode {
+  id: string;      // repo-relative file path
+  inDeg: number;   // incoming edge count (hotspot indicator)
+  outDeg: number;  // outgoing edge count
+  lang: string;    // language (typescript, rust, python, etc.)
+}
+export interface CodeGraphEdge { src: string; tgt: string; }
+export interface CodeGraphData {
+  nodes: CodeGraphNode[];
+  edges: CodeGraphEdge[];
+  stats: { nodeCount: number; edgeCount: number; fileCount: number };
+}

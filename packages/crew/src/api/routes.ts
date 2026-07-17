@@ -1,13 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
+
+const execFileAsync = promisify(execFile);
 
 const V = '/api/v1';
 
@@ -408,6 +412,79 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       return { graph: JSON.parse(content) as unknown };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
+
+  // ── Repo code graph (estate DB → file-level nodes + import edges) ──────────
+  // Queries the estate SQLite at <root>/.codegraph/estate.db via Python (no new
+  // Node deps). Returns file-level graph capped at 80 nodes / 200 edges.
+
+  app.get(`${V}/repos/:id/graph`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    if (!existsSync(dbPath)) {
+      return reply.send({ graph: null });
+    }
+
+    const pyScript = `
+import sqlite3, json, sys
+db = sqlite3.connect(sys.argv[1])
+db.row_factory = sqlite3.Row
+
+meta = db.execute("SELECT COUNT(*) n FROM nodes").fetchone()
+node_count = meta["n"]
+edge_count = db.execute("SELECT COUNT(*) n FROM edges").fetchone()["n"]
+file_count = db.execute("SELECT COUNT(DISTINCT file) n FROM nodes WHERE file!=''").fetchone()["n"]
+
+file_stats = db.execute("""
+  SELECT n.file,
+         n.language as lang,
+         COUNT(DISTINCT e_in.source) as in_deg,
+         COUNT(DISTINCT e_out.target) as out_deg
+  FROM nodes n
+  LEFT JOIN edges e_in ON e_in.target = n.symbol
+  LEFT JOIN edges e_out ON e_out.source = n.symbol
+  WHERE n.file != ''
+  GROUP BY n.file
+  ORDER BY in_deg DESC
+  LIMIT 80
+""").fetchall()
+
+top_files = {r["file"] for r in file_stats}
+
+raw_edges = db.execute("""
+  SELECT DISTINCT n_src.file as src, n_tgt.file as tgt
+  FROM edges e
+  JOIN nodes n_src ON n_src.symbol = e.source
+  JOIN nodes n_tgt ON n_tgt.symbol = e.target
+  WHERE e.kind IN ('imports', '"imports"', 'calls', '"calls"')
+    AND n_src.file != '' AND n_tgt.file != ''
+    AND n_src.file != n_tgt.file
+  LIMIT 200
+""").fetchall()
+
+edges = [{"src": r["src"], "tgt": r["tgt"]} for r in raw_edges
+         if r["src"] in top_files and r["tgt"] in top_files]
+nodes = [{"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]}
+         for r in file_stats]
+
+print(json.dumps({"nodes": nodes, "edges": edges,
+                  "stats": {"nodeCount": node_count, "edgeCount": edge_count, "fileCount": file_count}}))
+`;
+
+    try {
+      const { stdout } = await execFileAsync(
+        'python3', ['-c', pyScript, dbPath],
+        { timeout: 15_000 },
+      );
+      const data = JSON.parse(stdout) as unknown;
+      return reply.send({ graph: data });
+    } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
   });
