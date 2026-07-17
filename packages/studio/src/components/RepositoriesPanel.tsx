@@ -3,6 +3,7 @@ import { api } from '../api/client.js';
 import type { RepoEntry, SessionView } from '../api/types.js';
 
 type SourceMode = 'local' | 'remote';
+type GraphMode = 'code' | 'domain';
 
 interface Props {
   onSelectRun?: (runId: string) => void;
@@ -57,6 +58,14 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
+  const [graphRepo, setGraphRepo] = useState<RepoEntry | null>(null);
+
+  // ── Graph tab state ───────────────────────────────────────────────────────
+  const [graphMode, setGraphMode] = useState<GraphMode>('code');
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<string>>(new Set());
+  const [inlineGraphData, setInlineGraphData] = useState<CodeGraphData | null>(null);
+  const [inlineGraphLoading, setInlineGraphLoading] = useState(false);
+
   const [rerunning, setRerunning] = useState<Record<string, boolean>>({});
   const [rerunError, setRerunError] = useState<Record<string, string>>({});
   const [showRegister, setShowRegister] = useState(autoShowRegister ?? false);
@@ -79,6 +88,18 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (tab !== 'graph' || graphMode !== 'code') return;
+    const firstId = Array.from(selectedRepoIds)[0];
+    if (!firstId) { setInlineGraphData(null); return; }
+    setInlineGraphLoading(true);
+    api
+      .getRepoGraph(firstId)
+      .then(({ graph }) => setInlineGraphData(graph))
+      .catch(() => setInlineGraphData(null))
+      .finally(() => setInlineGraphLoading(false));
+  }, [tab, graphMode, selectedRepoIds]);
 
   function deriveName(value: string): void {
     if (nameEditedRef.current) return;
@@ -441,6 +462,10 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
           </div>
         )}
       </div>
+
+      {graphRepo && (
+        <RepoGraphModal repo={graphRepo} onClose={() => setGraphRepo(null)} />
+      )}
     </div>
   );
 }
