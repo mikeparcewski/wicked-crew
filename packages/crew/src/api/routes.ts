@@ -436,10 +436,25 @@ import sqlite3, json, sys
 db = sqlite3.connect(sys.argv[1])
 db.row_factory = sqlite3.Row
 
-meta = db.execute("SELECT COUNT(*) n FROM nodes").fetchone()
-node_count = meta["n"]
+node_count = db.execute("SELECT COUNT(*) n FROM nodes").fetchone()["n"]
 edge_count = db.execute("SELECT COUNT(*) n FROM edges").fetchone()["n"]
 file_count = db.execute("SELECT COUNT(DISTINCT file) n FROM nodes WHERE file!=''").fetchone()["n"]
+
+# Step 1: collect file-level import/call edges (all kinds, quoted or unquoted)
+raw_edges = db.execute("""
+  SELECT DISTINCT n_src.file as src, n_tgt.file as tgt
+  FROM edges e
+  JOIN nodes n_src ON n_src.symbol = e.source
+  JOIN nodes n_tgt ON n_tgt.symbol = e.target
+  WHERE e.kind IN ('imports', '"imports"', 'calls', '"calls"')
+    AND n_src.file != '' AND n_tgt.file != ''
+    AND n_src.file != n_tgt.file
+  LIMIT 300
+""").fetchall()
+edges = [{"src": r["src"], "tgt": r["tgt"]} for r in raw_edges]
+
+# Step 2: gather all files referenced in edges + top hotspots; cap at 80 total
+edge_files = {e["src"] for e in edges} | {e["tgt"] for e in edges}
 
 file_stats = db.execute("""
   SELECT n.file,
@@ -452,26 +467,25 @@ file_stats = db.execute("""
   WHERE n.file != ''
   GROUP BY n.file
   ORDER BY in_deg DESC
-  LIMIT 80
 """).fetchall()
 
-top_files = {r["file"] for r in file_stats}
+seen = set()
+nodes = []
+# First pass: files that appear in edges
+for r in file_stats:
+  if r["file"] in edge_files and r["file"] not in seen:
+    nodes.append({"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]})
+    seen.add(r["file"])
+# Second pass: fill remainder with top hotspot files up to 80
+for r in file_stats:
+  if len(nodes) >= 80: break
+  if r["file"] not in seen:
+    nodes.append({"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]})
+    seen.add(r["file"])
 
-raw_edges = db.execute("""
-  SELECT DISTINCT n_src.file as src, n_tgt.file as tgt
-  FROM edges e
-  JOIN nodes n_src ON n_src.symbol = e.source
-  JOIN nodes n_tgt ON n_tgt.symbol = e.target
-  WHERE e.kind IN ('imports', '"imports"', 'calls', '"calls"')
-    AND n_src.file != '' AND n_tgt.file != ''
-    AND n_src.file != n_tgt.file
-  LIMIT 200
-""").fetchall()
-
-edges = [{"src": r["src"], "tgt": r["tgt"]} for r in raw_edges
-         if r["src"] in top_files and r["tgt"] in top_files]
-nodes = [{"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]}
-         for r in file_stats]
+# Trim edges to only connect included nodes, cap at 200
+node_set = {n["id"] for n in nodes}
+edges = [e for e in edges if e["src"] in node_set and e["tgt"] in node_set][:200]
 
 print(json.dumps({"nodes": nodes, "edges": edges,
                   "stats": {"nodeCount": node_count, "edgeCount": edge_count, "fileCount": file_count}}))
