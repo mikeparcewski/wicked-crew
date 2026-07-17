@@ -337,9 +337,12 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
               </p>
             </div>
           ) : (
-            /* Keep both tabs mounted; toggle visibility with hidden to preserve graph state. */
+            /* Keep both tabs mounted; use inline style to guarantee display wins over Tailwind. */
             <div className="h-full flex flex-col">
-              <div className={`flex-1 overflow-hidden flex ${tab === 'graph' ? '' : 'hidden'}`}>
+              <div
+                className="flex-1 overflow-hidden flex"
+                style={{ display: tab === 'graph' ? 'flex' : 'none' }}
+              >
                 <ForceGraphContainer
                   nodes={codeData!.nodes}
                   edges={codeData!.edges}
@@ -354,7 +357,10 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
                   />
                 )}
               </div>
-              <div className={`flex-1 overflow-hidden ${tab === 'hotspots' ? '' : 'hidden'}`}>
+              <div
+                className="flex-1 overflow-hidden"
+                style={{ display: tab === 'hotspots' ? 'block' : 'none' }}
+              >
                 <HotspotsView nodes={codeData!.nodes} onSelect={handleHotspotSelect} />
               </div>
             </div>
