@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
-import { mkdir, access, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, access, writeFile, chmod, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -254,7 +254,13 @@ export class CoreAdapter {
    * launch an `onboarding` workflow run so progress is visible in the run list.
    */
   async cloneAndRegisterRepo(name: string, gitUrl: string): Promise<RepoOnboardRef> {
-    const cloneDir = wickedDir('repos', name);
+    const reposRoot = wickedDir('repos');
+    const cloneDir = join(reposRoot, name);
+    // Defense-in-depth: confirm the resolved path is inside the repos root
+    // (the name was already validated by the route schema, but verify here too).
+    if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+      throw new Error(`Unsafe repo name: would escape the repos directory`);
+    }
     await mkdir(cloneDir, { recursive: true });
 
     let needsClone = true;
@@ -264,9 +270,15 @@ export class CoreAdapter {
     } catch { /* not yet cloned */ }
 
     if (needsClone) {
-      await execFileAsync('git', ['clone', '--', gitUrl, cloneDir], {
-        timeout: 5 * 60 * 1000,
-      });
+      try {
+        await execFileAsync('git', ['clone', '--', gitUrl, cloneDir], {
+          timeout: 5 * 60 * 1000,
+        });
+      } catch (err) {
+        // Clean up the partial clone so a retry starts fresh.
+        await rm(cloneDir, { recursive: true, force: true });
+        throw err;
+      }
     }
 
     const entry = await this.registerRepo(name, cloneDir);

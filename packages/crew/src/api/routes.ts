@@ -43,9 +43,17 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// Repo names become directory components under ~/.wicked/repos/ — reject anything
+// that would allow path traversal (slashes, dots-only segments, control chars).
+const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
 const RegisterRepoSchema = z
   .object({
-    name: z.string().min(1),
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
     rootPath: z.string().optional(),
     gitUrl: z.string().optional(),
   })
@@ -349,6 +357,9 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const body = req.body as { name?: unknown; content?: unknown; lang?: unknown };
     if (typeof body.name !== 'string' || typeof body.content !== 'string') {
       return reply.code(400).send({ error: '`name` and `content` are required strings' });
+    }
+    if (!SAFE_REPO_NAME.test(body.name) || body.name.length > 128) {
+      return reply.code(400).send({ error: 'Script name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores' });
     }
     const lang = (body.lang as string | undefined) ?? 'bash';
     if (!['bash', 'python', 'sh'].includes(lang)) {
