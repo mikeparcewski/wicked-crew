@@ -12,17 +12,32 @@ interface Props {
   navigate: (path: string) => void;
 }
 
+// Wicked teal-blue sidebar palette
+const S = {
+  bg:       '#1c4053',
+  border:   'rgba(0,0,0,0.25)',
+  ink:      '#e6edf3',
+  muted:    'rgba(230,237,243,0.6)',
+  faint:    'rgba(230,237,243,0.3)',
+  hover:    'rgba(0,0,0,0.2)',
+  active:   'rgba(0,0,0,0.35)',
+  // primary action: wicked yellow
+  accent:   '#ffda19',
+  accentInk:'#0d1117',
+  // link blue for secondary
+  link:     '#79c0ff',
+};
+
 export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Props): React.ReactElement {
   const [collapsed, setCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <div
-      className={`flex flex-col bg-zinc-900 border-r border-zinc-800 shrink-0 transition-all duration-200 ${
-        collapsed ? 'w-14' : 'w-60'
-      }`}
+      className={`flex flex-col shrink-0 transition-all duration-200 ${collapsed ? 'w-14' : 'w-60'}`}
+      style={{ background: S.bg, borderRight: `1px solid ${S.border}` }}
     >
-      {/* Header: logo + title + collapse toggle */}
+      {/* Header */}
       <div className="flex items-center gap-2 px-3 pt-4 pb-3 shrink-0">
         <button
           type="button"
@@ -33,13 +48,16 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           <WickedLogo size={26} />
         </button>
         {!collapsed && (
-          <span className="flex-1 text-sm font-semibold text-white truncate">Wicked Crew Studio</span>
+          <span className="flex-1 text-sm font-semibold truncate font-mono" style={{ color: S.ink }}>
+            wicked crew
+          </span>
         )}
         <button
           type="button"
           onClick={() => setCollapsed((v) => !v)}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className="ml-auto text-zinc-400 hover:text-zinc-200 text-xs font-mono shrink-0 leading-none"
+          className="ml-auto text-xs font-mono shrink-0 leading-none"
+          style={{ color: S.faint }}
         >
           {collapsed ? '»' : '«'}
         </button>
@@ -47,14 +65,16 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
 
       {/* Action buttons */}
       <div className={`px-2 flex flex-col gap-1 shrink-0 ${collapsed ? 'items-center' : ''}`}>
+        {/* Primary: wicked yellow */}
         <button
           type="button"
           data-testid="new-run"
           onClick={() => navigate('/')}
           aria-label="New run"
-          className={`rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors ${
+          className={`rounded text-xs font-semibold transition-opacity hover:opacity-90 ${
             collapsed ? 'w-9 h-9 flex items-center justify-center' : 'w-full py-1.5 px-3'
           }`}
+          style={{ background: S.accent, color: S.accentInk }}
         >
           {collapsed ? '+' : 'New run'}
         </button>
@@ -62,49 +82,38 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           type="button"
           onClick={() => navigate('/repos')}
           aria-label="Repositories"
-          className={`rounded text-zinc-300 hover:bg-zinc-800 text-xs transition-colors ${
+          className={`rounded text-xs transition-colors ${
             collapsed
               ? 'w-9 h-9 flex items-center justify-center'
               : 'w-full py-1.5 px-3 text-left'
           }`}
+          style={{ color: S.muted }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = S.hover; e.currentTarget.style.color = S.ink; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = ''; e.currentTarget.style.color = S.muted; }}
         >
           {collapsed ? '⊞' : 'Repositories'}
         </button>
       </div>
 
-      {/* Run list — fills remaining space */}
+      {/* Run list */}
       <div className="flex-1 overflow-y-auto mt-3 px-2 flex flex-col gap-0.5">
         {runs.length === 0 ? (
           !collapsed && (
-            <p className="px-2 text-[11px] text-zinc-500 italic">No runs yet</p>
+            <p className="px-2 text-[11px] italic font-mono" style={{ color: S.faint }}>No runs yet</p>
           )
         ) : (
           runs.map((v) =>
             collapsed ? (
-              // Collapsed: status dot only — title gives the run name on hover
               <button
                 key={v.session.id}
                 type="button"
                 onClick={() => onSelectRun(v.session.id)}
                 aria-label={v.session.problem}
                 title={v.session.problem}
-                className={`w-9 h-9 mx-auto flex items-center justify-center rounded-md ${
-                  selectedRunId === v.session.id ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'
-                }`}
+                className="w-9 h-9 mx-auto flex items-center justify-center rounded-md transition-colors"
+                style={{ background: selectedRunId === v.session.id ? S.active : 'transparent' }}
               >
-                <span
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    v.session.status === 'completed'
-                      ? 'bg-emerald-500'
-                      : v.session.status === 'failed'
-                        ? 'bg-red-500'
-                        : v.session.status === 'cancelled'
-                          ? 'bg-zinc-500'
-                          : v.session.status === 'awaiting_human'
-                            ? 'bg-amber-400 animate-pulse'
-                            : 'bg-blue-400 animate-pulse'
-                  }`}
-                />
+                <CollapsedDot status={v.session.status} />
               </button>
             ) : (
               <RunLink
@@ -118,7 +127,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
         )}
       </div>
 
-      {/* Bottom: connection status + version + settings */}
+      {/* Footer */}
       <div className={`px-2 pb-3 shrink-0 flex flex-col gap-1 ${collapsed ? 'items-center' : ''}`}>
         {!collapsed && (
           <div className="px-1">
@@ -126,7 +135,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           </div>
         )}
         {!collapsed && (
-          <p className="text-[10px] text-zinc-500 px-1">v0.2.1</p>
+          <p className="text-[10px] px-1 font-mono" style={{ color: S.faint }}>v0.2.1</p>
         )}
         <div className="relative">
           <button
@@ -134,11 +143,14 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
             onClick={() => setSettingsOpen((v) => !v)}
             onMouseDown={(e) => e.stopPropagation()}
             aria-label="Settings"
-            className={`rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors ${
+            className={`rounded transition-colors ${
               collapsed
                 ? 'w-9 h-9 flex items-center justify-center text-base'
                 : 'w-full flex items-center gap-2 px-2 py-1.5 text-xs'
             }`}
+            style={{ color: S.faint }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = S.hover; e.currentTarget.style.color = S.ink; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = ''; e.currentTarget.style.color = S.faint; }}
           >
             <span>⚙</span>
             {!collapsed && <span>Settings</span>}
@@ -152,5 +164,21 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
         </div>
       </div>
     </div>
+  );
+}
+
+function CollapsedDot({ status }: { status: string }): React.ReactElement {
+  const color =
+    status === 'completed'      ? '#3fb950' :
+    status === 'failed'         ? '#f85149' :
+    status === 'cancelled'      ? 'rgba(230,237,243,0.25)' :
+    status === 'awaiting_human' ? '#ffda19' :
+    '#79c0ff';
+  const pulse = status === 'awaiting_human' || status === 'executing' || status === 'distributing' || status === 'planning';
+  return (
+    <span
+      className={`w-2.5 h-2.5 rounded-full ${pulse ? 'animate-pulse' : ''}`}
+      style={{ background: color }}
+    />
   );
 }

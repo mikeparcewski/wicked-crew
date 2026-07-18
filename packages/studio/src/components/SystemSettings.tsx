@@ -10,10 +10,13 @@ interface SettingRowProps {
 
 function SettingRow({ label, description, children }: SettingRowProps): React.ReactElement {
   return (
-    <div className="flex items-start justify-between gap-6 py-4 border-b border-gray-100 last:border-0">
+    <div
+      className="flex items-start justify-between gap-6 py-4 last:border-0"
+      style={{ borderBottom: '1px solid rgba(230,237,243,0.07)' }}
+    >
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-800">{label}</p>
-        <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+        <p className="text-sm font-medium" style={{ color: '#e6edf3' }}>{label}</p>
+        <p className="text-xs mt-0.5" style={{ color: 'rgba(230,237,243,0.45)' }}>{description}</p>
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -61,19 +64,37 @@ export function SystemSettings(): React.ReactElement {
   return (
     <div className="max-w-2xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-lg font-semibold text-gray-900">System</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Runtime tunables persisted to <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">~/.config/wicked-core/settings.json</code>.
+        <h1 className="text-lg font-semibold" style={{ color: '#e6edf3' }}>System</h1>
+        <p className="text-sm mt-1" style={{ color: 'rgba(230,237,243,0.45)' }}>
+          Runtime tunables persisted to{' '}
+          <code
+            className="font-mono text-xs rounded px-1 py-0.5"
+            style={{ background: 'rgba(230,237,243,0.06)', color: 'rgba(230,237,243,0.7)' }}
+          >
+            ~/.config/wicked-core/settings.json
+          </code>.
         </p>
       </div>
 
       {error && (
-        <div className="mb-4 px-3 py-2 rounded bg-red-50 border border-red-200 text-xs text-red-700">{error}</div>
+        <div
+          className="mb-4 px-3 py-2 rounded text-xs"
+          style={{ background: 'rgba(248,81,73,0.08)', border: '1px solid rgba(248,81,73,0.3)', color: '#f85149' }}
+        >
+          {error}
+        </div>
       )}
 
-      {/* Graph section */}
-      <section className="bg-white border border-gray-200 rounded-xl px-5 mb-6">
-        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide pt-4 pb-2">Code Graph</h2>
+      <section
+        className="rounded-xl px-5 mb-6"
+        style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.07)' }}
+      >
+        <h2
+          className="text-xs font-semibold uppercase tracking-wide pt-4 pb-2 font-mono"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
+        >
+          Code Graph
+        </h2>
 
         <SettingRow
           label="Graph node limit"
@@ -86,7 +107,8 @@ export function SystemSettings(): React.ReactElement {
             step={10}
             value={merged.graphNodeLimit}
             onChange={(e) => patch('graphNodeLimit', Math.max(20, Math.min(500, Number(e.target.value))))}
-            className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            className="w-24 rounded px-2 py-1 text-sm text-right tabular-nums focus:outline-none"
+            style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.12)', color: '#e6edf3' }}
           />
         </SettingRow>
       </section>
@@ -96,15 +118,15 @@ export function SystemSettings(): React.ReactElement {
           type="button"
           onClick={save}
           disabled={!hasDirty || saving}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-            hasDirty && !saving
-              ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-          }`}
+          className="px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40"
+          style={hasDirty && !saving
+            ? { background: '#3fb950', color: '#0d1117' }
+            : { background: 'rgba(230,237,243,0.06)', color: 'rgba(230,237,243,0.35)', cursor: 'not-allowed' }
+          }
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
-        {saved && <span className="text-xs text-emerald-600 font-medium">Saved</span>}
+        {saved && <span className="text-xs font-medium" style={{ color: '#3fb950' }}>Saved</span>}
       </div>
     </div>
   );

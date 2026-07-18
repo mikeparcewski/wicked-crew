@@ -119,56 +119,56 @@ export function App(): React.ReactElement {
   function renderCenter(): React.ReactElement {
     if (panel === 'coverage') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <CoverageView />
         </div>
       );
     }
     if (panel === 'workflows') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <WorkflowViewer />
         </div>
       );
     }
     if (panel === 'domain') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <DomainModelBrowser />
         </div>
       );
     }
     if (panel === 'policies') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <PolicyManager />
         </div>
       );
     }
     if (panel === 'rules') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <RuleManager />
         </div>
       );
     }
     if (panel === 'repos') {
       return (
-        <div className="flex-1 overflow-hidden bg-white">
+        <div className="flex-1 overflow-hidden bg-wk-canvas-2">
           <RepositoriesPanel onSelectRun={selectRun} />
         </div>
       );
     }
     if (panel === 'system') {
       return (
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-6 bg-wk-canvas-2">
           <SystemSettings />
         </div>
       );
     }
     // Default: runs / chat panel
     return (
-      <div className="flex-1 overflow-hidden bg-white">
+      <div className="flex-1 overflow-hidden bg-wk-canvas-2">
         <ChatPanel
           view={selected}
           onLaunched={onLaunched}
@@ -180,7 +180,7 @@ export function App(): React.ReactElement {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-zinc-900">
+    <div className="flex h-screen overflow-hidden bg-wk-canvas">
       <LeftSidebar
         runs={runs}
         selectedRunId={runId}

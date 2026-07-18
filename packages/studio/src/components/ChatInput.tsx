@@ -129,9 +129,11 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
   // Run-selected mode: just a disabled placeholder
   if (runId) {
     return (
-      <div className="px-5 py-4 border-t border-gray-100 bg-white">
-        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4">
-          <p className="text-sm text-gray-400 italic">Run in progress — responses stream above.</p>
+      <div className="px-5 py-4 shrink-0" style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}>
+        <div className="rounded-2xl px-5 py-4" style={{ border: '1px solid rgba(230,237,243,0.1)', background: '#1b222e' }}>
+          <p className="text-sm italic font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
+            Run in progress — responses stream above.
+          </p>
         </div>
       </div>
     );
@@ -141,21 +143,29 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
   const showDetection = detectedWorkflow !== null && !workflowDismissed && !workflow;
 
   return (
-    <div className="px-5 py-4 border-t border-gray-100 bg-white flex flex-col gap-3">
+    <div
+      className="px-5 py-4 flex flex-col gap-3 shrink-0"
+      style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
+    >
       {showDetection && (
-        <div className="flex items-center gap-2 text-xs text-zinc-600 bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2">
-          <span>Detected: <strong>{detectedWorkflow}</strong> workflow</span>
+        <div
+          className="flex items-center gap-2 text-xs rounded-xl px-4 py-2 font-mono"
+          style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.1)', color: 'rgba(230,237,243,0.7)' }}
+        >
+          <span>Detected: <strong style={{ color: '#ffda19' }}>{detectedWorkflow}</strong> workflow</span>
           <button
             type="button"
             onClick={() => { setWorkflow(detectedWorkflow!); setWorkflowDismissed(true); }}
-            className="rounded-lg bg-emerald-600 text-white px-3 py-1 hover:bg-emerald-700 font-semibold text-xs"
+            className="rounded-lg px-3 py-1 font-semibold text-xs"
+            style={{ background: '#ffda19', color: '#0d1117' }}
           >
             Apply
           </button>
           <button
             type="button"
             onClick={() => setWorkflowDismissed(true)}
-            className="text-zinc-400 hover:text-zinc-600 ml-auto"
+            className="ml-auto"
+            style={{ color: 'rgba(230,237,243,0.35)' }}
           >
             ✕
           </button>
@@ -163,12 +173,15 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
       )}
 
       {/* Main input row */}
-      <div className="flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm focus-within:border-emerald-400 focus-within:ring-1 focus-within:ring-emerald-200 transition-all">
+      <div
+        className="flex items-end gap-3 rounded-2xl px-4 py-3 transition-all"
+        style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.14)' }}
+      >
         <textarea
           ref={textareaRef}
           data-testid="launch-problem"
-          className="flex-1 resize-none text-base outline-none border-0 bg-transparent leading-6 placeholder:text-gray-400 text-gray-900"
-          style={{ minHeight: '28px' }}
+          className="flex-1 resize-none text-base outline-none border-0 bg-transparent leading-6"
+          style={{ minHeight: '28px', color: '#e6edf3', fontFamily: 'inherit' }}
           placeholder="What do you need built?"
           value={problem}
           onChange={(e) => { setProblem(e.target.value); setWorkflowDismissed(false); }}
@@ -187,17 +200,17 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
           onClick={() => void submit()}
           disabled={!canSubmit}
           aria-label="Send"
-          className="shrink-0 rounded-xl bg-emerald-600 px-5 py-2.5 text-white text-sm font-semibold hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="shrink-0 rounded-xl px-5 py-2.5 text-sm font-semibold font-mono disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+          style={{ background: '#ffda19', color: '#0d1117' }}
         >
           {submitting ? `${elapsedSecs}s` : 'Send'}
         </button>
       </div>
 
       {/* Agent checkboxes + options row */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-500">
-        {/* CLI checkboxes */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono" style={{ color: 'rgba(230,237,243,0.45)' }}>
         {roster.map((seat) => (
-          <label key={seat.key} className="flex items-center gap-1.5 cursor-pointer hover:text-gray-700">
+          <label key={seat.key} className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'rgba(230,237,243,0.55)' }}>
             <input
               type="checkbox"
               className="rounded"
@@ -205,18 +218,18 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
               onChange={() => toggleCli(seat.key)}
               data-testid={`launch-seat-${seat.key}`}
             />
-            <span className="font-mono">{seat.key}</span>
+            <span>{seat.key}</span>
           </label>
         ))}
 
-        <span className="text-gray-200">|</span>
+        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
 
-        {/* Gate dropdown */}
         <div className="flex items-center gap-1.5">
           <span>Gate:</span>
           <select
             data-testid="launch-confirm"
-            className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-700 bg-white"
+            className="rounded-lg px-2 py-1 text-xs font-mono"
+            style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
             value={confirmMode}
             onChange={(e) => setConfirmMode(e.target.value as ConfirmMode)}
           >
@@ -230,14 +243,14 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
               min={1}
               value={beforeOrd}
               onChange={(e) => setBeforeOrd(Math.max(1, Number(e.target.value) || 1))}
-              className="w-14 rounded-lg border border-gray-200 px-2 py-1 text-xs"
+              className="w-14 rounded-lg px-2 py-1 text-xs font-mono"
+              style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
             />
           )}
         </div>
 
-        <span className="text-gray-200">|</span>
+        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
 
-        {/* Entity mode toggle */}
         <div className="flex items-center gap-1.5">
           <span>Mode:</span>
           {(['shared', 'isolated'] as EntityMode[]).map((m) => (
@@ -246,37 +259,39 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
               type="button"
               data-testid={`launch-entity-${m}`}
               onClick={() => setEntityMode(m)}
-              className={`rounded-lg px-2.5 py-1 capitalize text-xs font-medium transition-colors ${
-                entityMode === m
-                  ? 'bg-gray-900 text-white'
-                  : 'text-gray-500 hover:bg-gray-100'
-              }`}
+              className="rounded-lg px-2.5 py-1 capitalize text-xs font-medium font-mono transition-colors"
+              style={entityMode === m
+                ? { background: 'rgba(230,237,243,0.12)', color: '#e6edf3' }
+                : { color: 'rgba(230,237,243,0.4)' }}
             >
               {m}
             </button>
           ))}
         </div>
 
-        <span className="text-gray-200">|</span>
+        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
 
-        {/* Advanced toggle */}
         <button
           type="button"
           onClick={() => setShowAdvanced((v) => !v)}
-          className="text-gray-400 hover:text-gray-600 transition-colors"
+          className="transition-colors font-mono"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
         >
           {showAdvanced ? '▾ Advanced' : '▸ Advanced'}
         </button>
       </div>
 
-      {/* Advanced: workflow + repo selectors */}
       {showAdvanced && (
-        <div className="flex flex-wrap gap-4 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 text-xs">
+        <div
+          className="flex flex-wrap gap-4 rounded-xl px-4 py-3 text-xs font-mono"
+          style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.07)' }}
+        >
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 font-medium">Workflow:</span>
+            <span style={{ color: 'rgba(230,237,243,0.5)' }}>Workflow:</span>
             <select
               data-testid="launch-workflow"
-              className="rounded-lg border border-gray-200 px-2 py-1 text-xs bg-white text-gray-700"
+              className="rounded-lg px-2 py-1 text-xs font-mono"
+              style={{ background: '#0f1419', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
               value={workflow}
               onChange={(e) => { setWorkflow(e.target.value); setWorkflowDismissed(true); }}
             >
@@ -287,10 +302,11 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
             </select>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 font-medium">Repo:</span>
+            <span style={{ color: 'rgba(230,237,243,0.5)' }}>Repo:</span>
             <select
               data-testid="launch-repo"
-              className="rounded-lg border border-gray-200 px-2 py-1 text-xs bg-white text-gray-700"
+              className="rounded-lg px-2 py-1 text-xs font-mono"
+              style={{ background: '#0f1419', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
               value={repoRef}
               onChange={(e) => setRepoRef(e.target.value)}
             >
@@ -304,11 +320,11 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
       )}
 
       {error && (
-        <p className="text-xs text-red-600 px-1" data-testid="launch-error">{error}</p>
+        <p className="text-xs px-1 font-mono" style={{ color: '#f85149' }} data-testid="launch-error">{error}</p>
       )}
 
       {submitting && elapsedSecs >= 5 && (
-        <p className="text-xs text-gray-400 text-center">
+        <p className="text-xs text-center font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
           Planning in progress — council routing + plan decomposition takes 30–60 s. Don't re-submit.
         </p>
       )}

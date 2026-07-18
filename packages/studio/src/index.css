@@ -1,3 +1,41 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+html, body, #root {
+  background: var(--wk-canvas);
+  color: var(--wk-ink);
+  height: 100%;
+  font-family: "Archivo", ui-sans-serif, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Wicked design tokens — mirrors wicked-web/src/styles/tokens.css
+   Dark theme (default) + the light-theme teal-blue canvas ("the blue of wicked-agile"). */
+:root {
+  --wk-canvas:          #0d1117;
+  --wk-canvas-2:        #161c26;
+  --wk-surface:         #1b222e;
+  --wk-surface-2:       #0f1419;
+  --wk-ink:             #e6edf3;
+  --wk-muted:           rgba(230, 237, 243, 0.55);
+  --wk-faint:           rgba(230, 237, 243, 0.24);
+  --wk-hairline:        rgba(230, 237, 243, 0.07);
+  --wk-hairline-strong: rgba(230, 237, 243, 0.14);
+  --wk-accent:          #ffda19;
+  --wk-accent-ink:      #0d1117;
+  --wk-link:            #79c0ff;
+  --wk-ok:              #3fb950;
+  --wk-deny:            #f85149;
+  /* Light-theme teal-blue canvas — "the blue of wicked-agile" */
+  --wk-blue:            #1c4053;
+  --wk-blue-2:          #182f3c;
+  --wk-blue-surface:    #224a5e;
+  --wk-blue-surface-2:  #1a3b4e;
+  --wk-font-display:    "Archivo", ui-sans-serif, sans-serif;
+  --wk-font-mono:       "JetBrains Mono", ui-monospace, monospace;
+}
+
+code, pre, .font-mono {
+  font-family: var(--wk-font-mono);
+}

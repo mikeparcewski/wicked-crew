@@ -71,11 +71,15 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
 
   if (collapsed) {
     return (
-      <div className="flex flex-col items-center bg-zinc-50 border-l w-10 shrink-0 py-3 gap-2">
+      <div
+        className="flex flex-col items-center w-10 shrink-0 py-3 gap-2"
+        style={{ background: '#161c26', borderLeft: '1px solid rgba(230,237,243,0.07)' }}
+      >
         <button
           type="button"
           onClick={() => setCollapsed(false)}
-          className="text-zinc-400 hover:text-zinc-700 text-sm leading-none"
+          className="text-sm leading-none"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
           aria-label="Expand insights panel"
         >
           ‹
@@ -87,7 +91,8 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
             disabled={cancelling}
             title="Kill run"
             aria-label="Kill run"
-            className="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-500 text-sm disabled:opacity-40"
+            className="w-7 h-7 flex items-center justify-center rounded text-sm disabled:opacity-40"
+            style={{ color: '#f85149' }}
           >
             ✕
           </button>
@@ -97,7 +102,8 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
           onClick={() => setTermOpen(true)}
           title="Terminal"
           aria-label="Open terminal"
-          className="w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-200 text-zinc-500 text-sm"
+          className="w-7 h-7 flex items-center justify-center rounded text-sm"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
         >
           ⬛
         </button>
@@ -106,7 +112,8 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
           onClick={() => setCoverageOpen(true)}
           title="Coverage"
           aria-label="Open coverage"
-          className="w-7 h-7 flex items-center justify-center rounded hover:bg-zinc-200 text-zinc-500 text-sm"
+          className="w-7 h-7 flex items-center justify-center rounded text-sm font-mono"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
         >
           %
         </button>
@@ -115,28 +122,38 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
   }
 
   return (
-    <div className="flex flex-col bg-zinc-50 border-l w-72 shrink-0 overflow-hidden">
-      {/* Header: expand/collapse + action buttons */}
-      <div className="flex items-center gap-1 px-3 py-2 border-b bg-white shrink-0">
+    <div
+      className="flex flex-col w-72 shrink-0 overflow-hidden"
+      style={{ background: '#161c26', borderLeft: '1px solid rgba(230,237,243,0.07)' }}
+    >
+      {/* Header */}
+      <div
+        className="flex items-center gap-1 px-3 py-2 border-b shrink-0"
+        style={{ background: '#0d1117', borderColor: 'rgba(230,237,243,0.07)' }}
+      >
         <button
           type="button"
           onClick={() => setCollapsed(true)}
-          className="text-zinc-400 hover:text-zinc-700 text-sm leading-none mr-1"
+          className="text-sm leading-none mr-1"
+          style={{ color: 'rgba(230,237,243,0.35)' }}
           aria-label="Collapse insights panel"
         >
           ›
         </button>
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 flex-1">
+        <span
+          className="text-[10px] font-semibold uppercase tracking-widest flex-1 font-mono"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
+        >
           Insights
         </span>
-        {/* Action buttons */}
         <button
           type="button"
           onClick={() => void killRun()}
           disabled={!canKill || cancelling}
           title="Kill run (Ctrl+K)"
           aria-label="Kill run"
-          className="rounded px-2 py-0.5 text-[11px] font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="rounded px-2 py-0.5 text-[11px] font-medium font-mono disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ color: '#f85149' }}
         >
           Kill
         </button>
@@ -145,36 +162,43 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
           onClick={() => setTermOpen(true)}
           title="Terminal"
           aria-label="Open terminal"
-          className="rounded px-2 py-0.5 text-[11px] text-zinc-600 hover:bg-zinc-100"
+          className="rounded px-2 py-0.5 text-[11px] font-mono"
+          style={{ color: 'rgba(230,237,243,0.45)' }}
         >
-          Terminal
+          Term
         </button>
         <button
           type="button"
           onClick={() => setCoverageOpen(true)}
           title="Coverage"
           aria-label="Open coverage report"
-          className="rounded px-2 py-0.5 text-[11px] text-zinc-600 hover:bg-zinc-100"
+          className="rounded px-2 py-0.5 text-[11px] font-mono"
+          style={{ color: 'rgba(230,237,243,0.45)' }}
         >
-          Coverage
+          Cov
         </button>
       </div>
 
       {/* Accordion sections */}
       <div className="flex-1 overflow-y-auto">
         {ACCORDIONS.map(({ id, label }) => (
-          <div key={id} className="border-b">
+          <div key={id} style={{ borderBottom: '1px solid rgba(230,237,243,0.06)' }}>
             <button
               type="button"
               onClick={() => toggleAccordion(id)}
-              className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-zinc-100 transition-colors"
+              className="w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors"
+              style={{ color: openAccordion === id ? '#e6edf3' : 'rgba(230,237,243,0.55)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(230,237,243,0.04)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               aria-expanded={openAccordion === id}
             >
-              <span className="text-xs font-medium text-zinc-700">{label}</span>
-              <span className="text-zinc-400 text-xs">{openAccordion === id ? '▲' : '▼'}</span>
+              <span className="text-xs font-medium font-mono">{label}</span>
+              <span className="text-xs" style={{ color: 'rgba(230,237,243,0.3)' }}>
+                {openAccordion === id ? '▲' : '▼'}
+              </span>
             </button>
             {openAccordion === id && model && (
-              <div className="px-4 py-3 bg-white">
+              <div className="px-4 py-3" style={{ background: '#0f1419' }}>
                 {id === 'decisions' && <DecisionsLedger model={model} />}
                 {id === 'governance' && <GovernanceAudit model={model} />}
                 {id === 'burn' && <Burn model={model} />}
@@ -186,7 +210,7 @@ export function RightPanel({ view, onRefresh }: Props): React.ReactElement {
             )}
             {openAccordion === id && !model && (
               <div className="px-4 py-3">
-                <p className="text-xs text-zinc-400">Loading…</p>
+                <p className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>Loading…</p>
               </div>
             )}
           </div>
