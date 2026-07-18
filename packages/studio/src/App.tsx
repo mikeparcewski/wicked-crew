@@ -9,6 +9,7 @@ import { RightPanel } from './components/RightPanel.js';
 import { RuleManager } from './components/RuleManager.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { WorkflowViewer } from './components/WorkflowViewer.js';
+import { SystemSettings } from './components/SystemSettings.js';
 import { useEventStream } from './hooks/useEventStream.js';
 import { useRoute } from './hooks/useRoute.js';
 import { useRuns } from './hooks/useRuns.js';
@@ -155,6 +156,13 @@ export function App(): React.ReactElement {
       return (
         <div className="flex-1 overflow-hidden bg-white">
           <RepositoriesPanel onSelectRun={selectRun} />
+        </div>
+      );
+    }
+    if (panel === 'system') {
+      return (
+        <div className="flex-1 overflow-y-auto p-6 bg-white">
+          <SystemSettings />
         </div>
       );
     }

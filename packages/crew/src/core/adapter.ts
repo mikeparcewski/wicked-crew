@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
-import { mkdir, access, writeFile, chmod, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
@@ -16,7 +16,9 @@ import type {
   GovernanceClaim,
   CoverageReport,
   WorkflowDef,
+  SystemSettings,
 } from './types.js';
+import { DEFAULT_SETTINGS } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +41,11 @@ function workflowOverlayDir(): string {
   if (process.env.WICKED_WORKFLOWS_DIR) return process.env.WICKED_WORKFLOWS_DIR;
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.config', 'wicked-core', 'workflows');
+}
+
+function settingsFilePath(): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+  return join(home, '.config', 'wicked-core', 'settings.json');
 }
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -490,6 +497,26 @@ export class CoreAdapter {
   /** Close a terminal (kill child, join reader) → `"ok"` after a `terminalExited` event. */
   closeTerminal(id: string): Promise<string> {
     return this.core.closeTerminal(id);
+  }
+
+  // ── System settings ───────────────────────────────────────────────────────
+
+  async getSettings(): Promise<SystemSettings> {
+    try {
+      const raw = await readFile(settingsFilePath(), 'utf8');
+      return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<SystemSettings>) };
+    } catch {
+      return { ...DEFAULT_SETTINGS };
+    }
+  }
+
+  async updateSettings(patch: Partial<SystemSettings>): Promise<SystemSettings> {
+    const current = await this.getSettings();
+    const next = { ...current, ...patch };
+    const path = settingsFilePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(next, null, 2), 'utf8');
+    return next;
   }
 
   /**

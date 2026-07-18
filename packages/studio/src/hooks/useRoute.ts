@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 
-export type Panel = 'runs' | 'coverage' | 'workflows' | 'domain' | 'policies' | 'rules' | 'repos';
+export type Panel = 'runs' | 'coverage' | 'workflows' | 'domain' | 'policies' | 'rules' | 'repos' | 'system';
 
-const PANELS: Panel[] = ['runs', 'coverage', 'workflows', 'domain', 'policies', 'rules', 'repos'];
+const PANELS: Panel[] = ['runs', 'coverage', 'workflows', 'domain', 'policies', 'rules', 'repos', 'system'];
 
 interface Route {
   panel: Panel;

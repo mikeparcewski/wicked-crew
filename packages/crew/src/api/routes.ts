@@ -467,9 +467,11 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
 
     try {
+      const settings = await adapter.getSettings();
+      const nodeLimit = String(settings.graphNodeLimit);
       const { stdout } = await execFileAsync(
         'wicked-estate',
-        ['graph-view', '--limit', '80', '--db', dbPath],
+        ['graph-view', '--limit', nodeLimit, '--db', dbPath],
         { timeout: 30_000, cwd: repo.root_path },
       );
       const raw = JSON.parse(stdout) as {
@@ -534,5 +536,22 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     } catch (err) {
       return reply.code(404).send({ error: message(err) });
     }
+  });
+
+  // ── System settings ──────────────────────────────────────────────────────────
+  app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings() }));
+
+  app.put(`${V}/settings`, async (req, reply) => {
+    const patch = req.body as Partial<import('../core/types.js').SystemSettings>;
+    if (typeof patch !== 'object' || patch === null) {
+      return reply.code(400).send({ error: 'body must be a JSON object' });
+    }
+    // Only allow known keys through.
+    const allowed: (keyof import('../core/types.js').SystemSettings)[] = ['graphNodeLimit'];
+    const safe: Partial<import('../core/types.js').SystemSettings> = {};
+    for (const key of allowed) {
+      if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
+    }
+    return { settings: await adapter.updateSettings(safe) };
   });
 }

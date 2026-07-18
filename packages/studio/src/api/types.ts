@@ -446,3 +446,8 @@ export interface CodeGraphData {
   edges: CodeGraphEdge[];
   stats: { nodeCount: number; edgeCount: number; fileCount: number };
 }
+
+/** Daemon-persisted system settings (~/.config/wicked-core/settings.json). */
+export interface SystemSettings {
+  graphNodeLimit: number;
+}

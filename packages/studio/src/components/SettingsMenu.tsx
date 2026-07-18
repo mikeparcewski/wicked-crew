@@ -9,6 +9,7 @@ const ITEMS: { label: string; path: string }[] = [
   { label: 'Workflows', path: '/workflows' },
   { label: 'Policies', path: '/policies' },
   { label: 'Rules', path: '/rules' },
+  { label: 'System', path: '/system' },
 ];
 
 export function SettingsMenu({ onNavigate, onClose }: Props): React.ReactElement {
