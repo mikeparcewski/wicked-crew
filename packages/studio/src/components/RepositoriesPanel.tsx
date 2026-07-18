@@ -127,7 +127,7 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
   };
 
   return (
-    <div className="flex flex-col h-full" style={{ background: '#161c26' }}>
+    <div className="flex flex-col h-full">
       <div className="px-6 py-4 shrink-0" style={{ borderBottom: '1px solid rgba(230,237,243,0.07)' }}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold" style={{ color: '#e6edf3' }}>Repositories</h2>

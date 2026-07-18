@@ -12,6 +12,7 @@ interface Props {
   onLaunched: (runId: string) => void;
   onNavigateBack: () => void;
   onRefresh: () => void;
+  onKill?: (runId: string) => void | Promise<void>;
 }
 
 // Stage pill — wicked dark palette
@@ -61,16 +62,27 @@ function statusDotColor(status: string): string {
   }
 }
 
+function StopIcon(): React.ReactElement {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="8" cy="8" r="6.75" stroke="currentColor" strokeWidth="1.5"/>
+      <rect x="5.25" y="5.25" width="5.5" height="5.5" rx="0.75" fill="currentColor"/>
+    </svg>
+  );
+}
+
 function RunChat({
   view,
   onLaunched,
   onNavigateBack,
   onRefresh,
+  onKill,
 }: {
   view: SessionView;
   onLaunched: (runId: string) => void;
   onNavigateBack: () => void;
   onRefresh: () => void;
+  onKill?: (runId: string) => void | Promise<void>;
 }): React.ReactElement {
   const { session, units } = view;
   const gate = useGateStore((s) => s.gates[session.id]);
@@ -127,7 +139,7 @@ function RunChat({
   const pulse = ['executing', 'distributing', 'planning', 'awaiting_human'].includes(session.status);
 
   return (
-    <div className="flex flex-col h-full" style={{ background: '#161c26' }}>
+    <div className="flex flex-col h-full">
       {/* Run header */}
       <div
         className="flex items-center gap-3 px-6 py-4 shrink-0"
@@ -152,6 +164,20 @@ function RunChat({
           {session.problem}
         </p>
         <span className="text-xs font-medium shrink-0 font-mono" style={{ color: style.color }}>{style.label}</span>
+        {!isTerminal && onKill && (
+          <button
+            type="button"
+            onClick={() => void onKill(session.id)}
+            title="Kill run (Ctrl+K)"
+            aria-label="Kill run"
+            className="flex items-center justify-center w-6 h-6 rounded shrink-0 transition-opacity disabled:opacity-30"
+            style={{ color: '#f85149', opacity: 0.65 }}
+            onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.65'; }}
+          >
+            <StopIcon />
+          </button>
+        )}
       </div>
 
       {/* Message thread */}
@@ -326,7 +352,7 @@ function RunChat({
 
 function NewRunView({ onLaunched }: { onLaunched: (id: string) => void }): React.ReactElement {
   return (
-    <div className="flex flex-col h-full" style={{ background: '#161c26' }}>
+    <div className="flex flex-col h-full">
       <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8 max-w-2xl mx-auto w-full">
         <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#e6edf3' }}>
           What do you need built?
@@ -341,7 +367,7 @@ function NewRunView({ onLaunched }: { onLaunched: (id: string) => void }): React
   );
 }
 
-export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh }: Props): React.ReactElement {
+export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh, onKill }: Props): React.ReactElement {
   if (view) {
     return (
       <RunChat
@@ -350,6 +376,7 @@ export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh }: Props
         onLaunched={onLaunched}
         onNavigateBack={onNavigateBack}
         onRefresh={onRefresh}
+        {...(onKill !== undefined ? { onKill } : {})}
       />
     );
   }
