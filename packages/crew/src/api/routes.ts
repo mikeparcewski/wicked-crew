@@ -417,8 +417,8 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   });
 
   // ── Per-repo domain graph ─────────────────────────────────────────────────
-  // Reads the requirements_graph.json from the repo's own root_path, not from
-  // the daemon's cwd. Falls back to null when the file hasn't been generated yet.
+  // Reads requirements_graph.json from the repo root. Coverage stats come from
+  // the live estate store via `wicked-core coverage --json` (not a cached file).
 
   app.get(`${V}/repos/:id/domain-graph`, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -427,13 +427,20 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     const graphPath = join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
-    const coveragePath = join(repo.root_path, '.codegraph', 'estate.coverage.json');
+    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
 
-    // Try to read coverage stats for "not yet available" informational state.
+    // Coverage from the live estate store — computed by wicked-core governance layer.
     let coverage: unknown = null;
-    try {
-      coverage = JSON.parse(await fsp.readFile(coveragePath, 'utf8'));
-    } catch { /* no coverage file — stays null */ }
+    if (existsSync(dbPath)) {
+      try {
+        const { stdout } = await execFileAsync(
+          'wicked-core',
+          ['coverage', '--db', dbPath, '--json'],
+          { timeout: 20_000, cwd: repo.root_path },
+        );
+        coverage = JSON.parse(stdout) as unknown;
+      } catch { /* store not yet indexed — coverage stays null */ }
+    }
 
     try {
       const content = await fsp.readFile(graphPath, 'utf8');
