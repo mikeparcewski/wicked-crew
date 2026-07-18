@@ -546,6 +546,12 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (typeof patch !== 'object' || patch === null) {
       return reply.code(400).send({ error: 'body must be a JSON object' });
     }
+    if ('graphNodeLimit' in patch) {
+      const limit = patch.graphNodeLimit;
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 20 || limit > 500) {
+        return reply.code(400).send({ error: 'graphNodeLimit must be an integer between 20 and 500' });
+      }
+    }
     // Only allow known keys through.
     const allowed: (keyof import('../core/types.js').SystemSettings)[] = ['graphNodeLimit'];
     const safe: Partial<import('../core/types.js').SystemSettings> = {};

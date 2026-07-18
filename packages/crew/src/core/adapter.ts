@@ -1,7 +1,8 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
@@ -286,12 +287,21 @@ export class CoreAdapter {
    */
   async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
     const reposRoot = wickedDir('repos');
-    const cloneDir = checkoutPath ?? join(reposRoot, name);
-    if (!checkoutPath) {
-      // Default path: must stay inside repos root (name validated by schema, but
-      // apply defense-in-depth for direct calls).
+    let cloneDir: string;
+    if (checkoutPath) {
+      // Expand leading ~/ so callers can use home-relative paths.
+      const expanded = checkoutPath.startsWith('~/')
+        ? join(homedir(), checkoutPath.slice(2))
+        : checkoutPath;
+      if (!isAbsolute(expanded)) {
+        throw new Error('checkoutPath must be an absolute path (or start with ~/)');
+      }
+      cloneDir = resolve(expanded);
+    } else {
+      cloneDir = join(reposRoot, name);
+      // Defense-in-depth: name validated by schema, but guard direct calls too.
       if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
-        throw new Error(`Unsafe repo name: would escape the repos directory`);
+        throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
     await mkdir(cloneDir, { recursive: true });

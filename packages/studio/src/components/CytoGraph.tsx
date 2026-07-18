@@ -46,6 +46,13 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
   const cyRef = useRef<cytoscape.Core | null>(null);
   // Maps original estate symbol ID → safe Cytoscape element ID ("n0", "n1", …).
   const cyIdMapRef = useRef<Map<string, string>>(new Map());
+  // Callback refs so event handlers always call the latest version without rebuilding the graph.
+  const onNodeClickRef = useRef(onNodeClick);
+  const onNodeSelectRef = useRef(onNodeSelect);
+  useEffect(() => {
+    onNodeClickRef.current = onNodeClick;
+    onNodeSelectRef.current = onNodeSelect;
+  }, [onNodeClick, onNodeSelect]);
 
   // Build/rebuild the graph when data changes.
   useEffect(() => {
@@ -165,10 +172,9 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
 
     cy.on('tap', 'node', (evt) => {
       const raw = evt.target.data('raw') as CodeGraphNode;
-      onNodeClick?.(raw);
-      onNodeSelect?.(raw);
+      onNodeClickRef.current?.(raw);
+      onNodeSelectRef.current?.(raw);
 
-      // Highlight neighbourhood.
       cy.elements().removeClass('highlighted dimmed');
       const neighbourhood = evt.target.closedNeighborhood();
       cy.elements().addClass('dimmed');
@@ -180,7 +186,7 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
       if (evt.target === cy) {
         cy.elements().removeClass('highlighted dimmed');
         cy.elements('node').unselect();
-        onNodeSelect?.(null);
+        onNodeSelectRef.current?.(null);
       }
     });
 
