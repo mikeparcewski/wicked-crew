@@ -90,7 +90,12 @@ export async function createServer(
   if (existsSync(studioRoot)) {
     await app.register(fastifyStatic, {
       root: studioRoot,
-      wildcard: false,
+      // wildcard: true (default) — uses a catch-all route that reads from disk
+      // per-request via `send`. wildcard: false globs at startup and registers
+      // one explicit route per file, so new hashed filenames after a deploy are
+      // invisible until the daemon restarts. Explicit API/WS routes registered
+      // above win over the wildcard; files that don't exist on disk 404 → SPA.
+      wildcard: true,
       // We own every Cache-Control value via setHeaders (§4.3) — disable the
       // plugin's automatic header so it can't override us.
       cacheControl: false,

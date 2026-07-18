@@ -1,13 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
+
+const execFileAsync = promisify(execFile);
 
 const V = '/api/v1';
 
@@ -54,16 +58,21 @@ const RegisterRepoSchema = z
       .min(1)
       .max(128)
       .regex(SAFE_REPO_NAME, 'Repository name must start with a letter/digit and contain only letters, digits, dots, hyphens, and underscores'),
+    // For local registration: path to an existing git repo on disk.
+    // For remote clone: optional clone destination (absolute path); if omitted,
+    // defaults to ~/.wicked/repos/<name>.
     rootPath: z.string().optional(),
     gitUrl: z.string().optional(),
   })
   .refine(
     (d) => {
-      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
       const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
-      return hasLocal !== hasRemote; // exactly one
+      const hasLocal = typeof d.rootPath === 'string' && d.rootPath.length > 0;
+      // gitUrl alone (clone to default path), gitUrl + rootPath (clone to custom path),
+      // or rootPath alone (register existing local repo) — all valid.
+      return hasRemote || hasLocal;
     },
-    { message: 'Provide exactly one of rootPath (local path) or gitUrl (remote clone URL).' },
+    { message: 'Provide gitUrl (remote clone) or rootPath (local registration), or both.' },
   );
 
 const LaunchSchema = z.object({
@@ -129,8 +138,9 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { name, rootPath, gitUrl } = parsed.data;
     try {
       if (gitUrl) {
-        // Remote: clone, register, launch onboarding run.
-        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl);
+        // Remote: clone to rootPath (if provided) or default ~/.wicked/repos/<name>,
+        // register, and launch onboarding run.
+        const { repoId, runId } = await adapter.cloneAndRegisterRepo(name, gitUrl, rootPath);
         const repos = await adapter.listRepos();
         const repo = repos.find((r) => r.id === repoId);
         if (!repo) return reply.code(500).send({ error: 'Repo registered but could not be retrieved' });
@@ -151,6 +161,20 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { id } = req.params as { id: string };
     const runId = adapter.getOnboardRunId(id) ?? null;
     return reply.code(200).send({ runId });
+  });
+
+  // Re-run (or run for the first time) the onboarding workflow for a registered repo.
+  app.post(`${V}/repos/:id/onboard`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    try {
+      const runId = await adapter.launchOnboardingRun(repo.id, repo.name);
+      return reply.code(201).send({ runId });
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
   });
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
@@ -388,6 +412,79 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       return { graph: JSON.parse(content) as unknown };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null };
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
+
+  // ── Per-repo domain graph ─────────────────────────────────────────────────
+  // Reads requirements_graph.json from the repo root. Coverage stats come from
+  // the live estate store via `wicked-core coverage --json` (not a cached file).
+
+  app.get(`${V}/repos/:id/domain-graph`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    const graphPath = join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
+    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+
+    // Coverage from the live estate store — computed by wicked-core governance layer.
+    let coverage: unknown = null;
+    if (existsSync(dbPath)) {
+      try {
+        const { stdout } = await execFileAsync(
+          'wicked-core',
+          ['coverage', '--db', dbPath, '--json'],
+          { timeout: 20_000, cwd: repo.root_path },
+        );
+        coverage = JSON.parse(stdout) as unknown;
+      } catch { /* store not yet indexed — coverage stays null */ }
+    }
+
+    try {
+      const content = await fsp.readFile(graphPath, 'utf8');
+      return { graph: JSON.parse(content) as unknown, coverage };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { graph: null, coverage };
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
+
+  // ── Repo code graph (via wicked-estate graph-view) ──────────────────────────
+  // Delegates to the estate CLI so the query goes through the proper service
+  // layer (store-seam aware, overlay edges included). Postgres-safe.
+
+  app.get(`${V}/repos/:id/graph`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    if (!existsSync(dbPath)) {
+      return reply.send({ graph: null });
+    }
+
+    try {
+      const { stdout } = await execFileAsync(
+        'wicked-estate',
+        ['graph-view', '--limit', '80', '--db', dbPath],
+        { timeout: 30_000, cwd: repo.root_path },
+      );
+      const raw = JSON.parse(stdout) as {
+        nodes: Array<{ id: string; name: string; kind: string; file: string; lang: string; score: number; inDeg: number; outDeg: number }>;
+        edges: Array<{ src: string; tgt: string }>;
+      };
+      const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
+      return reply.send({
+        graph: {
+          nodes: raw.nodes,
+          edges: raw.edges,
+          stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
+        },
+      });
+    } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
   });
