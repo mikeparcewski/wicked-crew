@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { SystemSettings as Settings } from '../api/types.js';
 
@@ -29,12 +29,15 @@ export function SystemSettings(): React.ReactElement {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     api.getSettings()
       .then(({ settings: s }) => setSettings(s))
       .catch((e: unknown) => setError(String(e)));
   }, []);
+
+  useEffect(() => () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); }, []);
 
   function patch<K extends keyof Settings>(key: K, value: Settings[K]): void {
     setDirty((d) => ({ ...d, [key]: value }));
@@ -50,7 +53,8 @@ export function SystemSettings(): React.ReactElement {
       setSettings(next);
       setDirty({});
       setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2500);
     } catch (e: unknown) {
       setError(String(e));
     } finally {

@@ -263,20 +263,14 @@ export function RepositoriesPanel({ onSelectRun }: Props): React.ReactElement {
               <p className="text-xs" style={{ color: 'rgba(230,237,243,0.4)' }}>No repositories registered yet.</p>
             ) : (
               <div className="flex flex-col gap-1">
-                <p className="text-[10px] mb-1" style={{ color: 'rgba(230,237,243,0.4)' }}>Select repos to visualize</p>
+                <p className="text-[10px] mb-1" style={{ color: 'rgba(230,237,243,0.4)' }}>Select a repo to visualize</p>
                 {repos.map((r) => (
                   <label key={r.id} className="flex items-center gap-2 cursor-pointer">
                     <input
-                      type="checkbox"
+                      type="radio"
+                      name="graph-repo"
                       checked={selectedRepoIds.has(r.id)}
-                      onChange={(e) => {
-                        setSelectedRepoIds((prev) => {
-                          const next = new Set(prev);
-                          if (e.target.checked) next.add(r.id);
-                          else next.delete(r.id);
-                          return next;
-                        });
-                      }}
+                      onChange={() => setSelectedRepoIds(new Set([r.id]))}
                       style={{ accentColor: '#ffda19' }}
                     />
                     <span className="text-xs" style={{ color: '#e6edf3' }}>{r.name}</span>
