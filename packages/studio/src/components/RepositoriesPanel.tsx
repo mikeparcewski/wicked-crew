@@ -60,7 +60,6 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
 
   const [graphRepo, setGraphRepo] = useState<RepoEntry | null>(null);
 
-  // ── Graph tab state ───────────────────────────────────────────────────────
   const [graphMode, setGraphMode] = useState<GraphMode>('code');
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<string>>(new Set());
   const [inlineGraphData, setInlineGraphData] = useState<CodeGraphData | null>(null);
