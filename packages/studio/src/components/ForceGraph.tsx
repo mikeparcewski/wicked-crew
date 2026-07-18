@@ -295,7 +295,7 @@ export function ForceGraph({
         onClick={() => { setSelectedId(null); onNodeSelect?.(null); }}
       />
       <g transform={`translate(${view.ox},${view.oy}) scale(${view.s})`}>
-        {displayEdges.map((e, i) => {
+        {displayEdges.map((e) => {
           const s = mergedPos[e.src];
           const t = mergedPos[e.tgt];
           if (!s || !t) return null;
@@ -303,7 +303,7 @@ export function ForceGraph({
             selectedId && (e.src === selectedId || e.tgt === selectedId);
           return (
             <line
-              key={i}
+              key={`${e.src}→${e.tgt}`}
               x1={s.x}
               y1={s.y}
               x2={t.x}
