@@ -220,6 +220,7 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
   const [domainLoading, setDomainLoading] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<CodeGraphNode | null>(null);
+  const [hideTests, setHideTests] = useState(true);
 
   useEffect(() => {
     setLoading(true);
@@ -251,9 +252,32 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
     if (node !== null) setHighlightId(node.id);
   }
 
-  // Belt-and-suspenders: drop external nodes that slipped through (empty file = stdlib/unresolved).
+  // Detect test files using directory and naming conventions across ~100 languages.
+  // Uses directory name matching (exact segment) to avoid false positives like "contest.ts".
+  function isTestFile(file: string): boolean {
+    const lower = file.toLowerCase();
+    const parts = lower.split('/');
+    const basename = parts[parts.length - 1] ?? '';
+    return (
+      // Exact test/spec directory segment anywhere in path (Python, Rust, Ruby, Java, Go, …)
+      parts.some((p) => p === 'test' || p === 'tests' || p === 'spec' || p === 'specs' || p === '__tests__' || p === 'e2e') ||
+      // test_ prefix: Python (test_foo.py), Rust (test_utils.rs), Elixir (test_helper.exs)
+      basename.startsWith('test_') ||
+      // _test.ext suffix: Go (*_test.go), Rust (*_test.rs), Dart (*_test.dart), many others
+      /_(test|spec|tests|suite)\.[^.]+$/.test(basename) ||
+      // .test.ext or .spec.ext: JS/TS/JSX/TSX (*.test.ts, *.spec.tsx, …)
+      /\.(test|spec)\.[^.]+$/.test(basename)
+    );
+  }
+
+  // Belt-and-suspenders: drop external nodes (empty file = stdlib/unresolved) and
+  // optionally test file nodes (default: hidden — most people don't want test noise).
   const localNodes = codeData
-    ? codeData.nodes.filter((n) => n.file && !n.file.startsWith('node_modules/'))
+    ? codeData.nodes.filter((n) => {
+        if (!n.file || n.file.startsWith('node_modules/')) return false;
+        if (hideTests && isTestFile(n.file)) return false;
+        return true;
+      })
     : [];
   const codeEmpty = localNodes.length === 0;
 
@@ -305,9 +329,25 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
             </div>
           )}
 
+          {graphType === 'code' && (
+            <button
+              type="button"
+              onClick={() => setHideTests((h) => !h)}
+              title={hideTests ? 'Tests hidden — click to show' : 'Tests visible — click to hide'}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors border ${
+                hideTests
+                  ? 'bg-gray-100 border-gray-200 text-gray-400'
+                  : 'bg-amber-50 border-amber-200 text-amber-700'
+              }`}
+            >
+              <span>{hideTests ? '🧪' : '🧪'}</span>
+              {hideTests ? 'Tests hidden' : 'Tests shown'}
+            </button>
+          )}
+
           {codeData && graphType === 'code' && (
             <span className="text-[10px] text-gray-400">
-              {codeData.stats.nodeCount} nodes · {codeData.stats.edgeCount} edges
+              {localNodes.length} nodes · {codeData.stats.edgeCount} edges
             </span>
           )}
 
