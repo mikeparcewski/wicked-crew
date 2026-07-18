@@ -11,16 +11,26 @@ interface Props {
   onNodeSelect?: (node: CodeGraphNode | null) => void;
 }
 
+const KIND_COLORS: Record<string, string> = {
+  function: '#10b981',
+  method:   '#10b981',
+  class:    '#f97316',
+  struct:   '#f97316',
+  interface:'#3b82f6',
+  type_alias:'#3b82f6',
+  enum:     '#8b5cf6',
+};
+
 const LANG_COLORS: Record<string, string> = {
   typescript: '#10b981',
   javascript: '#10b981',
-  rust: '#f97316',
-  python: '#3b82f6',
-  go: '#06b6d4',
+  rust:       '#f97316',
+  python:     '#3b82f6',
+  go:         '#06b6d4',
 };
 
-function langColor(lang: string): string {
-  return LANG_COLORS[lang.toLowerCase()] ?? '#9ca3af';
+function nodeColor(n: CodeGraphNode): string {
+  return KIND_COLORS[n.kind?.toLowerCase()] ?? LANG_COLORS[n.lang?.toLowerCase()] ?? '#9ca3af';
 }
 
 function nodeRadius(inDeg: number): number {
@@ -317,7 +327,7 @@ export function ForceGraph({
               cx={pos.x}
               cy={pos.y}
               r={rad}
-              fill={langColor(n.lang)}
+              fill={nodeColor(n)}
               stroke="white"
               strokeWidth={isSelected ? 3 : 1.5}
               opacity={dimmed ? 0.2 : 1}
@@ -342,26 +352,28 @@ export function ForceGraph({
 
         {hoverNode && hoverPos && (() => {
           const rad = nodeRadius(hoverNode.inDeg);
-          const labelW = Math.min(hoverNode.id.length * 6.5 + 8, 340);
+          const label = hoverNode.name || hoverNode.id.split('/').pop() || hoverNode.id;
+          const subLabel = hoverNode.kind ? `${hoverNode.kind} · ${hoverNode.file?.split('/').slice(-2).join('/')}` : hoverNode.file;
+          const labelW = Math.min(Math.max(label.length, (subLabel ?? '').length) * 6.5 + 12, 360);
           return (
             <g pointerEvents="none">
               <rect
                 x={hoverPos.x + rad + 6}
-                y={hoverPos.y - 10}
+                y={hoverPos.y - 16}
                 width={labelW}
-                height={18}
+                height={subLabel ? 30 : 18}
                 rx={3}
                 fill="#1f2937"
-                opacity={0.88}
+                opacity={0.92}
               />
-              <text
-                x={hoverPos.x + rad + 11}
-                y={hoverPos.y + 3}
-                fontSize={10}
-                fill="white"
-              >
-                {hoverNode.id}
+              <text x={hoverPos.x + rad + 11} y={hoverPos.y - 3} fontSize={11} fontWeight="600" fill="white">
+                {label}
               </text>
+              {subLabel && (
+                <text x={hoverPos.x + rad + 11} y={hoverPos.y + 11} fontSize={9} fill="#9ca3af">
+                  {subLabel}
+                </text>
+              )}
             </g>
           );
         })()}

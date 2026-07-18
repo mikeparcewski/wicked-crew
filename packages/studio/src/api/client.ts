@@ -188,7 +188,7 @@ export const api = {
   /** The requirements_graph.json domain model; `graph` is null when not generated yet. */
   getDomainGraph: () => apiFetch<{ graph: import('./types.js').DomainGraph | null }>('/domain-graph'),
 
-  /** File-level code graph for a repo from estate; `graph` is null when not yet built. */
+  /** Symbol-level code graph for a repo via wicked-estate graph-view; `graph` is null when not yet built. */
   getRepoGraph: (repoId: string) =>
     apiFetch<{ graph: import('./types.js').CodeGraphData | null }>(`/repos/${encodeURIComponent(repoId)}/graph`),
 

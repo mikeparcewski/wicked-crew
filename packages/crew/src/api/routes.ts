@@ -444,9 +444,9 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
-  // ── Repo code graph (estate DB → file-level nodes + import edges) ──────────
-  // Queries the estate SQLite at <root>/.codegraph/estate.db via Python (no new
-  // Node deps). Returns file-level graph capped at 80 nodes / 200 edges.
+  // ── Repo code graph (via wicked-estate graph-view) ──────────────────────────
+  // Delegates to the estate CLI so the query goes through the proper service
+  // layer (store-seam aware, overlay edges included). Postgres-safe.
 
   app.get(`${V}/repos/:id/graph`, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -459,73 +459,24 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       return reply.send({ graph: null });
     }
 
-    const pyScript = `
-import sqlite3, json, sys
-db = sqlite3.connect(sys.argv[1])
-db.row_factory = sqlite3.Row
-
-node_count = db.execute("SELECT COUNT(*) n FROM nodes").fetchone()["n"]
-edge_count = db.execute("SELECT COUNT(*) n FROM edges").fetchone()["n"]
-file_count = db.execute("SELECT COUNT(DISTINCT file) n FROM nodes WHERE file!=''").fetchone()["n"]
-
-# Step 1: collect file-level import/call edges (all kinds, quoted or unquoted)
-raw_edges = db.execute("""
-  SELECT DISTINCT n_src.file as src, n_tgt.file as tgt
-  FROM edges e
-  JOIN nodes n_src ON n_src.symbol = e.source
-  JOIN nodes n_tgt ON n_tgt.symbol = e.target
-  WHERE e.kind IN ('imports', '"imports"', 'calls', '"calls"')
-    AND n_src.file != '' AND n_tgt.file != ''
-    AND n_src.file != n_tgt.file
-  LIMIT 300
-""").fetchall()
-edges = [{"src": r["src"], "tgt": r["tgt"]} for r in raw_edges]
-
-# Step 2: gather all files referenced in edges + top hotspots; cap at 80 total
-edge_files = {e["src"] for e in edges} | {e["tgt"] for e in edges}
-
-file_stats = db.execute("""
-  SELECT n.file,
-         n.language as lang,
-         COUNT(DISTINCT e_in.source) as in_deg,
-         COUNT(DISTINCT e_out.target) as out_deg
-  FROM nodes n
-  LEFT JOIN edges e_in ON e_in.target = n.symbol
-  LEFT JOIN edges e_out ON e_out.source = n.symbol
-  WHERE n.file != ''
-  GROUP BY n.file
-  ORDER BY in_deg DESC
-""").fetchall()
-
-seen = set()
-nodes = []
-# First pass: files that appear in edges
-for r in file_stats:
-  if r["file"] in edge_files and r["file"] not in seen:
-    nodes.append({"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]})
-    seen.add(r["file"])
-# Second pass: fill remainder with top hotspot files up to 80
-for r in file_stats:
-  if len(nodes) >= 80: break
-  if r["file"] not in seen:
-    nodes.append({"id": r["file"], "inDeg": r["in_deg"], "outDeg": r["out_deg"], "lang": r["lang"]})
-    seen.add(r["file"])
-
-# Trim edges to only connect included nodes, cap at 200
-node_set = {n["id"] for n in nodes}
-edges = [e for e in edges if e["src"] in node_set and e["tgt"] in node_set][:200]
-
-print(json.dumps({"nodes": nodes, "edges": edges,
-                  "stats": {"nodeCount": node_count, "edgeCount": edge_count, "fileCount": file_count}}))
-`;
-
     try {
       const { stdout } = await execFileAsync(
-        'python3', ['-c', pyScript, dbPath],
-        { timeout: 15_000 },
+        'wicked-estate',
+        ['graph-view', '--limit', '80', '--db', dbPath],
+        { timeout: 30_000, cwd: repo.root_path },
       );
-      const data = JSON.parse(stdout) as unknown;
-      return reply.send({ graph: data });
+      const raw = JSON.parse(stdout) as {
+        nodes: Array<{ id: string; name: string; kind: string; file: string; lang: string; score: number; inDeg: number; outDeg: number }>;
+        edges: Array<{ src: string; tgt: string }>;
+      };
+      const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
+      return reply.send({
+        graph: {
+          nodes: raw.nodes,
+          edges: raw.edges,
+          stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
+        },
+      });
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }

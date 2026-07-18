@@ -12,13 +12,25 @@ interface Props {
 type TabId = 'graph' | 'hotspots';
 type GraphType = 'code' | 'domain';
 
-const LANG_DOT: Record<string, string> = {
+const KIND_COLORS: Record<string, string> = {
+  function:   '#10b981',
+  method:     '#10b981',
+  class:      '#f97316',
+  struct:     '#f97316',
+  interface:  '#3b82f6',
+  type_alias: '#3b82f6',
+  enum:       '#8b5cf6',
+};
+const LANG_COLORS: Record<string, string> = {
   typescript: '#10b981',
   javascript: '#10b981',
-  rust: '#f97316',
-  python: '#3b82f6',
-  go: '#06b6d4',
+  rust:       '#f97316',
+  python:     '#3b82f6',
+  go:         '#06b6d4',
 };
+function symbolColor(n: CodeGraphNode): string {
+  return KIND_COLORS[n.kind?.toLowerCase()] ?? LANG_COLORS[n.lang?.toLowerCase()] ?? '#9ca3af';
+}
 
 function NodeDetailPanel({
   node,
@@ -29,81 +41,71 @@ function NodeDetailPanel({
   edges: CodeGraphEdge[];
   onClose: () => void;
 }): React.ReactElement {
-  const imports = edges.filter((e) => e.src === node.id).map((e) => e.tgt);
-  const importedBy = edges.filter((e) => e.tgt === node.id).map((e) => e.src);
-  const color = LANG_DOT[node.lang.toLowerCase()] ?? '#9ca3af';
+  const calledBy = edges.filter((e) => e.tgt === node.id);
+  const calls = edges.filter((e) => e.src === node.id);
+  const color = symbolColor(node);
+
+  function shortName(symbolId: string): string {
+    const parts = symbolId.split('/');
+    return parts[parts.length - 1] ?? symbolId;
+  }
 
   return (
     <div className="w-64 border-l flex flex-col shrink-0 bg-gray-50">
       <div className="flex items-center gap-1.5 px-3 py-2 border-b bg-white shrink-0 min-w-0">
         <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
-        <span className="text-[11px] font-semibold text-gray-700 truncate flex-1" title={node.id}>
-          {node.id.split('/').pop()}
+        <span className="text-[11px] font-semibold text-gray-700 truncate flex-1" title={node.name || node.id}>
+          {node.name || node.id.split('/').pop()}
         </span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-gray-400 hover:text-gray-600 shrink-0 leading-none"
-        >
-          ×
-        </button>
+        <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600 shrink-0 leading-none">×</button>
       </div>
 
       <div className="overflow-y-auto flex-1 p-3 flex flex-col gap-3 text-[11px]">
-        <div>
-          <p className="text-[10px] text-gray-400 mb-0.5">Path</p>
-          <p className="font-mono text-gray-700 break-all">{node.id}</p>
-        </div>
+        {node.kind && (
+          <div className="flex items-center gap-2">
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase bg-gray-100 text-gray-600">{node.kind}</span>
+            <span className="text-gray-400 capitalize">{node.lang || ''}</span>
+          </div>
+        )}
+
+        {node.file && (
+          <div>
+            <p className="text-[10px] text-gray-400 mb-0.5">File</p>
+            <p className="font-mono text-[10px] text-gray-700 break-all">{node.file}</p>
+          </div>
+        )}
 
         <div className="flex gap-4">
           <div>
-            <p className="text-[10px] text-gray-400">Language</p>
-            <p className="text-gray-700 capitalize">{node.lang || '—'}</p>
-          </div>
-          <div>
-            <p className="text-[10px] text-gray-400">In</p>
+            <p className="text-[10px] text-gray-400">Callers</p>
             <p className="font-mono text-gray-700">{node.inDeg}</p>
           </div>
           <div>
-            <p className="text-[10px] text-gray-400">Out</p>
+            <p className="text-[10px] text-gray-400">Calls</p>
             <p className="font-mono text-gray-700">{node.outDeg}</p>
           </div>
         </div>
 
-        {importedBy.length > 0 && (
+        {calledBy.length > 0 && (
           <div>
-            <p className="text-[10px] text-gray-400 mb-1">
-              Imported by{' '}
-              <span className="text-gray-500">{importedBy.length}</span>
-            </p>
+            <p className="text-[10px] text-gray-400 mb-1">Called by (in view) <span className="text-gray-500">{calledBy.length}</span></p>
             <div className="flex flex-col gap-0.5">
-              {importedBy.slice(0, 12).map((id) => (
-                <p key={id} className="font-mono text-[10px] text-gray-600 truncate" title={id}>
-                  {id}
-                </p>
+              {calledBy.slice(0, 10).map((e) => (
+                <p key={e.src} className="font-mono text-[10px] text-gray-600 truncate" title={e.src}>{shortName(e.src)}</p>
               ))}
-              {importedBy.length > 12 && (
-                <p className="text-[10px] text-gray-400">+{importedBy.length - 12} more</p>
-              )}
+              {calledBy.length > 10 && <p className="text-[10px] text-gray-400">+{calledBy.length - 10} more</p>}
             </div>
           </div>
         )}
 
-        {imports.length > 0 && (
+        {calls.length > 0 && (
           <div>
-            <p className="text-[10px] text-gray-400 mb-1">
-              Imports{' '}
-              <span className="text-gray-500">{imports.length}</span>
-            </p>
+            <p className="text-[10px] text-gray-400 mb-1">Calls (in view) <span className="text-gray-500">{calls.length}</span></p>
             <div className="flex flex-col gap-0.5">
-              {imports.slice(0, 12).map((id) => (
-                <p key={id} className="font-mono text-[10px] text-gray-600 truncate" title={id}>
-                  {id}
-                </p>
+              {calls.slice(0, 10).map((e) => (
+                <p key={e.tgt} className="font-mono text-[10px] text-gray-600 truncate" title={e.tgt}>{shortName(e.tgt)}</p>
               ))}
-              {imports.length > 12 && (
-                <p className="text-[10px] text-gray-400">+{imports.length - 12} more</p>
-              )}
+              {calls.length > 10 && <p className="text-[10px] text-gray-400">+{calls.length - 10} more</p>}
             </div>
           </div>
         )}

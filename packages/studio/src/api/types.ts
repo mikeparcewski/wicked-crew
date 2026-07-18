@@ -430,11 +430,14 @@ export interface OpenTerminalBody {
   governed?: boolean;
 }
 
-/** File-level code graph from estate (GET /repos/:id/graph). */
+/** Symbol-level code graph from estate (GET /repos/:id/graph). */
 export interface CodeGraphNode {
-  id: string;      // repo-relative file path
-  inDeg: number;   // incoming edge count (hotspot indicator)
-  outDeg: number;  // outgoing edge count
+  id: string;      // estate symbol ID (primary key)
+  name: string;    // short display name (function/class/type name)
+  kind: string;    // function | class | struct | interface | type_alias | method | enum
+  file: string;    // source file path
+  inDeg: number;   // incoming call/import count (hotspot indicator)
+  outDeg: number;  // outgoing call/import count
   lang: string;    // language (typescript, rust, python, etc.)
 }
 export interface CodeGraphEdge { src: string; tgt: string; }
