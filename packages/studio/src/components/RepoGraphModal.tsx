@@ -13,13 +13,16 @@ type TabId = 'graph' | 'hotspots';
 type GraphType = 'code' | 'domain';
 
 const KIND_COLORS: Record<string, string> = {
-  function:   '#10b981',
-  method:     '#10b981',
-  class:      '#f97316',
-  struct:     '#f97316',
-  interface:  '#3b82f6',
-  type_alias: '#3b82f6',
-  enum:       '#8b5cf6',
+  function:    '#10b981',
+  method:      '#10b981',
+  constructor: '#10b981',
+  class:       '#f97316',
+  struct:      '#f97316',
+  interface:   '#3b82f6',
+  type_alias:  '#3b82f6',
+  trait:       '#3b82f6',
+  enum:        '#8b5cf6',
+  macro:       '#a855f7',
 };
 const LANG_COLORS: Record<string, string> = {
   typescript: '#10b981',
@@ -248,7 +251,11 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
     if (node !== null) setHighlightId(node.id);
   }
 
-  const codeEmpty = !codeData || codeData.nodes.length === 0;
+  // Belt-and-suspenders: drop external nodes that slipped through (empty file = stdlib/unresolved).
+  const localNodes = codeData
+    ? codeData.nodes.filter((n) => n.file && !n.file.startsWith('node_modules/'))
+    : [];
+  const codeEmpty = localNodes.length === 0;
 
   return (
     <div
@@ -379,7 +386,7 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
                   style={{ display: tab === 'graph' ? 'flex' : 'none' }}
                 >
                   <ForceGraphContainer
-                    nodes={codeData!.nodes}
+                    nodes={localNodes}
                     edges={codeData!.edges}
                     highlightId={highlightId}
                     onNodeSelect={handleNodeSelect}
@@ -391,7 +398,7 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
                   style={{ display: tab === 'hotspots' ? 'block' : 'none' }}
                 >
                   <HotspotsView
-                    nodes={codeData!.nodes}
+                    nodes={localNodes}
                     selectedId={selectedNode?.id ?? null}
                     onSelect={handleHotspotSelect}
                   />
