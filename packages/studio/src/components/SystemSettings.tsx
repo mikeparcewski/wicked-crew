@@ -11,8 +11,8 @@ interface SettingRowProps {
 function SettingRow({ label, description, children }: SettingRowProps): React.ReactElement {
   return (
     <div
-      className="flex items-start justify-between gap-6 py-4 last:border-0"
-      style={{ borderBottom: '1px solid rgba(230,237,243,0.07)' }}
+      className="flex items-start justify-between gap-6 py-4 border-b last:border-b-0"
+      style={{ borderColor: 'rgba(230,237,243,0.07)' }}
     >
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium" style={{ color: '#e6edf3' }}>{label}</p>

@@ -15,7 +15,6 @@ import { WhatWhere } from './WhatWhere.js';
 
 interface Props {
   view: SessionView;
-  onRefresh: () => void;
 }
 
 type AccordionId =
@@ -29,12 +28,12 @@ type AccordionId =
   | 'artifacts';
 
 const ACCORDIONS: { id: AccordionId; label: string }[] = [
+  { id: 'whatwhere', label: 'What / Where' },
   { id: 'decisions', label: 'Decisions' },
   { id: 'governance', label: 'Governance' },
   { id: 'burn', label: 'Burn' },
   { id: 'data', label: 'Data' },
   { id: 'steering', label: 'Steering' },
-  { id: 'whatwhere', label: 'What / Where' },
   { id: 'assumptions', label: 'Assumptions' },
   { id: 'artifacts', label: 'Artifacts' },
 ];
@@ -74,7 +73,7 @@ function ArtifactsPanel({ model }: { model: RunModel }): React.ReactElement {
 
 export function RightPanel({ view }: Props): React.ReactElement {
   const [collapsed, setCollapsed] = useState(false);
-  const [openAccordion, setOpenAccordion] = useState<AccordionId | null>(null);
+  const [openAccordion, setOpenAccordion] = useState<AccordionId | null>('whatwhere');
   const [termOpen, setTermOpen] = useState(false);
   const [coverageOpen, setCoverageOpen] = useState(false);
 
@@ -137,18 +136,14 @@ export function RightPanel({ view }: Props): React.ReactElement {
         <button
           type="button"
           onClick={() => setCollapsed(true)}
-          className="text-sm leading-none mr-1"
-          style={{ color: 'rgba(230,237,243,0.35)' }}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
           aria-label="Collapse insights panel"
         >
-          ›
+          <span className="text-sm leading-none shrink-0" style={{ color: 'rgba(230,237,243,0.35)' }}>›</span>
+          <span className="text-[10px] font-semibold uppercase tracking-widest font-mono" style={{ color: 'rgba(230,237,243,0.4)' }}>
+            Insights
+          </span>
         </button>
-        <span
-          className="text-[10px] font-semibold uppercase tracking-widest flex-1 font-mono"
-          style={{ color: 'rgba(230,237,243,0.4)' }}
-        >
-          Insights
-        </span>
         <button
           type="button"
           onClick={() => setTermOpen(true)}

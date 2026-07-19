@@ -407,7 +407,7 @@ export interface DomainGraphRequirement {
   error_paths: Array<{ id: string; statement: string }>;
 }
 
-/** Coverage stats from estate.coverage.json — present when code is indexed but not yet annotated. */
+/** Coverage stats from `wicked-core coverage --json` — present when code is indexed but domain not yet annotated. */
 export interface DomainCoverage {
   coverage: number;
   total: number;

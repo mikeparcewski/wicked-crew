@@ -115,15 +115,6 @@ export function App(): React.ReactElement {
 
   const selected = runs.find((v) => v.session.id === runId) ?? null;
 
-  // Crew-site ambient gradient — matches the lighter (non-odd) sections of wc.wickedagile.com
-  const centerBg: React.CSSProperties = {
-    background: [
-      'radial-gradient(ellipse 65% 55% at 0% 0%, rgba(255,218,25,0.09), transparent 60%)',
-      'radial-gradient(ellipse 55% 55% at 100% 100%, rgba(248,81,73,0.07), transparent 60%)',
-      '#0d1117',
-    ].join(', '),
-  };
-
   // Center panel content based on route
   function renderCenter(): React.ReactElement {
     if (panel === 'coverage') {
@@ -198,16 +189,13 @@ export function App(): React.ReactElement {
         navigate={navigate}
       />
 
-      <div className="flex flex-1 overflow-hidden" style={centerBg}>
+      <div className="wk-crew-bg flex flex-1 overflow-hidden">
         {renderCenter()}
       </div>
 
       {/* Right panel only when a run is selected */}
       {selected !== null && (
-        <RightPanel
-          view={selected}
-          onRefresh={refresh}
-        />
+        <RightPanel view={selected} />
       )}
 
       {/* Gate toasts — always mounted, renders above everything */}

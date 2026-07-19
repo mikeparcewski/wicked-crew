@@ -15,6 +15,7 @@ export default {
           link:         '#79c0ff',
           ok:           '#3fb950',
           deny:         '#f85149',
+          muted:        'rgba(230,237,243,0.55)',
           blue:         '#1c4053',
           'blue-2':     '#182f3c',
           'blue-s':     '#224a5e',
