@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { EntityMode, LaunchRunBody, RepoEntry, RosterSeat, WorkflowDef } from '../api/types.js';
+import { useGateStore } from '../store/gates.js';
 
 interface Props {
-  /** If set, we're in "run selected" mode — show disabled placeholder. */
+  /** If set, we're in "run selected" mode — steer if gated, otherwise placeholder. */
   runId?: string | null;
+  /** The current status of the selected run. Used to decide steer vs disabled mode. */
+  runStatus?: string | null;
   onLaunched: (runId: string) => void;
 }
 
@@ -24,7 +27,12 @@ function detectWorkflow(text: string): string | null {
   return null;
 }
 
-export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
+export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactElement {
+  const clearGate = useGateStore((s) => s.clearGate);
+  const [steerText, setSteerText] = useState('');
+  const [steering, setSteering] = useState(false);
+  const [steerError, setSteerError] = useState<string | null>(null);
+  const steerRef = useRef<HTMLTextAreaElement>(null);
   const [problem, setProblem] = useState('');
   const [workflow, setWorkflow] = useState('');
   const [roster, setRoster] = useState<RosterSeat[]>([]);
@@ -126,13 +134,79 @@ export function ChatInput({ runId, onLaunched }: Props): React.ReactElement {
     }
   }
 
-  // Run-selected mode: just a disabled placeholder
+  // Run-selected mode: steer at gates, otherwise explain the state
   if (runId) {
+    if (runStatus === 'awaiting_human') {
+      // Gate is open — operator can send a steer (approve-with-steer)
+      const canSteer = steerText.trim().length > 0 && !steering;
+
+      async function submitSteer(): Promise<void> {
+        const text = steerText.trim();
+        if (!text || !runId) return;
+        setSteering(true);
+        setSteerError(null);
+        try {
+          await api.confirmGate(runId, { approve: true, amend: text });
+          setSteerText('');
+          clearGate(runId);
+        } catch (err) {
+          setSteerError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setSteering(false);
+        }
+      }
+
+      return (
+        <div
+          className="px-5 py-4 flex flex-col gap-2 shrink-0"
+          style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
+        >
+          {steerError && (
+            <p className="text-[11px] font-mono" style={{ color: '#f85149' }}>{steerError}</p>
+          )}
+          <div
+            className="flex items-end gap-3 rounded-2xl px-4 py-3"
+            style={{ background: '#1b222e', border: '1px solid rgba(255,218,25,0.25)' }}
+          >
+            <textarea
+              ref={steerRef}
+              className="flex-1 resize-none text-base outline-none border-0 bg-transparent leading-6"
+              style={{ minHeight: '28px', color: '#e6edf3', fontFamily: 'inherit' }}
+              placeholder="Send steering guidance… (approves gate)"
+              value={steerText}
+              onChange={(e) => setSteerText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submitSteer();
+                }
+              }}
+              disabled={steering}
+              rows={1}
+            />
+            <button
+              type="button"
+              onClick={() => void submitSteer()}
+              disabled={!canSteer}
+              className="shrink-0 rounded-xl px-4 py-2 text-sm font-semibold transition-opacity disabled:opacity-40"
+              style={{ background: '#ffda19', color: '#0d1117' }}
+            >
+              {steering ? '…' : 'Steer →'}
+            </button>
+          </div>
+          <p className="text-[10px] font-mono text-center" style={{ color: 'rgba(230,237,243,0.3)' }}>
+            Approve + steer · Cmd+Enter · Use the gate panel above to approve/reject without steering
+          </p>
+        </div>
+      );
+    }
+
+    // Actively executing — no mid-run injection supported
     return (
       <div className="px-5 py-4 shrink-0" style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}>
         <div className="rounded-2xl px-5 py-4" style={{ border: '1px solid rgba(230,237,243,0.1)', background: '#1b222e' }}>
           <p className="text-sm italic font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
-            Run in progress — responses stream above.
+            Run in progress — steer at the next gate.
           </p>
         </div>
       </div>

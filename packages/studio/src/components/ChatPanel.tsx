@@ -344,6 +344,7 @@ function RunChat({
 
       <ChatInput
         runId={isTerminal ? null : session.id}
+        runStatus={isTerminal ? null : session.status}
         onLaunched={onLaunched}
       />
     </div>
