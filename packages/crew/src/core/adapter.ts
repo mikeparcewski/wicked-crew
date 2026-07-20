@@ -513,7 +513,13 @@ export class CoreAdapter {
   async getSettings(): Promise<SystemSettings> {
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
-      return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<SystemSettings>) };
+      const parsed = JSON.parse(raw) as Partial<SystemSettings>;
+      // Validate numeric fields; drop anything out-of-range rather than propagate bad values.
+      if ('graphNodeLimit' in parsed) {
+        const v = parsed.graphNodeLimit;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
+      }
+      return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
       return { ...DEFAULT_SETTINGS };
     }

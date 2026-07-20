@@ -217,15 +217,15 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
           if (!u.resolved) {
             // Unit not yet in snapshot — populate all phase metadata from the event.
             if (typeof ev.stage === 'string') u.stage = ev.stage as StageKind;
-            if (typeof ev['role'] === 'string') u.role = ev['role'] as PhaseRole;
-            if (typeof ev['gate'] === 'string') u.gate = ev['gate'];
+            if (typeof ev.role === 'string') u.role = ev.role as PhaseRole;
+            if (typeof ev.gate === 'string') u.gate = ev.gate;
             u.hasValidatorPin = ev.has_validator_pin === true;
             if (typeof ev.executor_type === 'string') u.executorType = ev.executor_type as 'agent' | 'tool';
           } else {
             // Unit is from snapshot — only supplement fields still at their null/false default
             // so the event never clobbers authoritative snapshot values.
-            if (u.role === null && typeof ev['role'] === 'string') u.role = ev['role'] as PhaseRole;
-            if (u.gate === null && typeof ev['gate'] === 'string') u.gate = ev['gate'];
+            if (u.role === null && typeof ev.role === 'string') u.role = ev.role as PhaseRole;
+            if (u.gate === null && typeof ev.gate === 'string') u.gate = ev.gate;
             if (!u.hasValidatorPin && ev.has_validator_pin === true) u.hasValidatorPin = true;
             if (u.executorType === null && typeof ev.executor_type === 'string') u.executorType = ev.executor_type as 'agent' | 'tool';
           }

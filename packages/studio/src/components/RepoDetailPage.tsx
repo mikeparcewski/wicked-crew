@@ -17,12 +17,14 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
   const [runs, setRuns] = useState<SessionView[]>([]);
   const [graph, setGraph] = useState<CodeGraphData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [onboarding, setOnboarding] = useState(false);
   const [onboardError, setOnboardError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
+    setError(null);
     setExpanded(false);
     Promise.all([
       api.listRepos().then(({ repos }) => repos.find(r => r.id === repoId) ?? null),
@@ -34,12 +36,20 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
       setRepo(r);
       setRuns(rs);
       setGraph(g);
+    }).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : 'Failed to load repo');
     }).finally(() => setLoading(false));
   }, [repoId]);
 
   if (loading) {
     return (
       <div className="p-8 font-mono text-sm" style={{ color: 'rgba(230,237,243,0.4)' }}>Loading…</div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-8 font-mono text-sm" style={{ color: '#f85149' }}>{error}</div>
     );
   }
 
@@ -51,7 +61,8 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
 
   const active    = runs.filter(v => !TERMINAL_STATUSES.has(v.session.status));
   const completed = runs.filter(v => v.session.status === 'completed');
-  const failed    = runs.filter(v => v.session.status === 'failed');
+  // Treat cancelled as failed — consistent with WorkPage and other surfaces.
+  const failed    = runs.filter(v => v.session.status === 'failed' || v.session.status === 'cancelled');
 
   // Hotspots: top 5 nodes by incoming edge count (inDeg), excluding node_modules
   const hotspots = graph
