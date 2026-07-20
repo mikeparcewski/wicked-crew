@@ -245,7 +245,7 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
       hookFires: [],
       validationPinAttached: false,
       gateEscalated: false,
-      toolExecutorCmd: null,
+      toolExecutorCmd: u.tool_cmd ?? null,
       governanceArmed: false,
     });
   }
