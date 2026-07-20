@@ -58,6 +58,14 @@ export function DecisionsLedger({ model }: Props): React.ReactElement {
     return hc.before === nextUnitOrd;
   })();
 
+  const rowStyle: React.CSSProperties = {
+    background: '#1b222e',
+    border: '1px solid rgba(230,237,243,0.07)',
+    borderRadius: '0.75rem',
+    padding: '0.75rem',
+    fontSize: '11px',
+  };
+
   return (
     <div data-testid="decisions-ledger" className="flex flex-col gap-2">
       {decidedUnits.length === 0 && pendingGate === null ? (
