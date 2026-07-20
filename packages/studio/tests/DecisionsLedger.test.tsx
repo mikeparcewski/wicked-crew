@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { mergeRunModel } from '../src/hooks/useRunModel.js';
 import type { CoreEvent } from '../src/api/types.js';
-import { makeView, makeUnit, makeUnitPlannedEvent } from './factories.js';
+import { makeView, makeUnit } from './factories.js';
 import { DecisionsLedger } from '../src/components/DecisionsLedger.js';
 
 /** Helper: routing needed to put a unit into decidedUnits. */
@@ -56,11 +56,7 @@ describe('DecisionsLedger — gate-policy badge', () => {
   });
 
   it('renders HUMAN-CONFIRM for string-form human_confirm gate (from event)', () => {
-    const snap = makeView({}, []);
-    const ev = makeUnitPlannedEvent({ ord: 1, gate: 'human_confirm' });
-    const unitEv: CoreEvent = { type: 'unitDispatched', session: 'run-1', ord: 1, attempt: 0 };
-    const m = mergeRunModel(snap, [ev as unknown as CoreEvent, unitEv]);
-    // force unit into decidedUnits via gateEvaluated
+    // String-form gate arrives via unitPlanned event; snapshot gate wins for decidedUnits routing
     const snapWithRouting = makeView({}, [makeUnit({ ord: 1, routing: councilRouting, gate: 'human_confirm' })]);
     render(<DecisionsLedger model={mergeRunModel(snapWithRouting, [])} />);
     const badge = screen.getByTestId('gate-badge');
