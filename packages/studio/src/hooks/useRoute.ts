@@ -26,10 +26,11 @@ function parse(pathname: string): Route {
   if ((PANELS as string[]).includes(first) && first !== 'runs') {
     return { panel: first as Panel, runId: null, showLaunch: false };
   }
-  // /repo-detail (no id) is not a valid panel in the current routing; fall
-  // through to the runs default rather than silently producing a broken state.
+  // /repo-detail without an id segment has no meaning; redirect to the
+  // repositories list panel rather than falling through to the runs default.
+  // (crew#65: distinct from the default fallback — repos is semantically correct.)
   if (first === 'repo-detail' && !second) {
-    return { panel: 'runs', runId: null, showLaunch: false };
+    return { panel: 'repos', runId: null, showLaunch: false };
   }
   if (second === 'new') return { panel: 'runs', runId: null, showLaunch: true };
   if (second) return { panel: 'runs', runId: safeDecodeURIComponent(second), showLaunch: false };
