@@ -49,7 +49,7 @@ export function makeUnitPlannedEvent(
   return {
     type: 'unitPlanned',
     session: 'run-1',
-    ord: 1,
+    ord: 0,
     description: 'do something',
     stage: 'build',
     role: 'neutral',
