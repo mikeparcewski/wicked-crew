@@ -126,16 +126,26 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               {repo.root_path}
             </p>
             {repo.git_url && (
-              <a
-                href={repo.git_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[11px] font-mono mt-0.5 block truncate hover:underline"
-                style={{ color: '#79c0ff' }}
-                title={repo.git_url}
-              >
-                {repo.git_url}
-              </a>
+              /^https?:\/\//i.test(repo.git_url) ? (
+                <a
+                  href={repo.git_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-mono mt-0.5 block truncate hover:underline"
+                  style={{ color: '#79c0ff' }}
+                  title={repo.git_url}
+                >
+                  {repo.git_url}
+                </a>
+              ) : (
+                <span
+                  className="text-[11px] font-mono mt-0.5 block truncate"
+                  style={{ color: '#79c0ff' }}
+                  title={repo.git_url}
+                >
+                  {repo.git_url}
+                </span>
+              )
             )}
           </div>
           <span
