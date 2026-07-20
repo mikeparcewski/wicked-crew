@@ -543,7 +543,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
 
   app.put(`${V}/settings`, async (req, reply) => {
     const patch = req.body as Partial<import('../core/types.js').SystemSettings>;
-    if (typeof patch !== 'object' || patch === null) {
+    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       return reply.code(400).send({ error: 'body must be a JSON object' });
     }
     if ('graphNodeLimit' in patch) {
