@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import cytoscape from 'cytoscape';
 import fcose from 'cytoscape-fcose';
 import type { CodeGraphNode, CodeGraphEdge } from '../api/types.js';
@@ -43,7 +43,7 @@ function nodeSize(inDeg: number): number {
 
 export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNodeSelect }: Props): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
-  const cyRef = useRef<cytoscape.Core | null>(null);
+  const [cy, setCy] = useState<cytoscape.Core | null>(null);
   // Maps original estate symbol ID → safe Cytoscape element ID ("n0", "n1", …).
   const cyIdMapRef = useRef<Map<string, string>>(new Map());
   // Callback refs so event handlers always call the latest version without rebuilding the graph.
@@ -192,16 +192,15 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
 
     cy.ready(() => { cy.fit(undefined, 40); });
 
-    cyRef.current = cy;
+    setCy(cy);
     return () => {
       cy.destroy();
-      cyRef.current = null;
+      setCy(null);
     };
   }, [nodes, edges]);
 
   // Sync external selection without rebuilding.
   useEffect(() => {
-    const cy = cyRef.current;
     if (!cy) return;
     cy.elements('node').unselect();
     cy.elements().removeClass('highlighted dimmed');
@@ -216,7 +215,7 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
         cy.animate({ fit: { eles: neighbourhood, padding: 60 }, duration: 300 });
       }
     }
-  }, [externalSelectedId]);
+  }, [cy, externalSelectedId]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }

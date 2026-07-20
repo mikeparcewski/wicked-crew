@@ -190,7 +190,7 @@ export function App(): React.ReactElement {
     if (panel === 'chats') {
       return (
         <div className="flex-1 overflow-y-auto">
-          <ChatsPage onSelect={selectRun} navigate={navigate} />
+          <ChatsPage runs={runs} onSelect={selectRun} navigate={navigate} />
         </div>
       );
     }

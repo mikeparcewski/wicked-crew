@@ -45,8 +45,7 @@ function workflowOverlayDir(): string {
 }
 
 function settingsFilePath(): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
-  return join(home, '.config', 'wicked-core', 'settings.json');
+  return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { SessionView } from '../api/types.js';
 
 interface Props {
+  runs: SessionView[];
   onSelect: (id: string) => void;
   navigate: (path: string) => void;
 }
@@ -9,9 +10,9 @@ interface Props {
 const terminal = (s: string): boolean =>
   ['completed', 'failed', 'cancelled'].includes(s);
 
-export function ChatsPage({ onSelect, navigate }: Props): React.ReactElement {
+export function ChatsPage({ runs, onSelect, navigate }: Props): React.ReactElement {
   const [query, setQuery] = useState('');
-  const chats: SessionView[] = []; // TODO: filter runs by type=chat once discriminator lands
+  const chats = runs; // TODO: filter by type=chat once discriminator lands
 
   const active    = chats.filter(v => !terminal(v.session.status));
   const completed = chats.filter(v => v.session.status === 'completed');
