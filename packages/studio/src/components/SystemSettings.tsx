@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
-import type { SystemSettings as Settings } from '../api/types.js';
+import type { RosterSeat, SystemSettings as Settings } from '../api/types.js';
+
+const CLI_DEFAULTS_KEY = 'wicked_default_clis';
 
 interface SettingRowProps {
   label: string;
@@ -23,6 +25,14 @@ function SettingRow({ label, description, children }: SettingRowProps): React.Re
   );
 }
 
+function loadDefaultClis(roster: RosterSeat[]): Set<string> {
+  try {
+    const stored = localStorage.getItem(CLI_DEFAULTS_KEY);
+    if (stored) return new Set(JSON.parse(stored) as string[]);
+  } catch { /* ignore */ }
+  return new Set(roster.filter((s) => s.enabled_for_council).map((s) => s.key));
+}
+
 export function SystemSettings(): React.ReactElement {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [dirty, setDirty] = useState<Partial<Settings>>({});
@@ -31,11 +41,41 @@ export function SystemSettings(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [roster, setRoster] = useState<RosterSeat[]>([]);
+  const [defaultClis, setDefaultClis] = useState<Set<string>>(new Set());
+  const [clisSaved, setClisSaved] = useState(false);
+  const clisSavedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     api.getSettings()
       .then(({ settings: s }) => setSettings(s))
       .catch((e: unknown) => setError(String(e)));
+    api.getRoster()
+      .then(({ roster: seats }) => {
+        setRoster(seats);
+        setDefaultClis(loadDefaultClis(seats));
+      })
+      .catch(() => {});
   }, []);
+
+  useEffect(() => () => {
+    if (clisSavedTimerRef.current) clearTimeout(clisSavedTimerRef.current);
+  }, []);
+
+  function toggleDefaultCli(key: string): void {
+    setDefaultClis((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  function saveDefaultClis(): void {
+    localStorage.setItem(CLI_DEFAULTS_KEY, JSON.stringify([...defaultClis]));
+    setClisSaved(true);
+    if (clisSavedTimerRef.current) clearTimeout(clisSavedTimerRef.current);
+    clisSavedTimerRef.current = setTimeout(() => setClisSaved(false), 2500);
+  }
 
   useEffect(() => () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); }, []);
 
@@ -117,7 +157,7 @@ export function SystemSettings(): React.ReactElement {
         </SettingRow>
       </section>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 mb-8">
         <button
           type="button"
           onClick={save}
@@ -132,6 +172,60 @@ export function SystemSettings(): React.ReactElement {
         </button>
         {saved && <span className="text-xs font-medium" style={{ color: '#3fb950' }}>Saved</span>}
       </div>
+
+      {/* ── CLIs section ──────────────────────────────────────────────────── */}
+      <section
+        className="rounded-xl px-5 mb-6"
+        style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.07)' }}
+      >
+        <h2
+          className="text-xs font-semibold uppercase tracking-wide pt-4 pb-2 font-mono"
+          style={{ color: 'rgba(230,237,243,0.4)' }}
+        >
+          Default CLIs
+        </h2>
+        <p className="text-xs mb-4" style={{ color: 'rgba(230,237,243,0.4)' }}>
+          Which CLIs are pre-selected when you open the launch form. Changes take effect on the next new session.
+        </p>
+        {roster.length === 0 ? (
+          <p className="text-xs italic pb-4 font-mono" style={{ color: 'rgba(230,237,243,0.3)' }}>Loading roster…</p>
+        ) : (
+          <div className="flex flex-col gap-2 pb-4">
+            {roster.map((seat) => (
+              <label key={seat.key} className="flex items-center gap-3 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={defaultClis.has(seat.key)}
+                  onChange={() => toggleDefaultCli(seat.key)}
+                  className="accent-[#ffda19] w-3.5 h-3.5 shrink-0"
+                />
+                <span className="text-sm font-mono flex-1" style={{ color: '#e6edf3' }}>
+                  {seat.display_name}
+                </span>
+                <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.3)' }}>
+                  {seat.key}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+        {roster.length > 0 && (
+          <div
+            className="flex items-center gap-3 pb-4 pt-2 border-t"
+            style={{ borderColor: 'rgba(230,237,243,0.07)' }}
+          >
+            <button
+              type="button"
+              onClick={saveDefaultClis}
+              className="px-4 py-2 rounded-lg text-sm font-medium"
+              style={{ background: '#ffda19', color: '#0d1117' }}
+            >
+              Save CLI defaults
+            </button>
+            {clisSaved && <span className="text-xs font-medium" style={{ color: '#3fb950' }}>Saved</span>}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { HotspotsView } from './HotspotsView.js';
 interface Props {
   repo: RepoEntry;
   onClose: () => void;
+  onSelectRun?: (runId: string) => void;
 }
 
 type TabId = 'graph' | 'hotspots';
@@ -233,7 +234,7 @@ function PanelDots(): React.ReactElement {
   );
 }
 
-export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
+export function RepoGraphModal({ repo, onClose, onSelectRun }: Props): React.ReactElement {
   const [tab, setTab] = useState<TabId>('graph');
   const [graphType, setGraphType] = useState<GraphType>('code');
   const [loading, setLoading] = useState(true);
@@ -241,9 +242,24 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
   const [domainData, setDomainData] = useState<DomainGraph | null>(null);
   const [domainCoverage, setDomainCoverage] = useState<DomainCoverage | null>(null);
   const [domainLoading, setDomainLoading] = useState(false);
+  const [annotating, setAnnotating] = useState(false);
+  const [annotateError, setAnnotateError] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<CodeGraphNode | null>(null);
   const [hideTests, setHideTests] = useState(true);
+
+  async function runAnnotation(): Promise<void> {
+    setAnnotating(true);
+    setAnnotateError(null);
+    try {
+      const { runId } = await api.rerunOnboarding(repo.id);
+      onSelectRun?.(runId);
+      onClose();
+    } catch (e: unknown) {
+      setAnnotateError(e instanceof Error ? e.message : String(e));
+      setAnnotating(false);
+    }
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -447,6 +463,18 @@ export function RepoGraphModal({ repo, onClose }: Props): React.ReactElement {
                     <p className="text-[11px] font-mono" style={{ color: T.faint }}>
                       No coverage data — run onboarding first.
                     </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void runAnnotation()}
+                    disabled={annotating}
+                    className="self-start rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                    style={{ background: T.accent, color: T.accentInk }}
+                  >
+                    {annotating ? 'Starting…' : 'Run annotation workflow →'}
+                  </button>
+                  {annotateError && (
+                    <p className="text-[11px] font-mono" style={{ color: T.deny }}>{annotateError}</p>
                   )}
                 </div>
               </div>

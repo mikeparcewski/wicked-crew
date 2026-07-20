@@ -9,6 +9,7 @@ import { ChatInput } from './ChatInput.js';
 
 interface Props {
   view: SessionView | null;
+  chatMode?: boolean;
   onLaunched: (runId: string) => void;
   onNavigateBack: () => void;
   onRefresh: () => void;
@@ -351,24 +352,32 @@ function RunChat({
   );
 }
 
-function NewRunView({ onLaunched }: { onLaunched: (id: string) => void }): React.ReactElement {
+function NewRunView({ chatMode, onLaunched }: { chatMode: boolean; onLaunched: (id: string) => void }): React.ReactElement {
+  const heading = chatMode
+    ? 'What do you want to explore?'
+    : 'What do you need built?';
+  const sub = chatMode
+    ? 'Ask about your repos, get answers, run searches, analyse patterns — without kicking off a full build.'
+    : 'Describe your goal. The council elects a CLI, decomposes the plan, and executes it — you approve each gate.';
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8 max-w-2xl mx-auto w-full">
-        <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#e6edf3' }}>
-          What do you need built?
-        </h1>
-        <p className="text-base text-center leading-relaxed" style={{ color: 'rgba(230,237,243,0.5)' }}>
-          Describe your goal. The council elects a CLI, decomposes the plan,
-          and executes it — you approve each gate.
-        </p>
+    <div className="flex flex-col h-full items-center justify-center">
+      <div className="w-full max-w-2xl px-8 flex flex-col gap-5">
+        <div className="flex flex-col gap-2 text-center">
+          <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#e6edf3' }}>
+            {heading}
+          </h1>
+          <p className="text-base leading-relaxed" style={{ color: 'rgba(230,237,243,0.5)' }}>
+            {sub}
+          </p>
+        </div>
+        <ChatInput embedded onLaunched={onLaunched} />
       </div>
-      <ChatInput onLaunched={onLaunched} />
     </div>
   );
 }
 
-export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh, onKill }: Props): React.ReactElement {
+export function ChatPanel({ view, chatMode, onLaunched, onNavigateBack, onRefresh, onKill }: Props): React.ReactElement {
   if (view) {
     return (
       <RunChat
@@ -381,5 +390,5 @@ export function ChatPanel({ view, onLaunched, onNavigateBack, onRefresh, onKill 
       />
     );
   }
-  return <NewRunView onLaunched={onLaunched} />;
+  return <NewRunView chatMode={chatMode ?? false} onLaunched={onLaunched} />;
 }

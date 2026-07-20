@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { EntityMode, LaunchRunBody, RepoEntry, RosterSeat, WorkflowDef } from '../api/types.js';
 import { useGateStore } from '../store/gates.js';
+import { ContextPopover } from './ContextPopover.js';
+import type { ConfirmMode } from './ContextPopover.js';
 
 interface Props {
   /** If set, we're in "run selected" mode — steer if gated, otherwise placeholder. */
@@ -9,83 +11,149 @@ interface Props {
   /** The current status of the selected run. Used to decide steer vs disabled mode. */
   runStatus?: string | null;
   onLaunched: (runId: string) => void;
+  /**
+   * When true, renders inline (no footer border/background) so the widget can sit
+   * centered in the empty-state layout rather than docked to the bottom of the pane.
+   */
+  embedded?: boolean;
 }
-
-type ConfirmMode = 'none' | 'all' | 'before';
-
-const WORKFLOW_LABELS: Record<string, string> = {
-  feature: 'Feature (6 phases)',
-  bug: 'Bug (4 phases)',
-  migration: 'Migration (5 phases)',
-};
 
 function detectWorkflow(text: string): string | null {
   const lower = text.toLowerCase();
   if (/\b(bug|fix|broken|error|crash|issue)\b/.test(lower)) return 'bug';
-  if (/\b(feature|implement|add|create)\b/.test(lower) && !/\b(bug|fix|broken|error|crash|issue)\b/.test(lower)) return 'feature';
+  if (
+    /\b(feature|implement|add|create)\b/.test(lower) &&
+    !/\b(bug|fix|broken|error|crash|issue)\b/.test(lower)
+  )
+    return 'feature';
   if (/\b(migrate|upgrade|migration|move)\b/.test(lower)) return 'migration';
   return null;
 }
 
-export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactElement {
+/** Small × pill for active non-default options */
+function ActivePill({
+  label,
+  onClear,
+}: {
+  label: string;
+  onClear: () => void;
+}): React.ReactElement {
+  return (
+    <span
+      className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-mono"
+      style={{
+        background: 'rgba(230,237,243,0.07)',
+        color: 'rgba(230,237,243,0.6)',
+        border: '1px solid rgba(230,237,243,0.1)',
+      }}
+    >
+      {label}
+      <button
+        type="button"
+        onClick={onClear}
+        aria-label={`Clear ${label}`}
+        className="opacity-60 hover:opacity-100 leading-none ml-0.5"
+      >
+        ×
+      </button>
+    </span>
+  );
+}
+
+export function ChatInput({ runId, runStatus, onLaunched, embedded }: Props): React.ReactElement {
   const clearGate = useGateStore((s) => s.clearGate);
+
+  // ── Steer mode state ───────────────────────────────────────────────────────
   const [steerText, setSteerText] = useState('');
   const [steering, setSteering] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const steerRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Launch form state ──────────────────────────────────────────────────────
   const [problem, setProblem] = useState('');
   const [workflow, setWorkflow] = useState('');
   const [roster, setRoster] = useState<RosterSeat[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDef[]>([]);
   const [selectedClis, setSelectedClis] = useState<Set<string>>(new Set());
   const [repos, setRepos] = useState<RepoEntry[]>([]);
-  const [repoRef, setRepoRef] = useState('');
+  const [repoRefs, setRepoRefs] = useState<string[]>([]);
   const [entityMode, setEntityMode] = useState<EntityMode>('shared');
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>('none');
   const [beforeOrd, setBeforeOrd] = useState(1);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+
   const [submitting, setSubmitting] = useState(false);
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [detectedWorkflow, setDetectedWorkflow] = useState<string | null>(null);
   const [workflowDismissed, setWorkflowDismissed] = useState(false);
+
+  // ── Popover state ──────────────────────────────────────────────────────────
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  /** Wraps the + button AND the absolutely-positioned popover for outside-click detection. */
+  const popoverAnchorRef = useRef<HTMLDivElement>(null);
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // ── Data loading ───────────────────────────────────────────────────────────
   useEffect(() => {
     api
       .getRoster()
       .then(({ roster: seats }) => {
         setRoster(seats);
+        try {
+          const stored = localStorage.getItem('wicked_default_clis');
+          if (stored) {
+            setSelectedClis(new Set(JSON.parse(stored) as string[]));
+            return;
+          }
+        } catch { /* ignore */ }
         setSelectedClis(new Set(seats.filter((s) => s.enabled_for_council).map((s) => s.key)));
       })
-      .catch(() => {/* roster load failure is non-fatal */});
-    api.listRepos().then(({ repos: rs }) => setRepos(rs)).catch(() => {});
-    api.listWorkflows().then(({ workflows: wfs }) => setWorkflows(wfs)).catch(() => {});
+      .catch(() => {
+        /* roster load failure is non-fatal */
+      });
+    api
+      .listRepos()
+      .then(({ repos: rs }) => setRepos(rs))
+      .catch(() => {});
+    api
+      .listWorkflows()
+      .then(({ workflows: wfs }) => setWorkflows(wfs))
+      .catch(() => {});
   }, []);
 
+  // ── Elapsed-time ticker ────────────────────────────────────────────────────
   useEffect(() => {
     if (submitting) {
       setElapsedSecs(0);
       timerRef.current = setInterval(() => setElapsedSecs((s) => s + 1), 1000);
     } else {
-      if (timerRef.current !== null) { clearInterval(timerRef.current); timerRef.current = null; }
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
       setElapsedSecs(0);
     }
-    return () => { if (timerRef.current !== null) { clearInterval(timerRef.current); timerRef.current = null; } };
+    return () => {
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
   }, [submitting]);
 
-  // Auto-resize textarea
+  // ── Auto-resize textarea ───────────────────────────────────────────────────
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = 'auto';
-    const lineHeight = 20;
-    const maxHeight = lineHeight * 5;
+    const maxHeight = 20 * 5; // 5 lines × 20 px line-height
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
   }, [problem]);
 
-  // Signal detection
+  // ── Workflow signal detection ───────────────────────────────────────────────
   useEffect(() => {
     if (!problem.trim() || workflow) {
       setDetectedWorkflow(null);
@@ -94,6 +162,32 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
     setDetectedWorkflow(detectWorkflow(problem));
   }, [problem, workflow]);
 
+  // ── Close popover on outside click ─────────────────────────────────────────
+  useEffect(() => {
+    if (!popoverOpen) return;
+    function handleClick(e: MouseEvent): void {
+      if (
+        popoverAnchorRef.current &&
+        !popoverAnchorRef.current.contains(e.target as Node)
+      ) {
+        setPopoverOpen(false);
+      }
+    }
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, [popoverOpen]);
+
+  // ── Close popover on Escape ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!popoverOpen) return;
+    function handleKey(e: KeyboardEvent): void {
+      if (e.key === 'Escape') setPopoverOpen(false);
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [popoverOpen]);
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
   function toggleCli(key: string): void {
     setSelectedClis((prev) => {
       const next = new Set(prev);
@@ -103,26 +197,31 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
     });
   }
 
-  function workflowLabel(id: string): string {
-    const wf = workflows.find((w) => w.id === id);
-    if (wf) {
-      return `${id.charAt(0).toUpperCase() + id.slice(1)} (${wf.phases.length} phases: ${wf.phases.map((p) => p.id).join(' → ')})`;
-    }
-    return WORKFLOW_LABELS[id] ?? id;
+  function resetCliSelection(): void {
+    setSelectedClis(
+      new Set(roster.filter((s) => s.enabled_for_council).map((s) => s.key)),
+    );
   }
 
+  // ── Submit ─────────────────────────────────────────────────────────────────
   async function submit(): Promise<void> {
     if (!problem.trim() || selectedClis.size === 0 || submitting) return;
     setSubmitting(true);
     setError(null);
+
+    // TODO: ingest attachedFiles via api.ingestKnowledge(title, chunks) before launching
+    // (api.ingestKnowledge does not yet exist on the client surface)
+
     const body: LaunchRunBody = { problem: problem.trim() };
     const seats = roster.filter((s) => selectedClis.has(s.key));
     if (seats.length > 0) body.clisJson = JSON.stringify(seats);
     body.entityMode = entityMode;
     if (confirmMode === 'all') body.humanConfirm = 'all';
     else if (confirmMode === 'before') body.humanConfirm = `before:${beforeOrd}`;
-    if (repoRef) body.repoRef = repoRef;
+    const firstRepo = repoRefs[0];
+    if (firstRepo) body.repoRef = firstRepo;
     if (workflow) body.workflow = workflow;
+
     try {
       const { runId: newRunId } = await api.launchRun(body);
       setProblem('');
@@ -134,35 +233,39 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
     }
   }
 
-  // Run-selected mode: steer at gates, otherwise explain the state
+  // ── Steer submit ───────────────────────────────────────────────────────────
+  async function submitSteer(): Promise<void> {
+    const text = steerText.trim();
+    if (!text || !runId) return;
+    setSteering(true);
+    setSteerError(null);
+    try {
+      await api.confirmGate(runId, { approve: true, amend: text });
+      setSteerText('');
+      clearGate(runId);
+    } catch (err) {
+      setSteerError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSteering(false);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Run-selected mode: steer at gates, placeholder otherwise
+  // ══════════════════════════════════════════════════════════════════════════
+
   if (runId) {
     if (runStatus === 'awaiting_human') {
-      // Gate is open — operator can send a steer (approve-with-steer)
       const canSteer = steerText.trim().length > 0 && !steering;
-
-      async function submitSteer(): Promise<void> {
-        const text = steerText.trim();
-        if (!text || !runId) return;
-        setSteering(true);
-        setSteerError(null);
-        try {
-          await api.confirmGate(runId, { approve: true, amend: text });
-          setSteerText('');
-          clearGate(runId);
-        } catch (err) {
-          setSteerError(err instanceof Error ? err.message : String(err));
-        } finally {
-          setSteering(false);
-        }
-      }
-
       return (
         <div
           className="px-5 py-4 flex flex-col gap-2 shrink-0"
           style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
         >
           {steerError && (
-            <p className="text-[11px] font-mono" style={{ color: '#f85149' }}>{steerError}</p>
+            <p className="text-[11px] font-mono" style={{ color: '#f85149' }}>
+              {steerError}
+            </p>
           )}
           <div
             className="flex items-end gap-3 rounded-2xl px-4 py-3"
@@ -194,17 +297,26 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
               {steering ? '…' : 'Steer →'}
             </button>
           </div>
-          <p className="text-[10px] font-mono text-center" style={{ color: 'rgba(230,237,243,0.3)' }}>
+          <p
+            className="text-[10px] font-mono text-center"
+            style={{ color: 'rgba(230,237,243,0.3)' }}
+          >
             Approve + steer · Cmd+Enter · Use the gate panel above to approve/reject without steering
           </p>
         </div>
       );
     }
 
-    // Actively executing — no mid-run injection supported
+    // Actively executing — no mid-run injection
     return (
-      <div className="px-5 py-4 shrink-0" style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}>
-        <div className="rounded-2xl px-5 py-4" style={{ border: '1px solid rgba(230,237,243,0.1)', background: '#1b222e' }}>
+      <div
+        className="px-5 py-4 shrink-0"
+        style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
+      >
+        <div
+          className="rounded-2xl px-5 py-4"
+          style={{ border: '1px solid rgba(230,237,243,0.1)', background: '#1b222e' }}
+        >
           <p className="text-sm italic font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
             Run in progress — steer at the next gate.
           </p>
@@ -213,23 +325,96 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // Launch form (no run selected)
+  // ══════════════════════════════════════════════════════════════════════════
+
   const canSubmit = problem.trim().length > 0 && selectedClis.size > 0 && !submitting;
   const showDetection = detectedWorkflow !== null && !workflowDismissed && !workflow;
 
+  // Determine whether CLIs differ from the defaults that loaded from the roster
+  const defaultCliSet = new Set(
+    roster.filter((s) => s.enabled_for_council).map((s) => s.key),
+  );
+  const clisDirty =
+    selectedClis.size !== defaultCliSet.size ||
+    [...selectedClis].some((k) => !defaultCliSet.has(k));
+
+  // Collect active non-default option pills
+  const activePills: Array<{ label: string; onClear: () => void }> = [];
+
+  if (attachedFiles.length > 0) {
+    activePills.push({
+      label: `${attachedFiles.length} file${attachedFiles.length !== 1 ? 's' : ''} attached`,
+      onClear: () => setAttachedFiles([]),
+    });
+  }
+  if (confirmMode !== 'none') {
+    activePills.push({
+      label: confirmMode === 'all' ? 'Gate: every unit' : `Gate: before #${beforeOrd}`,
+      onClear: () => setConfirmMode('none'),
+    });
+  }
+  if (entityMode === 'isolated') {
+    activePills.push({
+      label: 'Mode: isolated',
+      onClear: () => setEntityMode('shared'),
+    });
+  }
+  if (workflow) {
+    activePills.push({
+      label: `Workflow: ${workflow}`,
+      onClear: () => {
+        setWorkflow('');
+        setWorkflowDismissed(true);
+      },
+    });
+  }
+  for (const rid of repoRefs) {
+    const found = repos.find((r) => r.id === rid);
+    activePills.push({
+      label: `Repo: ${found?.name ?? rid}`,
+      onClear: () => setRepoRefs((prev) => prev.filter((id) => id !== rid)),
+    });
+  }
+  if (clisDirty && roster.length > 0) {
+    activePills.push({
+      label: `CLIs: ${[...selectedClis].join(', ')}`,
+      onClear: resetCliSelection,
+    });
+  }
+
   return (
     <div
-      className="px-5 py-4 flex flex-col gap-3 shrink-0"
-      style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
+      className={`flex flex-col gap-3 ${embedded ? '' : 'px-5 py-4 shrink-0'}`}
+      style={
+        embedded
+          ? {}
+          : {
+              borderTop: '1px solid rgba(230,237,243,0.07)',
+              background: '#161c26',
+            }
+      }
     >
+      {/* Workflow detection hint */}
       {showDetection && (
         <div
           className="flex items-center gap-2 text-xs rounded-xl px-4 py-2 font-mono"
-          style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.1)', color: 'rgba(230,237,243,0.7)' }}
+          style={{
+            background: '#161c26',
+            border: '1px solid rgba(230,237,243,0.1)',
+            color: 'rgba(230,237,243,0.7)',
+          }}
         >
-          <span>Detected: <strong style={{ color: '#ffda19' }}>{detectedWorkflow}</strong> workflow</span>
+          <span>
+            Detected: <strong style={{ color: '#ffda19' }}>{detectedWorkflow}</strong> workflow
+          </span>
           <button
             type="button"
-            onClick={() => { setWorkflow(detectedWorkflow!); setWorkflowDismissed(true); }}
+            onClick={() => {
+              setWorkflow(detectedWorkflow!);
+              setWorkflowDismissed(true);
+            }}
             className="rounded-lg px-3 py-1 font-semibold text-xs"
             style={{ background: '#ffda19', color: '#0d1117' }}
           >
@@ -246,11 +431,75 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
         </div>
       )}
 
-      {/* Main input row */}
+      {/* ── Main input bubble ────────────────────────────────────────────── */}
       <div
-        className="flex items-end gap-3 rounded-2xl px-4 py-3 transition-all"
+        className="flex items-end gap-2 rounded-2xl px-4 py-3 transition-all"
         style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.14)' }}
       >
+        {/* + button with floating popover — both share the anchor ref */}
+        <div className="relative shrink-0" ref={popoverAnchorRef}>
+          {/* Floating popover, opens upward */}
+          {popoverOpen && (
+            <div
+              style={{
+                position: 'absolute',
+                bottom: 'calc(100% + 10px)',
+                left: 0,
+                zIndex: 50,
+              }}
+            >
+              <ContextPopover
+                roster={roster}
+                selectedClis={selectedClis}
+                onToggleCli={toggleCli}
+                confirmMode={confirmMode}
+                onConfirmModeChange={setConfirmMode}
+                beforeOrd={beforeOrd}
+                onBeforeOrdChange={setBeforeOrd}
+                entityMode={entityMode}
+                onEntityModeChange={setEntityMode}
+                workflows={workflows}
+                workflow={workflow}
+                onWorkflowChange={(wf) => {
+                  setWorkflow(wf);
+                  setWorkflowDismissed(true);
+                }}
+                repos={repos}
+                repoRefs={repoRefs}
+                onRepoRefsChange={setRepoRefs}
+                attachedFiles={attachedFiles}
+                onFilesChange={setAttachedFiles}
+              />
+            </div>
+          )}
+
+          {/* + trigger button */}
+          <button
+            type="button"
+            aria-label="Open launch options"
+            aria-expanded={popoverOpen}
+            aria-haspopup="dialog"
+            onClick={() => setPopoverOpen((v) => !v)}
+            className="w-7 h-7 rounded-full flex items-center justify-center text-base font-light transition-all"
+            style={
+              popoverOpen
+                ? {
+                    background: 'rgba(255,218,25,0.15)',
+                    color: '#ffda19',
+                    border: '1px solid rgba(255,218,25,0.3)',
+                  }
+                : {
+                    background: 'rgba(230,237,243,0.06)',
+                    color: 'rgba(230,237,243,0.4)',
+                    border: '1px solid rgba(230,237,243,0.08)',
+                  }
+            }
+          >
+            +
+          </button>
+        </div>
+
+        {/* Problem textarea */}
         <textarea
           ref={textareaRef}
           data-testid="launch-problem"
@@ -258,7 +507,10 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
           style={{ minHeight: '28px', color: '#e6edf3', fontFamily: 'inherit' }}
           placeholder="What do you need built?"
           value={problem}
-          onChange={(e) => { setProblem(e.target.value); setWorkflowDismissed(false); }}
+          onChange={(e) => {
+            setProblem(e.target.value);
+            setWorkflowDismissed(false);
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
@@ -268,6 +520,8 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
           disabled={submitting}
           rows={1}
         />
+
+        {/* Send button */}
         <button
           type="button"
           data-testid="launch-submit"
@@ -281,122 +535,27 @@ export function ChatInput({ runId, runStatus, onLaunched }: Props): React.ReactE
         </button>
       </div>
 
-      {/* Agent checkboxes + options row */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono" style={{ color: 'rgba(230,237,243,0.45)' }}>
-        {roster.map((seat) => (
-          <label key={seat.key} className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'rgba(230,237,243,0.55)' }}>
-            <input
-              type="checkbox"
-              className="rounded"
-              checked={selectedClis.has(seat.key)}
-              onChange={() => toggleCli(seat.key)}
-              data-testid={`launch-seat-${seat.key}`}
-            />
-            <span>{seat.key}</span>
-          </label>
-        ))}
-
-        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
-
-        <div className="flex items-center gap-1.5">
-          <span>Gate:</span>
-          <select
-            data-testid="launch-confirm"
-            className="rounded-lg px-2 py-1 text-xs font-mono"
-            style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
-            value={confirmMode}
-            onChange={(e) => setConfirmMode(e.target.value as ConfirmMode)}
-          >
-            <option value="none">None</option>
-            <option value="all">Every unit</option>
-            <option value="before">Before unit #</option>
-          </select>
-          {confirmMode === 'before' && (
-            <input
-              type="number"
-              min={1}
-              value={beforeOrd}
-              onChange={(e) => setBeforeOrd(Math.max(1, Number(e.target.value) || 1))}
-              className="w-14 rounded-lg px-2 py-1 text-xs font-mono"
-              style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
-            />
-          )}
-        </div>
-
-        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
-
-        <div className="flex items-center gap-1.5">
-          <span>Mode:</span>
-          {(['shared', 'isolated'] as EntityMode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              data-testid={`launch-entity-${m}`}
-              onClick={() => setEntityMode(m)}
-              className="rounded-lg px-2.5 py-1 capitalize text-xs font-medium font-mono transition-colors"
-              style={entityMode === m
-                ? { background: 'rgba(230,237,243,0.12)', color: '#e6edf3' }
-                : { color: 'rgba(230,237,243,0.4)' }}
-            >
-              {m}
-            </button>
+      {/* Active option pills */}
+      {activePills.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-1">
+          {activePills.map((pill, i) => (
+            <ActivePill key={i} label={pill.label} onClear={pill.onClear} />
           ))}
         </div>
-
-        <span style={{ color: 'rgba(230,237,243,0.15)' }}>|</span>
-
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="transition-colors font-mono"
-          style={{ color: 'rgba(230,237,243,0.4)' }}
-        >
-          {showAdvanced ? '▾ Advanced' : '▸ Advanced'}
-        </button>
-      </div>
-
-      {showAdvanced && (
-        <div
-          className="flex flex-wrap gap-4 rounded-xl px-4 py-3 text-xs font-mono"
-          style={{ background: '#161c26', border: '1px solid rgba(230,237,243,0.07)' }}
-        >
-          <div className="flex items-center gap-2">
-            <span style={{ color: 'rgba(230,237,243,0.5)' }}>Workflow:</span>
-            <select
-              data-testid="launch-workflow"
-              className="rounded-lg px-2 py-1 text-xs font-mono"
-              style={{ background: '#0f1419', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
-              value={workflow}
-              onChange={(e) => { setWorkflow(e.target.value); setWorkflowDismissed(true); }}
-            >
-              <option value="">(free-text)</option>
-              {(workflows.length > 0 ? workflows.map((w) => w.id) : Object.keys(WORKFLOW_LABELS)).map((id) => (
-                <option key={id} value={id}>{workflowLabel(id)}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <span style={{ color: 'rgba(230,237,243,0.5)' }}>Repo:</span>
-            <select
-              data-testid="launch-repo"
-              className="rounded-lg px-2 py-1 text-xs font-mono"
-              style={{ background: '#0f1419', border: '1px solid rgba(230,237,243,0.14)', color: '#e6edf3' }}
-              value={repoRef}
-              onChange={(e) => setRepoRef(e.target.value)}
-            >
-              <option value="">(none)</option>
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>{r.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
       )}
 
+      {/* Error message */}
       {error && (
-        <p className="text-xs px-1 font-mono" style={{ color: '#f85149' }} data-testid="launch-error">{error}</p>
+        <p
+          className="text-xs px-1 font-mono"
+          style={{ color: '#f85149' }}
+          data-testid="launch-error"
+        >
+          {error}
+        </p>
       )}
 
+      {/* Planning latency hint */}
       {submitting && elapsedSecs >= 5 && (
         <p className="text-xs text-center font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
           Planning in progress — council routing + plan decomposition takes 30–60 s. Don't re-submit.

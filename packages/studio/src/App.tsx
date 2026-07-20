@@ -1,14 +1,19 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { ChatsPage } from './components/ChatsPage.js';
+import { Dashboard } from './components/Dashboard.js';
 import { CoverageView } from './components/CoverageView.js';
 import { DomainModelBrowser } from './components/DomainModelBrowser.js';
 import { GateNotifications } from './components/GateNotifications.js';
 import { LeftSidebar } from './components/LeftSidebar.js';
 import { PolicyManager } from './components/PolicyManager.js';
 import { RepositoriesPanel } from './components/RepositoriesPanel.js';
+import { RepoDetailPage } from './components/RepoDetailPage.js';
+import { RepoGraphModal } from './components/RepoGraphModal.js';
 import { RightPanel } from './components/RightPanel.js';
 import { RuleManager } from './components/RuleManager.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { WorkflowViewer } from './components/WorkflowViewer.js';
+import { WorkPage } from './components/WorkPage.js';
 import { SystemSettings } from './components/SystemSettings.js';
 import { useEventStream } from './hooks/useEventStream.js';
 import { useRoute } from './hooks/useRoute.js';
@@ -16,7 +21,7 @@ import { useRuns } from './hooks/useRuns.js';
 import { useGateStore } from './store/gates.js';
 import { useRuntimeStore } from './store/runtime.js';
 import { useRunEventStore } from './store/events.js';
-import type { CoreEvent } from './api/types.js';
+import type { CoreEvent, RepoEntry } from './api/types.js';
 import { api } from './api/client.js';
 
 /** Frames that change run-list / unit state → trigger a `GET /runs` reconcile. */
@@ -66,7 +71,7 @@ function useKillShortcut(
 }
 
 export function App(): React.ReactElement {
-  const { panel, runId, navigate } = useRoute();
+  const { panel, runId, repoId, showLaunch, showRegisterRepo, chatMode, navigate } = useRoute();
   const { runs, refresh } = useRuns();
   const ingestGate = useGateStore((s) => s.ingest);
   const ingestRuntime = useRuntimeStore((s) => s.ingest);
@@ -115,6 +120,17 @@ export function App(): React.ReactElement {
 
   const selected = runs.find((v) => v.session.id === runId) ?? null;
 
+  // ── Repo graph modal — opened from RepoDetailPage via onOpenGraph ───────────
+  const [graphModalRepo, setGraphModalRepo] = useState<RepoEntry | null>(null);
+
+  const openGraphModal = useCallback(() => {
+    if (!repoId) return;
+    void api.listRepos().then(({ repos }) => {
+      const r = repos.find((x) => x.id === repoId);
+      if (r) setGraphModalRepo(r);
+    });
+  }, [repoId]);
+
   // Center panel content based on route
   function renderCenter(): React.ReactElement {
     if (panel === 'coverage') {
@@ -155,7 +171,33 @@ export function App(): React.ReactElement {
     if (panel === 'repos') {
       return (
         <div className="flex-1 overflow-hidden">
-          <RepositoriesPanel onSelectRun={selectRun} />
+          <RepositoriesPanel onSelectRun={selectRun} autoShowRegister={showRegisterRepo} navigate={navigate} />
+        </div>
+      );
+    }
+    if (panel === 'repo-detail' && repoId) {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <RepoDetailPage
+            repoId={repoId}
+            onSelectRun={selectRun}
+            navigate={navigate}
+            onOpenGraph={openGraphModal}
+          />
+        </div>
+      );
+    }
+    if (panel === 'chats') {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <ChatsPage onSelect={selectRun} navigate={navigate} />
+        </div>
+      );
+    }
+    if (panel === 'work') {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <WorkPage runs={runs} selectedRunId={runId} onSelect={selectRun} navigate={navigate} />
         </div>
       );
     }
@@ -166,11 +208,20 @@ export function App(): React.ReactElement {
         </div>
       );
     }
-    // Default: runs / chat panel
+    // Dashboard: no run selected and not launching — show stats home
+    if (panel === 'runs' && !runId && !selected && !showLaunch) {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <Dashboard runs={runs} navigate={navigate} />
+        </div>
+      );
+    }
+    // Run selected or launch form
     return (
       <div className="flex-1 overflow-hidden">
         <ChatPanel
           view={selected}
+          chatMode={chatMode}
           onLaunched={onLaunched}
           onNavigateBack={onNavigateBack}
           onRefresh={refresh}
@@ -200,6 +251,15 @@ export function App(): React.ReactElement {
 
       {/* Gate toasts — always mounted, renders above everything */}
       <GateNotifications onSelect={selectRun} />
+
+      {/* Repo graph modal — opened from RepoDetailPage */}
+      {graphModalRepo !== null && (
+        <RepoGraphModal
+          repo={graphModalRepo}
+          onClose={() => setGraphModalRepo(null)}
+          onSelectRun={selectRun}
+        />
+      )}
     </div>
   );
 }
