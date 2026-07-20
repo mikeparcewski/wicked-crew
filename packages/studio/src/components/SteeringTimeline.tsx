@@ -26,7 +26,7 @@ export function SteeringTimeline({ runId }: Props): React.ReactElement {
   return (
     <div className="flex flex-col gap-2">
       <p data-testid="steering-scope-note" className="text-[10px] font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
-        Client-recorded, this session only — cleared on reload.
+        Client-recorded, this session only — daemon keeps no per-action history, cleared on reload.
       </p>
       <ol data-testid="steering-timeline" className="flex flex-col gap-2">
         {entries.map((e) => {
