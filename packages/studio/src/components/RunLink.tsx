@@ -40,7 +40,7 @@ export function RunLink({ view, selectedRunId, onSelect }: Props): React.ReactEl
       data-run-id={session.id}
       data-status={session.status}
       onClick={() => onSelect(session.id)}
-      className={`w-full text-left px-3 py-2 rounded-md transition-colors ${
+      className={`w-full text-left px-3 py-2 rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500 ${
         isActive ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'
       }`}
     >

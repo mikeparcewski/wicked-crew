@@ -12,13 +12,27 @@ interface Route {
   showLaunch: boolean;
 }
 
+/** Decode a URI component without throwing on malformed sequences. */
+function safeDecodeURIComponent(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s; // malformed percent-sequence — use the raw string
+  }
+}
+
 function parse(pathname: string): Route {
   const [, first = '', second = ''] = pathname.split('/');
   if ((PANELS as string[]).includes(first) && first !== 'runs') {
     return { panel: first as Panel, runId: null, showLaunch: false };
   }
+  // /repo-detail (no id) is not a valid panel in the current routing; fall
+  // through to the runs default rather than silently producing a broken state.
+  if (first === 'repo-detail' && !second) {
+    return { panel: 'runs', runId: null, showLaunch: false };
+  }
   if (second === 'new') return { panel: 'runs', runId: null, showLaunch: true };
-  if (second) return { panel: 'runs', runId: decodeURIComponent(second), showLaunch: false };
+  if (second) return { panel: 'runs', runId: safeDecodeURIComponent(second), showLaunch: false };
   return { panel: 'runs', runId: null, showLaunch: false };
 }
 
