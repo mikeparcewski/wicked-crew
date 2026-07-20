@@ -286,7 +286,12 @@ export class CoreAdapter {
     // Both user-supplied and default-derived paths must stay inside the repos root.
     const resolvedRoot = resolve(reposRoot);
     const cloneDir = resolve(rawDir);
-    if (cloneDir !== resolvedRoot && !cloneDir.startsWith(resolvedRoot + sep)) {
+    // Windows paths are case-insensitive (drive letter C: vs c:) — use lower-case
+    // comparison there; keep exact comparison on case-sensitive filesystems (Linux/macOS).
+    const isWindows = process.platform === 'win32';
+    const compareRoot = isWindows ? resolvedRoot.toLowerCase() : resolvedRoot;
+    const compareClone = isWindows ? cloneDir.toLowerCase() : cloneDir;
+    if (compareClone !== compareRoot && !compareClone.startsWith(compareRoot + sep)) {
       throw new Error(
         `checkoutPath must be within the repos directory (~/.wicked/repos). ` +
         `Resolved "${cloneDir}" escapes "${resolvedRoot}".`,
