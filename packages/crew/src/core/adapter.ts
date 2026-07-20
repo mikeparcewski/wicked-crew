@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, writeFile, chmod, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
@@ -279,13 +279,27 @@ export class CoreAdapter {
    */
   async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
     const reposRoot = wickedDir('repos');
-    const cloneDir = checkoutPath ?? join(reposRoot, name);
-    if (!checkoutPath) {
-      // Default path: must stay inside repos root (name validated by schema, but
-      // apply defense-in-depth for direct calls).
-      if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
-        throw new Error(`Unsafe repo name: would escape the repos directory`);
-      }
+    const rawDir = checkoutPath ?? join(reposRoot, name);
+
+    // Resolve both paths to remove any `..` segments before comparing.
+    // This prevents path-traversal attacks via checkoutPath (e.g. "../../etc").
+    // Both user-supplied and default-derived paths must stay inside the repos root.
+    const resolvedRoot = resolve(reposRoot);
+    const cloneDir = resolve(rawDir);
+    if (cloneDir !== resolvedRoot && !cloneDir.startsWith(resolvedRoot + sep)) {
+      throw new Error(
+        `checkoutPath must be within the repos directory (~/.wicked/repos). ` +
+        `Resolved "${cloneDir}" escapes "${resolvedRoot}".`,
+      );
+    }
+
+    // Track whether we create this directory so cleanup only removes it when
+    // this operation created it — not a pre-existing directory with unrelated data.
+    let dirCreatedByUs = false;
+    try {
+      await access(cloneDir);
+    } catch {
+      dirCreatedByUs = true;
     }
     await mkdir(cloneDir, { recursive: true });
 
@@ -301,8 +315,12 @@ export class CoreAdapter {
           timeout: 5 * 60 * 1000,
         });
       } catch (err) {
-        // Clean up the partial clone so a retry starts fresh.
-        await rm(cloneDir, { recursive: true, force: true });
+        // Clean up the partial clone so a retry starts fresh, but only remove
+        // the directory if this operation created it — never delete a pre-existing
+        // directory that may contain unrelated user data.
+        if (dirCreatedByUs) {
+          await rm(cloneDir, { recursive: true, force: true });
+        }
         throw err;
       }
     }
