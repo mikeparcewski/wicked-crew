@@ -330,7 +330,7 @@ export interface WorkerSessionClosedEvent {
   type: 'workerSessionClosed';
   session: string;
   terminalId: string;
-  reason: string;
+  reason: 'run_complete' | 'error';
 }
 
 /**

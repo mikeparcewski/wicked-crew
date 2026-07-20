@@ -140,7 +140,7 @@ export interface RunModel {
   /** P1: ACP fallback events for this session, in arrival order. */
   acpFallbacks: AcpFallbackRecord[];
   /** P2: most-recent PTY session close (from `workerSessionClosed`); null until first event. */
-  lastWorkerClose: { terminalId: string; reason: string } | null;
+  lastWorkerClose: { terminalId: string; reason: 'run_complete' | 'error' } | null;
 }
 
 function blankUnit(ord: number): UnitModel {
@@ -234,7 +234,7 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
   let activeTerminalId: string | null = null;
   const acpFallbacks: AcpFallbackRecord[] = [];
   // P2 state
-  let lastWorkerClose: { terminalId: string; reason: string } | null = null;
+  let lastWorkerClose: { terminalId: string; reason: 'run_complete' | 'error' } | null = null;
   // Dedup trackers for replay-safe accumulators (matches gateEvaluated pattern).
   const redrivedAttempts = new Map<number, Set<number>>(); // ord → Set<attempt>
   // P2 dedup: one reuse count per (ord, terminalId) pair; one injection record per recipient ord.
@@ -445,7 +445,11 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
         break;
       case 'workerSessionClosed':
         // Last-write wins: a run's session can close multiple times (error → reopen → run_complete).
-        if (typeof ev.terminalId === 'string' && typeof ev.reason === 'string') {
+        // Validate reason against the known literals for runtime robustness and type narrowing.
+        if (
+          typeof ev.terminalId === 'string' &&
+          (ev.reason === 'run_complete' || ev.reason === 'error')
+        ) {
           lastWorkerClose = { terminalId: ev.terminalId, reason: ev.reason };
         }
         break;
