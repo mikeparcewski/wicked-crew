@@ -10,11 +10,21 @@ interface Props {
 export function Modal({ title, onClose, children }: Props): React.ReactElement {
   const dialogRef = useRef<HTMLDivElement>(null);
 
+  // Focus the dialog on mount and restore the previous element on unmount.
+  // Empty deps so `prev` is captured exactly once at mount time, regardless
+  // of whether `onClose` is re-created on re-renders (avoids focus restoration
+  // bug when parent does not memoize the callback).
   useEffect(() => {
-    // Save and restore focus around the modal lifetime.
     const prev = document.activeElement as HTMLElement | null;
     dialogRef.current?.focus();
+    return () => {
+      prev?.focus();
+    };
+  }, []);
 
+  // Keyboard handler: Escape closes, Tab/Shift+Tab stays within the modal.
+  // Separate effect from focus restoration so the cleanup order is predictable.
+  useEffect(() => {
     function handleKeyDown(e: KeyboardEvent): void {
       if (e.key === 'Escape') {
         onClose();
@@ -24,17 +34,20 @@ export function Modal({ title, onClose, children }: Props): React.ReactElement {
 
       const el = dialogRef.current;
       if (!el) return;
+      // Include only visible, non-disabled focusable descendants.
       const focusable = Array.from(
         el.querySelectorAll<HTMLElement>(
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         ),
-      ).filter((n) => !n.hasAttribute('disabled'));
+      ).filter((n) => !n.hasAttribute('disabled') && (n.offsetWidth > 0 || n.offsetHeight > 0));
       if (focusable.length === 0) return;
 
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (e.shiftKey) {
-        if (document.activeElement === first) {
+        // Also handle Shift+Tab when focus is on the dialog container itself
+        // (initial state immediately after mount before the user Tabs forward).
+        if (document.activeElement === first || document.activeElement === el) {
           e.preventDefault();
           last?.focus();
         }
@@ -47,10 +60,7 @@ export function Modal({ title, onClose, children }: Props): React.ReactElement {
     }
 
     document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      prev?.focus();
-    };
+    return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
   return (
