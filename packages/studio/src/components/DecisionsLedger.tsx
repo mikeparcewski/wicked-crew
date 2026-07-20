@@ -55,7 +55,43 @@ export function DecisionsLedger({ model }: Props): React.ReactElement {
           {decidedUnits.map((u) => (
             <li key={u.ord} data-testid="ledger-row" data-ord={u.ord} style={rowStyle}>
               <div className="flex items-center justify-between mb-1">
-                <span className="font-semibold text-[11px] font-mono" style={{ color: '#e6edf3' }}>unit #{u.ord}</span>
+                <div className="flex items-center gap-1">
+                  <span className="font-semibold text-[11px] font-mono" style={{ color: '#e6edf3' }}>unit #{u.ord}</span>
+                  {(u.role === 'creator' || u.role === 'evaluator') && (
+                    <span
+                      data-testid="role-badge"
+                      className="text-[10px] font-mono px-1 rounded"
+                      style={{
+                        background: u.role === 'evaluator' ? 'rgba(56,139,253,0.15)' : 'rgba(63,185,80,0.12)',
+                        color: u.role === 'evaluator' ? '#58a6ff' : '#3fb950',
+                      }}
+                    >
+                      {u.role === 'creator' ? 'Creator' : 'Evaluator'}
+                    </span>
+                  )}
+                  {u.gate != null && u.gate !== 'auto' && (
+                    <span
+                      data-testid="gate-badge"
+                      className="text-[10px] font-mono px-1 rounded"
+                      style={{ background: 'rgba(255,218,25,0.1)', color: '#ffda19' }}
+                    >
+                      {typeof u.gate === 'string' && u.gate === 'human_confirm'
+                        ? 'HUMAN-CONFIRM'
+                        : typeof u.gate === 'object' && 'human_confirm' in u.gate
+                        ? 'HUMAN-CONFIRM'
+                        : 'CONDITIONAL'}
+                    </span>
+                  )}
+                  {u.attempts.length > 1 && (
+                    <span
+                      data-testid="rework-badge"
+                      className="text-[10px] font-mono px-1 rounded"
+                      style={{ background: 'rgba(248,81,73,0.12)', color: '#f85149' }}
+                    >
+                      ×{u.attempts.length}
+                    </span>
+                  )}
+                </div>
                 <span className="text-[10px] font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
                   {u.resolved ? u.stage : 'resolving…'}
                 </span>
