@@ -20,8 +20,15 @@ export function SettingsMenu({ onNavigate, onClose }: Props): React.ReactElement
         onClose();
       }
     }
+    function handleKeyDown(e: KeyboardEvent): void {
+      if (e.key === 'Escape') onClose();
+    }
     document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [onClose]);
 
   return (
@@ -36,7 +43,7 @@ export function SettingsMenu({ onNavigate, onClose }: Props): React.ReactElement
           type="button"
           role="menuitem"
           onClick={() => { onNavigate(item.path); onClose(); }}
-          className="w-full text-left px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+          className="w-full text-left px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-white focus-visible:bg-zinc-700 focus-visible:text-white focus-visible:outline-none transition-colors"
         >
           {item.label}
         </button>
