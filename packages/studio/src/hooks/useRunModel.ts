@@ -222,6 +222,8 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
       : null;
   let activeTerminalId: string | null = null;
   const acpFallbacks: AcpFallbackRecord[] = [];
+  // Dedup trackers for replay-safe accumulators (matches gateEvaluated pattern).
+  const redrivedAttempts = new Map<number, Set<number>>(); // ord → Set<attempt>
 
   const ensureUnit = (ord: number): UnitModel => {
     let u = units.get(ord);
@@ -372,12 +374,23 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
           typeof ev.failureKind === 'string'
         ) {
           const u = ensureUnit(ord);
-          u.stepErrors.push({ attempt: ev.attempt, detail: ev.detail, failureKind: ev.failureKind });
+          // Dedup: one failure record per attempt (replay-safe).
+          if (!u.stepErrors.some((e) => e.attempt === ev.attempt)) {
+            u.stepErrors.push({ attempt: ev.attempt, detail: ev.detail, failureKind: ev.failureKind });
+          }
         }
         break;
       case 'crashRecoveryRedrive':
-        if (ord !== undefined) {
-          ensureUnit(ord).crashRedrives += 1;
+        if (ord !== undefined && typeof ev.attempt === 'number') {
+          let seen = redrivedAttempts.get(ord);
+          if (!seen) {
+            seen = new Set();
+            redrivedAttempts.set(ord, seen);
+          }
+          if (!seen.has(ev.attempt)) {
+            seen.add(ev.attempt);
+            ensureUnit(ord).crashRedrives += 1;
+          }
         }
         break;
       case 'workerSessionStarted':
@@ -394,7 +407,13 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
           typeof ev.reason === 'string' &&
           typeof ev.fallbackKind === 'string'
         ) {
-          acpFallbacks.push({ cliKey: ev.cliKey, reason: ev.reason, fallbackKind: ev.fallbackKind });
+          // Dedup: replay-safe (same cliKey+reason+fallbackKind is one event).
+          const isDupFallback = acpFallbacks.some(
+            (f) => f.cliKey === ev.cliKey && f.reason === ev.reason && f.fallbackKind === ev.fallbackKind,
+          );
+          if (!isDupFallback) {
+            acpFallbacks.push({ cliKey: ev.cliKey, reason: ev.reason, fallbackKind: ev.fallbackKind });
+          }
         }
         break;
       default:
