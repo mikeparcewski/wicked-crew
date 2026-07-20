@@ -265,7 +265,7 @@ export interface UnitPlannedEvent {
   description: string;
   stage: StageKind;
   role: PhaseRole;
-  gate: string; // short discriminant: "auto" | "human_confirm" | "human_confirm_if"
+  gate: 'auto' | 'human_confirm' | 'human_confirm_if';
   skill_ref: string | null;
   has_validator_pin: boolean;
   executor_type: 'agent' | 'tool';
