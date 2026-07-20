@@ -300,11 +300,15 @@ export class CoreAdapter {
 
     // Track whether we create this directory so cleanup only removes it when
     // this operation created it — not a pre-existing directory with unrelated data.
+    // We probe with access() and set dirCreatedByUs only on ENOENT; other errors
+    // (e.g. EACCES) mean the directory exists but is unreadable, so we leave it alone.
     let dirCreatedByUs = false;
     try {
       await access(cloneDir);
-    } catch {
-      dirCreatedByUs = true;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        dirCreatedByUs = true;
+      }
     }
     await mkdir(cloneDir, { recursive: true });
 
