@@ -330,7 +330,6 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   placeholder="Search…"
-                  // eslint-disable-next-line jsx-a11y/no-autofocus
                   autoFocus
                   className="w-full bg-transparent text-xs font-mono outline-none border-b"
                   style={{ color: S.ink, borderColor: S.faint, caretColor: S.accent }}

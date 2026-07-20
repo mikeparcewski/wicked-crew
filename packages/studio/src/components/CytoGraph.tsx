@@ -197,8 +197,6 @@ export function CytoGraph({ nodes, edges, externalSelectedId, onNodeClick, onNod
       cy.destroy();
       cyRef.current = null;
     };
-  // Rebuild only when node/edge data changes (not on callback identity changes).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges]);
 
   // Sync external selection without rebuilding.
