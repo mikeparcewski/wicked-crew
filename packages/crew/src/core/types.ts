@@ -300,3 +300,14 @@ export interface WorkflowDef {
   id: string;
   phases: PhaseDef[];
 }
+
+// ── System settings ────────────────────────────────────────────────────────────
+
+export interface SystemSettings {
+  /** Max nodes returned by wicked-estate graph-view (default 150). */
+  graphNodeLimit: number;
+}
+
+export const DEFAULT_SETTINGS: SystemSettings = {
+  graphNodeLimit: 150,
+};

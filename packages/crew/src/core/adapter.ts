@@ -1,7 +1,8 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
-import { mkdir, access, writeFile, chmod, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { join, dirname, resolve, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
@@ -16,7 +17,9 @@ import type {
   GovernanceClaim,
   CoverageReport,
   WorkflowDef,
+  SystemSettings,
 } from './types.js';
+import { DEFAULT_SETTINGS } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +42,10 @@ function workflowOverlayDir(): string {
   if (process.env.WICKED_WORKFLOWS_DIR) return process.env.WICKED_WORKFLOWS_DIR;
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.config', 'wicked-core', 'workflows');
+}
+
+function settingsFilePath(): string {
+  return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -279,12 +286,21 @@ export class CoreAdapter {
    */
   async cloneAndRegisterRepo(name: string, gitUrl: string, checkoutPath?: string): Promise<RepoOnboardRef> {
     const reposRoot = wickedDir('repos');
-    const cloneDir = checkoutPath ?? join(reposRoot, name);
-    if (!checkoutPath) {
-      // Default path: must stay inside repos root (name validated by schema, but
-      // apply defense-in-depth for direct calls).
+    let cloneDir: string;
+    if (checkoutPath) {
+      // Expand leading ~/ so callers can use home-relative paths.
+      const expanded = checkoutPath.startsWith('~/')
+        ? join(homedir(), checkoutPath.slice(2))
+        : checkoutPath;
+      if (!isAbsolute(expanded)) {
+        throw new Error('checkoutPath must be an absolute path (or start with ~/)');
+      }
+      cloneDir = resolve(expanded);
+    } else {
+      cloneDir = join(reposRoot, name);
+      // Defense-in-depth: name validated by schema, but guard direct calls too.
       if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
-        throw new Error(`Unsafe repo name: would escape the repos directory`);
+        throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
     await mkdir(cloneDir, { recursive: true });
@@ -490,6 +506,32 @@ export class CoreAdapter {
   /** Close a terminal (kill child, join reader) → `"ok"` after a `terminalExited` event. */
   closeTerminal(id: string): Promise<string> {
     return this.core.closeTerminal(id);
+  }
+
+  // ── System settings ───────────────────────────────────────────────────────
+
+  async getSettings(): Promise<SystemSettings> {
+    try {
+      const raw = await readFile(settingsFilePath(), 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SystemSettings>;
+      // Validate numeric fields; drop anything out-of-range rather than propagate bad values.
+      if ('graphNodeLimit' in parsed) {
+        const v = parsed.graphNodeLimit;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
+      }
+      return { ...DEFAULT_SETTINGS, ...parsed };
+    } catch {
+      return { ...DEFAULT_SETTINGS };
+    }
+  }
+
+  async updateSettings(patch: Partial<SystemSettings>): Promise<SystemSettings> {
+    const current = await this.getSettings();
+    const next = { ...current, ...patch };
+    const path = settingsFilePath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(next, null, 2), 'utf8');
+    return next;
   }
 
   /**
