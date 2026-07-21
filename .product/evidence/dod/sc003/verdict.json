@@ -1,0 +1,34 @@
+{
+  "scenario": "gate-evaluation-determinism",
+  "maps_to": ["SC-003"],
+  "date": "2026-07-21",
+  "executor": "claude-code",
+  "test_file": "packages/crew/tests/integration/gate-determinism.test.ts",
+  "runs": 100,
+  "assertions": {
+    "A1_all_completed": {
+      "pass": true,
+      "description": "all 100 auto-gated runs reached terminal status 'completed'",
+      "completed": 100,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "A2_identical_outcomes": {
+      "pass": true,
+      "description": "all 100 runs produced the same terminal status (determinism at session level)",
+      "unique_outcomes": 1,
+      "outcome": "completed"
+    },
+    "A3_identical_unit_signatures": {
+      "pass": true,
+      "description": "all 100 runs produced the same unit-level signature (ord+stage+description+status+denial_reason) — determinism at the unit level",
+      "unique_signatures": 1
+    },
+    "A4_no_unit_denied": {
+      "pass": true,
+      "description": "all units across all runs have denial_reason=null — gate allowed every unit"
+    }
+  },
+  "verdict": "PASS",
+  "note": "Test uses CoreAdapter(stub:true) — deterministic offline stub engine, no real LLM or network. Polls GET /api/v1/runs/:id (not the full list) for per-run status. Identical inputs → identical terminal status, identical unit signatures, no unit denials across 100 consecutive runs through the daemon HTTP/REST surface."
+}
