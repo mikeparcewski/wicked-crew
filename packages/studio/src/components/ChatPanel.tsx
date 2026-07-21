@@ -35,9 +35,9 @@ function CliAvatar({ cli }: { cli: string }): React.ReactElement {
   const { bg, fg } = CLI_COLORS[cli.toLowerCase()] ?? CLI_FALLBACK;
   return (
     <span
+      aria-hidden="true"
       className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold font-mono select-none"
       style={{ background: bg, color: fg }}
-      title={cli}
     >
       {cliInitials(cli)}
     </span>
@@ -284,15 +284,7 @@ function RunChat({
                     {unit.stage}
                   </span>
                   {unit.has_validator_pin && (
-                    <span title="Governance floor armed" style={{ color: '#ffda19', fontSize: '12px' }}>🔒</span>
-                  )}
-                  {unit.routing?.method === 'degraded' && (
-                    <span
-                      className="rounded-full px-2 py-0.5 text-[11px] font-mono"
-                      style={{ background: 'rgba(248,81,73,0.12)', color: '#f85149', border: '1px solid rgba(248,81,73,0.2)' }}
-                    >
-                      degraded
-                    </span>
+                    <span role="img" aria-label="Governance floor armed" style={{ color: '#ffda19', fontSize: '12px' }}>🔒</span>
                   )}
                   <span className="text-xs font-mono truncate max-w-xs" style={{ color: 'rgba(230,237,243,0.35)' }} title={unit.description}>
                     {unit.description}
