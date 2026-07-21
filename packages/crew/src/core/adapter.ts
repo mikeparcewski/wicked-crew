@@ -364,6 +364,10 @@ export class CoreAdapter {
       } catch (err) {
         if (weMadeDir) {
           await rm(cloneDir, { recursive: true, force: true });
+        } else {
+          // Pre-existing dir: remove a partially-written .git so the next call
+          // doesn't incorrectly skip cloning against a broken working tree.
+          await rm(join(cloneDir, '.git'), { recursive: true, force: true });
         }
         throw err;
       }
