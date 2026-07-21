@@ -340,14 +340,18 @@ export class CoreAdapter {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
-    // Track whether we created the directory so cleanup after a failed clone never
-    // removes a pre-existing user directory (crew#63 — clone cleanup risk).
+    // Atomic exclusive mkdir: succeeds only if we created the directory, throws
+    // EEXIST if it already existed. This is race-safe — recursive mkdir would
+    // silently succeed for existing dirs, making weMadeDir unreliable.
     let weMadeDir = false;
     try {
-      await access(cloneDir);
-    } catch {
-      await mkdir(cloneDir, { recursive: true });
+      await mkdir(cloneDir);
       weMadeDir = true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+      // Directory already existed — verify it is actually a directory (not a file).
+      await access(join(cloneDir, '.'));
     }
 
     let needsClone = true;
@@ -362,12 +366,14 @@ export class CoreAdapter {
           timeout: 5 * 60 * 1000,
         });
       } catch (err) {
+        // Cleanup is best-effort: swallow any cleanup error so the original
+        // clone failure is what the caller sees.
         if (weMadeDir) {
-          await rm(cloneDir, { recursive: true, force: true });
+          await rm(cloneDir, { recursive: true, force: true }).catch(() => {});
         } else {
           // Pre-existing dir: remove a partially-written .git so the next call
           // doesn't incorrectly skip cloning against a broken working tree.
-          await rm(join(cloneDir, '.git'), { recursive: true, force: true });
+          await rm(join(cloneDir, '.git'), { recursive: true, force: true }).catch(() => {});
         }
         throw err;
       }
