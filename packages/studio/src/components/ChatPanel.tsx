@@ -180,6 +180,8 @@ function ModePill({
   const modes: RunMode[] = ['ask', 'balanced', 'autonomous'];
   return (
     <div
+      role="radiogroup"
+      aria-label="Run mode"
       className="flex items-center rounded-lg overflow-hidden shrink-0"
       style={{ background: 'rgba(230,237,243,0.06)', border: '1px solid rgba(230,237,243,0.1)' }}
     >
@@ -187,7 +189,8 @@ function ModePill({
         <button
           key={m}
           type="button"
-          aria-pressed={mode === m}
+          role="radio"
+          aria-checked={mode === m}
           onClick={() => onChange(m)}
           className="px-3 py-1 text-[11px] font-mono font-medium transition-colors"
           style={
