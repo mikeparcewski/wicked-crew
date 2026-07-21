@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { join, dirname, resolve, isAbsolute } from 'node:path';
+import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -333,7 +333,10 @@ export class CoreAdapter {
     } else {
       cloneDir = join(reposRoot, name);
       // Defense-in-depth: name validated by schema, but guard direct calls too.
-      if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+      // Use relative() instead of startsWith(root+'/') so this works cross-platform
+      // (Windows uses backslash separators, making a literal '/' suffix check unreliable).
+      const rel = relative(reposRoot, cloneDir);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
@@ -547,7 +550,13 @@ export class CoreAdapter {
   async getSettings(): Promise<SystemSettings> {
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
-      return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<SystemSettings>) };
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const merged: SystemSettings = { ...DEFAULT_SETTINGS };
+      // Validate each field to guard against manually-edited or corrupted settings files.
+      if (typeof parsed.graphNodeLimit === 'number' && Number.isFinite(parsed.graphNodeLimit)) {
+        merged.graphNodeLimit = Math.max(20, Math.min(2000, parsed.graphNodeLimit));
+      }
+      return merged;
     } catch {
       return { ...DEFAULT_SETTINGS };
     }
