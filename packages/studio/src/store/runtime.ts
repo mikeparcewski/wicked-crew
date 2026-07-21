@@ -111,7 +111,6 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
         return {
           seq,
           executorTypes: { ...s.executorTypes, [typeKey]: event.executor_type as 'agent' | 'tool' },
-          // still fall through to log the event below
           ...((): Pick<RuntimeStore, 'logs'> => {
             const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
             entry.ord = event.ord as number;

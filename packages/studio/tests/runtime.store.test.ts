@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { useRuntimeStore, outputKey } from '../src/store/runtime.js';
 import type { CoreEvent } from '../src/api/types.js';
 
-const reset = (): void => useRuntimeStore.setState({ outputs: {}, logs: {}, seq: 0 });
+const reset = (): void => useRuntimeStore.setState({ outputs: {}, logs: {}, executorTypes: {}, seq: 0 });
 const delta = (session: string, ord: number, chunk: string): CoreEvent =>
   ({ type: 'cliOutputDelta', session, ord, chunk } as CoreEvent);
 
