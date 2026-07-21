@@ -71,6 +71,7 @@ export function SystemSettings(): React.ReactElement {
   }
 
   function saveDefaultClis(): void {
+    setError(null);
     try {
       localStorage.setItem(CLI_DEFAULTS_KEY, JSON.stringify([...defaultClis]));
     } catch (e: unknown) {
