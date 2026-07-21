@@ -1,7 +1,7 @@
 ---
 name: REQ-005-dod-criteria
 title: wicked-crew — Definition of Done
-status: partially-verified
+status: verified
 version: 0.3
 date: 2026-07-21
 author: michael.parcewski@accenture.com
