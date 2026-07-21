@@ -279,7 +279,7 @@ function RunChat({
   const pulse = ['executing', 'distributing', 'planning', 'awaiting_human'].includes(session.status);
 
   function stopRun(): void {
-    void api.cancelRun(session.id).catch(() => {});
+    void onKill?.(session.id);
   }
 
   return (
@@ -484,7 +484,7 @@ function RunChat({
               <StepFailedCard detail={entry.detail} onStop={stopRun} />
             )}
             {entry.type === 'crashRecoveryRedrive' && (
-              <CrashRedriveCard attempt={entry.ord ?? 0} />
+              <CrashRedriveCard attempt={entry.attempt ?? 1} />
             )}
           </div>
         ))}
