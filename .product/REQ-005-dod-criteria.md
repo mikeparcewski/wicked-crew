@@ -25,9 +25,9 @@ All required before Design begins:
 - [x] REQ-001 through REQ-005 written
   - Evidence: `.product/evidence/define-phase-pass.md` (PASS, 3 adversarial review rounds, 2026-07-07)
 - [x] RAID.md populated with known risks, assumptions, issues
-  - Evidence: `RAID.md` — 7 risks, 7 assumptions, 4 issues (ISS-001 resolved), 8 decisions
+  - Evidence: `.product/RAID.md` — 7 risks, 7 assumptions, 4 issues (ISS-001 resolved), 8 decisions
 - [x] Research brief (OSS landscape) written and findings incorporated into REQ-002
-  - Evidence: incorporated into REQ-002-technology-constraints.md
+  - Evidence: incorporated into `.product/REQ-002-technology-constraints.md`
 - [x] Adversarial review of requirements: no open CRITs or SIGs
   - Evidence: `.product/evidence/define-phase-pass.md` — 3 rounds, all CRITs and SIGs resolved
 - [x] All success criteria (SC-001..SC-009) are measurable (have a specific, observable check)
@@ -51,13 +51,13 @@ All required before Design begins:
 - [x] TEST-001 written with executable scenarios for every SC-001..SC-008
   - Evidence: `.product/evidence/test-strategy-phase-pass.md` (PASS, 2 rounds, 2026-07-07)
 - [x] Scenarios are specific: "run this command, observe this output/file/event"
-  - Evidence: TEST-001 scenario sections; each SC has a named scenario with assertion list
+  - Evidence: `.product/TEST-001-test-strategy.md` scenario sections; each SC has a named scenario with assertion list
 - [x] Acceptance scenarios for wicked-testing pipeline included
-  - Evidence: TEST-001 §acceptance map
+  - Evidence: `.product/TEST-001-test-strategy.md` §acceptance map
 - [x] Adversarial review: no open CRITs or SIGs
   - Evidence: `.product/evidence/test-strategy-phase-pass.md` — round 2 PASS
 - [x] Testability review: every scenario has a defined execution path
-  - Evidence: TEST-001 — each scenario names the fixture worker and concrete invocation
+  - Evidence: `.product/TEST-001-test-strategy.md` — each scenario names the fixture worker and concrete invocation
 
 ### Build Phase DoD
 
