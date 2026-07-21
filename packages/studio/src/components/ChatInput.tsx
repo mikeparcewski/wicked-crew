@@ -7,9 +7,9 @@ import type { ConfirmMode } from './ContextPopover.js';
 import type { RunMode } from './runMode.js';
 
 interface Props {
-  /** If set, we're in "run selected" mode — steer if gated, otherwise placeholder. */
+  /** If set, we're in "run selected" mode — steer if gated, inject if executing, placeholder otherwise. */
   runId?: string | null;
-  /** The current status of the selected run. Used to decide steer vs disabled mode. */
+  /** The current status of the selected run. Used to decide steer vs inject vs disabled mode. */
   runStatus?: string | null;
   onLaunched: (runId: string) => void;
   /**
@@ -24,6 +24,13 @@ interface Props {
    * confirmMode selection from the context popover with the mode-derived value.
    */
   mode?: RunMode;
+  /**
+   * Inject target for mid-run messaging: "all" broadcasts to every active worker;
+   * any other value targets a specific CLI key. Defaults to "all" when absent.
+   */
+  injectTarget?: string;
+  /** Called when the user clears the agent-specific inject target (resets to "all"). */
+  onClearInjectTarget?: () => void;
 }
 
 function detectWorkflow(text: string): string | null {
@@ -69,7 +76,7 @@ function ActivePill({
 }
 
 
-export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOverride, mode }: Props): React.ReactElement {
+export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOverride, mode, injectTarget, onClearInjectTarget }: Props): React.ReactElement {
   const clearGate = useGateStore((s) => s.clearGate);
 
   // ── Steer mode state ───────────────────────────────────────────────────────
@@ -77,6 +84,11 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   const [steering, setSteering] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const steerRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Inject mode state ─────────────────────────────────────────────────────
+  const [injectText, setInjectText] = useState('');
+  const [injecting, setInjecting] = useState(false);
+  const [injectError, setInjectError] = useState<string | null>(null);
 
   // ── Launch form state ──────────────────────────────────────────────────────
   const [problem, setProblem] = useState('');
@@ -265,8 +277,24 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     }
   }
 
+  // ── Inject submit ──────────────────────────────────────────────────────────
+  async function submitInject(): Promise<void> {
+    const text = injectText.trim();
+    if (!text || !runId) return;
+    setInjecting(true);
+    setInjectError(null);
+    try {
+      await api.injectMessage(runId, text, injectTarget ?? 'all');
+      setInjectText('');
+    } catch (err) {
+      setInjectError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInjecting(false);
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
-  // Run-selected mode: steer at gates, placeholder otherwise
+  // Run-selected mode: steer at gates, inject if executing, placeholder otherwise
   // ══════════════════════════════════════════════════════════════════════════
 
   if (runId) {
@@ -322,7 +350,80 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
       );
     }
 
-    // Actively executing — no mid-run injection
+    // Executing statuses — inject a message into the active worker(s).
+    const injectStatuses = new Set(['executing', 'distributing', 'planning']);
+    if (runStatus && injectStatuses.has(runStatus)) {
+      const canInject = injectText.trim().length > 0 && !injecting;
+      const targetLabel = !injectTarget || injectTarget === 'all' ? 'all agents' : injectTarget;
+      const isTargeted = injectTarget && injectTarget !== 'all';
+      return (
+        <div
+          className="px-5 py-4 flex flex-col gap-2 shrink-0"
+          style={{ borderTop: '1px solid rgba(230,237,243,0.07)', background: '#161c26' }}
+        >
+          {injectError && (
+            <p className="text-[11px] font-mono" style={{ color: '#f85149' }}>
+              {injectError}
+            </p>
+          )}
+          <div
+            className="flex items-end gap-3 rounded-2xl px-4 py-3"
+            style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.12)' }}
+          >
+            <textarea
+              className="flex-1 resize-none text-base outline-none border-0 bg-transparent leading-6"
+              style={{ minHeight: '28px', color: '#e6edf3', fontFamily: 'inherit' }}
+              placeholder={`Send message to ${targetLabel}…`}
+              value={injectText}
+              onChange={(e) => setInjectText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submitInject();
+                }
+              }}
+              disabled={injecting}
+              rows={1}
+            />
+            <button
+              type="button"
+              onClick={() => void submitInject()}
+              disabled={!canInject}
+              className="shrink-0 rounded-xl px-4 py-2 text-sm font-semibold transition-opacity disabled:opacity-40"
+              style={{ background: '#ffda19', color: '#0d1117' }}
+            >
+              {injecting ? '…' : 'Send →'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <p
+              className="text-[10px] font-mono flex-1"
+              style={{ color: 'rgba(230,237,243,0.3)' }}
+            >
+              Cmd+Enter · Click an agent to target it
+            </p>
+            {isTargeted && (
+              <span
+                className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-mono"
+                style={{ background: 'rgba(139,92,246,0.15)', color: '#c4b5fd', border: '1px solid rgba(139,92,246,0.25)' }}
+              >
+                → {injectTarget}
+                <button
+                  type="button"
+                  onClick={onClearInjectTarget}
+                  aria-label="Clear target, broadcast to all"
+                  className="opacity-60 hover:opacity-100 leading-none ml-0.5"
+                >
+                  ×
+                </button>
+              </span>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Terminal or otherwise inactive — nothing to do.
     return (
       <div
         className="px-5 py-4 shrink-0"
@@ -333,7 +434,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
           style={{ border: '1px solid rgba(230,237,243,0.1)', background: '#1b222e' }}
         >
           <p className="text-sm italic font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
-            Run in progress — steer at the next gate.
+            Steer at the next gate.
           </p>
         </div>
       </div>

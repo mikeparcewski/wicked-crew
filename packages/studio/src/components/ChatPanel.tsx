@@ -244,6 +244,8 @@ function RunChat({
   const gate = useGateStore((s) => s.gates[session.id]);
   const log = useRuntimeStore((s) => s.logs[session.id]) ?? [];
   const executorTypes = useRuntimeStore((s) => s.executorTypes);
+  /** "all" broadcasts; any other value is a CLI key (set by clicking an agent card). */
+  const [injectTarget, setInjectTarget] = useState<string>('all');
 
   const [transcripts, setTranscripts] = useState<
     Record<number, { text: string | null; loading: boolean; visible: boolean }>
@@ -401,16 +403,24 @@ function RunChat({
 
               {/* Agent response card */}
               <div className="self-start max-w-[85%] flex flex-col gap-2">
-                {/* Meta row: avatar + attribution + stage + governance */}
+                {/* Meta row: avatar + attribution + stage + governance (clickable to target inject) */}
                 <div className="flex items-center gap-2 flex-wrap">
-                  {unit.assigned_cli
-                    ? <CliAvatar cli={unit.assigned_cli} />
-                    : <span className="w-7 h-7 rounded-full shrink-0" style={{ background: 'rgba(230,237,243,0.06)' }} />
-                  }
-                  <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>
-                    {unit.assigned_cli ?? 'agent'}
-                    <span style={{ color: 'rgba(230,237,243,0.3)' }}> · unit {unit.ord}</span>
-                  </span>
+                  <button
+                    type="button"
+                    onClick={() => unit.assigned_cli ? setInjectTarget(unit.assigned_cli) : undefined}
+                    title={unit.assigned_cli ? `Target ${unit.assigned_cli}` : undefined}
+                    className="flex items-center gap-2 rounded-lg pr-1 transition-opacity hover:opacity-80"
+                    style={{ background: 'transparent', border: 'none', cursor: unit.assigned_cli ? 'pointer' : 'default', padding: 0 }}
+                  >
+                    {unit.assigned_cli
+                      ? <CliAvatar cli={unit.assigned_cli} />
+                      : <span className="w-7 h-7 rounded-full shrink-0" style={{ background: 'rgba(230,237,243,0.06)' }} />
+                    }
+                    <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>
+                      {unit.assigned_cli ?? 'agent'}
+                      <span style={{ color: 'rgba(230,237,243,0.3)' }}> · unit {unit.ord}</span>
+                    </span>
+                  </button>
                   <span
                     className="rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide font-mono"
                     style={{ background: stageBadge.bg, color: stageBadge.color }}
@@ -546,6 +556,8 @@ function RunChat({
         runStatus={isTerminal ? null : session.status}
         mode={mode}
         onLaunched={onLaunched}
+        injectTarget={injectTarget}
+        onClearInjectTarget={() => setInjectTarget('all')}
       />
     </div>
   );
