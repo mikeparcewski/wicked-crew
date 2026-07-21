@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from '../src/components/ChatInput.js';
 import * as client from '../src/api/client.js';
@@ -97,6 +97,6 @@ describe('ChatInput inject mode (§11.7 — operator message injection)', () => 
     await user.type(field, 'hello');
     await user.click(screen.getByRole('button', { name: /send/i }));
     expect(client.api.injectMessage).toHaveBeenCalled();
-    expect(field).toHaveValue('');
+    await waitFor(() => expect(field).toHaveValue(''));
   });
 });

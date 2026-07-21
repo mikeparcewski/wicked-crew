@@ -408,14 +408,16 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
                 style={{ background: 'rgba(139,92,246,0.15)', color: '#c4b5fd', border: '1px solid rgba(139,92,246,0.25)' }}
               >
                 → {injectTarget}
-                <button
-                  type="button"
-                  onClick={onClearInjectTarget}
-                  aria-label="Clear target, broadcast to all"
-                  className="opacity-60 hover:opacity-100 leading-none ml-0.5"
-                >
-                  ×
-                </button>
+                {onClearInjectTarget && (
+                  <button
+                    type="button"
+                    onClick={onClearInjectTarget}
+                    aria-label="Clear target, broadcast to all"
+                    className="opacity-60 hover:opacity-100 leading-none ml-0.5"
+                  >
+                    ×
+                  </button>
+                )}
               </span>
             )}
           </div>

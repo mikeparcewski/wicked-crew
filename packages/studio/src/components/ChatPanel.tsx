@@ -403,24 +403,31 @@ function RunChat({
 
               {/* Agent response card */}
               <div className="self-start max-w-[85%] flex flex-col gap-2">
-                {/* Meta row: avatar + attribution + stage + governance (clickable to target inject) */}
+                {/* Meta row: avatar + attribution + stage + governance (clickable to target inject when agent is assigned) */}
                 <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() => unit.assigned_cli ? setInjectTarget(unit.assigned_cli) : undefined}
-                    title={unit.assigned_cli ? `Target ${unit.assigned_cli}` : undefined}
-                    className="flex items-center gap-2 rounded-lg pr-1 transition-opacity hover:opacity-80"
-                    style={{ background: 'transparent', border: 'none', cursor: unit.assigned_cli ? 'pointer' : 'default', padding: 0 }}
-                  >
-                    {unit.assigned_cli
-                      ? <CliAvatar cli={unit.assigned_cli} />
-                      : <span className="w-7 h-7 rounded-full shrink-0" style={{ background: 'rgba(230,237,243,0.06)' }} />
-                    }
-                    <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>
-                      {unit.assigned_cli ?? 'agent'}
-                      <span style={{ color: 'rgba(230,237,243,0.3)' }}> · unit {unit.ord}</span>
-                    </span>
-                  </button>
+                  {unit.assigned_cli ? (
+                    <button
+                      type="button"
+                      onClick={() => setInjectTarget(unit.assigned_cli!)}
+                      title={`Target ${unit.assigned_cli}`}
+                      className="flex items-center gap-2 rounded-lg pr-1 transition-opacity hover:opacity-80"
+                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                    >
+                      <CliAvatar cli={unit.assigned_cli} />
+                      <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>
+                        {unit.assigned_cli}
+                        <span style={{ color: 'rgba(230,237,243,0.3)' }}> · unit {unit.ord}</span>
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="w-7 h-7 rounded-full shrink-0" style={{ background: 'rgba(230,237,243,0.06)' }} />
+                      <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>
+                        agent
+                        <span style={{ color: 'rgba(230,237,243,0.3)' }}> · unit {unit.ord}</span>
+                      </span>
+                    </div>
+                  )}
                   <span
                     className="rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide font-mono"
                     style={{ background: stageBadge.bg, color: stageBadge.color }}
