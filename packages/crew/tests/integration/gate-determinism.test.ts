@@ -53,9 +53,9 @@ beforeAll(async () => {
 }, 30000);
 
 afterAll(async () => {
-  await app.close();
-  adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  if (app) await app.close();
+  if (adapter) adapter.close();
+  if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
 async function launchRun(sessionId: string): Promise<void> {
@@ -78,14 +78,16 @@ async function waitForTerminal(sessionId: string): Promise<string> {
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const res = await fetch(`${baseUrl}/api/v1/runs`);
-    if (res.ok) {
-      const body = (await res.json()) as { runs: SessionView[] };
-      const run = body.runs.find((r) => r.session.id === sessionId);
-      if (run) {
-        const { status } = run.session;
-        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-          return status;
-        }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`GET /runs failed with status ${res.status}: ${text}`);
+    }
+    const body = (await res.json()) as { runs: SessionView[] };
+    const run = body.runs.find((r) => r.session.id === sessionId);
+    if (run) {
+      const { status } = run.session;
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        return status;
       }
     }
     await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
