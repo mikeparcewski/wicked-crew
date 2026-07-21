@@ -12,6 +12,11 @@ const components: Components = {
       {children}
     </a>
   ),
+  img: ({ alt }) => (
+    <span className="text-xs font-mono rounded px-1" style={{ background: 'rgba(230,237,243,0.08)', color: 'rgba(230,237,243,0.4)' }}>
+      [image{alt ? `: ${alt}` : ''}]
+    </span>
+  ),
   code: ({ className, children }) => {
     // Block fences always include a trailing \n; inline code never does.
     const isBlock = !!className?.startsWith('language-') || (typeof children === 'string' && children.includes('\n'));
