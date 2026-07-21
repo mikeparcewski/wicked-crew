@@ -12,10 +12,15 @@
 //
 // Approach:
 //   - Boot CoreAdapter(stub:true) + server once; reuse across runs (no LLM, no network)
-//   - POST /runs N times with identical inputs (auto-gate, no humanConfirm)
-//   - Poll /runs/:id until each session reaches a terminal status
-//   - Assert every terminal status is 'completed' and the gate allowed every unit
+//   - POST /runs N times with identical inputs using the free-text planning path (no explicit
+//     workflow field — this exercises the auto-gate path that SC-003 targets; any named
+//     workflow would also exercise the gate, but the free-text path is simpler and equally
+//     valid for determinism testing)
+//   - Poll GET /api/v1/runs/:id until each session reaches a terminal status
+//   - Assert every terminal status is 'completed' and every unit has denial_reason=null
 //   - Assert no run ended in 'failed' or 'cancelled'
+//   - Assert unit-level signature (ord+stage+description+status+denial_reason) is identical
+//     across all 100 runs — determinism proven at the unit level, not only at session level
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
