@@ -1,6 +1,6 @@
 ---
 id: feature-workflow-end-to-end
-title: Full feature workflow — fixture worker, autonomous, all units approved
+title: Full feature workflow — stub adapter, autonomous, all units approved
 maps_to: [SC-001]
 trust_level: local-dev
 tags: [crew, run, autonomous, e2e]
@@ -10,7 +10,7 @@ status: active
 ## Goal
 
 A full run completes autonomously when `stub: true` is set (no real worker) and all
-governance units reach `status: "allowed"`. The run session reaches `completed`.
+governance units have `denial_reason: null` (gate allowed every unit). The run session reaches `completed`.
 
 ## Preconditions
 
@@ -36,4 +36,4 @@ governance units reach `status: "allowed"`. The run session reaches `completed`.
 ## Evidence
 
 - `run-response.json` — final `GET /api/v1/runs/at-e2e-01` response body (units + session)
-- `vitest-run.txt` — `packages/crew/tests/integration/gate-determinism.test.ts` output (100 runs, PASS)
+- `vitest-run.txt` — full integration test suite summary (5 files, 27 tests, 7.77s, all PASS)

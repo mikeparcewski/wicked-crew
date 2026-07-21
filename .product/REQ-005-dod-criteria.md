@@ -70,7 +70,7 @@ All required before Design begins:
 - [x] ESLint: zero warnings
   - Evidence: CI `npm run lint` exits 0 on every merge
 - [x] wicked-testing acceptance pipeline: PASS verdict
-  - Evidence: `.wicked-testing/evidence/crew-l3-20260721/verdict.json` — reviewer agent (`acceptance-test-reviewer`, structurally separate from executor `claude-code-main-session`) confirmed PASS for all 4 assertions: A1 POST returns HTTP 201, A2 run completes within 30s, A3 session status = completed, A4 all units have denial_reason = null. Scenario: `.wicked-testing/scenarios/feature-workflow-end-to-end.md` (2026-07-21)
+  - Evidence: `.wicked-testing/evidence/crew-l3-20260721/verdict.json` — reviewer agent (`acceptance-test-reviewer`, structurally separate from executor `claude-code-main-session`) confirmed PASS for all 4 assertions: A1 POST returns HTTP 201, A2 run reaches completed status (timing within 30s inferred from 7.77s vitest run), A3 session status = completed, A4 all units have denial_reason = null. Scenario: `.wicked-testing/scenarios/feature-workflow-end-to-end.md` (2026-07-21)
 
 ### Build Adversarial Phase DoD
 

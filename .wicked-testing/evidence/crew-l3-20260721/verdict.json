@@ -18,7 +18,7 @@
     },
     "A3": {
       "verdict": "PASS",
-      "evidence": "run-response.json: run.session.status = 'completed' (line 4). Not 'failed' or 'cancelled'. Direct confirmation.",
+      "evidence": "run-response.json: run.session.status = 'completed'. Not 'failed' or 'cancelled'. Direct confirmation.",
       "notes": "None."
     },
     "A4": {
