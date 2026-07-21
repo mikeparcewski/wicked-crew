@@ -2,7 +2,7 @@
 name: REQ-005-dod-criteria
 title: wicked-crew — Definition of Done
 status: partially-verified
-version: 0.2
+version: 0.3
 date: 2026-07-21
 author: michael.parcewski@accenture.com
 review-required: true
@@ -141,8 +141,8 @@ wicked-studio is done when:
   - Evidence: `.product/evidence/dod/sc-studio-hitl/verdict.json` `SCS03_approve_advances_within_3s: pass=true` (11ms actual), `SCS03_next_phase_started: pass=true`
 - [x] Event feed shows live wicked-bus events within < 500ms of emission
   - Evidence: `.product/evidence/dod/sc-studio-hitl/verdict.json` — `notifyDeltaMs=124ms` (gate notification delivered to studio within 124ms); WebSocket bridge tested in `packages/crew/tests/integration/daemon-bridge.test.ts`
-- [ ] Settings panel allows worker registry view (read-only in v1)
-  - Not yet verified with dedicated evidence
+- [x] Settings panel allows worker registry view (read-only in v1)
+  - Evidence: `.product/evidence/dod/sc-settings/verdict.json` — `SystemSettings.tsx` renders all roster seats (key + display_name) from `GET /api/v1/roster`. No API surface to add/remove/modify seat definitions; registry is read-only. Default-CLI checkbox preference is localStorage-only (no server mutation). 155 studio tests pass (2026-07-21).
 - [x] Works on macOS (Chrome) and responds correctly to daemon being unavailable (shows disconnected state gracefully)
   - Evidence: `.product/evidence/dod/sc006/console-error-log.json` — no console errors; `packages/crew/tests/integration/studio-serving.test.ts` — headless degradation test passes (no studio bundle → 404 gracefully)
 
@@ -198,3 +198,4 @@ These cannot be waived or deferred:
 |---------|------|--------|--------|
 | 0.1 | 2026-07-07 | michael.parcewski@accenture.com | Initial draft — all items unchecked |
 | 0.2 | 2026-07-21 | michael.parcewski@accenture.com | Evidence-phase verification: checked off all items with existing evidence. Phase gates: Define/Design/Test-Strategy/Build-Adversarial PASS; Build phase: 4 of 5 items verified (wicked-testing acceptance pipeline re-run pending — unchecked non-negotiable). Behaviors verified: SC-001 (session start, dispatch, auto-gate, status — 4 behaviors), SC-002 (crash+resume), SC-006 (studio connectivity, wsFirstMsgMs=33.8ms), SC-007 (startup time), SC-008 (worker hot-add), SC-009 (terminal HITL gate), SC-studio-hitl (studio HITL panel, 11ms approve). SC-003/SC-004/SC-005 marked DELEGATED/OPEN — governance migrated to wicked-core Rust; crew-level 100-run test NOT yet run (non-negotiable gap). Status set to partially-verified. Remaining open: wicked-testing acceptance pipeline re-run, SC-003/004/005 crew-level verification, settings panel evidence, wicked-garden scope reduction (separate workstream). Fixed bot findings: evidence paths corrected to `.product/evidence/dod/...`, SC-006 timing corrected to wsFirstMsgMs=33.8ms, SC-009 clarified as terminal HITL (not studio), test path corrected to packages/crew/tests/integration/studio-serving.test.ts. |
+| 0.3 | 2026-07-21 | michael.parcewski@accenture.com | Settings panel evidence: checked off "Settings panel allows worker registry view (read-only in v1)" — `SystemSettings.tsx` fetches roster from `GET /api/v1/roster`, renders all seats (key + display_name), no registry mutation surface in the UI. Evidence: `.product/evidence/dod/sc-settings/verdict.json`. SC-003 closed with dedicated 100-run determinism test (`packages/crew/tests/integration/gate-determinism.test.ts`, PR #98). Remaining open: wicked-testing acceptance pipeline re-run, wicked-garden scope reduction (separate workstream). |
