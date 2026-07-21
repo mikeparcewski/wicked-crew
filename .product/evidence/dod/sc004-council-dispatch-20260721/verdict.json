@@ -8,12 +8,12 @@
   "assertions": {
     "A1": {
       "verdict": "PASS",
-      "evidence": "POST /api/v1/runs with clisJson=[{key:'alpha',...},{key:'beta',...}] → {runId:'0314e3d2-eddf-4a69-a2c6-7ddf6177b4fb'}. Run created with status=completed.",
+      "evidence": "POST /api/v1/runs with clisJson=JSON.stringify([{\"key\":\"alpha\"},{\"key\":\"beta\"}]) → {\"runId\":\"0314e3d2-eddf-4a69-a2c6-7ddf6177b4fb\"}. Run created with status=completed.",
       "notes": "Crew stub mode server started on port 19399 with wicked-core engine. Run accepted with 2 explicit CLI seats."
     },
     "A2": {
       "verdict": "PASS",
-      "evidence": "GET /api/v1/runs → run.session.clis=['alpha','beta'], unit.routing.method='council', unit.routing.returned=2, unit.routing.winner='alpha', unit.routing.agreement_pct=100, unit.routing.dissent=0.",
+      "evidence": "GET /api/v1/runs → {\"runs\":[{\"session\":{\"clis\":[\"alpha\",\"beta\"]},\"units\":[{\"routing\":{\"method\":\"council\",\"returned\":2,\"winner\":\"alpha\",\"agreement_pct\":100,\"dissent\":0}}]}]}. runs[0].units[0].routing.returned=2 confirms both seats voted.",
       "notes": "Council dispatched to BOTH CLI seats (returned=2 ≥ 2). StubDispatcher returns one Vote per CLI in the clis_json array, proving that crew-level council dispatch correctly fans out to all registered seats. The routing.returned field is the crew-observable analogue of perspectives.length in the DoD criterion."
     }
   },
