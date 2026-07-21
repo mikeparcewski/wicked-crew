@@ -71,6 +71,11 @@ All required before Design begins:
   - Evidence: CI gate green on 2026-07-21 (`npm run lint` exits 0 with zero warnings across both packages)
 - [ ] wicked-testing acceptance pipeline: PASS verdict
   - Not yet run against the current architecture (wicked-core-ts adapter version)
+
+### Build Adversarial Phase DoD
+
+Adversarial review of the build diff: no open CRITs or SIGs before the build gate closes.
+
 - [x] Adversarial diff review: no open CRITs or SIGs on the diff vs design spec
   - Evidence: `.product/evidence/build-adversarial-review-round2-pass.md` — 3 rounds; see `## Round 3 verdict: PASS` section (file title/frontmatter reference round 2; body records the final round 3 PASS)
 
