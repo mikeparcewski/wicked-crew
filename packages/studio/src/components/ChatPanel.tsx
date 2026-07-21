@@ -410,8 +410,8 @@ function RunChat({
                       type="button"
                       onClick={() => setInjectTarget(unit.assigned_cli!)}
                       title={`Target ${unit.assigned_cli}`}
-                      className="flex items-center gap-2 rounded-lg pr-1 transition-opacity hover:opacity-80"
-                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                      className="flex items-center gap-2 rounded-lg p-0 pr-1 transition-opacity hover:opacity-80"
+                      style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
                     >
                       <CliAvatar cli={unit.assigned_cli} />
                       <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.55)' }}>

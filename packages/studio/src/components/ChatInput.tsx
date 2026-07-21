@@ -89,6 +89,9 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   const [injectText, setInjectText] = useState('');
   const [injecting, setInjecting] = useState(false);
   const [injectError, setInjectError] = useState<string | null>(null);
+  // Synchronous guard prevents a second inject from firing before the first
+  // setInjecting(true) call re-renders the disabled state.
+  const injectInflightRef = useRef(false);
 
   // ── Launch form state ──────────────────────────────────────────────────────
   const [problem, setProblem] = useState('');
@@ -280,7 +283,8 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   // ── Inject submit ──────────────────────────────────────────────────────────
   async function submitInject(): Promise<void> {
     const text = injectText.trim();
-    if (!text || !runId) return;
+    if (!text || !runId || injectInflightRef.current) return;
+    injectInflightRef.current = true;
     setInjecting(true);
     setInjectError(null);
     try {
@@ -289,6 +293,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     } catch (err) {
       setInjectError(err instanceof Error ? err.message : String(err));
     } finally {
+      injectInflightRef.current = false;
       setInjecting(false);
     }
   }
