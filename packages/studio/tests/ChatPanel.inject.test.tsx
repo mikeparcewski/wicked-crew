@@ -28,7 +28,7 @@ describe('ChatPanel inject targeting (crew#74 — click avatar → target CLI)',
       />,
     );
     expect(screen.getByPlaceholderText(/send message to all agents/i)).toBeInTheDocument();
-    await user.click(screen.getByTitle(/target claude/i));
+    await user.click(screen.getByRole('button', { name: /send message to claude only/i }));
     expect(screen.getByPlaceholderText(/send message to claude/i)).toBeInTheDocument();
   });
 
@@ -46,7 +46,7 @@ describe('ChatPanel inject targeting (crew#74 — click avatar → target CLI)',
         onRefresh={vi.fn()}
       />,
     );
-    await user.click(screen.getByTitle(/target codex/i));
+    await user.click(screen.getByRole('button', { name: /send message to codex only/i }));
     expect(screen.getByPlaceholderText(/send message to codex/i)).toBeInTheDocument();
     await user.click(screen.getByLabelText(/clear target/i));
     expect(screen.getByPlaceholderText(/send message to all agents/i)).toBeInTheDocument();

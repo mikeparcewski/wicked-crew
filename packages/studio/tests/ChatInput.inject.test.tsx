@@ -36,6 +36,17 @@ describe('ChatInput inject mode (§11.7 — operator message injection)', () => 
     expect(screen.getByPlaceholderText(/send message to all agents/i)).toBeInTheDocument();
   });
 
+  it('shows inject textarea when runStatus is "planning"', () => {
+    render(
+      <ChatInput
+        runId="run-1"
+        runStatus="planning"
+        onLaunched={vi.fn()}
+      />
+    );
+    expect(screen.getByPlaceholderText(/send message to all agents/i)).toBeInTheDocument();
+  });
+
   it('calls api.injectMessage with runId, text, and default target "all"', async () => {
     const user = userEvent.setup();
     render(

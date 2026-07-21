@@ -33,6 +33,8 @@ interface Props {
   onClearInjectTarget?: () => void;
 }
 
+const INJECT_STATUSES = new Set(['executing', 'distributing', 'planning']);
+
 function detectWorkflow(text: string): string | null {
   const lower = text.toLowerCase();
   if (/\b(bug|fix|broken|error|crash|issue)\b/.test(lower)) return 'bug';
@@ -357,8 +359,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     }
 
     // Executing statuses — inject a message into the active worker(s).
-    const injectStatuses = new Set(['executing', 'distributing', 'planning']);
-    if (runStatus && injectStatuses.has(runStatus)) {
+    if (runStatus && INJECT_STATUSES.has(runStatus)) {
       const canInject = injectText.trim().length > 0 && !injecting;
       const normalizedTarget = injectTarget?.trim() || 'all';
       const isTargeted = normalizedTarget !== 'all';

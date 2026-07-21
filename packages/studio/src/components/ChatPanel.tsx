@@ -410,6 +410,7 @@ function RunChat({
                       type="button"
                       onClick={() => setInjectTarget(unit.assigned_cli!)}
                       title={`Target ${unit.assigned_cli}`}
+                      aria-label={`Send message to ${unit.assigned_cli} only`}
                       className="flex items-center gap-2 rounded-lg p-0 pr-1 transition-opacity hover:opacity-80"
                       style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
                     >
