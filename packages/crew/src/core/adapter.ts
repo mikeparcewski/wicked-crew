@@ -340,7 +340,24 @@ export class CoreAdapter {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
-    await mkdir(cloneDir, { recursive: true });
+    // Ensure the parent exists (first-run, nested checkoutPath, etc.) before the
+    // atomic create below — recursive mkdir is safe for parents since we are not
+    // the intended owner of those directories.
+    await mkdir(resolve(cloneDir, '..'), { recursive: true });
+
+    // Atomic exclusive mkdir: succeeds only if we created the directory, throws
+    // EEXIST if it already existed. This is race-safe — recursive mkdir would
+    // silently succeed for existing dirs, making weMadeDir unreliable.
+    let weMadeDir = false;
+    try {
+      await mkdir(cloneDir);
+      weMadeDir = true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+      // Directory already existed — verify it is actually a directory (not a file).
+      await access(join(cloneDir, '.'));
+    }
 
     let needsClone = true;
     try {
@@ -354,8 +371,15 @@ export class CoreAdapter {
           timeout: 5 * 60 * 1000,
         });
       } catch (err) {
-        // Clean up the partial clone so a retry starts fresh.
-        await rm(cloneDir, { recursive: true, force: true });
+        // Cleanup is best-effort: swallow any cleanup error so the original
+        // clone failure is what the caller sees.
+        if (weMadeDir) {
+          await rm(cloneDir, { recursive: true, force: true }).catch(() => {});
+        } else {
+          // Pre-existing dir: remove a partially-written .git so the next call
+          // doesn't incorrectly skip cloning against a broken working tree.
+          await rm(join(cloneDir, '.git'), { recursive: true, force: true }).catch(() => {});
+        }
         throw err;
       }
     }
