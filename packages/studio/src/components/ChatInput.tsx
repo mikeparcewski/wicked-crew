@@ -225,7 +225,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     const seats = roster.filter((s) => selectedClis.has(s.key));
     if (seats.length > 0) body.clisJson = JSON.stringify(seats);
     body.entityMode = entityMode;
-    // Ask → gate all; Autonomous → no human gates (skip popover); Balanced/unset → popover.
+    // Ask → gate all; Autonomous → no human gates (confirmMode selection ignored); Balanced/unset → popover applies.
     if (mode === 'ask') {
       body.humanConfirm = 'all';
     } else if (mode !== 'autonomous') {
