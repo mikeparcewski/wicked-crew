@@ -178,6 +178,21 @@ function ModePill({
   onChange: (m: RunMode) => void;
 }): React.ReactElement {
   const modes: RunMode[] = ['ask', 'balanced', 'autonomous'];
+
+  function handleKey(e: React.KeyboardEvent, idx: number): void {
+    let next = idx;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = (idx + 1) % modes.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = (idx - 1 + modes.length) % modes.length;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    onChange(modes[next]!);
+    (e.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus();
+  }
+
   return (
     <div
       role="radiogroup"
@@ -185,13 +200,15 @@ function ModePill({
       className="flex items-center rounded-lg overflow-hidden shrink-0"
       style={{ background: 'rgba(230,237,243,0.06)', border: '1px solid rgba(230,237,243,0.1)' }}
     >
-      {modes.map((m) => (
+      {modes.map((m, idx) => (
         <button
           key={m}
           type="button"
           role="radio"
           aria-checked={mode === m}
+          tabIndex={mode === m ? 0 : -1}
           onClick={() => onChange(m)}
+          onKeyDown={(e) => handleKey(e, idx)}
           className="px-3 py-1 text-[11px] font-mono font-medium transition-colors"
           style={
             mode === m
