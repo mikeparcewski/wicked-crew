@@ -133,7 +133,7 @@ wicked-studio is done when:
 - [x] Human approval via studio advances the gate in wicked-crew (verified by phase state change)
   - Evidence: `.product/evidence/dod/sc-studio-hitl/verdict.json` `SCS03_approve_advances_within_3s: pass=true` (11ms actual), `SCS03_next_phase_started: pass=true`
 - [x] Event feed shows live wicked-bus events within < 500ms of emission
-  - Evidence: `.product/evidence/dod/sc006/verdict.json` — events received within the 5s window; SSE bridge tested in `daemon-bridge.test.ts`
+  - Evidence: `.product/evidence/dod/sc006/verdict.json` — events received within the 5s window; WebSocket bridge tested in `packages/crew/tests/integration/daemon-bridge.test.ts`
 - [ ] Settings panel allows worker registry view (read-only in v1)
   - Not yet verified with dedicated evidence
 - [x] Works on macOS (Chrome) and responds correctly to daemon being unavailable (shows disconnected state gracefully)
