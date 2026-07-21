@@ -33,8 +33,23 @@ const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
 ]);
 
+interface UnitView {
+  ord: number;
+  stage: string;
+  description: string;
+  status: string;
+  denial_reason: string | null;
+}
+
 interface SessionView {
   session: { id: string; status: string };
+  units: UnitView[];
+}
+
+interface RunResult {
+  status: string;
+  /** Normalized unit signature — stable across runs with identical inputs. */
+  signature: string;
 }
 
 let app: Awaited<ReturnType<typeof createServer>>;
@@ -74,21 +89,33 @@ async function launchRun(sessionId: string): Promise<void> {
   }
 }
 
-async function waitForTerminal(sessionId: string): Promise<string> {
+async function waitForTerminal(sessionId: string): Promise<RunResult> {
   const deadline = Date.now() + RUN_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const res = await fetch(`${baseUrl}/api/v1/runs`);
+    const res = await fetch(`${baseUrl}/api/v1/runs/${sessionId}`);
+    if (res.status === 404) {
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      continue;
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`GET /runs failed with status ${res.status}: ${text}`);
+      throw new Error(`GET /runs/${sessionId} failed with status ${res.status}: ${text}`);
     }
-    const body = (await res.json()) as { runs: SessionView[] };
-    const run = body.runs.find((r) => r.session.id === sessionId);
-    if (run) {
-      const { status } = run.session;
-      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-        return status;
-      }
+    const body = (await res.json()) as { run: SessionView };
+    const { status } = body.run.session;
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      const signature = JSON.stringify(
+        (body.run.units ?? [])
+          .sort((a, b) => a.ord - b.ord)
+          .map((u) => ({
+            ord: u.ord,
+            stage: u.stage,
+            description: u.description,
+            status: u.status,
+            denial_reason: u.denial_reason,
+          })),
+      );
+      return { status, signature };
     }
     await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
@@ -96,19 +123,20 @@ async function waitForTerminal(sessionId: string): Promise<string> {
 }
 
 describe(`SC-003: gate evaluation is deterministic across ${RUNS} consecutive runs`, () => {
-  it(`all ${RUNS} auto-gated runs complete with identical terminal status`, async () => {
-    const results: string[] = [];
+  it(`all ${RUNS} auto-gated runs complete with identical terminal status and unit signatures`, async () => {
+    const results: RunResult[] = [];
 
     for (let i = 0; i < RUNS; i++) {
       const sessionId = `det-run-${String(i).padStart(3, '0')}`;
       await launchRun(sessionId);
-      const status = await waitForTerminal(sessionId);
-      results.push(status);
+      const result = await waitForTerminal(sessionId);
+      results.push(result);
     }
 
-    const completed = results.filter((s) => s === 'completed').length;
-    const failed = results.filter((s) => s === 'failed').length;
-    const cancelled = results.filter((s) => s === 'cancelled').length;
+    const statuses = results.map((r) => r.status);
+    const completed = statuses.filter((s) => s === 'completed').length;
+    const failed = statuses.filter((s) => s === 'failed').length;
+    const cancelled = statuses.filter((s) => s === 'cancelled').length;
 
     expect(
       failed,
@@ -123,9 +151,17 @@ describe(`SC-003: gate evaluation is deterministic across ${RUNS} consecutive ru
       `expected all ${RUNS} runs to complete, got ${completed}`,
     ).toBe(RUNS);
 
-    // Every run produced the same outcome — determinism proven.
-    const unique = new Set(results);
-    expect(unique.size).toBe(1);
-    expect([...unique][0]).toBe('completed');
+    // Every run produced the same terminal status — determinism proven at the session level.
+    const uniqueStatuses = new Set(statuses);
+    expect(uniqueStatuses.size).toBe(1);
+    expect([...uniqueStatuses][0]).toBe('completed');
+
+    // Every run produced the same unit-level signature (ord, stage, description, status,
+    // denial_reason) — determinism proven at the unit level too.
+    const uniqueSignatures = new Set(results.map((r) => r.signature));
+    expect(
+      uniqueSignatures.size,
+      `unit signatures differed across runs — nondeterminism detected at the unit level`,
+    ).toBe(1);
   }, RUNS * RUN_TIMEOUT_MS);
 });
