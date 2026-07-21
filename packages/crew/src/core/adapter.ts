@@ -340,7 +340,15 @@ export class CoreAdapter {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
-    await mkdir(cloneDir, { recursive: true });
+    // Track whether we created the directory so cleanup after a failed clone never
+    // removes a pre-existing user directory (crew#63 — clone cleanup risk).
+    let weMadeDir = false;
+    try {
+      await access(cloneDir);
+    } catch {
+      await mkdir(cloneDir, { recursive: true });
+      weMadeDir = true;
+    }
 
     let needsClone = true;
     try {
@@ -354,8 +362,9 @@ export class CoreAdapter {
           timeout: 5 * 60 * 1000,
         });
       } catch (err) {
-        // Clean up the partial clone so a retry starts fresh.
-        await rm(cloneDir, { recursive: true, force: true });
+        if (weMadeDir) {
+          await rm(cloneDir, { recursive: true, force: true });
+        }
         throw err;
       }
     }
