@@ -88,7 +88,7 @@ All six working-app behaviors verified with evidence:
    - [x] **PASS** — `.product/evidence/dod/sc001/verdict.json` `behavior3_auto_gate: pass=true`, `bus_gate_approved=6`
 
 4. **Studio connectivity**: wicked-studio connects, live session visible within 5 seconds, WebSocket event received. Evidence: screenshot + WebSocket frame capture.
-   - [x] **PASS** — `.product/evidence/dod/sc006/verdict.json` and `.product/evidence/dod/sc-studio-hitl/verdict.json` (notifyDeltaMs=124, within 5s)
+   - [x] **PASS** — `.product/evidence/dod/sc006/verdict.json` — `wsFirstMsgMs=33.8ms`, `sessionVisibleMs=96ms` (both within 5s window)
 
 5. **Crash + resume**: Daemon killed via SIGKILL during InProgress phase. `wicked-crew resume --session <id>` restores to pre-crash phase state. Evidence: SQLite dump before kill vs after resume — all non-temporal fields (phase, state, phase_id, session_id, evidence references, blocking_items) are identical; timestamp fields (updated_at) are excluded from comparison.
    - [x] **PASS** — `.product/evidence/dod/sc002/verdict.json` — real SIGKILL (signalCode: SIGKILL, exitCode: null), pre/post field diff clean, `behavior5_resumed: pass=true`
@@ -114,7 +114,7 @@ Each SC from REQ-001 §7 has a specific verification method:
 | SC-008 | Add entry to workers.json; wait ≤ 30s; dispatch to new worker; assert success | `.product/evidence/dod/sc008/verdict.json` | **PASS** |
 | SC-009 | HITL gate approval from **terminal CLI** advances phase gate within 5s | `.product/evidence/dod/sc009/verdict.json` — terminal `wicked-crew gate` exit (0), phase advanced in 413ms | **PASS** |
 
-**DELEGATED / OPEN**: SC-003, SC-004, SC-005 previously tested the TypeScript governance engine (json-rules-engine, XState v5, council dispatch). Those modules migrated to wicked-core (Rust). The successor tests live in `wicked-core/tests/` and pass as part of the wicked-core CI gate — but this does NOT satisfy the §7 non-negotiable for SC-003: 100 automated crew-level runs with identical inputs asserting identical outputs have NOT been run. This is an open gap. The sc001 evidence covers the happy path (6 deterministic auto-gate passes) but does not constitute 100-run equivalence testing. Closing requires a dedicated crew-level integration test that drives the wicked-core-ts adapter 100× and asserts gate output stability.
+**DELEGATED / OPEN**: SC-003, SC-004, SC-005 previously tested the TypeScript governance engine (json-rules-engine, XState v5, council dispatch). Those modules migrated to wicked-core (Rust). The successor tests live in `wicked-core/tests/` and pass as part of the wicked-core CI gate — but this does NOT satisfy the §7 non-negotiable for SC-003: 100 automated crew-level runs with identical inputs asserting identical outputs have NOT been run. This is an open gap. The sc001 evidence shows 6 deterministic auto-gate passes (happy-path only); this is NOT a substitute for 100-run equivalence testing and does not partially satisfy SC-003. Closing requires a dedicated crew-level integration test that drives the wicked-core-ts adapter 100× and asserts gate output stability.
 
 ---
 
