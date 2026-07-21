@@ -489,7 +489,7 @@ function RunChat({
                 <StepFailedCard
                   detail={entry.detail}
                   onStop={stopRun}
-                  canStop={onKill !== undefined}
+                  canStop={onKill !== undefined && !isTerminal}
                 />
               </div>
             );
