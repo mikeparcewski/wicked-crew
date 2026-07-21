@@ -16,6 +16,8 @@ interface Props {
    * centered in the empty-state layout rather than docked to the bottom of the pane.
    */
   embedded?: boolean;
+  /** When set, forces this workflow id on every launch (overrides the popover selector). */
+  workflowOverride?: string;
 }
 
 function detectWorkflow(text: string): string | null {
@@ -60,7 +62,7 @@ function ActivePill({
   );
 }
 
-export function ChatInput({ runId, runStatus, onLaunched, embedded }: Props): React.ReactElement {
+export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOverride }: Props): React.ReactElement {
   const clearGate = useGateStore((s) => s.clearGate);
 
   // ── Steer mode state ───────────────────────────────────────────────────────
@@ -220,7 +222,8 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded }: Props): Re
     else if (confirmMode === 'before') body.humanConfirm = `before:${beforeOrd}`;
     const firstRepo = repoRefs[0];
     if (firstRepo) body.repoRef = firstRepo;
-    if (workflow) body.workflow = workflow;
+    const wf = workflowOverride ?? workflow;
+    if (wf) body.workflow = wf;
 
     try {
       const { runId: newRunId } = await api.launchRun(body);

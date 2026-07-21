@@ -111,6 +111,12 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 // the wicked-core-ts NAPI methods land.
 const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
+    id: 'chat',
+    phases: [
+      { id: 'explore', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
     id: 'onboarding',
     phases: [
       { id: 'index', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },

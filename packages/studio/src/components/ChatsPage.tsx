@@ -12,7 +12,7 @@ const terminal = (s: string): boolean =>
 
 export function ChatsPage({ runs, onSelect, navigate }: Props): React.ReactElement {
   const [query, setQuery] = useState('');
-  const chats = runs; // TODO: filter by type=chat once discriminator lands
+  const chats = runs.filter((v) => v.session.workflow_id === 'chat');
 
   const active    = chats.filter(v => !terminal(v.session.status));
   const completed = chats.filter(v => v.session.status === 'completed');
