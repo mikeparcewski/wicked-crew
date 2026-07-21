@@ -1,7 +1,8 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
+import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -62,7 +63,7 @@ function locateWickedCoreExe(): string | undefined {
     candidates.push(join(home, '.cargo', 'bin', exeName));
   }
   // Monorepo dev build.
-  candidates.push(join(dirname(new URL(import.meta.url).pathname), '../../..', 'wicked-core', 'target', 'release', exeName));
+  candidates.push(join(dirname(fileURLToPath(import.meta.url)), '../../..', 'wicked-core', 'target', 'release', exeName));
   // PATH lookup.
   const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
   for (const dir of pathDirs) {
@@ -335,7 +336,7 @@ export class CoreAdapter {
       // Use relative() instead of startsWith(root+'/') so this works cross-platform
       // (Windows uses backslash separators, making a literal '/' suffix check unreliable).
       const rel = relative(reposRoot, cloneDir);
-      if (rel.startsWith('..') || isAbsolute(rel)) {
+      if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
