@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { api, terminalWsUrl } from '../api/client.js';
+import { terminalWsUrl } from '../api/client.js';
 
 interface Props {
   /** The terminalId from a workerSessionStarted event — connects to this existing PTY. */
@@ -14,16 +14,14 @@ interface Props {
 }
 
 /**
- * Attaches an xterm.js viewer to an already-running agent PTY session.
+ * Read-only observer for an already-running agent PTY session.
  *
- * Unlike Terminal, this component does NOT create a new PTY — it connects
- * directly to the existing websocket for `terminalId`. On unmount it closes
- * the socket but does NOT call POST /terminals/:id/close (the engine owns the
- * lifecycle; closing it would kill the agent's CLI session).
+ * Attaches xterm.js to the existing WS for `terminalId` — no new PTY is created
+ * and no input is forwarded (observer-only). The underlying PTY lifecycle is
+ * owned by the engine; on unmount the socket closes but the PTY continues running.
  *
- * A RemoteObserver flag is sent so the daemon can track observer count without
- * forwarding keystrokes to the PTY (write-only from the agent's perspective).
- * For now keystrokes ARE forwarded — the operator can send input this way too.
+ * Resize only reflows the local xterm display — it does NOT call
+ * POST /terminals/:id/resize so the agent's active PTY is left undisturbed.
  */
 export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.ReactElement {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -38,7 +36,8 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
 
     const term = new XTerm({
       convertEol: false,
-      cursorBlink: true,
+      cursorBlink: false,
+      disableStdin: true,
       fontSize: 12,
       fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#ffda19', cursorAccent: '#0d1117' },
@@ -65,18 +64,13 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
       if (!disposed) term.write('\r\n\x1b[90m[agent session ended]\x1b[0m\r\n');
     };
 
-    // Forward keystrokes to the PTY (operator can interact with the agent session).
-    const dataSub = term.onData((chunk: string) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
-    });
-
+    // Reflow the local xterm display on container resize — does NOT resize the PTY.
     const observe =
       typeof ResizeObserver !== 'undefined'
         ? new ResizeObserver(() => {
             try {
               fit.fit();
             } catch { /* not laid out */ }
-            void api.resizeTerminal(terminalIdRef.current, term.cols, term.rows).catch(() => {});
           })
         : undefined;
     observe?.observe(host);
@@ -84,7 +78,6 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
     return () => {
       disposed = true;
       observe?.disconnect();
-      dataSub.dispose();
       try {
         ws.close();
       } catch {
@@ -105,7 +98,7 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
         style={{ background: '#161c26', borderBottom: '1px solid rgba(230,237,243,0.06)' }}
       >
         <span className="text-[11px] font-mono font-semibold" style={{ color: 'rgba(230,237,243,0.5)' }}>
-          {cliKey}
+          {cliKey} <span style={{ color: 'rgba(230,237,243,0.3)', fontWeight: 400 }}>· observer</span>
         </span>
         <button
           type="button"
