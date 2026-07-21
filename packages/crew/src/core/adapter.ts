@@ -49,6 +49,29 @@ function settingsFilePath(): string {
   return join(home, '.config', 'wicked-core', 'settings.json');
 }
 
+/** Find the wicked-core standalone binary for the gate-hook command.
+ * Checks common install locations so the Rust actor can build a correct
+ * hook command even when loaded as a napi addon (where current_exe() = node).
+ */
+function locateWickedCoreExe(): string | undefined {
+  const candidates: string[] = [];
+  // User-local install (cargo install / manual).
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home) {
+    candidates.push(join(home, '.local', 'bin', 'wicked-core'));
+    candidates.push(join(home, '.cargo', 'bin', 'wicked-core'));
+  }
+  // Monorepo dev build.
+  candidates.push(join(dirname(new URL(import.meta.url).pathname), '../../..', 'wicked-core', 'target', 'release', 'wicked-core'));
+  // PATH lookup.
+  const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
+  for (const dir of pathDirs) {
+    candidates.push(join(dir, process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core'));
+  }
+  const { existsSync } = require('node:fs') as typeof import('node:fs');
+  return candidates.find((p) => existsSync(p));
+}
+
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
 // require even though this daemon is ESM. This module is the ONLY place that
 // touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
@@ -186,6 +209,15 @@ export class CoreAdapter {
     }
     this.engineExec = armExec;
     this.busDbPath = armExec ? opts.busDbPath : undefined;
+
+    // Give the Rust actor the path to the wicked-core standalone binary so the gate-hook
+    // command works when wicked-core is loaded as a napi-rs addon (where current_exe()
+    // returns the Node.js interpreter, not wicked-core). The actor checks WICKED_CORE_EXE
+    // first, so this env wins over the current_exe() fallback.
+    if (!process.env['WICKED_CORE_EXE']) {
+      const wcExe = locateWickedCoreExe();
+      if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
+    }
 
     this.core = opts.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
