@@ -27,6 +27,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  adapter.close();
   rmSync(dbDir, { recursive: true, force: true });
 });
 
@@ -37,17 +38,19 @@ describe('cloneAndRegisterRepo cleanup', () => {
     const sentinel = join(preexistingDir, 'sentinel.txt');
     writeFileSync(sentinel, 'do-not-delete');
 
-    await expect(
-      adapter.cloneAndRegisterRepo('pre-existing', INVALID_URL, preexistingDir),
-    ).rejects.toThrow();
+    try {
+      await expect(
+        adapter.cloneAndRegisterRepo('pre-existing', INVALID_URL, preexistingDir),
+      ).rejects.toThrow();
 
-    // The directory and its contents must survive.
-    expect(existsSync(preexistingDir)).toBe(true);
-    expect(existsSync(sentinel)).toBe(true);
-    // Any partial .git written by the failed clone must be gone.
-    expect(existsSync(join(preexistingDir, '.git'))).toBe(false);
-
-    rmSync(preexistingDir, { recursive: true, force: true });
+      // The directory and its contents must survive.
+      expect(existsSync(preexistingDir)).toBe(true);
+      expect(existsSync(sentinel)).toBe(true);
+      // Any partial .git written by the failed clone must be gone.
+      expect(existsSync(join(preexistingDir, '.git'))).toBe(false);
+    } finally {
+      rmSync(preexistingDir, { recursive: true, force: true });
+    }
   });
 
   it('removes a newly-created directory entirely on clone failure', async () => {

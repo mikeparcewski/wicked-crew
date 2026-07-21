@@ -340,6 +340,11 @@ export class CoreAdapter {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
+    // Ensure the parent exists (first-run, nested checkoutPath, etc.) before the
+    // atomic create below — recursive mkdir is safe for parents since we are not
+    // the intended owner of those directories.
+    await mkdir(resolve(cloneDir, '..'), { recursive: true });
+
     // Atomic exclusive mkdir: succeeds only if we created the directory, throws
     // EEXIST if it already existed. This is race-safe — recursive mkdir would
     // silently succeed for existing dirs, making weMadeDir unreliable.
