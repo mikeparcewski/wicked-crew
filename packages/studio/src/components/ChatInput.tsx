@@ -157,12 +157,12 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
 
   // ── Workflow signal detection ───────────────────────────────────────────────
   useEffect(() => {
-    if (!problem.trim() || workflow) {
+    if (!problem.trim() || workflow || workflowOverride) {
       setDetectedWorkflow(null);
       return;
     }
     setDetectedWorkflow(detectWorkflow(problem));
-  }, [problem, workflow]);
+  }, [problem, workflow, workflowOverride]);
 
   // ── Close popover on outside click ─────────────────────────────────────────
   useEffect(() => {
@@ -222,7 +222,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     else if (confirmMode === 'before') body.humanConfirm = `before:${beforeOrd}`;
     const firstRepo = repoRefs[0];
     if (firstRepo) body.repoRef = firstRepo;
-    const wf = workflowOverride ?? workflow;
+    const wf = workflowOverride?.trim() || workflow;
     if (wf) body.workflow = wf;
 
     try {
@@ -333,7 +333,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   // ══════════════════════════════════════════════════════════════════════════
 
   const canSubmit = problem.trim().length > 0 && selectedClis.size > 0 && !submitting;
-  const showDetection = detectedWorkflow !== null && !workflowDismissed && !workflow;
+  const showDetection = detectedWorkflow !== null && !workflowDismissed && !workflow && !workflowOverride;
 
   // Determine whether CLIs differ from the defaults that loaded from the roster
   const defaultCliSet = new Set(
