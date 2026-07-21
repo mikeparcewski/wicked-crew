@@ -235,4 +235,22 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     const cancel = await fetch(`${baseUrl}/api/v1/runs/nope/cancel`, { method: 'POST' });
     expect(cancel.status).toBe(404);
   });
+
+  it('POST /runs/:id/inject 404s on unknown run and 400s on missing body', async () => {
+    const notFound = await fetch(`${baseUrl}/api/v1/runs/nope/inject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', target: 'all' }),
+    });
+    expect(notFound.status).toBe(404);
+
+    const badBody = await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/inject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(badBody.status).toBe(400);
+    const err = (await badBody.json()) as { error: string };
+    expect(err.error).toBe('Invalid request body');
+  });
 });

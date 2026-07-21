@@ -5,4 +5,12 @@ declare module 'wicked-core-ts' {
   interface LaunchOptions {
     workflow?: string;
   }
+  interface Core {
+    /**
+     * Inject an operator message into active PTY worker(s) for `runId`.
+     * `target` is `"all"` (broadcast) or a CLI key (single session).
+     * Resolves to `"ok"` when the command has been queued.
+     */
+    injectWorkerMessage(runId: string, message: string, target: string): Promise<string>;
+  }
 }
