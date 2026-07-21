@@ -860,14 +860,25 @@ export function CenterDashboard({
     [gates],
   );
 
-  // ── Chat sessions (workflow_id === 'chat' or unset legacy) ────────────────
+  // ── Chat sessions (workflow_id === 'chat' or unset legacy); newest-first, unsliced ──
   const chatRuns = useMemo(
     () =>
       runs
         .filter((v) => !v.session.workflow_id || v.session.workflow_id === 'chat')
-        .slice(-4)
+        .slice()
         .reverse(),
     [runs],
+  );
+
+  // ── Work runs — exclude chat sessions so the Runs panel doesn't overlap ────
+  const workRuns = useMemo(
+    () => runs.filter((v) => !!v.session.workflow_id && v.session.workflow_id !== 'chat'),
+    [runs],
+  );
+
+  const activeWorkRuns = useMemo(
+    () => workRuns.filter((v) => ACTIVE_STATUSES.has(v.session.status)),
+    [workRuns],
   );
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -985,15 +996,15 @@ export function CenterDashboard({
               </button>
             </div>
 
-            {runs.length === 0 ? (
+            {workRuns.length === 0 ? (
               <p style={{ fontSize: '11px', color: 'rgba(230,237,243,0.3)', ...mono, fontStyle: 'italic' }}>
-                No sessions yet
+                No work sessions yet
               </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                 {[
-                  ...activeRuns,
-                  ...runs.filter((v) => !ACTIVE_STATUSES.has(v.session.status)).slice(-3).reverse(),
+                  ...activeWorkRuns,
+                  ...workRuns.filter((v) => !ACTIVE_STATUSES.has(v.session.status)).slice(-3).reverse(),
                 ]
                   .slice(0, 5)
                   .map((v) => (
@@ -1002,7 +1013,7 @@ export function CenterDashboard({
               </div>
             )}
 
-            {runs.length > 5 && (
+            {workRuns.length > 5 && (
               <button
                 type="button"
                 onClick={() => navigate('/work')}
@@ -1096,7 +1107,7 @@ export function CenterDashboard({
               </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {chatRuns.map((v) => (
+                {chatRuns.slice(0, 4).map((v) => (
                   <button
                     key={v.session.id}
                     type="button"
@@ -1152,7 +1163,7 @@ export function CenterDashboard({
               </div>
             )}
 
-            {chatRuns.length >= 4 && (
+            {chatRuns.length > 4 && (
               <button
                 type="button"
                 onClick={() => navigate('/chats')}
