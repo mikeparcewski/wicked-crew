@@ -27,9 +27,10 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<StatusTab>('all');
 
+  const workRuns = runs.filter((v) => !!v.session.workflow_id && v.session.workflow_id !== 'chat');
   const searched = query
-    ? runs.filter(v => v.session.problem.toLowerCase().includes(query.toLowerCase()))
-    : runs;
+    ? workRuns.filter(v => v.session.problem.toLowerCase().includes(query.toLowerCase()))
+    : workRuns;
 
   const counts: Record<StatusTab, number> = {
     all: searched.length,

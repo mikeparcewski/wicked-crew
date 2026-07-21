@@ -269,9 +269,8 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
     }).catch(() => { /* sidebar — fail silently */ });
   }, []);
 
-  // Chats = future concept (empty until backend adds chat sessions)
-  const chats: SessionView[] = [];
-  const work = runs;
+  const chats = runs.filter((v) => !v.session.workflow_id || v.session.workflow_id === 'chat');
+  const work  = runs.filter((v) => !!v.session.workflow_id && v.session.workflow_id !== 'chat');
 
   const q = searchQuery.trim().toLowerCase();
   const filteredRepos  = q ? repos.filter(r => r.name.toLowerCase().includes(q)) : repos;
