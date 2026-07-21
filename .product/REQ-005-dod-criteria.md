@@ -62,13 +62,13 @@ All required before Design begins:
 ### Build Phase DoD
 
 - [x] All unit tests pass (Vitest)
-  - Evidence: `npm test` — 155 tests pass across both packages (crew + studio) as of 2026-07-21
+  - Evidence: CI gate green on 2026-07-21 (`npm test` exits 0, all Vitest tests pass across crew + studio packages); see `.product/evidence/build-phase-pass.md` for the original build gate (2026-07-07)
 - [x] All integration tests pass (real SQLite, real subprocess workers)
-  - Evidence: `packages/crew/tests/integration/` — 4 integration test suites (26 tests) all pass; daemon-bridge tests exercise the real wicked-core-ts adapter
+  - Evidence: CI gate green on 2026-07-21 (`packages/crew/tests/integration/` — all integration suites pass; daemon-bridge tests exercise the real wicked-core-ts adapter)
 - [x] TypeScript strict mode: zero errors
-  - Evidence: `npm run typecheck` passes with zero errors across both packages (2026-07-21)
+  - Evidence: CI gate green on 2026-07-21 (`npm run typecheck` exits 0 with zero type errors across both packages)
 - [x] ESLint: zero warnings
-  - Evidence: `npm run lint` passes with zero warnings across both packages (2026-07-21)
+  - Evidence: CI gate green on 2026-07-21 (`npm run lint` exits 0 with zero warnings across both packages)
 - [ ] wicked-testing acceptance pipeline: PASS verdict
   - Not yet run against the current architecture (wicked-core-ts adapter version)
 - [x] Adversarial diff review: no open CRITs or SIGs on the diff vs design spec
