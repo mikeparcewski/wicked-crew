@@ -395,9 +395,9 @@ describe('useRunModel — P2 observability events (EVT-003/004/007)', () => {
     expect(model.units[0]?.workerSessionReuses).toBe(0);
     expect(model.units[0]?.contextInjections).toEqual([]);
   });
+});
 
-  // ── P2 decisions-full (EVT-001/012/013) ──────────────────────────────────
-
+describe('useRunModel — P2 decisions-full events (EVT-001/012/013)', () => {
   test('selectedWorkflow is seeded from snapshot so late-join refresh gets the right value', () => {
     const view = makeView({ workflow_id: 'wf-42' }, []);
     const model = mergeRunModel(view, []);
@@ -438,7 +438,8 @@ describe('useRunModel — P2 observability events (EVT-003/004/007)', () => {
 
   test('unitReworkAmended backward-compat: sets reworkAmendment even when updatedDescription is absent', () => {
     const view = makeView({}, [makeUnit({ ord: 0, description: 'original desc' })]);
-    // Simulate an older daemon that emits unitReworkAmended without updatedDescription
+    // Simulate an older daemon that emits unitReworkAmended without updatedDescription.
+    // CoreEvent.updatedDescription is optional so no type assertion is needed.
     const events: CoreEvent[] = [
       {
         type: 'unitReworkAmended',
@@ -446,7 +447,7 @@ describe('useRunModel — P2 observability events (EVT-003/004/007)', () => {
         ord: 0,
         amendment: 'operator note',
         // updatedDescription intentionally absent
-      } as CoreEvent,
+      },
     ];
     const model = mergeRunModel(view, events);
     expect(model.units[0]?.reworkAmendment).toBe('operator note');
