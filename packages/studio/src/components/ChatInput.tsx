@@ -287,8 +287,9 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     injectInflightRef.current = true;
     setInjecting(true);
     setInjectError(null);
+    const target = injectTarget?.trim() || 'all';
     try {
-      await api.injectMessage(runId, text, injectTarget ?? 'all');
+      await api.injectMessage(runId, text, target);
       setInjectText('');
     } catch (err) {
       setInjectError(err instanceof Error ? err.message : String(err));
@@ -359,8 +360,9 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     const injectStatuses = new Set(['executing', 'distributing', 'planning']);
     if (runStatus && injectStatuses.has(runStatus)) {
       const canInject = injectText.trim().length > 0 && !injecting;
-      const targetLabel = !injectTarget || injectTarget === 'all' ? 'all agents' : injectTarget;
-      const isTargeted = injectTarget && injectTarget !== 'all';
+      const normalizedTarget = injectTarget?.trim() || 'all';
+      const isTargeted = normalizedTarget !== 'all';
+      const targetLabel = isTargeted ? normalizedTarget : 'all agents';
       return (
         <div
           className="px-5 py-4 flex flex-col gap-2 shrink-0"
@@ -412,7 +414,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
                 className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-mono"
                 style={{ background: 'rgba(139,92,246,0.15)', color: '#c4b5fd', border: '1px solid rgba(139,92,246,0.25)' }}
               >
-                → {injectTarget}
+                → {normalizedTarget}
                 {onClearInjectTarget && (
                   <button
                     type="button"
