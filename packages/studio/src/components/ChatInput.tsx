@@ -78,8 +78,6 @@ function ActivePill({
 }
 
 
-// Workflows with dedicated entry points — hidden from the work-mode selector.
-const SYSTEM_WORKFLOW_IDS = new Set(['chat', 'onboarding', 'survey-repo', 'repo-graph', 'domain-graph-slice', 'memories']);
 
 export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOverride, mode, injectTarget, onClearInjectTarget }: Props): React.ReactElement {
   const clearGate = useGateStore((s) => s.clearGate);
@@ -104,7 +102,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   const [roster, setRoster] = useState<RosterSeat[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDef[]>([]);
   const selectableWorkflows = useMemo(
-    () => workflows.filter((w) => !SYSTEM_WORKFLOW_IDS.has(w.id)),
+    () => workflows.filter((w) => !w.is_system),
     [workflows],
   );
   const [selectedClis, setSelectedClis] = useState<Set<string>>(new Set());

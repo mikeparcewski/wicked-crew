@@ -299,6 +299,8 @@ export interface PhaseDef {
 export interface WorkflowDef {
   id: string;
   phases: PhaseDef[];
+  /** True for built-in system workflows that have dedicated entry points — hidden from the work-mode selector. */
+  is_system?: boolean;
 }
 
 // ── System settings ────────────────────────────────────────────────────────────
