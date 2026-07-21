@@ -434,7 +434,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (existsSync(dbPath)) {
       try {
         const { stdout } = await execFileAsync(
-          'wicked-core',
+          process.env['WICKED_CORE_EXE'] ?? 'wicked-core',
           ['coverage', '--db', dbPath, '--json'],
           { timeout: 20_000, cwd: repo.root_path },
         );

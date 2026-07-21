@@ -1,7 +1,8 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { join, dirname, resolve, isAbsolute } from 'node:path';
+import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -46,6 +47,30 @@ function workflowOverlayDir(): string {
 
 function settingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
+}
+
+/** Find the wicked-core standalone binary for the gate-hook command.
+ * Checks common install locations so the Rust actor can build a correct
+ * hook command even when loaded as a napi addon (where current_exe() = node).
+ */
+function locateWickedCoreExe(): string | undefined {
+  const exeName = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+  const candidates: string[] = [];
+  // User-local install (cargo install / manual).
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home) {
+    candidates.push(join(home, '.local', 'bin', exeName));
+    candidates.push(join(home, '.cargo', 'bin', exeName));
+  }
+  // Monorepo dev build.
+  candidates.push(join(dirname(fileURLToPath(import.meta.url)), '../../..', 'wicked-core', 'target', 'release', exeName));
+  // PATH lookup.
+  const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
+  for (const dir of pathDirs) {
+    candidates.push(join(dir, exeName));
+  }
+  const { existsSync } = require('node:fs') as typeof import('node:fs');
+  return candidates.find((p) => existsSync(p));
 }
 
 // The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
@@ -186,6 +211,15 @@ export class CoreAdapter {
     this.engineExec = armExec;
     this.busDbPath = armExec ? opts.busDbPath : undefined;
 
+    // Give the Rust actor the path to the wicked-core standalone binary so the gate-hook
+    // command works when wicked-core is loaded as a napi-rs addon (where current_exe()
+    // returns the Node.js interpreter, not wicked-core). The actor checks WICKED_CORE_EXE
+    // first, so this env wins over the current_exe() fallback.
+    if (!process.env['WICKED_CORE_EXE']) {
+      const wcExe = locateWickedCoreExe();
+      if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
+    }
+
     this.core = opts.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
@@ -299,7 +333,10 @@ export class CoreAdapter {
     } else {
       cloneDir = join(reposRoot, name);
       // Defense-in-depth: name validated by schema, but guard direct calls too.
-      if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+      // Use relative() instead of startsWith(root+'/') so this works cross-platform
+      // (Windows uses backslash separators, making a literal '/' suffix check unreliable).
+      const rel = relative(reposRoot, cloneDir);
+      if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
