@@ -33,7 +33,7 @@ All required before Design begins:
 - [x] All success criteria (SC-001..SC-009) are measurable (have a specific, observable check)
   - Evidence: REQ-001 §7 — each SC has a measurable check and evidence artifact type
 - [x] wicked-studio requirements written (at minimum: scope, domain model, DoD for the UI layer)
-  - Evidence: `from-studio-REQ-001-studio-overview.md` and `DES-STUDIO-001-crew-daemon-studio-on-core-ts.md`
+  - Evidence: `.product/from-studio-REQ-001-studio-overview.md` and `.product/DES-STUDIO-001-crew-daemon-studio-on-core-ts.md`
 
 ### Design Phase DoD
 
