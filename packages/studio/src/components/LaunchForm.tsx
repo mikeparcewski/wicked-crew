@@ -25,7 +25,7 @@ const WORKFLOW_LABELS: Record<string, string> = {
  *
  * Planning note: `launchRun` returns immediately once the Planning stub is created
  * (~1 ms). Council distribution (CLI selection) happens off-thread; progress
- * arrives via the SSE event stream on the run detail page.
+ * arrives via the WebSocket event stream (`/ws`) on the run detail page.
  */
 export function LaunchForm({ onLaunched, onCancel }: Props): React.ReactElement {
   const [problem, setProblem] = useState('');
@@ -337,7 +337,7 @@ export function LaunchForm({ onLaunched, onCancel }: Props): React.ReactElement 
 
       {submitting && elapsedSecs >= 5 && (
         <p className="text-[10px] text-gray-400 mt-1.5 text-center">
-          Creating run… council distribution continues on the run page.
+          Creating run… council distribution happens off-thread once launched.
         </p>
       )}
     </div>
