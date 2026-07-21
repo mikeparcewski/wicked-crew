@@ -35,7 +35,6 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
     if (!host) return;
 
     let disposed = false;
-    let socket: WebSocket | undefined;
 
     const term = new XTerm({
       convertEol: false,
@@ -53,11 +52,6 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
       /* container not laid out yet */
     }
 
-    // Forward keystrokes to the PTY (operator can interact with the agent session).
-    const dataSub = term.onData((chunk: string) => {
-      if (socket && socket.readyState === WebSocket.OPEN) socket.send(chunk);
-    });
-
     const ws = new WebSocket(terminalWsUrl(terminalIdRef.current));
     ws.binaryType = 'arraybuffer';
     ws.onmessage = (ev: MessageEvent) => {
@@ -70,7 +64,11 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
     ws.onclose = () => {
       if (!disposed) term.write('\r\n\x1b[90m[agent session ended]\x1b[0m\r\n');
     };
-    socket = ws;
+
+    // Forward keystrokes to the PTY (operator can interact with the agent session).
+    const dataSub = term.onData((chunk: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+    });
 
     const observe =
       typeof ResizeObserver !== 'undefined'
@@ -88,7 +86,7 @@ export function AgentTerminal({ terminalId, cliKey, onClose }: Props): React.Rea
       observe?.disconnect();
       dataSub.dispose();
       try {
-        socket?.close();
+        ws.close();
       } catch {
         /* already closing */
       }
