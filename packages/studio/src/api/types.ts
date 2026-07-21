@@ -467,6 +467,8 @@ export interface UnitDistributedEvent {
   returned: number | null;
   dissent: number | null;
   degraded_reason: string | null;
+}
+
 // ── Worker injection + reassignment events (core#93) ──────────────────────────
 
 /** An operator message was injected into active worker sessions mid-run. */
