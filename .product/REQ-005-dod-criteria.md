@@ -72,7 +72,7 @@ All required before Design begins:
 - [ ] wicked-testing acceptance pipeline: PASS verdict
   - Not yet run against the current architecture (wicked-core-ts adapter version)
 - [x] Adversarial diff review: no open CRITs or SIGs on the diff vs design spec
-  - Evidence: `.product/evidence/build-adversarial-review-round2-pass.md` — 2 rounds, round 2 PASS
+  - Evidence: `.product/evidence/build-adversarial-review-round2-pass.md` — 3 rounds; see `## Round 3 verdict: PASS` section (file title/frontmatter reference round 2; body records the final round 3 PASS)
 
 ### Test (DoD Verification) Phase DoD
 
