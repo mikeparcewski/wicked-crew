@@ -568,9 +568,10 @@ export function mergeRunModel(snapshot: SessionView, events: readonly CoreEvent[
       case 'unitReworkAmended':
         // Last-write-wins per ord: an operator can amend at most once per gate pause, so
         // a WS reconnect replay just overwrites the same value (idempotent in practice).
-        // Guards are decoupled: reworkAmendment is written whenever ev.amendment is present;
-        // description is only updated if ev.updatedDescription is present, so this remains
-        // backward-compatible with older daemons that might not include the field.
+        // Guards are decoupled: reworkAmendment is written whenever ev.amendment is present
+        // (and ord is defined); description is only updated if ev.updatedDescription is also
+        // present, so this remains backward-compatible with older daemons that might not
+        // include that field.
         if (ord !== undefined && typeof ev.amendment === 'string') {
           const u = ensureUnit(ord);
           u.reworkAmendment = ev.amendment;
