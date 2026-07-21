@@ -293,15 +293,15 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
 
   // Inject an operator message into a run's active worker(s) (§11.7).
   // target="all" broadcasts; any other value targets a specific CLI key.
+  // Use sessions() (IDs only) for existence check — cheaper than sessionsDetail() on a hot path.
   app.post(`${V}/runs/:id/inject`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = InjectSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
-    const views = await adapter.sessionsDetail();
-    const run = views.find((v) => v.session.id === id);
-    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    const ids = await adapter.sessions();
+    if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
     try {
       await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
       return reply.send({ status: 'ok' });
