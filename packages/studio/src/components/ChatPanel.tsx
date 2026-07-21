@@ -125,9 +125,9 @@ function StepFailedCard({
         <span>Step failure</span>
       </div>
       {detail && (
-        <p className="text-[11px] leading-relaxed" style={{ color: 'rgba(230,237,243,0.6)', fontFamily: 'inherit' }}>
+        <pre className="text-[11px] leading-relaxed whitespace-pre-wrap break-words m-0 overflow-hidden" style={{ color: 'rgba(230,237,243,0.6)', fontFamily: 'inherit' }}>
           {detail.length > 200 ? `${detail.slice(0, 200)}…` : detail}
-        </p>
+        </pre>
       )}
       <div className="flex items-center gap-2 mt-1">
         <button
