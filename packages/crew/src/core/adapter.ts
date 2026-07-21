@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { join, dirname, resolve, isAbsolute } from 'node:path';
+import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -332,7 +332,10 @@ export class CoreAdapter {
     } else {
       cloneDir = join(reposRoot, name);
       // Defense-in-depth: name validated by schema, but guard direct calls too.
-      if (!cloneDir.startsWith(reposRoot + '/') && cloneDir !== reposRoot) {
+      // Use relative() instead of startsWith(root+'/') so this works cross-platform
+      // (Windows uses backslash separators, making a literal '/' suffix check unreliable).
+      const rel = relative(reposRoot, cloneDir);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
         throw new Error('Unsafe repo name: would escape the repos directory');
       }
     }
