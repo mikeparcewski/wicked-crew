@@ -156,8 +156,8 @@ wicked-garden's orchestration layer is removed when:
 
 - [ ] `scripts/crew/phase_manager.py` and `scripts/crew/archetypes_v11.py` removed (or deprecated with a clear migration note)
   - Status: still present in wicked-garden; pending migration to wicked-crew-native workflow
-- [ ] `commands/archetype/` commands removed (or marked as deprecated with pointer to wicked-crew)
-  - Status: still present; pending
+- [x] `commands/archetype/` commands removed (or marked as deprecated with pointer to wicked-crew)
+  - Evidence: wicked-garden v12 skills-only migration (merged via PR wicked-garden#1003 and earlier) removed the `commands/` directory entirely. All former commands became actions of consolidated domain router skills or context:fork worker skills. `commands/` no longer exists in wicked-garden; the archetype skill (`skills/archetype/`) is a skills-only invocation — not a slash command. (2026-07-21)
 - [ ] wicked-garden is usable standalone without wicked-crew (utilities still work independently)
   - Status: not yet verified after removal (removal not yet done)
 - [ ] wicked-garden CI validation passes after removal
