@@ -1,7 +1,7 @@
 ---
 name: REQ-005-dod-criteria
 title: wicked-crew — Definition of Done
-status: evidence-verified
+status: partially-verified
 version: 0.2
 date: 2026-07-21
 author: michael.parcewski@accenture.com
@@ -106,15 +106,15 @@ Each SC from REQ-001 §7 has a specific verification method:
 |---|---|---|---|
 | SC-001 | Run full feature workflow end-to-end; query wicked-bus for gate events | `.product/evidence/dod/sc001/verdict.json` | **PASS** |
 | SC-002 | SIGKILL daemon mid-phase; SQLite snapshot before/after resume comparison | `.product/evidence/dod/sc002/verdict.json` | **PASS** |
-| SC-003 | Automated test: 100 runs of gate eval with identical inputs; assert identical outputs | *Governance migrated to wicked-core (Rust); covered by `wicked-core/tests/governance_in_run.rs` and `events_governance_deep.rs`* | **DELEGATED** |
-| SC-004 | Automated test: council dispatch to ≥ 2 workers; assert council artifact `perspectives.length ≥ 2` | *Council dispatch in wicked-core; covered by `wicked-core/tests/p2_gates.rs`* | **DELEGATED** |
-| SC-005 | Automated test: fixture verdicts PASS/CONDITIONAL → gate advances; FAIL → gate blocked | *test-verdict gate policy in wicked-core governance engine; covered by `wicked-core/tests/events_governance_deep.rs`* | **DELEGATED** |
-| SC-006 | Start daemon; open studio; measure time to first WebSocket event | `.product/evidence/dod/sc006/verdict.json` (124ms actual) | **PASS** |
+| SC-003 | Automated test: 100 runs of gate eval with identical inputs; assert identical outputs | *Governance migrated to wicked-core (Rust); covered by `wicked-core/tests/governance_in_run.rs` and `wicked-core/tests/events_governance_deep.rs`. 100-run crew-level test NOT yet run (non-negotiable per §7).* | **DELEGATED / OPEN** |
+| SC-004 | Automated test: council dispatch to ≥ 2 workers; assert council artifact `perspectives.length ≥ 2` | *Council dispatch in wicked-core; covered by `wicked-core/tests/p2_gates.rs`. Crew-level verification not yet run.* | **DELEGATED / OPEN** |
+| SC-005 | Automated test: fixture verdicts PASS/CONDITIONAL → gate advances; FAIL → gate blocked | *test-verdict gate policy in wicked-core; covered by `wicked-core/tests/events_governance_deep.rs`. Crew-level verification not yet run.* | **DELEGATED / OPEN** |
+| SC-006 | Start daemon; open studio; measure time to first WebSocket event | `.product/evidence/dod/sc006/verdict.json` — `wsFirstMsgMs=33.8ms`, `sessionVisibleMs=96ms` | **PASS** |
 | SC-007 | `time wicked-crew start --type feature --goal "x"` on macOS M1; assert < 3s | `.product/evidence/dod/sc007/verdict.json` | **PASS** |
 | SC-008 | Add entry to workers.json; wait ≤ 30s; dispatch to new worker; assert success | `.product/evidence/dod/sc008/verdict.json` | **PASS** |
-| SC-009 | HITL gate approval from studio advances phase gate within 5s | `.product/evidence/dod/sc009/verdict.json` + `sc-studio-hitl/verdict.json` (11ms actual) | **PASS** |
+| SC-009 | HITL gate approval from **terminal CLI** advances phase gate within 5s | `.product/evidence/dod/sc009/verdict.json` — terminal `wicked-crew gate` exit (0), phase advanced in 413ms | **PASS** |
 
-**DELEGATED**: SC-003, SC-004, SC-005 tested the TypeScript governance engine (json-rules-engine, XState v5, council dispatch dispatcher.ts). Those modules have migrated to wicked-core (Rust). The successor tests live in `wicked-core/tests/` and pass as part of the wicked-core CI gate. A crew-level re-verification would require running the system end-to-end with controlled inputs, which the sc001 evidence partially covers (6 auto-gate passes on the same workflow = deterministic for the happy path).
+**DELEGATED / OPEN**: SC-003, SC-004, SC-005 previously tested the TypeScript governance engine (json-rules-engine, XState v5, council dispatch). Those modules migrated to wicked-core (Rust). The successor tests live in `wicked-core/tests/` and pass as part of the wicked-core CI gate — but this does NOT satisfy the §7 non-negotiable for SC-003: 100 automated crew-level runs with identical inputs asserting identical outputs have NOT been run. This is an open gap. The sc001 evidence covers the happy path (6 deterministic auto-gate passes) but does not constitute 100-run equivalence testing. Closing requires a dedicated crew-level integration test that drives the wicked-core-ts adapter 100× and asserts gate output stability.
 
 ---
 
@@ -123,21 +123,21 @@ Each SC from REQ-001 §7 has a specific verification method:
 wicked-studio is done when:
 
 - [x] Connects to wicked-crew daemon REST + WebSocket without configuration (auto-discovers on default port)
-  - Evidence: `dod/sc006/verdict.json` — WebSocket connected, first event within 124ms
+  - Evidence: `.product/evidence/dod/sc006/verdict.json` — WebSocket connected, `wsFirstMsgMs=33.8ms`; `.product/evidence/dod/sc-studio-hitl/verdict.json` — session visible in studio, `notifyDeltaMs=124ms`
 - [x] Session list shows all active and recent sessions with accurate status
-  - Evidence: `dod/sc001/verdict.json` `behavior6_status_accuracy: pass=true`
+  - Evidence: `.product/evidence/dod/sc001/verdict.json` `behavior6_status_accuracy: pass=true`
 - [x] Phase graph visualizes current phase state for a selected session
-  - Evidence: `dod/sc006/verdict.json` — phase state visible in studio
+  - Evidence: `.product/evidence/dod/sc006/verdict.json` — phase state visible in studio
 - [x] HITL gate panel shows phase artifact + governance findings + approve/reject controls
-  - Evidence: `dod/sc-studio-hitl/verdict.json` — gate notification surfaced within 124ms, screenshot `gate-notification.png`
+  - Evidence: `.product/evidence/dod/sc-studio-hitl/verdict.json` — gate notification surfaced within 124ms, screenshot `gate-notification.png`
 - [x] Human approval via studio advances the gate in wicked-crew (verified by phase state change)
-  - Evidence: `dod/sc-studio-hitl/verdict.json` `SCS03_approve_advances_within_3s: pass=true` (11ms actual), `SCS03_next_phase_started: pass=true`
+  - Evidence: `.product/evidence/dod/sc-studio-hitl/verdict.json` `SCS03_approve_advances_within_3s: pass=true` (11ms actual), `SCS03_next_phase_started: pass=true`
 - [x] Event feed shows live wicked-bus events within < 500ms of emission
-  - Evidence: `dod/sc006/verdict.json` — events received within the 5s window; SSE bridge tested in `daemon-bridge.test.ts`
+  - Evidence: `.product/evidence/dod/sc006/verdict.json` — events received within the 5s window; SSE bridge tested in `daemon-bridge.test.ts`
 - [ ] Settings panel allows worker registry view (read-only in v1)
   - Not yet verified with dedicated evidence
 - [x] Works on macOS (Chrome) and responds correctly to daemon being unavailable (shows disconnected state gracefully)
-  - Evidence: `dod/sc006/console-error-log.json` — no console errors; `integration/studio-serving.test.ts` — headless degradation test passes (no studio bundle → 404 gracefully)
+  - Evidence: `.product/evidence/dod/sc006/console-error-log.json` — no console errors; `packages/crew/tests/integration/studio-serving.test.ts` — headless degradation test passes (no studio bundle → 404 gracefully)
 
 ---
 
@@ -190,4 +190,4 @@ These cannot be waived or deferred:
 | Version | Date | Author | Change |
 |---------|------|--------|--------|
 | 0.1 | 2026-07-07 | michael.parcewski@accenture.com | Initial draft — all items unchecked |
-| 0.2 | 2026-07-21 | michael.parcewski@accenture.com | Evidence-phase verification: checked off all items with existing evidence. All 5 phase DoD gates PASS (define/design/test-strategy/build/build-adversarial). All 6 working-app behaviors PASS (SC-001, SC-002, SC-006, SC-007, SC-008, SC-009, SC-studio-HITL). SC-003/SC-004/SC-005 marked DELEGATED to wicked-core (governance/council migrated to Rust). Remaining open: wicked-testing acceptance pipeline re-run on wicked-core-ts architecture, settings panel evidence, wicked-garden scope reduction (separate workstream). |
+| 0.2 | 2026-07-21 | michael.parcewski@accenture.com | Evidence-phase verification: checked off all items with existing evidence. All 5 phase DoD gates PASS (define/design/test-strategy/build/build-adversarial). Behaviors verified: SC-001 (session start, dispatch, auto-gate, status — 4 behaviors), SC-002 (crash+resume), SC-006 (studio connectivity, wsFirstMsgMs=33.8ms), SC-007 (startup time), SC-008 (worker hot-add), SC-009 (terminal HITL gate), SC-studio-hitl (studio HITL panel, 11ms approve). SC-003/SC-004/SC-005 marked DELEGATED/OPEN — governance migrated to wicked-core Rust; crew-level 100-run test NOT yet run (non-negotiable gap). Status set to partially-verified. Remaining open: wicked-testing acceptance pipeline re-run, SC-003/004/005 crew-level verification, settings panel evidence, wicked-garden scope reduction (separate workstream). Fixed bot findings: evidence paths corrected to `.product/evidence/dod/...`, SC-006 timing corrected to wsFirstMsgMs=33.8ms, SC-009 clarified as terminal HITL (not studio), test path corrected to packages/crew/tests/integration/studio-serving.test.ts. |
