@@ -12,7 +12,7 @@ const components: Components = {
       {children}
     </a>
   ),
-  code: ({ className, children, ...rest }) => {
+  code: ({ className, children, node: _node, ...rest }) => {
     const isBlock = className?.startsWith('language-');
     if (isBlock) {
       return (
