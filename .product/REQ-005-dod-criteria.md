@@ -69,8 +69,8 @@ All required before Design begins:
   - Evidence: CI `npm run typecheck` exits 0 on every merge
 - [x] ESLint: zero warnings
   - Evidence: CI `npm run lint` exits 0 on every merge
-- [ ] wicked-testing acceptance pipeline: PASS verdict
-  - Not yet run against the current architecture (wicked-core-ts adapter version)
+- [x] wicked-testing acceptance pipeline: PASS verdict
+  - Evidence: `.wicked-testing/evidence/crew-l3-20260721/verdict.json` — reviewer agent (`acceptance-test-reviewer`, structurally separate from executor `claude-code-main-session`) confirmed PASS for all 4 assertions: A1 POST returns HTTP 201, A2 run reaches completed status (timing within 30s inferred from 7.77s vitest run), A3 session status = completed, A4 all units have denial_reason = null. Scenario: `.wicked-testing/scenarios/feature-workflow-end-to-end.md` (2026-07-21)
 
 ### Build Adversarial Phase DoD
 

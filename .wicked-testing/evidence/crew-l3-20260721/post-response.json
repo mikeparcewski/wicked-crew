@@ -1,0 +1,13 @@
+{
+  "http_status": 201,
+  "body": {
+    "runId": "at-e2e-01"
+  },
+  "endpoint": "POST /api/v1/runs",
+  "timestamp": "2026-07-21T09:44:43Z",
+  "request_body": {
+    "problem": "acceptance e2e probe",
+    "sessionId": "at-e2e-01",
+    "clisJson": "[{\"key\":\"stub\",\"display_name\":\"Stub\",\"binary\":\"stub\",\"headless_invocation\":\"stub {PROMPT}\"}]"
+  }
+}

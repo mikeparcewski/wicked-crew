@@ -1,0 +1,32 @@
+{
+  "scenario": "feature-workflow-end-to-end",
+  "maps_to": ["SC-001"],
+  "run_id": "crew-l3-20260721",
+  "date": "2026-07-21",
+  "reviewer": "acceptance-test-reviewer",
+  "executor": "claude-code-main-session",
+  "assertions": {
+    "A1": {
+      "verdict": "PASS",
+      "evidence": "post-response.json: http_status = 201, endpoint = 'POST /api/v1/runs', body = {\"runId\": \"at-e2e-01\"}, timestamp = 2026-07-21T09:44:43Z. Request body matches scenario step 2 exactly (problem, sessionId, clisJson with stub worker). Direct confirmation.",
+      "notes": "Updated from PARTIAL after post-response.json was added to the evidence package."
+    },
+    "A2": {
+      "verdict": "PASS",
+      "evidence": "run-response.json shows run.session.status = 'completed'. The file's existence means the test reached terminal state without a timeout. vitest-run.txt confirms all 27 tests passed (duration 7.77s), consistent with the run completing well within the 30s limit. Exact per-request latency is not captured.",
+      "notes": "Timing within 30s is inferred from test success; no explicit timestamp delta in evidence. Acceptable for this trust level (local-dev)."
+    },
+    "A3": {
+      "verdict": "PASS",
+      "evidence": "run-response.json: run.session.status = 'completed'. Not 'failed' or 'cancelled'. Direct confirmation.",
+      "notes": "None."
+    },
+    "A4": {
+      "verdict": "PASS",
+      "evidence": "run-response.json: single unit 'at-e2e-01:u1' has denial_reason = null, status = 'done', phase_status = 'approved'. routing.agreement_pct = 100, dissent = 0. Gate allowed the unit; no denial recorded.",
+      "notes": "One unit total — assertion is satisfied for all present units."
+    }
+  },
+  "overall_verdict": "PASS",
+  "summary": "All four assertions pass. A1: post-response.json confirms http_status=201 for POST /api/v1/runs with body {runId: 'at-e2e-01'} — direct confirmation. A2: run-response.json shows run.session.status='completed'; vitest completed in 7.77s (well within the 30s limit). A3: run.session.status='completed' explicitly, not 'failed' or 'cancelled'. A4: the single unit at-e2e-01:u1 has denial_reason=null, status='done', phase_status='approved', agreement_pct=100. The run completed autonomously end-to-end with stub worker and all governance units approved."
+}
