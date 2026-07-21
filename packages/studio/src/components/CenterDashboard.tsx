@@ -187,8 +187,8 @@ interface GateCardProps {
   ord: number | undefined;
   prompt: string | undefined;
   sessionLbl: string;
-  onApprove: (runId: string, amend?: string) => void;
-  onReject: (runId: string) => void;
+  onApprove: (runId: string, amend?: string) => Promise<void>;
+  onReject: (runId: string) => Promise<void>;
 }
 
 function GateActionCard({
@@ -208,6 +208,8 @@ function GateActionCard({
       setLoading(true);
       try {
         await action();
+      } catch {
+        // errors surface via the gate API; keep loading state clean
       } finally {
         setLoading(false);
       }
@@ -325,7 +327,7 @@ function GateActionCard({
         <button
           type="button"
           disabled={loading}
-          onClick={() => void run(() => Promise.resolve(onApprove(runId)))}
+          onClick={() => void run(() => onApprove(runId))}
           style={{
             background: '#3fb950',
             color: '#0d1117',
@@ -348,7 +350,7 @@ function GateActionCard({
             if (!steerOpen) {
               setSteerOpen(true);
             } else if (amend.trim()) {
-              void run(() => Promise.resolve(onApprove(runId, amend.trim())));
+              void run(() => onApprove(runId, amend.trim()));
             }
           }}
           style={{
@@ -369,7 +371,7 @@ function GateActionCard({
         <button
           type="button"
           disabled={loading}
-          onClick={() => void run(() => Promise.resolve(onReject(runId)))}
+          onClick={() => void run(() => onReject(runId))}
           style={{
             background: 'rgba(248,81,73,0.1)',
             color: '#f85149',
@@ -590,13 +592,13 @@ function SendPanel({ activeRuns }: SendPanelProps): React.ReactElement {
     setSending(true);
     try {
       if (target === '__all__') {
-        await Promise.allSettled(
-          activeRuns.map((v) =>
-            api.injectMessage(v.session.id, trimmed, 'all'),
-          ),
+        const results = await Promise.allSettled(
+          activeRuns.map((v) => api.injectMessage(v.session.id, trimmed, 'all')),
         );
+        const failed = results.filter((r) => r.status === 'rejected').length;
+        if (failed > 0) throw new Error(`${failed} inject(s) failed`);
       } else {
-        await api.injectMessage(target, trimmed, 'session');
+        await api.injectMessage(target, trimmed, 'all');
       }
       setMessage('');
       setSent(true);
@@ -764,29 +766,25 @@ export function CenterDashboard({
 
   // ── Gate handlers (with steering store + gate-store sync) ─────────────────
   const handleApprove = useCallback(
-    (runId: string, amend?: string): void => {
-      void (async () => {
-        await api.confirmGate(runId, { approve: true, ...(amend ? { amend } : {}) });
-        recordSteering({
-          runId,
-          action: amend ? 'approve-with-steer' : 'approve',
-          ...(amend ? { amend } : {}),
-        });
-        clearGate(runId);
-        onApproveGate(runId, amend);
-      })();
+    async (runId: string, amend?: string): Promise<void> => {
+      await api.confirmGate(runId, { approve: true, ...(amend ? { amend } : {}) });
+      recordSteering({
+        runId,
+        action: amend ? 'approve-with-steer' : 'approve',
+        ...(amend ? { amend } : {}),
+      });
+      clearGate(runId);
+      onApproveGate(runId, amend);
     },
     [clearGate, recordSteering, onApproveGate],
   );
 
   const handleReject = useCallback(
-    (runId: string): void => {
-      void (async () => {
-        await api.confirmGate(runId, { approve: false });
-        recordSteering({ runId, action: 'reject' });
-        clearGate(runId);
-        onRejectGate(runId);
-      })();
+    async (runId: string): Promise<void> => {
+      await api.confirmGate(runId, { approve: false });
+      recordSteering({ runId, action: 'reject' });
+      clearGate(runId);
+      onRejectGate(runId);
     },
     [clearGate, recordSteering, onRejectGate],
   );
