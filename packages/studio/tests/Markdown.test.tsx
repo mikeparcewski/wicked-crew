@@ -23,9 +23,11 @@ describe('Markdown', () => {
     expect(screen.getByText('console.log("hi")')).toBeInTheDocument();
   });
 
-  it('renders a fenced code block without a language specifier', () => {
-    render(<Markdown>{'```\nplain code\n```'}</Markdown>);
-    expect(screen.getByText('plain code')).toBeInTheDocument();
+  it('renders a fenced code block without a language specifier as a block', () => {
+    const { container } = render(<Markdown>{'```\nplain code\n```'}</Markdown>);
+    const el = container.querySelector('code');
+    expect(el?.textContent).toContain('plain code');
+    expect(el?.className).toContain('block');
   });
 
   it('renders a GFM table', () => {

@@ -13,7 +13,8 @@ const components: Components = {
     </a>
   ),
   code: ({ className, children }) => {
-    const isBlock = className?.startsWith('language-');
+    // Block fences always include a trailing \n; inline code never does.
+    const isBlock = !!className?.startsWith('language-') || (typeof children === 'string' && children.includes('\n'));
     if (isBlock) {
       return (
         <code
