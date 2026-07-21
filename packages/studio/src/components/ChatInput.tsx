@@ -4,7 +4,7 @@ import type { EntityMode, LaunchRunBody, RepoEntry, RosterSeat, WorkflowDef } fr
 import { useGateStore } from '../store/gates.js';
 import { ContextPopover } from './ContextPopover.js';
 import type { ConfirmMode } from './ContextPopover.js';
-import type { RunMode } from './ChatPanel.js';
+import type { RunMode } from './runMode.js';
 
 interface Props {
   /** If set, we're in "run selected" mode — steer if gated, otherwise placeholder. */

@@ -7,15 +7,9 @@ import { STATUS_STYLE } from './RunCard.js';
 import { SteeringGate } from './SteeringGate.js';
 import { ChatInput } from './ChatInput.js';
 import { Markdown } from './Markdown.js';
-
-/** Maps to LaunchRunBody.humanConfirm (Ask / Balanced / Autonomous). */
-export type RunMode = 'ask' | 'balanced' | 'autonomous';
-
-const MODE_LABELS: Record<RunMode, string> = {
-  ask:        'Ask',
-  balanced:   'Balanced',
-  autonomous: 'Autonomous',
-};
+import type { RunMode } from './runMode.js';
+import { MODE_LABELS } from './runMode.js';
+export type { RunMode } from './runMode.js';
 
 interface Props {
   view: SessionView | null;

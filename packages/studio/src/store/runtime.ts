@@ -12,7 +12,7 @@ export interface LoggedEvent {
   seq: number;
   type: string;
   ord?: number;
-  /** Attempt number — preserved for stepFailed and crashRecoveryRedrive events. */
+  /** Attempt number — preserved from any event that carries an `attempt` field. */
   attempt?: number;
   ts: number;
   /** A short human summary of the frame (cli won, description, prompt, message...). */
