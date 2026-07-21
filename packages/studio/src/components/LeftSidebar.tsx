@@ -269,8 +269,15 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
     }).catch(() => { /* sidebar — fail silently */ });
   }, []);
 
-  const chats = runs.filter((v) => !v.session.workflow_id || v.session.workflow_id === 'chat');
-  const work  = runs.filter((v) => !!v.session.workflow_id && v.session.workflow_id !== 'chat');
+  const chats: SessionView[] = [];
+  const work: SessionView[] = [];
+  for (const v of runs) {
+    if (!v.session.workflow_id || v.session.workflow_id === 'chat') {
+      chats.push(v);
+    } else {
+      work.push(v);
+    }
+  }
 
   const q = searchQuery.trim().toLowerCase();
   const filteredRepos  = q ? repos.filter(r => r.name.toLowerCase().includes(q)) : repos;
