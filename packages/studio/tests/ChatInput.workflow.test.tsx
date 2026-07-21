@@ -14,7 +14,7 @@ beforeEach(() => {
 describe('ChatInput workflow selector (system-workflow filter)', () => {
   it('hides workflows with is_system: true from the ContextPopover dropdown', async () => {
     const user = userEvent.setup();
-    vi.spyOn(client.api, 'listWorkflows').mockResolvedValue({
+    vi.mocked(client.api.listWorkflows).mockResolvedValue({
       workflows: [
         { id: 'chat',      is_system: true,  phases: [] },
         { id: 'onboarding', is_system: true, phases: [] },
