@@ -467,6 +467,26 @@ export interface UnitDistributedEvent {
   returned: number | null;
   dissent: number | null;
   degraded_reason: string | null;
+// ── Worker injection + reassignment events (core#93) ──────────────────────────
+
+/** An operator message was injected into active worker sessions mid-run. */
+export interface WorkerMessageInjectedEvent {
+  type: 'workerMessageInjected';
+  session: string;
+  message: string;
+  /** `"all"` or the cli_key that was targeted. */
+  target: string;
+}
+
+/** A unit was stopped and re-dispatched to a different CLI (or re-routed via council). */
+export interface UnitReassignedEvent {
+  type: 'unitReassigned';
+  session: string;
+  ord: number;
+  attempt: number;
+  previousCli: string;
+  /** `null` means the council was re-convened and its choice is the new assignment. */
+  newCli: string | null;
 }
 
 // ── Governance types (crew#40/42/43) ───────────────────────────────────────────
