@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { EntityMode, LaunchRunBody, RepoEntry, RosterSeat, WorkflowDef } from '../api/types.js';
 import { useGateStore } from '../store/gates.js';
@@ -103,6 +103,10 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
   const [workflow, setWorkflow] = useState('');
   const [roster, setRoster] = useState<RosterSeat[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDef[]>([]);
+  const selectableWorkflows = useMemo(
+    () => workflows.filter((w) => !SYSTEM_WORKFLOW_IDS.has(w.id)),
+    [workflows],
+  );
   const [selectedClis, setSelectedClis] = useState<Set<string>>(new Set());
   const [repos, setRepos] = useState<RepoEntry[]>([]);
   const [repoRefs, setRepoRefs] = useState<string[]>([]);
@@ -587,7 +591,7 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
                 onBeforeOrdChange={setBeforeOrd}
                 entityMode={entityMode}
                 onEntityModeChange={setEntityMode}
-                workflows={workflows.filter((w) => !SYSTEM_WORKFLOW_IDS.has(w.id))}
+                workflows={selectableWorkflows}
                 workflow={workflow}
                 onWorkflowChange={(wf) => {
                   setWorkflow(wf);
