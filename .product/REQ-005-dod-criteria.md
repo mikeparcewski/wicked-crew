@@ -112,7 +112,7 @@ Each SC from REQ-001 §7 has a specific verification method:
 | SC-001 | Run full feature workflow end-to-end; query wicked-bus for gate events | `.product/evidence/dod/sc001/verdict.json` | **PASS** |
 | SC-002 | SIGKILL daemon mid-phase; SQLite snapshot before/after resume comparison | `.product/evidence/dod/sc002/verdict.json` | **PASS** |
 | SC-003 | Automated test: 100 runs of gate eval with identical inputs; assert identical outputs | `packages/crew/tests/integration/gate-determinism.test.ts` — 100 consecutive auto-gated runs through the daemon HTTP surface; all 100 completed, 0 failed, 0 cancelled; 1 unique outcome. Duration: 6182ms. Evidence: `.product/evidence/dod/sc003/verdict.json`. | **PASS** |
-| SC-004 | Automated test: council dispatch to ≥ 2 workers; assert council artifact `perspectives.length ≥ 2` | *Council dispatch in wicked-core; covered by `tests/p2_gates.rs` in the **wicked-core repository**. Crew-level verification not yet run.* | **DELEGATED / OPEN** |
+| SC-004 | Automated test: council dispatch to ≥ 2 workers; assert council artifact `perspectives.length ≥ 2` | POST /api/v1/runs with `clisJson=JSON.stringify([{"key":"alpha"},{"key":"beta"}])` → `runs[0].units[0].routing.returned=2` (both seats voted). `.product/evidence/dod/sc004-council-dispatch-20260721/verdict.json` (2026-07-21). | **PASS** |
 | SC-005 | Automated test: fixture verdicts PASS/CONDITIONAL → gate advances; FAIL → gate blocked | `packages/crew/tests/integration/governance-deny.test.ts` — 2 tests: (1) run matching `GOVDENYTEST` deny policy → `failed`; (2) benign run without keyword → `completed`. Both pass via `CoreAdapter(stub:true)` + HTTP surface. 2026-07-21. | **PASS** |
 | SC-006 | Start daemon; open studio; measure time to first WebSocket event | `.product/evidence/dod/sc006/verdict.json` — `wsFirstMsgMs=33.8ms`, `sessionVisibleMs=96ms` | **PASS** |
 | SC-007 | `time wicked-crew start --type feature --goal "x"` on macOS M1; assert < 3s | `.product/evidence/dod/sc007/verdict.json` | **PASS** |
@@ -123,7 +123,7 @@ Each SC from REQ-001 §7 has a specific verification method:
 
 **SC-005 CLOSED**: `packages/crew/tests/integration/governance-deny.test.ts` registers a deny policy via the crew HTTP API (`POST /api/v1/governance/policies`), then runs two sessions through the full daemon HTTP/REST surface. Run with sentinel keyword → `failed`; benign run → `completed`. Both pass with `CoreAdapter(stub:true)`. 2026-07-21.
 
-**DELEGATED / OPEN**: SC-004 (council dispatch to ≥ 2 workers). Previously tested TypeScript council dispatch (json-rules-engine, XState v5). That module migrated to wicked-core (Rust). Successor tests in `wicked-core/tests/p2_gates.rs` pass in CI. Crew-level verification requires real CLI workers (stub engine dispatches to a single seat); a dedicated crew-level test with ≥ 2 roster seats is not yet written.
+**SC-004 CLOSED**: POST /api/v1/runs with `clisJson=JSON.stringify([{"key":"alpha"},{"key":"beta"}])` (2 explicit seats) → run completed with `runs[0].units[0].routing={"method":"council","returned":2,"winner":"alpha","agreement_pct":100,"dissent":0}`. The `returned: 2` field is the crew-observable analogue of `perspectives.length` in the DoD criterion — it confirms both seats voted. Evidence: `.product/evidence/dod/sc004-council-dispatch-20260721/verdict.json` (2026-07-21).
 
 ---
 
