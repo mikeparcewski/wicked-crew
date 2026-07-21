@@ -83,9 +83,9 @@ async function launchRun(sessionId: string): Promise<void> {
       clisJson: SEATS,
     }),
   });
+  const body = await res.json().catch(() => null);
   if (res.status !== 201) {
-    const body = await res.text();
-    throw new Error(`POST /runs failed ${res.status}: ${body}`);
+    throw new Error(`POST /runs failed ${res.status}: ${JSON.stringify(body)}`);
   }
 }
 
@@ -163,5 +163,15 @@ describe(`SC-003: gate evaluation is deterministic across ${RUNS} consecutive ru
       uniqueSignatures.size,
       `unit signatures differed across runs — nondeterminism detected at the unit level`,
     ).toBe(1);
-  }, RUNS * RUN_TIMEOUT_MS);
+
+    // Gate allowance: assert no unit was denied across any run.
+    // Parse the common (and unique) signature and check every unit's denial_reason.
+    const units = JSON.parse([...uniqueSignatures][0]) as UnitView[];
+    for (const unit of units) {
+      expect(
+        unit.denial_reason,
+        `unit ord=${unit.ord} was denied (denial_reason: ${unit.denial_reason})`,
+      ).toBeNull();
+    }
+  }, 60000);
 });

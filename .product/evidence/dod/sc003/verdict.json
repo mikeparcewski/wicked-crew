@@ -15,12 +15,20 @@
     },
     "A2_identical_outcomes": {
       "pass": true,
-      "description": "all 100 runs produced the same terminal status (determinism proven)",
+      "description": "all 100 runs produced the same terminal status (determinism at session level)",
       "unique_outcomes": 1,
       "outcome": "completed"
+    },
+    "A3_identical_unit_signatures": {
+      "pass": true,
+      "description": "all 100 runs produced the same unit-level signature (ord+stage+description+status+denial_reason) — determinism at the unit level",
+      "unique_signatures": 1
+    },
+    "A4_no_unit_denied": {
+      "pass": true,
+      "description": "all units across all runs have denial_reason=null — gate allowed every unit"
     }
   },
   "verdict": "PASS",
-  "duration_ms": 6182,
-  "note": "Test uses CoreAdapter(stub:true) — deterministic offline stub engine, no real LLM or network. Identical inputs (same workflow, same stub worker, no humanConfirm) → identical outputs across 100 consecutive runs through the daemon HTTP/REST surface."
+  "note": "Test uses CoreAdapter(stub:true) — deterministic offline stub engine, no real LLM or network. Polls GET /api/v1/runs/:id (not the full list) for per-run status. Identical inputs → identical terminal status, identical unit signatures, no unit denials across 100 consecutive runs through the daemon HTTP/REST surface."
 }
