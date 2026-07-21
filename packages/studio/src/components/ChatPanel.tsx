@@ -115,9 +115,11 @@ function StopIcon(): React.ReactElement {
 function StepFailedCard({
   detail,
   onStop,
+  canStop,
 }: {
   detail: string;
   onStop: () => void;
+  canStop: boolean;
 }): React.ReactElement {
   return (
     <div
@@ -145,8 +147,9 @@ function StepFailedCard({
         </button>
         <button
           type="button"
-          onClick={onStop}
-          className="rounded px-3 py-1 text-[11px] font-semibold transition-opacity hover:opacity-100 opacity-80"
+          onClick={canStop ? onStop : undefined}
+          disabled={!canStop}
+          className="rounded px-3 py-1 text-[11px] font-semibold transition-opacity hover:opacity-100 opacity-80 disabled:opacity-30 disabled:cursor-not-allowed"
           style={{ background: 'rgba(248,81,73,0.15)', color: '#f85149', border: '1px solid rgba(248,81,73,0.3)' }}
         >
           Stop run
@@ -190,6 +193,7 @@ function ModePill({
         <button
           key={m}
           type="button"
+          aria-pressed={mode === m}
           onClick={() => onChange(m)}
           className="px-3 py-1 text-[11px] font-mono font-medium transition-colors"
           style={
@@ -273,8 +277,8 @@ function RunChat({
 
   const style = STATUS_STYLE[session.status] ?? { label: session.status, className: '', color: 'rgba(230,237,243,0.5)' };
   const isTerminal = ['completed', 'cancelled', 'failed'].includes(session.status);
-  const systemLog = log.filter((e) => SYSTEM_EVENT_TYPES.has(e.type));
-  const actionLog = log.filter((e) => ACTION_EVENT_TYPES.has(e.type));
+  // Keep action + system events interleaved in arrival order (log is seq-ordered).
+  const eventLog = log.filter((e) => SYSTEM_EVENT_TYPES.has(e.type) || ACTION_EVENT_TYPES.has(e.type));
   const dotColor = statusDotColor(session.status);
   const pulse = ['executing', 'distributing', 'planning', 'awaiting_human'].includes(session.status);
 
@@ -477,29 +481,37 @@ function RunChat({
           );
         })}
 
-        {/* Inline action cards (stepFailed / crashRecoveryRedrive) */}
-        {actionLog.map((entry) => (
-          <div key={entry.seq} className="flex flex-col gap-2">
-            {entry.type === 'stepFailed' && (
-              <StepFailedCard detail={entry.detail} onStop={stopRun} />
-            )}
-            {entry.type === 'crashRecoveryRedrive' && (
-              <CrashRedriveCard attempt={entry.attempt ?? 1} />
-            )}
-          </div>
-        ))}
-
-        {/* System event pills */}
-        {systemLog.map((entry) => (
-          <div key={entry.seq} className="flex justify-center">
-            <span
-              className="text-xs rounded-full px-3 py-1 font-mono"
-              style={{ color: 'rgba(230,237,243,0.4)', background: '#161c26', border: '1px solid rgba(230,237,243,0.07)' }}
-            >
-              {systemEventLabel(entry.type, entry.detail)}
-            </span>
-          </div>
-        ))}
+        {/* Action cards + system event pills — rendered in arrival (seq) order */}
+        {eventLog.map((entry) => {
+          if (entry.type === 'stepFailed') {
+            return (
+              <div key={entry.seq} className="flex flex-col gap-2">
+                <StepFailedCard
+                  detail={entry.detail}
+                  onStop={stopRun}
+                  canStop={onKill !== undefined}
+                />
+              </div>
+            );
+          }
+          if (entry.type === 'crashRecoveryRedrive') {
+            return (
+              <div key={entry.seq} className="flex flex-col gap-2">
+                <CrashRedriveCard attempt={entry.attempt ?? 1} />
+              </div>
+            );
+          }
+          return (
+            <div key={entry.seq} className="flex justify-center">
+              <span
+                className="text-xs rounded-full px-3 py-1 font-mono"
+                style={{ color: 'rgba(230,237,243,0.4)', background: '#161c26', border: '1px solid rgba(230,237,243,0.07)' }}
+              >
+                {systemEventLabel(entry.type, entry.detail)}
+              </span>
+            </div>
+          );
+        })}
 
         {/* Steering gate */}
         {session.status === 'awaiting_human' && (
@@ -518,6 +530,7 @@ function RunChat({
       <ChatInput
         runId={isTerminal ? null : session.id}
         runStatus={isTerminal ? null : session.status}
+        mode={mode}
         onLaunched={onLaunched}
       />
     </div>

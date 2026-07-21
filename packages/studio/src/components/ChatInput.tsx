@@ -70,8 +70,7 @@ function ActivePill({
 
 function modeToConfirm(m: RunMode): string | undefined {
   if (m === 'ask') return 'all';
-  if (m === 'autonomous') return undefined;
-  return undefined; // balanced = default (no override)
+  return undefined; // balanced + autonomous defer to the context popover / workflow defaults
 }
 
 export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOverride, mode }: Props): React.ReactElement {
@@ -230,10 +229,10 @@ export function ChatInput({ runId, runStatus, onLaunched, embedded, workflowOver
     const seats = roster.filter((s) => selectedClis.has(s.key));
     if (seats.length > 0) body.clisJson = JSON.stringify(seats);
     body.entityMode = entityMode;
-    // Mode prop takes precedence over the per-launch confirm selector.
-    if (mode !== undefined) {
-      const mc = modeToConfirm(mode);
-      if (mc) body.humanConfirm = mc;
+    // Ask mode forces gate-all; balanced/autonomous fall through to popover selection.
+    const modeOverride = mode !== undefined ? modeToConfirm(mode) : undefined;
+    if (modeOverride !== undefined) {
+      body.humanConfirm = modeOverride;
     } else if (confirmMode === 'all') {
       body.humanConfirm = 'all';
     } else if (confirmMode === 'before') {
