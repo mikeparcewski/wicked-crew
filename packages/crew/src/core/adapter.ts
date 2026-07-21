@@ -53,19 +53,20 @@ function settingsFilePath(): string {
  * hook command even when loaded as a napi addon (where current_exe() = node).
  */
 function locateWickedCoreExe(): string | undefined {
+  const exeName = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
   const candidates: string[] = [];
   // User-local install (cargo install / manual).
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (home) {
-    candidates.push(join(home, '.local', 'bin', 'wicked-core'));
-    candidates.push(join(home, '.cargo', 'bin', 'wicked-core'));
+    candidates.push(join(home, '.local', 'bin', exeName));
+    candidates.push(join(home, '.cargo', 'bin', exeName));
   }
   // Monorepo dev build.
-  candidates.push(join(dirname(new URL(import.meta.url).pathname), '../../..', 'wicked-core', 'target', 'release', 'wicked-core'));
+  candidates.push(join(dirname(new URL(import.meta.url).pathname), '../../..', 'wicked-core', 'target', 'release', exeName));
   // PATH lookup.
   const pathDirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
   for (const dir of pathDirs) {
-    candidates.push(join(dir, process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core'));
+    candidates.push(join(dir, exeName));
   }
   const { existsSync } = require('node:fs') as typeof import('node:fs');
   return candidates.find((p) => existsSync(p));
