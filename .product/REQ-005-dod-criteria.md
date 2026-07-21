@@ -38,7 +38,7 @@ All required before Design begins:
 ### Design Phase DoD
 
 - [x] DES-001 (technical design) covers: daemon architecture, REST API spec, WebSocket event schema, SQLite schema, XState v5 FSM definition, governance engine design, worker dispatch protocol, wicked-studio component hierarchy
-  - Evidence: `.product/evidence/design-phase-pass.md` (PASS, 3 rounds, 2026-07-07); architecture subsequently migrated to wicked-core-ts NAPI adapter — DES-001 updated accordingly
+  - Evidence: `.product/evidence/design-phase-pass.md` (PASS, 3 rounds, 2026-07-07); architecture subsequently migrated to wicked-core-ts NAPI adapter — Rust execution engine design is in `wicked-core/.product/DES-EXEC-001`; crew DES-001 covers the pre-migration TypeScript design spec
 - [x] API contract (REST + WebSocket) is frozen before build begins
   - Evidence: DES-001-technical-design.md REST + WebSocket spec sections
 - [x] Worker protocol spec: exact stdin/stdout format, output parsing rules, timeout handling
@@ -72,7 +72,7 @@ All required before Design begins:
 - [ ] wicked-testing acceptance pipeline: PASS verdict
   - Not yet run against the current architecture (wicked-core-ts adapter version)
 - [x] Adversarial diff review: no open CRITs or SIGs on the diff vs design spec
-  - Evidence: `.product/evidence/build-adversarial-review-round2-pass.md` — 3 rounds, round 3 PASS
+  - Evidence: `.product/evidence/build-adversarial-review-round2-pass.md` — 2 rounds, round 2 PASS
 
 ### Test (DoD Verification) Phase DoD
 
