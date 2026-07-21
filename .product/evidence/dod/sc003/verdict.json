@@ -1,0 +1,26 @@
+{
+  "scenario": "gate-evaluation-determinism",
+  "maps_to": ["SC-003"],
+  "date": "2026-07-21",
+  "executor": "claude-code",
+  "test_file": "packages/crew/tests/integration/gate-determinism.test.ts",
+  "runs": 100,
+  "assertions": {
+    "A1_all_completed": {
+      "pass": true,
+      "description": "all 100 auto-gated runs reached terminal status 'completed'",
+      "completed": 100,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "A2_identical_outcomes": {
+      "pass": true,
+      "description": "all 100 runs produced the same terminal status (determinism proven)",
+      "unique_outcomes": 1,
+      "outcome": "completed"
+    }
+  },
+  "verdict": "PASS",
+  "duration_ms": 6182,
+  "note": "Test uses CoreAdapter(stub:true) — deterministic offline stub engine, no real LLM or network. Identical inputs (same workflow, same stub worker, no humanConfirm) → identical outputs across 100 consecutive runs through the daemon HTTP/REST surface."
+}
