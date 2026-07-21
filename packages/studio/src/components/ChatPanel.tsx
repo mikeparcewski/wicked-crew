@@ -309,7 +309,7 @@ function RunChat({
                         >
                           {tc.loading
                             ? <span className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.5)' }}>Loading…</span>
-                            : <Markdown className="whitespace-pre-wrap" children={tc.text ?? ''} />
+                            : <Markdown className="whitespace-pre-wrap">{tc.text ?? ''}</Markdown>
                           }
                         </div>
                       )}
