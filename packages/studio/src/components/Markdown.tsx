@@ -12,14 +12,13 @@ const components: Components = {
       {children}
     </a>
   ),
-  code: ({ className, children, node: _node, ...rest }) => {
+  code: ({ className, children }) => {
     const isBlock = className?.startsWith('language-');
     if (isBlock) {
       return (
         <code
           className={`block overflow-auto rounded-lg px-4 py-3 text-xs leading-5 font-mono my-2 ${className ?? ''}`}
           style={{ background: '#0d1117', color: '#e6edf3' }}
-          {...rest}
         >
           {children}
         </code>
@@ -29,7 +28,6 @@ const components: Components = {
       <code
         className="rounded px-1.5 py-0.5 text-xs font-mono"
         style={{ background: 'rgba(230,237,243,0.1)', color: '#e6edf3' }}
-        {...rest}
       >
         {children}
       </code>
