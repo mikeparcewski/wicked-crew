@@ -80,19 +80,13 @@ export function App(): React.ReactElement {
   // Dashboard gate callbacks — the CenterDashboard handles the API call + store
   // clearing itself; these callbacks exist for any post-confirmation side-effects
   // the parent needs (currently: refresh the run list to pick up status changes).
-  const onDashboardApproveGate = useCallback(
-    (_runId: string, _amend?: string): void => {
-      refresh();
-    },
-    [refresh],
-  );
+  const onDashboardApproveGate = useCallback((): void => {
+    refresh();
+  }, [refresh]);
 
-  const onDashboardRejectGate = useCallback(
-    (_runId: string): void => {
-      refresh();
-    },
-    [refresh],
-  );
+  const onDashboardRejectGate = useCallback((): void => {
+    refresh();
+  }, [refresh]);
 
   const handleEvent = useCallback(
     (event: CoreEvent) => {
