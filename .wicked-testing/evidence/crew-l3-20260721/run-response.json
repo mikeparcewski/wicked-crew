@@ -1,0 +1,50 @@
+{
+  "run": {
+    "session": {
+      "attempt": 0,
+      "clis": [
+        "stub"
+      ],
+      "collection_scope": "wicked-agent/at-e2e-01/shared",
+      "entity_mode": "shared",
+      "human_confirm": "none",
+      "id": "at-e2e-01",
+      "problem": "acceptance e2e probe",
+      "repo_ref": null,
+      "status": "completed",
+      "unit_ix": 1,
+      "workdir": null,
+      "workflow_id": "wf-at-e2e-01"
+    },
+    "units": [
+      {
+        "allowed_skills": [],
+        "assigned_cli": "stub",
+        "assigned_invocation": "stub {PROMPT}",
+        "collection_scope": "wicked-agent/at-e2e-01/shared",
+        "conformance_ref": "18a42c1f3293fea5024ecb3a042ad2d3127f2fe85a3f1131be0be6427f168370",
+        "council_task_ref": "01784641483633-0000000000000000",
+        "denial_reason": null,
+        "description": "acceptance e2e probe",
+        "gate": "auto",
+        "id": "at-e2e-01:u1",
+        "ord": 1,
+        "phase_ref": "wf-at-e2e-01:unit-1",
+        "phase_status": "approved",
+        "role": "neutral",
+        "routing": {
+          "agreement_pct": 100,
+          "dissent": 0,
+          "method": "council",
+          "returned": 1,
+          "winner": "stub"
+        },
+        "session_id": "at-e2e-01",
+        "skill_ref": null,
+        "stage": "build",
+        "status": "done",
+        "validator": null
+      }
+    ]
+  }
+}
