@@ -1,0 +1,36 @@
+{
+  "scenario": "settings-panel-worker-registry",
+  "maps_to": ["studio-settings"],
+  "date": "2026-07-21",
+  "executor": "claude-code",
+  "assertions": {
+    "A1_roster_api_wired": {
+      "pass": true,
+      "description": "SystemSettings.tsx calls api.getRoster() on mount; GET /api/v1/roster returns CoreAdapter.roster() (the static worker registry from wicked-core)",
+      "source": "packages/studio/src/components/SystemSettings.tsx:53-58, packages/crew/src/api/routes.ts:134"
+    },
+    "A2_registry_read_only": {
+      "pass": true,
+      "description": "No API to add/remove/modify worker definitions from the UI. The registry is served by GET /roster only; no PATCH/PUT/DELETE /roster route exists. The UI cannot mutate the registry.",
+      "source": "packages/crew/src/api/routes.ts — only GET /roster is registered"
+    },
+    "A3_seats_displayed": {
+      "pass": true,
+      "description": "Each RosterSeat's display_name and key are rendered in the Default CLIs section. enabled_for_council drives initial checkbox state. Additional seat fields pass through via [k: string]: unknown index signature.",
+      "source": "packages/studio/src/components/SystemSettings.tsx:200-219, packages/studio/src/api/types.ts:113-120"
+    },
+    "A4_local_preference_only": {
+      "pass": true,
+      "description": "The 'Save CLI defaults' action persists selected keys to localStorage (key: wicked_default_clis) only — it does not call any server endpoint. This is a UI convenience (pre-selection for new sessions), not a registry mutation.",
+      "source": "packages/studio/src/components/SystemSettings.tsx:73-84"
+    },
+    "A5_tests_pass": {
+      "pass": true,
+      "description": "155 studio tests pass (20 test files). getRoster() is stubbed in 3 test files; the studio test suite exercises the full component tree without regressions.",
+      "test_count": 155,
+      "test_files": 20
+    }
+  },
+  "verdict": "PASS",
+  "note": "The 'Default CLIs' section in SystemSettings satisfies 'worker registry view (read-only in v1)': it fetches and displays all registered worker seats from the daemon API; no UI surface allows adding, removing, or modifying seat definitions. The only user-editable preference (which CLIs are pre-selected in the launch form) is stored in localStorage and does not mutate the registry."
+}
