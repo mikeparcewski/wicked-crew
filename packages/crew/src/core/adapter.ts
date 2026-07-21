@@ -106,10 +106,17 @@ interface CoreConstructor {
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 
 // ── Built-in workflow definitions (crew#44) ──────────────────────────────────
-// Static mirrors of workflow.rs feature_def / bug_def / migration_def.
+// Static mirrors of wicked-core workflow defs: feature, bug, migration, survey-repo,
+// repo-graph, domain-graph-slice, memories, onboarding, and chat.
 // Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
 // the wicked-core-ts NAPI methods land.
 const BUILTIN_WORKFLOWS: WorkflowDef[] = [
+  {
+    id: 'chat',
+    phases: [
+      { id: 'explore', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
   {
     id: 'onboarding',
     phases: [
