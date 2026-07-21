@@ -236,7 +236,7 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     expect(cancel.status).toBe(404);
   });
 
-  it('POST /runs/:id/inject 404s on unknown run and 400s on missing body', async () => {
+  it('POST /runs/:id/inject 404s on unknown run and 400s on missing required field (message)', async () => {
     const notFound = await fetch(`${baseUrl}/api/v1/runs/nope/inject`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

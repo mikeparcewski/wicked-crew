@@ -297,8 +297,8 @@ export class CoreAdapter {
   }
 
   /** Inject an operator message into a run's active PTY worker(s). target="all" or a CLI key. */
-  async injectWorkerMessage(runId: string, message: string, target: string): Promise<void> {
-    await this.core.injectWorkerMessage(runId, message, target);
+  injectWorkerMessage(runId: string, message: string, target: string): Promise<string> {
+    return this.core.injectWorkerMessage(runId, message, target);
   }
 
   /** Run ids on the store. */
