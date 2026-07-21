@@ -42,10 +42,12 @@ export function SettingsMenu({ onNavigate, onClose }: Props): React.ReactElement
           type="button"
           role="menuitem"
           onClick={() => { onNavigate(item.path); onClose(); }}
-          className="w-full text-left px-3 py-2 text-xs font-mono transition-colors"
+          className="w-full text-left px-3 py-2 text-xs font-mono transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
           style={{ color: 'rgba(230,237,243,0.6)' }}
           onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(230,237,243,0.06)'; e.currentTarget.style.color = '#e6edf3'; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(230,237,243,0.6)'; }}
+          onFocus={(e) => { e.currentTarget.style.background = 'rgba(230,237,243,0.06)'; e.currentTarget.style.color = '#e6edf3'; }}
+          onBlur={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(230,237,243,0.6)'; }}
         >
           {item.label}
         </button>
