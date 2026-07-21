@@ -113,12 +113,14 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
     id: 'chat',
+    is_system: true,
     phases: [
       { id: 'explore', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
     id: 'onboarding',
+    is_system: true,
     phases: [
       { id: 'index', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'annotate', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
