@@ -23,6 +23,11 @@ describe('Markdown', () => {
     expect(screen.getByText('console.log("hi")')).toBeInTheDocument();
   });
 
+  it('renders a fenced code block without a language specifier', () => {
+    render(<Markdown>{'```\nplain code\n```'}</Markdown>);
+    expect(screen.getByText('plain code')).toBeInTheDocument();
+  });
+
   it('renders a GFM table', () => {
     const md = '| A | B |\n|---|---|\n| 1 | 2 |';
     render(<Markdown>{md}</Markdown>);
