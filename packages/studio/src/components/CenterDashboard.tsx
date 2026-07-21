@@ -7,7 +7,7 @@
  *   3. Progress      — per-session unit ladder (click → open session)
  *   4. Send-to-agents — broadcast message input
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { SessionView } from '../api/types.js';
 import { useGateStore } from '../store/gates.js';
@@ -355,7 +355,7 @@ function GateActionCard({
           }}
           style={{
             background: steerOpen && amend.trim() ? '#ffda19' : 'rgba(255,218,25,0.12)',
-            color: '#ffda19',
+            color: steerOpen && amend.trim() ? '#0d1117' : '#ffda19',
             border: '1px solid rgba(255,218,25,0.3)',
             borderRadius: '6px',
             padding: '5px 12px',
@@ -476,7 +476,8 @@ function ProgressRow({ view, onSelect }: ProgressRowProps): React.ReactElement {
   const isAwaiting = session.status === 'awaiting_human';
 
   return (
-    <div
+    <button
+      type="button"
       style={{
         display: 'flex',
         alignItems: 'flex-start',
@@ -487,13 +488,15 @@ function ProgressRow({ view, onSelect }: ProgressRowProps): React.ReactElement {
         borderRadius: '10px',
         cursor: 'pointer',
         transition: 'border-color 0.15s',
+        width: '100%',
+        textAlign: 'left',
       }}
       onClick={() => onSelect(id)}
       onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(230,237,243,0.18)';
+        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(230,237,243,0.18)';
       }}
       onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(230,237,243,0.07)';
+        (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(230,237,243,0.07)';
       }}
     >
       {/* Status pulse dot */}
@@ -569,7 +572,7 @@ function ProgressRow({ view, onSelect }: ProgressRowProps): React.ReactElement {
           )}
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -585,6 +588,9 @@ function SendPanel({ activeRuns }: SendPanelProps): React.ReactElement {
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const sentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => { if (sentTimerRef.current) clearTimeout(sentTimerRef.current); }, []);
 
   const handleSend = useCallback(async (): Promise<void> => {
     const trimmed = message.trim();
@@ -602,7 +608,7 @@ function SendPanel({ activeRuns }: SendPanelProps): React.ReactElement {
       }
       setMessage('');
       setSent(true);
-      setTimeout(() => setSent(false), 2500);
+      sentTimerRef.current = setTimeout(() => setSent(false), 2500);
       textRef.current?.focus();
     } finally {
       setSending(false);
@@ -923,7 +929,7 @@ export function CenterDashboard({
             const lbl = v ? sessionLabel(v) : gate.runId.slice(0, 8);
             return (
               <GateActionCard
-                key={`gate-${gate.runId}`}
+                key={`gate-${gate.runId}-${gate.ord ?? 'x'}`}
                 runId={gate.runId}
                 ord={gate.ord}
                 prompt={gate.prompt}
