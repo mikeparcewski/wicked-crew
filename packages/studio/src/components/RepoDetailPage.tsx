@@ -333,7 +333,7 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.25)' }}>Loading…</p>
             ) : commits.length === 0 ? (
               <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.35)' }}>
-                No commits found — ensure this is a git repository.
+                No commits yet.
               </p>
             ) : (
               <div className="flex flex-col gap-2">
