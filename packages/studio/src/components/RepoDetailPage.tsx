@@ -76,6 +76,19 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
 
   const graphStats = graph?.stats;
 
+  async function startOnboarding(): Promise<void> {
+    setOnboarding(true);
+    setOnboardError(null);
+    try {
+      const { runId } = await api.rerunOnboarding(repoId);
+      onSelectRun(runId);
+    } catch (e: unknown) {
+      setOnboardError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOnboarding(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6 p-8" style={{ color: '#e6edf3' }}>
       {/* Header */}
@@ -94,18 +107,7 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               <h1 className="text-2xl font-semibold font-mono">{repo.name}</h1>
               <button
                 type="button"
-                onClick={async () => {
-                  setOnboarding(true);
-                  setOnboardError(null);
-                  try {
-                    const { runId } = await api.rerunOnboarding(repoId);
-                    onSelectRun(runId);
-                  } catch (e: unknown) {
-                    setOnboardError(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setOnboarding(false);
-                  }
-                }}
+                onClick={() => void startOnboarding()}
                 disabled={onboarding}
                 className="px-3 py-1 rounded-lg text-xs font-semibold font-mono transition-opacity disabled:opacity-50"
                 style={{ background: '#ffda19', color: '#0d1117' }}
@@ -319,24 +321,10 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               Contributor data is derived from git history during onboarding and stored in the estate graph.
               This surface will populate after the next full onboarding run.
             </p>
-            {onboardError && (
-              <p className="text-[11px] font-mono mt-1" style={{ color: '#f85149' }}>{onboardError}</p>
-            )}
             <button
               type="button"
               disabled={onboarding}
-              onClick={async () => {
-                setOnboarding(true);
-                setOnboardError(null);
-                try {
-                  const { runId } = await api.rerunOnboarding(repoId);
-                  onSelectRun(runId);
-                } catch (e: unknown) {
-                  setOnboardError(e instanceof Error ? e.message : String(e));
-                } finally {
-                  setOnboarding(false);
-                }
-              }}
+              onClick={() => void startOnboarding()}
               className="mt-3 self-start text-xs font-mono hover:underline disabled:opacity-50"
               style={{ color: '#79c0ff', background: 'none', border: 'none', cursor: onboarding ? 'not-allowed' : 'pointer', padding: 0 }}
             >
