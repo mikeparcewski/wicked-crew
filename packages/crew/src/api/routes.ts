@@ -545,7 +545,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return reply.code(500).send({ error: 'git executable not found on server' });
       }
-      const msg = (err as Error).message ?? String(err);
+      const msg = message(err);
       if (msg.includes('not a git repository') || msg.includes('does not have any commits')) {
         return reply.send({ commits: [] });
       }
@@ -578,7 +578,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return reply.code(500).send({ error: 'git executable not found on server' });
       }
-      const msg = (err as Error).message ?? String(err);
+      const msg = message(err);
       // "ambiguous argument 'HEAD'" means no commits yet; treat as empty list
       if (
         msg.includes('not a git repository') ||

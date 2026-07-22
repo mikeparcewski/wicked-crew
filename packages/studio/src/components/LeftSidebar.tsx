@@ -274,15 +274,20 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
   const isExpanded = !collapsed || hovered;
 
   useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
     function load(): void {
+      if (inFlight) return;
+      inFlight = true;
       api.listRepos().then(({ repos: rs }) => {
+        if (disposed) return;
         const sorted = [...rs].sort((a, b) => b.registered_at - a.registered_at);
         setRepos(sorted);
-      }).catch(() => { /* sidebar — fail silently */ });
+      }).catch(() => { /* sidebar — fail silently */ }).finally(() => { inFlight = false; });
     }
     load();
     const id = setInterval(load, 5_000);
-    return () => clearInterval(id);
+    return () => { disposed = true; clearInterval(id); };
   }, []);
 
   const awaitingCount = runs.filter(r => r.session.status === 'awaiting_human').length;

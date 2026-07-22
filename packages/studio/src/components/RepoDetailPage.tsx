@@ -28,23 +28,23 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
     setLoading(true);
     setError(null);
     setExpanded(false);
+    // Core data drives the page-level loading state; git sections load independently
     Promise.all([
       api.listRepos().then(({ repos }) => repos.find(r => r.id === repoId) ?? null),
       api.listRuns().then(({ runs: rs }) =>
         rs.filter((v: SessionView) => v.session.repo_ref === repoId)
       ).catch(() => [] as SessionView[]),
       api.getRepoGraph(repoId).then(({ graph: g }) => g).catch(() => null),
-      api.getRepoGitHistory(repoId).then(({ commits: c }) => c).catch(() => [] as GitCommit[]),
-      api.getRepoContributors(repoId).then(({ contributors: c }) => c).catch(() => [] as GitContributor[]),
-    ]).then(([r, rs, g, c, ctrs]) => {
+    ]).then(([r, rs, g]) => {
       setRepo(r);
       setRuns(rs);
       setGraph(g);
-      setCommits(c);
-      setContributors(ctrs);
     }).catch((err: unknown) => {
       setError(err instanceof Error ? err.message : 'Failed to load repo');
     }).finally(() => setLoading(false));
+    // Git sections are decoupled — they don't block the page skeleton
+    api.getRepoGitHistory(repoId).then(({ commits: c }) => setCommits(c)).catch(() => {});
+    api.getRepoContributors(repoId).then(({ contributors: c }) => setContributors(c)).catch(() => {});
   }, [repoId]);
 
   if (loading) {
