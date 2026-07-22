@@ -516,6 +516,74 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
+  // ── Git history (last 20 commits via git log) ─────────────────────────────
+
+  app.get(`${V}/repos/:id/git-history`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['log', '--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ar', '-n', '20'],
+        { timeout: 10_000, cwd: repo.root_path },
+      );
+      const commits = stdout.trim().split('\n').filter(Boolean).map((line) => {
+        const parts = line.split('\x1f');
+        return {
+          sha:      parts[0] ?? '',
+          shortSha: parts[1] ?? '',
+          message:  parts[2] ?? '',
+          author:   parts[3] ?? '',
+          date:     parts[4] ?? '',
+        };
+      });
+      return reply.send({ commits });
+    } catch (err) {
+      // Not a git repo or no commits yet — return empty list gracefully
+      if ((err as NodeJS.ErrnoException & { code?: string }).code === 'ENOENT') {
+        return reply.send({ commits: [] });
+      }
+      const msg = (err as Error).message ?? String(err);
+      if (msg.includes('not a git repository') || msg.includes('does not have any commits')) {
+        return reply.send({ commits: [] });
+      }
+      return reply.code(500).send({ error: msg });
+    }
+  });
+
+  // ── Git contributors (top 10 by commit count via git shortlog) ─────────────
+
+  app.get(`${V}/repos/:id/contributors`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['shortlog', '-sne', '--no-merges', 'HEAD'],
+        { timeout: 10_000, cwd: repo.root_path },
+      );
+      // Output: "  42\tFull Name <email@example.com>"
+      const contributors = stdout.trim().split('\n').filter(Boolean).slice(0, 10).map((line) => {
+        const m = line.match(/^\s*(\d+)\s+(.+?)\s+<([^>]+)>/);
+        if (!m) return null;
+        return { commits: parseInt(m[1] ?? '0', 10), name: m[2] ?? '', email: m[3] ?? '' };
+      }).filter((c): c is { commits: number; name: string; email: string } => c !== null);
+      return reply.send({ contributors });
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      if (msg.includes('not a git repository') || msg.includes('does not have any commits')) {
+        return reply.send({ contributors: [] });
+      }
+      return reply.code(500).send({ error: msg });
+    }
+  });
+
   // ── PTY terminal sessions (DES-TERMINAL-001 §6) ────────────────────────────
   // Open a PTY → its id. Drive it over the per-terminal WS `/ws/terminals/:id`;
   // raw output arrives there. `governed` defaults to `true` (the gate-hook-routed
