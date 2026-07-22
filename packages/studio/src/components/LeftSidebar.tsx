@@ -334,7 +334,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
             onClick={(e) => {
               e.stopPropagation();
               const first = runs.find(r => r.session.status === 'awaiting_human');
-              if (first) navigate(`/runs/${first.session.id}`);
+              if (first) onSelectRun(first.session.id);
             }}
           >
             <IconBell />

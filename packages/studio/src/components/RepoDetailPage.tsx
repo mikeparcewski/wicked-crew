@@ -203,7 +203,7 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
       )}
 
       {/* Two-column body — single col on narrow viewports, two col at lg+ */}
-      <div className="grid gap-6 grid-cols-1 lg:grid-cols-2">
+      <div className="grid gap-6 grid-cols-1 md:grid-cols-2">
         {/* Left column */}
         <div className="flex flex-col gap-6">
           {/* Work & Chats history */}
