@@ -43,7 +43,7 @@ export function Dashboard({ runs, navigate }: Props): React.ReactElement {
   const [repos, setRepos] = useState<RepoEntry[]>([]);
   const [roster, setRoster] = useState<RosterSeat[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDef[]>([]);
-  const [range, setRange] = useState<SessionRange>('all');
+  const [range, setRange] = useState<SessionRange>('last30');
 
   useEffect(() => {
     api.listRepos().then(({ repos: rs }) => setRepos(rs)).catch(() => {});
