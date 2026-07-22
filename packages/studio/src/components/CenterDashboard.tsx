@@ -731,7 +731,7 @@ export function CenterDashboard({
   const clearGate = useGateStore((s) => s.clearGate);
   const recordSteering = useSteeringStore((s) => s.record);
 
-  const [range, setRange] = useState<SessionRange>('all');
+  const [range, setRange] = useState<SessionRange>('last30');
 
   // ── Range-filtered runs (positional — no timestamp on AgentSession) ────────
   const filteredRuns = useMemo(() => {

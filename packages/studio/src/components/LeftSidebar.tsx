@@ -281,7 +281,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
       }).catch(() => { /* sidebar — fail silently */ });
     }
     load();
-    const id = setInterval(load, 30_000);
+    const id = setInterval(load, 5_000);
     return () => clearInterval(id);
   }, []);
 
@@ -315,9 +315,14 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           <WickedLogo size={26} />
         </button>
         {isExpanded && (
-          <span className="flex-1 text-sm font-semibold font-mono truncate" style={{ color: S.ink }}>
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="flex-1 text-left text-sm font-semibold font-mono truncate transition-opacity hover:opacity-70"
+            style={{ color: S.ink, background: 'transparent' }}
+          >
             wicked-crew studio
-          </span>
+          </button>
         )}
         {awaitingCount > 0 && (
           <button
@@ -348,7 +353,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
           className={`text-xs font-mono shrink-0 leading-none ${isExpanded ? 'ml-auto' : ''}`}
           style={{ color: S.faint }}
         >
-          {isExpanded ? '«' : '»'}
+          {collapsed ? '»' : '«'}
         </button>
       </div>
 

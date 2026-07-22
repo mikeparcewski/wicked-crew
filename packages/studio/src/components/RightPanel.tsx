@@ -87,6 +87,10 @@ export function RightPanel({ view }: Props): React.ReactElement {
   const { session } = view;
   const model = useRunModel(session.id, view);
 
+  const fileCount = model
+    ? new Set(model.units.flatMap((u) => u.filesRead)).size
+    : null;
+
   function toggleAccordion(id: AccordionId): void {
     setOpenAccordion((prev) => (prev === id ? null : id));
   }
@@ -186,7 +190,17 @@ export function RightPanel({ view }: Props): React.ReactElement {
               onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               aria-expanded={openAccordion === id}
             >
-              <span className="text-xs font-medium font-mono">{label}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium font-mono">{label}</span>
+                {id === 'files' && fileCount !== null && fileCount > 0 && (
+                  <span
+                    className="text-[9px] font-mono px-1 py-0.5 rounded"
+                    style={{ background: 'rgba(121,192,255,0.12)', color: '#79c0ff' }}
+                  >
+                    {fileCount}
+                  </span>
+                )}
+              </div>
               <span className="text-xs" style={{ color: 'rgba(230,237,243,0.3)' }}>
                 {openAccordion === id ? '▲' : '▼'}
               </span>
