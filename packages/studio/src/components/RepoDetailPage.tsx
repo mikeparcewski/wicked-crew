@@ -200,8 +200,8 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
         </Section>
       )}
 
-      {/* Two-column body */}
-      <div className="grid gap-6" style={{ gridTemplateColumns: '1fr 1fr' }}>
+      {/* Two-column body — single col on narrow viewports, two col at lg+ */}
+      <div className="grid gap-6 grid-cols-1 lg:grid-cols-2">
         {/* Left column */}
         <div className="flex flex-col gap-6">
           {/* Work & Chats history */}
@@ -319,16 +319,28 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               Contributor data is derived from git history during onboarding and stored in the estate graph.
               This surface will populate after the next full onboarding run.
             </p>
+            {onboardError && (
+              <p className="text-[11px] font-mono mt-1" style={{ color: '#f85149' }}>{onboardError}</p>
+            )}
             <button
               type="button"
+              disabled={onboarding}
               onClick={async () => {
-                const { runId } = await api.rerunOnboarding(repoId);
-                onSelectRun(runId);
+                setOnboarding(true);
+                setOnboardError(null);
+                try {
+                  const { runId } = await api.rerunOnboarding(repoId);
+                  onSelectRun(runId);
+                } catch (e: unknown) {
+                  setOnboardError(e instanceof Error ? e.message : String(e));
+                } finally {
+                  setOnboarding(false);
+                }
               }}
-              className="mt-3 self-start text-xs font-mono hover:underline"
+              className="mt-3 self-start text-xs font-mono hover:underline disabled:opacity-50"
               style={{ color: '#79c0ff', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
             >
-              Run onboarding now →
+              {onboarding ? 'Starting…' : 'Run onboarding now →'}
             </button>
           </Section>
         </div>

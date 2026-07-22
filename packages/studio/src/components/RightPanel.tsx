@@ -39,6 +39,7 @@ const ACCORDIONS: { id: AccordionId; label: string }[] = [
 ];
 
 function FilesPanel({ model }: { model: RunModel }): React.ReactElement {
+  // filesRead is populated from dataUsed events which cover all tool_use paths (reads + writes)
   const files = Array.from(
     new Set(model.units.flatMap((u) => u.filesRead))
   ).sort();
