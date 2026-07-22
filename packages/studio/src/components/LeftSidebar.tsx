@@ -306,7 +306,7 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
     <div
       className={`flex flex-col shrink-0 transition-all duration-200 ${isExpanded ? 'w-[280px]' : 'w-14'}`}
       style={{ background: S.bg, borderRight: `1px solid ${S.border}` }}
-      onMouseEnter={() => setHovered(true)}
+      onMouseEnter={() => { if (collapsed) setHovered(true); }}
       onMouseLeave={() => setHovered(false)}
     >
       {/* Header */}
