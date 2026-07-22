@@ -742,10 +742,10 @@ export function CenterDashboard({
     return runs.slice(0, n);
   }, [runs, range]);
 
-  // ── Derived: active sessions only ─────────────────────────────────────────
+  // ── Derived: active sessions only (scoped to filteredRuns for consistency) ──
   const activeRuns = useMemo(
-    () => runs.filter((v) => ACTIVE_STATUSES.has(v.session.status)),
-    [runs],
+    () => filteredRuns.filter((v) => ACTIVE_STATUSES.has(v.session.status)),
+    [filteredRuns],
   );
 
   // ── Stats: aggregate cost/tokens from cliUsage events ────────────────────
@@ -778,11 +778,11 @@ export function CenterDashboard({
   // ── Units in-flight (distributed status) ──────────────────────────────────
   const unitsInFlight = useMemo(
     () =>
-      runs.reduce(
+      filteredRuns.reduce(
         (sum, v) => sum + v.units.filter((u) => u.status === 'distributed').length,
         0,
       ),
-    [runs],
+    [filteredRuns],
   );
 
   // ── Gate handlers (with steering store + gate-store sync) ─────────────────
