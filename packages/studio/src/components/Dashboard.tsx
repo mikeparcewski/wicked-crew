@@ -164,7 +164,7 @@ export function Dashboard({ runs, navigate }: Props): React.ReactElement {
                 border: '1px solid rgba(230,237,243,0.1)',
               }}
             >
-              {([['last30', 'Last 30'], ['last60', 'Last 60'], ['all', 'All']] as [SessionRange, string][]).map(([r, label]) => (
+              {([['last30', 'Top 30'], ['last60', 'Top 60'], ['all', 'All']] as [SessionRange, string][]).map(([r, label]) => (
                 <button
                   key={r}
                   type="button"

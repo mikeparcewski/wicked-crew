@@ -331,7 +331,7 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
               <div className="flex flex-col gap-2">
                 {commits.map((c) => (
                   <div key={c.sha} className="flex items-start gap-2 min-w-0">
-                    {repo.git_url && /^https?:\/\//i.test(repo.git_url) ? (
+                    {repo.git_url && /^https:\/\//i.test(repo.git_url) ? (
                       <a
                         href={`${repo.git_url.replace(/\.git$/, '')}/commit/${c.sha}`}
                         target="_blank"
@@ -346,6 +346,9 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
                         {c.shortSha}
                       </span>
                     )}
+                    <span className="shrink-0 text-[9px] font-mono truncate max-w-[80px]" style={{ color: 'rgba(230,237,243,0.45)' }} title={c.author}>
+                      {c.author}
+                    </span>
                     <span className="flex-1 text-[10px] font-mono truncate" style={{ color: 'rgba(230,237,243,0.8)' }} title={c.message}>
                       {c.message.length > 72 ? `${c.message.slice(0, 72)}…` : c.message}
                     </span>

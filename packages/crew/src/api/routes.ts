@@ -542,9 +542,8 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       });
       return reply.send({ commits });
     } catch (err) {
-      // Not a git repo or no commits yet — return empty list gracefully
-      if ((err as NodeJS.ErrnoException & { code?: string }).code === 'ENOENT') {
-        return reply.send({ commits: [] });
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return reply.code(500).send({ error: 'git executable not found on server' });
       }
       const msg = (err as Error).message ?? String(err);
       if (msg.includes('not a git repository') || msg.includes('does not have any commits')) {
@@ -576,8 +575,17 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       }).filter((c): c is { commits: number; name: string; email: string } => c !== null);
       return reply.send({ contributors });
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return reply.code(500).send({ error: 'git executable not found on server' });
+      }
       const msg = (err as Error).message ?? String(err);
-      if (msg.includes('not a git repository') || msg.includes('does not have any commits')) {
+      // "ambiguous argument 'HEAD'" means no commits yet; treat as empty list
+      if (
+        msg.includes('not a git repository') ||
+        msg.includes('does not have any commits') ||
+        msg.includes("ambiguous argument 'HEAD'") ||
+        msg.includes('unknown revision')
+      ) {
         return reply.send({ contributors: [] });
       }
       return reply.code(500).send({ error: msg });
