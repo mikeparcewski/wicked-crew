@@ -52,11 +52,12 @@ export function Dashboard({ runs, navigate }: Props): React.ReactElement {
   }, []);
 
   // ── Session range filter ───────────────────────────────────────────────────
-  // No timestamp on AgentSession; filter by most-recent N sessions (positional proxy).
+  // runs is status-sorted (active first); slice(0, n) preserves active sessions
+  // and uses a positional proxy for recency (no timestamp on AgentSession).
   const filteredRuns = range === 'last30'
-    ? runs.slice(-30)
+    ? runs.slice(0, 30)
     : range === 'last60'
-    ? runs.slice(-60)
+    ? runs.slice(0, 60)
     : runs;
 
   // ── Derived metrics ────────────────────────────────────────────────────────

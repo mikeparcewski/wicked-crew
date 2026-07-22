@@ -736,8 +736,10 @@ export function CenterDashboard({
   // ── Range-filtered runs (positional — no timestamp on AgentSession) ────────
   const filteredRuns = useMemo(() => {
     if (range === 'all') return runs;
+    // runs is status-sorted (active first); slice(0, n) preserves active sessions
+    // and takes the n most-salient entries as a positional proxy for recency
     const n = range === 'last30' ? 30 : 60;
-    return runs.slice(-n);
+    return runs.slice(0, n);
   }, [runs, range]);
 
   // ── Derived: active sessions only ─────────────────────────────────────────
