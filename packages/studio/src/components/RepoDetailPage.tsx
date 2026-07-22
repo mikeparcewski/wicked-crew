@@ -338,7 +338,7 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
                 }
               }}
               className="mt-3 self-start text-xs font-mono hover:underline disabled:opacity-50"
-              style={{ color: '#79c0ff', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              style={{ color: '#79c0ff', background: 'none', border: 'none', cursor: onboarding ? 'not-allowed' : 'pointer', padding: 0 }}
             >
               {onboarding ? 'Starting…' : 'Run onboarding now →'}
             </button>
