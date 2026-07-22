@@ -25,9 +25,12 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
   const [onboardError, setOnboardError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
     setExpanded(false);
+    setCommits([]);
+    setContributors([]);
     // Core data drives the page-level loading state; git sections load independently
     Promise.all([
       api.listRepos().then(({ repos }) => repos.find(r => r.id === repoId) ?? null),
@@ -36,15 +39,18 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
       ).catch(() => [] as SessionView[]),
       api.getRepoGraph(repoId).then(({ graph: g }) => g).catch(() => null),
     ]).then(([r, rs, g]) => {
+      if (cancelled) return;
       setRepo(r);
       setRuns(rs);
       setGraph(g);
     }).catch((err: unknown) => {
+      if (cancelled) return;
       setError(err instanceof Error ? err.message : 'Failed to load repo');
-    }).finally(() => setLoading(false));
+    }).finally(() => { if (!cancelled) setLoading(false); });
     // Git sections are decoupled — they don't block the page skeleton
-    api.getRepoGitHistory(repoId).then(({ commits: c }) => setCommits(c)).catch(() => {});
-    api.getRepoContributors(repoId).then(({ contributors: c }) => setContributors(c)).catch(() => {});
+    api.getRepoGitHistory(repoId).then(({ commits: c }) => { if (!cancelled) setCommits(c); }).catch(() => {});
+    api.getRepoContributors(repoId).then(({ contributors: c }) => { if (!cancelled) setContributors(c); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [repoId]);
 
   if (loading) {
