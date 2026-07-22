@@ -16,8 +16,8 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
   const [repo, setRepo] = useState<RepoEntry | null>(null);
   const [runs, setRuns] = useState<SessionView[]>([]);
   const [graph, setGraph] = useState<CodeGraphData | null>(null);
-  const [commits, setCommits] = useState<GitCommit[]>([]);
-  const [contributors, setContributors] = useState<GitContributor[]>([]);
+  const [commits, setCommits] = useState<GitCommit[] | null>(null);
+  const [contributors, setContributors] = useState<GitContributor[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -29,8 +29,8 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
     setLoading(true);
     setError(null);
     setExpanded(false);
-    setCommits([]);
-    setContributors([]);
+    setCommits(null);
+    setContributors(null);
     // Core data drives the page-level loading state; git sections load independently
     Promise.all([
       api.listRepos().then(({ repos }) => repos.find(r => r.id === repoId) ?? null),
@@ -329,9 +329,11 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
 
           {/* Git History */}
           <Section title="Git History">
-            {commits.length === 0 ? (
+            {commits === null ? (
+              <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.25)' }}>Loading…</p>
+            ) : commits.length === 0 ? (
               <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.35)' }}>
-                No commits found — run onboarding or ensure this is a git repository.
+                No commits found — ensure this is a git repository.
               </p>
             ) : (
               <div className="flex flex-col gap-2">
@@ -369,7 +371,9 @@ export function RepoDetailPage({ repoId, onSelectRun, navigate, onOpenGraph }: P
 
           {/* Contributors */}
           <Section title="Contributors">
-            {contributors.length === 0 ? (
+            {contributors === null ? (
+              <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.25)' }}>Loading…</p>
+            ) : contributors.length === 0 ? (
               <p className="text-sm font-mono italic" style={{ color: 'rgba(230,237,243,0.35)' }}>
                 No contributors found.
               </p>

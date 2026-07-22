@@ -564,7 +564,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     try {
       const { stdout } = await execFileAsync(
         'git',
-        ['shortlog', '-sne', '--no-merges', 'HEAD'],
+        ['shortlog', '-sne', '-n', '--no-merges', 'HEAD'],
         { timeout: 10_000, cwd: repo.root_path },
       );
       // Output: "  42\tFull Name <email@example.com>"

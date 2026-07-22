@@ -80,7 +80,7 @@ export function Dashboard({ runs, navigate }: Props): React.ReactElement {
   // Sparkline: last 10 filtered runs, oldest → newest
   const sparklineRuns = filteredRuns.slice(Math.max(0, filteredRuns.length - 10));
 
-  // Recent activity: last 5 filtered runs, newest first
+  // Recent activity: last 5 runs in current (status-sorted) order, reversed for display
   const recentRuns = filteredRuns.slice(-5).reverse();
 
   // Gate approval rate across all filtered units

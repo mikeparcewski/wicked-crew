@@ -873,7 +873,7 @@ export function CenterDashboard({
     [gates],
   );
 
-  // ── Chat sessions (workflow_id === 'chat' or unset legacy); newest-first, unsliced ──
+  // ── Chat sessions (workflow_id === 'chat' or unset legacy); reversed from status-sort order ──
   const chatRuns = useMemo(
     () =>
       filteredRuns
