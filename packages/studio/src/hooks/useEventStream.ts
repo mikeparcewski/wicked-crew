@@ -33,9 +33,13 @@ export function useEventStream(onEvent: EventHandler): void {
       const ws = new WebSocket(`${wsBase()}/ws`);
       activeWs = ws;
 
-      ws.onopen = () => setStatus('connected');
+      // Gate every handler on `activeWs === ws` so stale sockets from a previous
+      // connect cycle (e.g. slow-connecting socket that gets superseded on reconnect)
+      // cannot update global status or dispatch events after they're replaced.
+      ws.onopen = () => { if (activeWs === ws) setStatus('connected'); };
 
       ws.onmessage = (msg) => {
+        if (activeWs !== ws) return;
         try {
           const parsed: unknown = JSON.parse(String(msg.data));
           // A CoreEvent frame is always a tagged object with a string `type`.
@@ -52,13 +56,12 @@ export function useEventStream(onEvent: EventHandler): void {
       };
 
       ws.onclose = () => {
-        setStatus('disconnected');
+        if (activeWs === ws) setStatus('disconnected');
         // Only reconnect if the hook is still mounted (not cleaned up).
         if (!cancelled) setTimeout(connect, 3000);
       };
 
       ws.onerror = () => {
-        setStatus('disconnected');
         ws.close();
       };
     }

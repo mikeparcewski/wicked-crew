@@ -323,8 +323,10 @@ export class CoreAdapter {
       // per process lifetime.
       const builtinDef = BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
       if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
-        await this._writeBuiltinOverlay(builtinDef);
+        // Mark before await so concurrent launchRun() calls for the same builtin
+        // don't both pass the has() check and race to write the same file.
         this._builtinOverlayWritten.add(input.workflow);
+        await this._writeBuiltinOverlay(builtinDef);
       }
     }
     return this.core.launchRun(opts);
@@ -497,8 +499,8 @@ export class CoreAdapter {
       // Uses _writeBuiltinOverlay (not registerWorkflow) to avoid adding onboarding to userWorkflows,
       // which would cause a duplicate entry in listWorkflows().
       if (!this._builtinOverlayWritten.has('onboarding')) {
-        await this._writeBuiltinOverlay(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
         this._builtinOverlayWritten.add('onboarding');
+        await this._writeBuiltinOverlay(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
       }
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
