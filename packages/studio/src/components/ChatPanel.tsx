@@ -244,7 +244,7 @@ function ModePill({
 
   return (
     <div
-      role={readOnly ? undefined : 'radiogroup'}
+      role="radiogroup"
       aria-label="Run mode"
       aria-readonly={readOnly || undefined}
       title={readOnly ? 'Run mode (read-only — run is complete)' : undefined}
@@ -259,8 +259,9 @@ function ModePill({
         <button
           key={m}
           type="button"
-          role={readOnly ? undefined : 'radio'}
-          aria-checked={readOnly ? undefined : mode === m}
+          role="radio"
+          aria-checked={mode === m}
+          aria-disabled={readOnly}
           tabIndex={readOnly ? -1 : mode === m ? 0 : -1}
           onClick={readOnly ? undefined : () => onChange(m)}
           onKeyDown={readOnly ? undefined : (e) => handleKey(e, idx)}

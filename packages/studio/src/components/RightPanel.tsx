@@ -74,7 +74,7 @@ function FilePath({ path, opKind }: { path: string; opKind?: FileOpKind }): Reac
     void navigator.clipboard.writeText(path).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    });
+    }).catch(() => { /* clipboard unavailable — silently ignore */ });
   }
 
   return (
@@ -126,6 +126,9 @@ function FilesPanel({ model }: { model: RunModel }): React.ReactElement {
     }
   }
 
+  // A file in both modified and deleted (across different units) is treated as deleted.
+  for (const f of deletedFiles) modifiedFiles.delete(f);
+
   // "Referenced" = files that appear only in read units (not in any write/delete unit)
   const referencedFiles = new Set<string>();
   for (const f of allFiles) {
@@ -139,7 +142,7 @@ function FilesPanel({ model }: { model: RunModel }): React.ReactElement {
   if (!hasAny) {
     return (
       <p className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
-        No files touched yet.
+        No files changed yet.
       </p>
     );
   }
