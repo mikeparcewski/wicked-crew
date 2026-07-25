@@ -363,12 +363,16 @@ export class CoreAdapter {
     const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
     // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
     // definition name). Patch it back to the definition name so the studio's chat/work filters work.
-    // Uses WorkUnit.phase_ref (the canonical phase identifier) rather than parsing the unit id.
+    // phase_ref is only set on executed units and uses format 'wf-<uuid>:unit-N' (not the phase id).
+    // The phase id is reliably embedded in the unit id as '<session-uuid>:<phase-id>'.
     for (const view of views) {
       if (view.session.workflow_id?.startsWith('wf-')) {
-        const phases = view.units.map((u) => u.phase_ref ?? '');
+        const phases = view.units.map((u) => {
+          const colonIdx = u.id.indexOf(':');
+          return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
+        });
         if (view.units.length === 1) {
-          // Single-unit chat sessions use phase_ref 'explore' (from the chat workflow def).
+          // Single-unit chat sessions have phase id 'explore' (from the chat workflow def).
           // 'u1' is ambiguous — it appears on any single-unit run without an explicit workflow,
           // including Do Work runs, so we leave those unpatched rather than misclassify them.
           const phase = phases[0] ?? '';
