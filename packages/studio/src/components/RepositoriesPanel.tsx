@@ -83,8 +83,10 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
 
   useEffect(() => {
     if (repos.length === 0) { setTrackedCount(0); return; }
-    Promise.all(repos.map(r => api.getRepoGraph(r.id).then(({ graph }) => graph !== null).catch(() => false)))
-      .then(flags => setTrackedCount(flags.filter(Boolean).length));
+    let cancelled = false;
+    Promise.all(repos.map(r => api.getRepoGraph(r.id).then(({ graph }) => graph != null).catch(() => false)))
+      .then(flags => { if (!cancelled) setTrackedCount(flags.filter(Boolean).length); });
+    return () => { cancelled = true; };
   }, [repos]);
 
   function deriveName(value: string): void {
