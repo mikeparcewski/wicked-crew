@@ -66,12 +66,14 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
     set((s) => {
       switch (event.type) {
         case 'awaitingHuman': {
-          if (typeof event.prompt !== 'string') return s;
           const entry: Notification = {
             id: uuid(),
             kind: 'gate',
             runId: session,
-            message: event.prompt || 'Run is awaiting human review',
+            message:
+              typeof event.prompt === 'string' && event.prompt
+                ? event.prompt
+                : 'Run is awaiting human review',
             ts: Date.now(),
             read: false,
           };
