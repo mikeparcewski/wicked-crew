@@ -95,6 +95,8 @@ export function NotificationBell({ navigate, collapsed = false }: Props): React.
             ? `${unreadCount} unread notification${unreadCount > 1 ? 's' : ''}`
             : 'Notifications'
         }
+        aria-expanded={open}
+        aria-haspopup="true"
         title="Notifications"
         onClick={() => setOpen((v) => !v)}
         className="relative flex items-center rounded transition-opacity hover:opacity-70"

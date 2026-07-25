@@ -27,8 +27,6 @@ const MAX_NOTIFICATIONS = 10;
 
 interface NotificationStore {
   notifications: Notification[];
-  /** Internal helper — generates id + ts, marks unread, prunes to MAX_NOTIFICATIONS. */
-  add: (n: Omit<Notification, 'id' | 'ts' | 'read'>) => void;
   markRead: (id: string) => void;
   markAllRead: () => void;
   /** Fold one CoreEvent into the notification list (same entry-point pattern as gates.ingest). */
@@ -37,18 +35,6 @@ interface NotificationStore {
 
 export const useNotificationStore = create<NotificationStore>((set) => ({
   notifications: [],
-
-  add: (n) =>
-    set((s) => {
-      const entry: Notification = {
-        ...n,
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        read: false,
-      };
-      const next = [entry, ...s.notifications].slice(0, MAX_NOTIFICATIONS);
-      return { notifications: next };
-    }),
 
   markRead: (id) =>
     set((s) => {
