@@ -367,7 +367,7 @@ export class CoreAdapter {
     // The phase id is reliably embedded in the unit id as '<session-uuid>:<phase-id>'.
     for (const view of views) {
       if (view.session.workflow_id?.startsWith('wf-')) {
-        const phases = view.units.map((u) => {
+        const phases = [...view.units].sort((a, b) => a.ord - b.ord).map((u) => {
           const colonIdx = u.id.indexOf(':');
           return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
         });

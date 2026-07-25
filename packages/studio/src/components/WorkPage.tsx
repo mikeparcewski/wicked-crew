@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { SessionView } from '../api/types.js';
 import { RunLink } from './RunLink.js';
 import { useTimeRange } from '../hooks/useTimeRange.js';
@@ -28,6 +28,7 @@ const TABS: { id: StatusTab; label: string }[] = [
 export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): React.ReactElement {
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<StatusTab>('all');
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const { range, setRange, filter: filterByRange } = useTimeRange('30d');
 
   const allWorkRuns = useMemo(
@@ -158,18 +159,24 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
         onKeyDown={e => {
           const ids = TABS.map(t => t.id);
           const idx = ids.indexOf(tab);
+          let nextIdx: number | null = null;
           if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
             e.preventDefault();
-            setTab(ids[(idx + 1) % ids.length]!);
+            nextIdx = (idx + 1) % ids.length;
           } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
             e.preventDefault();
-            setTab(ids[(idx - 1 + ids.length) % ids.length]!);
+            nextIdx = (idx - 1 + ids.length) % ids.length;
+          }
+          if (nextIdx !== null) {
+            setTab(ids[nextIdx]!);
+            tabRefs.current[nextIdx]?.focus();
           }
         }}
       >
-        {TABS.map(t => (
+        {TABS.map((t, i) => (
           <button
             key={t.id}
+            ref={el => { tabRefs.current[i] = el; }}
             id={`work-tab-${t.id}`}
             type="button"
             role="tab"
