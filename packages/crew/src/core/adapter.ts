@@ -230,6 +230,8 @@ export class CoreAdapter {
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
   private closed = false;
+  /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
+  private readonly _builtinOverlayWritten = new Set<string>();
 
   /** `true` when this adapter armed the event-driven exec seam (for readiness/reporting). */
   readonly engineExec: boolean;
@@ -316,9 +318,14 @@ export class CoreAdapter {
     if (input.workflow !== undefined) {
       opts.workflow = input.workflow;
       // Ensure built-in workflow definitions are present in the Rust overlay dir on first use.
-      // The Rust actor loads overlay JSONs at startup, so this is a no-op after the first call.
+      // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
+      // which would duplicate them in listWorkflows(). The write is skipped after the first call
+      // per process lifetime.
       const builtinDef = BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
-      if (builtinDef) await this.registerWorkflow(builtinDef);
+      if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
+        await this._writeBuiltinOverlay(builtinDef);
+        this._builtinOverlayWritten.add(input.workflow);
+      }
     }
     return this.core.launchRun(opts);
   }
@@ -356,7 +363,8 @@ export class CoreAdapter {
     // Chat runs have exactly one unit whose phase is 'explore' (from the chat workflow def).
     for (const view of views) {
       if (view.session.workflow_id?.startsWith('wf-') && view.units.length === 1) {
-        const phase = view.units[0]?.id.split(':').pop();
+        const unitId = view.units[0]?.id ?? '';
+        const phase = unitId.slice(unitId.lastIndexOf(':') + 1);
         if (phase === 'explore') view.session.workflow_id = 'chat';
       }
     }
@@ -552,6 +560,19 @@ export class CoreAdapter {
 
   getWorkflow(id: string): WorkflowDef | null {
     return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+  }
+
+  /** Write a built-in workflow definition to the Rust overlay dir (and hot-register when possible).
+   *  Unlike registerWorkflow(), this does NOT touch userWorkflows, avoiding duplicates in listWorkflows(). */
+  private async _writeBuiltinOverlay(def: WorkflowDef): Promise<void> {
+    const dir = workflowOverlayDir();
+    await mkdir(dir, { recursive: true });
+    const { is_system: _sys, ...overlayDef } = def as WorkflowDef & { is_system?: boolean };
+    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['registerWorkflow'] === 'function') {
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
+    }
   }
 
   /**
