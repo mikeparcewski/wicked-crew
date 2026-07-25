@@ -347,6 +347,9 @@ export class CoreAdapter {
 
   /** Inject an operator message into a run's active PTY worker(s). target="all" or a CLI key. */
   injectWorkerMessage(runId: string, message: string, target: string): Promise<string> {
+    if (typeof this.core.injectWorkerMessage !== 'function') {
+      return Promise.reject(new Error('Operator message injection is not yet supported by this wicked-core build'));
+    }
     return this.core.injectWorkerMessage(runId, message, target);
   }
 
