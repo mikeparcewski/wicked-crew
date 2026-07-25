@@ -338,12 +338,10 @@ export function LeftSidebar({ runs, selectedRunId, onSelectRun, navigate }: Prop
         </div>
       )}
 
-      {/* Notification bell — always visible; popover opens on click */}
-      {isExpanded && (
-        <div className="px-4 pb-2">
-          <NotificationBell navigate={navigate} />
-        </div>
-      )}
+      {/* Notification bell — always visible (collapsed: icon-only with badge; expanded: label too) */}
+      <div className={isExpanded ? 'px-4 pb-2' : 'flex justify-center pb-2'}>
+        <NotificationBell navigate={navigate} collapsed={!isExpanded} />
+      </div>
 
       {/* Action links */}
       <div className={`flex flex-col ${!isExpanded ? 'px-2 items-center gap-2 mt-1' : 'px-5 pt-1 pb-1 gap-1'}`}>

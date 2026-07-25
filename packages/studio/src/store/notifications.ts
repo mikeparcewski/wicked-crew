@@ -4,12 +4,11 @@ import type { CoreEvent } from '../api/types.js';
 /**
  * A global notification kind discriminating what triggered the notification.
  *
- * - `gate`             — a run is awaiting a human decision
- * - `run_failed`       — a run terminated with a failure
- * - `steer_requested`  — an agent sent an `agentMessage` asking for direction
- * - `chat_reply_needed`— a chat run completed with an unreplied question
+ * - `gate`            — a run is awaiting a human decision
+ * - `run_failed`      — a run terminated with a failure
+ * - `steer_requested` — an agent sent an `agentMessage` asking for direction
  */
-export type NotifKind = 'gate' | 'run_failed' | 'steer_requested' | 'chat_reply_needed';
+export type NotifKind = 'gate' | 'run_failed' | 'steer_requested';
 
 /**
  * One notification entry.  `id` and `ts` are generated internally by `add`;

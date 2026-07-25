@@ -4,6 +4,8 @@ import type { NotifKind } from '../store/notifications.js';
 
 interface Props {
   navigate: (path: string) => void;
+  /** When true the sidebar is collapsed — render icon-only (no label). */
+  collapsed?: boolean;
 }
 
 // ── Design tokens (matching LeftSidebar's `S` palette) ──────────────────────
@@ -24,19 +26,17 @@ const S = {
 
 function kindLabel(kind: NotifKind): string {
   switch (kind) {
-    case 'gate':             return 'Awaiting review';
-    case 'run_failed':       return 'Run failed';
-    case 'steer_requested':  return 'Steer requested';
-    case 'chat_reply_needed': return 'Reply needed';
+    case 'gate':            return 'Awaiting review';
+    case 'run_failed':      return 'Run failed';
+    case 'steer_requested': return 'Steer requested';
   }
 }
 
 function kindColor(kind: NotifKind): string {
   switch (kind) {
-    case 'gate':             return S.accent;
-    case 'run_failed':       return S.danger;
-    case 'steer_requested':  return S.link;
-    case 'chat_reply_needed': return S.link;
+    case 'gate':            return S.accent;
+    case 'run_failed':      return S.danger;
+    case 'steer_requested': return S.link;
   }
 }
 
@@ -57,7 +57,7 @@ function IconBell(): React.ReactElement {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function NotificationBell({ navigate }: Props): React.ReactElement {
+export function NotificationBell({ navigate, collapsed = false }: Props): React.ReactElement {
   const notifications = useNotificationStore((s) => s.notifications);
   const markRead      = useNotificationStore((s) => s.markRead);
   const markAllRead   = useNotificationStore((s) => s.markAllRead);
@@ -97,15 +97,23 @@ export function NotificationBell({ navigate }: Props): React.ReactElement {
         }
         title="Notifications"
         onClick={() => setOpen((v) => !v)}
-        className="relative flex items-center justify-center rounded transition-opacity hover:opacity-70"
+        className="relative flex items-center rounded transition-opacity hover:opacity-70"
         style={{
-          width: '28px',
+          gap: collapsed ? 0 : '6px',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          width: collapsed ? '28px' : 'auto',
           height: '28px',
           color: unreadCount > 0 ? S.accent : S.faint,
           background: 'transparent',
+          padding: collapsed ? 0 : '0 6px 0 4px',
         }}
       >
         <IconBell />
+        {!collapsed && (
+          <span style={{ fontSize: '11px', fontFamily: 'monospace', color: S.faint }}>
+            Notifications
+          </span>
+        )}
         {unreadCount > 0 && (
           <span
             aria-hidden
