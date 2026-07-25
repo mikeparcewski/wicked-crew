@@ -151,13 +151,14 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
       </div>
 
       {/* Filter tabs */}
-      <div className="px-8 pb-3 flex items-center gap-2">
+      <div role="tablist" aria-label="Filter by status" className="px-8 pb-3 flex items-center gap-2">
         {TABS.map(t => (
           <button
             key={t.id}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className="rounded-full px-3 py-1 text-xs font-mono"
             style={

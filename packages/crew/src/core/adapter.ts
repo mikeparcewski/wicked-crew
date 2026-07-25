@@ -360,9 +360,10 @@ export class CoreAdapter {
     const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
     // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
     // definition name). Patch it back to the definition name so the studio's chat/work filters work.
+    // Uses WorkUnit.phase_ref (the canonical phase identifier) rather than parsing the unit id.
     for (const view of views) {
       if (view.session.workflow_id?.startsWith('wf-')) {
-        const phases = view.units.map((u) => u.id.slice(u.id.lastIndexOf(':') + 1));
+        const phases = view.units.map((u) => u.phase_ref ?? '');
         if (view.units.length === 1) {
           // Single-unit: chat uses 'explore', free-form (no workflow) uses 'u1'
           const phase = phases[0] ?? '';

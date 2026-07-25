@@ -194,13 +194,14 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
             style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.08)' }}
           >
             {/* Source mode tabs */}
-            <div className="flex gap-1">
+            <div role="tablist" aria-label="Repository source" className="flex gap-1">
               {(['local', 'remote'] as SourceMode[]).map((m) => (
                 <button
                   key={m}
                   type="button"
                   role="tab"
                   aria-selected={sourceMode === m}
+                  tabIndex={sourceMode === m ? 0 : -1}
                   onClick={() => setSourceMode(m)}
                   className="rounded-md px-3 py-1 text-[11px] font-mono font-medium transition-colors"
                   style={
