@@ -421,7 +421,7 @@ function SkeletonRows({ count, widths }: { count: number; widths: string[] }): R
   return (
     <div className="flex flex-col gap-2.5">
       {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="flex items-center gap-2 min-w-0" style={{ opacity: 1 - i * 0.12 }}>
+        <div key={i} className="flex items-center gap-2 min-w-0" style={{ opacity: Math.max(0.15, 1 - i * 0.12) }}>
           {widths.map((w, j) => (
             <SkeletonBlock key={j} className={`h-2.5 ${w}`} />
           ))}
@@ -435,7 +435,7 @@ function SkeletonContributors({ count }: { count: number }): React.ReactElement 
   return (
     <div className="flex flex-col gap-2.5">
       {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="flex items-center gap-2" style={{ opacity: 1 - i * 0.18 }}>
+        <div key={i} className="flex items-center gap-2" style={{ opacity: Math.max(0.15, 1 - i * 0.18) }}>
           {/* avatar circle */}
           <span
             className="shrink-0 w-6 h-6 rounded-full animate-pulse"
