@@ -360,12 +360,21 @@ export class CoreAdapter {
     const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
     // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
     // definition name). Patch it back to the definition name so the studio's chat/work filters work.
-    // Chat runs have exactly one unit whose phase is 'explore' (from the chat workflow def).
     for (const view of views) {
-      if (view.session.workflow_id?.startsWith('wf-') && view.units.length === 1) {
-        const unitId = view.units[0]?.id ?? '';
-        const phase = unitId.slice(unitId.lastIndexOf(':') + 1);
-        if (phase === 'explore') view.session.workflow_id = 'chat';
+      if (view.session.workflow_id?.startsWith('wf-')) {
+        const phases = view.units.map((u) => u.id.slice(u.id.lastIndexOf(':') + 1));
+        if (view.units.length === 1) {
+          // Single-unit: chat uses 'explore', free-form (no workflow) uses 'u1'
+          const phase = phases[0] ?? '';
+          if (phase === 'explore' || phase === 'u1') view.session.workflow_id = 'chat';
+        } else {
+          // Multi-unit: match against builtin workflow defs by phase sequence
+          const match = BUILTIN_WORKFLOWS.find(
+            (def) => def.phases.length === phases.length &&
+              def.phases.every((p, i) => p.id === phases[i]),
+          );
+          if (match) view.session.workflow_id = match.id;
+        }
       }
     }
     return views;
@@ -475,8 +484,12 @@ export class CoreAdapter {
     const runId = randomUUID();
     try {
       // Write onboarding.json to the Rust overlay dir so the actor picks it up on (re)start.
-      // When registerWorkflow NAPI is present, also hot-registers it for immediate use.
-      await this.registerWorkflow(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
+      // Uses _writeBuiltinOverlay (not registerWorkflow) to avoid adding onboarding to userWorkflows,
+      // which would cause a duplicate entry in listWorkflows().
+      if (!this._builtinOverlayWritten.has('onboarding')) {
+        await this._writeBuiltinOverlay(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
+        this._builtinOverlayWritten.add('onboarding');
+      }
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
@@ -555,7 +568,12 @@ export class CoreAdapter {
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
   listWorkflows(): WorkflowDef[] {
-    return [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()];
+    const seen = new Set<string>();
+    const result: WorkflowDef[] = [];
+    for (const w of [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()]) {
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(w); }
+    }
+    return result;
   }
 
   getWorkflow(id: string): WorkflowDef | null {
@@ -567,7 +585,8 @@ export class CoreAdapter {
   private async _writeBuiltinOverlay(def: WorkflowDef): Promise<void> {
     const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });
-    const { is_system: _sys, ...overlayDef } = def as WorkflowDef & { is_system?: boolean };
+    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete overlayDef.is_system;
     await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
     const core = this.core as unknown as Record<string, unknown>;
     if (typeof core['registerWorkflow'] === 'function') {
@@ -591,7 +610,8 @@ export class CoreAdapter {
     const path = join(dir, `${def.id}.json`);
     // Strip `is_system` before writing — the Rust core's overlay format does not recognise that
     // field and silently drops any workflow whose JSON it cannot fully deserialise.
-    const { is_system: _sys, ...overlayDef } = def as WorkflowDef & { is_system?: boolean };
+    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete overlayDef.is_system;
     await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
     this.userWorkflows.set(def.id, def);
 

@@ -59,7 +59,9 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
     const freq = new Map<string, number>();
     for (const v of windowedRuns) {
       const wf = v.session.workflow_id;
-      if (wf && wf !== 'chat') {
+      // Skip chat and unresolved instance UUIDs (wf-<uuid>) — the sessionsDetail patch
+      // resolves known builtins; anything still starting with 'wf-' has no known def name.
+      if (wf && wf !== 'chat' && !wf.startsWith('wf-')) {
         freq.set(wf, (freq.get(wf) ?? 0) + 1);
       }
     }
@@ -154,6 +156,8 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
           <button
             key={t.id}
             type="button"
+            role="tab"
+            aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
             className="rounded-full px-3 py-1 text-xs font-mono"
             style={

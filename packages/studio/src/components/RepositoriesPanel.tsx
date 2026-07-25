@@ -176,7 +176,10 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
           />
           <button
             type="button"
-            onClick={() => setShowRegister((v) => !v)}
+            onClick={() => {
+              if (showRegister) { setShowRegister(false); navigate('/repos'); }
+              else { setShowRegister(true); navigate('/repos/new'); }
+            }}
             className="shrink-0 rounded-lg px-4 py-1.5 text-xs font-semibold font-mono"
             style={{ background: showRegister ? 'rgba(230,237,243,0.1)' : '#ffda19', color: showRegister ? '#e6edf3' : '#0d1117' }}
           >
@@ -196,6 +199,8 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
                 <button
                   key={m}
                   type="button"
+                  role="tab"
+                  aria-selected={sourceMode === m}
                   onClick={() => setSourceMode(m)}
                   className="rounded-md px-3 py-1 text-[11px] font-mono font-medium transition-colors"
                   style={
