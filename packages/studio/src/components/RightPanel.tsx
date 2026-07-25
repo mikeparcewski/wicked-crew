@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client.js';
 import type { SessionView, SessionStatus } from '../api/types.js';
 import { useRunModel } from '../hooks/useRunModel.js';
@@ -52,6 +52,8 @@ type FileOpKind = 'write' | 'delete';
 
 function FilePath({ path, opKind }: { path: string; opKind?: FileOpKind }): React.ReactElement {
   const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current); }, []);
   const parts = path.replace(/\\/g, '/').split('/');
   const name = parts.pop() ?? path;
   const dir = parts.length > 0 ? `${parts.join('/')}/` : '';
@@ -73,7 +75,8 @@ function FilePath({ path, opKind }: { path: string; opKind?: FileOpKind }): Reac
   function handleCopy(): void {
     void navigator.clipboard.writeText(path).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = setTimeout(() => { setCopied(false); resetTimerRef.current = null; }, 1500);
     }).catch(() => { /* clipboard unavailable — silently ignore */ });
   }
 
@@ -380,8 +383,8 @@ export function RightPanel({ view }: Props): React.ReactElement {
                   setSteerText('');
                 })
                 .catch((err: unknown) => {
-                  const msg = err instanceof Error ? err.message : String(err);
-                  setSteerError(msg || 'Failed to send instruction — please try again.');
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  setSteerError(errMsg || 'Failed to send instruction — please try again.');
                 })
                 .finally(() => {
                   steerInflightRef.current = false;
