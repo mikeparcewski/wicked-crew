@@ -230,6 +230,8 @@ export class CoreAdapter {
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
   private closed = false;
+  /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
+  private readonly _builtinOverlayWritten = new Set<string>();
 
   /** `true` when this adapter armed the event-driven exec seam (for readiness/reporting). */
   readonly engineExec: boolean;
@@ -304,7 +306,7 @@ export class CoreAdapter {
   }
 
   /** Launch an interactive, resumable run → the run id. */
-  launchRun(input: LaunchRunInput): Promise<string> {
+  async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -313,7 +315,20 @@ export class CoreAdapter {
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
-    if (input.workflow !== undefined) opts.workflow = input.workflow;
+    if (input.workflow !== undefined) {
+      opts.workflow = input.workflow;
+      // Ensure built-in workflow definitions are present in the Rust overlay dir on first use.
+      // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
+      // which would duplicate them in listWorkflows(). The write is skipped after the first call
+      // per process lifetime.
+      const builtinDef = BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
+      if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
+        // Mark before await so concurrent launchRun() calls for the same builtin
+        // don't both pass the has() check and race to write the same file.
+        this._builtinOverlayWritten.add(input.workflow);
+        await this._writeBuiltinOverlay(builtinDef);
+      }
+    }
     return this.core.launchRun(opts);
   }
 
@@ -334,6 +349,9 @@ export class CoreAdapter {
 
   /** Inject an operator message into a run's active PTY worker(s). target="all" or a CLI key. */
   injectWorkerMessage(runId: string, message: string, target: string): Promise<string> {
+    if (typeof this.core.injectWorkerMessage !== 'function') {
+      return Promise.reject(new Error('Operator message injection is not yet supported by this wicked-core build'));
+    }
     return this.core.injectWorkerMessage(runId, message, target);
   }
 
@@ -344,7 +362,34 @@ export class CoreAdapter {
 
   /** Every run + its ordered units. */
   async sessionsDetail(): Promise<SessionView[]> {
-    return JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+    const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+    // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
+    // definition name). Patch it back to the definition name so the studio's chat/work filters work.
+    // phase_ref is only set on executed units and uses format 'wf-<uuid>:unit-N' (not the phase id).
+    // The phase id is reliably embedded in the unit id as '<session-uuid>:<phase-id>'.
+    for (const view of views) {
+      if (view.session.workflow_id?.startsWith('wf-')) {
+        const phases = [...view.units].sort((a, b) => a.ord - b.ord).map((u) => {
+          const colonIdx = u.id.indexOf(':');
+          return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
+        });
+        if (view.units.length === 1) {
+          // Single-unit chat sessions have phase id 'explore' (from the chat workflow def).
+          // 'u1' is ambiguous — it appears on any single-unit run without an explicit workflow,
+          // including Do Work runs, so we leave those unpatched rather than misclassify them.
+          const phase = phases[0] ?? '';
+          if (phase === 'explore') view.session.workflow_id = 'chat';
+        } else {
+          // Multi-unit: match against builtin workflow defs by phase sequence
+          const match = BUILTIN_WORKFLOWS.find(
+            (def) => def.phases.length === phases.length &&
+              def.phases.every((p, i) => p.id === phases[i]),
+          );
+          if (match) view.session.workflow_id = match.id;
+        }
+      }
+    }
+    return views;
   }
 
   /** A unit's captured transcript (string, or `null`). */
@@ -451,8 +496,12 @@ export class CoreAdapter {
     const runId = randomUUID();
     try {
       // Write onboarding.json to the Rust overlay dir so the actor picks it up on (re)start.
-      // When registerWorkflow NAPI is present, also hot-registers it for immediate use.
-      await this.registerWorkflow(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
+      // Uses _writeBuiltinOverlay (not registerWorkflow) to avoid adding onboarding to userWorkflows,
+      // which would cause a duplicate entry in listWorkflows().
+      if (!this._builtinOverlayWritten.has('onboarding')) {
+        this._builtinOverlayWritten.add('onboarding');
+        await this._writeBuiltinOverlay(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
+      }
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
@@ -531,11 +580,36 @@ export class CoreAdapter {
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
   listWorkflows(): WorkflowDef[] {
-    return [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()];
+    // Builtins first (stable ordering), but user-registered workflows take precedence when
+    // ids conflict — consistent with getWorkflow() which prefers userWorkflows.get().
+    const seen = new Set<string>();
+    const result: WorkflowDef[] = [];
+    for (const w of BUILTIN_WORKFLOWS) {
+      const override = this.userWorkflows.get(w.id);
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(override ?? w); }
+    }
+    for (const w of this.userWorkflows.values()) {
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(w); }
+    }
+    return result;
   }
 
   getWorkflow(id: string): WorkflowDef | null {
     return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
+  }
+
+  /** Write a built-in workflow definition to the Rust overlay dir (and hot-register when possible).
+   *  Unlike registerWorkflow(), this does NOT touch userWorkflows, avoiding duplicates in listWorkflows(). */
+  private async _writeBuiltinOverlay(def: WorkflowDef): Promise<void> {
+    const dir = workflowOverlayDir();
+    await mkdir(dir, { recursive: true });
+    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete overlayDef.is_system;
+    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['registerWorkflow'] === 'function') {
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
+    }
   }
 
   /**
@@ -552,14 +626,18 @@ export class CoreAdapter {
     const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });
     const path = join(dir, `${def.id}.json`);
-    await writeFile(path, JSON.stringify(def, null, 2), 'utf8');
+    // Strip `is_system` before writing — the Rust core's overlay format does not recognise that
+    // field and silently drops any workflow whose JSON it cannot fully deserialise.
+    const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
+    delete overlayDef.is_system;
+    await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
     this.userWorkflows.set(def.id, def);
 
     // Hot-register in the Rust actor when the NAPI method is available.
     // Falls back gracefully if running against an older core build.
     const core = this.core as unknown as Record<string, unknown>;
     if (typeof core['registerWorkflow'] === 'function') {
-      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(def));
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
     }
     return def.id;
   }
