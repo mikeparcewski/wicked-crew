@@ -568,14 +568,17 @@ export class CoreAdapter {
     const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });
     const path = join(dir, `${def.id}.json`);
-    await writeFile(path, JSON.stringify(def, null, 2), 'utf8');
+    // Strip `is_system` before writing — the Rust core's overlay format does not recognise that
+    // field and silently drops any workflow whose JSON it cannot fully deserialise.
+    const { is_system: _sys, ...overlayDef } = def as WorkflowDef & { is_system?: boolean };
+    await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
     this.userWorkflows.set(def.id, def);
 
     // Hot-register in the Rust actor when the NAPI method is available.
     // Falls back gracefully if running against an older core build.
     const core = this.core as unknown as Record<string, unknown>;
     if (typeof core['registerWorkflow'] === 'function') {
-      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(def));
+      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
     }
     return def.id;
   }
