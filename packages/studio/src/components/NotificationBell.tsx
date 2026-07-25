@@ -29,6 +29,7 @@ function kindLabel(kind: NotifKind): string {
     case 'gate':            return 'Awaiting review';
     case 'run_failed':      return 'Run failed';
     case 'steer_requested': return 'Steer requested';
+    default:                return 'Notification';
   }
 }
 
@@ -37,6 +38,7 @@ function kindColor(kind: NotifKind): string {
     case 'gate':            return S.accent;
     case 'run_failed':      return S.danger;
     case 'steer_requested': return S.link;
+    default:                return S.muted;
   }
 }
 

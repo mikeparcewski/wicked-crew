@@ -11,7 +11,7 @@ import type { CoreEvent } from '../api/types.js';
 export type NotifKind = 'gate' | 'run_failed' | 'steer_requested';
 
 /** One notification entry. `id` and `ts` are generated on ingestion. */
-export interface Notification {
+interface Notification {
   id: string;
   kind: NotifKind;
   runId: string;
