@@ -10,10 +10,7 @@ import type { CoreEvent } from '../api/types.js';
  */
 export type NotifKind = 'gate' | 'run_failed' | 'steer_requested';
 
-/**
- * One notification entry.  `id` and `ts` are generated internally by `add`;
- * callers supply only the meaningful fields.
- */
+/** One notification entry. `id` and `ts` are generated on ingestion. */
 export interface Notification {
   id: string;
   kind: NotifKind;
@@ -24,6 +21,15 @@ export interface Notification {
 }
 
 const MAX_NOTIFICATIONS = 10;
+
+function uuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Array.from({ length: 36 }, (_, i) =>
+    [8, 13, 18, 23].includes(i) ? '-' : Math.floor(Math.random() * 16).toString(16),
+  ).join('');
+}
 
 interface NotificationStore {
   notifications: Notification[];
@@ -62,7 +68,7 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
         case 'awaitingHuman': {
           if (typeof event.prompt !== 'string') return s;
           const entry: Notification = {
-            id: crypto.randomUUID(),
+            id: uuid(),
             kind: 'gate',
             runId: session,
             message: event.prompt || 'Run is awaiting human review',
@@ -73,7 +79,7 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
         }
         case 'sessionFailed': {
           const entry: Notification = {
-            id: crypto.randomUUID(),
+            id: uuid(),
             kind: 'run_failed',
             runId: session,
             message:
@@ -87,7 +93,7 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
         }
         case 'agentMessage': {
           const entry: Notification = {
-            id: crypto.randomUUID(),
+            id: uuid(),
             kind: 'steer_requested',
             runId: session,
             message:

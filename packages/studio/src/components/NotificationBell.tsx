@@ -136,6 +136,8 @@ export function NotificationBell({ navigate, collapsed = false }: Props): React.
       {/* Dropdown */}
       {open && (
         <div
+          role="menu"
+          aria-label="Notifications"
           style={{
             position: 'absolute',
             top: 'calc(100% + 6px)',
@@ -210,7 +212,9 @@ export function NotificationBell({ navigate, collapsed = false }: Props): React.
                 <li key={n.id}>
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => handleNotifClick(n.id, n.runId)}
+                    className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#79c0ff]"
                     style={{
                       width: '100%',
                       textAlign: 'left',
