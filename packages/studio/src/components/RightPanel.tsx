@@ -142,7 +142,7 @@ function FilesPanel({ model }: { model: RunModel }): React.ReactElement {
   if (!hasAny) {
     return (
       <p className="text-xs font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
-        No files changed yet.
+        {isActive ? 'No files changed yet.' : 'No files changed.'}
       </p>
     );
   }
@@ -358,7 +358,7 @@ export function RightPanel({ view }: Props): React.ReactElement {
         ))}
       </div>
 
-      {/* Compact steering input — visible only when the run is actively executing */}
+      {/* Compact steering input — visible when the run is executing, planning, or distributing */}
       {canSteer && (
         <div
           className="shrink-0 px-3 py-2 flex flex-col gap-1.5"
