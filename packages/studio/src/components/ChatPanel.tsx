@@ -39,6 +39,7 @@ function cliInitials(key: string): string {
 function DegradedRoutingBanner({ reason }: { reason: string }): React.ReactElement {
   const [dismissed, setDismissed] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const detailId = 'degraded-routing-detail';
   if (dismissed) return <></>;
   return (
     <div
@@ -46,14 +47,16 @@ function DegradedRoutingBanner({ reason }: { reason: string }): React.ReactEleme
       style={{ background: 'rgba(255,218,25,0.08)', border: '1px solid rgba(255,218,25,0.2)', color: '#ffda19' }}
     >
       <div className="flex items-center gap-2">
-        <span className="shrink-0">⚠</span>
+        <span className="shrink-0" aria-hidden="true">⚠</span>
         <span className="flex-1">Degraded routing: {reason}</span>
         <button
           type="button"
           onClick={() => setExpanded(v => !v)}
           className="shrink-0 text-[10px] transition-opacity hover:opacity-70"
           style={{ color: 'rgba(255,218,25,0.6)' }}
-          title="Why does this happen?"
+          aria-expanded={expanded}
+          aria-controls={detailId}
+          aria-label={expanded ? 'Hide explanation' : 'Show explanation'}
         >
           {expanded ? '▲' : '▼'}
         </button>
@@ -62,13 +65,13 @@ function DegradedRoutingBanner({ reason }: { reason: string }): React.ReactEleme
           onClick={() => setDismissed(true)}
           className="shrink-0 transition-opacity hover:opacity-70"
           style={{ color: 'rgba(255,218,25,0.5)' }}
-          aria-label="Dismiss"
+          aria-label="Dismiss degraded routing warning"
         >
-          ✕
+          <span aria-hidden="true">✕</span>
         </button>
       </div>
       {expanded && (
-        <p className="text-[10px] leading-relaxed pl-5" style={{ color: 'rgba(255,218,25,0.6)' }}>
+        <p id={detailId} className="text-[10px] leading-relaxed pl-5" style={{ color: 'rgba(255,218,25,0.6)' }}>
           The multi-model council could not reach a quorum vote. The unit proceeded using a
           fallback routing strategy. Open the <strong>Decisions</strong> section in the Insights
           panel on the right to see each reviewer's verdict.
