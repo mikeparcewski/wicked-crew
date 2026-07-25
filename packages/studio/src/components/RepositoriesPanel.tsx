@@ -56,6 +56,7 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [trackedCount, setTrackedCount] = useState(0);
 
   const [rerunning, setRerunning] = useState<Record<string, boolean>>({});
   const [rerunError, setRerunError] = useState<Record<string, string>>({});
@@ -79,6 +80,12 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (repos.length === 0) { setTrackedCount(0); return; }
+    Promise.all(repos.map(r => api.getRepoGraph(r.id).then(({ graph }) => graph !== null).catch(() => false)))
+      .then(flags => setTrackedCount(flags.filter(Boolean).length));
+  }, [repos]);
 
   function deriveName(value: string): void {
     if (nameEditedRef.current) return;
@@ -301,7 +308,7 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
             />
             <StatCard
               label="Tracked"
-              value={repos.length}
+              value={trackedCount}
               hint="onboarded and graph-indexed"
             />
           </div>
