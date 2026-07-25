@@ -170,9 +170,11 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
         {TABS.map(t => (
           <button
             key={t.id}
+            id={`work-tab-${t.id}`}
             type="button"
             role="tab"
             aria-selected={tab === t.id}
+            aria-controls={`work-panel-${t.id}`}
             tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
             className="rounded-full px-3 py-1 text-xs font-mono"
@@ -188,7 +190,12 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto px-5 pb-8 flex flex-col">
+      <div
+        id={`work-panel-${tab}`}
+        role="tabpanel"
+        aria-labelledby={`work-tab-${tab}`}
+        className="flex-1 overflow-y-auto px-5 pb-8 flex flex-col"
+      >
         {tab === 'all' ? (
           <>
             {activeGroup.length > 0 && (

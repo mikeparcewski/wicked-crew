@@ -193,30 +193,13 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
             className="flex flex-col gap-3 rounded-2xl p-5 mb-5"
             style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.08)' }}
           >
-            {/* Source mode tabs */}
-            <div
-              role="tablist"
-              aria-label="Repository source"
-              className="flex gap-1"
-              onKeyDown={e => {
-                const modes: SourceMode[] = ['local', 'remote'];
-                const idx = modes.indexOf(sourceMode);
-                if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  setSourceMode(modes[(idx + 1) % modes.length]!);
-                } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  setSourceMode(modes[(idx - 1 + modes.length) % modes.length]!);
-                }
-              }}
-            >
+            {/* Source mode toggle — two mutually exclusive options; aria-pressed is correct for a binary toggle */}
+            <div role="group" aria-label="Repository source" className="flex gap-1">
               {(['local', 'remote'] as SourceMode[]).map((m) => (
                 <button
                   key={m}
                   type="button"
-                  role="tab"
-                  aria-selected={sourceMode === m}
-                  tabIndex={sourceMode === m ? 0 : -1}
+                  aria-pressed={sourceMode === m}
                   onClick={() => setSourceMode(m)}
                   className="rounded-md px-3 py-1 text-[11px] font-mono font-medium transition-colors"
                   style={
