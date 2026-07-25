@@ -51,7 +51,7 @@ export async function createServer(
     if (origin && LOOPBACK_ORIGIN.test(origin)) {
       reply.header('Access-Control-Allow-Origin', origin);
       reply.header('Vary', 'Origin');
-      reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
       reply.header('Access-Control-Allow-Headers', 'Content-Type');
     }
     if (req.method === 'OPTIONS') {
