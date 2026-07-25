@@ -59,7 +59,11 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   if (!res.ok) {
     const text = await res.text();
     let msg: string;
-    try { msg = (JSON.parse(text) as { error?: string }).error ?? text; } catch { msg = text; }
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const raw = body.error ?? body.message ?? text;
+      msg = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    } catch { msg = text; }
     if (!msg) msg = res.statusText || String(res.status);
     throw new Error(`API ${res.status}: ${msg}`);
   }
