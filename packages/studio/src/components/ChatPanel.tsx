@@ -246,7 +246,7 @@ function ModePill({
     <div
       role="radiogroup"
       aria-label="Run mode"
-      aria-readonly={readOnly || undefined}
+      aria-disabled={readOnly || undefined}
       title={readOnly ? 'Run mode (read-only — run is complete)' : undefined}
       className="flex items-center rounded-lg overflow-hidden shrink-0"
       style={{

@@ -395,7 +395,7 @@ export function RightPanel({ view }: Props): React.ReactElement {
                 value={steerText}
                 onChange={(e) => { setSteerText(e.target.value); setSteerError(null); }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
                     e.currentTarget.form?.requestSubmit();
                   }
@@ -414,6 +414,7 @@ export function RightPanel({ view }: Props): React.ReactElement {
               />
               <button
                 type="submit"
+                aria-label={steerSending ? 'Sending…' : 'Send steering instruction'}
                 disabled={steerSending || !steerText.trim()}
                 className="shrink-0 self-end rounded px-2 py-1 text-[11px] font-mono font-medium transition-opacity disabled:opacity-30"
                 style={{ background: 'rgba(121,192,255,0.15)', color: '#79c0ff', border: '1px solid rgba(121,192,255,0.2)' }}
