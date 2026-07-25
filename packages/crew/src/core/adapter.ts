@@ -304,7 +304,7 @@ export class CoreAdapter {
   }
 
   /** Launch an interactive, resumable run → the run id. */
-  launchRun(input: LaunchRunInput): Promise<string> {
+  async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
@@ -313,7 +313,13 @@ export class CoreAdapter {
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
-    if (input.workflow !== undefined) opts.workflow = input.workflow;
+    if (input.workflow !== undefined) {
+      opts.workflow = input.workflow;
+      // Ensure built-in workflow definitions are present in the Rust overlay dir on first use.
+      // The Rust actor loads overlay JSONs at startup, so this is a no-op after the first call.
+      const builtinDef = BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
+      if (builtinDef) await this.registerWorkflow(builtinDef);
+    }
     return this.core.launchRun(opts);
   }
 
@@ -344,7 +350,17 @@ export class CoreAdapter {
 
   /** Every run + its ordered units. */
   async sessionsDetail(): Promise<SessionView[]> {
-    return JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+    const views = JSON.parse(await this.core.sessionsDetail()) as SessionView[];
+    // The Rust core always stores workflow_id as 'wf-<session-uuid>' (an instance ID, not the
+    // definition name). Patch it back to the definition name so the studio's chat/work filters work.
+    // Chat runs have exactly one unit whose phase is 'explore' (from the chat workflow def).
+    for (const view of views) {
+      if (view.session.workflow_id?.startsWith('wf-') && view.units.length === 1) {
+        const phase = view.units[0]?.id.split(':').pop();
+        if (phase === 'explore') view.session.workflow_id = 'chat';
+      }
+    }
+    return views;
   }
 
   /** A unit's captured transcript (string, or `null`). */
