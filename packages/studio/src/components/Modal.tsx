@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useId, useEffect } from 'react';
 import type { ReactNode } from 'react';
 
 interface Props {
@@ -9,6 +9,12 @@ interface Props {
 
 export function Modal({ title, onClose, children }: Props): React.ReactElement {
   const titleId = useId();
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.6)' }}>
       <div
