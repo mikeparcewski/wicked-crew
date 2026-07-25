@@ -365,9 +365,11 @@ export class CoreAdapter {
       if (view.session.workflow_id?.startsWith('wf-')) {
         const phases = view.units.map((u) => u.phase_ref ?? '');
         if (view.units.length === 1) {
-          // Single-unit: chat uses 'explore', free-form (no workflow) uses 'u1'
+          // Single-unit chat sessions use phase_ref 'explore' (from the chat workflow def).
+          // 'u1' is ambiguous — it appears on any single-unit run without an explicit workflow,
+          // including Do Work runs, so we leave those unpatched rather than misclassify them.
           const phase = phases[0] ?? '';
-          if (phase === 'explore' || phase === 'u1') view.session.workflow_id = 'chat';
+          if (phase === 'explore') view.session.workflow_id = 'chat';
         } else {
           // Multi-unit: match against builtin workflow defs by phase sequence
           const match = BUILTIN_WORKFLOWS.find(
@@ -569,9 +571,15 @@ export class CoreAdapter {
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
   listWorkflows(): WorkflowDef[] {
+    // Builtins first (stable ordering), but user-registered workflows take precedence when
+    // ids conflict — consistent with getWorkflow() which prefers userWorkflows.get().
     const seen = new Set<string>();
     const result: WorkflowDef[] = [];
-    for (const w of [...BUILTIN_WORKFLOWS, ...this.userWorkflows.values()]) {
+    for (const w of BUILTIN_WORKFLOWS) {
+      const override = this.userWorkflows.get(w.id);
+      if (!seen.has(w.id)) { seen.add(w.id); result.push(override ?? w); }
+    }
+    for (const w of this.userWorkflows.values()) {
       if (!seen.has(w.id)) { seen.add(w.id); result.push(w); }
     }
     return result;

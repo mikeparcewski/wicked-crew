@@ -194,7 +194,22 @@ export function RepositoriesPanel({ onSelectRun, autoShowRegister, navigate }: P
             style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.08)' }}
           >
             {/* Source mode tabs */}
-            <div role="tablist" aria-label="Repository source" className="flex gap-1">
+            <div
+              role="tablist"
+              aria-label="Repository source"
+              className="flex gap-1"
+              onKeyDown={e => {
+                const modes: SourceMode[] = ['local', 'remote'];
+                const idx = modes.indexOf(sourceMode);
+                if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setSourceMode(modes[(idx + 1) % modes.length]!);
+                } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setSourceMode(modes[(idx - 1 + modes.length) % modes.length]!);
+                }
+              }}
+            >
               {(['local', 'remote'] as SourceMode[]).map((m) => (
                 <button
                   key={m}

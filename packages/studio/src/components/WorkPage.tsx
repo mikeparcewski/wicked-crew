@@ -151,7 +151,22 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
       </div>
 
       {/* Filter tabs */}
-      <div role="tablist" aria-label="Filter by status" className="px-8 pb-3 flex items-center gap-2">
+      <div
+        role="tablist"
+        aria-label="Filter by status"
+        className="px-8 pb-3 flex items-center gap-2"
+        onKeyDown={e => {
+          const ids = TABS.map(t => t.id);
+          const idx = ids.indexOf(tab);
+          if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+            e.preventDefault();
+            setTab(ids[(idx + 1) % ids.length]!);
+          } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            setTab(ids[(idx - 1 + ids.length) % ids.length]!);
+          }
+        }}
+      >
         {TABS.map(t => (
           <button
             key={t.id}
