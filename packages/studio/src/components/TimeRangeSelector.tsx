@@ -19,6 +19,7 @@ export function TimeRangeSelector({ value, onChange }: Props): React.ReactElemen
         <button
           key={r}
           type="button"
+          aria-pressed={value === r}
           onClick={() => onChange(r)}
           style={{
             padding: '3px 8px',
