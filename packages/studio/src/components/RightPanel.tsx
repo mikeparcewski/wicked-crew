@@ -379,8 +379,9 @@ export function RightPanel({ view }: Props): React.ReactElement {
                 .then(() => {
                   setSteerText('');
                 })
-                .catch(() => {
-                  setSteerError('Send failed — run still active?');
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  setSteerError(msg || 'Failed to send instruction — please try again.');
                 })
                 .finally(() => {
                   steerInflightRef.current = false;
@@ -400,6 +401,7 @@ export function RightPanel({ view }: Props): React.ReactElement {
                     e.currentTarget.form?.requestSubmit();
                   }
                 }}
+                aria-label="Steering instruction"
                 rows={2}
                 placeholder="Send instruction to agents…"
                 disabled={steerSending}
