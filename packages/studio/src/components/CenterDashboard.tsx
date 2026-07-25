@@ -733,9 +733,7 @@ export function CenterDashboard({
 
   const { range, setRange, filter: filterByRange } = useTimeRange('30d');
 
-  // ── Range-filtered runs (positional — no timestamp on AgentSession) ────────
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const filteredRuns = useMemo(() => filterByRange(runs), [runs, range]);
+  const filteredRuns = useMemo(() => filterByRange(runs), [runs, filterByRange]);
 
   // ── Derived: active sessions only (scoped to filteredRuns for consistency) ──
   const activeRuns = useMemo(

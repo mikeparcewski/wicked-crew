@@ -8,7 +8,7 @@
  * recency. This comment intentionally documents the limitation; swap the
  * implementation for a real date filter once AgentSession.started_at exists.
  */
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { SessionView } from '../api/types.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -43,6 +43,6 @@ export interface UseTimeRangeResult {
 
 export function useTimeRange(initial: TimeRange = '30d'): UseTimeRangeResult {
   const [range, setRange] = useState<TimeRange>(initial);
-  const filter = (runs: SessionView[]) => filterByWindow(runs, range);
+  const filter = useCallback((runs: SessionView[]) => filterByWindow(runs, range), [range]);
   return { range, setRange, filter };
 }

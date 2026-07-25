@@ -22,9 +22,7 @@ export function ChatsPage({ runs, onSelect, navigate }: Props): React.ReactEleme
     [runs],
   );
 
-  // Apply time window
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const chats = useMemo(() => filterByRange(allChats), [allChats, range]);
+  const chats = useMemo(() => filterByRange(allChats), [allChats, filterByRange]);
 
   const active = useMemo(() => chats.filter(v => !terminal(v.session.status)), [chats]);
 

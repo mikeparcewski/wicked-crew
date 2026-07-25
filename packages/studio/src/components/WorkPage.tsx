@@ -35,9 +35,7 @@ export function WorkPage({ runs, selectedRunId, onSelect, navigate }: Props): Re
     [runs],
   );
 
-  // Apply time window first, then search filter
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const windowedRuns = useMemo(() => filterByRange(allWorkRuns), [allWorkRuns, range]);
+  const windowedRuns = useMemo(() => filterByRange(allWorkRuns), [allWorkRuns, filterByRange]);
 
   const normalizedQuery = query.toLowerCase();
   const searched = useMemo(

@@ -14,7 +14,7 @@ interface Props {
 
 export function TimeRangeSelector({ value, onChange }: Props): React.ReactElement {
   return (
-    <div style={{ display: 'flex', gap: '4px' }}>
+    <div role="group" aria-label="Time range" style={{ display: 'flex', gap: '4px' }}>
       {TIME_RANGE_OPTIONS.map(({ value: r, label }) => (
         <button
           key={r}
