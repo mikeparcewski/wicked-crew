@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "packages/crew",
-    "packages/studio"
+    "packages/studio",
+    "packages/claude-agent-acp"
   ],
   "scripts": {
     "build": "npm run build -w packages/studio && npm run build -w packages/crew",
