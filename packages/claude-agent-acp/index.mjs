@@ -75,9 +75,10 @@ function execTurn(rpcId, promptBlocks) {
       claudeArgs.push('--settings', settingsPath);
     }
     // stream-json --verbose: gives us structured JSON we can parse per-line.
-    // Each assistant turn arrives as one JSON object with content blocks.
-    // Tool use / tool result frames are skipped — only text blocks are forwarded.
-    claudeArgs.push('--output-format', 'stream-json', '--verbose');
+    // --include-partial-messages adds stream_event frames (token deltas) so text
+    // reaches the client AS it is generated, not once per completed message.
+    // Tool use / tool result frames are skipped — only text is forwarded.
+    claudeArgs.push('--output-format', 'stream-json', '--verbose', '--include-partial-messages');
     claudeArgs.push(promptText);
 
     const child = spawn('claude', claudeArgs, {
@@ -90,6 +91,18 @@ function execTurn(rpcId, promptBlocks) {
     let inputTokens = 0;
     let outputTokens = 0;
     let stopReason = 'end_turn';
+    // Chars emitted via stream_event deltas for the in-flight message. When >0 the
+    // complete `assistant` frame's text is a duplicate of what already streamed.
+    let deltaChars = 0;
+
+    function emitChunk(text) {
+      notify('session/update', {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text },
+        },
+      });
+    }
 
     rl.on('line', (line) => {
       if (!line.trim()) return;
@@ -99,19 +112,24 @@ function execTurn(rpcId, promptBlocks) {
 
       const type = msg.type;
 
-      if (type === 'assistant') {
-        // Emit text content as agent_message_chunk notifications.
+      if (type === 'stream_event') {
+        // Token-level delta (--include-partial-messages): forward text as it is generated.
+        const ev = msg.event;
+        if (ev?.type === 'message_start') deltaChars = 0;
+        if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+          deltaChars += ev.delta.text.length;
+          emitChunk(ev.delta.text);
+        }
+      } else if (type === 'assistant') {
+        // Complete-message frame. Emit its text only if no deltas streamed for it
+        // (older CLI without stream_event support, or a delta gap) — else it would double.
         const content = msg.message?.content ?? [];
-        for (const block of content) {
-          if (block.type === 'text' && block.text) {
-            notify('session/update', {
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { text: block.text },
-              },
-            });
+        if (deltaChars === 0) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) emitChunk(block.text);
           }
         }
+        deltaChars = 0;
         // Accumulate usage from assistant turns (last wins).
         const u = msg.message?.usage;
         if (u) {

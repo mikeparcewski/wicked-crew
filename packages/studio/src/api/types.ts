@@ -192,12 +192,19 @@ export interface CoreEvent {
   skill_ref?: string | null;
   has_validator_pin?: boolean;
   executor_type?: string;
+  /** unitPlanned: the wire spelling per event_to_json (camelCase). */
+  executorType?: string;
   // unitDistributed enrichment fields
   routing_method?: string;
   agreement_pct?: number | null;
   returned?: number | null;
   dissent?: number | null;
   degraded_reason?: string | null;
+  // councilConvened / councilVoted (live deliberation) — camelCase per event_to_json
+  clis?: string[];
+  consensus?: boolean;
+  agreementPct?: number;
+  votes?: number;
   [k: string]: unknown;
 }
 
