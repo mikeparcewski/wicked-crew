@@ -5,7 +5,8 @@
   "workspaces": [
     "packages/crew",
     "packages/studio",
-    "packages/claude-agent-acp"
+    "packages/claude-agent-acp",
+    "packages/agent-acp-bridges"
   ],
   "scripts": {
     "build": "npm run build -w packages/studio && npm run build -w packages/crew",
