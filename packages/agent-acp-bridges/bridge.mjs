@@ -21,9 +21,13 @@ import { createInterface } from 'readline';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 
-/** Strip ANSI escape sequences so spinner/colour codes never pollute the transcript. */
+/**
+ * Strip ANSI escape sequences so spinner/colour codes never pollute the transcript:
+ * CSI sequences (colours, cursor movement) and OSC sequences (terminated by BEL or
+ * ST). Written with explicit \u escapes so no literal control bytes live in source.
+ */
 // eslint-disable-next-line no-control-regex
-const ANSI = /\[[0-9;?]*[A-Za-z]|\][^]*/g;
+const ANSI = /\u001B\[[0-9;?]*[A-Za-z]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)?/g;
 
 /**
  * Run the bridge for one CLI.
@@ -72,11 +76,9 @@ export function runBridge({ name, version, invocation }) {
         return;
       }
 
-      let sawOutput = false;
       child.stdout.on('data', (data) => {
         const text = String(data).replace(ANSI, '');
         if (!text) return;
-        sawOutput = true;
         notify('session/update', {
           update: {
             sessionUpdate: 'agent_message_chunk',
@@ -86,7 +88,10 @@ export function runBridge({ name, version, invocation }) {
       });
 
       child.on('close', (code) => {
-        const stopReason = code === 0 || (code === null && sawOutput) ? 'end_turn' : 'error';
+        // Only a clean exit is a completed turn. `code === null` means the CLI was
+        // killed by a signal (timeout, mid-stream kill) — reporting end_turn there
+        // would mask a truncated response as a successful one.
+        const stopReason = code === 0 ? 'end_turn' : 'error';
         respond(rpcId, { stopReason });
         resolve();
       });
