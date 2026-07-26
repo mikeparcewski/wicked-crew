@@ -35,6 +35,10 @@ function summarize(event: CoreEvent): string {
       return typeof event.cli === 'string' ? `assigned -> ${event.cli}` : 'distributed';
     case 'councilConvened':
       return Array.isArray(event.clis) ? `council convened — polling ${event.clis.length} CLIs` : 'council convened';
+    case 'councilDeliberated':
+      return typeof event.agreementPct === 'number'
+        ? `ballot ${String(event.round ?? '?')} at ${event.agreementPct}% — below ${String(event.neededPct ?? '?')}%, runoff round starting`
+        : 'council deliberating';
     case 'councilVoted':
       return typeof event.agreementPct === 'number'
         ? `council voted — ${event.agreementPct}% agreement (${String(event.votes ?? '?')} votes)`
@@ -68,15 +72,19 @@ function summarize(event: CoreEvent): string {
   }
 }
 
-/** Live council deliberation state for one unit (from councilConvened / councilVoted). */
+/** Live council deliberation state for one unit (councilConvened / councilDeliberated / councilVoted). */
 export interface CouncilStatus {
-  state: 'convened' | 'voted';
+  state: 'convened' | 'deliberating' | 'voted';
   /** Roster keys polled (set on convened). */
   clis?: string[];
-  /** Verdict agreement percent (set on voted). */
+  /** Latest agreement percent (deliberating and voted). */
   agreementPct?: number;
-  /** Vote count returned (set on voted). */
+  /** Vote count returned (deliberating and voted). */
   votes?: number;
+  /** Deliberating only: the completed ballot number. */
+  round?: number;
+  /** Deliberating only: the approval bar the council must reach, as a percent. */
+  neededPct?: number;
 }
 
 interface RuntimeStore {
@@ -136,18 +144,28 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
       // Council deliberation lifecycle → live per-unit status (also logged below via fall-through
       // is NOT used here: log the entry inline so the status map and log stay one atomic update).
       if (
-        (event.type === 'councilConvened' || event.type === 'councilVoted') &&
+        (event.type === 'councilConvened' ||
+          event.type === 'councilDeliberated' ||
+          event.type === 'councilVoted') &&
         typeof event.ord === 'number'
       ) {
         const cKey = `${session}:${event.ord}`;
         const status: CouncilStatus =
           event.type === 'councilConvened'
             ? { state: 'convened', ...(Array.isArray(event.clis) ? { clis: event.clis as string[] } : {}) }
-            : {
-                state: 'voted',
-                ...(typeof event.agreementPct === 'number' ? { agreementPct: event.agreementPct } : {}),
-                ...(typeof event.votes === 'number' ? { votes: event.votes } : {}),
-              };
+            : event.type === 'councilDeliberated'
+              ? {
+                  state: 'deliberating',
+                  ...(typeof event.round === 'number' ? { round: event.round } : {}),
+                  ...(typeof event.agreementPct === 'number' ? { agreementPct: event.agreementPct } : {}),
+                  ...(typeof event.neededPct === 'number' ? { neededPct: event.neededPct } : {}),
+                  ...(typeof event.votes === 'number' ? { votes: event.votes } : {}),
+                }
+              : {
+                  state: 'voted',
+                  ...(typeof event.agreementPct === 'number' ? { agreementPct: event.agreementPct } : {}),
+                  ...(typeof event.votes === 'number' ? { votes: event.votes } : {}),
+                };
         const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
         entry.ord = event.ord;
         const prevLog = s.logs[session] ?? [];
