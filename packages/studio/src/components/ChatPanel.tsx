@@ -43,7 +43,9 @@ function CouncilDeliberation({ runId, ord }: { runId: string; ord: number }): Re
     ? 'Council deliberating…'
     : status.state === 'convened'
       ? `Council convened — polling ${status.clis?.length ?? '?'} CLI${(status.clis?.length ?? 0) === 1 ? '' : 's'}…`
-      : `Council voted — ${status.agreementPct ?? '?'}% agreement (${status.votes ?? '?'} votes)`;
+      : status.state === 'deliberating'
+        ? `Ballot ${status.round ?? '?'}: ${status.agreementPct ?? '?'}% — below the ${status.neededPct ?? 75}% bar, runoff in progress…`
+        : `Council voted — ${status.agreementPct ?? '?'}% agreement (${status.votes ?? '?'} votes)`;
   return (
     <div
       className="flex items-center gap-2 text-xs font-mono rounded-lg px-3 py-2"
@@ -586,7 +588,11 @@ function RunChat({
                     </div>
                   )}
                   {unit.status === 'pending' && (() => {
-                    const isAgent = executorTypes[`${session.id}:${unit.ord}`] === 'agent';
+                    // Unknown executor type (late join — unitPlanned fired before the WS
+                    // connected, and there is no replay) defaults to agent: council units
+                    // dominate, and tool units correct themselves on the next live frame.
+                    const executorType = executorTypes[`${session.id}:${unit.ord}`];
+                    const isAgent = executorType ? executorType === 'agent' : true;
                     return isAgent ? (
                       <CouncilDeliberation runId={session.id} ord={unit.ord} />
                     ) : (

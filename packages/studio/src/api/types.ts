@@ -187,12 +187,14 @@ export interface CoreEvent {
   // unitOutputCaptured (EVT-013)
   outputBytes?: number;
   stepStatus?: 'ok' | 'failed' | 'cancelled';
-  // unitPlanned enrichment fields
+  // unitPlanned enrichment fields — the wire spelling is camelCase (event_to_json);
+  // the snake_case variants are kept for older daemons.
   stage?: string;
   skill_ref?: string | null;
+  skillRef?: string | null;
   has_validator_pin?: boolean;
+  hasValidatorPin?: boolean;
   executor_type?: string;
-  /** unitPlanned: the wire spelling per event_to_json (camelCase). */
   executorType?: string;
   // unitDistributed enrichment fields
   routing_method?: string;
@@ -200,11 +202,16 @@ export interface CoreEvent {
   returned?: number | null;
   dissent?: number | null;
   degraded_reason?: string | null;
-  // councilConvened / councilVoted (live deliberation) — camelCase per event_to_json
+  // councilConvened / councilDeliberated / councilVoted (live deliberation) — camelCase
+  // per event_to_json
   clis?: string[];
   consensus?: boolean;
   agreementPct?: number;
   votes?: number;
+  /** councilDeliberated: the completed ballot number (1-based). */
+  round?: number;
+  /** councilDeliberated: the approval bar the council must reach, as a percent. */
+  neededPct?: number;
   [k: string]: unknown;
 }
 

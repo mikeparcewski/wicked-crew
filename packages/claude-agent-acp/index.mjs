@@ -18,7 +18,7 @@
  */
 
 import { createInterface } from 'readline';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 
 // ── CLI arg parsing ───────────────────────────────────────────────────────────
@@ -35,6 +35,22 @@ for (let i = 0; i < argv.length; i++) {
 // ── Session state ─────────────────────────────────────────────────────────────
 
 let sessionCwd = process.cwd();
+
+// Older claude CLIs reject unknown flags at startup, so probe --help once per
+// bridge process and only pass --include-partial-messages when supported.
+let partialMessagesSupported = null;
+
+function supportsPartialMessages() {
+  if (partialMessagesSupported === null) {
+    try {
+      const res = spawnSync('claude', ['--help'], { encoding: 'utf8', timeout: 10_000 });
+      partialMessagesSupported = (res.stdout ?? '').includes('--include-partial-messages');
+    } catch {
+      partialMessagesSupported = false;
+    }
+  }
+  return partialMessagesSupported;
+}
 
 // ── JSON-RPC output helpers ───────────────────────────────────────────────────
 
@@ -76,9 +92,11 @@ function execTurn(rpcId, promptBlocks) {
     }
     // stream-json --verbose: gives us structured JSON we can parse per-line.
     // --include-partial-messages adds stream_event frames (token deltas) so text
-    // reaches the client AS it is generated, not once per completed message.
+    // reaches the client AS it is generated, not once per completed message —
+    // probed once because older CLIs reject unknown flags at startup.
     // Tool use / tool result frames are skipped — only text is forwarded.
-    claudeArgs.push('--output-format', 'stream-json', '--verbose', '--include-partial-messages');
+    claudeArgs.push('--output-format', 'stream-json', '--verbose');
+    if (supportsPartialMessages()) claudeArgs.push('--include-partial-messages');
     claudeArgs.push(promptText);
 
     const child = spawn('claude', claudeArgs, {
