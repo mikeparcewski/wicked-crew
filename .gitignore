@@ -16,3 +16,5 @@ wicked-estate.coverage.json
 .product/domain-model.json
 scripts/domain/__pycache__/
 .product/
+.claude/
+.wicked/

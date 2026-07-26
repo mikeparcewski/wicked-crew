@@ -5,7 +5,6 @@
   "workspaces": [
     "packages/crew",
     "packages/studio",
-    "packages/claude-agent-acp",
     "packages/agent-acp-bridges"
   ],
   "scripts": {
