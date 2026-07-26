@@ -1,7 +1,7 @@
 {
   "name": "agent-acp-bridges",
   "version": "1.0.0",
-  "description": "ACP (Agent Client Protocol) stdio bridges for headless coding CLIs — codex, pi, agy (Antigravity), and opencode. Used by wicked-core to drive governed multi-turn sessions.",
+  "description": "ACP (Agent Client Protocol) stdio bridges for headless coding CLIs \u2014 codex, pi, agy (Antigravity), and opencode. Used by wicked-core to drive governed multi-turn sessions.",
   "type": "module",
   "bin": {
     "codex-acp": "codex-acp.mjs",
@@ -12,5 +12,20 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikeparcewski/wicked-crew.git",
+    "directory": "packages/agent-acp-bridges"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "ai-agents",
+    "wicked"
+  ],
+  "files": [
+    "*.mjs",
+    "README.md"
+  ]
 }

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
+import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { startServer } from '../api/server.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -46,6 +47,11 @@ function parseBootstrap(args: string[]): BootstrapOpts {
 let adapterRef: CoreAdapter | undefined;
 
 async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; port: number }> {
+  // Put the packaged ACP bridge shims on PATH BEFORE the engine exists — the core
+  // spawns bridge binaries by bare name, and every engine subprocess inherits this
+  // environment. Makes a plain `npm install` deployment fully self-contained (no
+  // global installs, no hand-made symlinks).
+  ensureBridgesOnPath();
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
