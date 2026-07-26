@@ -60,8 +60,11 @@ export function ensureBridgesOnPath(
 ): string | null {
   const binDir = findBridgeBinDir(start);
   if (binDir === null) return null;
-  const current = process.env['PATH'] ?? '';
-  if (!current.split(delimiter).includes(binDir)) {
+  const current = process.env['PATH'];
+  if (current === undefined || current === '') {
+    // No trailing delimiter: an empty PATH entry means the CWD on POSIX.
+    process.env['PATH'] = binDir;
+  } else if (!current.split(delimiter).includes(binDir)) {
     process.env['PATH'] = binDir + delimiter + current;
   }
   return binDir;

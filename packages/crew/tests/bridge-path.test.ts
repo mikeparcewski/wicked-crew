@@ -55,7 +55,8 @@ describe('ensureBridgesOnPath', () => {
     const binDir = join(root, 'node_modules', '.bin');
     const before = process.env['PATH'];
     cleanups.push(() => {
-      process.env['PATH'] = before;
+      if (before === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = before;
     });
 
     expect(ensureBridgesOnPath(start)).toBe(binDir);
