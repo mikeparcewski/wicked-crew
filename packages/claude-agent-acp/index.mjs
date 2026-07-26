@@ -75,8 +75,8 @@ function execTurn(rpcId, promptBlocks) {
       claudeArgs.push('--settings', settingsPath);
     }
     // stream-json --verbose: gives us structured JSON we can parse per-line.
-    // Each assistant turn arrives as one JSON object; tool use events also arrive
-    // as JSON objects so we can emit them as agent_message_chunk text.
+    // Each assistant turn arrives as one JSON object with content blocks.
+    // Tool use / tool result frames are skipped — only text blocks are forwarded.
     claudeArgs.push('--output-format', 'stream-json', '--verbose');
     claudeArgs.push(promptText);
 
@@ -183,11 +183,14 @@ rl.on('line', async (line) => {
 
   const { id, method, params } = msg;
 
+  // JSON-RPC 2.0: messages without an id are notifications — never send a response.
+  const isNotification = id == null;
+
   pending++;
   try {
     switch (method) {
       case 'initialize':
-        respond(id, {
+        if (!isNotification) respond(id, {
           protocolVersion: 1,
           serverCapabilities: {},
           serverInfo: { name: 'claude-agent-acp', version: '1.0.0' },
@@ -196,15 +199,15 @@ rl.on('line', async (line) => {
 
       case 'session/new':
         if (params?.cwd) sessionCwd = params.cwd;
-        respond(id, { sessionId: randomUUID() });
+        if (!isNotification) respond(id, { sessionId: randomUUID() });
         break;
 
       case 'session/prompt':
-        await execTurn(id, params?.prompt ?? []);
+        if (!isNotification) await execTurn(id, params?.prompt ?? []);
         break;
 
       default:
-        if (id != null) {
+        if (!isNotification) {
           respondError(id, -32601, `Method not found: ${method}`);
         }
     }
