@@ -18,7 +18,7 @@
  */
 
 import { createInterface } from 'readline';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 
 // ── CLI arg parsing ───────────────────────────────────────────────────────────
@@ -38,18 +38,39 @@ let sessionCwd = process.cwd();
 
 // Older claude CLIs reject unknown flags at startup, so probe --help once per
 // bridge process and only pass --include-partial-messages when supported.
-let partialMessagesSupported = null;
+// Async (this process is an RPC server — a synchronous probe would stall the
+// event loop) and cached as a promise so concurrent turns share one probe.
+// Both stdout and stderr are checked: some CLIs write help text to stderr.
+let partialMessagesProbe = null;
 
 function supportsPartialMessages() {
-  if (partialMessagesSupported === null) {
-    try {
-      const res = spawnSync('claude', ['--help'], { encoding: 'utf8', timeout: 10_000 });
-      partialMessagesSupported = (res.stdout ?? '').includes('--include-partial-messages');
-    } catch {
-      partialMessagesSupported = false;
-    }
+  if (!partialMessagesProbe) {
+    partialMessagesProbe = new Promise((resolve) => {
+      let out = '';
+      let child;
+      try {
+        child = spawn('claude', ['--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch {
+        resolve(false);
+        return;
+      }
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve(false);
+      }, 10_000);
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { out += d; });
+      child.on('close', () => {
+        clearTimeout(timer);
+        resolve(out.includes('--include-partial-messages'));
+      });
+      child.on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
   }
-  return partialMessagesSupported;
+  return partialMessagesProbe;
 }
 
 // ── JSON-RPC output helpers ───────────────────────────────────────────────────
@@ -77,7 +98,8 @@ function respondError(id, code, message) {
  * prompt blocks, stream agent_message_chunk notifications for each text
  * block, then send the final session/prompt response.
  */
-function execTurn(rpcId, promptBlocks) {
+async function execTurn(rpcId, promptBlocks) {
+  const partialMessages = await supportsPartialMessages();
   return new Promise((resolve) => {
     const promptText = promptBlocks
       .filter((b) => b.type === 'text' && b.text)
@@ -96,7 +118,7 @@ function execTurn(rpcId, promptBlocks) {
     // probed once because older CLIs reject unknown flags at startup.
     // Tool use / tool result frames are skipped — only text is forwarded.
     claudeArgs.push('--output-format', 'stream-json', '--verbose');
-    if (supportsPartialMessages()) claudeArgs.push('--include-partial-messages');
+    if (partialMessages) claudeArgs.push('--include-partial-messages');
     claudeArgs.push(promptText);
 
     const child = spawn('claude', claudeArgs, {

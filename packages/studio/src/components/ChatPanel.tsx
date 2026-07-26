@@ -36,7 +36,10 @@ function cliInitials(key: string): string {
   return key.slice(0, 2).toUpperCase();
 }
 
-/** Live council deliberation status for a pending unit (councilConvened / councilVoted). */
+/**
+ * Live council deliberation status for a pending unit, derived from the
+ * councilConvened / councilDeliberated (below-bar runoff) / councilVoted frames.
+ */
 function CouncilDeliberation({ runId, ord }: { runId: string; ord: number }): React.ReactElement {
   const status = useRuntimeStore((s) => s.councilStatus[`${runId}:${ord}`]);
   const label = !status

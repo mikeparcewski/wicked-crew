@@ -168,6 +168,7 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
                 };
         const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
         entry.ord = event.ord;
+        if (typeof event.attempt === 'number') entry.attempt = event.attempt;
         const prevLog = s.logs[session] ?? [];
         const nextLog = [...prevLog, entry];
         if (nextLog.length > LOG_CAP) nextLog.splice(0, nextLog.length - LOG_CAP);
