@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
@@ -27,8 +28,16 @@ interface BootstrapOpts {
   busDbPath: string;
 }
 
+/** Durable state home (~/.wicked-crew) — runs/evidence must survive a reboot, which the
+ * OS temp dir explicitly does not. Created on demand; --db/--bus-db still override. */
+function stateHome(): string {
+  const dir = join(homedir(), '.wicked-crew');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function parseBootstrap(args: string[]): BootstrapOpts {
-  const dbPath = flag(args, '--db') ?? join(tmpdir(), 'wicked-crew-core.db');
+  const dbPath = flag(args, '--db') ?? join(stateHome(), 'core.db');
   const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
   const port = portStr !== undefined ? Number(portStr) : 7701;
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
@@ -40,7 +49,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const busDbPath =
     flag(args, '--bus-db') ??
     process.env['WICKED_BUS_DB'] ??
-    join(tmpdir(), 'wicked-crew-bus.db');
+    join(stateHome(), 'bus.db');
   return { dbPath, port, stub, engineExec, busDbPath };
 }
 
