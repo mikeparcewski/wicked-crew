@@ -35,8 +35,8 @@ const ANSI = /\u001B\[[0-9;?]*[A-Za-z]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\
  * @param {object} config
  * @param {string} config.name    Bridge name reported in serverInfo (e.g. "codex-acp").
  * @param {string} config.version serverInfo version.
- * @param {(prompt: string) => { bin: string, args: string[] }} config.invocation
- *   Maps a turn's prompt text to the headless CLI invocation.
+ * @param {(prompt: string, cwd: string) => { bin: string, args: string[] }} config.invocation
+ *   Maps a turn's prompt text (and the session cwd) to the headless CLI invocation.
  */
 export function runBridge({ name, version, invocation }) {
   let sessionCwd = process.cwd();
@@ -62,7 +62,7 @@ export function runBridge({ name, version, invocation }) {
         .join('\n\n')
         .trim();
 
-      const { bin, args } = invocation(promptText);
+      const { bin, args } = invocation(promptText, sessionCwd);
       let child;
       try {
         child = spawn(bin, args, {
