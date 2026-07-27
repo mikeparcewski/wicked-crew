@@ -37,7 +37,7 @@ body { padding-top: var(--topbar-h); }
    every crew section fits the viewport, so this never traps. Mobile falls back
    to natural scroll (scroll-snap-type: none). scroll-padding offsets the topbar. */
 html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
-.hero, .idd, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
+.hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
   min-height: calc(100svh - var(--topbar-h));
   scroll-snap-align: start;
   display: flex;
@@ -50,7 +50,7 @@ html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
 .idd, .console-sec, .rail-sec, .studio { background: color-mix(in oklab, #000 7%, transparent); }
 @media (max-width: 760px) {
   html { scroll-snap-type: none; }
-  .hero, .idd, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
+  .hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
 }
 
 /* ── Crew background — ITS OWN motif: an EXECUTION / HARNESS SCHEMATIC ──────
@@ -1112,3 +1112,30 @@ code {
 .article-wrap code { font-size: .92em; }
 .article-wrap pre { overflow-x: auto; padding: 12px; border: 1px solid var(--hairline-strong); border-radius: 8px; }
 .article-wrap hr { border: 0; border-top: 1px solid var(--hairline-strong); margin: 2em 0; }
+
+/* ── Hero console (the studio mock IS the hero visual) ─────────────────── */
+.hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; }
+.hero-console-wrap .studio-mock { margin: 0; }
+@media (max-width: 600px) {
+  /* The phone-density block already displays .studio-static; only nudge spacing here. */
+  .hero-console-wrap .studio-static { margin-top: 4px; }
+}
+
+/* ── The four-problems band ────────────────────────────────────────────── */
+.probs { background: color-mix(in oklab, #000 7%, transparent); padding: clamp(40px, 7svh, 72px) 0; }
+.probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; list-style: none; padding: 0; margin: 0; }
+@media (max-width: 940px) { .probs-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .probs-grid { grid-template-columns: 1fr; } }
+.prob-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 16px 14px; border: 1px solid var(--hairline-strong); border-radius: 10px;
+}
+.prob-n {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: 999px; font-weight: 700; font-size: 13px;
+  background: color-mix(in oklab, var(--deny) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--deny) 45%, var(--hairline-strong));
+}
+.prob-t { font-size: 13.5px; line-height: 1.55; opacity: .92; }
+.prob-fix { margin-top: auto; font-size: 12.5px; color: var(--accent); }
+.probs-line { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 26px; }
