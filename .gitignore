@@ -18,3 +18,4 @@ scripts/domain/__pycache__/
 .product/
 .claude/
 .wicked/
+e2e/shots/
