@@ -97,8 +97,9 @@ prompt can undo it.
 
 A workflow is a JSON document, not code: an ordered list of phases with kinds
 (recon/build/review/test), roles (creator/evaluator), and gates. `feature` ships as
-clarify → design → build → adversarial-review → test → review. Drop a JSON file in the
-overlay directory and the engine runs yours instead.
+clarify → design → build → adversarial-review → test → review. Drop a JSON file in
+`~/.config/wicked-core/workflows/` (or point `WICKED_WORKFLOWS_DIR` elsewhere) and the
+engine runs yours instead.
 
 A worked example *(observed)*: a four-phase `collab` workflow
 (propose → critique → revise → verdict) turned two CLIs into a genuine design
