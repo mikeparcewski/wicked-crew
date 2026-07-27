@@ -18,7 +18,7 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "eslint": "^9.39.4",
+    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "typescript-eslint": "^8.63.0"
   }
