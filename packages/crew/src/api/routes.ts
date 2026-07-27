@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
+import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 
 const execFileAsync = promisify(execFile);
@@ -234,6 +235,20 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const suffix = unitKey.startsWith(`${id}:`) ? unitKey.slice(id.length + 1) : unitKey;
     const output = await adapter.workOutput(`${id}:${suffix}`);
     return reply.send({ output });
+  });
+
+  // The whole run as one auditable JSON attachment: the run, its units (each with
+  // the captured transcript), and the gate/routing decision trail re-derived from
+  // the run DTO — the daemon keeps no event log of its own.
+  app.get(`${V}/runs/:id/evidence`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    const bundle = await buildEvidenceBundle(run, (unitId) => adapter.workOutput(unitId));
+    return reply
+      .header('Content-Disposition', `attachment; filename="${evidenceFilename(id)}"`)
+      .send(bundle);
   });
 
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
