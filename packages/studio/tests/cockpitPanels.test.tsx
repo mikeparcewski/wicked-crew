@@ -169,6 +169,10 @@ describe('WhatWhere (FR-8)', () => {
 });
 
 describe('AssumptionsPanel (FR-6)', () => {
+  afterEach(() => {
+    useRuntimeStore.setState({ assumptions: {} });
+  });
+
   it('shows routing provenance for all resolved units', () => {
     const el = render(<AssumptionsPanel model={modelWith()} />).getByTestId('assumptions');
     // The model has a resolved unit with council routing (2 dissent, 80% agreement).
@@ -207,7 +211,6 @@ describe('AssumptionsPanel (FR-6)', () => {
     // Only the needs-research entry carries the review badge.
     expect(view.getAllByTestId('needs-review-badge')).toHaveLength(1);
     expect(items[1]).toHaveTextContent('needs review');
-    useRuntimeStore.setState({ assumptions: {} });
   });
 });
 

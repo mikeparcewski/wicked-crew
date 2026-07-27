@@ -30,7 +30,7 @@ export function AssumptionsPanel({ model }: Props): React.ReactElement {
           <ul className="flex flex-col gap-1">
             {recorded.map((a, i) => (
               <li
-                key={i}
+                key={`${a.ord}:${a.library}:${i}`}
                 data-testid="assumption-transform"
                 className="rounded p-1.5 font-mono"
                 style={{
