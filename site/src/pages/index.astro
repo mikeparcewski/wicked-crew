@@ -29,7 +29,7 @@ import Topbar from 'wicked-web/components/Topbar.astro';
 import Footer from 'wicked-web/components/Footer.astro';
 import '../styles/crew.css';
 
-const title = 'wicked-crew — the control room for governed agent delivery';
+const title = 'wicked-crew studio — launch, watch, steer, export the evidence';
 const description =
   'wicked-crew studio is the operator console for governed agent delivery: launch a run, watch every agent stream live over persistent ACP sessions, answer steering gates, see cost and rework as they accrue, and export the evidence bundle when it lands. Underneath: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers in git worktrees through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded — the agent that wrote the code is never the agent that approves it. Workflows are data. Crash-resumable by construction. The engine underneath is wicked-core. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
@@ -119,171 +119,17 @@ const GATE_CARDS = [
   <section class="hero">
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-head">
-      <div class="kicker">Govern · the wicked loop</div>
-      <h1>The control room that<br>runs <span class="y">your agents.</span></h1>
+      <div class="kicker">The studio · wicked-crew v0.3</div>
+      <h1>Launch. Watch. Steer.<br><span class="y">Export the evidence.</span></h1>
       <p class="lede">
-        Point crew at the coding agents you already run — <b>Claude Code, Codex, Copilot, opencode, Pi</b>.
-        Launch a run in the <b>studio console</b>, watch every agent stream live, answer the gates,
-        and walk away with the <b>evidence</b>. The thing that grades the work is <b>never</b> the
-        thing that did it.
+        This is the console, live. Point it at the coding agents you already run —
+        <b>Claude Code, Codex, Copilot, opencode, Pi</b> — and drive: launch, watch every agent
+        stream, answer the gate below. The thing that grades the work is <b>never</b> the thing
+        that did it.
       </p>
     </div>
 
-    <!-- Self-playing line: intent → your CLIs run as governed workers → the gate
-         re-derives "done" from evidence (and can refuse) → verified work out. -->
-    <div class="wrap hero-line-wrap">
-      <div class="ln-line" data-line role="img" aria-label="Intent in; your agents run as governed workers in isolated worktrees; the gate re-derives done from evidence and can refuse; verified work out">
-        <div class="ln-stage ln-intent">
-          <span class="ln-k">intent</span>
-          <span class="ln-intent-v">“add rate-limiting to the API”</span>
-          <span class="ln-sub">plain English in</span>
-        </div>
-
-        <div class="ln-flow" data-flow aria-hidden="true"><span class="ln-pip"></span></div>
-
-        <div class="ln-stage ln-crew">
-          <div class="ln-crew-bar"><span class="ln-badge">wicked-crew</span><span class="ln-crew-loc">the control room</span></div>
-          <div class="ln-crew-body">
-            <span class="ln-crew-label">your CLIs, dispatched as governed workers · isolated git worktrees</span>
-            <div class="ln-workers">
-              <span class="ln-worker" data-w><i class="ln-dot"></i>claude</span>
-              <span class="ln-worker" data-w><i class="ln-dot"></i>antigravity</span>
-              <span class="ln-worker" data-w><i class="ln-dot"></i>codex</span>
-            </div>
-            <div class="ln-gate" data-gate>
-              <span class="ln-gate-node" data-gate-node>GATE</span>
-              <span class="ln-gate-t" data-gate-t>the grader is never the doer — <b>done is re-derived from evidence</b></span>
-            </div>
-          </div>
-        </div>
-
-        <div class="ln-flow" data-flow aria-hidden="true"><span class="ln-pip"></span></div>
-
-        <div class="ln-stage ln-out" data-out>
-          <span class="ln-stamp" data-stamp>✓ VERIFIED</span>
-          <span class="ln-sub">work out — nothing self-graded</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="wrap hero-foot">
-      <div class="hero-tags" role="list">
-        <span role="listitem">bring your own CLI</span>
-        <span role="listitem">can’t self-grade</span>
-        <span role="listitem">live token streaming</span>
-        <span role="listitem">evidence export</span>
-        <span role="listitem">local-first</span>
-      </div>
-      <div class="hero-cta">
-        <a class="btn btn-primary" href="#studio">Open the console ↓</a>
-        <a class="btn btn-ghost" href="#get">Install it</a>
-      </div>
-    </div>
-  </section>
-
-  <script is:inline>
-    (function () {
-      var line = document.querySelector('[data-line]');
-      if (!line) return;
-      var flows = Array.prototype.slice.call(line.querySelectorAll('[data-flow]'));
-      var workers = Array.prototype.slice.call(line.querySelectorAll('[data-w]'));
-      var gate = line.querySelector('[data-gate]');
-      var gateT = line.querySelector('[data-gate-t]');
-      var out = line.querySelector('[data-out]');
-      if (flows.length < 2 || !gate || !out) return;
-      var DEFAULT = gateT ? gateT.innerHTML : '';
-      var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      var timers = [];
-      function at(fn, ms) { timers.push(setTimeout(fn, ms)); }
-      function clear() { for (var i = 0; i < timers.length; i++) clearTimeout(timers[i]); timers = []; }
-      function workersOn(on) { for (var i = 0; i < workers.length; i++) workers[i].classList.toggle('is-on', on); }
-      function reset() {
-        for (var i = 0; i < flows.length; i++) flows[i].classList.remove('is-live');
-        workersOn(false);
-        gate.classList.remove('is-deny', 'is-pass');
-        if (gateT) gateT.innerHTML = DEFAULT;
-        out.classList.remove('is-done');
-      }
-      function pass() {
-        gate.classList.remove('is-deny'); gate.classList.add('is-pass');
-        if (gateT) gateT.innerHTML = '<b>re-derived</b> — verifier re-ran, evidence re-hashed';
-      }
-      // one run through the line. deny=true first shows the gate REFUSING, the
-      // work re-running, and only then passing — that's "can't self-grade".
-      function run(deny) {
-        clear(); reset();
-        at(function () { flows[0].classList.add('is-live'); }, 250);
-        at(function () { if (workers[0]) workers[0].classList.add('is-on'); }, 950);
-        at(function () { if (workers[1]) workers[1].classList.add('is-on'); }, 1180);
-        at(function () { if (workers[2]) workers[2].classList.add('is-on'); }, 1410);
-        if (deny) {
-          at(function () {
-            gate.classList.add('is-deny');
-            if (gateT) gateT.innerHTML = '<b>REJECTED</b> — evidence didn’t hold; sent back to rerun';
-          }, 2200);
-          at(function () { gate.classList.remove('is-deny'); workersOn(false); }, 3300);
-          at(function () { if (workers[0]) workers[0].classList.add('is-on'); }, 3600);
-          at(function () { if (workers[1]) workers[1].classList.add('is-on'); }, 3800);
-          at(function () { if (workers[2]) workers[2].classList.add('is-on'); }, 4000);
-          at(pass, 4700);
-          at(function () { flows[1].classList.add('is-live'); }, 5050);
-          at(function () { out.classList.add('is-done'); }, 5450);
-          at(function () { run(false); }, 8000);
-        } else {
-          at(pass, 2300);
-          at(function () { flows[1].classList.add('is-live'); }, 2650);
-          at(function () { out.classList.add('is-done'); }, 3050);
-          at(function () { run(true); }, 5600);
-        }
-      }
-      if (reduced) {
-        for (var i = 0; i < flows.length; i++) flows[i].classList.add('is-live');
-        workersOn(true); pass(); out.classList.add('is-done');
-        return;
-      }
-      run(false);
-    })();
-  </script>
-
-  <!-- ── Intent-driven development beat ────────────────────────────────── -->
-  <section class="idd" aria-labelledby="idd-h">
-    <div class="wrap">
-      <div class="idd-grid">
-        <div class="idd-copy">
-          <div class="kicker">Intent-driven development</div>
-          <h2 id="idd-h">Spec-driven development’s outcome — without the theater of specs nobody reads.</h2>
-          <p>
-            You state <b>intent</b>. crew drives a governed workflow to a <b>verified result</b> — deriving
-            “done” from evidence at every gate instead of trusting a claim. No ceremony, no shelfware spec.
-          </p>
-        </div>
-        <div class="idd-flow" aria-hidden="true">
-          <span class="idd-chip idd-chip--in">intent</span>
-          <span class="idd-arrow">→</span>
-          <span class="idd-chip idd-chip--mid">governed workflow</span>
-          <span class="idd-arrow">→</span>
-          <span class="idd-chip idd-chip--out">verified result</span>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ── The driving interface — the studio, built into crew ───────────── -->
-  <section class="studio" id="studio" aria-labelledby="studio-h">
-    <div class="wrap">
-      <div class="sec-head sec-head--wide">
-        <div class="kicker">The studio · the centerpiece</div>
-        <h2 id="studio-h">Launch. Watch. Steer. Export the evidence.</h2>
-        <p class="sec-sub">
-          The browser console built into crew. Pick a workflow (<b>10 built-ins</b>, or your own),
-          launch from a plain-text brief, and watch <b>every agent stream token-by-token</b> over
-          persistent ACP sessions. Resolve steering gates — <b>approve</b>, <b>steer with an
-          amendment</b> that rides the next prompt, or <b>reject</b> (deny dominates). Inject an
-          operator message mid-run. When it lands, <b>one click exports the evidence bundle</b>:
-          every unit, transcript, decision, and assumption.
-        </p>
-      </div>
-
+    <div class="wrap hero-console-wrap">
       <!-- The studio ships inside crew (dist/studio). This is a hands-on mirror of
            the real SPA: LaunchForm → the free-text input, LiveOutput → the feed,
            SteeringGate → the gate buttons, Terminal → the governed term line. It
@@ -344,6 +190,79 @@ const GATE_CARDS = [
           <li><span class="sts-n">2</span><div><b>Watch</b> the live event feed stream unit-by-unit, with a per-unit transcript</div></li>
           <li><span class="sts-n">3</span><div><b>Steer</b> the gate — approve, amend, or reject. <span class="sts-chip">schema-drift · DENY → held for you</span></div></li>
         </ol>
+      </div>
+
+    </div>
+
+    <div class="wrap hero-foot">
+      <div class="hero-tags" role="list">
+        <span role="listitem">bring your own CLI</span>
+        <span role="listitem">can’t self-grade</span>
+        <span role="listitem">live token streaming</span>
+        <span role="listitem">evidence export</span>
+        <span role="listitem">local-first</span>
+      </div>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#get">Install it</a>
+        <a class="btn btn-ghost" href="/article">Read why it exists</a>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ── The four problems (why this exists) ───────────────────────────── -->
+  <section class="probs" aria-labelledby="probs-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">Why this exists</div>
+        <h2 id="probs-h">Four things go wrong when agents run unsupervised.</h2>
+      </div>
+      <div class="probs-grid" role="list">
+        <div class="prob-card" role="listitem">
+          <span class="prob-n">1</span>
+          <span class="prob-t"><b>There is no process.</b> The same task moves through different steps run to run — sometimes reviewed, sometimes not.</span>
+          <span class="prob-fix">→ workflows as data, same phases every time</span>
+        </div>
+        <div class="prob-card" role="listitem">
+          <span class="prob-n">2</span>
+          <span class="prob-t"><b>Agents grade their own homework.</b> Nothing structurally prevents self-approval.</span>
+          <span class="prob-fix">→ evaluator ≠ creator, enforced in the engine</span>
+        </div>
+        <div class="prob-card" role="listitem">
+          <span class="prob-n">3</span>
+          <span class="prob-t"><b>The trail evaporates.</b> Who decided what lives in a scrollback buffer, if anywhere.</span>
+          <span class="prob-fix">→ every decision is a durable event; one-click evidence export</span>
+        </div>
+        <div class="prob-card" role="listitem">
+          <span class="prob-n">4</span>
+          <span class="prob-t"><b>Token burn is opaque.</b> You learn the cost when the invoice arrives.</span>
+          <span class="prob-fix">→ Burn panel: tokens, cost, rework — live, per CLI</span>
+        </div>
+      </div>
+      <p class="probs-line" aria-hidden="true">
+        <span class="idd-chip idd-chip--in">intent</span>
+        <span class="idd-arrow">→</span>
+        <span class="idd-chip idd-chip--mid">governed workflow</span>
+        <span class="idd-arrow">→</span>
+        <span class="idd-chip idd-chip--out">verified result · with the evidence</span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── The driving interface — the studio, built into crew ───────────── -->
+  <section class="studio" id="studio" aria-labelledby="studio-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker">The operator’s rail</div>
+        <h2 id="studio-h">Cost, assumptions, failures, evidence — live.</h2>
+        <p class="sec-sub">
+          Every run page carries an insight rail fed by the event stream: who won each unit’s
+          council vote, what the human approved, what each CLI consumed, which external-transform
+          assumptions need review, and which failures were triaged — by a <b>different</b> CLI
+          acting as judge. Steering gates take <b>approve</b>, <b>approve with an amendment</b> that
+          rides the next prompt, or <b>reject</b> (deny dominates). Inject an operator
+          message mid-run; it lands with delivery receipts.
+        </p>
       </div>
 
       <div class="op-cards" role="list" aria-label="What the rail answers">
@@ -559,8 +478,8 @@ const GATE_CARDS = [
           <b>10 built-ins ship</b> — feature, bug, migration, onboarding, <b>collab</b> (a real
           propose → critique → revise → verdict discussion between two CLIs) and more — each as
           <b>validated JSON</b> you pick in the studio’s workflow selector. Add your own by dropping a
-          file in <code>~/.config/wicked-core/workflows/</code>; the plan is <b>acyclic-validated</b>
-          with loud, per-file errors. It auto-cycles the defs below — click one to pin it.
+          file in <code>~/.config/wicked-core/workflows/</code>; the plan is <b>acyclic-validated</b> with
+          loud, per-file errors. It auto-cycles the defs below — click one to pin it.
         </p>
       </div>
 

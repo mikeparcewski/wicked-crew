@@ -1112,3 +1112,30 @@ code {
 .article-wrap code { font-size: .92em; }
 .article-wrap pre { overflow-x: auto; padding: 12px; border: 1px solid var(--hairline-strong); border-radius: 8px; }
 .article-wrap hr { border: 0; border-top: 1px solid var(--hairline-strong); margin: 2em 0; }
+
+/* ── Hero console (the studio mock IS the hero visual) ─────────────────── */
+.hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; padding: 0 20px; }
+.hero-console-wrap .studio-mock { margin: 0; }
+@media (max-width: 600px) {
+  /* On phones the interactive mock is hidden; show the static story in the hero. */
+  .hero-console-wrap .studio-static { display: block; margin-top: 4px; }
+}
+
+/* ── The four-problems band ────────────────────────────────────────────── */
+.probs { background: color-mix(in oklab, #000 7%, transparent); }
+.probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 940px) { .probs-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .probs-grid { grid-template-columns: 1fr; } }
+.prob-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 16px 14px; border: 1px solid var(--hairline-strong); border-radius: 10px;
+}
+.prob-n {
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: 999px; font-weight: 700; font-size: 13px;
+  background: color-mix(in oklab, var(--deny) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--deny) 45%, var(--hairline-strong));
+}
+.prob-t { font-size: 13.5px; line-height: 1.55; opacity: .92; }
+.prob-fix { margin-top: auto; font-size: 12.5px; color: var(--accent); }
+.probs-line { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 26px; }
