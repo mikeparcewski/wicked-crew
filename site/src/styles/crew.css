@@ -1139,3 +1139,24 @@ code {
 .prob-t { font-size: 13.5px; line-height: 1.55; opacity: .92; }
 .prob-fix { margin-top: auto; font-size: 12.5px; color: var(--accent); }
 .probs-line { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 26px; }
+
+/* ── Hero fit: the whole hero (head + console + foot) must fit ONE viewport.
+   Tighter type + a hero-compressed console: terminal row hidden (the gate +
+   rail carry the story), feed capped, paddings reduced. ─────────────────── */
+.hero .hero-head h1 { font-size: clamp(2rem, 4vw, 3.1rem); margin-top: 10px; }
+.hero .lede { margin-top: 12px; max-width: 46em; }
+.hero .kicker { margin-top: 0; }
+.hero-console-wrap { margin-top: clamp(14px, 2.2svh, 24px); }
+.hero-console-wrap .studio-term { display: none; }
+.hero-console-wrap .studio-body { padding: 12px; gap: 10px; }
+.hero-console-wrap .studio-launch { padding: 8px 12px; }
+.hero-console-wrap .studio-feed { height: clamp(110px, 17svh, 158px); }
+.hero-console-wrap .studio-railbar { padding: 6px 10px; }
+.hero .hero-foot { margin-top: clamp(12px, 2svh, 20px); }
+@media (max-height: 850px) and (min-width: 761px) {
+  /* Short laptop viewports (snap-active widths only — phones scroll naturally
+     and keep their tags): give the console the space, shrink the frame. */
+  .hero .hero-head h1 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
+  .hero-console-wrap .studio-feed { height: clamp(96px, 15svh, 130px); }
+  .hero .hero-tags { display: none; }
+}
