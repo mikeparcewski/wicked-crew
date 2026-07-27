@@ -19,3 +19,6 @@ scripts/domain/__pycache__/
 .claude/
 .wicked/
 e2e/shots/
+
+# local wicked-brain server artifacts
+.wicked-brain/
