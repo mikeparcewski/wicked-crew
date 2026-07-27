@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { mergeRunModel, type RunModel } from '../src/hooks/useRunModel.js';
 import type { CoreEvent } from '../src/api/types.js';
