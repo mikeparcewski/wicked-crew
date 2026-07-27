@@ -134,3 +134,27 @@ describe('evidenceFilename', () => {
     expect(evidenceFilename('x'.repeat(500))).toBe(`${'x'.repeat(128)}-evidence.json`);
   });
 });
+
+describe('parseAssumptions (external-transform convention)', () => {
+  it('parses known and needs-research markers with the run ord', async () => {
+    const { parseAssumptions } = await import('../src/api/evidence.js');
+    const t =
+      'work done\n' +
+      'ASSUMPTION[external-transform] library=libpostal transform=address normalization confidence=known :: expands abbreviations per locale\n' +
+      'ASSUMPTION[external-transform] library=stripe-tax transform=tax enrichment confidence=needs-research :: rounding rules unverified\n';
+    const got = parseAssumptions(3, t);
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatchObject({ ord: 3, library: 'libpostal', known: true });
+    expect(got[1]).toMatchObject({ library: 'stripe-tax', known: false });
+    expect(got[1]!.detail).toContain('unverified');
+  });
+
+  it('malformed markers become needs-review placeholders, never silence', async () => {
+    const { parseAssumptions } = await import('../src/api/evidence.js');
+    const got = parseAssumptions(1, 'ASSUMPTION[external-transform] libpostal does stuff');
+    expect(got).toHaveLength(1);
+    expect(got[0]!.known).toBe(false);
+    expect(got[0]!.detail).toContain('malformed marker');
+    expect(parseAssumptions(1, null)).toHaveLength(0);
+  });
+});

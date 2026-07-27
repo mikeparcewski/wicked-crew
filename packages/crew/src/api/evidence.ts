@@ -19,6 +19,22 @@ export interface EvidenceBundle {
   units: EvidenceUnit[];
   /** The derived decision trail, in unit order (routing before that unit's gate). */
   events: EvidenceEvent[];
+  /**
+   * Structured assumptions re-parsed from the transcripts (the external-transform
+   * convention): third-party payload transformations agents relied on. Entries with
+   * `known: false` are needs-research placeholders awaiting human review.
+   */
+  assumptions: EvidenceAssumption[];
+}
+
+/** One external-transform assumption parsed from a unit transcript. */
+export interface EvidenceAssumption {
+  ord: number;
+  kind: 'external-transform';
+  library: string;
+  transform: string;
+  known: boolean;
+  detail: string;
 }
 
 /** A unit as it appears in the bundle: the run DTO's unit plus its captured transcript. */
@@ -130,7 +146,80 @@ export async function buildEvidenceBundle(
     session: view.session,
     units,
     events: evidenceEvents(ordered),
+    assumptions: units.flatMap((u) => parseAssumptions(u.ord, u.transcript)),
   };
+}
+
+const ASSUMPTION_MARKER = 'ASSUMPTION[external-transform]';
+const MAX_ASSUMPTIONS_PER_UNIT = 16;
+
+/**
+ * Parse external-transform markers from one transcript — mirrors wicked-core's
+ * `assumptions::parse` (same grammar, same malformed→needs-review posture) so the
+ * bundle matches what the live event stream reported.
+ */
+export function parseAssumptions(ord: number, transcript: string | null): EvidenceAssumption[] {
+  if (transcript === null) return [];
+  const found: EvidenceAssumption[] = [];
+  for (const raw of transcript.split('\n')) {
+    const ix = raw.indexOf(ASSUMPTION_MARKER);
+    if (ix === -1) continue;
+    const rest = raw.slice(ix + ASSUMPTION_MARKER.length).trim();
+    const sep = rest.indexOf('::');
+    const fields = (sep === -1 ? rest : rest.slice(0, sep)).trim();
+    const detail = (sep === -1 ? '' : rest.slice(sep + 2)).trim();
+
+    const token = (key: string): string => {
+      const kix = fields.indexOf(key);
+      if (kix === -1) return '';
+      return fields.slice(kix + key.length).split(/\s+/)[0] ?? '';
+    };
+    const span = (key: string, stops: string[]): string => {
+      const kix = fields.indexOf(key);
+      if (kix === -1) return '';
+      const after = fields.slice(kix + key.length);
+      const end = Math.min(
+        ...stops.map((st) => {
+          const i = after.indexOf(st);
+          return i === -1 ? after.length : i;
+        }),
+        after.length,
+      );
+      return after.slice(0, end).trim();
+    };
+
+    const library = token('library=');
+    const confidence = token('confidence=');
+    const transform = span('transform=', ['confidence=', 'library=']);
+    const wellFormed =
+      library !== '' && transform !== '' && (confidence === 'known' || confidence === 'needs-research');
+
+    found.push(
+      wellFormed
+        ? {
+            ord,
+            kind: 'external-transform',
+            library: clip(library),
+            transform: clip(transform),
+            known: confidence === 'known',
+            detail: clip(detail === '' ? '(no detail provided)' : detail),
+          }
+        : {
+            ord,
+            kind: 'external-transform',
+            library: library === '' ? '(unspecified)' : clip(library),
+            transform: transform === '' ? '(unspecified transformation)' : clip(transform),
+            known: false,
+            detail: clip(`malformed marker, review the source line: ${rest}`),
+          },
+    );
+    if (found.length >= MAX_ASSUMPTIONS_PER_UNIT) break;
+  }
+  return found;
+}
+
+function clip(s: string): string {
+  return s.length > 400 ? s.slice(0, 400) : s;
 }
 
 /**

@@ -107,6 +107,15 @@ touching it.
 > idempotent, correlation-aware handlers) run on it (`wicked-bus/examples/crew-sidecars`, smoke-verified).
 > Wiring the bridge into the studio's browser feed is a follow-up.
 
+## Third-party CLI terms of service
+
+Crew drives the coding-agent CLIs you install, under your own accounts and subscriptions.
+**It is your responsibility to confirm that driving a given CLI programmatically is
+permitted by its terms of service.** In particular, community reports suggest that
+driving **Antigravity (`agy`)** headless/programmatically may conflict with its ToS —
+review Google's current terms before enabling that seat, and remove it from your roster
+if in doubt. The engine works identically with any subset of the roster.
+
 ## Where things are
 
 - `.product/` — requirements, design, and evidence:
