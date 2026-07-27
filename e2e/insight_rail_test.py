@@ -115,8 +115,13 @@ with sync_playwright() as p:
                 btn.click()
                 page.wait_for_timeout(1500)
                 page.screenshot(path=str(OUT / f"{j:02d}-{name}.png"))
-                # Close overlays with Escape so the next step starts clean.
-                page.keyboard.press("Escape")
+                # Close via the modal's X — the Term modal deliberately disables
+                # Escape (a shell keystroke must never close the operator shell).
+                close = page.locator('div.fixed button:has-text("✕"), div.fixed button:has-text("×")').first
+                if close.count() > 0:
+                    close.click()
+                else:
+                    entry["close_button_missing"] = True
                 page.wait_for_timeout(500)
         except Exception as e:  # noqa: BLE001
             entry["error"] = str(e)

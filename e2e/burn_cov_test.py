@@ -12,6 +12,7 @@ from playwright.sync_api import sync_playwright
 BASE = os.environ.get("STUDIO_URL", "http://127.0.0.1:4200")
 API = os.environ.get("CREW_API", "http://127.0.0.1:7701/api/v1")
 OUT = Path(__file__).parent / "shots"
+OUT.mkdir(exist_ok=True)
 
 report = {}
 
@@ -77,6 +78,9 @@ with sync_playwright() as p:
         if close.count() > 0:
             close.click()
             report["cov_closed_via_x"] = True
+        else:
+            # The X-close path IS the assertion — a missing button is a failure.
+            report["cov_closed_via_x"] = False
         page.wait_for_timeout(600)
 
     browser.close()

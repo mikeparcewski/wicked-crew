@@ -5,7 +5,15 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 
 const [bin, ...args] = process.argv.slice(2);
+if (!bin) {
+  console.error('usage: node acp-probe.mjs <acp-binary> [args...]');
+  process.exit(2);
+}
 const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'inherit'] });
+child.on('error', (err) => {
+  console.error(`spawn ${bin} failed: ${err.message}`);
+  process.exit(2);
+});
 const rl = createInterface({ input: child.stdout });
 
 function send(obj) {
