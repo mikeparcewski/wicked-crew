@@ -1153,8 +1153,9 @@ code {
 .hero-console-wrap .studio-feed { height: clamp(110px, 17svh, 158px); }
 .hero-console-wrap .studio-railbar { padding: 6px 10px; }
 .hero .hero-foot { margin-top: clamp(12px, 2svh, 20px); }
-@media (max-height: 850px) {
-  /* Short laptop viewports: give the console the space, shrink the frame. */
+@media (max-height: 850px) and (min-width: 761px) {
+  /* Short laptop viewports (snap-active widths only — phones scroll naturally
+     and keep their tags): give the console the space, shrink the frame. */
   .hero .hero-head h1 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
   .hero-console-wrap .studio-feed { height: clamp(96px, 15svh, 130px); }
   .hero .hero-tags { display: none; }
