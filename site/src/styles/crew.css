@@ -1114,7 +1114,7 @@ code {
 .article-wrap hr { border: 0; border-top: 1px solid var(--hairline-strong); margin: 2em 0; }
 
 /* ── Hero console (the studio mock IS the hero visual) ─────────────────── */
-.hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; padding: 0 20px; }
+.hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; }
 .hero-console-wrap .studio-mock { margin: 0; }
 @media (max-width: 600px) {
   /* On phones the interactive mock is hidden; show the static story in the hero. */
@@ -1123,7 +1123,7 @@ code {
 
 /* ── The four-problems band ────────────────────────────────────────────── */
 .probs { background: color-mix(in oklab, #000 7%, transparent); }
-.probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; list-style: none; padding: 0; margin: 0; }
 @media (max-width: 940px) { .probs-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .probs-grid { grid-template-columns: 1fr; } }
 .prob-card {

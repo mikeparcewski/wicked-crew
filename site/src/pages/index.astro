@@ -217,28 +217,28 @@ const GATE_CARDS = [
         <div class="kicker">Why this exists</div>
         <h2 id="probs-h">Four things go wrong when agents run unsupervised.</h2>
       </div>
-      <div class="probs-grid" role="list">
-        <div class="prob-card" role="listitem">
+      <ul class="probs-grid">
+        <li class="prob-card">
           <span class="prob-n">1</span>
           <span class="prob-t"><b>There is no process.</b> The same task moves through different steps run to run — sometimes reviewed, sometimes not.</span>
           <span class="prob-fix">→ workflows as data, same phases every time</span>
-        </div>
-        <div class="prob-card" role="listitem">
+        </li>
+        <li class="prob-card">
           <span class="prob-n">2</span>
           <span class="prob-t"><b>Agents grade their own homework.</b> Nothing structurally prevents self-approval.</span>
           <span class="prob-fix">→ evaluator ≠ creator, enforced in the engine</span>
-        </div>
-        <div class="prob-card" role="listitem">
+        </li>
+        <li class="prob-card">
           <span class="prob-n">3</span>
           <span class="prob-t"><b>The trail evaporates.</b> Who decided what lives in a scrollback buffer, if anywhere.</span>
           <span class="prob-fix">→ every decision is a durable event; one-click evidence export</span>
-        </div>
-        <div class="prob-card" role="listitem">
+        </li>
+        <li class="prob-card">
           <span class="prob-n">4</span>
           <span class="prob-t"><b>Token burn is opaque.</b> You learn the cost when the invoice arrives.</span>
           <span class="prob-fix">→ Burn panel: tokens, cost, rework — live, per CLI</span>
-        </div>
-      </div>
+        </li>
+      </ul>
       <p class="probs-line" aria-hidden="true">
         <span class="idd-chip idd-chip--in">intent</span>
         <span class="idd-arrow">→</span>
