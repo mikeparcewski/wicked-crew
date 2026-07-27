@@ -1,0 +1,31 @@
+---
+/**
+ * article.astro — /article: the studio control-plane article, rendered from
+ * src/content/control-plane.md (a synced copy of docs/articles/
+ * studio-a-control-plane-for-coding-agents.md — keep them in step).
+ */
+import Base from 'wicked-web/layouts/Base.astro';
+import Topbar from 'wicked-web/components/Topbar.astro';
+import Footer from 'wicked-web/components/Footer.astro';
+import * as article from '../content/control-plane.md';
+import '../styles/crew.css';
+
+const title = 'A control plane for coding agents — wicked-crew studio';
+const description =
+  'What wicked-crew studio is and why it exists: process consistency, review that isn’t self-review, deny-dominant human gates, governed failure recovery, and evidence derived from durable run state — every claim labeled observed or fault-injected.';
+const repo = 'https://github.com/mikeparcewski/wicked-crew';
+---
+
+<Base title={title} description={description}>
+  <Topbar pkg="wicked-crew" repo={repo} />
+  <main class="article-wrap">
+    <article.Content />
+  </main>
+  <Footer repo={repo} />
+</Base>
+
+<style is:global>
+  /* The article is prose, not a snap deck — the landing page's mandatory
+     y-snap (crew.css) would fight normal reading scroll here. */
+  html { scroll-snap-type: none; }
+</style>

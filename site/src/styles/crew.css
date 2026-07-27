@@ -1047,3 +1047,68 @@ code {
   .gc-seg.is-live::after, .dock-evidence.pop, .dock-note.flash, .ln-flow.is-live .ln-pip, .sl-caret, .wf-phase, .byo-stage-wt.pop, .gc-hint, .gc-sw-well, .sf-row, .sg-cue { animation: none; }
   .gc-seg.is-live::after { display: none; }
 }
+
+/* ── Studio insight-rail strip (mock chrome) ───────────────────────────── */
+.studio-railbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 12px; border-top: 1px solid var(--hairline-strong);
+  font-size: 12px;
+}
+.srb-k { opacity: .55; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
+.srb-chip {
+  padding: 2px 8px; border: 1px solid var(--hairline-strong); border-radius: 999px;
+  opacity: .85;
+}
+.srb-chip--hot { border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline-strong)); color: var(--accent); }
+.srb-chip--badge { border-color: color-mix(in oklab, var(--deny) 45%, var(--hairline-strong)); }
+.srb-chip--badge::after { content: ' ●'; color: var(--deny); font-size: 9px; }
+.srb-export {
+  margin-left: auto; padding: 3px 10px; border-radius: 6px; font-weight: 600;
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--hairline-strong));
+}
+@media (max-width: 700px) { .srb-export { margin-left: 0; } }
+
+/* ── Operator-rail cards (what the rail answers) ───────────────────────── */
+.op-cards {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 22px;
+}
+@media (max-width: 940px) { .op-cards { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .op-cards { grid-template-columns: 1fr; } }
+.op-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 14px; border: 1px solid var(--hairline-strong); border-radius: 10px;
+  background: color-mix(in oklab, #000 6%, transparent);
+}
+.op-k { font-weight: 700; font-size: 13px; letter-spacing: .02em; color: var(--accent); }
+.op-t { font-size: 13px; line-height: 1.5; opacity: .9; }
+
+/* ── Council routing-seat votes (profile ballots) ──────────────────────── */
+.council-seat.is-p1 .cs-vote, .council-seat.is-p2 .cs-vote, .council-seat.is-p3 .cs-vote {
+  color: var(--accent-ink, #0b0d0e); background: var(--seat);
+}
+.council-seat.is-p1, .council-seat.is-p2, .council-seat.is-p3 {
+  border-color: color-mix(in oklab, var(--seat) 35%, var(--hairline-strong));
+}
+
+/* ── Get-section ToS note ──────────────────────────────────────────────── */
+.get-tos {
+  margin-top: 12px; font-size: 13px; line-height: 1.55; opacity: .78;
+  border-left: 3px solid color-mix(in oklab, var(--deny) 50%, var(--hairline-strong));
+  padding-left: 12px;
+}
+
+/* ── Article page prose ────────────────────────────────────────────────── */
+.article-wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
+.article-wrap h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); line-height: 1.15; margin-bottom: .4em; }
+.article-wrap h2 { font-size: 1.35rem; margin: 1.8em 0 .5em; }
+.article-wrap h3 { font-size: 1.08rem; margin: 1.5em 0 .4em; }
+.article-wrap p, .article-wrap li { line-height: 1.7; margin: .7em 0; }
+.article-wrap blockquote {
+  border-left: 3px solid var(--accent); padding-left: 14px; margin: 1.2em 0; font-style: italic;
+}
+.article-wrap table { border-collapse: collapse; margin: 1em 0; display: block; overflow-x: auto; }
+.article-wrap th, .article-wrap td { border: 1px solid var(--hairline-strong); padding: 6px 10px; font-size: .92em; }
+.article-wrap code { font-size: .92em; }
+.article-wrap pre { overflow-x: auto; padding: 12px; border: 1px solid var(--hairline-strong); border-radius: 8px; }
+.article-wrap hr { border: 0; border-top: 1px solid var(--hairline-strong); margin: 2em 0; }
