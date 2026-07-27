@@ -5,9 +5,9 @@ agents — but the project is young, local-first, and evolving. Treat it as a wo
 research vehicle, not a finished product.*
 
 *Two kinds of verification appear in this article, and they are not the same thing.
-Some claims are backed by incidents **observed** in real working runs. Others are backed
-by **fault injection** — deliberately broken configurations built to test a mechanism.
-Both are labeled. Fault injection proves the mechanism fires; only observation proves it
+Claims tagged *(observed)* are backed by incidents from real working runs. Claims tagged
+*(fault-injected)* are backed by deliberately broken configurations built to test a
+mechanism. Fault injection proves the mechanism fires; only observation proves it
 matters.*
 
 ---
@@ -73,8 +73,10 @@ Agents run as workers over the
 [Agent Client Protocol](https://agentclientprotocol.com): persistent sessions, streamed
 token-level output, structured usage reporting. The adapters come from the ecosystem
 where they exist (the official `@agentclientprotocol/claude-agent-acp` and `codex-acp`,
-community `pi-acp`, native `copilot --acp` and `opencode acp`) — installing the repo
-installs them. Cross-agent context is injected automatically: when unit 4 runs on a
+community `pi-acp`, native `copilot --acp` and `opencode acp`). The adapter packages
+are npm dependencies — installing the repo installs them; the CLIs themselves (and the
+natively-speaking `copilot`/`opencode`) you install and authenticate separately.
+Cross-agent context is injected automatically: when unit 4 runs on a
 different CLI than unit 3, it receives unit 3's output as labeled context.
 
 > **Terms-of-service note:** crew drives CLIs you install under your own accounts.
