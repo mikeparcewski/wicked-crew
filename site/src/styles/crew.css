@@ -37,7 +37,7 @@ body { padding-top: var(--topbar-h); }
    every crew section fits the viewport, so this never traps. Mobile falls back
    to natural scroll (scroll-snap-type: none). scroll-padding offsets the topbar. */
 html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
-.hero, .idd, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
+.hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
   min-height: calc(100svh - var(--topbar-h));
   scroll-snap-align: start;
   display: flex;
@@ -50,7 +50,7 @@ html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
 .idd, .console-sec, .rail-sec, .studio { background: color-mix(in oklab, #000 7%, transparent); }
 @media (max-width: 760px) {
   html { scroll-snap-type: none; }
-  .hero, .idd, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
+  .hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
 }
 
 /* ── Crew background — ITS OWN motif: an EXECUTION / HARNESS SCHEMATIC ──────
@@ -1122,7 +1122,7 @@ code {
 }
 
 /* ── The four-problems band ────────────────────────────────────────────── */
-.probs { background: color-mix(in oklab, #000 7%, transparent); }
+.probs { background: color-mix(in oklab, #000 7%, transparent); padding: clamp(40px, 7svh, 72px) 0; }
 .probs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; list-style: none; padding: 0; margin: 0; }
 @media (max-width: 940px) { .probs-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .probs-grid { grid-template-columns: 1fr; } }
