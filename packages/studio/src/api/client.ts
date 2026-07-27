@@ -92,7 +92,7 @@ export async function downloadRunEvidence(runId: string): Promise<void> {
   }
   const filename =
     /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1]
-    ?? `${runId}-evidence.json`;
+    ?? `${runId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128)}-evidence.json`;
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement('a');
   a.href = url;
