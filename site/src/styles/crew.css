@@ -1117,8 +1117,8 @@ code {
 .hero-console-wrap { width: 100%; max-width: 1080px; margin: clamp(20px, 3.5svh, 38px) auto 0; }
 .hero-console-wrap .studio-mock { margin: 0; }
 @media (max-width: 600px) {
-  /* On phones the interactive mock is hidden; show the static story in the hero. */
-  .hero-console-wrap .studio-static { display: block; margin-top: 4px; }
+  /* The phone-density block already displays .studio-static; only nudge spacing here. */
+  .hero-console-wrap .studio-static { margin-top: 4px; }
 }
 
 /* ── The four-problems band ────────────────────────────────────────────── */
