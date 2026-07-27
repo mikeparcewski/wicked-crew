@@ -338,7 +338,7 @@ const GATE_CARDS = [
       <!-- Phone-native studio: the live console is a desktop affordance. On a phone
            we hide the mock and tell the same launch → watch → steer story as a
            compact static list. -->
-      <div class="studio-static" aria-hidden="true">
+      <div class="studio-static">
         <ol class="sts-steps">
           <li><span class="sts-n">1</span><div><b>Launch</b> a run from a plain-text problem<code>add rate-limiting to the public API</code></div></li>
           <li><span class="sts-n">2</span><div><b>Watch</b> the live event feed stream unit-by-unit, with a per-unit transcript</div></li>
@@ -517,7 +517,7 @@ const GATE_CARDS = [
       <!-- Phone-native gate: the interactive series-circuit ladder is a desktop
            affordance. On a phone we hide it and render a compact static verdict of
            the same run — a checklist + the held outcome — that fits one screen. -->
-      <div class="gc-static" aria-hidden="true">
+      <div class="gc-static">
         <div class="gcs-flow"><b>build</b><span class="gcs-arr">→</span><b>ship</b><span class="gcs-tag">dual gate · deny-dominates</span></div>
         <ul class="gcs-list">
           {POLICIES.map((p) => (
