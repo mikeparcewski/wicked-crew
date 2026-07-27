@@ -126,7 +126,7 @@ describe('GET /runs/:id/evidence', () => {
 
   it('bundles the run, its ordered units, and the derived event trail', async () => {
     const { bundle } = await getEvidence();
-    expect(Object.keys(bundle).sort()).toEqual(['events', 'exportedAt', 'session', 'units']);
+    expect(Object.keys(bundle).sort()).toEqual(['assumptions', 'events', 'exportedAt', 'session', 'units']);
 
     // The run itself, verbatim from the run DTO.
     expect(bundle.session.id).toBe(RUN_ID);
