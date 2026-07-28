@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api/client.js';
 import type { RepoEntry, CodeGraphNode, CodeGraphEdge, CodeGraphData, DomainGraph, DomainCoverage } from '../api/types.js';
 import { CytoGraph } from './CytoGraph.js';
@@ -168,56 +168,127 @@ function NodeDetailPanel({
 }
 
 function DomainGraphView({ graph }: { graph: DomainGraph }): React.ReactElement {
-  const domains = Object.entries(graph.domains);
+  // Scale-safe (core#126 aftermath): the first real extraction produced 514 domains /
+  // ~35k requirements in a 38MB artifact — rendering every card expanded produced an
+  // unusable wall. Collapsed-by-default + search + a visible-card cap keeps the DOM
+  // bounded no matter what the modeler emits.
+  const [query, setQuery] = useState('');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const VISIBLE_CAP = 60;
+  const REQ_CAP = 150;
+
+  const domains = useMemo(() => Object.entries(graph.domains), [graph]);
+  const totalReqs = useMemo(
+    () => domains.reduce((n, [, d]) => n + Object.keys(d.requirements ?? {}).length, 0),
+    [domains],
+  );
+  const q = query.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      q === ''
+        ? domains
+        : domains.filter(
+            ([id, d]) =>
+              id.toLowerCase().includes(q) ||
+              Object.values(d.requirements ?? {}).some((r) =>
+                (r.title ?? '').toLowerCase().includes(q),
+              ),
+          ),
+    [domains, q],
+  );
+  const visible = filtered.slice(0, VISIBLE_CAP);
+
+  function toggle(id: string): void {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  if (domains.length === 0) {
+    return (
+      <div className="h-full overflow-y-auto p-4">
+        <p className="text-sm text-center mt-8 font-mono" style={{ color: T.faint }}>No domains in this graph.</p>
+      </div>
+    );
+  }
   return (
     <div className="h-full overflow-y-auto p-4 flex flex-col gap-3">
-      {domains.length === 0 ? (
-        <p className="text-sm text-center mt-8 font-mono" style={{ color: T.faint }}>No domains in this graph.</p>
-      ) : (
-        domains.map(([domainId, domain]) => {
-          const reqs = Object.entries(domain.requirements ?? {});
-          return (
-            <div
-              key={domainId}
-              className="rounded-xl overflow-hidden border"
-              style={{ border: `1px solid ${T.hairlineS}`, background: T.surface2 }}
+      <div className="flex items-center gap-3 sticky top-0 z-10 pb-1 shrink-0" style={{ background: T.surface }}>
+        <span className="text-[11px] font-mono" style={{ color: T.muted }}>
+          {domains.length} domains · {totalReqs} requirements
+        </span>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter domains + requirement titles…"
+          className="flex-1 text-[11px] font-mono px-3 py-1.5 rounded-lg border outline-none"
+          style={{ border: `1px solid ${T.hairlineS}`, background: T.canvas2, color: T.ink }}
+        />
+        {q !== '' && (
+          <span className="text-[10px] font-mono" style={{ color: T.faint }}>{filtered.length} match</span>
+        )}
+      </div>
+      {visible.map(([domainId, domain]) => {
+        const reqs = Object.entries(domain.requirements ?? {});
+        const open = expanded.has(domainId);
+        return (
+          <div
+            key={domainId}
+            className="rounded-xl overflow-hidden border shrink-0"
+            style={{ border: `1px solid ${T.hairlineS}`, background: T.surface2, scrollMarginTop: '44px' }}
+          >
+            <button
+              type="button"
+              onClick={() => toggle(domainId)}
+              className="w-full px-4 py-2 flex items-center gap-2 text-left"
+              style={{ background: T.canvas2 }}
             >
-              <div
-                className="px-4 py-2 border-b flex items-center gap-2"
-                style={{ borderColor: T.hairline, background: T.canvas2 }}
-              >
-                <span className="text-[11px] font-semibold font-mono" style={{ color: T.ink }}>{domainId}</span>
-                <span className="text-[10px] font-mono" style={{ color: T.faint }}>{reqs.length} reqs</span>
-              </div>
-              {domain.description && (
-                <p className="text-[11px] px-4 pt-2 pb-1" style={{ color: T.muted }}>{domain.description}</p>
-              )}
-              {reqs.length > 0 && (
-                <div className="divide-y" style={{ borderColor: T.hairline }}>
-                  {reqs.map(([reqId, req]) => (
-                    <div key={reqId} className="px-4 py-2" style={{ borderColor: T.hairline }}>
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="text-[10px] font-mono" style={{ color: T.faint }}>{reqId}</span>
-                        {req.status && (
-                          <span
-                            className="text-[9px] uppercase font-semibold px-1.5 py-0.5 rounded font-mono"
-                            style={{
-                              background: req.status === 'active' ? 'rgba(63,185,80,0.15)' : req.status === 'deprecated' ? 'rgba(248,81,73,0.15)' : T.surface,
-                              color: req.status === 'active' ? T.ok : req.status === 'deprecated' ? T.deny : T.muted,
-                            }}
-                          >
-                            {req.status}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px]" style={{ color: T.ink }}>{req.title}</p>
+              <span className="text-[10px] font-mono" style={{ color: T.faint }}>{open ? '▾' : '▸'}</span>
+              <span className="text-[11px] font-semibold font-mono truncate" style={{ color: T.ink }}>{domainId}</span>
+              <span className="text-[10px] font-mono ml-auto shrink-0" style={{ color: T.faint }}>{reqs.length} reqs</span>
+            </button>
+            {open && domain.description && (
+              <p className="text-[11px] px-4 pt-2 pb-1" style={{ color: T.muted }}>{domain.description}</p>
+            )}
+            {open && reqs.length > 0 && (
+              <div className="divide-y" style={{ borderColor: T.hairline }}>
+                {reqs.slice(0, REQ_CAP).map(([reqId, req]) => (
+                  <div key={reqId} className="px-4 py-2" style={{ borderColor: T.hairline }}>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-[10px] font-mono" style={{ color: T.faint }}>{reqId}</span>
+                      {req.status && (
+                        <span
+                          className="text-[9px] uppercase font-semibold px-1.5 py-0.5 rounded font-mono"
+                          style={{
+                            background: req.status === 'active' ? 'rgba(63,185,80,0.15)' : req.status === 'deprecated' ? 'rgba(248,81,73,0.15)' : T.surface,
+                            color: req.status === 'active' ? T.ok : req.status === 'deprecated' ? T.deny : T.muted,
+                          }}
+                        >
+                          {req.status}
+                        </span>
+                      )}
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })
+                    <p className="text-[11px]" style={{ color: T.ink }}>{req.title}</p>
+                  </div>
+                ))}
+                {reqs.length > REQ_CAP && (
+                  <p className="text-[10px] font-mono px-4 py-2" style={{ color: T.faint }}>
+                    +{reqs.length - REQ_CAP} more requirements — refine the filter
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {filtered.length > VISIBLE_CAP && (
+        <p className="text-[10px] font-mono text-center py-2" style={{ color: T.faint }}>
+          showing {VISIBLE_CAP} of {filtered.length} domains — refine the filter to narrow
+        </p>
       )}
     </div>
   );
