@@ -248,8 +248,8 @@ function RequirementRow({
       <span className="text-[10px] font-mono shrink-0 w-16" style={{ color: T.faint }}>{req.reqId}</span>
       <span className="flex-1 min-w-0">
         <span className="block text-[12px] truncate" style={{ color: T.ink }}>{req.title}</span>
-        {req.statement !== '' && (
-          <span className="block text-[11px] truncate" style={{ color: T.muted }}>{req.statement}</span>
+        {req.statement.trim() !== '' && (
+          <span className="block text-[11px] truncate" style={{ color: T.muted }}>{req.statement.trim()}</span>
         )}
         <span className="block text-[10px] font-mono truncate" style={{ color: T.faint }}>{req.domain}</span>
       </span>
@@ -441,7 +441,8 @@ function RequirementEditRail({
               <ol className="mt-1 flex flex-col gap-1.5">
                 {detail.businessRules.map((r, i) => {
                   const rule = r as { statement?: unknown; confidence?: unknown };
-                  const st = typeof rule.statement === 'string' ? rule.statement : JSON.stringify(r);
+                  const raw = typeof rule.statement === 'string' ? rule.statement.trim() : '';
+                  const st = raw !== '' ? raw : JSON.stringify(r);
                   const conf = typeof rule.confidence === 'number' ? rule.confidence : null;
                   return (
                     <li key={i} className="text-[11px] leading-snug" style={{ color: T.ink }}>

@@ -144,7 +144,7 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
       const statements = (req.business_rules ?? [])
         .map((r) => {
           const st = (r as { statement?: unknown }).statement;
-          return typeof st === 'string' ? st : '';
+          return typeof st === 'string' ? st.trim() : '';
         })
         .filter((st) => st !== '');
       const summary: RequirementSummary = {
