@@ -229,7 +229,7 @@ function DomainGraphView({ graph }: { graph: DomainGraph }): React.ReactElement 
           style={{ border: `1px solid ${T.hairlineS}`, background: T.canvas2, color: T.ink }}
         />
         {q !== '' && (
-          <span className="text-[10px] font-mono" style={{ color: T.faint }}>{filtered.length} match</span>
+          <span className="text-[10px] font-mono" style={{ color: T.faint }}>{filtered.length === 1 ? '1 match' : `${filtered.length} matches`}</span>
         )}
       </div>
       {visible.map(([domainId, domain]) => {
@@ -244,6 +244,7 @@ function DomainGraphView({ graph }: { graph: DomainGraph }): React.ReactElement 
             <button
               type="button"
               onClick={() => toggle(domainId)}
+              aria-expanded={open}
               className="w-full px-4 py-2 flex items-center gap-2 text-left"
               style={{ background: T.canvas2 }}
             >
