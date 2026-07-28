@@ -124,7 +124,7 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'domain', executor: { type: 'tool', cmd: ['wicked-estate', 'nodes', '--json'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'domain', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -530,10 +530,19 @@ export class CoreAdapter {
       if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
       const dbPath = join(repoEntry.root_path, '.codegraph', 'estate.db');
       const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
+      const requirementsGraphPath = join(
+        repoEntry.root_path,
+        '.wicked-estate',
+        'requirements',
+        'requirements_graph.json',
+      );
       const CMDS: Record<string, string[]> = {
         index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
         annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
-        domain: ['wicked-estate', 'nodes', '--json', '--db', dbPath],
+        // The real domain front-end (writes what /repos/:id/domain-graph reads). Fails
+        // closed with an actionable message until the domain-extraction front-half has
+        // annotated the graph — that message surfacing in the unit output is correct.
+        domain: ['wicked-core', 'domain-graph', '--db', dbPath, '--out', requirementsGraphPath],
       };
       const def: WorkflowDef = {
         ...base,
