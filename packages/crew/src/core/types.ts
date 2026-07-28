@@ -280,7 +280,11 @@ export type PhaseRole = 'neutral' | 'creator' | 'evaluator';
 export type StageKindPhase = 'recon' | 'build' | 'review' | 'test';
 
 /** One ordered phase of a workflow — pure data. */
+export type PhaseExecutor = { type: 'agent' } | { type: 'tool'; cmd: string[] };
+
 export interface PhaseDef {
+  /** Omitted = agent execution (engine default). Tool phases bypass the council and run cmd directly. */
+  executor?: PhaseExecutor;
   id: string;
   kind: StageKindPhase;
   gate_type: GateType | null;
