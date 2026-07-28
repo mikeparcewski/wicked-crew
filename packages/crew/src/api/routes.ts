@@ -578,12 +578,23 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
 
     try {
       const settings = await adapter.getSettings();
-      const nodeLimit = String(settings.graphNodeLimit);
-      const { stdout } = await execFileAsync(
-        'wicked-estate',
-        ['graph-view', '--limit', nodeLimit, '--db', dbPath],
-        { timeout: 30_000, cwd: repo.root_path },
+      const q = req.query as { focus?: string; limit?: string };
+      const parsedLimit = q.limit !== undefined ? Number.parseInt(q.limit, 10) : NaN;
+      const nodeLimit = String(
+        Number.isFinite(parsedLimit) && parsedLimit > 0 && parsedLimit <= 1000
+          ? parsedLimit
+          : settings.graphNodeLimit,
       );
+      const args = ['graph-view', '--limit', nodeLimit, '--db', dbPath];
+      // FOCUS (ego-graph) mode: seed the slice from one symbol and expand its
+      // neighbourhood — the navigation primitive (estate graph-view --focus).
+      if (q.focus !== undefined && q.focus.trim() !== '') {
+        args.push('--focus', q.focus.trim());
+      }
+      const { stdout } = await execFileAsync('wicked-estate', args, {
+        timeout: 30_000,
+        cwd: repo.root_path,
+      });
       const raw = JSON.parse(stdout) as {
         nodes: Array<{ id: string; name: string; kind: string; file: string; lang: string; score: number; inDeg: number; outDeg: number }>;
         edges: Array<{ src: string; tgt: string }>;
@@ -602,6 +613,34 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   });
 
   // ── Git history (last 20 commits via git log) ─────────────────────────────
+
+  // ── Blast radius for a symbol (via wicked-estate blast-radius --json).
+  //    Carries the honesty contract through: dependents PLUS the unresolved-call
+  //    count — an empty dependents list must never read as "safe to change".
+  app.get(`${V}/repos/:id/graph/blast-radius`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { name?: string };
+    if (q.name === undefined || q.name.trim() === '') {
+      return reply.code(400).send({ error: 'name query parameter required' });
+    }
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    if (!existsSync(dbPath)) {
+      return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
+    }
+    try {
+      const { stdout } = await execFileAsync(
+        'wicked-estate',
+        ['blast-radius', q.name.trim(), '--db', dbPath, '--json'],
+        { timeout: 30_000, cwd: repo.root_path },
+      );
+      return reply.send(JSON.parse(stdout) as unknown);
+    } catch (err) {
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
 
   app.get(`${V}/repos/:id/git-history`, async (req, reply) => {
     const { id } = req.params as { id: string };
