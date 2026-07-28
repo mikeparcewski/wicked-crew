@@ -543,6 +543,10 @@ export class CoreAdapter {
       };
       // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
       await this._writeBuiltinOverlay(def);
+      // Mark the builtin as written BEFORE launchRun: its generic once-guard would otherwise
+      // see 'onboarding' as unwritten and clobber the baked def with the static mirror in the
+      // window between this write and the engine resolving the workflow (observed live).
+      this._builtinOverlayWritten.add('onboarding');
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
