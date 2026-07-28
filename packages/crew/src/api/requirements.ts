@@ -46,6 +46,8 @@ export interface RequirementSummary {
   domain: string;
   reqId: string;
   title: string;
+  /** First business-rule statement — the requirement's actual content (empty when none). */
+  statement: string;
   status: string;
   risk: boolean;
   riskSource: 'operator' | 'data' | null;
@@ -139,17 +141,26 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
       const riskSource: RequirementSummary['riskSource'] =
         ov?.risk !== undefined ? 'operator' : dataRisk ? 'data' : null;
       const title = ov?.title ?? req.title ?? reqId;
+      const statements = (req.business_rules ?? [])
+        .map((r) => {
+          const st = (r as { statement?: unknown }).statement;
+          return typeof st === 'string' ? st.trim() : '';
+        })
+        .filter((st) => st !== '');
       const summary: RequirementSummary = {
         key,
         domain,
         reqId,
         title,
+        statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
         riskSource,
         edited: ov !== undefined,
       };
-      const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${ov?.notes ?? ''}`.toLowerCase();
+      // Statements are part of the haystack: searching the requirements means
+      // searching the actual rule text, not just titles and ids.
+      const haystack = `${reqId} ${domain} ${title} ${req.description ?? ''} ${statements.join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
       const entry: IndexEntry = { summary, haystack, source: req };
       entries.push(entry);
       byKey.set(key, entry);
