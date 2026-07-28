@@ -122,9 +122,9 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     id: 'onboarding',
     is_system: true,
     phases: [
-      { id: 'index', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'annotate', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'domain', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'domain', executor: { type: 'tool', cmd: ['wicked-estate', 'nodes', '--json'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -161,8 +161,8 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     id: 'repo-graph',
     is_system: true,
     phases: [
-      { id: 'index', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'annotate', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -505,12 +505,33 @@ export class CoreAdapter {
     this.onboardingInFlight.add(repoId);
     const runId = randomUUID();
     try {
-      // Write onboarding.json to the Rust overlay dir so the actor picks it up on (re)start.
-      // Uses _writeBuiltinOverlay (not registerWorkflow) to avoid adding onboarding to userWorkflows,
-      // which would cause a duplicate entry in listWorkflows().
-      if (!this._builtinOverlayWritten.has('onboarding')) {
-        this._builtinOverlayWritten.add('onboarding');
-        await this._writeBuiltinOverlay(BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!);
+      // Bake THIS repo's absolute paths into the onboarding def (core#120). The static def's
+      // relative commands are triple-wrong at runtime: the run's workdir is the per-run WORKTREE
+      // (not the root the graph endpoint reads), and estate's default db location/name
+      // (.wicked-estate/graph.db) differs from the endpoint's (.codegraph/estate.db). Rewritten
+      // per launch and hot-registered so the running actor sees it — never restart-dependent.
+      const repoEntries = await this.listRepos();
+      const repoEntry = repoEntries.find((r) => r.id === repoId);
+      if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
+      const dbPath = join(repoEntry.root_path, '.codegraph', 'estate.db');
+      const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
+      const CMDS: Record<string, string[]> = {
+        index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
+        annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
+        domain: ['wicked-estate', 'nodes', '--json', '--db', dbPath],
+      };
+      const def: WorkflowDef = {
+        ...base,
+        phases: base.phases.map((ph) =>
+          CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
+        ),
+      };
+      await this._writeBuiltinOverlay(def);
+      const coreDyn = this.core as unknown as Record<string, unknown>;
+      if (typeof coreDyn['registerWorkflow'] === 'function') {
+        const overlay = { ...(def as WorkflowDef & { is_system?: boolean }) };
+        delete overlay.is_system;
+        await (coreDyn['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlay));
       }
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
