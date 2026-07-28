@@ -90,6 +90,12 @@ describe('requirements service', () => {
     expect(await listRequirements(empty, { offset: 0, limit: 10 })).toBeNull();
   });
 
+  it('search matches the actual rule STATEMENTS, not just titles', async () => {
+    const hit = await listRequirements(root, { q: 'jurisdiction applied', offset: 0, limit: 10 });
+    expect(hit!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
+    expect(hit!.items[0]!.statement).toBe('sum then tax');
+  });
+
   it('search is tokenized AND-match across id, domain, title, description', async () => {
     const tax = await listRequirements(root, { q: 'tax jurisdiction', offset: 0, limit: 10 });
     expect(tax!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
