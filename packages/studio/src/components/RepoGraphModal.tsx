@@ -80,7 +80,7 @@ function NodeDetailPanel({
   blast?: import('../api/types.js').BlastRadius | null;
   blastBusy?: boolean;
   expandBusy?: boolean;
-  onFocusDependent?: (name: string) => void;
+  onFocusDependent?: (dep: { id: string; name: string }) => void;
 }): React.ReactElement {
   const calledBy = edges.filter((e) => e.tgt === node.id);
   const calls = edges.filter((e) => e.src === node.id);
@@ -163,7 +163,7 @@ function NodeDetailPanel({
                 <li key={d.id}>
                   <button
                     type="button"
-                    onClick={() => onFocusDependent?.(d.name)}
+                    onClick={() => onFocusDependent?.(d)}
                     className="w-full text-left text-[10px] font-mono truncate hover:underline"
                     style={{ color: T.link }}
                     title={`${d.file}:${d.line}`}
@@ -529,14 +529,9 @@ export function RepoGraphModal({ repo, onClose, onSelectRun, initialFocus }: Pro
       .finally(() => setBlastBusy(false));
   }
 
-  /** Fetch the node's ego-slice and MERGE it into the current view (progressive navigation). */
-  function expandNeighbors(node: CodeGraphNode): void {
-    setExpandBusy(true);
-    api
-      .getRepoGraph(repo.id, { focus: node.id, limit: 60 })
-      .then(({ graph }) => {
-        if (graph === null) return;
-        setCodeData((prev) => {
+  /** MERGE a fetched ego-slice into the current view (progressive navigation). */
+  function mergeSlice(graph: NonNullable<Awaited<ReturnType<typeof api.getRepoGraph>>['graph']>): void {
+    setCodeData((prev) => {
           if (prev === null) return prev;
           const nodeIds = new Set(prev.nodes.map((n) => n.id));
           const mergedNodes = [...prev.nodes, ...graph.nodes.filter((n) => !nodeIds.has(n.id))];
@@ -548,10 +543,37 @@ export function RepoGraphModal({ repo, onClose, onSelectRun, initialFocus }: Pro
             edges: mergedEdges,
             stats: { nodeCount: mergedNodes.length, edgeCount: mergedEdges.length, fileCount: new Set(mergedNodes.map((n) => n.file)).size },
           };
-        });
+    });
+  }
+
+  function expandNeighbors(node: CodeGraphNode): void {
+    setExpandBusy(true);
+    api
+      .getRepoGraph(repo.id, { focus: node.id, limit: 60 })
+      .then(({ graph }) => {
+        if (graph !== null) mergeSlice(graph);
       })
       .catch(() => undefined)
       .finally(() => setExpandBusy(false));
+  }
+
+  /** Focus a blast-radius dependent: select in-slice, or fetch its ego-slice and merge first. */
+  function focusDependent(dep: { id: string; name: string }): void {
+    setBlast(null);
+    const hit = codeData?.nodes.find((n) => n.id === dep.id);
+    if (hit) {
+      handleNodeSelect(hit);
+      return;
+    }
+    api
+      .getRepoGraph(repo.id, { focus: dep.id, limit: 60 })
+      .then(({ graph }) => {
+        if (graph === null) return;
+        mergeSlice(graph);
+        const fetched = graph.nodes.find((n) => n.id === dep.id) ?? graph.nodes.find((n) => n.name === dep.name);
+        if (fetched) handleNodeSelect(fetched);
+      })
+      .catch(() => undefined);
   }
 
   function isTestFile(file: string): boolean {
@@ -838,11 +860,7 @@ export function RepoGraphModal({ repo, onClose, onSelectRun, initialFocus }: Pro
                   blast={blast}
                   blastBusy={blastBusy}
                   expandBusy={expandBusy}
-                  onFocusDependent={(name) => {
-                    setBlast(null);
-                    const hit = codeData!.nodes.find((n) => n.name === name || n.id === name);
-                    if (hit) handleNodeSelect(hit);
-                  }}
+                  onFocusDependent={focusDependent}
                 />
               )}
             </div>
