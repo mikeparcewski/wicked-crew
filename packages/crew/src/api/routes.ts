@@ -526,7 +526,13 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
-    const detail = await getRequirement(repo.root_path, decodeURIComponent(key));
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    const detail = await getRequirement(repo.root_path, decoded);
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -548,7 +554,13 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid patch', details: parsed.error.issues });
     }
-    const detail = await patchRequirement(repo.root_path, decodeURIComponent(key), parsed.data);
+    let decodedKey: string;
+    try {
+      decodedKey = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    const detail = await patchRequirement(repo.root_path, decodedKey, parsed.data);
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });

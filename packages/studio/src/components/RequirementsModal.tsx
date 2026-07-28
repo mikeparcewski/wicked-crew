@@ -61,7 +61,7 @@ export function RequirementsModal({ repoId, repoName, onClose }: Props): React.R
     [repoId],
   );
 
-  // Debounced server-side search; filter/pagination changes fetch immediately.
+  // One debounced (250ms) server fetch covers search, filter, and pagination changes.
   useEffect(() => {
     if (debounceRef.current !== null) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => fetchPage(query, risk, offset), 250);
@@ -329,6 +329,11 @@ function RequirementEditRail({
         setDetail(requirement);
         setTitle(requirement.title);
         setNotes(requirement.notes);
+        setStatus(
+          requirement.status === 'deprecated' || requirement.status === 'review'
+            ? requirement.status
+            : 'active',
+        );
         onSaved(requirement);
         setSavedAt(Date.now());
       })

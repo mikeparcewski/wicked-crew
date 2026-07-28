@@ -108,6 +108,7 @@ async function readOverrides(rootPath: string): Promise<Record<string, Requireme
 }
 
 const cache = new Map<string, RepoIndex>();
+let tmpSeq = 0;
 
 async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
   const [artMtime, ovMtime] = await Promise.all([
@@ -251,7 +252,9 @@ export async function patchRequirement(
   overrides[key] = next;
   const path = overridesPath(rootPath);
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
+  // Collision-proof temp name: pid alone can collide for concurrent in-process
+  // patches; a monotonic per-process counter disambiguates.
+  const tmp = `${path}.tmp-${process.pid}-${++tmpSeq}`;
   await writeFile(tmp, JSON.stringify(overrides, null, 2), 'utf8');
   await rename(tmp, path);
   cache.delete(rootPath); // next read rebuilds with the new overrides

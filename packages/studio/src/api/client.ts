@@ -240,7 +240,7 @@ export const api = {
       body: JSON.stringify({ name, content, lang }),
     }),
 
-  /** The requirements_graph.json domain model; `graph` is null when not generated yet. */
+  /** Server-side requirements search: tokenized AND-match + risk/domain filters + pagination. */
   listRequirements: (repoId: string, params: { q?: string; risk?: 'risk' | 'no-risk'; domain?: string; offset?: number; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set('q', params.q);
@@ -258,6 +258,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }),
+  /** The requirements_graph.json domain model; `graph` is null when not generated yet. */
   getDomainGraph: () => apiFetch<{ graph: import('./types.js').DomainGraph | null }>('/domain-graph'),
 
   /** Symbol-level code graph for a repo via wicked-estate graph-view; `graph` is null when not yet built. */
