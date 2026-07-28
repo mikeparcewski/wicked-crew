@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
@@ -494,6 +495,75 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   // ── Repo code graph (via wicked-estate graph-view) ──────────────────────────
   // Delegates to the estate CLI so the query goes through the proper service
   // layer (store-seam aware, overlay edges included). Postgres-safe.
+
+  // ── Requirements management (server-side search over requirements_graph.json +
+  //    operator overrides sidecar; see api/requirements.ts) ─────────────────────
+  const ReqQuerySchema = z.object({
+    q: z.string().optional(),
+    risk: z.enum(['risk', 'no-risk']).optional(),
+    domain: z.string().optional(),
+    offset: z.coerce.number().int().min(0).default(0),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  });
+  app.get(`${V}/repos/:id/requirements`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const parsed = ReqQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid query', details: parsed.error.issues });
+    }
+    const page = await listRequirements(repo.root_path, parsed.data);
+    if (page === null) {
+      return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
+    }
+    return page;
+  });
+
+  app.get(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
+    const { id, key } = req.params as { id: string; key: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    const detail = await getRequirement(repo.root_path, decoded);
+    if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
+    return { requirement: detail };
+  });
+
+  const ReqPatchSchema = z
+    .object({
+      title: z.string().min(1).max(500).optional(),
+      notes: z.string().max(5000).optional(),
+      status: z.enum(['active', 'deprecated', 'review']).optional(),
+      risk: z.boolean().optional(),
+    })
+    .refine((b) => Object.keys(b).length > 0, { message: 'empty patch' });
+  app.patch(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
+    const { id, key } = req.params as { id: string; key: string };
+    const repos = await adapter.listRepos();
+    const repo = repos.find((r) => r.id === id);
+    if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
+    const parsed = ReqPatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid patch', details: parsed.error.issues });
+    }
+    let decodedKey: string;
+    try {
+      decodedKey = decodeURIComponent(key);
+    } catch {
+      return reply.code(400).send({ error: 'Malformed requirement key encoding' });
+    }
+    const detail = await patchRequirement(repo.root_path, decodedKey, parsed.data);
+    if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
+    return { requirement: detail };
+  });
 
   app.get(`${V}/repos/:id/graph`, async (req, reply) => {
     const { id } = req.params as { id: string };
