@@ -411,6 +411,10 @@ export class CoreAdapter {
   private readonly repoOnboardRunIds = new Map<string, string>();
   /** repo ids with an onboarding run in flight — guards against concurrent double-launch. */
   private readonly onboardingInFlight = new Set<string>();
+  /** Serializes onboarding launches: they rewrite the SHARED 'onboarding' overlay with
+   *  repo-specific paths, so two repos launching concurrently must not interleave between
+   *  overlay registration and launchRun (after launch the def is baked into the run's units). */
+  private _onboardingChain: Promise<unknown> = Promise.resolve();
 
   /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
@@ -504,7 +508,18 @@ export class CoreAdapter {
     }
     this.onboardingInFlight.add(repoId);
     const runId = randomUUID();
+    const chained = this._onboardingChain.then(() => this._doOnboardingLaunch(repoId, repoName, runId));
+    this._onboardingChain = chained.catch(() => undefined);
     try {
+      await chained;
+      return runId;
+    } finally {
+      this.onboardingInFlight.delete(repoId);
+    }
+  }
+
+  private async _doOnboardingLaunch(repoId: string, repoName: string, runId: string): Promise<void> {
+    {
       // Bake THIS repo's absolute paths into the onboarding def (core#120). The static def's
       // relative commands are triple-wrong at runtime: the run's workdir is the per-run WORKTREE
       // (not the root the graph endpoint reads), and estate's default db location/name
@@ -526,13 +541,8 @@ export class CoreAdapter {
           CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
         ),
       };
+      // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
       await this._writeBuiltinOverlay(def);
-      const coreDyn = this.core as unknown as Record<string, unknown>;
-      if (typeof coreDyn['registerWorkflow'] === 'function') {
-        const overlay = { ...(def as WorkflowDef & { is_system?: boolean }) };
-        delete overlay.is_system;
-        await (coreDyn['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlay));
-      }
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
@@ -540,11 +550,8 @@ export class CoreAdapter {
         workflow: 'onboarding',
         repoRef: repoId,
       });
-    } finally {
-      this.onboardingInFlight.delete(repoId);
     }
     this.repoOnboardRunIds.set(repoId, runId);
-    return runId;
   }
 
   /** Return the onboarding run id for a repo (undefined if not launched this session). */
