@@ -94,7 +94,15 @@ type GovernanceMethods = {
   recallRulesPreview(queryJson: string): Promise<string>;
 };
 
-type CoreHandleFull = CoreHandle & GovernanceMethods;
+/** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
+type ChatMethods = {
+  chatOpen(chatId: string, clisJson: string, cwd?: string | null): Promise<string>;
+  chatSend(chatId: string, text: string, targetsJson?: string | null, cwd?: string | null): Promise<string>;
+  chatSeats(chatId: string): Promise<string>;
+  chatClose(chatId: string): Promise<string>;
+};
+
+type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
@@ -405,6 +413,40 @@ export class CoreAdapter {
   /** A unit's captured transcript (string, or `null`). */
   async workOutput(unitId: string): Promise<string | null> {
     return JSON.parse(await this.core.workOutput(unitId)) as string | null;
+  }
+
+  // ── Chat sessions (core#134 / crew#165) ────────────────────────────────────
+
+  async chatOpen(
+    chatId: string,
+    clis: string[],
+    cwd?: string,
+  ): Promise<{ cliKey: string; ok: boolean; error?: string }[]> {
+    const raw = await this.core.chatOpen(chatId, JSON.stringify(clis), cwd ?? null);
+    return JSON.parse(raw) as { cliKey: string; ok: boolean; error?: string }[];
+  }
+
+  async chatSend(
+    chatId: string,
+    text: string,
+    targets?: string[],
+    cwd?: string,
+  ): Promise<string[]> {
+    const raw = await this.core.chatSend(
+      chatId,
+      text,
+      targets === undefined ? null : JSON.stringify(targets),
+      cwd ?? null,
+    );
+    return JSON.parse(raw) as string[];
+  }
+
+  async chatSeats(chatId: string): Promise<string[]> {
+    return JSON.parse(await this.core.chatSeats(chatId)) as string[];
+  }
+
+  async chatClose(chatId: string): Promise<void> {
+    await this.core.chatClose(chatId);
   }
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
