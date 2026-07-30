@@ -243,6 +243,26 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
     expect(refund.risk).toBe(true);
     expect(refund.riskSource).toBe('data');
     expect(refund.domain).toBe('billing');
+    expect(refund.category).toBe('functional'); // .ts source → product code
+  });
+
+  it('classifies lockfile/data-fixture statements as config-data and filters them', async () => {
+    const root = await storeRepo();
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(root, '.codegraph', 'estate.db'));
+    db.exec(`
+      INSERT INTO symbols VALUES (4, 'lock::version#'), (5, 'fixture::garak#');
+      INSERT INTO nodes VALUES
+        (4, 'lockfileVersion', 'pnpm-lock.yaml', 'The lock file must conform to format version 9.0', 1),
+        (5, 'memories', 'add-ins/memories/redteam/garak.json', 'Adversarial testing via Garak is required', 1);
+    `);
+    db.close();
+    const functional = await listRequirements(root, { category: 'functional', offset: 0, limit: 10 });
+    expect(functional!.items.some((i) => i.title === 'lockfileVersion')).toBe(false);
+    expect(functional!.items.some((i) => i.title === 'memories')).toBe(false);
+    expect(functional!.items.some((i) => i.title === 'chargeTax')).toBe(true);
+    const config = await listRequirements(root, { category: 'config-data', offset: 0, limit: 10 });
+    expect(config!.total).toBe(2);
   });
 
   it('search matches statement text; detail carries rule annotations', async () => {

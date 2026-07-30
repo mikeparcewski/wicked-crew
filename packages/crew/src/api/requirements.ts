@@ -49,11 +49,26 @@ export interface RequirementOverride {
   risk?: boolean | undefined;
 }
 
+export type RequirementCategory = 'functional' | 'config-data';
+
+/** Product-functional requirements come from CODE; statements extracted from
+ * lockfiles, manifests, data fixtures, and docs are honest observations about
+ * those assets but are NOT product behavior — they class as config-data so the
+ * default view can focus on the product. */
+export function categoryOf(file: string): RequirementCategory {
+  const f = file.toLowerCase();
+  const base = f.slice(f.lastIndexOf('/') + 1);
+  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
+  if (base.includes('pnpm-lock') || base.includes('package-lock')) return 'config-data';
+  return 'functional';
+}
+
 export interface RequirementSummary {
   key: string; // `${domain}::${reqId}`
   domain: string;
   reqId: string;
   title: string;
+  category: RequirementCategory;
   /** First business-rule statement — the requirement's actual content (empty when none). */
   statement: string;
   status: string;
@@ -211,6 +226,7 @@ async function buildStoreIndex(
         domain,
         reqId: key,
         title,
+        category: categoryOf(file),
         statement: row.requirement,
         status: ov?.status ?? (row.validated === 1 ? 'validated' : 'active'),
         risk,
@@ -301,11 +317,15 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
           return typeof st === 'string' ? st.trim() : '';
         })
         .filter((st) => st !== '');
+      const firstComponent = (req.legacy_components ?? []).find((c) => typeof c === 'string') as
+        | string
+        | undefined;
       const summary: RequirementSummary = {
         key,
         domain,
         reqId,
         title,
+        category: categoryOf(firstComponent ?? ''),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -337,6 +357,7 @@ export interface RequirementsQuery {
   q?: string | undefined;
   risk?: 'risk' | 'no-risk' | undefined;
   domain?: string | undefined;
+  category?: RequirementCategory | undefined;
   offset: number;
   limit: number;
 }
@@ -363,6 +384,7 @@ export async function listRequirements(
   const domainFilter = query.domain?.toLowerCase();
   const matched: RequirementSummary[] = [];
   for (const e of index.entries) {
+    if (query.category !== undefined && e.summary.category !== query.category) continue;
     if (query.risk === 'risk' && !e.summary.risk) continue;
     if (query.risk === 'no-risk' && e.summary.risk) continue;
     if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;
