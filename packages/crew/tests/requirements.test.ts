@@ -191,7 +191,19 @@ describe('requirements service', () => {
   });
 });
 
-describe('requirements service — live estate store (primary source)', () => {
+const hasSqlite = await (async () => {
+  try {
+    const name = 'node:sqlite';
+    await import(name);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+// Without the sqlite builtin the service falls back to the artifact by design —
+// these tests cover the primary path and need the builtin the daemon runs with.
+describe.skipIf(!hasSqlite)('requirements service — live estate store (primary source)', () => {
   async function storeRepo(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), 'req-store-'));
     const dir = join(root, '.codegraph');
