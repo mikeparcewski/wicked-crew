@@ -1,12 +1,20 @@
 /**
- * REQUIREMENTS SERVICE — server-side search + operator overrides over the
- * `requirements_graph.json` artifact (produced by `wicked-core domain-graph`).
+ * REQUIREMENTS SERVICE — server-side search + operator overrides over the LIVE
+ * estate store, with the `requirements_graph.json` artifact as fallback.
  *
- * Why server-side: the first real artifact is 38MB / ~35k requirements — shipping it
- * to the browser for JS-side filtering is not search. The daemon parses it ONCE into a
- * flat index (cached, invalidated on file mtime), and queries run here: tokenized
- * AND-match over id/domain/title/description, risk + domain filters, offset/limit
- * pagination.
+ * Why the store is primary: the artifact is an evidence-gated SNAPSHOT — it only
+ * regenerates when `wicked-core domain-graph` passes its coverage bar, so mid-extraction
+ * it can lag the store by hours (observed: a UI serving day-old placeholder titles while
+ * the store held thousands of validated statements). Requirements content lives in
+ * estate (`nodes.requirement` + RULE-* annotations); the UI reads that truth directly
+ * (read-only `node:sqlite`) and falls back to the artifact for repos without a store
+ * or on runtimes without the sqlite builtin.
+ *
+ * Why server-side: 15k+ requirements — shipping them to the browser for JS-side
+ * filtering is not search. The daemon builds a flat index (cached, invalidated on
+ * store/artifact mtime with a small TTL guard against WAL-churn thrash), and queries
+ * run here: tokenized AND-match over id/domain/title/statements, risk + domain
+ * filters, offset/limit pagination.
  *
  * Why an OVERRIDES sidecar: the artifact is DERIVED (regenerated from the estate
  * store), so operator edits written into it would be clobbered on the next
@@ -41,11 +49,26 @@ export interface RequirementOverride {
   risk?: boolean | undefined;
 }
 
+export type RequirementCategory = 'functional' | 'config-data';
+
+/** Product-functional requirements come from CODE; statements extracted from
+ * lockfiles, manifests, data fixtures, and docs are honest observations about
+ * those assets but are NOT product behavior — they class as config-data so the
+ * default view can focus on the product. */
+export function categoryOf(file: string): RequirementCategory {
+  const f = file.toLowerCase();
+  const base = f.slice(f.lastIndexOf('/') + 1);
+  if (/\.(json|ya?ml|lock|toml|ini|env|md|mdx|txt|csv)$/.test(base)) return 'config-data';
+  if (base.includes('pnpm-lock') || base.includes('package-lock')) return 'config-data';
+  return 'functional';
+}
+
 export interface RequirementSummary {
   key: string; // `${domain}::${reqId}`
   domain: string;
   reqId: string;
   title: string;
+  category: RequirementCategory;
   /** First business-rule statement — the requirement's actual content (empty when none). */
   statement: string;
   status: string;
@@ -75,12 +98,23 @@ interface IndexEntry {
 interface RepoIndex {
   entries: IndexEntry[];
   byKey: Map<string, IndexEntry>;
-  artifactMtimeMs: number;
+  /** mtime of whichever source built this index (store db+wal, or artifact). */
+  sourceMtimeMs: number;
+  fromStore: boolean;
   overridesMtimeMs: number;
+  builtAtMs: number;
   total: number;
 }
 
 const RISK_RE = /risk/i;
+const RISK_PREFIX = '[RISK]';
+/** WAL churn during extraction touches the db every few seconds — don't rebuild a
+ * 15k-row index per keystroke; a fresh-enough index is authoritative for this long. */
+const REBUILD_TTL_MS = 5_000;
+
+function storePath(rootPath: string): string {
+  return join(rootPath, '.codegraph', 'estate.db');
+}
 
 function artifactPath(rootPath: string): string {
   return join(rootPath, '.wicked-estate', 'requirements', 'requirements_graph.json');
@@ -112,15 +146,151 @@ async function readOverrides(rootPath: string): Promise<Record<string, Requireme
 const cache = new Map<string, RepoIndex>();
 let tmpSeq = 0;
 
+/** Minimal surface of the `node:sqlite` builtin (typed locally: the project's
+ * @types/node predates it; the import is resolved dynamically at runtime). */
+interface SqliteDatabase {
+  prepare(sql: string): { all(): unknown[] };
+  close(): void;
+}
+interface SqliteModule {
+  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => SqliteDatabase;
+}
+
+/** Lazily resolved sqlite builtin — absent on older Node runtimes → artifact fallback. */
+let sqliteMod: SqliteModule | null | undefined;
+async function sqlite(): Promise<SqliteModule | null> {
+  if (sqliteMod === undefined) {
+    try {
+      const name = 'node:sqlite';
+      sqliteMod = (await import(name)) as SqliteModule;
+    } catch {
+      sqliteMod = null;
+    }
+  }
+  return sqliteMod;
+}
+
+interface StoreRow {
+  sym: string;
+  name: string | null;
+  file: string | null;
+  requirement: string;
+  validated: number;
+}
+
+/** Build the index from the LIVE estate store (read-only). Returns null when the
+ * store can't serve (no db, no sqlite builtin, schema mismatch) — caller falls back. */
+async function buildStoreIndex(
+  rootPath: string,
+  sourceMtime: number,
+  ovMtime: number,
+): Promise<RepoIndex | null> {
+  const mod = await sqlite();
+  if (mod === null) return null;
+  const overrides = await readOverrides(rootPath);
+  let db: SqliteDatabase | null = null;
+  const entries: IndexEntry[] = [];
+  const byKey = new Map<string, IndexEntry>();
+  try {
+    db = new mod.DatabaseSync(storePath(rootPath), { readOnly: true });
+    const rules = new Map<number, { statement: string; confidence: number | null }[]>();
+    for (const r of db
+      .prepare("SELECT node_sym, value, confidence FROM annotations WHERE key LIKE 'RULE-%'")
+      .all() as { node_sym: number; value: string | null; confidence: number | null }[]) {
+      const list = rules.get(r.node_sym) ?? [];
+      list.push({ statement: r.value ?? '', confidence: r.confidence });
+      rules.set(r.node_sym, list);
+    }
+    const rows = db
+      .prepare(
+        `SELECT n.symbol AS sid, s.sym AS sym, n.name, n.file, n.requirement,
+                n.requirement_validated AS validated
+         FROM nodes n JOIN symbols s ON s.sid = n.symbol
+         WHERE n.requirement IS NOT NULL AND n.requirement != ''`,
+      )
+      .all() as (StoreRow & { sid: number })[];
+    for (const row of rows) {
+      const key = row.sym;
+      const ov = overrides[key];
+      const file = row.file ?? '';
+      const slash = file.lastIndexOf('/');
+      const domain = slash > 0 ? file.slice(0, slash) : '(root)';
+      const dataRisk = row.requirement.startsWith(RISK_PREFIX);
+      const risk = ov?.risk !== undefined ? ov.risk : dataRisk;
+      const riskSource: RequirementSummary['riskSource'] =
+        ov?.risk !== undefined ? 'operator' : dataRisk ? 'data' : null;
+      const title = ov?.title ?? (row.name !== null && row.name !== '' ? row.name : key);
+      const nodeRules = rules.get(row.sid) ?? [];
+      const summary: RequirementSummary = {
+        key,
+        domain,
+        reqId: key,
+        title,
+        category: categoryOf(file),
+        statement: row.requirement,
+        status: ov?.status ?? (row.validated === 1 ? 'validated' : 'active'),
+        risk,
+        riskSource,
+        edited: ov !== undefined,
+      };
+      const source: ArtifactRequirement = {
+        title,
+        description: file,
+        status: summary.status,
+        legacy_components: file === '' ? [] : [file],
+        business_rules: nodeRules,
+      };
+      const haystack =
+        `${key} ${domain} ${title} ${row.requirement} ${nodeRules.map((r) => r.statement).join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
+      const entry: IndexEntry = { summary, haystack, source };
+      entries.push(entry);
+      byKey.set(key, entry);
+    }
+  } catch {
+    return null; // schema drift or unreadable store — artifact fallback
+  } finally {
+    db?.close();
+  }
+  return {
+    entries,
+    byKey,
+    sourceMtimeMs: sourceMtime,
+    fromStore: true,
+    overridesMtimeMs: ovMtime,
+    builtAtMs: Date.now(),
+    total: entries.length,
+  };
+}
+
 async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
-  const [artMtime, ovMtime] = await Promise.all([
+  const [dbMtime, walMtime, artMtime, ovMtime] = await Promise.all([
+    mtimeMs(storePath(rootPath)),
+    mtimeMs(`${storePath(rootPath)}-wal`),
     mtimeMs(artifactPath(rootPath)),
     mtimeMs(overridesPath(rootPath)),
   ]);
-  if (artMtime < 0) return null; // artifact absent — requirements not generated yet
+  const storeMtime = Math.max(dbMtime, walMtime);
 
   const cached = cache.get(rootPath);
-  if (cached && cached.artifactMtimeMs === artMtime && cached.overridesMtimeMs === ovMtime) {
+  // TTL applies ONLY to store-built indexes: extraction WAL churn changes the db
+  // mtime every few seconds and must not trigger a rebuild per request. Artifact
+  // mtime changes only on regen, so artifact-built indexes always mtime-check.
+  if (cached?.fromStore === true && Date.now() - cached.builtAtMs < REBUILD_TTL_MS) return cached;
+
+  if (storeMtime >= 0) {
+    if (cached && cached.sourceMtimeMs === storeMtime && cached.overridesMtimeMs === ovMtime) {
+      cached.builtAtMs = Date.now();
+      return cached;
+    }
+    const fromStore = await buildStoreIndex(rootPath, storeMtime, ovMtime);
+    if (fromStore !== null) {
+      cache.set(rootPath, fromStore);
+      return fromStore;
+    }
+  }
+
+  if (artMtime < 0) return null; // no store, no artifact — requirements not generated yet
+  if (cached && cached.sourceMtimeMs === artMtime && cached.overridesMtimeMs === ovMtime) {
     return cached;
   }
 
@@ -147,11 +317,15 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
           return typeof st === 'string' ? st.trim() : '';
         })
         .filter((st) => st !== '');
+      const firstComponent = (req.legacy_components ?? []).find((c) => typeof c === 'string') as
+        | string
+        | undefined;
       const summary: RequirementSummary = {
         key,
         domain,
         reqId,
         title,
+        category: categoryOf(firstComponent ?? ''),
         statement: statements[0] ?? '',
         status: ov?.status ?? req.status ?? 'active',
         risk,
@@ -169,8 +343,10 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
   const index: RepoIndex = {
     entries,
     byKey,
-    artifactMtimeMs: artMtime,
+    sourceMtimeMs: artMtime,
+    fromStore: false,
     overridesMtimeMs: ovMtime,
+    builtAtMs: Date.now(),
     total: entries.length,
   };
   cache.set(rootPath, index);
@@ -181,6 +357,7 @@ export interface RequirementsQuery {
   q?: string | undefined;
   risk?: 'risk' | 'no-risk' | undefined;
   domain?: string | undefined;
+  category?: RequirementCategory | undefined;
   offset: number;
   limit: number;
 }
@@ -207,6 +384,7 @@ export async function listRequirements(
   const domainFilter = query.domain?.toLowerCase();
   const matched: RequirementSummary[] = [];
   for (const e of index.entries) {
+    if (query.category !== undefined && e.summary.category !== query.category) continue;
     if (query.risk === 'risk' && !e.summary.risk) continue;
     if (query.risk === 'no-risk' && e.summary.risk) continue;
     if (domainFilter !== undefined && !e.summary.domain.toLowerCase().includes(domainFilter)) continue;

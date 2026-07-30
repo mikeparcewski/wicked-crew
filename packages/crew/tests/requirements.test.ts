@@ -190,3 +190,106 @@ describe('requirements service', () => {
     expect(await patchRequirement(root, 'nope::REQ-9', { risk: true })).toBeNull();
   });
 });
+
+const hasSqlite = await (async () => {
+  try {
+    const name = 'node:sqlite';
+    await import(name);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+// Without the sqlite builtin the service falls back to the artifact by design —
+// these tests cover the primary path and need the builtin the daemon runs with.
+describe.skipIf(!hasSqlite)('requirements service — live estate store (primary source)', () => {
+  async function storeRepo(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'req-store-'));
+    const dir = join(root, '.codegraph');
+    await mkdir(dir, { recursive: true });
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(dir, 'estate.db'));
+    db.exec(`
+      CREATE TABLE symbols (sid INTEGER PRIMARY KEY, sym TEXT);
+      CREATE TABLE nodes (symbol INTEGER, name TEXT, file TEXT,
+                          requirement TEXT, requirement_validated INTEGER DEFAULT 0);
+      CREATE TABLE annotations (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                node_sym INTEGER NOT NULL, key TEXT, value TEXT,
+                                confidence REAL);
+    `);
+    db.exec(`
+      INSERT INTO symbols VALUES (1, 'src::chargeTax()'), (2, 'src::refund()'), (3, 'src::helper()');
+      INSERT INTO nodes VALUES
+        (1, 'chargeTax', 'billing/tax.ts', 'Invoice totals must apply tax after summing line items', 1),
+        (2, 'refund', 'billing/refund.ts', '[RISK] refund: below confidence threshold — Refunds over threshold need approval', 0),
+        (3, 'helper', 'lib/util.ts', NULL, 0);
+      INSERT INTO annotations (node_sym, key, value, confidence) VALUES
+        (1, 'RULE-aaa', 'Invoice totals must apply tax after summing line items', 0.95);
+    `);
+    db.close();
+    return root;
+  }
+
+  it('serves validated statements and RISK flags straight from the store', async () => {
+    const root = await storeRepo();
+    const page = await listRequirements(root, { offset: 0, limit: 10 });
+    expect(page!.total).toBe(2); // requirement-less nodes are not requirements
+    const tax = page!.items.find((i) => i.title === 'chargeTax')!;
+    expect(tax.statement).toBe('Invoice totals must apply tax after summing line items');
+    expect(tax.status).toBe('validated');
+    expect(tax.risk).toBe(false);
+    const refund = page!.items.find((i) => i.title === 'refund')!;
+    expect(refund.risk).toBe(true);
+    expect(refund.riskSource).toBe('data');
+    expect(refund.domain).toBe('billing');
+    expect(refund.category).toBe('functional'); // .ts source → product code
+  });
+
+  it('classifies lockfile/data-fixture statements as config-data and filters them', async () => {
+    const root = await storeRepo();
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(root, '.codegraph', 'estate.db'));
+    db.exec(`
+      INSERT INTO symbols VALUES (4, 'lock::version#'), (5, 'fixture::garak#');
+      INSERT INTO nodes VALUES
+        (4, 'lockfileVersion', 'pnpm-lock.yaml', 'The lock file must conform to format version 9.0', 1),
+        (5, 'memories', 'add-ins/memories/redteam/garak.json', 'Adversarial testing via Garak is required', 1);
+    `);
+    db.close();
+    const functional = await listRequirements(root, { category: 'functional', offset: 0, limit: 10 });
+    expect(functional!.items.some((i) => i.title === 'lockfileVersion')).toBe(false);
+    expect(functional!.items.some((i) => i.title === 'memories')).toBe(false);
+    expect(functional!.items.some((i) => i.title === 'chargeTax')).toBe(true);
+    const config = await listRequirements(root, { category: 'config-data', offset: 0, limit: 10 });
+    expect(config!.total).toBe(2);
+  });
+
+  it('search matches statement text; detail carries rule annotations', async () => {
+    const root = await storeRepo();
+    const page = await listRequirements(root, { q: 'tax summing', offset: 0, limit: 10 });
+    expect(page!.total).toBe(1);
+    const detail = await getRequirement(root, page!.items[0]!.key);
+    expect(detail!.ruleCount).toBe(1);
+    expect((detail!.businessRules[0] as { confidence: number }).confidence).toBe(0.95);
+  });
+
+  it('store takes precedence over a stale artifact, and overrides patch by symbol key', async () => {
+    const root = await storeRepo();
+    // stale artifact present alongside the store — the store must win
+    const dir = join(root, '.wicked-estate', 'requirements');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'requirements_graph.json'),
+      JSON.stringify({ domains: { stale: { requirements: { 'REQ-001': { title: 'OLD.md' } } } } }),
+    );
+    const page = await listRequirements(root, { offset: 0, limit: 10 });
+    expect(page!.items.some((i) => i.title === 'OLD.md')).toBe(false);
+    const key = page!.items.find((i) => i.title === 'refund')!.key;
+    const patched = await patchRequirement(root, key, { risk: false, notes: 'reviewed' });
+    expect(patched!.risk).toBe(false);
+    expect(patched!.riskSource).toBe('operator');
+    const raw = JSON.parse(await readFile(join(dir, 'requirements_overrides.json'), 'utf8'));
+    expect(raw[key].notes).toBe('reviewed');
+  });
+});
