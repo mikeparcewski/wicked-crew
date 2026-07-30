@@ -58,13 +58,33 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
   }, [messages]);
 
   // Open once on mount; sessions OUTLIVE the page (explicit End chat closes them).
+  // The chat id is minted CLIENT-side and set before the open call: seats warm
+  // serially (~2-3s each), and their chatSessionReady events arrive BEFORE the
+  // POST resolves — a server-minted id would drop every one of them.
   useEffect(() => {
     let cancelled = false;
-    api
-      .openChat(repoId ? { repoRef: repoId } : {})
-      .then(({ chatId, seats }) => {
+    const id = crypto.randomUUID();
+    setChatId(id);
+    chatIdRef.current = id;
+    // Optimistic chips: every enabled roster seat shows as warming immediately;
+    // ready/failed events (and the open response) correct them as truth arrives.
+    void api
+      .getRoster()
+      .then(({ roster }) => {
         if (cancelled) return;
-        setChatId(chatId);
+        setSeats((prev) => {
+          const st = { ...prev };
+          for (const seat of roster) {
+            if (typeof seat.key === 'string' && st[seat.key] === undefined) st[seat.key] = 'warming';
+          }
+          return st;
+        });
+      })
+      .catch(() => undefined);
+    api
+      .openChat(repoId ? { chatId: id, repoRef: repoId } : { chatId: id })
+      .then(({ seats }) => {
+        if (cancelled) return;
         const st: Record<string, SeatState> = {};
         const errs: Record<string, string> = {};
         for (const s of seats) {
@@ -139,7 +159,8 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
 
   async function send(): Promise<void> {
     const text = input.trim();
-    if (text === '' || chatId === null || ended) return;
+    const anyReady = Object.values(seats).some((st) => st === 'ready');
+    if (text === '' || chatId === null || ended || !anyReady) return;
     setInput('');
     const warm = Object.entries(seats)
       .filter(([, st]) => st === 'ready')
@@ -215,7 +236,7 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
         {openError !== null && (
           <p className="text-[12px] font-mono" style={{ color: '#f85149' }}>Could not open chat: {openError}</p>
         )}
-        {chatId === null && openError === null && (
+        {Object.keys(seats).length === 0 && openError === null && (
           <p className="text-[12px] font-mono opacity-60">Warming seats…</p>
         )}
         {messages.map((m, i) =>
@@ -270,7 +291,7 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
           <button
             type="button"
             onClick={() => void send()}
-            disabled={chatId === null || input.trim() === ''}
+            disabled={!Object.values(seats).some((st) => st === 'ready') || input.trim() === ''}
             className="px-4 rounded-xl text-sm font-mono font-semibold disabled:opacity-40"
             style={{ background: 'rgba(88,166,255,0.2)', color: '#79c0ff' }}
           >
