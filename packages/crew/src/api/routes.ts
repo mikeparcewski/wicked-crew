@@ -231,6 +231,79 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   // A unit's captured transcript. unitKey is the suffix after `<run>:` — `u<ord>` for free-text
   // runs, `<phase_id>` for workflow runs (e.g. "survey", "coverage"). Strip any accidental
   // `<id>:` prefix so both `survey` and `run-1:survey` resolve to the same key.
+  // ── Chat sessions (crew#165): warm ACP seat pool + group fan-out (core#134) ──
+  // A chat is NOT a run: no council, no gates, no units. Seats warm on open;
+  // messages fan out to warm seats; replies stream on /ws as chatDelta/chatReply.
+  const ChatOpenSchema = z.object({
+    chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
+    clis: z.array(z.string().min(1)).min(1).max(8).optional(),
+    repoRef: z.string().optional(),
+  });
+  app.post(`${V}/chats`, async (req, reply) => {
+    const parsed = ChatOpenSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    const b = parsed.data;
+    const chatId = b.chatId ?? randomUUID();
+    let cwd: string | undefined;
+    if (b.repoRef !== undefined) {
+      const repos = await adapter.listRepos();
+      const repo = repos.find((r) => r.id === b.repoRef);
+      if (!repo) return reply.code(404).send({ error: `Repo ${b.repoRef} not found` });
+      cwd = repo.root_path;
+    }
+    const clis =
+      b.clis ??
+      (CoreAdapter.roster() as { key?: string }[])
+        .map((s) => s.key)
+        .filter((k): k is string => typeof k === 'string');
+    try {
+      const seats = await adapter.chatOpen(chatId, clis, cwd);
+      return reply.code(201).send({ chatId, seats });
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  const ChatMessageSchema = z.object({
+    text: z.string().min(1).max(65536),
+    targets: z.array(z.string().min(1)).min(1).max(8).optional(),
+  });
+  app.post(`${V}/chats/:id/messages`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = ChatMessageSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+    try {
+      const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
+      return reply.code(202).send({ seats });
+    } catch (err) {
+      const msg = message(err);
+      return reply.code(/no warm seats/.test(msg) ? 409 : 400).send({ error: msg });
+    }
+  });
+
+  app.get(`${V}/chats/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      return { chatId: id, seats: await adapter.chatSeats(id) };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  app.delete(`${V}/chats/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      await adapter.chatClose(id);
+      return { ok: true };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
   app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
     const { id, unitKey } = req.params as { id: string; unitKey: string };
     const suffix = unitKey.startsWith(`${id}:`) ? unitKey.slice(id.length + 1) : unitKey;
