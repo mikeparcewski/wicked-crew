@@ -49,6 +49,29 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Turns a failed parse into a 400 body, naming any field the schema does not know.
+ *
+ * Every schema here is `.strict()`, because zod's default is to STRIP unknown keys — which made a
+ * misspelled optional field a silent behaviour change (FINDING-031). `POST /runs {"clis":[...],
+ * "workflowId":"feature"}` — core's field names, not the HTTP layer's — answered `201` and ran the
+ * full roster with no workflow. Rejecting is only half the fix: a bare "Invalid request body" leaves
+ * the caller comparing their JSON against the source, so the unknown keys are named in `error`
+ * itself, where a human and a `curl | jq .error` both see it without reading `details`.
+ */
+function invalidBody(err: z.ZodError, what: string): { error: string; details: z.ZodIssue[] } {
+  const unknown = err.issues.flatMap((i) => (i.code === 'unrecognized_keys' ? i.keys : []));
+  const error =
+    unknown.length > 0
+      ? `${what}: unknown field${unknown.length > 1 ? 's' : ''} ${unknown
+          .map((k) => `\`${k}\``)
+          .join(', ')} — this endpoint does not accept ${
+          unknown.length > 1 ? 'them' : 'it'
+        }, and ignoring ${unknown.length > 1 ? 'them' : 'it'} would run a different request than you sent`
+      : what;
+  return { error, details: err.issues };
+}
+
 // Repo names become directory components under ~/.wicked/repos/ — reject anything
 // that would allow path traversal (slashes, dots-only segments, control chars).
 const SAFE_REPO_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -66,6 +89,7 @@ const RegisterRepoSchema = z
     rootPath: z.string().optional(),
     gitUrl: z.string().optional(),
   })
+  .strict()
   .refine(
     (d) => {
       const hasRemote = typeof d.gitUrl === 'string' && d.gitUrl.length > 0;
@@ -77,6 +101,19 @@ const RegisterRepoSchema = z
     { message: 'Provide gitUrl (remote clone) or rootPath (local registration), or both.' },
   );
 
+/**
+ * The launch body. Every field but `problem` is optional, which is what made stripping dangerous:
+ * omitting one is a legitimate request that gets an engine default, so a MISSPELLED one was
+ * indistinguishable from an omitted one and the run went ahead on a configuration the caller never
+ * asked for (FINDING-031).
+ *
+ * The names differ from core's on purpose and this is the trap worth knowing about: core's
+ * `LaunchSpec` takes `clis` (an array) and `workflow`, this takes `clisJson` (a JSON *string*) and
+ * `workflow`, and the `/ws` `sessionStarted` frame reports the chosen workflow as `workflowId`. A
+ * caller who reads the event stream to learn the field names arrives at `workflowId`, which this
+ * schema does not accept — so `.strict()` is what turns that trip into a 400 instead of an
+ * unworkflowed run reported as `201`.
+ */
 const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
@@ -85,18 +122,18 @@ const LaunchSchema = z.object({
   humanConfirm: z.string().min(1).optional(),
   repoRef: z.string().min(1).optional(),
   workflow: z.string().min(1).optional(),
-});
+}).strict();
 
 const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-});
+}).strict();
 
 const InjectSchema = z.object({
   message: z.string().min(1),
   /** `"all"` broadcasts to every active worker; any other value is a CLI key. */
   target: z.string().min(1).default('all'),
-});
+}).strict();
 
 const OpenTerminalSchema = z.object({
   cwd: z.string().min(1),
@@ -106,12 +143,12 @@ const OpenTerminalSchema = z.object({
   // Optional so omission is the SAFE governed default (§7 — `false` is never a
   // default; the ungoverned operator shell must opt in explicitly).
   governed: z.boolean().optional(),
-});
+}).strict();
 
 const ResizeTerminalSchema = z.object({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
-});
+}).strict();
 
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
@@ -141,7 +178,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   app.post(`${V}/repos`, async (req, reply) => {
     const parsed = RegisterRepoSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const { name, rootPath, gitUrl } = parsed.data;
     try {
@@ -190,7 +227,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   app.post(`${V}/runs`, async (req, reply) => {
     const parsed = LaunchSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
     const input: LaunchRunInput = {
@@ -238,11 +275,11 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
     clis: z.array(z.string().min(1)).min(1).max(8).optional(),
     repoRef: z.string().optional(),
-  });
+  }).strict();
   app.post(`${V}/chats`, async (req, reply) => {
     const parsed = ChatOpenSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
     const chatId = b.chatId ?? randomUUID();
@@ -269,12 +306,12 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   const ChatMessageSchema = z.object({
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
-  });
+  }).strict();
   app.post(`${V}/chats/:id/messages`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = ChatMessageSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     try {
       const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
@@ -330,7 +367,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { id } = req.params as { id: string };
     const parsed = GateSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
@@ -387,7 +424,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { id } = req.params as { id: string };
     const parsed = InjectSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
@@ -578,7 +615,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     domain: z.string().optional(),
     offset: z.coerce.number().int().min(0).default(0),
     limit: z.coerce.number().int().min(1).max(200).default(50),
-  });
+  }).strict();
   app.get(`${V}/repos/:id/requirements`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
@@ -586,7 +623,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
     const parsed = ReqQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid query', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid query'));
     }
     const page = await listRequirements(repo.root_path, parsed.data);
     if (page === null) {
@@ -618,6 +655,11 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       status: z.enum(['active', 'deprecated', 'review']).optional(),
       risk: z.boolean().optional(),
     })
+    .strict()
+    // `.strict()` BEFORE `.refine()`: the refine runs on the parsed object, so with stripping still
+    // in effect `{"title":"x","note":"y"}` would pass the non-empty check having silently discarded
+    // the edit the caller cared about. Every field here is optional, which is exactly the shape
+    // FINDING-031 makes dangerous.
     .refine((b) => Object.keys(b).length > 0, { message: 'empty patch' });
   app.patch(`${V}/repos/:id/requirements/:key`, async (req, reply) => {
     const { id, key } = req.params as { id: string; key: string };
@@ -626,7 +668,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
     const parsed = ReqPatchSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid patch', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid patch'));
     }
     let decodedKey: string;
     try {
@@ -797,7 +839,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   app.post(`${V}/terminals`, async (req, reply) => {
     const parsed = OpenTerminalSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
     try {
@@ -814,7 +856,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const { id } = req.params as { id: string };
     const parsed = ResizeTerminalSchema.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     try {
       const status = await adapter.resizeTerminal(id, parsed.data.cols, parsed.data.rows);
