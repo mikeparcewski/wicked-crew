@@ -13,6 +13,7 @@ import type {
   RepoEntry,
   RepoOnboardRef,
   SessionView,
+  RecordedEvent,
   GovernancePolicy,
   ConformanceRule,
   GovernanceClaim,
@@ -542,9 +543,12 @@ export class CoreAdapter {
    * tell you what happened" is how a missing capability gets reported to an operator as an absent
    * gate — the FINDING-050 shape, distinct causes wearing one message. Callers branch on it.
    */
-  async runEvents(runId: string): Promise<CoreEvent[] | null> {
+  async runEvents(runId: string): Promise<RecordedEvent[] | null> {
     if (typeof this.core.runEvents !== 'function') return null;
-    return JSON.parse(await this.core.runEvents(runId)) as CoreEvent[];
+    // `RecordedEvent`, not `CoreEvent`: the binding's contract is the `/ws` frame PLUS a capture-time
+    // `ts` and an ordering `seq`, and consumers (the evidence bundle) need both. Typing this as the
+    // bare frame made every caller widen or cast to get at fields the engine always sends.
+    return JSON.parse(await this.core.runEvents(runId)) as RecordedEvent[];
   }
 
   /** Run ids on the store. */

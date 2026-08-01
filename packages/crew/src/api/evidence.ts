@@ -1,14 +1,22 @@
-import type { AgentSession, RoutingInfo, SessionView, WorkUnit } from '../core/types.js';
+import type { AgentSession, RecordedEvent, SessionView, WorkUnit } from '../core/types.js';
+
+export type { RecordedEvent };
 
 /**
  * The run evidence bundle — everything an operator needs to audit a finished run,
  * in one downloadable JSON document (`GET /runs/:id/evidence`).
  *
- * The daemon persists no event log of its own (CoreEvent frames are fanned out
- * over `/ws` and dropped), so the decision trail is RE-DERIVED from the run DTO,
- * which is where core durably records it: `routing` carries the council/routing
- * provenance and `status`/`denial_reason`/`phase_status` carry the gate outcome.
- * Nothing here is invented — every field traces to a field on the run.
+ * `events` is core's DURABLE EVENT LOG for the run, read back verbatim. It used to
+ * be re-derived here from the unit records, because the daemon persisted no log of
+ * its own — which meant an exported bundle carried a handful of pseudo-events in a
+ * vocabulary this file invented (`routingDecided`) instead of what actually
+ * happened. Re-derivation cannot recover what it never saw: council deliberation
+ * and votes, gate depth, escalations, fallbacks, and every timestamp were simply
+ * absent, and nothing in the bundle said so. (FINDING-014)
+ *
+ * Nothing was lost by dropping the derived events: `routing`, `assigned_cli`,
+ * `denial_reason`, `phase_status` and `conformance_ref` were their only inputs and
+ * they ride in `units` verbatim already.
  */
 export interface EvidenceBundle {
   /** When the bundle was assembled (ISO-8601). */
@@ -17,8 +25,17 @@ export interface EvidenceBundle {
   session: AgentSession;
   /** The run's units in `ord` order, each with its captured transcript. */
   units: EvidenceUnit[];
-  /** The derived decision trail, in unit order (routing before that unit's gate). */
-  events: EvidenceEvent[];
+  /**
+   * The run's recorded event history, oldest first — the same frames `/ws` carried
+   * live, each with a capture-time `ts` and an ordering `seq`.
+   */
+  events: RecordedEvent[];
+  /**
+   * Why `events` is empty, present ONLY when it is. An empty trail must never be
+   * indistinguishable from a run that genuinely decided nothing — the same posture
+   * `transcriptError` takes for a unit.
+   */
+  eventsUnavailable?: string;
   /**
    * Structured assumptions re-parsed from the transcripts (the external-transform
    * convention): third-party payload transformations agents relied on. Entries with
@@ -49,31 +66,16 @@ export interface EvidenceUnit extends WorkUnit {
   transcriptError?: string;
 }
 
-/** A gate decision, re-derived from the unit's persisted outcome. */
-export interface GateDecisionEvent {
-  type: 'gateDecided';
-  unitId: string;
-  ord: number;
-  /** `true` when the unit passed its gate (`done`), `false` when it was `rejected`. */
-  allow: boolean;
-  denialReason: string | null;
-  phaseStatus: string | null;
-  conformanceRef: string | null;
-}
-
-/** Council / routing provenance, re-derived from the unit's `routing`. */
-export interface RoutingDecidedEvent {
-  type: 'routingDecided';
-  unitId: string;
-  ord: number;
-  assignedCli: string | null;
-  routing: RoutingInfo;
-}
-
-export type EvidenceEvent = GateDecisionEvent | RoutingDecidedEvent;
-
 /** Loads one unit's captured transcript (the adapter's `workOutput`). */
 export type TranscriptLoader = (coreUnitId: string) => Promise<string | null>;
+
+/**
+ * Loads a run's recorded event history (the adapter's `runEvents`).
+ *
+ * `null` means the engine has no event-log binding at all — a capability gap, not an empty run.
+ * The adapter returns it rather than `[]` so this module can say which of the two happened.
+ */
+export type EventLoader = (runId: string) => Promise<RecordedEvent[] | null>;
 
 /**
  * The id core keys the transcript store by. Unit ids are already `<run>:<suffix>`;
@@ -85,47 +87,38 @@ function coreUnitId(runId: string, unit: WorkUnit): string {
 }
 
 /**
- * Re-derive the decision trail from the units. A unit contributes its routing
- * provenance (when the council/router recorded one) and its gate decision (once
- * the gate has actually resolved — a `pending`/`distributed` unit has no verdict
- * yet, and an evidence bundle must not imply one).
+ * Why a run's `events` came back empty. Both cases are reported, never conflated:
+ * a read that failed is an operator problem, a run with no recorded history is a
+ * statement about that run.
  */
-export function evidenceEvents(units: WorkUnit[]): EvidenceEvent[] {
-  const events: EvidenceEvent[] = [];
-  for (const unit of [...units].sort((a, b) => a.ord - b.ord)) {
-    if (unit.routing) {
-      events.push({
-        type: 'routingDecided',
-        unitId: unit.id,
-        ord: unit.ord,
-        assignedCli: unit.assigned_cli,
-        routing: unit.routing,
-      });
-    }
-    if (unit.status === 'done' || unit.status === 'rejected') {
-      events.push({
-        type: 'gateDecided',
-        unitId: unit.id,
-        ord: unit.ord,
-        allow: unit.status === 'done',
-        denialReason: unit.denial_reason,
-        phaseStatus: unit.phase_status,
-        conformanceRef: unit.conformance_ref,
-      });
-    }
-  }
-  return events;
-}
+const NO_EVENTS_RECORDED =
+  'core recorded no events for this run — it ran before the durable event log existed ' +
+  '(FINDING-014), or its log was removed. This is not a run that made no decisions.';
 
 /**
- * Assemble a run's evidence bundle. Transcripts are read per unit; a single
- * unreadable transcript degrades that unit to `transcript: null` + a
- * `transcriptError` rather than failing the whole export — a partial bundle that
- * says which part is missing beats no bundle at all.
+ * The third cause, and a different kind of problem from the other two: the engine BUILD in use
+ * exposes no `runEvents` binding, so no run on this daemon has a readable trail. Reporting that as
+ * "this run recorded nothing" would blame the run for a missing capability — the FINDING-050 shape,
+ * distinct causes wearing one message.
+ */
+const NO_EVENT_LOG_BINDING =
+  'the running wicked-core build exposes no durable event log (runEvents), so no decision trail ' +
+  'can be read for any run on this daemon — rebuild/reinstall wicked-core-ts. This says nothing ' +
+  'about what this run decided.';
+
+/**
+ * Assemble a run's evidence bundle.
+ *
+ * Every read degrades in place rather than failing the export: an unreadable
+ * transcript becomes `transcript: null` + `transcriptError` on that unit, and an
+ * unreadable event history becomes `events: []` + `eventsUnavailable`. A partial
+ * bundle that says which part is missing beats no bundle at all — but it must say
+ * so, or the gap reads as a fact about the run.
  */
 export async function buildEvidenceBundle(
   view: SessionView,
   loadTranscript: TranscriptLoader,
+  loadEvents: EventLoader,
 ): Promise<EvidenceBundle> {
   const ordered = [...view.units].sort((a, b) => a.ord - b.ord);
   const units = await Promise.all(
@@ -141,11 +134,29 @@ export async function buildEvidenceBundle(
       }
     }),
   );
+
+  let events: RecordedEvent[] = [];
+  let eventsUnavailable: string | undefined;
+  try {
+    const loaded = await loadEvents(view.session.id);
+    if (loaded === null) {
+      eventsUnavailable = NO_EVENT_LOG_BINDING;
+    } else {
+      events = loaded;
+      if (events.length === 0) eventsUnavailable = NO_EVENTS_RECORDED;
+    }
+  } catch (err) {
+    eventsUnavailable = `could not read the run's event history: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+  }
+
   return {
     exportedAt: new Date().toISOString(),
     session: view.session,
     units,
-    events: evidenceEvents(ordered),
+    events,
+    ...(eventsUnavailable === undefined ? {} : { eventsUnavailable }),
     assumptions: units.flatMap((u) => parseAssumptions(u.ord, u.transcript)),
   };
 }

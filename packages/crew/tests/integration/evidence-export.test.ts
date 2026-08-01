@@ -124,8 +124,10 @@ describe('GET /runs/:id/evidence', () => {
     expect(res.headers.get('content-type')).toContain('application/json');
   });
 
-  it('bundles the run, its ordered units, and the derived event trail', async () => {
+  it('bundles the run, its ordered units, and the recorded event trail', async () => {
     const { bundle } = await getEvidence();
+    // No `eventsUnavailable` on a healthy run: its presence would mean the export
+    // silently shipped an empty trail.
     expect(Object.keys(bundle).sort()).toEqual(['assumptions', 'events', 'exportedAt', 'session', 'units']);
 
     // The run itself, verbatim from the run DTO.
@@ -164,32 +166,83 @@ describe('GET /runs/:id/evidence', () => {
     expect(bundle.units[0]?.transcript).toBe(output);
   });
 
-  it('derives a gate decision per resolved unit and a routing record per routed unit', async () => {
-    const { bundle } = await getEvidence();
+  // ── The recorded trail (FINDING-014) ───────────────────────────────────────
+  //
+  // This suite is the finding's own reproduction, automated. The bundle used to
+  // re-derive a handful of pseudo-events from the unit records while the socket
+  // carried the real run — an export that named the run in a vocabulary nobody
+  // watching it would recognise. `frames` is what the socket carried, live, for
+  // this exact run; `bundle.events` is what the export ships. They must agree.
 
+  /** Frame types the durable log skips by design (chunk streams + liveness). */
+  const NOT_LOGGED = new Set(['cliOutputDelta', 'chatDelta', 'terminalOutput', 'heartbeat']);
+
+  /** What the socket carried for THIS run, minus the types the log excludes. */
+  function liveTrail(): Frame[] {
+    return frames.filter((f) => f.session === RUN_ID && !NOT_LOGGED.has(f.type));
+  }
+
+  it('ships what the socket carried live, not a re-derivation of it', async () => {
+    const { bundle } = await getEvidence();
+    const live = liveTrail();
+
+    // A real run emits a whole lifecycle. The old export shipped two event types.
+    expect(live.length).toBeGreaterThan(4);
+    expect(bundle.events.map((e) => e.type)).toEqual(live.map((f) => f.type));
+
+    // The lifecycle bookends are the cheapest proof the trail is the run's own.
+    expect(bundle.events[0]?.type).toBe('sessionStarted');
+    expect(bundle.events.at(-1)?.type).toBe('sessionCompleted');
+
+    // And the vocabulary is core's, not this file's: `routingDecided` was invented here.
+    expect(bundle.events.map((e) => e.type)).not.toContain('routingDecided');
+  });
+
+  it('carries each frame’s own fields, not a projection of them', async () => {
+    const { bundle } = await getEvidence();
+    for (const live of liveTrail()) {
+      const recorded = bundle.events.find((e) => e.type === live.type && e.ord === live.ord);
+      expect(recorded, `no recorded frame for ${live.type} ord=${String(live.ord)}`).toBeDefined();
+      for (const [k, v] of Object.entries(live)) expect(recorded?.[k]).toEqual(v);
+    }
+  });
+
+  it('timestamps and orders every frame, so the trail is replayable', async () => {
+    const { bundle } = await getEvidence();
+    const seqs = bundle.events.map((e) => e.seq);
+    // Strictly increasing: `seq` is what orders frames that share a millisecond.
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(seqs.length);
+    for (const e of bundle.events) {
+      expect(Number.isFinite(e.ts)).toBe(true);
+      // A real capture time, not a placeholder or the export's own clock.
+      expect(e.ts).toBeGreaterThan(1_600_000_000_000);
+      expect(e.ts).toBeLessThanOrEqual(Date.parse(bundle.exportedAt));
+    }
+  });
+
+  it('scopes the trail to this run', async () => {
+    const { bundle } = await getEvidence();
+    const foreign = bundle.events.filter(
+      (e) => typeof e.session === 'string' && e.session !== RUN_ID,
+    );
+    expect(foreign).toEqual([]);
+  });
+
+  it('still lets every gate decision and routing record be reconciled to its unit', async () => {
+    // The old derivation's whole output, re-asserted against the recorded trail —
+    // the replacement must not lose what it replaced.
+    const { bundle } = await getEvidence();
     const gates = bundle.events.filter((e) => e.type === 'gateDecided');
     const resolved = bundle.units.filter((u) => u.status === 'done' || u.status === 'rejected');
     expect(gates.length).toBe(resolved.length);
-    expect(gates.map((g) => g.ord)).toEqual(resolved.map((u) => u.ord));
     for (const gate of gates) {
       const unit = bundle.units.find((u) => u.ord === gate.ord);
-      expect(gate.unitId).toBe(unit?.id);
+      expect(unit).toBeDefined();
       expect(gate.allow).toBe(unit?.status === 'done');
-      expect(gate.denialReason).toBe(unit?.denial_reason ?? null);
     }
-
-    // Routing provenance is emitted for exactly the units that carry one.
-    const routed = bundle.units.filter((u) => u.routing !== null);
-    const routing = bundle.events.filter((e) => e.type === 'routingDecided');
-    expect(routing.length).toBe(routed.length);
-    for (const event of routing) {
-      const unit = bundle.units.find((u) => u.ord === event.ord);
-      expect(event.routing).toEqual(unit?.routing);
-      expect(event.assignedCli).toBe(unit?.assigned_cli ?? null);
-    }
-
-    // Events stay in unit order so the trail reads as the run happened.
-    expect(bundle.events.map((e) => e.ord)).toEqual([...bundle.events.map((e) => e.ord)].sort((a, b) => a - b));
+    // Routing provenance still reaches the bundle — on the units, where it is stored.
+    for (const unit of bundle.units) expect(unit).toHaveProperty('routing');
   });
 
   it('404s on an unknown run id', async () => {

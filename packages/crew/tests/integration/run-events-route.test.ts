@@ -13,16 +13,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
-import type { CoreEvent } from '../../src/core/types.js';
+import type { RecordedEvent } from '../../src/core/types.js';
 
 const RUN = 'run-with-history';
 
-const HISTORY: CoreEvent[] = [
-  { type: 'sessionStarted', session: RUN, ts: 1 } as CoreEvent,
-  { type: 'unitDistributed', session: RUN, ord: 1, agreementPct: 33, ts: 2 } as CoreEvent,
-  { type: 'gateDecided', session: RUN, ord: 1, allow: true, ts: 3 } as CoreEvent,
-  { type: 'gateDecided', session: RUN, ord: 2, allow: false, ts: 4 } as CoreEvent,
-  { type: 'sessionCompleted', session: RUN, ts: 5 } as CoreEvent,
+const HISTORY: RecordedEvent[] = [
+  { type: 'sessionStarted', session: RUN, ts: 1, seq: 0 } as RecordedEvent,
+  { type: 'unitDistributed', session: RUN, ord: 1, agreementPct: 33, ts: 2, seq: 0 } as RecordedEvent,
+  { type: 'gateDecided', session: RUN, ord: 1, allow: true, ts: 3, seq: 0 } as RecordedEvent,
+  { type: 'gateDecided', session: RUN, ord: 2, allow: false, ts: 4, seq: 0 } as RecordedEvent,
+  { type: 'sessionCompleted', session: RUN, ts: 5, seq: 0 } as RecordedEvent,
 ];
 
 let app: Awaited<ReturnType<typeof createServer>>;
@@ -31,7 +31,7 @@ let dir: string;
 let baseUrl: string;
 
 /** What the stubbed `runEvents` answers. Reassigned per case. */
-let events: CoreEvent[] | null = HISTORY;
+let events: RecordedEvent[] | null = HISTORY;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'run-events-'));
@@ -66,7 +66,7 @@ describe('GET /runs/:id/events', () => {
     expect(res.status).toBe(200);
     expect(res.body['total']).toBe(5);
     expect(res.body['returned']).toBe(5);
-    expect((res.body['events'] as CoreEvent[]).map((e) => e.type)).toEqual([
+    expect((res.body['events'] as RecordedEvent[]).map((e) => e.type)).toEqual([
       'sessionStarted',
       'unitDistributed',
       'gateDecided',
