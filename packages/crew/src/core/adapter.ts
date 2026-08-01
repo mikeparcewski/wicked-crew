@@ -212,8 +212,8 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   // The one workflow that ARMS the dual-validator gate: `coverage` carries an approved
   // `validator_pin`, so layer 1 is live here and inert in every entry above. Transcribed
   // field-for-field from the source of truth, `wicked-core/workflows/domain-extraction.json`
-  // (core is a *shipped drop-in*, not a seeded built-in, and exposes no dump command — hence the
-  // mirror, same as the nine above).
+  // (core ships it as a *drop-in*, not a seeded built-in, and exposes no dump command — hence a
+  // hand-transcribed mirror, like every other entry in this array).
   //
   // The pin is a content hash over the validator's criterion + script + approved flag. Core
   // re-derives it in `domain_extraction.rs` and fails its own test if it drifts; if that test ever

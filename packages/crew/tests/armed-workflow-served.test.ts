@@ -44,8 +44,12 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  adapter?.close?.();
-  rmSync(dir, { recursive: true, force: true });
+  if (adapter) adapter.close();
+  // `close()` returns before the Rust actor thread has finished flushing SQLite's WAL/SHM
+  // sidecars, so an immediate recursive remove can lose a race with a file being recreated and
+  // fail ENOTEMPTY (observed intermittently — it passed on the first run and failed on the next).
+  // `force` does not cover ENOTEMPTY; retries do.
+  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe('the armed workflow is served', () => {
@@ -87,19 +91,20 @@ const CORE_DIR =
   join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'wicked-core');
 const CORE_DEF = join(CORE_DIR, 'workflows', 'domain-extraction.json');
 
-function readCoreDef(): WorkflowDef | null {
+// Read ONCE, at collection time: the skip predicate and the assertion must agree on what they saw.
+// Re-reading in the test body would let the file vanish in between, turning a skip into a crash.
+const coreDef: WorkflowDef | null = (() => {
   try {
     return JSON.parse(readFileSync(CORE_DEF, 'utf8')) as WorkflowDef;
   } catch {
     return null;
   }
-}
+})();
 
-describe.skipIf(readCoreDef() === null)('mirror matches wicked-core', () => {
+describe.skipIf(coreDef === null)('mirror matches wicked-core', () => {
   it('is field-for-field identical to workflows/domain-extraction.json', () => {
-    const core = readCoreDef()!;
     // `is_system` is crew-only metadata and is stripped before the overlay write; the mirror does
     // not set it here, so a plain deep-equal is the honest comparison.
-    expect(def).toEqual(core);
+    expect(def).toEqual(coreDef);
   });
 });
