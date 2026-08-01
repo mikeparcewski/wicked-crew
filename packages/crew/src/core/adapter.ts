@@ -115,7 +115,7 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 
 // ── Built-in workflow definitions (crew#44) ──────────────────────────────────
 // Static mirrors of wicked-core workflow defs: feature, bug, migration, survey-repo,
-// repo-graph, domain-graph-slice, memories, onboarding, and chat.
+// repo-graph, domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
 // Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
 // the wicked-core-ts NAPI methods land.
 const BUILTIN_WORKFLOWS: WorkflowDef[] = [
@@ -207,6 +207,32 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'critique', kind: 'review', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['propose'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'revise', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['critique'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'verdict', kind: 'review', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['revise'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  // The one workflow that ARMS the dual-validator gate: `coverage` carries an approved
+  // `validator_pin`, so layer 1 is live here and inert in every entry above. Transcribed
+  // field-for-field from the source of truth, `wicked-core/workflows/domain-extraction.json`
+  // (core is a *shipped drop-in*, not a seeded built-in, and exposes no dump command — hence the
+  // mirror, same as the nine above).
+  //
+  // The pin is a content hash over the validator's criterion + script + approved flag. Core
+  // re-derives it in `domain_extraction.rs` and fails its own test if it drifts; if that test ever
+  // forces core's constant to change, THIS literal must change with it or crew will write an
+  // overlay that fails closed at plan time.
+  //
+  // Running it needs a one-time, idempotent `wicked-core seed-domain-validators` to vault + approve
+  // that validator. That step is deliberately manual — approval is an audited act a human/council
+  // owns, not something a daemon does unattended — and until it is run, a launch fails CLOSED at
+  // plan time rather than running the phase ungated. Not `is_system`: this is an operator-selectable
+  // work mode, unlike the dedicated-entry-point workflows above.
+  {
+    id: 'domain-extraction',
+    phases: [
+      { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['legacy-graph.digest.txt'], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
+      { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['analysis-report.json'], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
+      { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['annotations.jsonl'], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
+      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: '4a4b10bf4277bd34' },
+      { id: 'domain-graph', kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: ['requirements_graph.json'], depends_on: ['coverage'], role: 'neutral', skill_ref: 'wicked-garden-domain-modeler', allowed_skills: [], validator_pin: null },
     ],
   },
 ];
