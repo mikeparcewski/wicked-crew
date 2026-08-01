@@ -24,7 +24,9 @@ function gateDecider(g: UnitModel['gateEvals'][number]): string {
     if (deniers.length === 0 && g.agentVerdict !== null) deniers.push('agent judge');
     return deniers.length > 0 ? deniers.join(' + ') : 'governance';
   }
-  if (g.evaluatorPass !== null && g.evaluatorPolicies.length > 0) return 'evaluator (2nd pass)';
+  // `=== true`, not `!== null`: an allow whose evaluator says `false` is a contradictory record, and
+  // the one thing we must not do with a contradiction is name a layer as the approver. Fall through.
+  if (g.evaluatorPass === true && g.evaluatorPolicies.length > 0) return 'evaluator (2nd pass)';
   if (g.agentVerdict !== null) return 'agent judge';
   if (g.hasDeterministicFloor) return 'deterministic floor';
   return 'ungated';

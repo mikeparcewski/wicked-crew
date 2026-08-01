@@ -176,6 +176,14 @@ describe('DecisionsLedger — an approval is only credited to a layer that ran (
     expect(screen.getByTestId('ledger-row')).toHaveTextContent('agent judge');
   });
 
+  // A contradictory record — an ALLOW whose evaluator says it failed — must not be attributed to
+  // that evaluator. Unreachable from a healthy core, which is why it is worth pinning: a truncated
+  // or reordered event stream must degrade to "we don't know", never to a fabricated approver.
+  it('does not credit the evaluator for an allow when evaluatorPass is false', () => {
+    renderGate({ evaluatorPass: false, combined: true, evaluatorPolicies: ['pol-a'] });
+    expect(screen.getByTestId('ledger-row')).not.toHaveTextContent('· evaluator (2nd pass)');
+  });
+
   // A core that predates the field must not be presented as governed.
   it('treats a missing evaluatorPolicies field as ungated', () => {
     const snap = makeView({}, [makeUnit({ ord: 1, routing: councilRouting })]);
