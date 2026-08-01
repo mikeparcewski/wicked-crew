@@ -52,6 +52,13 @@ afterAll(() => {
   if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
+/** The served def, or a clear failure. The content tests below are meaningless without it, and a
+ *  bare `def!` would crash them with a TypeError that buries the actual regression. */
+function served(): WorkflowDef {
+  if (!def) throw new Error('domain-extraction is not in listWorkflows() — see the catalog test');
+  return def;
+}
+
 describe('the armed workflow is served', () => {
   it('appears in the catalog an operator selects from', () => {
     expect(def, 'domain-extraction must be in listWorkflows() — it is the only workflow that arms the gate').not.toBeNull();
@@ -60,7 +67,7 @@ describe('the armed workflow is served', () => {
   it('still carries the approved validator pin', () => {
     // Serving the workflow with a null/edited pin would be worse than not serving it: the run
     // would proceed UNGATED and read as governed.
-    const pinned = def!.phases.filter((p) => p.validator_pin !== null);
+    const pinned = served().phases.filter((p) => p.validator_pin !== null);
     expect(pinned.map((p) => p.id)).toEqual(['coverage']);
     expect(pinned[0]!.validator_pin).toBe(COVERAGE_PIN);
     expect(pinned[0]!.role).toBe('evaluator');
@@ -70,9 +77,10 @@ describe('the armed workflow is served', () => {
   it('has a well-formed phase DAG (core rejects the overlay otherwise)', () => {
     // Crew writes this def to core's overlay dir verbatim; core validates on load and rejects a
     // def whose `depends_on` does not resolve. A broken mirror would surface only at launch.
-    const ids = new Set(def!.phases.map((p) => p.id));
-    expect(ids.size).toBe(def!.phases.length);
-    for (const p of def!.phases) {
+    const phases = served().phases;
+    const ids = new Set(phases.map((p) => p.id));
+    expect(ids.size).toBe(phases.length);
+    for (const p of phases) {
       for (const d of p.depends_on) {
         expect(ids.has(d), `phase ${p.id} depends on unknown phase ${d}`).toBe(true);
       }
