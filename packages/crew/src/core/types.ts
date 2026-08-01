@@ -168,6 +168,12 @@ export interface CoreEvent {
   agentReasoning?: string | null;
   /** `gateEvaluated`: the evaluator≠creator second-pass result — `null` when it did not run. */
   evaluatorPass?: boolean | null;
+  /**
+   * `gateEvaluated`: policy ids the second pass applied. EMPTY alongside `evaluatorPass: true`
+   * means nothing applied, so the pass is a vacuous default-allow rather than an enforced
+   * approval (FINDING-025). The layer-3 analogue of `hasDeterministicFloor`.
+   */
+  evaluatorPolicies?: string[];
   /** `gateEvaluated`: the WINNING denial's reason when `combined === false`, else `null`. */
   denialReason?: string | null;
   /** `gateEvaluated`: the final deny-dominant decision over all layers. */
