@@ -94,8 +94,14 @@ type GovernanceMethods = {
   recallRulesPreview(queryJson: string): Promise<string>;
   // FINDING-038 retire seam. Resolve to the JSON boolean `true` when a record with that id
   // existed, `false` when none did.
-  retirePolicy(id: string): Promise<string>;
-  retireConformanceRule(id: string): Promise<string>;
+  //
+  // Optional on purpose: these two are the newest bindings, so a node_modules still holding a
+  // pre-crew#42 `wicked-core-ts` will not have them at runtime. Declaring them required would
+  // make the `typeof … !== 'function'` guards below read as unreachable and invite a later
+  // cleanup to delete them — the FINDING-042 failure shape, where a type asserted more than the
+  // runtime could guarantee. Optional keeps the guard type-meaningful.
+  retirePolicy?(id: string): Promise<string>;
+  retireConformanceRule?(id: string): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -691,22 +697,20 @@ export class CoreAdapter {
    * 404 instead of reporting a success that removed nothing.
    */
   async retirePolicy(id: string): Promise<boolean> {
-    const core = this.core as unknown as Record<string, unknown>;
-    if (typeof core['retirePolicy'] !== 'function') {
+    const retire = this.core.retirePolicy;
+    if (typeof retire !== 'function') {
       throw new Error('Retiring a policy is not yet supported by this wicked-core build');
     }
-    return JSON.parse(await (core['retirePolicy'] as (i: string) => Promise<string>)(id)) as boolean;
+    return JSON.parse(await retire.call(this.core, id)) as boolean;
   }
 
   /** Withdraw a conformance rule from recall. Same contract as {@link retirePolicy}. */
   async retireConformanceRule(id: string): Promise<boolean> {
-    const core = this.core as unknown as Record<string, unknown>;
-    if (typeof core['retireConformanceRule'] !== 'function') {
+    const retire = this.core.retireConformanceRule;
+    if (typeof retire !== 'function') {
       throw new Error('Retiring a conformance rule is not yet supported by this wicked-core build');
     }
-    return JSON.parse(
-      await (core['retireConformanceRule'] as (i: string) => Promise<string>)(id),
-    ) as boolean;
+    return JSON.parse(await retire.call(this.core, id)) as boolean;
   }
 
   /** Recall conformance rules matching a facet query (read-only, does not block actor). */
