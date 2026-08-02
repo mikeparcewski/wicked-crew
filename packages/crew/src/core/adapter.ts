@@ -92,6 +92,10 @@ type GovernanceMethods = {
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
   recallRulesPreview(queryJson: string): Promise<string>;
+  // FINDING-038 retire seam. Resolve to the JSON boolean `true` when a record with that id
+  // existed, `false` when none did.
+  retirePolicy(id: string): Promise<string>;
+  retireConformanceRule(id: string): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -677,6 +681,32 @@ export class CoreAdapter {
   /** Upsert a conformance rule via the single-writer actor. */
   async upsertConformanceRule(rule: ConformanceRule): Promise<void> {
     await this.core.upsertConformanceRule(JSON.stringify(rule));
+  }
+
+  /**
+   * Withdraw a policy from enforcement. Resolves `true` if a policy with that id existed.
+   *
+   * Retire, not delete (FINDING-038): the node stays readable so a past decision citing this id is
+   * still explicable, but governance stops selecting it. The boolean is what lets the route answer
+   * 404 instead of reporting a success that removed nothing.
+   */
+  async retirePolicy(id: string): Promise<boolean> {
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['retirePolicy'] !== 'function') {
+      throw new Error('Retiring a policy is not yet supported by this wicked-core build');
+    }
+    return JSON.parse(await (core['retirePolicy'] as (i: string) => Promise<string>)(id)) as boolean;
+  }
+
+  /** Withdraw a conformance rule from recall. Same contract as {@link retirePolicy}. */
+  async retireConformanceRule(id: string): Promise<boolean> {
+    const core = this.core as unknown as Record<string, unknown>;
+    if (typeof core['retireConformanceRule'] !== 'function') {
+      throw new Error('Retiring a conformance rule is not yet supported by this wicked-core build');
+    }
+    return JSON.parse(
+      await (core['retireConformanceRule'] as (i: string) => Promise<string>)(id),
+    ) as boolean;
   }
 
   /** Recall conformance rules matching a facet query (read-only, does not block actor). */
