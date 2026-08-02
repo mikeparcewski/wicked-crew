@@ -131,7 +131,9 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 /**
  * The ids wicked-core seeds itself, in `WorkflowRegistry::with_defaults()`.
  *
- * These are NEVER written to core's overlay dir. A file there shadows the compiled built-in
+ * `launchRun`'s generic drop-in overlay write SKIPS every id in this set (`onboarding` is written
+ * by the onboarding path instead — see the end of this comment, it is the one deliberate exception).
+ * A file in that dir shadows the compiled built-in
  * *wholesale* — `register` overwrites by id and `load_dir` runs after `with_defaults` — so writing
  * this hand-transcribed mirror over the real def silently replaces it with a copy missing whatever
  * the def has grown since the mirror was transcribed. That is not hypothetical: the mirror predated
@@ -141,9 +143,12 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
  *
  * The write exists for the ids core does NOT seed (chat, repo-graph, survey-repo,
  * domain-graph-slice, memories, domain-extraction): for those the overlay is the only reason they
- * resolve at all, so it stays. `onboarding` is seeded by core but still written on the onboarding
- * path — deliberately, and with a def whose executor cmds are baked with runtime `--db` paths. That
- * is a real customization, not a stale copy, and it is the one shadow that earns its keep.
+ * resolve at all, so it stays.
+ *
+ * The exception: `onboarding` is core-seeded AND still written, by the onboarding path rather than
+ * by the generic one. Deliberate — that def's executor cmds are baked with runtime `--db` paths, so
+ * it shadows core's copy with a real customization rather than a stale transcription. It is the one
+ * shadow that earns its keep, and the reason this set gates the generic write specifically.
  */
 const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
 
