@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { lostQuorum, quorumLabel } from './councilQuorum.js';
 import { api, downloadRunEvidence } from '../api/client.js';
 import type { SessionView, StageKind, UnitStatus } from '../api/types.js';
+import { isUnitExecuting } from '../api/run-state.js';
 import { useGateStore } from '../store/gates.js';
 import { useRuntimeStore, outputKey } from '../store/runtime.js';
 import { STATUS_STYLE } from './RunCard.js';
@@ -773,7 +774,7 @@ function RunChat({
                   className="rounded-2xl px-5 py-4"
                   style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.08)' }}
                 >
-                  {unit.status === 'distributed' && !isTerminal && (
+                  {unit.status === 'distributed' && isUnitExecuting(session, units, unit) && (
                     <div>
                       <div className="flex items-center gap-2 text-sm font-mono" style={{ color: 'rgba(230,237,243,0.5)' }}>
                         <span className="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#79c0ff' }} />
@@ -782,7 +783,9 @@ function RunChat({
                       <LiveOutputPreview runId={session.id} ord={unit.ord} />
                     </div>
                   )}
-                  {unit.status === 'distributed' && isTerminal && (
+                  {/* Routed but not dispatched. `isTerminal` used to be the test here, which made
+                      every queued unit of a merely PAUSED run claim to be working (FINDING-052). */}
+                  {unit.status === 'distributed' && !isUnitExecuting(session, units, unit) && (
                     <div className="flex items-center gap-2 text-sm font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
                       <span>—</span>
                       <span>Not started</span>
