@@ -155,8 +155,12 @@ export interface CoreEvent {
   message?: string;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
-  /** `terminalOutput`: monotonic per-terminal sequence number. */
+  /** `terminalOutput`: monotonic per-terminal sequence number. Also the log's ordering key on
+   *  entries read back through `runEvents`. */
   seq?: number;
+  /** Capture time, epoch millis. Present ONLY on entries replayed from the durable event log
+   *  (`runEvents`); live `/ws` frames are not stamped, because for those the arrival IS the time. */
+  ts?: number;
   /** `terminalOutput`: raw PTY bytes, base64-encoded (decode → send to the owning socket). */
   bytesB64?: string;
   /** `terminalOpened`: the working directory the PTY was opened in. */

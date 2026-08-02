@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { CoreAdapter } from '../core/adapter.js';
+import { ChatUnsupportedError, CoreAdapter } from '../core/adapter.js';
 import type { GateCache } from './gate-cache.js';
 import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
@@ -331,10 +331,14 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     try {
       return { chats: await adapter.chatList() };
     } catch (err) {
-      // A wicked-core-ts predating the enumerate surface is a capability gap, not a bad request:
-      // 501 tells an operator to upgrade rather than to fix their call.
-      const msg = message(err);
-      return reply.code(/not yet supported/.test(msg) ? 501 : 400).send({ error: msg });
+      // A build that cannot do chat is a capability gap, not a bad request: 501 tells an operator to
+      // upgrade rather than to fix a call that was already correct. Branching on the type, not on
+      // the message — regexing the text here caught the missing-binding phrasing and missed the
+      // engine's own ("chat unsupported: engine spawned without the ACP runner"), so half of one
+      // condition answered 400.
+      return reply
+        .code(err instanceof ChatUnsupportedError ? 501 : 400)
+        .send({ error: message(err) });
     }
   });
 
@@ -452,13 +456,29 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
-  // The daemon-cached gate prompt for a paused run (not a core call) so a fresh
-  // browser can render the gate after a late join.
+  // The gate prompt for a paused run, so a fresh browser can render the gate after a late join.
+  //
+  // Cache first, durable event log second (FINDING-051). The cache is process-lifetime, so before
+  // the fallback existed a daemon restart left every parked run unable to say what it was asking —
+  // not because the prompt was gone (core records `awaitingHuman` to the log) but because nothing
+  // read it. A restart is routine: deploy, crash, laptop sleep.
   app.get(`${V}/runs/:id/gate`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const entry = gateCache.get(id);
-    if (!entry) return reply.code(404).send({ error: 'No open gate for this run' });
-    return { runId: id, ...entry };
+    const cached = gateCache.get(id);
+    if (cached) return { runId: id, ...cached };
+
+    const events = await adapter.runEvents(id);
+    if (events === null) {
+      // Distinct cause, distinct message: this build cannot answer the question at all, which is
+      // not the same as answering "no gate" (FINDING-050 — one message for several causes is how a
+      // capability gap gets read as a fact about the run).
+      return reply.code(503).send({
+        error: 'Gate history is unavailable: this wicked-core build has no event-log read binding',
+      });
+    }
+    const replayed = gateCache.rebuild(id, events);
+    if (!replayed) return reply.code(404).send({ error: 'No open gate for this run' });
+    return { runId: id, ...replayed };
   });
 
   // ── Governance reads (crew#40) ──────────────────────────────────────────────
