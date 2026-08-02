@@ -36,7 +36,23 @@ export type HumanConfirm = 'none' | 'all' | { before: number };
 
 /** Why a CLI was assigned to a unit (`RoutingInfo`, internally tagged on `method`). */
 export type RoutingInfo =
-  | { method: 'council'; winner: string; agreement_pct: number; returned: number; dissent: number }
+  /**
+   * `seated` is the seats CONVENED — the denominator `returned` must be read against.
+   * Unknown on a run recorded by an engine older than the quorum fix; unknown means exactly that,
+   * never "equal to `returned`" (FINDING-026 D).
+   *
+   * `number | null` AND optional because unknown arrives in both shapes: the engine serializes the
+   * artifact's `Option<u32>` as an explicit `null`, and a payload predating the field has no key.
+   * Test it with `== null` so both are covered.
+   */
+  | {
+      method: 'council';
+      winner: string;
+      agreement_pct: number;
+      returned: number;
+      seated?: number | null;
+      dissent: number;
+    }
   | { method: 'degraded'; reason: string }
   | { method: 'evaluator_distinct'; winner: string; was: string }
   | { method: 'tool' };
