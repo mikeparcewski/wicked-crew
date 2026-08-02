@@ -108,40 +108,57 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
   // a full page reload, lands on the same stored id.
   useEffect(() => {
     let cancelled = false;
-    // Optimistic chips: every enabled roster seat shows as warming immediately;
-    // ready/failed events (and the open response) correct them as truth arrives.
-    void api
+
+    // `repoId` is a dep, so this effect also fires on a repo SWITCH with the component still
+    // mounted. Everything below is per-chat, and none of it survives that switch: leaving the
+    // previous repo's transcript on screen under a newly rejoined chat would misattribute it.
+    setMessages([]);
+    setSeats({});
+    setSeatErrors({});
+    setOpenError(null);
+    setEnded(false);
+
+    // Started now so the network round-trip overlaps the probe below, but APPLIED only on the mint
+    // path. Optimistic chips are a stand-in for an open that is in flight; after a rejoin there is
+    // no open and no incoming seat events, so a roster seat that is not warm in the rejoined chat
+    // would sit at `warming` forever with nothing left to correct it.
+    const rosterP = api
       .getRoster()
-      .then(({ roster }) => {
-        if (cancelled) return;
-        setSeats((prev) => {
-          const st = { ...prev };
-          for (const seat of roster) {
-            if (typeof seat.key === 'string' && st[seat.key] === undefined) st[seat.key] = 'warming';
-          }
-          return st;
-        });
-      })
-      .catch(() => undefined);
+      .then(({ roster }) => roster)
+      .catch(() => []);
 
     void (async () => {
       // A stored id is a claim, not a fact — the daemon reaps idle chats and enforces a pool cap,
       // so it may have reclaimed this one underneath us. Ask before trusting it.
       const stored = readStoredChatId(repoId);
       if (stored !== null) {
-        const alive = await api
+        // Three distinct answers, and collapsing them is how the leak comes back. `chat_seats`
+        // returns an empty list (a 200, not an error) for a chat the daemon no longer holds, so
+        // ONLY that means reclaimed. A thrown error means we do not know — and "do not know" must
+        // not mint, because minting on a transient 5xx orphans a chat that is still warm and burns
+        // the one id that could have reached it.
+        const probe = await api
           .getChat(stored)
-          .then(({ seats }) => seats)
-          .catch(() => [] as string[]);
+          .then(({ seats }) => ({ seats }))
+          .catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
         if (cancelled) return;
-        if (alive.length > 0) {
+
+        if ('error' in probe) {
+          setChatId(stored);
+          chatIdRef.current = stored;
+          setOpenError(
+            `Could not reach the daemon to check the previous chat (${probe.error}). Keeping it — ` +
+              `reload to retry, or End chat to release its seats.`,
+          );
+          return;
+        }
+        if (probe.seats.length > 0) {
           setChatId(stored);
           chatIdRef.current = stored;
           // Warm seats only — the transcript is not persisted server-side, so a rejoined chat
           // starts with an empty log. The SESSIONS carry the conversation memory, which is the
           // expensive part; re-minting would have thrown that away as well as leaking it.
-          setSeats(Object.fromEntries(alive.map((k) => [k, 'ready' as SeatState])));
-          setSeatErrors({});
+          setSeats(Object.fromEntries(probe.seats.map((k) => [k, 'ready' as SeatState])));
           return;
         }
         clearStoredChatId(repoId);
@@ -152,6 +169,19 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
       setChatId(id);
       chatIdRef.current = id;
       writeStoredChatId(repoId, id);
+
+      // Optimistic chips: every enabled roster seat shows as warming while the open is in flight;
+      // ready/failed events (and the open response) correct them as truth arrives.
+      const roster = await rosterP;
+      if (cancelled) return;
+      setSeats(
+        Object.fromEntries(
+          roster.flatMap((seat) =>
+            typeof seat.key === 'string' ? [[seat.key, 'warming' as SeatState]] : [],
+          ),
+        ),
+      );
+
       try {
         const { seats } = await api.openChat(repoId ? { chatId: id, repoRef: repoId } : { chatId: id });
         if (cancelled) return;

@@ -83,12 +83,15 @@ describe('GroupChat — chat reuse (FINDING-027)', () => {
   });
 
   it('each repo keeps its own chat, so a repo switch does not abandon one', async () => {
-    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    // A prop change on ONE mounted component, not two renders: `repoId` is an effect dep, so a
+    // switch re-runs the effect in place. Two separate mounts would exercise a different path and
+    // would not catch state that fails to reset across the switch.
+    const { rerender } = render(<GroupChat repoId="r1" onBack={() => undefined} />);
     await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
     const idA = sessionStorage.getItem('wicked.chat.r1');
 
     // A different repo is a different conversation — it opens its own rather than reusing r1's.
-    render(<GroupChat repoId="r2" onBack={() => undefined} />);
+    rerender(<GroupChat repoId="r2" onBack={() => undefined} />);
     await waitFor(() => expect(openChat).toHaveBeenCalledTimes(2));
     const idB = sessionStorage.getItem('wicked.chat.r2');
 
@@ -97,6 +100,69 @@ describe('GroupChat — chat reuse (FINDING-027)', () => {
     expect(idB).not.toBe(idA);
     // r1's id survives the switch — coming back rejoins it rather than leaking it.
     expect(sessionStorage.getItem('wicked.chat.r1')).toBe(idA);
+  });
+
+  it('a repo switch leaves no trace of the previous repo on screen', async () => {
+    // The effect is keyed on repoId, so a switch re-runs it in place — but per-chat React state
+    // does not reset on its own. A transcript carried across the switch is attributed to the wrong
+    // repo's chat, which is a wrong answer rendered confidently.
+    const user = userEvent.setup();
+    const { rerender } = render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+
+    await user.type(screen.getByRole('textbox'), 'a message about repo one');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(screen.getByText('a message about repo one')).toBeTruthy());
+
+    rerender(<GroupChat repoId="r2" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(2));
+    expect(
+      screen.queryByText('a message about repo one'),
+      "r1's transcript must not appear under r2's chat",
+    ).toBeNull();
+  });
+
+  it('a daemon we cannot reach is not the same as a chat that is gone', async () => {
+    // The sharp edge of the whole fix. `chat_seats` answers an EMPTY LIST for a chat the daemon no
+    // longer holds — that is the reclaimed signal. A thrown error means we do not know, and minting
+    // on "do not know" orphans a chat that may still be warm AND discards the only id that could
+    // have reached it: the exact leak, reintroduced by a transient 5xx.
+    sessionStorage.setItem('wicked.chat.r1', 'maybe-alive');
+    getChat.mockRejectedValue(new Error('502 Bad Gateway'));
+
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(getChat).toHaveBeenCalledWith('maybe-alive'));
+    await waitFor(() => expect(screen.getByText(/502 Bad Gateway/)).toBeTruthy());
+
+    expect(openChat, 'an unreachable daemon must not mint a second chat').not.toHaveBeenCalled();
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBe('maybe-alive');
+  });
+
+  it('a rejoin shows the seats the chat actually has, not the ones the roster lists', async () => {
+    // Optimistic `warming` chips stand in for an open that is in flight. After a rejoin there is no
+    // open and no seat events are coming, so a roster seat absent from the rejoined chat would sit
+    // at `warming` forever with nothing left to correct it — a chip that lies indefinitely.
+    //
+    // The roster is resolved LAST, deliberately. Both requests are in flight at once and the bug
+    // only bites when the roster lands after the rejoin has already written the seat map; letting
+    // the mocks race would make this test pass or fail on microtask ordering rather than on
+    // behaviour.
+    let releaseRoster = (): void => undefined;
+    getRoster.mockReturnValue(
+      new Promise((resolve) => {
+        releaseRoster = () => resolve({ roster: [{ key: 'claude' }, { key: 'codex' }] });
+      }),
+    );
+    sessionStorage.setItem('wicked.chat.r1', 'live-id');
+    getChat.mockResolvedValue({ chatId: 'live-id', seats: ['claude'] });
+
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTitle('ready')).toHaveTextContent('claude'));
+    releaseRoster();
+    await waitFor(() => expect(getRoster).toHaveBeenCalled());
+
+    expect(openChat).not.toHaveBeenCalled();
+    expect(screen.queryByTitle('warming'), 'no seat may be left warming after a rejoin').toBeNull();
   });
 
   it('End chat forgets the id, so the next mount starts clean instead of rejoining a closed chat', async () => {
