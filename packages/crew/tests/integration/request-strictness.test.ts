@@ -35,9 +35,37 @@ const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
 ]);
 
+const HAPPY_PATH_ID = 'strictness-happy-path';
+const POLL_INTERVAL_MS = 50;
+const RUN_TIMEOUT_MS = 15000;
+
 interface ErrorBody {
   error: string;
   details?: unknown[];
+}
+
+/**
+ * Block until `sessionId` stops running. Teardown removes the engine's whole state directory, and
+ * a run still executing will recreate files inside it mid-`rmSync` — `rmSync` lists the directory,
+ * unlinks what it listed, then fails `ENOTEMPTY` on the entry that appeared after the listing.
+ * `force: true` does not cover that; it suppresses "already gone", not "came back".
+ */
+async function waitForTerminal(sessionId: string): Promise<void> {
+  const deadline = Date.now() + RUN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${baseUrl}/api/v1/runs/${sessionId}`);
+    if (res.ok) {
+      const body = (await res.json()) as { run: { session: { status: string } } };
+      const { status } = body.run.session;
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') return;
+    } else if (res.status !== 404) {
+      // 404 is the launch not yet visible; anything else is a broken surface, and swallowing it
+      // here would surface as an unrelated teardown flake rather than as this test failing.
+      throw new Error(`GET /runs/${sessionId} failed with status ${res.status}`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+  throw new Error(`run ${sessionId} did not reach a terminal status within ${RUN_TIMEOUT_MS}ms`);
 }
 
 async function post(path: string, body: unknown): Promise<{ status: number; body: ErrorBody }> {
@@ -74,6 +102,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close();
+  // Releases the event-pump thread. Closing the server alone leaves it delivering into a callback
+  // whose state directory is about to be deleted.
+  adapter.close();
   rmSync(dir, { recursive: true, force: true });
   rmSync(repoDir, { recursive: true, force: true });
 });
@@ -107,11 +138,17 @@ describe('POST /runs rejects fields it does not know (FINDING-031)', () => {
   it('still accepts a correctly-spelled launch (strictness did not break the happy path)', async () => {
     const { status } = await post('/api/v1/runs', {
       problem: 'Do step one. Do step two',
-      sessionId: 'strictness-happy-path',
+      sessionId: HAPPY_PATH_ID,
       clisJson: SEATS,
       entityMode: 'shared',
     });
     expect(status).toBe(201);
+    // 201 means ACCEPTED, not finished — the engine goes on executing this run and spooling its
+    // events. Every other case here is a 400 that dispatches nothing, so this is the only one that
+    // outlives its own assertion. It has to be drained here, before the test returns: `afterAll`
+    // closes the adapter unconditionally, so an in-flight run would still be writing when the
+    // pump thread goes away.
+    await waitForTerminal(HAPPY_PATH_ID);
   });
 });
 

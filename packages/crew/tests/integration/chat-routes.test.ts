@@ -28,6 +28,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close();
+  // No run is dispatched here (every case is a 4xx or a capability error), so this file has not
+  // been seen to leak — but leaving the pump thread alive past teardown is the same latent gap
+  // that made `request-strictness` flaky, and closing is what the other adapter-using suites do.
+  adapter.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
