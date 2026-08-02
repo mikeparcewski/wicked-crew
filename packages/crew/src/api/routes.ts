@@ -501,6 +501,44 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     return { runId: id, ...replayed };
   });
 
+  // The durable history of one run (FINDING-057).
+  //
+  // `/ws` is a live tap and explicitly replays nothing on late join, so until this route existed
+  // the event log had exactly one reader — the gate route above, which reads it for a single
+  // `awaitingHuman` frame and discards the rest. Everything else a run recorded (routing councils,
+  // gate verdicts, per-unit cost) was write-only: observable if you happened to be attached while
+  // it streamed, and unrecoverable afterwards. That makes an incident un-investigable and a run's
+  // audit trail unciteable, which is the opposite of what a durable log is for.
+  //
+  // `type` filters server-side because the alternative is shipping an entire run's history to
+  // answer "what did the gates decide" — the log already excludes high-volume frames
+  // (`is_high_volume` drops CLI/chat deltas and terminal output), so what remains is the
+  // lifecycle, but a long run is still thousands of frames.
+  app.get(`${V}/runs/:id/events`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { type } = req.query as { type?: string };
+
+    const views = await adapter.sessionsDetail();
+    if (!views.some((v) => v.session.id === id)) {
+      return reply.code(404).send({ error: 'Run not found' });
+    }
+
+    const events = await adapter.runEvents(id);
+    if (events === null) {
+      // Same shape as the gate route's 503, and for the same reason: "no events" would report a
+      // missing binding as a fact about the run. The run may well have a rich history.
+      return reply.code(503).send({
+        error: 'Run history is unavailable: this wicked-core build has no event-log read binding',
+      });
+    }
+
+    // An empty array here is a real answer, not a failure: runs that predate the log have no
+    // history, and saying so is the honest response.
+    const wanted = type ? new Set(type.split(',').map((t) => t.trim()).filter(Boolean)) : null;
+    const filtered = wanted ? events.filter((e) => wanted.has(e.type)) : events;
+    return { runId: id, total: events.length, returned: filtered.length, events: filtered };
+  });
+
   // ── Governance reads (crew#40) ──────────────────────────────────────────────
 
   app.get(`${V}/governance/policies`, async () => {
