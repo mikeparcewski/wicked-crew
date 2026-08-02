@@ -18,12 +18,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// `setupFiles` is evaluated once per test FILE, not once per process. Under vitest's default fork
-// pool that is the same thing — measured on this suite, 15 files ran as 15 distinct pids carrying
-// one `exit` listener each. It stops being the same thing the moment the pool is shared
-// (`isolate: false`, `poolOptions.threads.singleThread`), where a per-file listener would pile up
-// until Node warns at 10. The guard costs one lookup and makes the file correct under either: one
-// dir and one listener per process, however many files that process ends up running.
+// `setupFiles` is evaluated once per test FILE, not once per process. On this suite those coincide:
+// measured, 15 files ran as 15 DISTINCT pids carrying one `exit` listener each — vitest 3 defaults
+// to `pool: 'forks'` (process per file) and nothing here overrides it. They stop coinciding the
+// moment a shared-process pool is configured (`isolate: false`, `poolOptions.threads.singleThread`),
+// where the per-file listener piles up until Node warns at 10. Rather than depend on a default that
+// is not ours to hold still, guard it: one dir and one listener per process, however many files that
+// process ends up running. Verified under the shared pool — 1 pid, 15 evaluations, listener count flat.
 const KEY = '__wickedCrewWorkflowOverlayDir';
 const slot = globalThis as typeof globalThis & { [KEY]?: string };
 
