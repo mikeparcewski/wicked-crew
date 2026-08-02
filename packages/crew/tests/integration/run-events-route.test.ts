@@ -13,14 +13,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
-import type { CoreEvent, SessionView } from '../../src/core/types.js';
+import type { CoreEvent } from '../../src/core/types.js';
 
 const RUN = 'run-with-history';
-
-/** A `sessionsDetail()` view reduced to the one field this route reads. */
-function view(id: string): SessionView {
-  return { session: { id, status: 'completed' }, units: [] } as unknown as SessionView;
-}
 
 const HISTORY: CoreEvent[] = [
   { type: 'sessionStarted', session: RUN, ts: 1 } as CoreEvent,
@@ -41,7 +36,8 @@ let events: CoreEvent[] | null = HISTORY;
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'run-events-'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
-  adapter.sessionsDetail = async () => [view(RUN)];
+  // The route's existence check reads IDs only, so that is what the stub supplies.
+  adapter.sessions = async () => [RUN];
   adapter.runEvents = async () => events;
 
   // One server for the whole file: this route holds no cache, so nothing a case does can leak
@@ -93,6 +89,27 @@ describe('GET /runs/:id/events', () => {
     events = HISTORY;
     const res = await get(`/api/v1/runs/${RUN}/events?type=sessionStarted,sessionCompleted`);
     expect(res.body['returned']).toBe(2);
+  });
+
+  it('accepts a repeated type param, which fastify parses as an array', async () => {
+    // `?type=a&type=b` is the other obvious spelling of the case above, and the one that
+    // arrives as `string[]`. Treating the query value as a bare string 500s here.
+    events = HISTORY;
+    const res = await get(
+      `/api/v1/runs/${RUN}/events?type=sessionStarted&type=sessionCompleted`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body['returned']).toBe(2);
+  });
+
+  it('treats an empty type filter as no filter', async () => {
+    // `?type=` is what a caller sends when it builds the query from an empty variable. Reading
+    // it as "match nothing" would answer with an empty list indistinguishable from a run with
+    // no history — the exact confusion this route exists to remove.
+    events = HISTORY;
+    const res = await get(`/api/v1/runs/${RUN}/events?type=`);
+    expect(res.status).toBe(200);
+    expect(res.body['returned']).toBe(5);
   });
 
   it('answers 200 with an empty list for a run that genuinely recorded nothing', async () => {

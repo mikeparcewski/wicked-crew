@@ -516,10 +516,15 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   // lifecycle, but a long run is still thousands of frames.
   app.get(`${V}/runs/:id/events`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { type } = req.query as { type?: string };
+    // Fastify's default querystring parser yields a string for `?type=a` and an ARRAY for a
+    // repeated `?type=a&type=b`. Typing it as `string` and calling `.split` would have thrown a
+    // 500 on the repeated form — a caller asking for two types the obvious way.
+    const { type } = req.query as { type?: string | string[] };
 
-    const views = await adapter.sessionsDetail();
-    if (!views.some((v) => v.session.id === id)) {
+    // IDs only: this is an existence check, and `sessionsDetail()` would load and parse every
+    // run's full unit detail to answer it — the same reason `/runs/:id/inject` uses `sessions()`.
+    const ids = await adapter.sessions();
+    if (!ids.includes(id)) {
       return reply.code(404).send({ error: 'Run not found' });
     }
 
@@ -534,7 +539,15 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
 
     // An empty array here is a real answer, not a failure: runs that predate the log have no
     // history, and saying so is the honest response.
-    const wanted = type ? new Set(type.split(',').map((t) => t.trim()).filter(Boolean)) : null;
+    // Both spellings of "several types" mean the same thing: `?type=a,b` and `?type=a&type=b`.
+    // An empty filter (`?type=`, or only separators) is treated as NO filter rather than as a
+    // filter matching nothing — "show me events of no type" is not a question anyone asks, and
+    // answering it with an empty list looks identical to a run that recorded nothing.
+    const names = (Array.isArray(type) ? type : type === undefined ? [] : [type])
+      .flatMap((t) => t.split(','))
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const wanted = names.length > 0 ? new Set(names) : null;
     const filtered = wanted ? events.filter((e) => wanted.has(e.type)) : events;
     return { runId: id, total: events.length, returned: filtered.length, events: filtered };
   });
