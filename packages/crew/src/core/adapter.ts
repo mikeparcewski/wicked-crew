@@ -110,6 +110,10 @@ type ChatMethods = {
   chatSend(chatId: string, text: string, targetsJson?: string | null, cwd?: string | null): Promise<string>;
   chatSeats(chatId: string): Promise<string>;
   chatClose(chatId: string): Promise<string>;
+  /** Optional for the same reason as `retirePolicy` above — the enumerate surface landed after
+   *  wicked-core-ts 0.3.0, so an installed binding at that version does not carry it. Declaring it
+   *  required would type away the very case the guard in `chatList` exists to handle. */
+  chatList?(): Promise<string>;
 };
 
 type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods;
@@ -246,6 +250,15 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     ],
   },
 ];
+
+/** One live chat on the enumerate surface — see {@link CoreAdapter.chatList}. */
+export interface ChatSummary {
+  chatId: string;
+  /** The seats currently warm, sorted. */
+  seats: string[];
+  /** Seconds since the chat's last open/ensure/turn; `null` when it has no activity stamp. */
+  idleSecs: number | null;
+}
 
 /** A parsed-CoreEvent listener. */
 export type CoreEventListener = (event: CoreEvent) => void;
@@ -479,6 +492,25 @@ export class CoreAdapter {
 
   async chatSeats(chatId: string): Promise<string[]> {
     return JSON.parse(await this.core.chatSeats(chatId)) as string[];
+  }
+
+  /**
+   * Every live chat, so an operator can find the ones nothing is going to close (FINDING-027).
+   *
+   * Chat sessions are a warm pool that deliberately outlives the page, and the only client that
+   * knew a chat's id is the tab that minted it. Without this an orphaned seat is unreclaimable
+   * short of restarting the daemon — the leak is real but invisible, which is the worse half.
+   *
+   * `idleSecs` is `number | null`, not `number`. The Rust side uses `u64::MAX` for "no activity
+   * timestamp"; as an f64 that arrives as 18446744073709552000, which no caller can test for by
+   * equality and every caller can accidentally do arithmetic on. The binding maps it to `null`.
+   */
+  async chatList(): Promise<ChatSummary[]> {
+    const list = this.core.chatList;
+    if (typeof list !== 'function') {
+      throw new Error('Listing chats is not yet supported by this wicked-core build');
+    }
+    return JSON.parse(await list.call(this.core)) as ChatSummary[];
   }
 
   async chatClose(chatId: string): Promise<void> {

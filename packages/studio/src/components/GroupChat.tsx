@@ -23,6 +23,42 @@ const SEAT_FALLBACK = { bg: 'rgba(230,237,243,0.1)', fg: 'rgba(230,237,243,0.55)
 
 type SeatState = 'warming' | 'ready' | 'failed';
 
+/**
+ * Where a repo's live chat id is parked between mounts (FINDING-027).
+ *
+ * `sessionStorage`, not `localStorage`: chats belong to the daemon process, and a chat id that
+ * outlived a daemon restart would point at a session that no longer exists. Per-tab scope also
+ * keeps two tabs on the same repo from fighting over one chat. Keyed by repo because the effect
+ * that owns the id is keyed by repo — one live chat per repo per tab.
+ */
+const CHAT_ID_KEY = (repoId?: string | null): string => `wicked.chat.${repoId ?? '_'}`;
+
+/** All three wrapped: sessionStorage throws in private-mode/blocked-cookie browsers, and a chat
+ *  the operator cannot open is a worse outcome than a chat that leaks. Degrades to mint-per-mount,
+ *  which is exactly the pre-fix behaviour — no new failure, just no improvement. */
+function readStoredChatId(repoId?: string | null): string | null {
+  try {
+    const v = sessionStorage.getItem(CHAT_ID_KEY(repoId));
+    return v !== null && v !== '' ? v : null;
+  } catch {
+    return null;
+  }
+}
+function writeStoredChatId(repoId: string | null | undefined, chatId: string): void {
+  try {
+    sessionStorage.setItem(CHAT_ID_KEY(repoId), chatId);
+  } catch {
+    /* non-fatal — see above */
+  }
+}
+function clearStoredChatId(repoId?: string | null): void {
+  try {
+    sessionStorage.removeItem(CHAT_ID_KEY(repoId));
+  } catch {
+    /* non-fatal — see above */
+  }
+}
+
 interface UserMsg {
   kind: 'user';
   text: string;
@@ -61,11 +97,17 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
   // The chat id is minted CLIENT-side and set before the open call: seats warm
   // serially (~2-3s each), and their chatSessionReady events arrive BEFORE the
   // POST resolves — a server-minted id would drop every one of them.
+  //
+  // REJOIN, don't re-mint (FINDING-027). This effect used to call crypto.randomUUID() on every
+  // fire, so each remount or repo switch abandoned a warm chat that nothing would ever close:
+  // measured at ~520 MB of pinned CLI processes per orphan, one leaked deterministically per mount,
+  // 19 seats warmed against 2 chats ever closed across a campaign. Closing on unmount would have
+  // been the wrong fix — it deletes the "sessions outlive the page" feature this component exists
+  // to provide. Instead the id is persisted per repo and the previous session is rejoined if the
+  // daemon still holds it. This is deliberately agnostic to WHAT remounts us: any cause, including
+  // a full page reload, lands on the same stored id.
   useEffect(() => {
     let cancelled = false;
-    const id = crypto.randomUUID();
-    setChatId(id);
-    chatIdRef.current = id;
     // Optimistic chips: every enabled roster seat shows as warming immediately;
     // ready/failed events (and the open response) correct them as truth arrives.
     void api
@@ -81,9 +123,37 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
         });
       })
       .catch(() => undefined);
-    api
-      .openChat(repoId ? { chatId: id, repoRef: repoId } : { chatId: id })
-      .then(({ seats }) => {
+
+    void (async () => {
+      // A stored id is a claim, not a fact — the daemon reaps idle chats and enforces a pool cap,
+      // so it may have reclaimed this one underneath us. Ask before trusting it.
+      const stored = readStoredChatId(repoId);
+      if (stored !== null) {
+        const alive = await api
+          .getChat(stored)
+          .then(({ seats }) => seats)
+          .catch(() => [] as string[]);
+        if (cancelled) return;
+        if (alive.length > 0) {
+          setChatId(stored);
+          chatIdRef.current = stored;
+          // Warm seats only — the transcript is not persisted server-side, so a rejoined chat
+          // starts with an empty log. The SESSIONS carry the conversation memory, which is the
+          // expensive part; re-minting would have thrown that away as well as leaking it.
+          setSeats(Object.fromEntries(alive.map((k) => [k, 'ready' as SeatState])));
+          setSeatErrors({});
+          return;
+        }
+        clearStoredChatId(repoId);
+      }
+
+      const id = crypto.randomUUID();
+      if (cancelled) return;
+      setChatId(id);
+      chatIdRef.current = id;
+      writeStoredChatId(repoId, id);
+      try {
+        const { seats } = await api.openChat(repoId ? { chatId: id, repoRef: repoId } : { chatId: id });
         if (cancelled) return;
         const st: Record<string, SeatState> = {};
         const errs: Record<string, string> = {};
@@ -93,14 +163,19 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
         }
         setSeats(st);
         setSeatErrors(errs);
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
+        // The id stays stored on purpose: an open that failed at the HTTP layer may still have
+        // warmed seats server-side, and dropping the id here would orphan exactly what this
+        // change exists to stop orphaning. The next mount re-checks it and clears it if dead.
         if (!cancelled) setOpenError(e instanceof Error ? e.message : String(e));
-      });
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // (The exhaustive-deps suppression that used to sit here is gone: the effect now closes over
+    // nothing but `repoId` and module-scope helpers, so the dep list is genuinely complete.)
   }, [repoId]);
 
   useEventStream((ev) => {
@@ -181,6 +256,10 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
   }
 
   async function endChat(): Promise<void> {
+    // Forget the id FIRST. If the DELETE fails we still must not rejoin a chat the operator has
+    // ended — and the daemon's idle reaper will collect it either way. The reverse order would
+    // leave a "live" id pointing at a chat the UI has already walked away from.
+    clearStoredChatId(repoId);
     if (chatId !== null) {
       try {
         await api.closeChat(chatId);

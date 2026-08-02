@@ -72,4 +72,28 @@ describe('chat routes (stub engine)', () => {
     // Close is best-effort teardown; unsupported engines surface the capability error.
     expect([200, 400, 500]).toContain(res.status);
   });
+
+  // FINDING-027 gap 4: before this route there was no way to enumerate chats, so an orphaned warm
+  // seat was unreclaimable without restarting the daemon.
+  //
+  // The assertion is branch-tolerant ON PURPOSE, and only in the one axis that is a DEPLOYMENT
+  // fact rather than a code fact: `chatList` landed after wicked-core-ts 0.3.0, so whether the
+  // installed native binding carries it depends on which version is resolved. What is pinned
+  // unconditionally is what this test exists to protect — the route is REGISTERED (never a 404, the
+  // failure mode of forgetting to add it), it never hangs, and each branch is well-formed: a 200
+  // carries a real `chats` array, a 501 names the capability so an operator upgrades instead of
+  // debugging their own call. A bare `expect(res.ok)` would pass on a 404-shaped catch-all.
+  it('GET /chats enumerates live chats, or says plainly that the binding cannot', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats`);
+    expect(res.status, 'the route must be registered').not.toBe(404);
+    expect([200, 501]).toContain(res.status);
+    const body = (await res.json()) as { chats?: unknown; error?: string };
+    if (res.status === 200) {
+      expect(Array.isArray(body.chats)).toBe(true);
+      // The stub engine opens no chats, so the honest answer is an empty list — not an error.
+      expect(body.chats).toEqual([]);
+    } else {
+      expect(body.error ?? '').toMatch(/not yet supported/i);
+    }
+  });
 });

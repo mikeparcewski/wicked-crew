@@ -1,0 +1,125 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { GroupChat } from '../src/components/GroupChat.js';
+
+/**
+ * FINDING-027 — the per-mount chat leak.
+ *
+ * A chat is a pool of warm CLI sessions costing ~520 MB apiece, deliberately outliving the page so
+ * an operator can navigate away and come back. The component minted a fresh `crypto.randomUUID()`
+ * on every effect fire, so every remount abandoned one — nothing on either side ever closed it, and
+ * with no list endpoint nobody could find it again. Measured across one campaign: 19 seats warmed,
+ * 2 chats ever closed, 4.10 GB reclaimed by hand.
+ *
+ * These tests pin the CONSEQUENCE (a second mount does not open a second chat), not the mechanism —
+ * the exact remount trigger in production was never pinned down, and a fix keyed to one trigger
+ * would leak on the next one.
+ */
+
+const openChat = vi.fn();
+const getChat = vi.fn();
+const closeChat = vi.fn();
+const getRoster = vi.fn();
+
+vi.mock('../src/api/client.js', () => ({
+  api: {
+    openChat: (...a: unknown[]) => openChat(...a),
+    getChat: (...a: unknown[]) => getChat(...a),
+    closeChat: (...a: unknown[]) => closeChat(...a),
+    getRoster: (...a: unknown[]) => getRoster(...a),
+    sendChatMessage: vi.fn(),
+  },
+  wsBase: () => 'ws://localhost',
+}));
+
+// The component subscribes to the daemon's event stream for seat/delta frames. None of these cases
+// depend on a live socket, and opening one would make the suite time-dependent.
+vi.mock('../src/hooks/useEventStream.js', () => ({ useEventStream: () => undefined }));
+
+beforeEach(() => {
+  openChat.mockReset();
+  getChat.mockReset();
+  closeChat.mockReset();
+  getRoster.mockReset();
+  getRoster.mockResolvedValue({ roster: [{ key: 'claude' }] });
+  openChat.mockResolvedValue({ chatId: 'x', seats: [{ cliKey: 'claude', ok: true }] });
+  closeChat.mockResolvedValue({ ok: true });
+  sessionStorage.clear();
+});
+
+describe('GroupChat — chat reuse (FINDING-027)', () => {
+  it('a remount rejoins the live chat instead of opening a second one', async () => {
+    // Mount 1: nothing stored, so it mints and opens.
+    const first = render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    const openedId = (openChat.mock.calls[0]?.[0] as { chatId: string }).chatId;
+    expect(openedId).toBeTruthy();
+
+    // The daemon still holds it.
+    getChat.mockResolvedValue({ chatId: openedId, seats: ['claude'] });
+    first.unmount();
+
+    // Mount 2: the leak. Before the fix this called openChat a second time and the first chat's
+    // seats stayed warm forever, referenced by nobody.
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(getChat).toHaveBeenCalledWith(openedId));
+    await waitFor(() => expect(screen.getByTitle('ready')).toHaveTextContent('claude'));
+    expect(openChat, 'a rejoin must not open a second chat').toHaveBeenCalledTimes(1);
+  });
+
+  it('a stored id the daemon has already reclaimed is discarded, not rejoined', async () => {
+    // The daemon reaps idle chats and enforces a pool cap, so a stored id is a claim and not a
+    // fact. `chat_seats` answers an empty list for an unknown chat rather than erroring — which is
+    // exactly the shape that would silently produce a dead-looking chat if trusted.
+    sessionStorage.setItem('wicked.chat.r1', 'reclaimed-id');
+    getChat.mockResolvedValue({ chatId: 'reclaimed-id', seats: [] });
+
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    const openedId = (openChat.mock.calls[0]?.[0] as { chatId: string }).chatId;
+    expect(openedId).not.toBe('reclaimed-id');
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBe(openedId);
+  });
+
+  it('each repo keeps its own chat, so a repo switch does not abandon one', async () => {
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    const idA = sessionStorage.getItem('wicked.chat.r1');
+
+    // A different repo is a different conversation — it opens its own rather than reusing r1's.
+    render(<GroupChat repoId="r2" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(2));
+    const idB = sessionStorage.getItem('wicked.chat.r2');
+
+    expect(idA).toBeTruthy();
+    expect(idB).toBeTruthy();
+    expect(idB).not.toBe(idA);
+    // r1's id survives the switch — coming back rejoins it rather than leaking it.
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBe(idA);
+  });
+
+  it('End chat forgets the id, so the next mount starts clean instead of rejoining a closed chat', async () => {
+    const user = userEvent.setup();
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'End chat' }));
+    await waitFor(() => expect(closeChat).toHaveBeenCalledTimes(1));
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBeNull();
+  });
+
+  it('a failed close still forgets the id — an ended chat must never be rejoined', async () => {
+    // Teardown is best-effort, but the id must go regardless: the daemon's idle reaper will collect
+    // the seats either way, whereas rejoining a chat the operator ended is a visible wrong answer.
+    const user = userEvent.setup();
+    closeChat.mockRejectedValue(new Error('daemon unreachable'));
+    render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'End chat' }));
+    await waitFor(() => expect(closeChat).toHaveBeenCalledTimes(1));
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBeNull();
+  });
+});
