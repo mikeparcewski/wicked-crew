@@ -18,15 +18,30 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const dir = mkdtempSync(join(tmpdir(), 'wicked-crew-workflows-'));
-process.env['WICKED_WORKFLOWS_DIR'] = dir;
+// `setupFiles` is evaluated once per test FILE, not once per process. Under vitest's default fork
+// pool that is the same thing — measured on this suite, 15 files ran as 15 distinct pids carrying
+// one `exit` listener each. It stops being the same thing the moment the pool is shared
+// (`isolate: false`, `poolOptions.threads.singleThread`), where a per-file listener would pile up
+// until Node warns at 10. The guard costs one lookup and makes the file correct under either: one
+// dir and one listener per process, however many files that process ends up running.
+const KEY = '__wickedCrewWorkflowOverlayDir';
+const slot = globalThis as typeof globalThis & { [KEY]?: string };
 
-// Best-effort: an `exit` handler must be synchronous, and a worker killed outright never runs it.
-// The dir is under the OS temp root either way, so the failure mode is a stray empty directory.
-process.on('exit', () => {
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* the OS owns temp cleanup from here */
-  }
-});
+if (slot[KEY] === undefined) {
+  const dir = mkdtempSync(join(tmpdir(), 'wicked-crew-workflows-'));
+  slot[KEY] = dir;
+
+  // Best-effort: an `exit` handler must be synchronous, and a worker killed outright never runs it.
+  // The dir is under the OS temp root either way, so the failure mode is a stray empty directory.
+  process.on('exit', () => {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* the OS owns temp cleanup from here */
+    }
+  });
+}
+
+// Re-asserted per file, not just per process: a test that points `WICKED_WORKFLOWS_DIR` somewhere of
+// its own must not leak that choice into whatever file the worker picks up next.
+process.env['WICKED_WORKFLOWS_DIR'] = slot[KEY];
