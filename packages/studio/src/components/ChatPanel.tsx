@@ -547,8 +547,9 @@ function RunChat({
   onKill?: (runId: string) => void | Promise<void>;
 }): React.ReactElement {
   const { session, units } = view;
-  // Both derived once per render, not once per unit: the ord sort is what `unit_ix` indexes into,
-  // and it was previously re-run inside the unit loop for every unit (PR #179 review).
+  // `ord` order is what `unit_ix` indexes into, so both the render order and the cursor derive from
+  // it. Memoized so neither reruns while `units` is unchanged; the cursor read in particular used to
+  // happen per unit, each call re-sorting the plan from inside the loop (PR #179 review).
   const ordered = useMemo(() => [...units].sort((a, b) => a.ord - b.ord), [units]);
   const executingUnitOrd = useMemo(() => executingOrd(session, units), [session, units]);
   const gate = useGateStore((s) => s.gates[session.id]);
