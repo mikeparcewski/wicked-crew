@@ -68,6 +68,8 @@ function CouncilDeliberation({ runId, ord }: { runId: string; ord: number }): Re
         <span>{label}</span>
       </div>
       {failed.length > 0 && (
+        // `why` is CRLF-normalized in the store, so a Windows seat's stderr does not put stray
+        // carriage returns into the tooltip.
         <div className="pl-3.5" style={{ color: '#fca5a5' }} title={failed.map((f) => `${f.cli}: ${f.why}`).join('\n')}>
           {failed.length} seat{failed.length === 1 ? '' : 's'} did not vote —{' '}
           {failed.map((f) => `${f.cli} (${f.kind})`).join(', ')}

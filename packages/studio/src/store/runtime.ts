@@ -24,6 +24,21 @@ export function outputKey(session: string, ord: number): string {
   return `${session}:u${ord}`;
 }
 
+/** Longest reason kept on a single log line before it is elided. */
+const REASON_CAP = 160;
+
+/**
+ * The first line of a captured reason, CRLF-normalized and capped for a one-line log entry.
+ *
+ * Both halves matter: a seat that failed on Windows writes CRLF, and a bare `split('\n')` would
+ * leave the `\r` behind; and a capture that is cut off must say so, or a truncated message reads
+ * as a complete one.
+ */
+function firstLineOf(text: string): string {
+  const line = text.replace(/\r/g, '').split('\n')[0] ?? '';
+  return line.length > REASON_CAP ? `${line.slice(0, REASON_CAP - 1)}…` : line;
+}
+
 /** A compact one-line summary of a frame for the event log. */
 function summarize(event: CoreEvent): string {
   switch (event.type) {
@@ -46,10 +61,13 @@ function summarize(event: CoreEvent): string {
     case 'councilSeatFailed': {
       const exit = typeof event.exitCode === 'number' ? ` (exit ${event.exitCode})` : '';
       const why = (typeof event.stderr === 'string' && event.stderr.trim()) || (typeof event.detail === 'string' && event.detail.trim()) || '';
-      // The stderr is what this event exists to carry — but the log is one line, so trim it
-      // to the first line and cap it. The full capture stays on the frame.
-      const firstLine = why.split('\n')[0]?.slice(0, 160) ?? '';
-      return `seat ${String(event.cli ?? '?')} did not vote — ${String(event.kind ?? 'unreported')}${exit}${firstLine ? `: ${firstLine}` : ''}`;
+      // The stderr is what this event exists to carry — but the log is one line, so trim it to
+      // the first line and cap it. The full capture stays on the frame. A Windows seat writes
+      // CRLF, so strip the carriage returns first or the "first line" keeps a trailing \r that
+      // renders as a stray glyph.
+      return `seat ${String(event.cli ?? '?')} did not vote — ${String(event.kind ?? 'unreported')}${exit}${
+        firstLineOf(why) ? `: ${firstLineOf(why)}` : ''
+      }`;
     }
     case 'unitExecuting':
       return 'executing';
@@ -222,10 +240,13 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
           cli: typeof event.cli === 'string' ? event.cli : '?',
           kind: typeof event.kind === 'string' ? event.kind : 'unreported',
           ...(typeof event.exitCode === 'number' ? { exitCode: event.exitCode } : {}),
-          why:
+          // CRLF-normalized at the boundary: a Windows seat's stderr would otherwise carry \r
+          // into every consumer, including the hover tooltip where it renders as a stray glyph.
+          why: (
             (typeof event.stderr === 'string' && event.stderr.trim()) ||
             (typeof event.detail === 'string' && event.detail.trim()) ||
-            '',
+            ''
+          ).replace(/\r\n?/g, '\n'),
         };
         const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
         entry.ord = event.ord;

@@ -165,4 +165,26 @@ describe('runtime store (§11.4 — live output + per-run event log)', () => {
     expect(detail).not.toContain('second line');
     expect(detail.split('\n')).toHaveLength(1);
   });
+
+  it('strips carriage returns from a Windows seat so the log stays one clean line', () => {
+    const ingest = useRuntimeStore.getState().ingest;
+    ingest(seatFailed('run-1', 0, 'codex', { kind: 'non_zero_exit', stderr: 'boom\r\nsecond line' }));
+    const detail = useRuntimeStore.getState().logs['run-1']?.[0]?.detail ?? '';
+    // Splitting on '\n' alone would leave the '\r' behind and render it as a stray glyph.
+    expect(detail).not.toContain('\r');
+    expect(detail).toContain('boom');
+    expect(detail).not.toContain('second line');
+    // The reason kept on the frame is normalized too — the tooltip reads it directly.
+    const seat = useRuntimeStore.getState().councilStatus['run-1:0']?.failedSeats?.[0];
+    expect(seat?.why).toBe('boom\nsecond line');
+  });
+
+  it('marks a truncated reason so a cut-off message does not read as a complete one', () => {
+    const ingest = useRuntimeStore.getState().ingest;
+    ingest(seatFailed('run-1', 0, 'codex', { kind: 'non_zero_exit', stderr: 'x'.repeat(400) }));
+    const detail = useRuntimeStore.getState().logs['run-1']?.[0]?.detail ?? '';
+    expect(detail).toContain('…');
+    expect(detail).toContain('x'.repeat(159));
+    expect(detail).not.toContain('x'.repeat(161));
+  });
 });
