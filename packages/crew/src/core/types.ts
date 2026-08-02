@@ -214,6 +214,12 @@ export interface GovernancePolicy {
   criteria: string;
   severity: 'high' | 'medium' | 'low';
   rule: string;
+  /**
+   * Withdrawn from enforcement (FINDING-038). A retired policy is still listed — its node survives
+   * so past decisions citing it stay explicable — but it can no longer decide a gate. Absent on
+   * policies written before the field existed, which read as active.
+   */
+  retired?: boolean;
 }
 
 /**
@@ -230,6 +236,8 @@ export interface ConformanceRule {
   symbol_ref?: string;
   compliance?: { framework: string; control_id: string };
   provenance: { source: string; ref?: string; source_kinds: string[] };
+  /** Withdrawn from recall. Same contract as {@link GovernancePolicy.retired}. */
+  retired?: boolean;
 }
 
 /**

@@ -487,6 +487,30 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
+  // Retire, not delete. The record survives so past decisions citing it stay explicable; it just
+  // stops being enforced (FINDING-038 — a mis-authored policy otherwise denied forever).
+  app.delete(`${V}/governance/policies/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const existed = await adapter.retirePolicy(id);
+      if (!existed) return reply.code(404).send({ error: `policy '${id}' not found` });
+      return { status: 'retired', id };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
+  app.delete(`${V}/governance/rules/:id`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const existed = await adapter.retireConformanceRule(id);
+      if (!existed) return reply.code(404).send({ error: `conformance rule '${id}' not found` });
+      return { status: 'retired', id };
+    } catch (err) {
+      return reply.code(400).send({ error: message(err) });
+    }
+  });
+
   app.get(`${V}/governance/rules/preview`, async (req, reply) => {
     const q = req.query as Record<string, string | string[] | undefined>;
     try {

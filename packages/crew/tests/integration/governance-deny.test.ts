@@ -69,6 +69,19 @@ function probeGovCapable(): boolean {
 }
 const GOV_CAPABLE = probeGovCapable();
 
+// FINDING-038's retire seam is newer than the governance seam above, so it gets its own probe —
+// otherwise an older-but-governance-capable binary would fail the retire test instead of skipping it.
+function probeRetireCapable(): boolean {
+  try {
+    const { Core } = _require('wicked-core-ts') as { Core: { spawnStub(p: string): Record<string, unknown> } };
+    const probe = Core.spawnStub(join(tmpdir(), 'gov-probe.db'));
+    return typeof probe['retirePolicy'] === 'function';
+  } catch {
+    return false;
+  }
+}
+const RETIRE_CAPABLE = probeRetireCapable();
+
 describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run at the crew HTTP surface', () => {
   let app: Awaited<ReturnType<typeof createServer>>;
   let adapter: CoreAdapter;
@@ -150,6 +163,37 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
     expect(
       status,
       `expected benign run to complete but got '${status}'`,
+    ).toBe('completed');
+  });
+
+  // FINDING-038: governance state was append-only. A policy authored with a too-broad trigger denied
+  // every matching unit forever, and no HTTP surface could withdraw it — the store had to be wiped.
+  // Runs LAST: it retires the policy the two tests above depend on.
+  it.runIf(RETIRE_CAPABLE)('a retired policy stops denying, stays listed, and 404s when unknown', async () => {
+    const unknown = await fetch(`${baseUrl}/api/v1/governance/policies/no-such-policy`, { method: 'DELETE' });
+    expect(unknown.status, 'retiring an id that was never registered must 404, not report a hollow success').toBe(404);
+
+    const res = await fetch(`${baseUrl}/api/v1/governance/policies/${DENY_POLICY.id}`, { method: 'DELETE' });
+    // Read the body ONCE — a fetch body cannot be consumed twice, so it cannot double as the
+    // failure message for a status assertion.
+    const body = await res.json().catch(() => null) as unknown;
+    expect(res.status, `DELETE returned ${res.status}: ${JSON.stringify(body)}`).toBe(200);
+    expect(body).toEqual({ status: 'retired', id: DENY_POLICY.id });
+
+    // Retire, not delete: past decisions cite this id, so it must still resolve.
+    const listed = await fetch(`${baseUrl}/api/v1/governance/policies`);
+    const { policies } = await listed.json() as { policies: GovernancePolicy[] };
+    const found = policies.find((p) => p.id === DENY_POLICY.id);
+    expect(found, 'the retired policy is still listed').toBeDefined();
+    expect(found?.retired, 'and is flagged so the UI can show it is no longer enforced').toBe(true);
+
+    // The identical run that failed in the first test now completes — same trigger, same problem.
+    const sessionId = 'sc005-retired';
+    await launchRun(sessionId, `please ${DENY_KEYWORD} this task step`);
+    const status = await waitForTerminal(sessionId);
+    expect(
+      status,
+      `after retiring the policy the same run must complete, got '${status}'`,
     ).toBe('completed');
   });
 });
