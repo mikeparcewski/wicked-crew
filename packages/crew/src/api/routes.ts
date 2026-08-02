@@ -467,17 +467,37 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const cached = gateCache.get(id);
     if (cached) return { runId: id, ...cached };
 
+    // A miss is not evidence of anything on its own, so ask the run what it is doing before paying
+    // to replay it. Only `awaiting_human` can have an open gate, and that answer is definitive:
+    // every other status is a 404 that needs no log at all — which is also the overwhelmingly
+    // common case here, since studio polls this route for runs that are merely finished.
+    //
+    // Reading status first is therefore CHEAPER than not reading it, the opposite of what the first
+    // cut of this assumed: it trades one `sessionsDetail()` for replaying an entire event history,
+    // and it was that skipped check which made a completed run answer 503 on any build without the
+    // binding (CI caught it) — an error where the honest, knowable answer was "no gate".
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    if (run.session.status !== 'awaiting_human') {
+      return reply.code(404).send({ error: 'No open gate for this run' });
+    }
+
     const events = await adapter.runEvents(id);
     if (events === null) {
-      // Distinct cause, distinct message: this build cannot answer the question at all, which is
-      // not the same as answering "no gate" (FINDING-050 — one message for several causes is how a
-      // capability gap gets read as a fact about the run).
+      // Now — and only now — 503 is the honest answer: this run really is holding for a human, and
+      // this build cannot say what it is asking. Distinct cause, distinct message; answering "no
+      // gate" here would report a capability gap as a fact about the run (the FINDING-050 shape).
       return reply.code(503).send({
         error: 'Gate history is unavailable: this wicked-core build has no event-log read binding',
       });
     }
     const replayed = gateCache.rebuild(id, events);
-    if (!replayed) return reply.code(404).send({ error: 'No open gate for this run' });
+    if (!replayed) {
+      // Parked, with a history that records no open gate. Pre-log runs land here (their prompt is
+      // genuinely lost), as does a gate whose `awaitingHuman` predates the log's retention.
+      return reply.code(404).send({ error: 'No open gate for this run' });
+    }
     return { runId: id, ...replayed };
   });
 
