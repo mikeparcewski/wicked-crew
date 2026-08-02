@@ -42,15 +42,16 @@ describe('PolicyManager — retire', () => {
     // Retiring stops a policy from deciding gates. One misplaced click should not do that, so the
     // button arms before it fires — the assertion that matters is that NOTHING was called after
     // the first click.
+    const user = userEvent.setup();
     listPolicies.mockResolvedValue({ policies: [policy()] });
     retirePolicy.mockResolvedValue(undefined);
     render(<PolicyManager />);
     await screen.findByText('deny-secrets');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Retire' }));
+    await user.click(screen.getByRole('button', { name: 'Retire' }));
     expect(retirePolicy).not.toHaveBeenCalled();
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Confirm retire' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm retire' }));
     await waitFor(() => expect(retirePolicy).toHaveBeenCalledWith('deny-secrets'));
   });
 
@@ -58,6 +59,7 @@ describe('PolicyManager — retire', () => {
     // The component must not paint "retired" from its own optimism — the second list call is the
     // one that proves the store agreed. A retire that 404s server-side would otherwise leave the
     // UI claiming an enforcement change that never happened.
+    const user = userEvent.setup();
     listPolicies
       .mockResolvedValueOnce({ policies: [policy()] })
       .mockResolvedValueOnce({ policies: [policy({ retired: true })] });
@@ -65,8 +67,8 @@ describe('PolicyManager — retire', () => {
     render(<PolicyManager />);
     await screen.findByText('deny-secrets');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Retire' }));
-    await userEvent.click(await screen.findByRole('button', { name: 'Confirm retire' }));
+    await user.click(screen.getByRole('button', { name: 'Retire' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm retire' }));
 
     await waitFor(() => expect(listPolicies).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('retired')).toBeTruthy();
@@ -84,13 +86,14 @@ describe('PolicyManager — retire', () => {
   });
 
   it('surfaces a failed retire instead of silently leaving the policy enforcing', async () => {
+    const user = userEvent.setup();
     listPolicies.mockResolvedValue({ policies: [policy()] });
     retirePolicy.mockRejectedValue(new Error('404 policy not found'));
     render(<PolicyManager />);
     await screen.findByText('deny-secrets');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Retire' }));
-    await userEvent.click(await screen.findByRole('button', { name: 'Confirm retire' }));
+    await user.click(screen.getByRole('button', { name: 'Retire' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm retire' }));
 
     expect(await screen.findByText(/404 policy not found/)).toBeTruthy();
   });
