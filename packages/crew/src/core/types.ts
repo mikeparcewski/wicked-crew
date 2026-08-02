@@ -36,7 +36,19 @@ export type HumanConfirm = 'none' | 'all' | { before: number };
 
 /** Why a CLI was assigned to a unit (`RoutingInfo`, internally tagged on `method`). */
 export type RoutingInfo =
-  | { method: 'council'; winner: string; agreement_pct: number; returned: number; dissent: number }
+  /**
+   * `seated` is the seats CONVENED — the denominator `returned` must be read against.
+   * Optional because a run recorded by an engine older than the quorum fix has no such field;
+   * absent means "unknown", never "equal to `returned`" (FINDING-026 D).
+   */
+  | {
+      method: 'council';
+      winner: string;
+      agreement_pct: number;
+      returned: number;
+      seated?: number;
+      dissent: number;
+    }
   | { method: 'degraded'; reason: string }
   | { method: 'evaluator_distinct'; winner: string; was: string }
   | { method: 'tool' };
