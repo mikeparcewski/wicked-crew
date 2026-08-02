@@ -322,6 +322,22 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
+  // Enumerate live chats (FINDING-027 gap 4). Chat sessions deliberately outlive the page, and
+  // their ids are minted client-side — so before this route the only record of an orphaned seat
+  // lived in the tab that abandoned it, and an operator could not reclaim one without restarting
+  // the daemon. Registered BEFORE `/chats/:id` is irrelevant to fastify (it routes on the literal
+  // segment first), but the order reads the way the routes nest.
+  app.get(`${V}/chats`, async (_req, reply) => {
+    try {
+      return { chats: await adapter.chatList() };
+    } catch (err) {
+      // A wicked-core-ts predating the enumerate surface is a capability gap, not a bad request:
+      // 501 tells an operator to upgrade rather than to fix their call.
+      const msg = message(err);
+      return reply.code(/not yet supported/.test(msg) ? 501 : 400).send({ error: msg });
+    }
+  });
+
   app.get(`${V}/chats/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
