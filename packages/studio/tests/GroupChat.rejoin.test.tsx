@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { GroupChat } from '../src/components/GroupChat.js';
 
@@ -34,8 +34,16 @@ vi.mock('../src/api/client.js', () => ({
 }));
 
 // The component subscribes to the daemon's event stream for seat/delta frames. None of these cases
-// depend on a live socket, and opening one would make the suite time-dependent.
-vi.mock('../src/hooks/useEventStream.js', () => ({ useEventStream: () => undefined }));
+// depend on a live socket, and opening one would make the suite time-dependent. The handler is
+// captured rather than discarded so a test can deliver an exact frame at an exact moment — the
+// stale-frame case below is about WHICH chat a frame is attributed to, which is unobservable
+// without driving it directly.
+let onFrame: ((ev: unknown) => void) | undefined;
+vi.mock('../src/hooks/useEventStream.js', () => ({
+  useEventStream: (cb: (ev: unknown) => void) => {
+    onFrame = cb;
+  },
+}));
 
 beforeEach(() => {
   openChat.mockReset();
@@ -163,6 +171,62 @@ describe('GroupChat — chat reuse (FINDING-027)', () => {
 
     expect(openChat).not.toHaveBeenCalled();
     expect(screen.queryByTitle('warming'), 'no seat may be left warming after a rejoin').toBeNull();
+  });
+
+  /**
+   * The two tests below cover the window between a repo switch and the new repo's chat resolving.
+   * It is not a theoretical window: resolving a stored id costs a `getChat` round-trip, and until it
+   * answers, the component is showing repo B while holding repo A's chat id. `getChat` is left
+   * unresolved on purpose — that is the state under test, not a race to be waited out.
+   */
+  it('a frame from the previous repo cannot render under the new one', async () => {
+    sessionStorage.setItem('wicked.chat.r2', 'stored-b');
+    getChat.mockReturnValue(new Promise(() => undefined)); // the probe never answers
+
+    const { rerender } = render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    const idA = (openChat.mock.calls[0]?.[0] as { chatId: string }).chatId;
+
+    rerender(<GroupChat repoId="r2" onBack={() => undefined} />);
+    await waitFor(() => expect(getChat).toHaveBeenCalledWith('stored-b'));
+
+    // r1's chat is still live and its seats still emit. Attributed to r2, this is a seat chip for a
+    // chat the operator is no longer looking at.
+    //
+    // `act` is load-bearing, not ceremony: without it the frame's `setSeats` never flushes and the
+    // assertion passes whether the frame was accepted or rejected. Verified by mutation — with the
+    // reset removed this test failed only once the flush was forced.
+    await act(async () => {
+      onFrame?.({ type: 'chatSessionReady', chat: idA, cliKey: 'claude' });
+    });
+
+    expect(
+      screen.queryByTitle('ready'),
+      "a frame for r1's chat must not be accepted while showing r2",
+    ).toBeNull();
+  });
+
+  it('ending a chat mid-switch does not close the previous repo’s chat', async () => {
+    // The sharpest form of the misattribution: `closeChat` took the stale id while
+    // `clearStoredChatId` took the CURRENT repo — so it closed r1's chat, dropped r2's key, and left
+    // r1's stored key pointing at a chat that is now dead. Both repos end up wrong at once, and r1's
+    // seats are orphaned behind an id nothing references: the leak, reintroduced by a repo switch.
+    const user = userEvent.setup();
+    sessionStorage.setItem('wicked.chat.r2', 'stored-b');
+    getChat.mockReturnValue(new Promise(() => undefined));
+
+    const { rerender } = render(<GroupChat repoId="r1" onBack={() => undefined} />);
+    await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
+    const idA = (openChat.mock.calls[0]?.[0] as { chatId: string }).chatId;
+
+    rerender(<GroupChat repoId="r2" onBack={() => undefined} />);
+    await waitFor(() => expect(getChat).toHaveBeenCalledWith('stored-b'));
+
+    await user.click(screen.getByRole('button', { name: 'End chat' }));
+
+    expect(closeChat, "r1's chat must not be closed by ending r2").not.toHaveBeenCalled();
+    expect(sessionStorage.getItem('wicked.chat.r1')).toBe(idA);
+    expect(sessionStorage.getItem('wicked.chat.r2')).toBeNull();
   });
 
   it('End chat forgets the id, so the next mount starts clean instead of rejoining a closed chat', async () => {

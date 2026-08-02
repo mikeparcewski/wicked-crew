@@ -117,6 +117,16 @@ export function GroupChat({ repoId, onBack }: Props): React.ReactElement {
     setSeatErrors({});
     setOpenError(null);
     setEnded(false);
+    // The id goes too, and it is the one reset that is not cosmetic. Resolving the new repo's chat
+    // is ASYNC — a stored id costs a probe round-trip — and until it lands, a `chatId` still holding
+    // the PREVIOUS repo's chat is actively wrong in three places: the event-stream guard below would
+    // accept that chat's frames and render them under this repo; `send` would post this repo's
+    // message into it; and `endChat` would close it while clearing the NEW repo's stored key,
+    // orphaning the old chat's seats behind an id nothing points at any more — the exact leak this
+    // change exists to close. Null is the honest value for "which chat is this repo on": all three
+    // already treat it as not-ready and wait.
+    setChatId(null);
+    chatIdRef.current = null;
 
     // Started now so the network round-trip overlaps the probe below, but APPLIED only on the mint
     // path. Optimistic chips are a stand-in for an open that is in flight; after a rejoin there is
