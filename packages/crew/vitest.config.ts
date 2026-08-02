@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: false,
+    // Runs before every test file: redirects the workflow overlay dir away from the real
+    // ~/.config. See the file — the suite was writing into it.
+    setupFiles: ['./tests/setup/isolate-workflow-overlay.ts'],
     testTimeout: 30000,
     hookTimeout: 15000,
     reporters: ['verbose'],
