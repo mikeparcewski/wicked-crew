@@ -36,6 +36,12 @@ export function lostQuorum(r: CouncilRouting): boolean {
  * `dissent === 0` alone is NOT unanimity: a three-seat council reduced to one survivor records
  * zero dissent and 100% agreement, and calling that "unanimous" is precisely the false consensus
  * FINDING-026 D was filed against.
+ *
+ * The one case this still calls unanimous on `dissent === 0` is an UNKNOWN seat count — a run
+ * recorded before the engine carried `seated`. That is deliberate back-compat via
+ * {@link lostQuorum}: those runs have no quorum signal at all, so the choice is between the
+ * pre-fix reading and flagging every historical council as suspect. It keeps the old reading.
+ * Newly recorded runs always carry `seated`, so the carve-out shrinks to nothing over time.
  */
 export function isUnanimous(r: CouncilRouting): boolean {
   return r.dissent === 0 && !lostQuorum(r);

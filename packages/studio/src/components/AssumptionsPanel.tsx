@@ -9,7 +9,9 @@ interface Props {
 function routingSummary(r: NonNullable<UnitModel['routing']>): string {
   if (r.method === 'council') {
     // "unanimous" is reserved for a council that KEPT its quorum. Zero dissent among one
-    // surviving seat of three is silence, not agreement (FINDING-026 D).
+    // surviving seat of three is silence, not agreement (FINDING-026 D). The exception is a
+    // pre-fix run with no `seated` recorded: no quorum signal exists, so `isUnanimous` keeps
+    // the old reading rather than casting doubt on every historical council.
     if (isUnanimous(r)) return `council: ${r.winner} (unanimous)`;
     const agreement = `${r.dissent} dissent, ${r.agreement_pct}% agreement`;
     return lostQuorum(r)
