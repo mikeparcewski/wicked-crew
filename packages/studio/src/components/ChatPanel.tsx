@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { lostQuorum, quorumLabel } from './councilQuorum.js';
 import { api, downloadRunEvidence } from '../api/client.js';
 import type { SessionView, StageKind, UnitStatus } from '../api/types.js';
-import { isUnitExecuting } from '../api/run-state.js';
+import { executingOrd } from '../api/run-state.js';
 import { useGateStore } from '../store/gates.js';
 import { useRuntimeStore, outputKey } from '../store/runtime.js';
 import { STATUS_STYLE } from './RunCard.js';
@@ -547,6 +547,10 @@ function RunChat({
   onKill?: (runId: string) => void | Promise<void>;
 }): React.ReactElement {
   const { session, units } = view;
+  // Both derived once per render, not once per unit: the ord sort is what `unit_ix` indexes into,
+  // and it was previously re-run inside the unit loop for every unit (PR #179 review).
+  const ordered = useMemo(() => [...units].sort((a, b) => a.ord - b.ord), [units]);
+  const executingUnitOrd = useMemo(() => executingOrd(session, units), [session, units]);
   const gate = useGateStore((s) => s.gates[session.id]);
   const log = useRuntimeStore((s) => s.logs[session.id]) ?? [];
   const executorTypes = useRuntimeStore((s) => s.executorTypes);
@@ -668,7 +672,7 @@ function RunChat({
         </div>
 
         {/* Unit messages — gate panel injected inline before the unit it blocks */}
-        {[...units].sort((a, b) => a.ord - b.ord).flatMap((unit) => {
+        {ordered.flatMap((unit) => {
           const tc = transcripts[unit.ord];
           const stageBadge = STAGE_BADGE[unit.stage] ?? { bg: 'rgba(230,237,243,0.08)', color: 'rgba(230,237,243,0.5)' };
           const gateBeforeThis = session.status === 'awaiting_human' && gate?.ord === unit.ord;
@@ -774,7 +778,7 @@ function RunChat({
                   className="rounded-2xl px-5 py-4"
                   style={{ background: '#1b222e', border: '1px solid rgba(230,237,243,0.08)' }}
                 >
-                  {unit.status === 'distributed' && isUnitExecuting(session, units, unit) && (
+                  {unit.status === 'distributed' && unit.ord === executingUnitOrd && (
                     <div>
                       <div className="flex items-center gap-2 text-sm font-mono" style={{ color: 'rgba(230,237,243,0.5)' }}>
                         <span className="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#79c0ff' }} />
@@ -785,7 +789,7 @@ function RunChat({
                   )}
                   {/* Routed but not dispatched. `isTerminal` used to be the test here, which made
                       every queued unit of a merely PAUSED run claim to be working (FINDING-052). */}
-                  {unit.status === 'distributed' && !isUnitExecuting(session, units, unit) && (
+                  {unit.status === 'distributed' && unit.ord !== executingUnitOrd && (
                     <div className="flex items-center gap-2 text-sm font-mono" style={{ color: 'rgba(230,237,243,0.35)' }}>
                       <span>—</span>
                       <span>Not started</span>

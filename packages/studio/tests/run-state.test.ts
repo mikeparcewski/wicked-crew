@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { executingOrd, isUnitExecuting, unitsInFlight } from '../src/api/run-state.js';
+import { executingOrd, unitsInFlight } from '../src/api/run-state.js';
 import type { AgentSession, SessionStatus, SessionView, UnitStatus, WorkUnit } from '../src/api/types.js';
 
 function unit(ord: number, status: UnitStatus): WorkUnit {
@@ -60,17 +60,17 @@ describe('run-state', () => {
     // five routed-but-undispatched units rendered "Working…" with a live spinner.
     const view = parkedRun('awaiting_human');
     expect(executingOrd(view.session, view.units)).toBeNull();
-    for (const u of view.units) {
-      expect(isUnitExecuting(view.session, view.units, u)).toBe(false);
-    }
+    // Null is what the render compares `unit.ord` against, so no unit can match it.
+    expect(view.units.some((u) => u.ord === executingOrd(view.session, view.units))).toBe(false);
   });
 
   it('executes exactly the cursor unit while the run is executing', () => {
     const view = parkedRun('executing');
     // unit_ix is a 0-based index into the ord-ordered units, so cursor 1 is ord 2.
-    expect(executingOrd(view.session, view.units)).toBe(2);
-    expect(isUnitExecuting(view.session, view.units, view.units[1]!)).toBe(true);
-    expect(isUnitExecuting(view.session, view.units, view.units[2]!)).toBe(false);
+    const ord = executingOrd(view.session, view.units);
+    expect(ord).toBe(2);
+    // Exactly one unit of the plan draws as working.
+    expect(view.units.filter((u) => u.ord === ord)).toHaveLength(1);
   });
 
   it('never reports work in a state that precedes dispatch', () => {

@@ -35,12 +35,13 @@ export function executingOrd(session: AgentSession, units: WorkUnit[]): number |
   return cursor.ord;
 }
 
-/** True only for the one unit a run is actively executing. */
-export function isUnitExecuting(session: AgentSession, units: WorkUnit[], unit: WorkUnit): boolean {
-  return executingOrd(session, units) === unit.ord;
-}
-
-/** Units executing across a set of runs. At most one per run, so this is also the busy-run count. */
+/**
+ * Units executing across a set of runs. At most one per run, so this is also the busy-run count.
+ *
+ * One `executingOrd` per run, not per unit. There is deliberately no `isUnitExecuting(unit)` helper:
+ * the obvious way to use one is from inside a render loop, which re-sorts the plan for every unit it
+ * draws. Callers hoist the ord once and compare against it.
+ */
 export function unitsInFlight(views: SessionView[]): number {
   return views.reduce((sum, v) => sum + (executingOrd(v.session, v.units) === null ? 0 : 1), 0);
 }
