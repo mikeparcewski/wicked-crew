@@ -145,7 +145,9 @@ describe('POST /runs rejects fields it does not know (FINDING-031)', () => {
     expect(status).toBe(201);
     // 201 means ACCEPTED, not finished — the engine goes on executing this run and spooling its
     // events. Every other case here is a 400 that dispatches nothing, so this is the only one that
-    // outlives its own assertion, and teardown has to wait for it (see `afterAll`).
+    // outlives its own assertion. It has to be drained here, before the test returns: `afterAll`
+    // closes the adapter unconditionally, so an in-flight run would still be writing when the
+    // pump thread goes away.
     await waitForTerminal(HAPPY_PATH_ID);
   });
 });
