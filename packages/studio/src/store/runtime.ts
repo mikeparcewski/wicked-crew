@@ -43,6 +43,14 @@ function summarize(event: CoreEvent): string {
       return typeof event.agreementPct === 'number'
         ? `council voted — ${event.agreementPct}% agreement (${String(event.votes ?? '?')} votes)`
         : 'council voted';
+    case 'councilSeatFailed': {
+      const exit = typeof event.exitCode === 'number' ? ` (exit ${event.exitCode})` : '';
+      const why = (typeof event.stderr === 'string' && event.stderr.trim()) || (typeof event.detail === 'string' && event.detail.trim()) || '';
+      // The stderr is what this event exists to carry — but the log is one line, so trim it
+      // to the first line and cap it. The full capture stays on the frame.
+      const firstLine = why.split('\n')[0]?.slice(0, 160) ?? '';
+      return `seat ${String(event.cli ?? '?')} did not vote — ${String(event.kind ?? 'unreported')}${exit}${firstLine ? `: ${firstLine}` : ''}`;
+    }
     case 'unitExecuting':
       return 'executing';
     case 'gateDecided':
@@ -105,6 +113,26 @@ export interface CouncilStatus {
   round?: number;
   /** Deliberating only: the approval bar the council must reach, as a percent. */
   neededPct?: number;
+  /**
+   * Seats that were polled and did not vote, accumulated across the unit's ballots.
+   *
+   * Carried on the status — not only in the log — because it is the number that qualifies
+   * the vote: "100% agreement" over one surviving seat of three is not the same governance
+   * as 100% over three, and without this the two render identically.
+   */
+  failedSeats?: FailedSeat[];
+}
+
+/** One seat that was convened and did not vote (councilSeatFailed). */
+export interface FailedSeat {
+  /** Roster key of the seat. */
+  cli: string;
+  /** The named dispatch branch — `spawn_failed`, `non_zero_exit`, `timed_out`, … */
+  kind: string;
+  /** Exit code when the seat ran far enough to have one. */
+  exitCode?: number;
+  /** The seat's own stderr / OS error text, whichever was populated. */
+  why: string;
 }
 
 interface RuntimeStore {
@@ -184,6 +212,41 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
         return { seq, assumptions: { ...s.assumptions, [session]: [...prev, entry] } };
       }
 
+      // A seat that was polled and did not vote. Accumulated onto the unit's council status
+      // rather than replacing it: failures arrive between convened and voted, and the count of
+      // seats that dropped out is what makes the final agreement percentage readable.
+      if (event.type === 'councilSeatFailed' && typeof event.ord === 'number') {
+        const cKey = `${session}:${event.ord}`;
+        const prev = s.councilStatus[cKey];
+        const seat: FailedSeat = {
+          cli: typeof event.cli === 'string' ? event.cli : '?',
+          kind: typeof event.kind === 'string' ? event.kind : 'unreported',
+          ...(typeof event.exitCode === 'number' ? { exitCode: event.exitCode } : {}),
+          why:
+            (typeof event.stderr === 'string' && event.stderr.trim()) ||
+            (typeof event.detail === 'string' && event.detail.trim()) ||
+            '',
+        };
+        const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
+        entry.ord = event.ord;
+        const prevLog = s.logs[session] ?? [];
+        const nextLog = [...prevLog, entry];
+        if (nextLog.length > LOG_CAP) nextLog.splice(0, nextLog.length - LOG_CAP);
+        return {
+          seq,
+          councilStatus: {
+            ...s.councilStatus,
+            [cKey]: {
+              // A seat can fail before any convened frame is folded; default to 'convened'
+              // rather than dropping the failure on the floor.
+              ...(prev ?? { state: 'convened' as const }),
+              failedSeats: [...(prev?.failedSeats ?? []), seat],
+            },
+          },
+          logs: { ...s.logs, [session]: nextLog },
+        };
+      }
+
       // Council deliberation lifecycle → live per-unit status (also logged below via fall-through
       // is NOT used here: log the entry inline so the status map and log stay one atomic update).
       if (
@@ -209,6 +272,11 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
                   ...(typeof event.agreementPct === 'number' ? { agreementPct: event.agreementPct } : {}),
                   ...(typeof event.votes === 'number' ? { votes: event.votes } : {}),
                 };
+        // Each lifecycle frame replaces the status, but the failed seats accumulated so far
+        // must survive it. Seats fail BEFORE the vote, so dropping them here would erase them
+        // at exactly the moment the agreement percentage needs qualifying.
+        const carried = s.councilStatus[cKey]?.failedSeats;
+        if (carried !== undefined && carried.length > 0) status.failedSeats = carried;
         const entry: LoggedEvent = { seq, type: event.type, ts: Date.now(), detail: summarize(event) };
         entry.ord = event.ord;
         if (typeof event.attempt === 'number') entry.attempt = event.attempt;
