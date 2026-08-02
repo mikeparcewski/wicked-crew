@@ -128,6 +128,39 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 // repo-graph, domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
 // Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
 // the wicked-core-ts NAPI methods land.
+/**
+ * The ids wicked-core seeds itself, in `WorkflowRegistry::with_defaults()`.
+ *
+ * These are NEVER written to core's overlay dir. A file there shadows the compiled built-in
+ * *wholesale* — `register` overwrites by id and `load_dir` runs after `with_defaults` — so writing
+ * this hand-transcribed mirror over the real def silently replaces it with a copy missing whatever
+ * the def has grown since the mirror was transcribed. That is not hypothetical: the mirror predated
+ * the evidence floors, so the write took `validator_pin` back off `feature.adversarial-review`,
+ * `bug.verify` and `migration.verify` — the entire content of core's gate-floor change, undone by a
+ * file write, with no error and a workflow still reporting the right id and phases (FINDING-049).
+ *
+ * The write exists for the ids core does NOT seed (chat, repo-graph, survey-repo,
+ * domain-graph-slice, memories, domain-extraction): for those the overlay is the only reason they
+ * resolve at all, so it stays. `onboarding` is seeded by core but still written on the onboarding
+ * path — deliberately, and with a def whose executor cmds are baked with runtime `--db` paths. That
+ * is a real customization, not a stale copy, and it is the one shadow that earns its keep.
+ */
+const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
+
+/**
+ * The content-address of core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`),
+ * carried on the Evaluator phase of feature/bug/migration.
+ *
+ * Duplicating a hash is a real cost, paid because the alternative is worse. What `listWorkflows()`
+ * serves IS what `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads
+ * as "this phase is ungated" — the opposite of the truth for the three phases core gates. Reporting
+ * a gate that exists is the honest failure direction; the drift guard in
+ * `tests/armed-workflow-served.test.ts` fails loudly on a developer machine the moment core's value
+ * moves. This is display only: as of FINDING-049 these defs are never written to core's overlay dir
+ * (see CORE_SEEDED_WORKFLOWS), so a stale value here cannot reach the engine.
+ */
+const EVIDENCE_FLOOR_PIN = '2fcde907d57f3ee2';
+
 const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
     id: 'chat',
@@ -151,7 +184,7 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'clarify', kind: 'recon', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'design', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['clarify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'build', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['design'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'adversarial-review', kind: 'review', gate_type: 'execution', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['build'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'adversarial-review', kind: 'review', gate_type: 'execution', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['build'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'test', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['build'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'review', kind: 'review', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['test'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
@@ -162,7 +195,7 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'triage', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'reproduce', kind: 'test', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['triage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'fix', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
     ],
   },
   {
@@ -171,7 +204,7 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'plan', kind: 'recon', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'execute', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['plan'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'cutover', kind: 'build', gate_type: 'execution', gate: { human_confirm: { unconditional: true } }, executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['execute'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
@@ -371,11 +404,17 @@ export class CoreAdapter {
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
     if (input.workflow !== undefined) {
       opts.workflow = input.workflow;
-      // Ensure built-in workflow definitions are present in the Rust overlay dir on first use.
+      // Ensure DROP-IN workflow definitions are present in the Rust overlay dir on first use.
       // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
       // which would duplicate them in listWorkflows(). The write is skipped after the first call
       // per process lifetime.
-      const builtinDef = BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
+      //
+      // Ids core seeds itself are excluded: writing them shadows the real def with this stale
+      // mirror — see CORE_SEEDED_WORKFLOWS. Core resolves those from its own registry, so there is
+      // nothing to write and never was.
+      const builtinDef = CORE_SEEDED_WORKFLOWS.has(input.workflow)
+        ? undefined
+        : BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
       if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
         // Mark before await so concurrent launchRun() calls for the same builtin
         // don't both pass the has() check and race to write the same file.
@@ -629,11 +668,13 @@ export class CoreAdapter {
         ),
       };
       // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
+      //
+      // This is the one place a core-seeded id is deliberately shadowed, and the shadow is the
+      // point: `def` differs from core's `onboarding` only in carrying executor cmds baked with
+      // this repo's resolved `--db` path. `launchRun` below no longer writes core-seeded ids
+      // (CORE_SEEDED_WORKFLOWS), so nothing clobbers this write with the static mirror afterwards —
+      // which it previously did, in the window between here and the engine resolving the workflow.
       await this._writeBuiltinOverlay(def);
-      // Mark the builtin as written BEFORE launchRun: its generic once-guard would otherwise
-      // see 'onboarding' as unwritten and clobber the baked def with the static mirror in the
-      // window between this write and the engine resolving the workflow (observed live).
-      this._builtinOverlayWritten.add('onboarding');
       await this.launchRun({
         problem: `Onboard repository: ${repoName}`,
         sessionId: runId,
