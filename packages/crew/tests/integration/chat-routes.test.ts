@@ -93,7 +93,13 @@ describe('chat routes (stub engine)', () => {
       // The stub engine opens no chats, so the honest answer is an empty list — not an error.
       expect(body.chats).toEqual([]);
     } else {
-      expect(body.error ?? '').toMatch(/not yet supported/i);
+      // Two deployments reach 501 and they word it differently: an addon predating the binding
+      // ("not yet supported by this wicked-core build") and an engine spawned without the ACP
+      // runner ("chat unsupported: …"), which has the binding and refuses when called. Pinning one
+      // phrasing made the other fail the message assertion after it had correctly reached 501, so
+      // what is pinned is the property that matters to an operator — the body names the missing
+      // capability rather than blaming their request.
+      expect(body.error ?? '').toMatch(/(not yet supported|unsupported)/i);
     }
   });
 });

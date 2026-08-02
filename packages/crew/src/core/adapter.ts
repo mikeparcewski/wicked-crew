@@ -116,7 +116,20 @@ type ChatMethods = {
   chatList?(): Promise<string>;
 };
 
-type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods;
+/** The durable event log's read half (core#139 / FINDING-014). */
+type EventLogMethods = {
+  /**
+   * A run's recorded events, oldest first, as a JSON array. Each entry is the same tagged object
+   * `/ws` carries plus a capture-time `ts` and an ordering `seq`.
+   *
+   * Optional for the same reason as `retirePolicy` above, and not hypothetically: the addon
+   * currently installed in `node_modules` predates this binding, so a required declaration would
+   * type away the guard that keeps this daemon running against it.
+   */
+  runEvents?(runId: string): Promise<string>;
+};
+
+type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods & EventLogMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
@@ -288,6 +301,28 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     ],
   },
 ];
+
+/**
+ * Chat is not available in this deployment at all — a capability gap, never a bad request.
+ *
+ * It arrives two ways and both mean the same thing to an operator: the addon predates the binding
+ * (no method to call), or the engine was spawned without the ACP runner and says so when called.
+ * Only the first is knowable before the call, which is why this is a thrown type rather than a
+ * capability flag.
+ *
+ * Typed rather than left to the caller to sniff out of the message text: the route used to regex
+ * the message for one of the two phrasings, so the other fell through to `400` and told an operator
+ * to fix a request that was already correct.
+ */
+export class ChatUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChatUnsupportedError';
+  }
+}
+
+/** The engine's own way of reporting a build that cannot do chat, raised at call time. */
+const ENGINE_CHAT_UNSUPPORTED = /chat unsupported/i;
 
 /** One live chat on the enumerate surface — see {@link CoreAdapter.chatList}. */
 export interface ChatSummary {
@@ -466,6 +501,20 @@ export class CoreAdapter {
     return this.core.injectWorkerMessage(runId, message, target);
   }
 
+  /**
+   * A run's recorded event history, oldest first — or `null` when this wicked-core build has no
+   * event-log read binding.
+   *
+   * `null` rather than `[]` on purpose. An empty history is a real, ordinary answer (a run that
+   * emitted nothing, or one predating the log), and collapsing "nothing happened" into "I cannot
+   * tell you what happened" is how a missing capability gets reported to an operator as an absent
+   * gate — the FINDING-050 shape, distinct causes wearing one message. Callers branch on it.
+   */
+  async runEvents(runId: string): Promise<CoreEvent[] | null> {
+    if (typeof this.core.runEvents !== 'function') return null;
+    return JSON.parse(await this.core.runEvents(runId)) as CoreEvent[];
+  }
+
   /** Run ids on the store. */
   async sessions(): Promise<string[]> {
     return JSON.parse(await this.core.sessions()) as string[];
@@ -552,9 +601,19 @@ export class CoreAdapter {
   async chatList(): Promise<ChatSummary[]> {
     const list = this.core.chatList;
     if (typeof list !== 'function') {
-      throw new Error('Listing chats is not yet supported by this wicked-core build');
+      throw new ChatUnsupportedError('Listing chats is not yet supported by this wicked-core build');
     }
-    return JSON.parse(await list.call(this.core)) as ChatSummary[];
+    try {
+      return JSON.parse(await list.call(this.core)) as ChatSummary[];
+    } catch (err) {
+      // A build without the ACP runner has the binding and refuses at call time, so the presence
+      // check above cannot catch it. Classified here rather than at the route because this file is
+      // the only one that touches the addon (DES-STUDIO-001 §5.2) — matching engine wording anywhere
+      // else would spread that coupling.
+      const text = err instanceof Error ? err.message : String(err);
+      if (ENGINE_CHAT_UNSUPPORTED.test(text)) throw new ChatUnsupportedError(text);
+      throw err;
+    }
   }
 
   async chatClose(chatId: string): Promise<void> {

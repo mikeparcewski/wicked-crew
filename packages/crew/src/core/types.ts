@@ -155,8 +155,26 @@ export interface CoreEvent {
   message?: string;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
-  /** `terminalOutput`: monotonic per-terminal sequence number. */
+  /**
+   * A monotonic counter — but of WHAT depends on where the event came from, and the two never
+   * appear together, so there is exactly one right reading per event:
+   *
+   * - **live `/ws` frame** — `terminalOutput` only, and it counts within that one terminal
+   *   (`actor.rs` `TerminalState::next_seq`). Two terminals both start at 0; comparing their `seq`
+   *   values means nothing.
+   * - **entry from `runEvents`** — the durable log's own envelope counter, process-wide and stamped
+   *   at emit (`event_log.rs` `SEQ`), which is what `read_run` sorts on. It totals-orders a run,
+   *   which `ts` alone cannot: a burst from one actor turn shares a millisecond.
+   *
+   * They cannot collide, because `terminalOutput` is classed high-volume and is **never written to
+   * the log** — so no payload ever carries both meanings. What that does forbid is merging the two
+   * sources and sorting the result on this field: a live per-terminal 3 is not comparable to a
+   * replayed envelope 4700. Sort a replay by `seq`; order live frames by arrival, per terminal id.
+   */
   seq?: number;
+  /** Capture time, epoch millis. Present ONLY on entries replayed from the durable event log
+   *  (`runEvents`); live `/ws` frames are not stamped, because for those the arrival IS the time. */
+  ts?: number;
   /** `terminalOutput`: raw PTY bytes, base64-encoded (decode → send to the owning socket). */
   bytesB64?: string;
   /** `terminalOpened`: the working directory the PTY was opened in. */
