@@ -43,9 +43,20 @@ describe('councilQuorum', () => {
   it('reports an unknown seat count as unknown, never as lost or as healthy', () => {
     // Runs recorded before the engine carried `seated`. Inferring `seated === returned` would
     // relabel every historical collapsed council as a complete one.
-    // `seated` is OMITTED, not set to undefined — `exactOptionalPropertyTypes` is on, and the
-    // wire shape is a field that is absent from the JSON, not one present and null.
+    // `seated` is OMITTED, not set to undefined — `exactOptionalPropertyTypes` is on.
     const r = council({ returned: 1, dissent: 0 });
+    expect(quorumLabel(r)).toBe('1 polled');
+    expect(lostQuorum(r)).toBe(false);
+    expect(isUnanimous(r)).toBe(true);
+  });
+
+  it('reads an explicit null seat count the same as an absent one', () => {
+    // This is the shape the LIVE API sends, and it is the one an `=== undefined` guard misses.
+    // The routing artifact's `seated` is a Rust `Option<u32>` with no `skip_serializing_if`, and
+    // the run view reserializes every unit it loads — so a council recorded before the field
+    // existed comes back over the wire as `"seated": null`, not as a missing key. Guarding on
+    // `=== undefined` rendered that as "1 of null seats".
+    const r = council({ returned: 1, seated: null, dissent: 0 });
     expect(quorumLabel(r)).toBe('1 polled');
     expect(lostQuorum(r)).toBe(false);
     expect(isUnanimous(r)).toBe(true);

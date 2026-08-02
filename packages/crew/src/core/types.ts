@@ -38,15 +38,19 @@ export type HumanConfirm = 'none' | 'all' | { before: number };
 export type RoutingInfo =
   /**
    * `seated` is the seats CONVENED — the denominator `returned` must be read against.
-   * Optional because a run recorded by an engine older than the quorum fix has no such field;
-   * absent means "unknown", never "equal to `returned`" (FINDING-026 D).
+   * Unknown on a run recorded by an engine older than the quorum fix; unknown means exactly that,
+   * never "equal to `returned`" (FINDING-026 D).
+   *
+   * `number | null` AND optional because unknown arrives in both shapes: the engine serializes the
+   * artifact's `Option<u32>` as an explicit `null`, and a payload predating the field has no key.
+   * Test it with `== null` so both are covered.
    */
   | {
       method: 'council';
       winner: string;
       agreement_pct: number;
       returned: number;
-      seated?: number;
+      seated?: number | null;
       dissent: number;
     }
   | { method: 'degraded'; reason: string }

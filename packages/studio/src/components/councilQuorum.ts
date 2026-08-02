@@ -10,12 +10,16 @@ export type CouncilRouting = Extract<RoutingInfo, { method: 'council' }>;
  * council that lost two seats, and only `seated` separates them (FINDING-026 D). Every surface
  * that shows one of these numbers goes through here so they cannot drift apart.
  *
- * `seated` is absent on runs recorded by an engine older than the quorum fix. That reads as
+ * `seated` is unknown on runs recorded by an engine older than the quorum fix. That reads as
  * UNKNOWN — the label falls back to the old wording rather than inventing `seated === returned`,
  * which would relabel every historical collapsed council as a healthy one.
+ *
+ * `== null`, deliberately loose: unknown arrives as an explicit `null` from the live engine and as
+ * an absent key from anything older, and both mean the same thing here. `=== undefined` would miss
+ * the null and render "1 of null seats".
  */
 export function quorumLabel(r: CouncilRouting): string {
-  return r.seated === undefined ? `${r.returned} polled` : `${r.returned} of ${r.seated} seats`;
+  return r.seated == null ? `${r.returned} polled` : `${r.returned} of ${r.seated} seats`;
 }
 
 /**
@@ -26,7 +30,7 @@ export function quorumLabel(r: CouncilRouting): string {
  * `false` when `seated` is unknown. An unknown quorum must not be reported as a lost one.
  */
 export function lostQuorum(r: CouncilRouting): boolean {
-  return r.seated !== undefined && r.returned * 2 <= r.seated;
+  return r.seated != null && r.returned * 2 <= r.seated;
 }
 
 /**
