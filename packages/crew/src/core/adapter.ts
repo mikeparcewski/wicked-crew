@@ -21,7 +21,7 @@ import type {
   SystemSettings,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
-import { codeGraphDb, requirementsGraph } from './repoPaths.js';
+import { codeGraphDb } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -198,7 +198,12 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'domain', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      // index → annotate, and NOT a third `domain` phase running `wicked-core domain-graph`. That
+      // phase could never pass: domain-graph fails closed below 1.0 front-half coverage, and nothing
+      // in this workflow annotates a single symbol, so coverage was 0.0 on every repo — every
+      // registration ended sessionFailed after the two phases that matter had both succeeded
+      // (FINDING-068). domain-graph belongs to `domain-extraction`, downstream of the agentic
+      // extract+coverage phases that produce its precondition. Mirrors core's `onboarding_def()`.
     ],
   },
   {
@@ -747,14 +752,9 @@ export class CoreAdapter {
       if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
       const dbPath = codeGraphDb(repoEntry);
       const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
-      const requirementsGraphPath = requirementsGraph(repoEntry);
       const CMDS: Record<string, string[]> = {
         index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
         annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
-        // The real domain front-end (writes what /repos/:id/domain-graph reads). Fails
-        // closed with an actionable message until the domain-extraction front-half has
-        // annotated the graph — that message surfacing in the unit output is correct.
-        domain: ['wicked-core', 'domain-graph', '--db', dbPath, '--out', requirementsGraphPath],
       };
       const def: WorkflowDef = {
         ...base,
