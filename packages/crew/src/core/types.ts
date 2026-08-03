@@ -110,6 +110,14 @@ export interface RepoEntry {
   registered_at: number;
   /** Remote git URL the repo was cloned from (undefined for locally-registered repos). */
   git_url?: string;
+  /**
+   * ABSOLUTE path of this repo's code graph, resolved by the engine (wicked-core#170).
+   *
+   * Optional in the TYPE, mandatory in practice: an addon predating the field omits it, and
+   * `codeGraphDb()` in `repoPaths.ts` is where that turns into a loud error. Never join this path
+   * yourself — six independent spellings is what FINDING-069 was.
+   */
+  code_graph_db?: string;
 }
 
 /** The run id of the onboarding run started when a repo was registered. */

@@ -23,7 +23,10 @@
  * regeneration and keeps provenance honest (`riskSource: operator` vs `data`).
  */
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
+
+import { codeGraphDb, requirementsGraph, requirementsOverrides } from '../core/repoPaths.js';
+import type { RepoEntry } from '../core/types.js';
 
 interface ArtifactRequirement {
   title?: string;
@@ -112,16 +115,9 @@ const RISK_PREFIX = '[RISK]';
  * 15k-row index per keystroke; a fresh-enough index is authoritative for this long. */
 const REBUILD_TTL_MS = 5_000;
 
-function storePath(rootPath: string): string {
-  return join(rootPath, '.codegraph', 'estate.db');
-}
-
-function artifactPath(rootPath: string): string {
-  return join(rootPath, '.wicked-estate', 'requirements', 'requirements_graph.json');
-}
-function overridesPath(rootPath: string): string {
-  return join(rootPath, '.wicked-estate', 'requirements', 'requirements_overrides.json');
-}
+// Paths come from `repoPaths` — this module used to spell the code-graph path itself, which is
+// one of the five copies FINDING-069 was made of. It takes the whole `RepoEntry` rather than a
+// root path for exactly that reason: a bare string is an invitation to re-derive.
 
 async function mtimeMs(path: string): Promise<number> {
   try {
@@ -131,9 +127,9 @@ async function mtimeMs(path: string): Promise<number> {
   }
 }
 
-async function readOverrides(rootPath: string): Promise<Record<string, RequirementOverride>> {
+async function readOverrides(repo: RepoEntry): Promise<Record<string, RequirementOverride>> {
   try {
-    const raw = await readFile(overridesPath(rootPath), 'utf8');
+    const raw = await readFile(requirementsOverrides(repo), 'utf8');
     const parsed: unknown = JSON.parse(raw);
     return typeof parsed === 'object' && parsed !== null
       ? (parsed as Record<string, RequirementOverride>)
@@ -181,18 +177,18 @@ interface StoreRow {
 /** Build the index from the LIVE estate store (read-only). Returns null when the
  * store can't serve (no db, no sqlite builtin, schema mismatch) — caller falls back. */
 async function buildStoreIndex(
-  rootPath: string,
+  repo: RepoEntry,
   sourceMtime: number,
   ovMtime: number,
 ): Promise<RepoIndex | null> {
   const mod = await sqlite();
   if (mod === null) return null;
-  const overrides = await readOverrides(rootPath);
+  const overrides = await readOverrides(repo);
   let db: SqliteDatabase | null = null;
   const entries: IndexEntry[] = [];
   const byKey = new Map<string, IndexEntry>();
   try {
-    db = new mod.DatabaseSync(storePath(rootPath), { readOnly: true });
+    db = new mod.DatabaseSync(codeGraphDb(repo), { readOnly: true });
     const rules = new Map<number, { statement: string; confidence: number | null }[]>();
     for (const r of db
       .prepare("SELECT node_sym, value, confidence FROM annotations WHERE key LIKE 'RULE-%'")
@@ -262,16 +258,17 @@ async function buildStoreIndex(
   };
 }
 
-async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
+async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
+  const db = codeGraphDb(repo);
   const [dbMtime, walMtime, artMtime, ovMtime] = await Promise.all([
-    mtimeMs(storePath(rootPath)),
-    mtimeMs(`${storePath(rootPath)}-wal`),
-    mtimeMs(artifactPath(rootPath)),
-    mtimeMs(overridesPath(rootPath)),
+    mtimeMs(db),
+    mtimeMs(`${db}-wal`),
+    mtimeMs(requirementsGraph(repo)),
+    mtimeMs(requirementsOverrides(repo)),
   ]);
   const storeMtime = Math.max(dbMtime, walMtime);
 
-  const cached = cache.get(rootPath);
+  const cached = cache.get(repo.root_path);
   // TTL applies ONLY to store-built indexes: extraction WAL churn changes the db
   // mtime every few seconds and must not trigger a rebuild per request. Artifact
   // mtime changes only on regen, so artifact-built indexes always mtime-check.
@@ -282,9 +279,9 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
       cached.builtAtMs = Date.now();
       return cached;
     }
-    const fromStore = await buildStoreIndex(rootPath, storeMtime, ovMtime);
+    const fromStore = await buildStoreIndex(repo, storeMtime, ovMtime);
     if (fromStore !== null) {
-      cache.set(rootPath, fromStore);
+      cache.set(repo.root_path, fromStore);
       return fromStore;
     }
   }
@@ -294,9 +291,9 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
     return cached;
   }
 
-  const raw = await readFile(artifactPath(rootPath), 'utf8');
+  const raw = await readFile(requirementsGraph(repo), 'utf8');
   const graph = JSON.parse(raw) as { domains?: Record<string, ArtifactDomain> };
-  const overrides = await readOverrides(rootPath);
+  const overrides = await readOverrides(repo);
 
   const entries: IndexEntry[] = [];
   const byKey = new Map<string, IndexEntry>();
@@ -349,7 +346,7 @@ async function buildIndex(rootPath: string): Promise<RepoIndex | null> {
     builtAtMs: Date.now(),
     total: entries.length,
   };
-  cache.set(rootPath, index);
+  cache.set(repo.root_path, index);
   return index;
 }
 
@@ -380,10 +377,10 @@ export interface RequirementsPage {
 
 /** Tokenized AND-match: every whitespace-separated term must appear in the haystack. */
 export async function listRequirements(
-  rootPath: string,
+  repo: RepoEntry,
   query: RequirementsQuery,
 ): Promise<RequirementsPage | null> {
-  const index = await buildIndex(rootPath);
+  const index = await buildIndex(repo);
   if (index === null) return null;
   const terms = (query.q ?? '')
     .toLowerCase()
@@ -410,13 +407,13 @@ export async function listRequirements(
 }
 
 export async function getRequirement(
-  rootPath: string,
+  repo: RepoEntry,
   key: string,
 ): Promise<RequirementDetail | null> {
-  const index = await buildIndex(rootPath);
+  const index = await buildIndex(repo);
   const entry = index?.byKey.get(key);
   if (index === null || entry === undefined) return null;
-  const overrides = await readOverrides(rootPath);
+  const overrides = await readOverrides(repo);
   const ov = overrides[key];
   const src = entry.source;
   return {
@@ -435,26 +432,26 @@ export async function getRequirement(
 
 /** Merge a patch into the overrides sidecar (atomic write) and return the fresh detail. */
 export async function patchRequirement(
-  rootPath: string,
+  repo: RepoEntry,
   key: string,
   patch: RequirementOverride,
 ): Promise<RequirementDetail | null> {
-  const index = await buildIndex(rootPath);
+  const index = await buildIndex(repo);
   if (index === null || !index.byKey.has(key)) return null;
-  const overrides = await readOverrides(rootPath);
+  const overrides = await readOverrides(repo);
   const next: RequirementOverride = { ...overrides[key] };
   if (patch.title !== undefined) next.title = patch.title;
   if (patch.notes !== undefined) next.notes = patch.notes;
   if (patch.status !== undefined) next.status = patch.status;
   if (patch.risk !== undefined) next.risk = patch.risk;
   overrides[key] = next;
-  const path = overridesPath(rootPath);
+  const path = requirementsOverrides(repo);
   await mkdir(dirname(path), { recursive: true });
   // Collision-proof temp name: pid alone can collide for concurrent in-process
   // patches; a monotonic per-process counter disambiguates.
   const tmp = `${path}.tmp-${process.pid}-${++tmpSeq}`;
   await writeFile(tmp, JSON.stringify(overrides, null, 2), 'utf8');
   await rename(tmp, path);
-  cache.delete(rootPath); // next read rebuilds with the new overrides
-  return getRequirement(rootPath, key);
+  cache.delete(repo.root_path); // next read rebuilds with the new overrides
+  return getRequirement(repo, key);
 }

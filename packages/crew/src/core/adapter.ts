@@ -21,6 +21,7 @@ import type {
   SystemSettings,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
+import { codeGraphDb, requirementsGraph } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -734,21 +735,19 @@ export class CoreAdapter {
   private async _doOnboardingLaunch(repoId: string, repoName: string, runId: string): Promise<void> {
     {
       // Bake THIS repo's absolute paths into the onboarding def (core#120). The static def's
-      // relative commands are triple-wrong at runtime: the run's workdir is the per-run WORKTREE
-      // (not the root the graph endpoint reads), and estate's default db location/name
-      // (.wicked-estate/graph.db) differs from the endpoint's (.codegraph/estate.db). Rewritten
-      // per launch and hot-registered so the running actor sees it — never restart-dependent.
+      // relative commands are wrong at runtime: the run's workdir is the per-run WORKTREE, not the
+      // root the graph endpoint reads, and estate's default db location (.wicked-estate/graph.db) is
+      // not where the engine looks. Rewritten per launch and hot-registered so the running actor sees
+      // it — never restart-dependent.
+      //
+      // The db path comes from the ENGINE's record now. Hand-joining it here is what made the indexed
+      // graph and the graph the worker queried two different files (FINDING-069).
       const repoEntries = await this.listRepos();
       const repoEntry = repoEntries.find((r) => r.id === repoId);
       if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
-      const dbPath = join(repoEntry.root_path, '.codegraph', 'estate.db');
+      const dbPath = codeGraphDb(repoEntry);
       const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
-      const requirementsGraphPath = join(
-        repoEntry.root_path,
-        '.wicked-estate',
-        'requirements',
-        'requirements_graph.json',
-      );
+      const requirementsGraphPath = requirementsGraph(repoEntry);
       const CMDS: Record<string, string[]> = {
         index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
         annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
