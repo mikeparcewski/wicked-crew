@@ -368,6 +368,14 @@ export interface RequirementsPage {
   offset: number;
   limit: number;
   items: RequirementSummary[];
+  /**
+   * Which of the two sources served this corpus. The module header explains why that
+   * matters operationally — the artifact is an evidence-gated snapshot that can lag the
+   * live store by hours, and a UI serving stale placeholder titles while the store held
+   * thousands of validated statements is an observed failure, not a hypothetical. Without
+   * this the caller cannot tell which one it is looking at. (FINDING-065)
+   */
+  source: 'store' | 'artifact';
 }
 
 /** Tokenized AND-match: every whitespace-separated term must appear in the haystack. */
@@ -397,6 +405,7 @@ export async function listRequirements(
     offset: query.offset,
     limit: query.limit,
     items: matched.slice(query.offset, query.offset + query.limit),
+    source: index.fromStore ? 'store' : 'artifact',
   };
 }
 

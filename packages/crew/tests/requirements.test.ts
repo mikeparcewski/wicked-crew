@@ -90,6 +90,15 @@ describe('requirements service', () => {
     expect(await listRequirements(empty, { offset: 0, limit: 10 })).toBeNull();
   });
 
+  // FINDING-065. The two sources are not interchangeable: the artifact is an evidence-gated
+  // snapshot that regenerates only when `domain-graph` clears its coverage bar, so it can lag
+  // the live store by hours. A caller that cannot tell which one answered cannot tell stale
+  // from current — the exact confusion this module's header records as already observed.
+  it('names which source served the corpus', async () => {
+    const page = await listRequirements(root, { offset: 0, limit: 50 });
+    expect(page!.source).toBe('artifact');
+  });
+
   it('whitespace-only statements are dropped at the service boundary', async () => {
     const { patchRequirement: _ } = await import('../src/api/requirements.js');
     // Fixture REQ-001 in auth/session has a real statement; simulate a blank one via a
@@ -285,6 +294,9 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
     );
     const page = await listRequirements(root, { offset: 0, limit: 10 });
     expect(page!.items.some((i) => i.title === 'OLD.md')).toBe(false);
+    // …and it SAYS the store won. Content assertions alone can't distinguish "served the
+    // store" from "served an artifact that happens to agree" (FINDING-065).
+    expect(page!.source).toBe('store');
     const key = page!.items.find((i) => i.title === 'refund')!.key;
     const patched = await patchRequirement(root, key, { risk: false, notes: 'reviewed' });
     expect(patched!.risk).toBe(false);
