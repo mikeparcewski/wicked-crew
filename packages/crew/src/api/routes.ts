@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ChatUnsupportedError, CoreAdapter } from '../core/adapter.js';
+import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
@@ -708,8 +709,8 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
-    const graphPath = join(repo.root_path, '.wicked-estate', 'requirements', 'requirements_graph.json');
-    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    const graphPath = requirementsGraph(repo);
+    const dbPath = codeGraphDb(repo);
 
     // Coverage from the live estate store — computed by wicked-core governance layer.
     let coverage: unknown = null;
@@ -756,7 +757,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid query'));
     }
-    const page = await listRequirements(repo.root_path, parsed.data);
+    const page = await listRequirements(repo, parsed.data);
     if (page === null) {
       return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
     }
@@ -774,7 +775,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await getRequirement(repo.root_path, decoded);
+    const detail = await getRequirement(repo, decoded);
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -807,7 +808,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await patchRequirement(repo.root_path, decodedKey, parsed.data);
+    const detail = await patchRequirement(repo, decodedKey, parsed.data);
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -818,7 +819,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
-    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    const dbPath = codeGraphDb(repo);
     if (!existsSync(dbPath)) {
       return reply.send({ graph: null });
     }
@@ -873,7 +874,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
-    const dbPath = join(repo.root_path, '.codegraph', 'estate.db');
+    const dbPath = codeGraphDb(repo);
     if (!existsSync(dbPath)) {
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }

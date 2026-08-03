@@ -12,6 +12,25 @@ import {
   getRequirement,
   patchRequirement,
 } from '../src/api/requirements.js';
+import type { RepoEntry } from '../src/core/types.js';
+
+/**
+ * A registered repo rooted at `root`.
+ *
+ * The service takes the whole entry rather than a root path, because `code_graph_db` is resolved by
+ * the engine and never re-derived here — that re-derivation is what FINDING-069 was. These fixtures
+ * point it at a path that does not exist, which is the artifact-fallback case they exercise.
+ */
+function repoAt(root: string): RepoEntry {
+  return {
+    id: 'fixture',
+    name: 'fixture',
+    root_path: root,
+    default_branch: 'main',
+    registered_at: 0,
+    code_graph_db: join(root, '.codegraph', 'estate.db'),
+  };
+}
 
 async function fixtureRepo(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'req-svc-'));
@@ -78,7 +97,7 @@ describe('requirements service', () => {
   });
 
   it('lists the whole corpus with pagination metadata', async () => {
-    const page = await listRequirements(root, { offset: 0, limit: 50 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
     expect(page).not.toBeNull();
     expect(page!.corpus).toBe(3);
     expect(page!.total).toBe(3);
@@ -87,7 +106,7 @@ describe('requirements service', () => {
 
   it('returns null when the artifact has not been generated', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'req-empty-'));
-    expect(await listRequirements(empty, { offset: 0, limit: 10 })).toBeNull();
+    expect(await listRequirements(repoAt(empty), { offset: 0, limit: 10 })).toBeNull();
   });
 
   // FINDING-065. The two sources are not interchangeable: the artifact is an evidence-gated
@@ -95,7 +114,7 @@ describe('requirements service', () => {
   // the live store by hours. A caller that cannot tell which one answered cannot tell stale
   // from current — the exact confusion this module's header records as already observed.
   it('names which source served the corpus', async () => {
-    const page = await listRequirements(root, { offset: 0, limit: 50 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
     expect(page!.source).toBe('artifact');
   });
 
@@ -104,38 +123,38 @@ describe('requirements service', () => {
     // Fixture REQ-001 in auth/session has a real statement; simulate a blank one via a
     // fresh fixture write is heavier than needed — assert the mapping contract directly:
     // a summary statement is never whitespace (trimmed or empty).
-    const page = await listRequirements(root, { offset: 0, limit: 50 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 50 });
     for (const item of page!.items) {
       expect(item.statement).toBe(item.statement.trim());
     }
   });
 
   it('search matches the actual rule STATEMENTS, not just titles', async () => {
-    const hit = await listRequirements(root, { q: 'jurisdiction applied', offset: 0, limit: 10 });
+    const hit = await listRequirements(repoAt(root), { q: 'jurisdiction applied', offset: 0, limit: 10 });
     expect(hit!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
     expect(hit!.items[0]!.statement).toBe('sum then tax');
   });
 
   it('search is tokenized AND-match across id, domain, title, description', async () => {
-    const tax = await listRequirements(root, { q: 'tax jurisdiction', offset: 0, limit: 10 });
+    const tax = await listRequirements(repoAt(root), { q: 'tax jurisdiction', offset: 0, limit: 10 });
     expect(tax!.items.map((i) => i.reqId)).toEqual(['REQ-001']);
-    const cross = await listRequirements(root, { q: 'session timeout', offset: 0, limit: 10 });
+    const cross = await listRequirements(repoAt(root), { q: 'session timeout', offset: 0, limit: 10 });
     expect(cross!.items.map((i) => i.domain)).toEqual(['auth/session']);
-    const none = await listRequirements(root, { q: 'tax session', offset: 0, limit: 10 });
+    const none = await listRequirements(repoAt(root), { q: 'tax session', offset: 0, limit: 10 });
     expect(none!.total).toBe(0); // AND semantics — terms in different requirements don't match
   });
 
   it('risk filter surfaces data-derived risk from business rules', async () => {
-    const risky = await listRequirements(root, { risk: 'risk', offset: 0, limit: 10 });
+    const risky = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 });
     expect(risky!.items.map((i) => i.reqId)).toEqual(['REQ-002']);
     expect(risky!.items[0]!.riskSource).toBe('data');
-    const calm = await listRequirements(root, { risk: 'no-risk', offset: 0, limit: 10 });
+    const calm = await listRequirements(repoAt(root), { risk: 'no-risk', offset: 0, limit: 10 });
     expect(calm!.total).toBe(2);
   });
 
   it('pagination slices after filtering', async () => {
-    const p1 = await listRequirements(root, { offset: 0, limit: 2 });
-    const p2 = await listRequirements(root, { offset: 2, limit: 2 });
+    const p1 = await listRequirements(repoAt(root), { offset: 0, limit: 2 });
+    const p2 = await listRequirements(repoAt(root), { offset: 2, limit: 2 });
     expect(p1!.items.length).toBe(2);
     expect(p2!.items.length).toBe(1);
     expect(p1!.total).toBe(3);
@@ -146,7 +165,7 @@ describe('requirements service', () => {
       join(root, '.wicked-estate', 'requirements', 'requirements_graph.json'),
       'utf8',
     );
-    const detail = await patchRequirement(root, 'auth/session::REQ-001', {
+    const detail = await patchRequirement(repoAt(root), 'auth/session::REQ-001', {
       risk: true,
       notes: 'flagged in review',
       title: 'Sessions MUST expire after inactivity',
@@ -172,15 +191,15 @@ describe('requirements service', () => {
   });
 
   it('operator risk override wins over data-derived risk (and can clear it)', async () => {
-    await patchRequirement(root, 'billing/invoices::REQ-002', { risk: false });
-    const page = await listRequirements(root, { risk: 'risk', offset: 0, limit: 10 });
+    await patchRequirement(repoAt(root), 'billing/invoices::REQ-002', { risk: false });
+    const page = await listRequirements(repoAt(root), { risk: 'risk', offset: 0, limit: 10 });
     expect(page!.total).toBe(0);
-    const detail = await getRequirement(root, 'billing/invoices::REQ-002');
+    const detail = await getRequirement(repoAt(root), 'billing/invoices::REQ-002');
     expect(detail!.riskSource).toBe('operator');
   });
 
   it('overrides survive artifact regeneration (cache invalidates on mtime)', async () => {
-    await patchRequirement(root, 'auth/session::REQ-001', { risk: true });
+    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true });
     // Simulate `wicked-core domain-graph` regenerating the artifact.
     const artPath = join(root, '.wicked-estate', 'requirements', 'requirements_graph.json');
     const graph = JSON.parse(await readFile(artPath, 'utf8')) as {
@@ -190,13 +209,13 @@ describe('requirements service', () => {
     await writeFile(artPath, JSON.stringify(graph), 'utf8');
     const future = new Date(Date.now() + 5000);
     await utimes(artPath, future, future);
-    const detail = await getRequirement(root, 'auth/session::REQ-001');
+    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001');
     expect(detail!.risk).toBe(true); // override survived
     expect(detail!.sourceTitle).toBe('Regenerated title'); // fresh artifact picked up
   });
 
   it('patching an unknown requirement 404s as null', async () => {
-    expect(await patchRequirement(root, 'nope::REQ-9', { risk: true })).toBeNull();
+    expect(await patchRequirement(repoAt(root), 'nope::REQ-9', { risk: true })).toBeNull();
   });
 });
 
@@ -242,7 +261,7 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
 
   it('serves validated statements and RISK flags straight from the store', async () => {
     const root = await storeRepo();
-    const page = await listRequirements(root, { offset: 0, limit: 10 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
     expect(page!.total).toBe(2); // requirement-less nodes are not requirements
     const tax = page!.items.find((i) => i.title === 'chargeTax')!;
     expect(tax.statement).toBe('Invoice totals must apply tax after summing line items');
@@ -266,19 +285,19 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
         (5, 'memories', 'add-ins/memories/redteam/garak.json', 'Adversarial testing via Garak is required', 1);
     `);
     db.close();
-    const functional = await listRequirements(root, { category: 'functional', offset: 0, limit: 10 });
+    const functional = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 10 });
     expect(functional!.items.some((i) => i.title === 'lockfileVersion')).toBe(false);
     expect(functional!.items.some((i) => i.title === 'memories')).toBe(false);
     expect(functional!.items.some((i) => i.title === 'chargeTax')).toBe(true);
-    const config = await listRequirements(root, { category: 'config-data', offset: 0, limit: 10 });
+    const config = await listRequirements(repoAt(root), { category: 'config-data', offset: 0, limit: 10 });
     expect(config!.total).toBe(2);
   });
 
   it('search matches statement text; detail carries rule annotations', async () => {
     const root = await storeRepo();
-    const page = await listRequirements(root, { q: 'tax summing', offset: 0, limit: 10 });
+    const page = await listRequirements(repoAt(root), { q: 'tax summing', offset: 0, limit: 10 });
     expect(page!.total).toBe(1);
-    const detail = await getRequirement(root, page!.items[0]!.key);
+    const detail = await getRequirement(repoAt(root), page!.items[0]!.key);
     expect(detail!.ruleCount).toBe(1);
     expect((detail!.businessRules[0] as { confidence: number }).confidence).toBe(0.95);
   });
@@ -292,13 +311,13 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
       join(dir, 'requirements_graph.json'),
       JSON.stringify({ domains: { stale: { requirements: { 'REQ-001': { title: 'OLD.md' } } } } }),
     );
-    const page = await listRequirements(root, { offset: 0, limit: 10 });
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
     expect(page!.items.some((i) => i.title === 'OLD.md')).toBe(false);
     // …and it SAYS the store won. Content assertions alone can't distinguish "served the
     // store" from "served an artifact that happens to agree" (FINDING-065).
     expect(page!.source).toBe('store');
     const key = page!.items.find((i) => i.title === 'refund')!.key;
-    const patched = await patchRequirement(root, key, { risk: false, notes: 'reviewed' });
+    const patched = await patchRequirement(repoAt(root), key, { risk: false, notes: 'reviewed' });
     expect(patched!.risk).toBe(false);
     expect(patched!.riskSource).toBe('operator');
     const raw = JSON.parse(await readFile(join(dir, 'requirements_overrides.json'), 'utf8'));
