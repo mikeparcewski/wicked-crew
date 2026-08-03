@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   listRequirements,
   getRequirement,
@@ -15,11 +15,28 @@ import {
 import type { RepoEntry } from '../src/core/types.js';
 
 /**
+ * Where THIS FILE puts a code graph, in one place.
+ *
+ * The test plays the engine here: `storeRepo` writes a sqlite db and `repoAt` publishes its path on
+ * the entry, exactly as `register_repo` would. Two writers of one path is what FINDING-069 was, and
+ * a test file is not exempt — so both go through this.
+ *
+ * The value is arbitrary. Nothing here pins the engine's spelling; core's `repo.rs` does that, on
+ * the side that owns it. Point this anywhere and every test still passes.
+ */
+function codeGraphAt(root: string): string {
+  return join(root, '.codegraph', 'estate.db');
+}
+
+/**
  * A registered repo rooted at `root`.
  *
  * The service takes the whole entry rather than a root path, because `code_graph_db` is resolved by
- * the engine and never re-derived here — that re-derivation is what FINDING-069 was. These fixtures
- * point it at a path that does not exist, which is the artifact-fallback case they exercise.
+ * the engine and never re-derived by this package — that re-derivation is what FINDING-069 was.
+ *
+ * Most fixtures leave the file absent, which is the artifact-fallback case. The
+ * `live estate store` block below is the exception: it writes a real db at [`codeGraphAt`] first,
+ * so the service reads the store instead.
  */
 function repoAt(root: string): RepoEntry {
   return {
@@ -28,7 +45,7 @@ function repoAt(root: string): RepoEntry {
     root_path: root,
     default_branch: 'main',
     registered_at: 0,
-    code_graph_db: join(root, '.codegraph', 'estate.db'),
+    code_graph_db: codeGraphAt(root),
   };
 }
 
@@ -234,10 +251,10 @@ const hasSqlite = await (async () => {
 describe.skipIf(!hasSqlite)('requirements service — live estate store (primary source)', () => {
   async function storeRepo(): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), 'req-store-'));
-    const dir = join(root, '.codegraph');
-    await mkdir(dir, { recursive: true });
+    const graphDb = codeGraphAt(root);
+    await mkdir(dirname(graphDb), { recursive: true });
     const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(join(dir, 'estate.db'));
+    const db = new DatabaseSync(graphDb);
     db.exec(`
       CREATE TABLE symbols (sid INTEGER PRIMARY KEY, sym TEXT);
       CREATE TABLE nodes (symbol INTEGER, name TEXT, file TEXT,
@@ -277,7 +294,7 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
   it('classifies lockfile/data-fixture statements as config-data and filters them', async () => {
     const root = await storeRepo();
     const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(join(root, '.codegraph', 'estate.db'));
+    const db = new DatabaseSync(codeGraphAt(root));
     db.exec(`
       INSERT INTO symbols VALUES (4, 'lock::version#'), (5, 'fixture::garak#');
       INSERT INTO nodes VALUES
