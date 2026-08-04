@@ -1,11 +1,27 @@
 # PR + main gate for wicked-crew (lint · typecheck · build · test).
 #
 # Until this existed, wicked-crew had NO build/test on PRs — only GitGuardian. Merges rode on
-# locally-run tests. Unlike wicked-core (Rust path deps), crew's `wicked-core-ts` dep resolves from
-# npm (^0.1), so a plain `npm ci` is enough — no sibling checkout.
+# locally-run tests.
 #
 # `build` runs crew's build, which runs scripts/bundle-studio.mjs (builds the studio SPA + copies its
 # dist into packages/crew/dist/studio) — so this also proves the v0.2.0 serving bundle assembles.
+#
+# ── Why this checks out two sibling repos ────────────────────────────────────────────────────────
+#
+# `packages/crew` declares `wicked-core-ts: ^0.3.0`, which resolves from npm. The newest PUBLISHED
+# build is 0.3.0; the engine this package is developed against is the sibling `wicked-core` checkout,
+# many merged PRs ahead. A plain `npm ci` therefore installed an engine OLDER than the code using it,
+# and every path touching a field added since the last publish was untestable — not skipped, not
+# reported, simply never reached.
+#
+# That produced a real false green: wicked-crew#184 shipped an onboarding launch path that throws on
+# npm's 0.3.0 (it reads `code_graph_db`, added by wicked-core#170 and never published), and merged
+# with CI passing, because no test touched it. CI proved that broken code compiles (FINDING-072,
+# wicked-crew#187).
+#
+# So CI now builds `wicked-core-ts` from source and links it in, exactly as wicked-core's own CI
+# checks out wicked-estate as a sibling for its path deps. `tests/engine-contract.test.ts` fails
+# loudly if that linking ever silently stops happening.
 
 name: CI
 
@@ -21,30 +37,100 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The wicked-core revision crew is tested against. `main` is deliberate: these two repos move
+  # together, and the point of building from source is to catch drift the day it lands rather than at
+  # the next publish. Pin to a tag if crew ever needs to trail core.
+  WICKED_CORE_REF: main
+  # Offline embedder — the memory engine must not download a model in CI (matches the tests' default).
+  WICKED_MEMORY_EMBEDDER: hash
+
 jobs:
   check:
     name: lint · typecheck · build · test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Checkout wicked-crew
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: wicked-crew
+
+      - name: Checkout wicked-core (source of the engine addon)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: mikeparcewski/wicked-core
+          ref: ${{ env.WICKED_CORE_REF }}
+          path: wicked-core
+
+      # wicked-core resolves wicked-estate through relative path deps, three of which are
+      # `publish = false` — so building the addon needs estate as a sibling too. The ref is READ OUT
+      # of wicked-core's own CI rather than copied here: this file having its own WICKED_ESTATE_REF
+      # would be a third copy of a constant that must agree, with nothing failing when it drifts.
+      # One producer, one consumer.
+      - name: Resolve the estate ref wicked-core pins
+        id: estate
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, sys
+          src = open('wicked-core/.github/workflows/ci.yml', encoding='utf-8').read()
+          m = re.search(r'^\s*WICKED_ESTATE_REF:\s*(\S+)', src, re.M)
+          if not m:
+              sys.exit("wicked-core/.github/workflows/ci.yml no longer declares WICKED_ESTATE_REF — "
+                       "the pin moved; update this step to read it from wherever it lives now.")
+          print(f"ref={m.group(1)}")
+          PY
+
+      - name: Checkout wicked-estate (sibling — wicked-core's path deps build from source)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: mikeparcewski/wicked-estate
+          ref: ${{ steps.estate.outputs.ref }}
+          path: wicked-estate
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '24'
           cache: npm
+          cache-dependency-path: wicked-crew/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wicked-core/crates/wicked-core-ts
+
+      # napi build --platform --release, emitting wicked-core-ts.<triple>.node into the package dir.
+      - name: Build wicked-core-ts from source
+        working-directory: wicked-core/crates/wicked-core-ts
+        run: npm install && npm run build
 
       - name: Install (clean, from lockfile)
+        working-directory: wicked-crew
         run: npm ci
 
+      # Overwrites node_modules/wicked-core-ts with the build above. Same script developers run
+      # locally, so the two paths cannot drift.
+      - name: Link the locally-built engine
+        working-directory: wicked-crew
+        run: node scripts/use-local-core-ts.mjs
+        env:
+          WICKED_CORE_TS_DIR: ${{ github.workspace }}/wicked-core/crates/wicked-core-ts
+
       - name: Lint (eslint — both packages)
+        working-directory: wicked-crew
         run: npm run -w packages/crew lint && npm run -w packages/studio lint
 
       - name: Typecheck (tsc --noEmit — both packages)
+        working-directory: wicked-crew
         run: npm run -w packages/crew typecheck && npm run -w packages/studio typecheck
 
       # Builds the studio SPA and bundles it into packages/crew/dist/studio (the v0.2.0 serving artifact).
       - name: Build (crew + studio bundle)
+        working-directory: wicked-crew
         run: npm run -w packages/crew build
 
       - name: Test (both packages)
+        working-directory: wicked-crew
         run: npm run -w packages/crew test && npm run -w packages/studio test
