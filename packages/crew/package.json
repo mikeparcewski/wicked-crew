@@ -7,7 +7,6 @@
     "url": "git+https://github.com/mikeparcewski/wicked-crew.git"
   },
   "type": "module",
-  "main": "dist/index.js",
   "bin": {
     "wicked-crew": "dist/cli/index.js"
   },
