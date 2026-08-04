@@ -60,6 +60,38 @@ describe('a stale onboarding overlay is cleared on startup', () => {
     expect(JSON.parse(readFileSync(parked, 'utf8'))).toEqual(STALE);
   });
 
+  it('leaves an operator-authored onboarding override alone', () => {
+    // `registerWorkflow()` writes user definitions into this same directory, and `listWorkflows()`
+    // prefers them. Parking one on every boot would delete a deliberate customization each time it
+    // was re-registered — so the quarantine keys on the DEFECT's signature (one repo's absolute
+    // paths baked into a shared def), not on the filename.
+    const override = join(overlayDir, 'onboarding.json');
+    writeFileSync(
+      override,
+      JSON.stringify({
+        id: 'onboarding',
+        phases: [
+          // Placeholders, as the current def uses — nothing repo-specific frozen in.
+          { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index', '{repo_root}'] } },
+          { id: 'review', executor: { type: 'agent' } },
+        ],
+      }),
+      'utf8',
+    );
+
+    adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+
+    expect(existsSync(override), 'an operator override was parked as if it were stale').toBe(true);
+    expect(existsSync(`${override}.superseded-by-crew197`)).toBe(false);
+  });
+
+  it('leaves an unparseable file for the engine to complain about', () => {
+    const broken = join(overlayDir, 'onboarding.json');
+    writeFileSync(broken, '{ not json', 'utf8');
+    adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+    expect(existsSync(broken)).toBe(true);
+  });
+
   it('leaves a clean overlay dir alone', () => {
     // Startup must not invent work on the ordinary path, and must not touch other ids.
     const other = join(overlayDir, 'chat.json');

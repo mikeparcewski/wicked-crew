@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { existsSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -382,13 +382,37 @@ export interface CoreAdapterOptions {
 function quarantineStaleOnboardingOverlay(): void {
   const stale = join(workflowOverlayDir(), 'onboarding.json');
   if (!existsSync(stale)) return; // the ordinary case on a clean install
+
+  // Only a PRE-#197 artifact, never an operator's override. `registerWorkflow()` writes user
+  // definitions into this same directory, and parking one on every boot would delete a deliberate
+  // customization each time it was re-registered.
+  //
+  // The signature is specific: old crew baked one repo's ABSOLUTE paths into the tool commands. A
+  // def carrying `{repo_root}` / `{code_graph_db}`, or agent phases, or relative commands, is not
+  // what this is looking for and is left alone. An operator who hand-writes absolute paths into a
+  // shared def has written the same bug, and gets the same treatment for the same reason.
+  let bakedPaths: string[];
+  try {
+    const def = JSON.parse(readFileSync(stale, 'utf8')) as {
+      phases?: { executor?: { type?: string; cmd?: string[] } }[];
+    };
+    bakedPaths = (def.phases ?? [])
+      .flatMap((p) => (p.executor?.type === 'tool' ? (p.executor.cmd ?? []) : []))
+      .filter((arg) => arg.startsWith('/'));
+  } catch {
+    // Unparseable: not ours to judge. The engine reports its own load failure.
+    return;
+  }
+  if (bakedPaths.length === 0) return;
+
   const parked = `${stale}.superseded-by-crew197`;
   try {
     renameSync(stale, parked);
     console.warn(
       `[onboarding] removed a stale overlay that would have hijacked every onboarding run: ` +
-        `${stale} → ${parked}. It was written by a pre-#197 crew with one repo's paths baked in, ` +
-        `and the engine resolves it in preference to the built-in def (FINDING-075).`,
+        `${stale} → ${parked}. It baked ${bakedPaths[0]} into a def shared by every repo, which is ` +
+        `what a pre-#197 crew wrote; the engine resolves it in preference to the built-in ` +
+        `(FINDING-075).`,
     );
   } catch (err) {
     // Loud, and non-fatal: the daemon still starts, but every onboarding on this host is wrong
