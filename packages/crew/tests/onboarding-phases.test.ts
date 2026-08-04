@@ -1,62 +1,51 @@
-// FINDING-068 regression: onboarding must not run a phase whose precondition no phase in
-// onboarding produces.
+// Two regressions on the same def, asserted together because the second is what the fix for the
+// first was originally built on top of.
 //
-// The `onboarding` def carried a third phase, `domain`, shelling out to `wicked-core domain-graph`.
-// That phase could never pass. `domain-graph` fails CLOSED below 1.0 front-half coverage — the
-// fraction of behavior-bearing symbols carrying a requirement annotation or a risk flag — and
-// nothing in onboarding annotates a single symbol (`wicked-estate clusters --annotate` is
-// CLUSTERING). On AutoGPT, indexed and annotated by exactly the two phases that precede it:
+// ── FINDING-068 ────────────────────────────────────────────────────────────────────────────────
+// `onboarding` carried a third phase, `domain`, shelling out to `wicked-core domain-graph`. That
+// phase could never pass. `domain-graph` fails CLOSED below 1.0 front-half coverage — the fraction
+// of behavior-bearing symbols carrying a requirement annotation or a risk flag — and nothing in
+// onboarding annotates a single symbol (`wicked-estate clusters --annotate` is CLUSTERING). On
+// AutoGPT, indexed and annotated by exactly the two phases that precede it:
 //
 //     total 42925 · behavior_bearing 28885 · resolved 0 · risk_flagged 0 · coverage 0.0000
 //
 // Not "short of the bar": nothing had ever been in the numerator. So every repo registration ended
 // `sessionFailed`, on a phase structurally incapable of passing, AFTER the two phases that matter
-// had both succeeded. Coverage comes from the agentic `domain-extraction` workflow, whose `extract`
-// phase writes the annotations and whose `coverage` phase measures them; `domain-graph` is that
-// workflow's last phase, downstream of its own precondition. Onboarding is deterministic tools and
-// no council by construction, so it cannot host any of them.
+// had both succeeded. The gate is not the defect and must not be relaxed to make this pass —
+// refusing to translate a partially-annotated graph is the design (DES-OUTGOV-001/005).
 //
-// What this asserts is the def that REACHES THE ENGINE, not the mirror in `BUILTIN_WORKFLOWS`.
-// `onboarding` is the one core-seeded id crew deliberately shadows (see
-// `builtin-overlay-shadow.test.ts`): the launch path rewrites it with runtime-baked `--db` paths and
-// hot-registers the result. `onboardingDefFor` IS that rewrite, and `_doOnboardingLaunch` hands its
-// return value to `_writeBuiltinOverlay` verbatim — so this is the artifact the engine resolves.
+// ── FINDING-075 (wicked-crew#196) ──────────────────────────────────────────────────────────────
+// The paths were baked into this def per launch and written to ONE shared file,
+// `~/.config/wicked-core/workflows/onboarding.json`. The engine resolves a workflow at DISPATCH
+// time, after the launch call returns, so concurrent registrations raced on that file and the last
+// writer won: runs labelled `cli-harness-crush` and `plugins-skills-agents` both ran
+// `wicked-estate index .../agentic-products/open-code-review`. Cross-org, and visible only because
+// three writers hit one SQLite file — otherwise each reports success for a repo it never opened.
 //
-// It is asserted through the pure function rather than by driving a real launch and reading the
-// overlay back off disk. A live launch needs an engine handle, and this package's CI resolves
-// `wicked-core-ts` from npm — where the newest published build (0.3.0) predates `code_graph_db`
-// entirely. Driving the launch there dies on `codeGraphDb`'s deliberate throw before the overlay is
-// ever written, so the suite reported a bare ENOENT about a phase list it never got to look at
-// (FINDING-072 tracks that CI-fidelity gap; it is not this test's job to paper over it).
-//
-// The gate is not the defect and must not be relaxed to make this pass. Refusing to translate a
-// partially-annotated graph is the design (DES-OUTGOV-001/005); a domain model built from a
-// 0%-covered graph is a file full of confident nonsense.
+// So the def must now carry core's PLACEHOLDERS and no absolute path. Core substitutes them per run
+// from the launch's `repoRef` (wicked-core#179), which is per-run state, not shared state.
 import { describe, expect, it } from 'vitest';
-import { onboardingDefFor } from '../src/core/adapter.js';
-import type { RepoEntry } from '../src/core/types.js';
+import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 
-// Only the three fields the rewrite reads. Typed through RepoEntry so a field rename breaks the
-// build here rather than silently making this a test of nothing.
-const REPO = {
-  id: 'onboarding-fixture',
-  name: 'onboarding-fixture',
-  root_path: '/repos/onboarding-fixture',
-  code_graph_db: '/repos/onboarding-fixture/.codegraph/estate.db',
-} as unknown as RepoEntry;
+// Resolved once, eagerly, and THROWN on rather than left optional. A `find` plus `!` in every case
+// means a rename surfaces as a TypeError inside whichever assertion happens to run first, burying
+// the one sentence that would explain it.
+const onboarding = (() => {
+  const found = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding');
+  if (!found) throw new Error('no `onboarding` entry in BUILTIN_WORKFLOWS — renamed or removed?');
+  return found;
+})();
 
-describe('onboarding runs only what it can actually finish', () => {
-  const def = onboardingDefFor(REPO);
-
-  it('is index → annotate, and nothing downstream of them', () => {
-    expect(def.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
+describe('the onboarding def', () => {
+  it('is index → annotate, and nothing downstream of them (FINDING-068)', () => {
+    expect(onboarding.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
   });
 
-  it('shells out to no command whose precondition onboarding cannot produce', () => {
+  it('shells out to no command whose precondition onboarding cannot produce (FINDING-068)', () => {
     // Stated as "no phase runs domain-graph" rather than "no phase named `domain`": the defect is
-    // the COMMAND's unmeetable precondition, not the phase's name. Mirrors core's
-    // `onboarding_runs_only_what_it_can_actually_finish`.
-    for (const phase of def.phases) {
+    // the COMMAND's unmeetable precondition, not the phase's name.
+    for (const phase of onboarding.phases) {
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
       expect(cmd, `onboarding phase \`${phase.id}\` runs \`${cmd.join(' ')}\``).not.toContain(
         'domain-graph',
@@ -64,17 +53,32 @@ describe('onboarding runs only what it can actually finish', () => {
     }
   });
 
-  it('bakes the engine-resolved --db into every phase, so none degrades to an agent', () => {
-    // The rewrite maps phase id → cmd and leaves a phase it has no entry for UNTOUCHED. An unmatched
-    // id therefore stays an agent phase: a deterministic tool step silently becomes a council-less
-    // LLM step. Two artifacts that must agree (the phase list and that map), with nothing failing
-    // when they diverge — so this fails instead.
-    for (const phase of def.phases) {
+  it('declares repo placeholders rather than carrying anyone absolute paths (FINDING-075)', () => {
+    for (const phase of onboarding.phases) {
       expect(phase.executor?.type, `phase \`${phase.id}\` has no tool executor`).toBe('tool');
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
-      expect(cmd, `phase \`${phase.id}\` was not given a resolved --db`).toContain('--db');
-      // The path the ENGINE published, not one re-derived here — the whole point of FINDING-069.
-      expect(cmd[cmd.indexOf('--db') + 1]).toBe(REPO.code_graph_db);
+
+      // Every phase reads the graph, so every phase must be told WHICH graph — and by placeholder,
+      // because one baked path in a shared def is one repo's path in every run of it.
+      expect(cmd, `phase \`${phase.id}\` names no --db`).toContain('--db');
+      expect(cmd[cmd.indexOf('--db') + 1]).toBe('{code_graph_db}');
+
+      // An absolute path here is the regression itself: it can only have come from one repo, and
+      // this def is shared by every run.
+      const absolute = cmd.filter((a) => a.startsWith('/'));
+      expect(
+        absolute,
+        `phase \`${phase.id}\` bakes absolute path(s) into a SHARED def — whichever repo they ` +
+          `belong to, every other repo's run would use them (FINDING-075)`,
+      ).toEqual([]);
     }
+  });
+
+  it('passes the index phase a repo root, and by placeholder (FINDING-075)', () => {
+    const index = onboarding.phases.find((p) => p.id === 'index')!;
+    const cmd = index.executor?.type === 'tool' ? index.executor.cmd : [];
+    // Without an explicit root, `wicked-estate index` reads its cwd — which is the per-run WORKTREE,
+    // not the repo. That is how FINDING-067 indexed the wrong tree.
+    expect(cmd).toContain('{repo_root}');
   });
 });

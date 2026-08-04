@@ -21,7 +21,6 @@ import type {
   SystemSettings,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
-import { codeGraphDb } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -184,7 +183,7 @@ const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboardin
  */
 const EVIDENCE_FLOOR_PIN = '2fcde907d57f3ee2';
 
-const BUILTIN_WORKFLOWS: WorkflowDef[] = [
+export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
     id: 'chat',
     is_system: true,
@@ -196,14 +195,19 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     id: 'onboarding',
     is_system: true,
     phases: [
-      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index', '{repo_root}', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate', '--db', '{code_graph_db}'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       // index → annotate, and NOT a third `domain` phase running `wicked-core domain-graph`. That
       // phase could never pass: domain-graph fails closed below 1.0 front-half coverage, and nothing
       // in this workflow annotates a single symbol, so coverage was 0.0 on every repo — every
       // registration ended sessionFailed after the two phases that matter had both succeeded
       // (FINDING-068). domain-graph belongs to `domain-extraction`, downstream of the agentic
       // extract+coverage phases that produce its precondition. Mirrors core's `onboarding_def()`.
+      //
+      // The `{repo_root}` / `{code_graph_db}` placeholders are core's, substituted per run from the
+      // launch's `repoRef` (wicked-core#179). This package used to bake absolute paths in here and
+      // write the result to one shared overlay file per launch — which concurrent registrations
+      // raced, indexing one repo's tree under another repo's name (FINDING-075, #196).
     ],
   },
   {
@@ -354,40 +358,6 @@ export interface CoreAdapterOptions {
   engineExec?: boolean;
   /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
   busDbPath?: string;
-}
-
-/**
- * The `onboarding` def as the engine will actually resolve it for THIS repo.
- *
- * Bakes the repo's absolute paths into the static def (core#120). The static def's relative commands
- * are wrong at runtime: the run's workdir is the per-run WORKTREE, not the root the graph endpoint
- * reads, and estate's default db location (`.wicked-estate/graph.db`) is not where the engine looks.
- * The caller rewrites this per launch and hot-registers it, so a running actor sees it without a
- * restart. The db path comes from the ENGINE's record — hand-joining it here is what made the indexed
- * graph and the graph the worker queried two different files (FINDING-069).
- *
- * Pure, exported, and taking the repo record rather than an id, so the def it produces can be
- * asserted on without an engine handle. That matters beyond tidiness: this package's CI installs
- * `wicked-core-ts` from npm, whose published build predates `code_graph_db`, so anything reaching the
- * live launch path there dies on `codeGraphDb`'s (correct, loud) throw rather than on the property
- * under test. See `tests/onboarding-phases.test.ts` and FINDING-072.
- */
-export function onboardingDefFor(repo: RepoEntry): WorkflowDef {
-  const dbPath = codeGraphDb(repo);
-  const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
-  // Keyed by phase id. A phase with no entry here is left UNTOUCHED — which means it stays an agent
-  // phase, silently turning a deterministic tool step into a council-less LLM one. That divergence is
-  // what `onboarding-phases.test.ts` pins; keep this map and `base.phases` in step.
-  const CMDS: Record<string, string[]> = {
-    index: ['wicked-estate', 'index', repo.root_path, '--db', dbPath],
-    annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
-  };
-  return {
-    ...base,
-    phases: base.phases.map((ph) =>
-      CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
-    ),
-  };
 }
 
 /**
@@ -654,12 +624,16 @@ export class CoreAdapter {
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
   private readonly repoOnboardRunIds = new Map<string, string>();
-  /** repo ids with an onboarding run in flight — guards against concurrent double-launch. */
-  private readonly onboardingInFlight = new Set<string>();
-  /** Serializes onboarding launches: they rewrite the SHARED 'onboarding' overlay with
-   *  repo-specific paths, so two repos launching concurrently must not interleave between
-   *  overlay registration and launchRun (after launch the def is baked into the run's units). */
-  private _onboardingChain: Promise<unknown> = Promise.resolve();
+  /**
+   * repo id → the in-flight launch, so a concurrent caller joins it instead of starting a second.
+   *
+   * A `Set` of ids was not enough. The id was added here but the run id was only recorded in
+   * `repoOnboardRunIds` AFTER the launch resolved, so a second caller arriving mid-flight saw
+   * "in flight" with no run id to return, fell through, and launched a DUPLICATE run against the
+   * same repo. Holding the promise makes the second caller await the first and receive its run id —
+   * the dedup the `Set` was named for.
+   */
+  private readonly onboardingInFlight = new Map<string, Promise<string>>();
 
   /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
@@ -747,44 +721,51 @@ export class CoreAdapter {
    * Returns the run id so the UI can navigate directly to it.
    */
   async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
-    if (this.onboardingInFlight.has(repoId)) {
-      const existing = this.repoOnboardRunIds.get(repoId);
-      if (existing) return existing;
-    }
-    this.onboardingInFlight.add(repoId);
+    // Join an in-flight launch for THIS repo rather than starting a second one. Concurrency across
+    // DIFFERENT repos is the point and is untouched; two launches for the SAME repo are a duplicate.
+    const inFlight = this.onboardingInFlight.get(repoId);
+    if (inFlight) return inFlight;
     const runId = randomUUID();
-    const chained = this._onboardingChain.then(() => this._doOnboardingLaunch(repoId, repoName, runId));
-    this._onboardingChain = chained.catch(() => undefined);
+    // Launches are NOT serialized. They used to be, through an `_onboardingChain` promise, because
+    // each rewrote the shared `onboarding` overlay before launching. That chain never worked: its
+    // own comment claimed "after launch the def is baked into the run's units", and the def is
+    // actually resolved at DISPATCH — after the launch call returns. So it serialized the writer and
+    // left the reader racing, which is how three concurrent registrations indexed one repo under
+    // three names (FINDING-075, #196).
+    //
+    // Nothing is shared now: core binds each run's repo into its own units from `repoRef`
+    // (wicked-core#179). Concurrent registration is the point — it is a requirement of the corpus
+    // this platform is tested against, not an optimisation.
+    const launch = this._doOnboardingLaunch(repoId, repoName, runId).then(() => runId);
+    this.onboardingInFlight.set(repoId, launch);
     try {
-      await chained;
-      return runId;
+      return await launch;
     } finally {
       this.onboardingInFlight.delete(repoId);
     }
   }
 
   private async _doOnboardingLaunch(repoId: string, repoName: string, runId: string): Promise<void> {
-    {
-      const repoEntries = await this.listRepos();
-      const repoEntry = repoEntries.find((r) => r.id === repoId);
-      if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
-      const def = onboardingDefFor(repoEntry);
-      // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
-      //
-      // This is the one place a core-seeded id is deliberately shadowed, and the shadow is the
-      // point: `def` differs from core's `onboarding` only in carrying executor cmds baked with
-      // this repo's resolved `--db` path. `launchRun` below no longer writes core-seeded ids
-      // (CORE_SEEDED_WORKFLOWS), so nothing clobbers this write with the static mirror afterwards —
-      // which it previously did, in the window between here and the engine resolving the workflow.
-      await this._writeBuiltinOverlay(def);
-      await this.launchRun({
-        problem: `Onboard repository: ${repoName}`,
-        sessionId: runId,
-        clisJson: JSON.stringify(CoreAdapter.roster()),
-        workflow: 'onboarding',
-        repoRef: repoId,
-      });
-    }
+    // No overlay write. This used to rewrite core's `onboarding` def with THIS repo's absolute paths
+    // and persist it to one shared file (`~/.config/wicked-core/workflows/onboarding.json`), then
+    // hot-register it — the one place a core-seeded id was deliberately shadowed.
+    //
+    // That shadow was the defect. The engine resolves a workflow at DISPATCH time, after this call
+    // returns, so concurrent launches raced on the single file and the last writer won: two repos in
+    // two different orgs had a third org's tree indexed into a third org's database, each reported
+    // under its own name (FINDING-075, #196). Serializing the writes does not fix it — the chain
+    // serializes the producer and leaves the consumer racing.
+    //
+    // Core now declares `{repo_root}` / `{code_graph_db}` on the phases and binds them per run from
+    // `repoRef`, which this call already passes (wicked-core#179). Nothing is shared, so nothing can
+    // be raced, and onboarding launches may run concurrently.
+    await this.launchRun({
+      problem: `Onboard repository: ${repoName}`,
+      sessionId: runId,
+      clisJson: JSON.stringify(CoreAdapter.roster()),
+      workflow: 'onboarding',
+      repoRef: repoId,
+    });
     this.repoOnboardRunIds.set(repoId, runId);
   }
 
