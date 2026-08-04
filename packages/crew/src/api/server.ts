@@ -100,14 +100,17 @@ export async function createServer(
       // plugin's automatic header so it can't override us.
       cacheControl: false,
       index: ['index.html'],
-      setHeaders: (res, pathName) => {
+      // `@fastify/static` v10 hands this callback a FastifyReply; v9 handed it the raw
+      // ServerResponse. That is a genuine breaking change, not a typings correction — v10's
+      // index.js calls `setHeaders?.(reply, ...)` — so `res.setHeader` becomes `reply.header`.
+      setHeaders: (reply, pathName) => {
         const p = pathName.replace(/\\/g, '/');
         if (p.endsWith('/index.html')) {
           // HTML must revalidate so a redeploy's new asset hashes are picked up.
-          res.setHeader('Cache-Control', 'no-cache');
+          reply.header('Cache-Control', 'no-cache');
         } else if (p.includes('/assets/')) {
           // Content-addressed (hashed) assets are immutable.
-          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          reply.header('Cache-Control', 'public, max-age=31536000, immutable');
         }
       },
     });
