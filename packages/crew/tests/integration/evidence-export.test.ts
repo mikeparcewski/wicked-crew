@@ -200,11 +200,22 @@ describe('GET /runs/:id/evidence', () => {
 
   it('carries each frame’s own fields, not a projection of them', async () => {
     const { bundle } = await getEvidence();
-    for (const live of liveTrail()) {
-      const recorded = bundle.events.find((e) => e.type === live.type && e.ord === live.ord);
-      expect(recorded, `no recorded frame for ${live.type} ord=${String(live.ord)}`).toBeDefined();
-      for (const [k, v] of Object.entries(live)) expect(recorded?.[k]).toEqual(v);
-    }
+    // Matched POSITIONALLY, not by (type, ord). `ord` is optional and a type repeats within a run
+    // (two `gateDecided`s, several `unitDone`s), so a find() on those fields can pair a live frame
+    // with the wrong recorded one and still pass — or pass by comparing a frame to itself. The
+    // recorded trail is the live trail in order, so index is the honest correspondence.
+    const live = liveTrail();
+    expect(
+      bundle.events.length,
+      'recorded trail is a different length from the live one, so positional matching is invalid',
+    ).toBe(live.length);
+    live.forEach((frame, i) => {
+      const recorded = bundle.events[i];
+      expect(recorded?.type, `frame ${i} is a different event in the recorded trail`).toBe(
+        frame.type,
+      );
+      for (const [k, v] of Object.entries(frame)) expect(recorded?.[k]).toEqual(v);
+    });
   });
 
   it('timestamps and orders every frame, so the trail is replayable', async () => {

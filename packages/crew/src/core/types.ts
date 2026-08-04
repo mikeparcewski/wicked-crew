@@ -236,7 +236,15 @@ export interface CoreEvent {
 export interface RecordedEvent extends CoreEvent {
   /** Capture time, epoch millis — when core emitted the frame, not when it was read. */
   ts: number;
-  /** Monotonic per-run ordering, so frames sharing a `ts` are still ordered. */
+  /**
+   * Monotonic ordering across THIS RUN's whole event trail, so frames sharing a `ts` are still
+   * ordered.
+   *
+   * Not the same `seq` as `CoreEvent`'s, which counts chunks within one terminal's output. This one
+   * is required and spans every frame of the run; that one is optional and scoped to a stream. The
+   * name is inherited from the wire and narrowed here rather than renamed, because the wire is what
+   * `runEvents` returns.
+   */
   seq: number;
 }
 
