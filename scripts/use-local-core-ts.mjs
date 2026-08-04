@@ -89,8 +89,12 @@ if (process.platform === 'darwin') {
   try {
     execFileSync('codesign', ['-s', '-', '-f', join(destDir, binaries[0])], { stdio: 'pipe' });
   } catch (err) {
+    // codesign puts the actionable part on stderr — which entitlement, which malformed field.
+    // `err.message` is only "Command failed", so reporting that alone would replace one silent
+    // failure with an uninformative one.
+    const detail = (err.stderr?.toString() || err.message || '').trim();
     die(
-      `codesign failed on ${binaries[0]}: ${err.message}\n` +
+      `codesign failed on ${binaries[0]}: ${detail}\n` +
         `  Without a valid ad-hoc signature the addon is SIGKILLed at load with no error.`,
     );
   }
