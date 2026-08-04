@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -360,6 +361,71 @@ export interface CoreAdapterOptions {
   busDbPath?: string;
 }
 
+
+/**
+ * Quarantine a pre-#197 `onboarding.json` left in the overlay dir.
+ *
+ * This package used to write that file on every launch, baked with ONE repo's absolute paths. It no
+ * longer does — core declares `{repo_root}` / `{code_graph_db}` and binds them per run
+ * (wicked-core#179). But the overlay dir is PERSISTENT STATE, and the engine's `load_dir` registers
+ * whatever it finds there, replacing a compiled def by id, wholesale.
+ *
+ * So an upgraded deployment keeps running the last file the old code wrote. Not intermittently:
+ * EVERY onboarding run indexes whichever repo happened to be registered last before the upgrade.
+ * Observed exactly that on this host after #197 merged — three fresh registrations in three
+ * different orgs all indexed `agentic-products/eliza`, the last repo seeded before the fix.
+ *
+ * Renamed rather than deleted. The file is almost certainly machine-written, but the overlay dir is
+ * an operator-facing extension point and silently destroying something out of it is not this
+ * process's call. The rename is enough to stop the shadow, and leaves the evidence in place.
+ */
+function quarantineStaleOnboardingOverlay(): void {
+  const stale = join(workflowOverlayDir(), 'onboarding.json');
+  if (!existsSync(stale)) return; // the ordinary case on a clean install
+
+  // Only a PRE-#197 artifact, never an operator's override. `registerWorkflow()` writes user
+  // definitions into this same directory, and parking one on every boot would delete a deliberate
+  // customization each time it was re-registered.
+  //
+  // The signature is specific: old crew baked one repo's ABSOLUTE paths into the tool commands. A
+  // def carrying `{repo_root}` / `{code_graph_db}`, or agent phases, or relative commands, is not
+  // what this is looking for and is left alone. An operator who hand-writes absolute paths into a
+  // shared def has written the same bug, and gets the same treatment for the same reason.
+  let bakedPaths: string[];
+  try {
+    const def = JSON.parse(readFileSync(stale, 'utf8')) as {
+      phases?: { executor?: { type?: string; cmd?: string[] } }[];
+    };
+    bakedPaths = (def.phases ?? [])
+      .flatMap((p) => (p.executor?.type === 'tool' ? (p.executor.cmd ?? []) : []))
+      .filter((arg) => arg.startsWith('/'));
+  } catch {
+    // Unparseable: not ours to judge. The engine reports its own load failure.
+    return;
+  }
+  if (bakedPaths.length === 0) return;
+
+  const parked = `${stale}.superseded-by-crew197`;
+  try {
+    renameSync(stale, parked);
+    console.warn(
+      `[onboarding] removed a stale overlay that would have hijacked every onboarding run: ` +
+        `${stale} → ${parked}. It baked ${bakedPaths[0]} into a def shared by every repo, which is ` +
+        `what a pre-#197 crew wrote; the engine resolves it in preference to the built-in ` +
+        `(FINDING-075).`,
+    );
+  } catch (err) {
+    // Loud, and non-fatal: the daemon still starts, but every onboarding on this host is wrong
+    // until the file goes, so the operator has to be told rather than left to discover it.
+    console.error(
+      `[onboarding] FAILED to remove the stale overlay at ${stale}: ${
+        err instanceof Error ? err.message : String(err)
+      }. Until it is removed by hand, every onboarding run will index the repo baked into it, ` +
+        `whatever repo the run names (FINDING-075).`,
+    );
+  }
+}
+
 /**
  * The single isolation boundary over wicked-core-ts. It holds the ONE `Core`
  * handle, makes the ONE `subscribe()` call for the whole process, parses each
@@ -387,6 +453,10 @@ export class CoreAdapter {
     // it publishes `task.dispatched` / consumes `task.completed` around WHATEVER step runner the engine
     // wires (the production wrapped-CLI runner OR the deterministic stub), so a stub engine can arm it
     // for a fast, offline, deterministic proof of the event path.
+    // BEFORE the Core spawns: the actor reads the overlay dir at startup, so a stale
+    // `onboarding.json` has to be out of the way by then or it shadows the built-in def.
+    quarantineStaleOnboardingOverlay();
+
     const armExec = opts.engineExec === true;
     if (armExec) {
       if (!opts.busDbPath || opts.busDbPath.length === 0) {
