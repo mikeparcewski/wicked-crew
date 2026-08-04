@@ -19,96 +19,62 @@
 // What this asserts is the def that REACHES THE ENGINE, not the mirror in `BUILTIN_WORKFLOWS`.
 // `onboarding` is the one core-seeded id crew deliberately shadows (see
 // `builtin-overlay-shadow.test.ts`): the launch path rewrites it with runtime-baked `--db` paths and
-// hot-registers the result. So the overlay file is the artifact under test, and reading it back also
-// covers the second half of the same defect class — a phase present in the def but absent from the
-// launch path's `CMDS` map silently degrades to an AGENT phase rather than failing.
+// hot-registers the result. `onboardingDefFor` IS that rewrite, and `_doOnboardingLaunch` hands its
+// return value to `_writeBuiltinOverlay` verbatim — so this is the artifact the engine resolves.
+//
+// It is asserted through the pure function rather than by driving a real launch and reading the
+// overlay back off disk. A live launch needs an engine handle, and this package's CI resolves
+// `wicked-core-ts` from npm — where the newest published build (0.3.0) predates `code_graph_db`
+// entirely. Driving the launch there dies on `codeGraphDb`'s deliberate throw before the overlay is
+// ever written, so the suite reported a bare ENOENT about a phase list it never got to look at
+// (FINDING-072 tracks that CI-fidelity gap; it is not this test's job to paper over it).
 //
 // The gate is not the defect and must not be relaxed to make this pass. Refusing to translate a
 // partially-annotated graph is the design (DES-OUTGOV-001/005); a domain model built from a
 // 0%-covered graph is a file full of confident nonsense.
-process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
+import { describe, expect, it } from 'vitest';
+import { onboardingDefFor } from '../src/core/adapter.js';
+import type { RepoEntry } from '../src/core/types.js';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CoreAdapter } from '../src/core/adapter.js';
-import type { WorkflowDef } from '../src/core/types.js';
-
-let adapter: CoreAdapter;
-let dir: string;
-let repoDir: string;
-let overlayDir: string;
-let priorOverlayDir: string | undefined;
-/** The def the launch path wrote to core's overlay dir — what the engine actually resolves. */
-let written: WorkflowDef;
-
-beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'onboarding-phases-'));
-  overlayDir = join(dir, 'workflows');
-  // Redirect the overlay write. Without this the test writes into the developer's real
-  // `~/.config/wicked-core/workflows`, baking a temp repo's paths into their live onboarding def.
-  priorOverlayDir = process.env['WICKED_WORKFLOWS_DIR'];
-  process.env['WICKED_WORKFLOWS_DIR'] = overlayDir;
-
-  // `registerRepo` prepares a worktree, so it insists on a git repo with at least one commit.
-  // Identity is set locally so this does not depend on a global git config.
-  repoDir = mkdtempSync(join(tmpdir(), 'onboarding-phases-repo-'));
-  const git = (...a: string[]): void => {
-    execFileSync('git', a, { cwd: repoDir, stdio: 'ignore' });
-  };
-  git('init', '-q');
-  git('config', 'user.email', 'test@example.invalid');
-  git('config', 'user.name', 'onboarding fixture');
-  git('commit', '-q', '--allow-empty', '-m', 'root');
-
-  adapter = new CoreAdapter({ dbPath: join(dir, 'onboarding.db'), stub: true });
-  const entry = await adapter.registerRepo('onboarding-fixture', repoDir);
-  try {
-    await adapter.launchOnboardingRun(entry.id, 'onboarding-fixture');
-  } catch {
-    // The run's own outcome is not what this measures — a stub run has no estate binary to drive.
-    // The overlay write happens BEFORE the launch, so swallowing this keeps an unrelated engine
-    // failure from masquerading as the regression.
-  }
-  written = JSON.parse(readFileSync(join(overlayDir, 'onboarding.json'), 'utf8')) as WorkflowDef;
-});
-
-afterAll(() => {
-  if (priorOverlayDir === undefined) delete process.env['WICKED_WORKFLOWS_DIR'];
-  else process.env['WICKED_WORKFLOWS_DIR'] = priorOverlayDir;
-  if (adapter) adapter.close();
-  // See armed-workflow-served.test.ts: close() returns before the actor thread finishes flushing
-  // SQLite's WAL sidecars, and `force` does not cover the ENOTEMPTY that races with it.
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  if (repoDir) rmSync(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-});
+// Only the three fields the rewrite reads. Typed through RepoEntry so a field rename breaks the
+// build here rather than silently making this a test of nothing.
+const REPO = {
+  id: 'onboarding-fixture',
+  name: 'onboarding-fixture',
+  root_path: '/repos/onboarding-fixture',
+  code_graph_db: '/repos/onboarding-fixture/.codegraph/estate.db',
+} as unknown as RepoEntry;
 
 describe('onboarding runs only what it can actually finish', () => {
+  const def = onboardingDefFor(REPO);
+
   it('is index → annotate, and nothing downstream of them', () => {
-    expect(written.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
+    expect(def.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
   });
 
   it('shells out to no command whose precondition onboarding cannot produce', () => {
     // Stated as "no phase runs domain-graph" rather than "no phase named `domain`": the defect is
     // the COMMAND's unmeetable precondition, not the phase's name. Mirrors core's
     // `onboarding_runs_only_what_it_can_actually_finish`.
-    for (const phase of written.phases) {
+    for (const phase of def.phases) {
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
-      expect(cmd, `onboarding phase \`${phase.id}\` runs \`${cmd.join(' ')}\``).not.toContain('domain-graph');
+      expect(cmd, `onboarding phase \`${phase.id}\` runs \`${cmd.join(' ')}\``).not.toContain(
+        'domain-graph',
+      );
     }
   });
 
-  it('bakes a runtime --db into every phase, so none degrades to an agent', () => {
-    // The launch path maps phase id → cmd and leaves a phase it has no entry for UNTOUCHED. An
-    // unmatched id therefore stays an agent phase: a deterministic tool step silently becomes a
-    // council-less LLM step. Two artifacts that must agree (the phase list and that map), with
-    // nothing failing when they diverge — so this fails instead.
-    for (const phase of written.phases) {
+  it('bakes the engine-resolved --db into every phase, so none degrades to an agent', () => {
+    // The rewrite maps phase id → cmd and leaves a phase it has no entry for UNTOUCHED. An unmatched
+    // id therefore stays an agent phase: a deterministic tool step silently becomes a council-less
+    // LLM step. Two artifacts that must agree (the phase list and that map), with nothing failing
+    // when they diverge — so this fails instead.
+    for (const phase of def.phases) {
       expect(phase.executor?.type, `phase \`${phase.id}\` has no tool executor`).toBe('tool');
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
       expect(cmd, `phase \`${phase.id}\` was not given a resolved --db`).toContain('--db');
+      // The path the ENGINE published, not one re-derived here — the whole point of FINDING-069.
+      expect(cmd[cmd.indexOf('--db') + 1]).toBe(REPO.code_graph_db);
     }
   });
 });

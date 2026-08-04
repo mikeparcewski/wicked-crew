@@ -365,6 +365,40 @@ export interface CoreAdapterOptions {
 }
 
 /**
+ * The `onboarding` def as the engine will actually resolve it for THIS repo.
+ *
+ * Bakes the repo's absolute paths into the static def (core#120). The static def's relative commands
+ * are wrong at runtime: the run's workdir is the per-run WORKTREE, not the root the graph endpoint
+ * reads, and estate's default db location (`.wicked-estate/graph.db`) is not where the engine looks.
+ * The caller rewrites this per launch and hot-registers it, so a running actor sees it without a
+ * restart. The db path comes from the ENGINE's record — hand-joining it here is what made the indexed
+ * graph and the graph the worker queried two different files (FINDING-069).
+ *
+ * Pure, exported, and taking the repo record rather than an id, so the def it produces can be
+ * asserted on without an engine handle. That matters beyond tidiness: this package's CI installs
+ * `wicked-core-ts` from npm, whose published build predates `code_graph_db`, so anything reaching the
+ * live launch path there dies on `codeGraphDb`'s (correct, loud) throw rather than on the property
+ * under test. See `tests/onboarding-phases.test.ts` and FINDING-072.
+ */
+export function onboardingDefFor(repo: RepoEntry): WorkflowDef {
+  const dbPath = codeGraphDb(repo);
+  const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
+  // Keyed by phase id. A phase with no entry here is left UNTOUCHED — which means it stays an agent
+  // phase, silently turning a deterministic tool step into a council-less LLM one. That divergence is
+  // what `onboarding-phases.test.ts` pins; keep this map and `base.phases` in step.
+  const CMDS: Record<string, string[]> = {
+    index: ['wicked-estate', 'index', repo.root_path, '--db', dbPath],
+    annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
+  };
+  return {
+    ...base,
+    phases: base.phases.map((ph) =>
+      CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
+    ),
+  };
+}
+
+/**
  * The single isolation boundary over wicked-core-ts. It holds the ONE `Core`
  * handle, makes the ONE `subscribe()` call for the whole process, parses each
  * CoreEvent, and re-emits it to registered in-daemon listeners. Every REST
@@ -739,29 +773,10 @@ export class CoreAdapter {
 
   private async _doOnboardingLaunch(repoId: string, repoName: string, runId: string): Promise<void> {
     {
-      // Bake THIS repo's absolute paths into the onboarding def (core#120). The static def's
-      // relative commands are wrong at runtime: the run's workdir is the per-run WORKTREE, not the
-      // root the graph endpoint reads, and estate's default db location (.wicked-estate/graph.db) is
-      // not where the engine looks. Rewritten per launch and hot-registered so the running actor sees
-      // it — never restart-dependent.
-      //
-      // The db path comes from the ENGINE's record now. Hand-joining it here is what made the indexed
-      // graph and the graph the worker queried two different files (FINDING-069).
       const repoEntries = await this.listRepos();
       const repoEntry = repoEntries.find((r) => r.id === repoId);
       if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
-      const dbPath = codeGraphDb(repoEntry);
-      const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
-      const CMDS: Record<string, string[]> = {
-        index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
-        annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
-      };
-      const def: WorkflowDef = {
-        ...base,
-        phases: base.phases.map((ph) =>
-          CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
-        ),
-      };
+      const def = onboardingDefFor(repoEntry);
       // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
       //
       // This is the one place a core-seeded id is deliberately shadowed, and the shadow is the
