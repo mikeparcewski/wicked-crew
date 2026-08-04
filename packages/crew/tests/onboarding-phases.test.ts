@@ -28,22 +28,24 @@
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 
-const onboarding = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding');
+// Resolved once, eagerly, and THROWN on rather than left optional. A `find` plus `!` in every case
+// means a rename surfaces as a TypeError inside whichever assertion happens to run first, burying
+// the one sentence that would explain it.
+const onboarding = (() => {
+  const found = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding');
+  if (!found) throw new Error('no `onboarding` entry in BUILTIN_WORKFLOWS — renamed or removed?');
+  return found;
+})();
 
 describe('the onboarding def', () => {
-  it('is mirrored here at all', () => {
-    // Guards the rest of this file from passing vacuously if the id is ever renamed or dropped.
-    expect(onboarding, 'no `onboarding` entry in BUILTIN_WORKFLOWS').toBeDefined();
-  });
-
   it('is index → annotate, and nothing downstream of them (FINDING-068)', () => {
-    expect(onboarding!.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
+    expect(onboarding.phases.map((p) => p.id)).toEqual(['index', 'annotate']);
   });
 
   it('shells out to no command whose precondition onboarding cannot produce (FINDING-068)', () => {
     // Stated as "no phase runs domain-graph" rather than "no phase named `domain`": the defect is
     // the COMMAND's unmeetable precondition, not the phase's name.
-    for (const phase of onboarding!.phases) {
+    for (const phase of onboarding.phases) {
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
       expect(cmd, `onboarding phase \`${phase.id}\` runs \`${cmd.join(' ')}\``).not.toContain(
         'domain-graph',
@@ -52,7 +54,7 @@ describe('the onboarding def', () => {
   });
 
   it('declares repo placeholders rather than carrying anyone absolute paths (FINDING-075)', () => {
-    for (const phase of onboarding!.phases) {
+    for (const phase of onboarding.phases) {
       expect(phase.executor?.type, `phase \`${phase.id}\` has no tool executor`).toBe('tool');
       const cmd = phase.executor?.type === 'tool' ? phase.executor.cmd : [];
 
@@ -73,7 +75,7 @@ describe('the onboarding def', () => {
   });
 
   it('passes the index phase a repo root, and by placeholder (FINDING-075)', () => {
-    const index = onboarding!.phases.find((p) => p.id === 'index')!;
+    const index = onboarding.phases.find((p) => p.id === 'index')!;
     const cmd = index.executor?.type === 'tool' ? index.executor.cmd : [];
     // Without an explicit root, `wicked-estate index` reads its cwd — which is the per-run WORKTREE,
     // not the repo. That is how FINDING-067 indexed the wrong tree.

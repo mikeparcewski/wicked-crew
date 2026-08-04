@@ -624,8 +624,16 @@ export class CoreAdapter {
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
   private readonly repoOnboardRunIds = new Map<string, string>();
-  /** repo ids with an onboarding run in flight — guards against concurrent double-launch. */
-  private readonly onboardingInFlight = new Set<string>();
+  /**
+   * repo id → the in-flight launch, so a concurrent caller joins it instead of starting a second.
+   *
+   * A `Set` of ids was not enough. The id was added here but the run id was only recorded in
+   * `repoOnboardRunIds` AFTER the launch resolved, so a second caller arriving mid-flight saw
+   * "in flight" with no run id to return, fell through, and launched a DUPLICATE run against the
+   * same repo. Holding the promise makes the second caller await the first and receive its run id —
+   * the dedup the `Set` was named for.
+   */
+  private readonly onboardingInFlight = new Map<string, Promise<string>>();
 
   /** Register a local git repo → the persisted `RepoEntry`. */
   async registerRepo(name: string, rootPath: string): Promise<RepoEntry> {
@@ -713,11 +721,10 @@ export class CoreAdapter {
    * Returns the run id so the UI can navigate directly to it.
    */
   async launchOnboardingRun(repoId: string, repoName: string): Promise<string> {
-    if (this.onboardingInFlight.has(repoId)) {
-      const existing = this.repoOnboardRunIds.get(repoId);
-      if (existing) return existing;
-    }
-    this.onboardingInFlight.add(repoId);
+    // Join an in-flight launch for THIS repo rather than starting a second one. Concurrency across
+    // DIFFERENT repos is the point and is untouched; two launches for the SAME repo are a duplicate.
+    const inFlight = this.onboardingInFlight.get(repoId);
+    if (inFlight) return inFlight;
     const runId = randomUUID();
     // Launches are NOT serialized. They used to be, through an `_onboardingChain` promise, because
     // each rewrote the shared `onboarding` overlay before launching. That chain never worked: its
@@ -729,9 +736,10 @@ export class CoreAdapter {
     // Nothing is shared now: core binds each run's repo into its own units from `repoRef`
     // (wicked-core#179). Concurrent registration is the point — it is a requirement of the corpus
     // this platform is tested against, not an optimisation.
+    const launch = this._doOnboardingLaunch(repoId, repoName, runId).then(() => runId);
+    this.onboardingInFlight.set(repoId, launch);
     try {
-      await this._doOnboardingLaunch(repoId, repoName, runId);
-      return runId;
+      return await launch;
     } finally {
       this.onboardingInFlight.delete(repoId);
     }
