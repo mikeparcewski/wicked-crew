@@ -21,7 +21,7 @@ import type {
   SystemSettings,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
-import { codeGraphDb, requirementsGraph } from './repoPaths.js';
+import { codeGraphDb } from './repoPaths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -198,7 +198,12 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'domain', executor: { type: 'tool', cmd: ['wicked-core', 'domain-graph'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['annotate'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      // index → annotate, and NOT a third `domain` phase running `wicked-core domain-graph`. That
+      // phase could never pass: domain-graph fails closed below 1.0 front-half coverage, and nothing
+      // in this workflow annotates a single symbol, so coverage was 0.0 on every repo — every
+      // registration ended sessionFailed after the two phases that matter had both succeeded
+      // (FINDING-068). domain-graph belongs to `domain-extraction`, downstream of the agentic
+      // extract+coverage phases that produce its precondition. Mirrors core's `onboarding_def()`.
     ],
   },
   {
@@ -357,6 +362,40 @@ export interface CoreAdapterOptions {
   engineExec?: boolean;
   /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
   busDbPath?: string;
+}
+
+/**
+ * The `onboarding` def as the engine will actually resolve it for THIS repo.
+ *
+ * Bakes the repo's absolute paths into the static def (core#120). The static def's relative commands
+ * are wrong at runtime: the run's workdir is the per-run WORKTREE, not the root the graph endpoint
+ * reads, and estate's default db location (`.wicked-estate/graph.db`) is not where the engine looks.
+ * The caller rewrites this per launch and hot-registers it, so a running actor sees it without a
+ * restart. The db path comes from the ENGINE's record — hand-joining it here is what made the indexed
+ * graph and the graph the worker queried two different files (FINDING-069).
+ *
+ * Pure, exported, and taking the repo record rather than an id, so the def it produces can be
+ * asserted on without an engine handle. That matters beyond tidiness: this package's CI installs
+ * `wicked-core-ts` from npm, whose published build predates `code_graph_db`, so anything reaching the
+ * live launch path there dies on `codeGraphDb`'s (correct, loud) throw rather than on the property
+ * under test. See `tests/onboarding-phases.test.ts` and FINDING-072.
+ */
+export function onboardingDefFor(repo: RepoEntry): WorkflowDef {
+  const dbPath = codeGraphDb(repo);
+  const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
+  // Keyed by phase id. A phase with no entry here is left UNTOUCHED — which means it stays an agent
+  // phase, silently turning a deterministic tool step into a council-less LLM one. That divergence is
+  // what `onboarding-phases.test.ts` pins; keep this map and `base.phases` in step.
+  const CMDS: Record<string, string[]> = {
+    index: ['wicked-estate', 'index', repo.root_path, '--db', dbPath],
+    annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
+  };
+  return {
+    ...base,
+    phases: base.phases.map((ph) =>
+      CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
+    ),
+  };
 }
 
 /**
@@ -734,34 +773,10 @@ export class CoreAdapter {
 
   private async _doOnboardingLaunch(repoId: string, repoName: string, runId: string): Promise<void> {
     {
-      // Bake THIS repo's absolute paths into the onboarding def (core#120). The static def's
-      // relative commands are wrong at runtime: the run's workdir is the per-run WORKTREE, not the
-      // root the graph endpoint reads, and estate's default db location (.wicked-estate/graph.db) is
-      // not where the engine looks. Rewritten per launch and hot-registered so the running actor sees
-      // it — never restart-dependent.
-      //
-      // The db path comes from the ENGINE's record now. Hand-joining it here is what made the indexed
-      // graph and the graph the worker queried two different files (FINDING-069).
       const repoEntries = await this.listRepos();
       const repoEntry = repoEntries.find((r) => r.id === repoId);
       if (!repoEntry) throw new Error(`repo ${repoId} not registered`);
-      const dbPath = codeGraphDb(repoEntry);
-      const base = BUILTIN_WORKFLOWS.find((w) => w.id === 'onboarding')!;
-      const requirementsGraphPath = requirementsGraph(repoEntry);
-      const CMDS: Record<string, string[]> = {
-        index: ['wicked-estate', 'index', repoEntry.root_path, '--db', dbPath],
-        annotate: ['wicked-estate', 'clusters', '--annotate', '--db', dbPath],
-        // The real domain front-end (writes what /repos/:id/domain-graph reads). Fails
-        // closed with an actionable message until the domain-extraction front-half has
-        // annotated the graph — that message surfacing in the unit output is correct.
-        domain: ['wicked-core', 'domain-graph', '--db', dbPath, '--out', requirementsGraphPath],
-      };
-      const def: WorkflowDef = {
-        ...base,
-        phases: base.phases.map((ph) =>
-          CMDS[ph.id] ? { ...ph, executor: { type: 'tool', cmd: CMDS[ph.id]! } } : ph,
-        ),
-      };
+      const def = onboardingDefFor(repoEntry);
       // _writeBuiltinOverlay persists the overlay AND hot-registers it in the actor.
       //
       // This is the one place a core-seeded id is deliberately shadowed, and the shadow is the
