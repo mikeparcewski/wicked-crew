@@ -223,6 +223,31 @@ export interface CoreEvent {
   [k: string]: unknown;
 }
 
+/**
+ * A frame read back from core's DURABLE per-run event log (`Core::runEvents`):
+ * the same tagged object the live stream carries, plus the two fields the log
+ * adds when it records one.
+ *
+ * Same shape as the live frame on purpose — one mapping in core
+ * (`CoreEvent::to_json`) serializes both, so an event named here is the event
+ * named live, and a bundle assembled after a run cannot describe it in different
+ * words than the operator watched it happen in. (FINDING-014)
+ */
+export interface RecordedEvent extends CoreEvent {
+  /** Capture time, epoch millis — when core emitted the frame, not when it was read. */
+  ts: number;
+  /**
+   * Monotonic ordering across THIS RUN's whole event trail, so frames sharing a `ts` are still
+   * ordered.
+   *
+   * Not the same `seq` as `CoreEvent`'s, which counts chunks within one terminal's output. This one
+   * is required and spans every frame of the run; that one is optional and scoped to a stream. The
+   * name is inherited from the wire and narrowed here rather than renamed, because the wire is what
+   * `runEvents` returns.
+   */
+  seq: number;
+}
+
 // ── Governance types (crew#40) ──────────────────────────────────────────────
 
 /**

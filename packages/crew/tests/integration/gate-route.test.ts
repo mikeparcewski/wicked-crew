@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
-import type { CoreEvent, SessionView } from '../../src/core/types.js';
+import type { RecordedEvent, SessionView } from '../../src/core/types.js';
 
 const PARKED = 'parked-run';
 const FINISHED = 'finished-run';
@@ -36,7 +36,7 @@ let dir: string;
 let baseUrl: string;
 
 /** What the stubbed `runEvents` answers, and how many times it was asked. */
-let events: CoreEvent[] | null;
+let events: RecordedEvent[] | null;
 let eventReads: number;
 
 beforeAll(() => {
@@ -102,8 +102,8 @@ describe('GET /runs/:id/gate', () => {
 
   it('serves the recorded prompt for a parked run whose cache is cold', async () => {
     events = [
-      { type: 'sessionStarted', session: PARKED, ts: 1 } as CoreEvent,
-      { type: 'awaitingHuman', session: PARKED, ord: 2, prompt: PROMPT, ts: 1_785_614_004_730 } as CoreEvent,
+      { type: 'sessionStarted', session: PARKED, ts: 1, seq: 0 } as RecordedEvent,
+      { type: 'awaitingHuman', session: PARKED, ord: 2, prompt: PROMPT, ts: 1_785_614_004_730, seq: 0 } as RecordedEvent,
     ];
     const res = await getGate(PARKED);
     expect(res.status).toBe(200);
@@ -131,7 +131,7 @@ describe('GET /runs/:id/gate', () => {
   it('404s a parked run whose history records no gate (pre-log runs)', async () => {
     // `a338d177-…` in the wild: parked, but it ran before the event log existed, so its prompt is
     // genuinely gone. Distinct from the 503 above — nothing is broken, the answer is just absent.
-    events = [{ type: 'sessionStarted', session: PARKED, ts: 1 } as CoreEvent];
+    events = [{ type: 'sessionStarted', session: PARKED, ts: 1, seq: 0 } as RecordedEvent];
     const res = await getGate(PARKED);
     expect(res.status).toBe(404);
     expect(res.body['error']).toBe('No open gate for this run');

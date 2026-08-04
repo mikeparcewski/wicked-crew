@@ -370,14 +370,18 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
   });
 
   // The whole run as one auditable JSON attachment: the run, its units (each with
-  // the captured transcript), and the gate/routing decision trail re-derived from
-  // the run DTO — the daemon keeps no event log of its own.
+  // the captured transcript), and the decision trail read back from core's durable
+  // per-run event log — what actually happened, not a re-derivation of it.
   app.get(`${V}/runs/:id/evidence`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    const bundle = await buildEvidenceBundle(run, (unitId) => adapter.workOutput(unitId));
+    const bundle = await buildEvidenceBundle(
+      run,
+      (unitId) => adapter.workOutput(unitId),
+      (runId) => adapter.runEvents(runId),
+    );
     return reply
       .header('Content-Disposition', `attachment; filename="${evidenceFilename(id)}"`)
       .send(bundle);
