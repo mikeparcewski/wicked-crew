@@ -143,7 +143,7 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 
 // ── Built-in workflow definitions (crew#44) ──────────────────────────────────
 // Static mirrors of wicked-core workflow defs: feature, bug, migration, survey-repo,
-// repo-graph, domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
+// domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
 // Swap for `this.core.listWorkflowsJson()` / `this.core.getWorkflowJson(id)` once
 // the wicked-core-ts NAPI methods land.
 /**
@@ -159,9 +159,9 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
  * `bug.verify` and `migration.verify` — the entire content of core's gate-floor change, undone by a
  * file write, with no error and a workflow still reporting the right id and phases (FINDING-049).
  *
- * The write exists for the ids core does NOT seed (chat, repo-graph, survey-repo,
- * domain-graph-slice, memories, domain-extraction): for those the overlay is the only reason they
- * resolve at all, so it stays.
+ * The write exists for the ids core does NOT seed (chat, survey-repo, domain-graph-slice,
+ * memories, domain-extraction): for those the overlay is the only reason they resolve at all, so
+ * it stays.
  *
  * The exception: `onboarding` is core-seeded AND still written, by the onboarding path rather than
  * by the generic one. Deliberate — that def's executor cmds are baked with runtime `--db` paths, so
@@ -234,14 +234,6 @@ const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'cutover', kind: 'build', gate_type: 'execution', gate: { human_confirm: { unconditional: true } }, executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['execute'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-    ],
-  },
-  {
-    id: 'repo-graph',
-    is_system: true,
-    phases: [
-      { id: 'index', executor: { type: 'tool', cmd: ['wicked-estate', 'index'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'annotate', executor: { type: 'tool', cmd: ['wicked-estate', 'clusters', '--annotate'] }, kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['index'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {
