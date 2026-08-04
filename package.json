@@ -8,6 +8,7 @@
     "packages/agent-acp-bridges"
   ],
   "scripts": {
+    "use-local-core-ts": "node scripts/use-local-core-ts.mjs",
     "build": "npm run build -w packages/studio && npm run build -w packages/crew",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
