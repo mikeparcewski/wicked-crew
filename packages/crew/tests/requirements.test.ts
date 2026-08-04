@@ -136,7 +136,6 @@ describe('requirements service', () => {
   });
 
   it('whitespace-only statements are dropped at the service boundary', async () => {
-    const { patchRequirement: _ } = await import('../src/api/requirements.js');
     // Fixture REQ-001 in auth/session has a real statement; simulate a blank one via a
     // fresh fixture write is heavier than needed — assert the mapping contract directly:
     // a summary statement is never whitespace (trimmed or empty).

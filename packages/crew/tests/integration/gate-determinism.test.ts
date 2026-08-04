@@ -171,7 +171,12 @@ describe(`SC-003: gate evaluation is deterministic across ${RUNS} consecutive ru
 
     // Gate allowance: assert no unit was denied across any run.
     // Parse the common (and unique) signature and check every unit's denial_reason.
-    const units = JSON.parse([...uniqueSignatures][0]) as UnitView[];
+    const [signature] = uniqueSignatures;
+    // The size assertion above already proves this is present. Stated rather than asserted away with
+    // `!`, so that if that assertion is ever relaxed this fails with a sentence instead of a
+    // `JSON.parse(undefined)` TypeError twelve lines later.
+    if (signature === undefined) throw new Error('unreachable: signature count was asserted to be 1');
+    const units = JSON.parse(signature) as UnitView[];
     for (const unit of units) {
       expect(
         unit.denial_reason,

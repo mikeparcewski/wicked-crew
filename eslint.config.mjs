@@ -1,8 +1,13 @@
 // Flat ESLint config for the wicked-crew workspace (crew daemon + studio SPA).
 // typescript-eslint's `recommended` set — correctness-focused (unused vars, unsafe
 // patterns, misused promises-lite), not opinionated style. Fast: no type-info project
-// wiring, so it runs the same locally and in CI. Scoped to each package's `src/`
-// (tests + build scripts are excluded — they're covered by typecheck + their own runs).
+// wiring, so it runs the same locally and in CI.
+//
+// This header used to say tests were "excluded — covered by typecheck". They were not:
+// `tsconfig.json` listed `tests` under `exclude`, so no test file in this repo had ever been
+// typechecked OR linted, and the sentence asserting otherwise was the only thing standing where a
+// check should have been (FINDING-071). Tests are now linted here and typechecked through
+// `tsconfig.test.json`. Build scripts under `packages/*/scripts/` remain ignored below, deliberately.
 import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 

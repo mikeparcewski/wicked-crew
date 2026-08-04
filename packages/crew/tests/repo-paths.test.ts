@@ -16,16 +16,32 @@ import { describe, it, expect } from 'vitest';
 import { codeGraphDb, requirementsGraph, requirementsOverrides } from '../src/core/repoPaths.js';
 import type { RepoEntry } from '../src/core/types.js';
 
-function repo(extra: Partial<RepoEntry> = {}): RepoEntry {
-  return {
-    id: 'demo',
-    name: 'demo',
-    root_path: '/repos/demo',
-    default_branch: 'main',
-    registered_at: 0,
-    code_graph_db: '/repos/demo/.codegraph/estate.db',
-    ...extra,
-  };
+const DEFAULT_DB = '/repos/demo/.codegraph/estate.db';
+
+const BASE = {
+  id: 'demo',
+  name: 'demo',
+  root_path: '/repos/demo',
+  default_branch: 'main',
+  registered_at: 0,
+};
+
+/** A repo record as a current engine publishes it. */
+function repo(codeGraphDb: string = DEFAULT_DB): RepoEntry {
+  return { ...BASE, code_graph_db: codeGraphDb };
+}
+
+/**
+ * A repo record as a STALE addon publishes it: the key is ABSENT, not set to `undefined`.
+ *
+ * A separate function rather than `repo(undefined)`, because a default parameter fires on an
+ * explicit `undefined` — so `repo(undefined)` would hand back the default path and the throw tests
+ * would silently assert nothing. (Observed: they went green against a repo that had a db.) The
+ * distinction is also the real one: the field is missing from the engine's JSON, so `JSON.parse`
+ * yields a record without the key, which is exactly what `exactOptionalPropertyTypes` models.
+ */
+function repoWithoutDb(): RepoEntry {
+  return { ...BASE };
 }
 
 describe('repoPaths', () => {
@@ -34,16 +50,17 @@ describe('repoPaths', () => {
     // repo, a future relocation). Passing it through is the point; re-checking its shape here would
     // be a second opinion about a value that has only one owner.
     expect(codeGraphDb(repo())).toBe('/repos/demo/.codegraph/estate.db');
-    expect(codeGraphDb(repo({ code_graph_db: '/elsewhere/graph.db' }))).toBe('/elsewhere/graph.db');
+    expect(codeGraphDb(repo('/elsewhere/graph.db'))).toBe('/elsewhere/graph.db');
   });
 
   it('throws when the engine did not publish one, rather than guessing', () => {
-    for (const bad of [undefined, '']) {
-      expect(() => codeGraphDb(repo({ code_graph_db: bad }))).toThrow(/code_graph_db/);
-    }
+    // Two distinct shapes of the same defect: the key absent (a stale addon) and the key present but
+    // empty (an engine that resolved nothing). Both must throw; neither may fall back to a hand-join.
+    expect(() => codeGraphDb(repoWithoutDb())).toThrow(/code_graph_db/);
+    expect(() => codeGraphDb(repo(''))).toThrow(/code_graph_db/);
     // Named, so the operator knows which repo and what to do — a bare "path missing" sends them
     // reading source to find out that their addon is stale.
-    expect(() => codeGraphDb(repo({ code_graph_db: undefined }))).toThrow(/wicked-core#170/);
+    expect(() => codeGraphDb(repoWithoutDb())).toThrow(/wicked-core#170/);
   });
 
   it('derives the requirements artifacts, which the engine does not publish', () => {
