@@ -45,7 +45,17 @@ export function ElicitationPrompt({ e }: { e: OpenElicitation }): React.ReactEle
       const msg = err instanceof Error ? err.message : String(err);
       if (/\b409\b/.test(msg)) {
         // Stale tab: refetch and swap in whatever the server has now (null clears).
-        const fresh = await api.getElicitation(e.runId).catch(() => null);
+        // `.catch(() => null)` here would treat a 500 or a dropped connection as "nothing
+        // pending" and CLEAR the prompt — hiding a broken daemon behind an empty panel, which is
+        // the degrade-silently shape this codebase keeps paying for. `getElicitation` already maps
+        // a genuine 404 to null; anything else must surface.
+        let fresh: Awaited<ReturnType<typeof api.getElicitation>>;
+        try {
+          fresh = await api.getElicitation(e.runId);
+        } catch (refetchErr) {
+          setError(refetchErr instanceof Error ? refetchErr.message : String(refetchErr));
+          return;
+        }
         const swapped = swapFromGet(
           e.runId,
           e.elicitationId,

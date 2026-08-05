@@ -147,3 +147,36 @@ describe('ingest', () => {
     expect(useElicitationStore.getState().elicitations[RUN]?.elicitationId).toBe('A');
   });
 });
+
+describe('the component is actually reachable', () => {
+  /// Review caught the original PR shipping ElicitationPrompt without ever rendering it — the
+  /// component existed, the tests passed, and Studio still had no way to answer an elicitation.
+  /// That is "presence, not substance": a thing built and not wired. A source audit is the honest
+  /// instrument, in the same shape as wicked-core's spawn_audit.
+  it('ElicitationPrompt is mounted somewhere, with a key', async () => {
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+    const files = (function walk(d: string): string[] {
+      return readdirSync(d).flatMap((e) => {
+        const p = join(d, e);
+        return statSync(p).isDirectory() ? walk(p) : p.endsWith('.tsx') ? [p] : [];
+      });
+    })(SRC).filter((f) => !f.endsWith('ElicitationPrompt.tsx'));
+
+    const mounts = files.filter((f) => /<ElicitationPrompt\b/.test(readFileSync(f, 'utf8')));
+    expect(
+      mounts.length,
+      'ElicitationPrompt is defined but never rendered — Studio has no operator surface',
+    ).toBeGreaterThan(0);
+
+    // `key` is not cosmetic here: without it React reuses the instance and a half-typed answer to
+    // elicitation A survives into B (DES-002 v0.24 F3).
+    for (const f of mounts) {
+      const jsx = /<ElicitationPrompt\b[^>]*/.exec(readFileSync(f, 'utf8'))?.[0] ?? '';
+      expect(jsx, `mount in ${f} is missing key={...}`).toMatch(/\bkey=\{/);
+    }
+  });
+});

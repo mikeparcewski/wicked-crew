@@ -145,14 +145,19 @@ export const useElicitationStore = create<ElicitationStore>((set, get) => ({
   reconcile: (liveRunIds) => {
     const live = new Set(liveRunIds);
     set((s) => {
+      const dropped = Object.keys(s.elicitations).filter((runId) => !live.has(runId));
+      // Identity-stable when nothing is dropped: reconcile runs on EVERY run-list refresh, so
+      // returning fresh objects each time rerenders every subscriber for no change.
+      if (dropped.length === 0) return s;
+
       const next: Record<string, OpenElicitation> = {};
-      let gens = s.generations;
       for (const [runId, e] of Object.entries(s.elicitations)) {
         if (live.has(runId)) next[runId] = e;
-        // A run that is absent or terminal must bump, so a GET still in flight for it cannot
-        // write back afterwards (DES-002 v0.25 — the zombie-prompt case).
-        else gens = bumped(gens, runId);
       }
+      // Each dropped run must still bump, so a GET in flight for it cannot write back afterwards
+      // (DES-002 v0.25 — the zombie-prompt case).
+      let gens = s.generations;
+      for (const runId of dropped) gens = bumped(gens, runId);
       return { elicitations: next, generations: gens };
     });
   },
