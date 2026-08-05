@@ -1,4 +1,4 @@
-# agent-acp-bridges — npm release caller (FINDING-096).
+# agent-acp-bridges — npm release (FINDING-096).
 #
 # ── Why this workflow exists ────────────────────────────────────────────────────────────────────
 #
@@ -25,23 +25,27 @@
 #   pi-acp                                  -> pi-acp
 #
 # — and the fourth is this one, ours, providing `agy-acp` for Antigravity. It is the only declared
-# bridge that was never published. (An earlier draft of this comment said "four of five"; review
-# caught the miscount. The five is the count of bridge NAMES in bridge-path.ts's prose, which
-# includes `opencode-acp` — a binary NO declared package provides and which is absent from
-# node_modules/.bin. That is stale prose, tracked separately; it is not part of this fix.)
+# bridge that was never published. (bridge-path.ts's prose also names `opencode-acp`, which NO
+# declared package provides and which produces no shim — stale documentation, filed as FINDING-097
+# and deliberately not fixed here.)
 #
-# ── Why a separate workflow and tag ─────────────────────────────────────────────────────────────
+# ── Why this is self-contained rather than a wicked-ci caller ───────────────────────────────────
 #
-# `wicked-ci/node-release.yml` publishes exactly one package per call (`publish_working_dir`), so a
-# second publishable package in this workspace needs its own caller and its own tag prefix. Same
-# shape wicked-core uses to publish the engine (`core-ts-v*`) separately from the CLI (`v*`).
+# The first attempt called `wicked-ci/node-release.yml`, which failed before publishing:
+#
+#     npm error Invalid version: bridges-v1.0.0
+#
+# That workflow derives the version with `${GITHUB_REF_NAME#v}` — a leading `v` only, so it
+# supports exactly one tag namespace per repo, and `v*` already belongs to wicked-crew itself.
+#
+# wicked-core hit the identical problem publishing a second package from one repo and solved it the
+# same way this does: `napi-release.yml` is self-contained and strips its own `core-ts-v` prefix.
+# Following that precedent keeps a one-package tag-scheme quirk out of shared infrastructure that
+# five products depend on.
 #
 # Publishing this RETROACTIVELY fixes already-published crew versions: they declare `^1.0.0`, so
 # once 1.0.0 exists on the registry, `npm install wicked-crew@0.4.0` resolves. No crew re-release
 # is required.
-#
-# os_matrix is ubuntu-only: the package is two `.mjs` files with a vitest suite and no native or
-# platform-specific parts, so a three-OS matrix would buy nothing.
 
 name: Release bridges
 
@@ -52,22 +56,68 @@ on:
 
 permissions:
   contents: write
-  packages: write
+  # OIDC trusted publishing + `npm publish --provenance`, the same tokenless path wicked-crew and
+  # wicked-core-ts already use. Neither repo holds an NPM_TOKEN.
   id-token: write
-  pull-requests: write
 
 jobs:
   release:
-    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@v1
-    with:
-      package_name: agent-acp-bridges
-      publish_working_dir: packages/agent-acp-bridges
-      os_matrix: '["ubuntu-latest"]'
-      version_dirs: |
-        packages/agent-acp-bridges
-      # The workspace install is needed for vitest; the package itself has no build step (`files`
-      # is the two committed .mjs files), so there is nothing to compile before publish.
-      install_cmd: 'npm install'
-      test_cmd: 'npm run -w packages/agent-acp-bridges test'
-      enable_sync_pr: true
-    secrets: inherit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/agent-acp-bridges
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+
+      # `npm publish --provenance` needs a newer npm than the runner ships.
+      - name: Upgrade npm (provenance-capable)
+        run: npm install -g npm@latest
+        working-directory: .
+
+      # The workspace install is what vitest needs; this package has no build step (`files` is the
+      # two committed .mjs files), so there is nothing to compile before publish.
+      - name: Install workspace
+        run: npm install
+        working-directory: .
+
+      - name: Test
+        run: npm test
+
+      # The tag and the manifest must agree. Deriving the version from the tag and stamping it
+      # silently would let `bridges-v9.9.9` publish whatever the manifest happens to say — the
+      # tag would then describe a release that does not exist. Compare instead, and fail loudly.
+      - name: Tag and manifest must agree
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#bridges-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "  tag      : ${GITHUB_REF_NAME}  -> ${TAG_VERSION}"
+          echo "  manifest : ${PKG_VERSION}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} implies ${TAG_VERSION} but package.json says ${PKG_VERSION}. Bump the manifest and re-tag rather than publishing a version the tag does not name."
+            exit 1
+          fi
+
+      - name: Publish to npm (trusted publisher + provenance)
+        run: npm publish --access public --provenance
+
+      # Prove the thing that FINDING-096 is actually about: not "publish exited 0", but "an
+      # operator can now obtain it". The registry is eventually consistent, so retry briefly.
+      - name: The registry can actually serve it
+        working-directory: .
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#bridges-v}"
+          for i in 1 2 3 4 5 6; do
+            if npm view "agent-acp-bridges@${TAG_VERSION}" version; then
+              echo "  ok — obtainable from the registry"
+              exit 0
+            fi
+            echo "  not visible yet (attempt $i), waiting…"
+            sleep 10
+          done
+          echo "::error::agent-acp-bridges@${TAG_VERSION} is still not resolvable after publish. This is the exact failure mode FINDING-096 describes: a green publish for something no operator can install."
+          exit 1
