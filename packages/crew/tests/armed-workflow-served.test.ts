@@ -30,8 +30,35 @@ import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
 
-/** The approved content-address pin core's `coverage` phase carries. */
-const COVERAGE_PIN = '4a4b10bf4277bd34';
+/**
+ * The approved content-address pin core's `coverage` phase carries — READ FROM CORE, not transcribed.
+ *
+ * This was a fourth hardcoded copy of that hash (after core's const, core's JSON, and crew's
+ * adapter mirror), and it drifted: it still held `4a4b10bf4277bd34` after core moved on, so this
+ * test asserted crew was serving a pin core had retired. A test that pins a stale value does not
+ * guard the contract, it guards the drift.
+ *
+ * Deriving beats duplicating. The P1 rule this ecosystem applies elsewhere is "one source, or a test
+ * that reads both" — here one source is available, so take it (FINDING-084/009).
+ */
+const COVERAGE_PIN: string = (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const rel of ['../../../../wicked-core', '../../../../../wicked-core']) {
+    try {
+      const def = JSON.parse(
+        readFileSync(join(here, rel, 'workflows', 'domain-extraction.json'), 'utf8'),
+      ) as WorkflowDef;
+      const pin = def.phases.find((p) => p.id === 'coverage')?.validator_pin;
+      if (pin) return pin;
+    } catch {
+      /* try the next layout */
+    }
+  }
+  throw new Error(
+    'cannot read core\'s domain-extraction.json — this test derives the pin rather than ' +
+      'hardcoding a fourth copy, so it needs the sibling wicked-core checkout',
+  );
+})();
 
 let adapter: CoreAdapter;
 let dir: string;
