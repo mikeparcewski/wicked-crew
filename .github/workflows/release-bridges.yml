@@ -17,9 +17,18 @@
 #
 # The bridge is not incidental: `packages/crew/src/core/bridge-path.ts` documents that the ACP
 # bridges "ship as npm packages (dependencies of this package)" so their launcher shims land in
-# `node_modules/.bin` and the engine can spawn them by bare name. Four of the five are real npm
-# packages (@agentclientprotocol/claude-agent-acp, @agentclientprotocol/codex-acp, pi-acp). This
-# one — ours, providing `agy-acp` for Antigravity — is the only one that was skipped.
+# `node_modules/.bin` and the engine can spawn them by bare name. crew declares FOUR bridge
+# packages; three are external and published —
+#
+#   @agentclientprotocol/claude-agent-acp   -> claude-agent-acp
+#   @agentclientprotocol/codex-acp          -> codex-acp
+#   pi-acp                                  -> pi-acp
+#
+# — and the fourth is this one, ours, providing `agy-acp` for Antigravity. It is the only declared
+# bridge that was never published. (An earlier draft of this comment said "four of five"; review
+# caught the miscount. The five is the count of bridge NAMES in bridge-path.ts's prose, which
+# includes `opencode-acp` — a binary NO declared package provides and which is absent from
+# node_modules/.bin. That is stale prose, tracked separately; it is not part of this fix.)
 #
 # ── Why a separate workflow and tag ─────────────────────────────────────────────────────────────
 #

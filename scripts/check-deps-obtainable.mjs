@@ -26,7 +26,8 @@
  * answers exactly "could an operator get this?", which is the question the workspace can never be
  * asked.
  *
- * Cross-platform per CLAUDE.md: node, `node:path`, no shell builtins.
+ * Cross-platform: node and `node:path` rather than shell builtins, so this runs the same on
+ * macOS, Linux and Windows. (`npm` itself needs `shell: true` on win32 — it is a `.cmd` shim there.)
  *
  *   node scripts/check-deps-obtainable.mjs
  */
@@ -55,6 +56,7 @@ function workspaceNames() {
 function obtainable(name, range) {
   const r = spawnSync('npm', ['view', `${name}@${range}`, 'version'], {
     encoding: 'utf8',
+    // npm on Windows is a .cmd shim, which spawnSync cannot exec without a shell.
     shell: process.platform === 'win32',
   });
   if (r.error) return { ok: false, why: `could not run npm: ${r.error.message}` };
