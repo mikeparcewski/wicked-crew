@@ -738,7 +738,9 @@ export function RepoGraphModal({ repo, onClose, onSelectRun, initialFocus }: Pro
                         <span className="text-[11px] font-mono font-bold" style={{ color: T.ink }}>
                           {domainCoverage.behavior_bearing === 0
                             ? 'not extracted'
-                            : `${(domainCoverage.coverage * 100).toFixed(1)}%`}
+                            : domainCoverage.coverage < 1 && domainCoverage.coverage * 100 >= 99.95
+                              ? '<100%'
+                              : `${(domainCoverage.coverage * 100).toFixed(1)}%`}
                         </span>
                       </div>
                       <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: T.surface }}>

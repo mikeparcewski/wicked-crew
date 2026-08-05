@@ -97,6 +97,26 @@ describe('the coverage badge reports the ENGINE gate (FINDING-009)', () => {
     expect(screen.queryByText('100.0%')).toBeNull();
   });
 
+  /// Rounding must not claim a completeness the gate denies. 9,999 of 10,000 is 99.99%, which
+  /// toFixed(1) renders as "100.0%" — and it would sit next to a GATE FAIL badge, since the engine
+  /// gates on the exact integer `unaccounted`. wicked-core's own comment names this trap.
+  it('does not round up to 100% while a node is still unaccounted', async () => {
+    current = report({
+      behavior_bearing: 10000,
+      resolved: 9999,
+      risk_flagged: 0,
+      unaccounted: 1,
+      coverage: 0.9999,
+    });
+    render(<CoverageView />);
+    await waitFor(() => expect(screen.getByText('GATE FAIL')).toBeTruthy());
+    // Assert on the COVERAGE rendering, not on the absence of "100.0%" anywhere: with
+    // risk_flagged 0, `resolved_rate` is legitimately 1.0 here — 9,999 of 9,999 ACCOUNTED nodes
+    // really are resolved. A blanket "no 100.0% on the page" check fails on a true statement.
+    // If the rounding guard regressed, coverage would render "100.0%" and "<100%" would be absent.
+    expect(screen.getAllByText('<100%').length).toBeGreaterThan(0);
+  });
+
   /// ...but a real 100% must still show, or the fix would have hidden the good case too.
   it('still renders a genuine 100%', async () => {
     current = report({ behavior_bearing: 100, resolved: 100, coverage: 1 });
