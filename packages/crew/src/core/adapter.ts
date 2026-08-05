@@ -956,11 +956,30 @@ export class CoreAdapter {
     await mkdir(dir, { recursive: true });
     const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
     delete overlayDef.is_system;
-    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
+    const json = JSON.stringify(overlayDef);
     const core = this.core as unknown as Record<string, unknown>;
-    if (typeof core['registerWorkflow'] === 'function') {
-      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
+    const register = core['registerWorkflow'];
+
+    // Same validate-before-persist ordering as registerWorkflow (FINDING-002). This path had the
+    // identical defect — write first, validate last — which is the P3 shape this campaign keeps
+    // finding: N paths, one hardened. A mirror that drifted far enough for core to reject it would
+    // otherwise leave an unparseable *.json in the dispatch overlay dir, and core would skip it at
+    // the next load. Letting the rejection propagate instead fails the launch with core's own
+    // reason, which beats dispatching against a workflow core will silently drop.
+    if (typeof register === 'function') {
+      await (register as (j: string) => Promise<string>).call(this.core, json);
     }
+    // Deliberately NOT the refusal registerWorkflow makes when the binding is absent, and the
+    // difference is the input, not the caller:
+    //   - a user def is arbitrary runtime input no test has ever seen, so unvalidatable means
+    //     unsafe to persist;
+    //   - a built-in mirror is asserted field-for-field against wicked-core's own
+    //     workflows/<id>.json by tests/builtin-overlay-shadow.test.ts, so its parseability is
+    //     established at build time rather than needing a runtime check.
+    // Refusing here would also break DELIVERY: this write is the only way core resolves a drop-in
+    // id, so a refusal turns a silent ungating into a hard "unknown workflow" — exactly the
+    // regression FINDING-084's first attempted fix caused.
+    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
   }
 
   /**

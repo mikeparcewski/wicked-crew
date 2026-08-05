@@ -118,3 +118,46 @@ describe('registerWorkflow is atomic (FINDING-002)', () => {
     expect(readdirSync(overlayDir)).toEqual([]);
   });
 });
+
+// The SAME defect lived in `_writeBuiltinOverlay`, the sibling writer `launchRun` uses to deliver
+// drop-in defs. Caught in review of the fix above, which makes it the P3 shape this campaign keeps
+// finding: N paths, one hardened. Fixing only the reported path would have left the poison pill
+// reachable through the more commonly travelled one.
+describe('the built-in overlay writer has the same ordering (FINDING-002, P3)', () => {
+  /** `_writeBuiltinOverlay` is private and reached via launchRun; call it directly rather than
+   *  standing up a whole run, in the same spirit as the `core` cast above. */
+  function writeBuiltin(a: CoreAdapter, def: WorkflowDef): Promise<void> {
+    return (a as unknown as { _writeBuiltinOverlay(d: WorkflowDef): Promise<void> })
+      ._writeBuiltinOverlay(def);
+  }
+
+  it('a mirror core rejects is not left in the dispatch overlay dir', async () => {
+    stubRegister(adapter!, () => Promise.reject(new Error('invalid workflow JSON')));
+
+    await expect(writeBuiltin(adapter!, DEF)).rejects.toThrow(/invalid workflow JSON/);
+    expect(
+      readdirSync(overlayDir),
+      'a rejected mirror must not be written — core would skip it at the next load',
+    ).toEqual([]);
+  });
+
+  /// Delivery must still work. This write is the ONLY way core resolves a drop-in id, so an
+  /// over-strict fix here turns a silent ungating into a hard "unknown workflow" — the regression
+  /// FINDING-084's first attempted fix caused.
+  it('still delivers an accepted mirror', async () => {
+    stubRegister(adapter!, () => Promise.resolve('{}'));
+
+    await expect(writeBuiltin(adapter!, DEF)).resolves.toBeUndefined();
+    expect(readdirSync(overlayDir)).toEqual([`${DEF.id}.json`]);
+  });
+
+  /// Deliberately UNLIKE registerWorkflow: a built-in mirror is asserted field-for-field against
+  /// core's own workflows/<id>.json by builtin-overlay-shadow.test.ts, so its parseability is
+  /// established at build time. Refusing here would break delivery for no runtime gain.
+  it('still delivers when the engine exposes no validator, unlike a user def', async () => {
+    stubRegister(adapter!, undefined);
+
+    await expect(writeBuiltin(adapter!, DEF)).resolves.toBeUndefined();
+    expect(readdirSync(overlayDir)).toEqual([`${DEF.id}.json`]);
+  });
+});
