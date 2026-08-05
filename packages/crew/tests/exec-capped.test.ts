@@ -17,7 +17,13 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXEC_MAX_BUFFER_BYTES, ExecOutputTooLarge, execCapped, isMaxBufferError } from '../src/core/exec.js';
+import {
+  EXEC_MAX_BUFFER_BYTES,
+  ExecOutputTooLarge,
+  execCapped,
+  isMaxBufferError,
+  resolveMaxBuffer,
+} from '../src/core/exec.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const CHOKEPOINT = join(SRC, 'core', 'exec.ts');
@@ -76,6 +82,38 @@ describe('every child process goes through the capped helper (FINDING-016)', () 
   it('passes ordinary output straight through', async () => {
     const { stdout } = await execCapped(process.execPath, ['-e', 'process.stdout.write("ok")']);
     expect(stdout).toBe('ok');
+  });
+
+  /// The chokepoint must not be defeatable by ACCIDENT. `{ maxBuffer: cfg?.limit }` produces
+  /// `maxBuffer: undefined` trivially, and under `{ maxBuffer: DEFAULT, ...opts }` the spread
+  /// overwrote the default with undefined — node then falls back to its own 1 MiB and the exact
+  /// defect this module exists to prevent returns, through the thing meant to stop it.
+  it('an explicit maxBuffer: undefined does not remove the cap', () => {
+    // Measured, not assumed — node's behaviour here is the opposite of the obvious guess:
+    //   no maxBuffer key     -> ERR_CHILD_PROCESS_STDIO_MAXBUFFER at node's 1 MiB default
+    //   maxBuffer: undefined -> OK, 3145728 bytes            <-- NO limit at all
+    //   maxBuffer: 1 MiB     -> ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+    // So the accidental spread does not SHRINK the cap, it DELETES it — the unbounded allocation
+    // the finite cap exists to prevent. `{ maxBuffer: cfg?.limit }` produces that shape trivially.
+    expect(resolveMaxBuffer({ maxBuffer: undefined })).toBe(EXEC_MAX_BUFFER_BYTES);
+    expect(resolveMaxBuffer({})).toBe(EXEC_MAX_BUFFER_BYTES);
+    // ...but a deliberate cap is still honoured.
+    expect(resolveMaxBuffer({ maxBuffer: 4096 })).toBe(4096);
+  });
+
+  /// The overflow message must state a limit a human can read. Math.round(1024 / MiB) is 0, and
+  /// "more than 0 MiB" reads as a bug in the message rather than a real limit.
+  it('states small caps in units that are not zero', async () => {
+    let message = '';
+    try {
+      await execCapped(process.execPath, ['-e', 'process.stdout.write("x".repeat(50000))'], {
+        maxBuffer: 1024,
+      });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('1 KiB');
+    expect(message).not.toMatch(/\b0 MiB\b/);
   });
 
   /// A non-overflow failure must NOT be relabelled as an overflow.

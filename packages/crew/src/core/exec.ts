@@ -34,6 +34,14 @@ const execFileAsync = promisify(execFile);
  *  tool needs more than this, streaming is the answer rather than a bigger buffer. */
 export const EXEC_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
+/** Bytes at a scale a human reads. `Math.round(n / MiB)` renders a 1 KiB cap as "0 MiB", which
+ *  reads as a bug in the message rather than a real limit — flagged in review. */
+function humanBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${Math.round(n / (1024 * 1024))} MiB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KiB`;
+  return `${n} bytes`;
+}
+
 /** A child produced more output than the cap allows.
  *
  *  Distinct from a generic failure ON PURPOSE: "this repo is too big for the current cap" and "the
@@ -45,9 +53,9 @@ export class ExecOutputTooLarge extends Error {
     readonly limitBytes: number,
   ) {
     super(
-      `${file} produced more than ${Math.round(limitBytes / (1024 * 1024))} MiB of output and was ` +
-        `stopped. This is a limit of this daemon, not a failure of ${file}; the output size scales ` +
-        `with repo size, so a larger repo can hit it where a smaller one does not.`,
+      `${file} produced more than ${humanBytes(limitBytes)} of output and was stopped. This is a ` +
+        `limit of this daemon, not a failure of ${file}; the output size scales with repo size, so ` +
+        `a larger repo can hit it where a smaller one does not.`,
     );
     this.name = 'ExecOutputTooLarge';
   }
@@ -62,7 +70,21 @@ export function isMaxBufferError(err: unknown): boolean {
   );
 }
 
-type ExecOpts = { timeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; maxBuffer?: number };
+type ExecOpts = {
+  timeout?: number;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** `number | undefined` on purpose: `exactOptionalPropertyTypes` would otherwise reject the very
+   *  shape this module defends against, making the guard below untypeable and untestable. */
+  maxBuffer?: number | undefined;
+};
+
+/** The cap that will actually apply. Exported so the rule can be tested directly: proving it
+ *  end-to-end means making the process buffer 64 MiB, which is a disproportionate cost in CI for a
+ *  one-line ordering rule. The end-to-end overflow path is covered separately. */
+export function resolveMaxBuffer(opts: ExecOpts): number {
+  return opts.maxBuffer ?? EXEC_MAX_BUFFER_BYTES;
+}
 
 /** `execFile`, with a bounded output buffer and an overflow that says what it was.
  *
@@ -72,12 +94,23 @@ export async function execCapped(
   args: string[],
   opts: ExecOpts = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  // Resolve the cap BEFORE spreading. `{ maxBuffer: DEFAULT, ...opts }` lets a caller that passes
+  // `maxBuffer: undefined` — trivially produced by `{ maxBuffer: cfg?.limit }` — overwrite the
+  // default. Flagged in review; measured rather than assumed, because the consequence is the
+  // opposite of the obvious guess:
+  //
+  //   no maxBuffer key     -> ERR_CHILD_PROCESS_STDIO_MAXBUFFER at node's 1 MiB default
+  //   maxBuffer: undefined -> OK, 3145728 bytes            <-- NO limit at all
+  //   maxBuffer: 1 MiB     -> ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+  //
+  // So an accidental `undefined` does not fall back to 1 MiB, it removes the cap entirely — the
+  // unbounded heap allocation this module's finite cap exists to prevent. The cap is not
+  // overridable by ACCIDENT, only on purpose.
+  const maxBuffer = resolveMaxBuffer(opts);
   try {
-    return await execFileAsync(file, args, { maxBuffer: EXEC_MAX_BUFFER_BYTES, ...opts });
+    return await execFileAsync(file, args, { ...opts, maxBuffer });
   } catch (err) {
-    if (isMaxBufferError(err)) {
-      throw new ExecOutputTooLarge(file, opts.maxBuffer ?? EXEC_MAX_BUFFER_BYTES);
-    }
+    if (isMaxBufferError(err)) throw new ExecOutputTooLarge(file, maxBuffer);
     throw err;
   }
 }
