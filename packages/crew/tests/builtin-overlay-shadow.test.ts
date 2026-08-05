@@ -99,7 +99,8 @@ function normalized(def: WorkflowDef): unknown {
   // `is_system` is crew-only bookkeeping and `registerWorkflow` STRIPS it before writing, so it can
   // never reach core's overlay. Comparing it would fail on a field that by construction never
   // crosses the boundary this test guards.
-  const { is_system: _ignored, ...rest } = def as WorkflowDef & { is_system?: boolean };
+  const rest: Record<string, unknown> = { ...(def as unknown as Record<string, unknown>) };
+  delete rest['is_system'];
   return {
     ...rest,
     phases: def.phases.map((p) => ({ executor: { type: 'agent' }, ...p })),
