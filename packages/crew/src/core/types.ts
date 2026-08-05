@@ -161,6 +161,10 @@ export interface CoreEvent {
   description?: string;
   problem?: string;
   message?: string;
+  /** `elicitationCreated`: the id minted by the actor for this elicitation round. */
+  elicitationId?: string;
+  /** `elicitationCreated`: an ordered set of valid responses; `null` / absent = free-text. */
+  options?: string[] | null;
   /** PTY terminal frames (`terminalOpened`/`terminalOutput`/`terminalExited`): the terminal id. */
   id?: string;
   /**

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
 import { GateCache } from './gate-cache.js';
+import { ElicitationCache } from './elicitation-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -35,13 +36,16 @@ export async function createServer(
 ): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
   const gateCache = new GateCache();
+  const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
 
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts
-  // (§3.3), route terminal frames to their owning per-terminal socket (by id,
-  // DES-TERMINAL-001 §6), then forward every frame verbatim to all `/ws` clients (§2.1).
+  // (§3.3), cache elicitation prompts (DES-002), route terminal frames to their owning
+  // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame verbatim
+  // to all `/ws` clients (§2.1).
   adapter.onEvent((event) => {
     gateCache.ingest(event);
+    elicitationCache.ingest(event);
     terminals.route(event);
     broadcast(event);
   });
@@ -80,7 +84,7 @@ export async function createServer(
   // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
   registerTerminalWs(app, adapter, terminals);
 
-  registerRoutes(app, adapter, gateCache);
+  registerRoutes(app, adapter, gateCache, elicitationCache);
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:

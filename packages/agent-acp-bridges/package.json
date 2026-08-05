@@ -1,13 +1,16 @@
 {
   "name": "agent-acp-bridges",
   "version": "1.0.0",
-  "description": "ACP (Agent Client Protocol) stdio bridge for headless coding CLIs without a native or ecosystem ACP adapter \u2014 currently agy (Antigravity). Used by wicked-core to drive governed multi-turn sessions.",
+  "description": "ACP (Agent Client Protocol) stdio bridge for headless coding CLIs without a native or ecosystem ACP adapter — currently agy (Antigravity). Used by wicked-core to drive governed multi-turn sessions.",
   "type": "module",
   "bin": {
     "agy-acp": "agy-acp.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
   },
   "license": "MIT",
   "repository": {
@@ -24,5 +27,8 @@
   "files": [
     "*.mjs",
     "README.md"
-  ]
+  ],
+  "devDependencies": {
+    "vitest": "^3.2.6"
+  }
 }
