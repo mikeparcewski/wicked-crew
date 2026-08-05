@@ -981,15 +981,40 @@ export class CoreAdapter {
     // field and silently drops any workflow whose JSON it cannot fully deserialise.
     const overlayDef = { ...(def as WorkflowDef & { is_system?: boolean }) };
     delete overlayDef.is_system;
+    const json = JSON.stringify(overlayDef);
+
+    // VALIDATE BEFORE PERSISTING (FINDING-002). This ordering is the whole fix.
+    //
+    // The write used to come first and `registerWorkflow` last, so core's parser — the only thing
+    // that actually knows the overlay schema — ran AFTER the state was already mutated. Observed
+    // end to end: POST /api/v1/workflows answered
+    //   400 invalid workflow JSON: unknown field `name`, expected `id` or `phases`
+    // and the file was on disk anyway, `name` included, and served from `userWorkflows` as though
+    // registered. On the next daemon start core could not deserialise its own overlay file:
+    //   wicked-core: skipping workflow file .../probe-002-persist.json
+    // and the workflow VANISHED while its file remained. That is FINDING-002's root cause: not
+    // "registration is not durable" but "a rejected request persisted a def core cannot read".
+    //
+    // Core's parser is the authority, so it is what we ask. Enumerating the accepted fields in TS
+    // instead would be a second copy of core's schema — the exact drift this codebase keeps paying
+    // for, and `is_system` above is already one hand-maintained instance of it.
+    const core = this.core as unknown as Record<string, unknown>;
+    const register = core['registerWorkflow'];
+    if (typeof register !== 'function') {
+      // No validator, so no safe way to persist: an unvalidated def written here is a file core
+      // may silently skip at load. Refusing is the honest outcome — and it is loud, unlike the
+      // vanishing act it replaces. `registerWorkflow` has been declared (non-optional) in
+      // wicked-core-ts since 0.4.0, so this is a real floor, not a routine path.
+      throw new Error(
+        'this wicked-core build exposes no registerWorkflow binding, so a workflow cannot be ' +
+          'validated before it is written; refusing to persist an unvalidated definition',
+      );
+    }
+    // Throws on a def core rejects — before anything is written or registered.
+    await (register as (j: string) => Promise<string>).call(this.core, json);
+
     await writeFile(path, JSON.stringify(overlayDef, null, 2), 'utf8');
     this.userWorkflows.set(def.id, def);
-
-    // Hot-register in the Rust actor when the NAPI method is available.
-    // Falls back gracefully if running against an older core build.
-    const core = this.core as unknown as Record<string, unknown>;
-    if (typeof core['registerWorkflow'] === 'function') {
-      await (core['registerWorkflow'] as (j: string) => Promise<string>)(JSON.stringify(overlayDef));
-    }
     return def.id;
   }
 
