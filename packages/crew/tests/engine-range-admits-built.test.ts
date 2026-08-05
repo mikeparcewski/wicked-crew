@@ -18,17 +18,19 @@
 // here would be a third copy, which is the defect, not the fix.
 
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { satisfies } from 'semver';
+import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CREW_MANIFEST = join(HERE, '..', 'package.json');
 
-const CORE_DIR =
-  process.env['WICKED_CORE_DIR'] ?? join(HERE, '..', '..', '..', '..', 'wicked-core');
-const CORE_TS_MANIFEST = join(CORE_DIR, 'crates', 'wicked-core-ts', 'package.json');
+/** Core's built engine version, or `null` under the explicit standalone opt-out (FINDING-094). */
+const builtEngineVersion: string | null = SKIP_CORE_CHECKS
+  ? null
+  : readCoreJson<{ version: string }>('crates', 'wicked-core-ts', 'package.json').version;
 
 function declaredRange(): string {
   const m = JSON.parse(readFileSync(CREW_MANIFEST, 'utf8')) as {
@@ -87,13 +89,18 @@ describe('the declared engine range admits the engine we build against', () => {
     expect(admits('^0.4.0-beta.2', '0.4.0-beta.1')).toBe(false);
   });
 
-  /// THE invariant. Skipped, not failed, when the sibling checkout is absent — crew's suite must
-  /// stay runnable standalone — but CI checks core out, so it runs there.
-  it.skipIf(!existsSync(CORE_TS_MANIFEST))(
+  /// THE invariant.
+  ///
+  /// This used to skip whenever the sibling checkout was missing, on the reasoning that crew's
+  /// suite must stay runnable standalone. That reasoning was right about developers and wrong about
+  /// automation: the RELEASE job has no sibling checkout either, so this check — the one that
+  /// decides whether the range being frozen into a published artifact can install the engine it was
+  /// tested against — silently vacated in the exact run where it mattered most (FINDING-094/095).
+  /// Now it skips only under an explicit human opt-out that automation never sets.
+  it.skipIf(SKIP_CORE_CHECKS)(
     'the range in crew/package.json admits the version in wicked-core/crates/wicked-core-ts',
     () => {
-      const built = (JSON.parse(readFileSync(CORE_TS_MANIFEST, 'utf8')) as { version: string })
-        .version;
+      const built = builtEngineVersion!;
       const range = declaredRange();
       expect(
         admits(range, built),

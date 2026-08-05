@@ -23,12 +23,12 @@
 // owns. Reachability is the defect; the seed step is the design.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
+import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
 
 /**
  * The approved content-address pin core's `coverage` phase carries — READ FROM CORE, not transcribed.
@@ -41,24 +41,20 @@ import type { WorkflowDef } from '../src/core/types.js';
  * Deriving beats duplicating. The P1 rule this ecosystem applies elsewhere is "one source, or a test
  * that reads both" — here one source is available, so take it (FINDING-084/009).
  */
-const COVERAGE_PIN: string = (() => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const rel of ['../../../../wicked-core', '../../../../../wicked-core']) {
-    try {
-      const def = JSON.parse(
-        readFileSync(join(here, rel, 'workflows', 'domain-extraction.json'), 'utf8'),
-      ) as WorkflowDef;
+const COVERAGE_PIN: string | null = SKIP_CORE_CHECKS
+  ? null
+  : (() => {
+      const def = readCoreJson<WorkflowDef>('workflows', 'domain-extraction.json');
       const pin = def.phases.find((p) => p.id === 'coverage')?.validator_pin;
-      if (pin) return pin;
-    } catch {
-      /* try the next layout */
-    }
-  }
-  throw new Error(
-    'cannot read core\'s domain-extraction.json — this test derives the pin rather than ' +
-      'hardcoding a fourth copy, so it needs the sibling wicked-core checkout',
-  );
-})();
+      if (pin === null || pin === undefined) {
+        throw new Error(
+          "core's domain-extraction.json has no validator_pin on its `coverage` phase. Either the " +
+            'floor was removed from the one workflow that arms the gate, or the phase was renamed ' +
+            '— both are the kind of change this guard exists to make loud.',
+        );
+      }
+      return pin;
+    })();
 
 let adapter: CoreAdapter;
 let dir: string;
@@ -91,14 +87,25 @@ describe('the armed workflow is served', () => {
     expect(def, 'domain-extraction must be in listWorkflows() — it is the only workflow that arms the gate').not.toBeNull();
   });
 
-  it('still carries the approved validator pin', () => {
+  it('still carries a validator pin, on the evaluator phase', () => {
     // Serving the workflow with a null/edited pin would be worse than not serving it: the run
     // would proceed UNGATED and read as governed.
+    //
+    // Deliberately NOT the cross-repo comparison — this claim is checkable from crew alone, so it
+    // is asserted unconditionally. Whether the pin is the one core approved is a separate claim
+    // needing core's artifact, and it is asserted separately below. Folding them together made a
+    // locally-checkable invariant hostage to an environmental prerequisite.
     const pinned = served().phases.filter((p) => p.validator_pin !== null);
     expect(pinned.map((p) => p.id)).toEqual(['coverage']);
-    expect(pinned[0]!.validator_pin).toBe(COVERAGE_PIN);
     expect(pinned[0]!.role).toBe('evaluator');
     expect(pinned[0]!.verified_evidence).toBe(true);
+  });
+
+  it.skipIf(SKIP_CORE_CHECKS)('serves the exact pin core approved', () => {
+    // A pin crew serves that core's vault does not hold is unresolvable, and every
+    // domain-extraction run fails closed on it (FINDING-066/080). Crew's overlay write is the only
+    // delivery path for this def, so this mirror is not display — it IS what reaches the engine.
+    expect(served().phases.find((p) => p.id === 'coverage')?.validator_pin).toBe(COVERAGE_PIN);
   });
 
   it('has a well-formed phase DAG (core rejects the overlay otherwise)', () => {
@@ -117,26 +124,20 @@ describe('the armed workflow is served', () => {
 
 // ── Cross-repo drift guard ───────────────────────────────────────────────────
 // Crew's entry is a hand-transcribed mirror of core's JSON (core ships the def as a drop-in and
-// exposes no dump command). Nothing in crew's own build can detect core changing it. When a
-// wicked-core checkout IS resolvable — the sibling layout every developer has, or an explicit
-// WICKED_CORE_DIR — compare the two directly. Skipped, not failed, when core is absent, so crew's
-// CI stays self-contained; this is a developer-machine tripwire, not a build dependency.
-const CORE_DIR =
-  process.env['WICKED_CORE_DIR'] ??
-  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'wicked-core');
-const CORE_DEF = join(CORE_DIR, 'workflows', 'domain-extraction.json');
-
+// exposes no dump command), so nothing in crew's own build can detect core changing it. Compare
+// the two directly.
+//
+// This block used to resolve the checkout itself and SKIP when it was absent — a second resolver
+// and a second, opposite policy inside the same file as the derivation above, which threw. One
+// prerequisite, one resolver, one policy (FINDING-094).
+//
 // Read ONCE, at collection time: the skip predicate and the assertion must agree on what they saw.
 // Re-reading in the test body would let the file vanish in between, turning a skip into a crash.
-const coreDef: WorkflowDef | null = (() => {
-  try {
-    return JSON.parse(readFileSync(CORE_DEF, 'utf8')) as WorkflowDef;
-  } catch {
-    return null;
-  }
-})();
+const coreDef: WorkflowDef | null = SKIP_CORE_CHECKS
+  ? null
+  : readCoreJson<WorkflowDef>('workflows', 'domain-extraction.json');
 
-describe.skipIf(coreDef === null)('mirror matches wicked-core', () => {
+describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
   it('is field-for-field identical to workflows/domain-extraction.json', () => {
     // `is_system` is crew-only metadata and is stripped before the overlay write; the mirror does
     // not set it here, so a plain deep-equal is the honest comparison.
