@@ -21,12 +21,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
+import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -88,11 +88,11 @@ describe('launching a built-in does not shadow core', () => {
 // ── Cross-repo drift guard ───────────────────────────────────────────────────
 // Same tripwire as armed-workflow-served.test.ts, widened to the three defs that carry a floor.
 // The mirror is hand-transcribed and nothing in crew's build can detect core changing it — which
-// is how it came to be missing three pins in the first place. Skipped, not failed, when a
-// wicked-core checkout is not resolvable, so crew's CI stays self-contained.
-const CORE_DIR =
-  process.env['WICKED_CORE_DIR'] ??
-  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'wicked-core');
+// is how it came to be missing three pins in the first place.
+//
+// Resolution and the absence policy both live in tests/support/core-checkout.ts now: this file's
+// own copy skipped silently, which in the release job meant the widened tripwire covering the five
+// mirrors crew actually writes never ran at all (FINDING-094).
 
 /** Core writes `executor` explicitly; the mirror omits it where it is the default. Same def. */
 function normalized(def: WorkflowDef): unknown {
@@ -120,16 +120,17 @@ function normalized(def: WorkflowDef): unknown {
 const MIRRORED_IDS = ['feature', 'bug', 'migration', 'domain-extraction', 'domain-graph-slice'];
 
 const coreDefs: Record<string, WorkflowDef | null> = Object.fromEntries(
-  MIRRORED_IDS.map((id) => {
-    try {
-      return [id, JSON.parse(readFileSync(join(CORE_DIR, 'workflows', `${id}.json`), 'utf8')) as WorkflowDef];
-    } catch {
-      return [id, null];
-    }
-  }),
+  MIRRORED_IDS.map((id) =>
+    SKIP_CORE_CHECKS
+      ? [id, null]
+      : // No try/catch: a checkout that resolved but is missing one of core's shipped defs means an
+        // id was renamed or removed on core's side. Swallowing that turned a real cross-repo break
+        // into a silent skip of the whole block, including the four ids that were still present.
+        [id, readCoreJson<WorkflowDef>('workflows', `${id}.json`)],
+  ),
 );
 
-describe.skipIf(Object.values(coreDefs).some((d) => d === null))('mirror matches wicked-core', () => {
+describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
   // FINDING-084: this list covered only the three mirrors crew does NOT write. The five it DOES
   // write — core's drop-ins — were unchecked, and `domain-extraction` drifted: crew carried
   // `4a4b10bf4277bd34` while core had moved to `e7f84b91d030fdcc`. Because the write is the

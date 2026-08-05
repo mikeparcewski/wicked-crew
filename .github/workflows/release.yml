@@ -41,6 +41,13 @@ jobs:
         packages/crew
         packages/studio
       build_cmd: 'npm install && npm run -w packages/crew build'
+      # The test job of wicked-ci's node-release.yml is a bare single-repo checkout, unlike crew's
+      # own ci.yml which checks crew and wicked-core out as true siblings. Crew's cross-repo drift
+      # guards read core's shipped artifacts, so without a sibling checkout they cannot run — and on
+      # the v0.4.0 tag that meant one guard hard-failed (blocking the publish) while two others
+      # silently skipped. Fetch the checkout so the release gates on the same evidence CI does
+      # (FINDING-094). `tests/core-checkout-policy.test.ts` fails loudly if this ever stops working.
+      install_cmd: 'node scripts/fetch-core-checkout.mjs && npm install'
       test_cmd: 'npm run -w packages/crew test && npm run -w packages/studio test'
       enable_sync_pr: true
     secrets: inherit
