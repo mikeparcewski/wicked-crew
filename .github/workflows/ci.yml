@@ -8,11 +8,11 @@
 #
 # ── Why this checks out two sibling repos ────────────────────────────────────────────────────────
 #
-# `packages/crew` declares `wicked-core-ts: ^0.3.0`, which resolves from npm. The newest PUBLISHED
-# build is 0.3.0; the engine this package is developed against is the sibling `wicked-core` checkout,
-# many merged PRs ahead. A plain `npm ci` therefore installed an engine OLDER than the code using it,
-# and every path touching a field added since the last publish was untestable — not skipped, not
-# reported, simply never reached.
+# `packages/crew` declares `wicked-core-ts` from npm, but the engine this package is developed
+# against is the sibling `wicked-core` checkout, many merged PRs ahead of any publish. A plain
+# `npm ci` therefore installed an engine OLDER than the code using it, and every path touching a
+# field added since the last publish was untestable — not skipped, not reported, simply never
+# reached.
 #
 # That produced a real false green: wicked-crew#184 shipped an onboarding launch path that throws on
 # npm's 0.3.0 (it reads `code_graph_db`, added by wicked-core#170 and never published), and merged
@@ -22,6 +22,15 @@
 # So CI now builds `wicked-core-ts` from source and links it in, exactly as wicked-core's own CI
 # checks out wicked-estate as a sibling for its path deps. `tests/engine-contract.test.ts` fails
 # loudly if that linking ever silently stops happening.
+#
+# That fix has a blind spot, which is FINDING-088: because BOTH CI and local dev replace the
+# installed engine with a source build, neither can observe the DECLARED range at all. It drifted
+# to `^0.3.0` while the code targeted 0.4.0 — and for a 0.x package a caret pins the minor, so that
+# range cannot install 0.4.0. Only an operator running `npm i wicked-crew` resolved it, and got an
+# engine missing `runEvents`, `retirePolicy`, `retireConformanceRule` and `chatList`.
+# `tests/engine-range-admits-built.test.ts` now compares the declared range against the version in
+# `wicked-core/crates/wicked-core-ts` — which is why that checkout must stay available to the
+# test job, not only to the build step.
 
 name: CI
 
