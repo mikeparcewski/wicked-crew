@@ -6,15 +6,13 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { ChatUnsupportedError, CoreAdapter } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
+import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 
-const execFileAsync = promisify(execFile);
 
 const V = '/api/v1';
 
@@ -720,13 +718,27 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     let coverage: unknown = null;
     if (existsSync(dbPath)) {
       try {
-        const { stdout } = await execFileAsync(
+        const { stdout } = await execCapped(
           process.env['WICKED_CORE_EXE'] ?? 'wicked-core',
           ['coverage', '--db', dbPath, '--json'],
           { timeout: 20_000, cwd: repo.root_path },
         );
         coverage = JSON.parse(stdout) as unknown;
-      } catch { /* store not yet indexed — coverage stays null */ }
+      } catch (err) {
+        // The bare `catch {}` here claimed "store not yet indexed" for EVERY failure — a comment
+        // asserting a diagnosis the code never checked. An output overflow, a timeout and a missing
+        // binary all became a silent null, so the panel showed "no coverage" for reasons that are
+        // not the same problem and do not have the same fix (FINDING-016, and FINDING-050's shape:
+        // distinct causes collapsed into one outcome).
+        //
+        // Coverage stays optional — this endpoint must not 500 because the store is not indexed yet,
+        // which is a legitimate and common state. But a cause that is NOT that gets said out loud.
+        if (err instanceof ExecOutputTooLarge) {
+          req.log.warn({ err: err.message }, 'coverage output exceeded the buffer cap');
+        } else if (!(err instanceof SyntaxError)) {
+          req.log.debug({ err: message(err) }, 'coverage unavailable');
+        }
+      }
     }
 
     try {
@@ -843,7 +855,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       if (q.focus !== undefined && q.focus.trim() !== '') {
         args.push('--focus', q.focus.trim());
       }
-      const { stdout } = await execFileAsync('wicked-estate', args, {
+      const { stdout } = await execCapped('wicked-estate', args, {
         timeout: 30_000,
         cwd: repo.root_path,
       });
@@ -883,7 +895,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }
     try {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCapped(
         'wicked-estate',
         ['blast-radius', q.name.trim(), '--db', dbPath, '--json'],
         { timeout: 30_000, cwd: repo.root_path },
@@ -901,7 +913,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     try {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCapped(
         'git',
         ['log', '--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ar', '-n', '20'],
         { timeout: 10_000, cwd: repo.root_path },
@@ -938,7 +950,7 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     try {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCapped(
         'git',
         ['shortlog', '-sne', '-n', '--no-merges', 'HEAD'],
         { timeout: 10_000, cwd: repo.root_path },
