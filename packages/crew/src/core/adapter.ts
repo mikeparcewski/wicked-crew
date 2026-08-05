@@ -1,11 +1,9 @@
 import { createRequire } from 'node:module';
-import { execFile } from 'node:child_process';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Core as CoreHandle, LaunchOptions, Subscription } from 'wicked-core-ts';
 import type {
@@ -23,8 +21,8 @@ import type {
   SystemSettings,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
+import { execCapped } from './exec.js';
 
-const execFileAsync = promisify(execFile);
 
 
 /** Resolved path under the user's home directory. */
@@ -767,7 +765,7 @@ export class CoreAdapter {
 
     if (needsClone) {
       try {
-        await execFileAsync('git', ['clone', '--', gitUrl, cloneDir], {
+        await execCapped('git', ['clone', '--', gitUrl, cloneDir], {
           timeout: 5 * 60 * 1000,
         });
       } catch (err) {
