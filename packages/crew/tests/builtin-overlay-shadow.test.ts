@@ -96,14 +96,30 @@ const CORE_DIR =
 
 /** Core writes `executor` explicitly; the mirror omits it where it is the default. Same def. */
 function normalized(def: WorkflowDef): unknown {
+  // `is_system` is crew-only bookkeeping and `registerWorkflow` STRIPS it before writing, so it can
+  // never reach core's overlay. Comparing it would fail on a field that by construction never
+  // crosses the boundary this test guards.
+  const { is_system: _ignored, ...rest } = def as WorkflowDef & { is_system?: boolean };
   return {
-    ...def,
+    ...rest,
     phases: def.phases.map((p) => ({ executor: { type: 'agent' }, ...p })),
   };
 }
 
+/**
+ * Mirrors checked against core's JSON.
+ *
+ * `feature`/`bug`/`migration` are mirrors crew never writes. The others are core's DROP-INS, which
+ * crew DOES write — its write is the only way core can resolve them — so those are the mirrors that
+ * can actually reach the engine, and they were the ones nobody checked (FINDING-084).
+ *
+ * ONE list, consumed by both the fixture loader and the assertions below. Two hardcoded lists that
+ * must agree is precisely the defect this file exists to document.
+ */
+const MIRRORED_IDS = ['feature', 'bug', 'migration', 'domain-extraction', 'domain-graph-slice'];
+
 const coreDefs: Record<string, WorkflowDef | null> = Object.fromEntries(
-  ['feature', 'bug', 'migration'].map((id) => {
+  MIRRORED_IDS.map((id) => {
     try {
       return [id, JSON.parse(readFileSync(join(CORE_DIR, 'workflows', `${id}.json`), 'utf8')) as WorkflowDef];
     } catch {
@@ -113,7 +129,16 @@ const coreDefs: Record<string, WorkflowDef | null> = Object.fromEntries(
 );
 
 describe.skipIf(Object.values(coreDefs).some((d) => d === null))('mirror matches wicked-core', () => {
-  for (const id of ['feature', 'bug', 'migration']) {
+  // FINDING-084: this list covered only the three mirrors crew does NOT write. The five it DOES
+  // write — core's drop-ins — were unchecked, and `domain-extraction` drifted: crew carried
+  // `4a4b10bf4277bd34` while core had moved to `e7f84b91d030fdcc`. Because the write is the
+  // delivery mechanism for those ids (see the survey-repo case above), the stale value reached the
+  // engine and a governed run gated on the PRE-substance-rule validator — and restored itself after
+  // being fixed by hand, because the write repeats on every launch.
+  //
+  // The unchecked ones are exactly the ones that can do damage. Checking the mirrors crew never
+  // writes, while leaving the mirrors it does write unchecked, is the inverse of the risk.
+  for (const id of MIRRORED_IDS) {
     it(`${id} is field-for-field identical to workflows/${id}.json`, () => {
       const served = adapter.listWorkflows().find((w) => w.id === id);
       expect(served, `${id} must be served`).toBeDefined();

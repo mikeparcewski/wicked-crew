@@ -169,43 +169,7 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
  * it shadows core's copy with a real customization rather than a stale transcription. It is the one
  * shadow that earns its keep, and the reason this set gates the generic write specifically.
  */
-/**
- * Every workflow id wicked-core seeds ITSELF. Crew must never write an overlay def for one of these:
- * core resolves them from its own registry, and a file crew writes REPLACES core's def wholesale.
- *
- * Core seeds two ways, and the first version of this set only knew about one of them:
- *   - compiled built-ins: `collab`, `onboarding` (+ feature/bug/migration, also shipped as JSON)
- *   - DROP-IN JSON in core's `workflows/`: bug, chat, domain-extraction, domain-graph-slice,
- *     feature, memories, migration, survey-repo
- *
- * FINDING-084: `domain-extraction` was absent here, so crew wrote its own mirror — carrying a
- * `validator_pin` copied from core at some past moment — over core's installed def, on every
- * registration. Observed live: a governed run gated on `4a4b10bf4277bd34`, the PRE-substance-rule
- * validator, months after core had moved to `e7f84b91d030fdcc`. The stale gate RESTORED ITSELF
- * after being fixed by hand, because this write runs again on the next launch.
- *
- * `carry_shadowed_pins` in core is the backstop for the compiled case — it carries a shadowed pin
- * forward. It cannot help here: a drop-in has no compiled form to shadow, so there is no earlier
- * pin to carry and crew's stale value wins outright. That is exactly why FINDING-049's fix did not
- * cover this.
- *
- * Pinned against core's actual `workflows/` directory by `tests/core-seeded-dropins.test.ts`, so a
- * new drop-in added to core fails here rather than silently becoming shadowable.
- */
-const CORE_SEEDED_WORKFLOWS = new Set([
-  // compiled built-ins
-  'collab',
-  'onboarding',
-  // drop-in JSON shipped in core's workflows/
-  'bug',
-  'chat',
-  'domain-extraction',
-  'domain-graph-slice',
-  'feature',
-  'memories',
-  'migration',
-  'survey-repo',
-]);
+const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
 
 /**
  * The content-address of core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`),
@@ -336,7 +300,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['legacy-graph.digest.txt'], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['analysis-report.json'], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['annotations.jsonl'], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
-      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: '4a4b10bf4277bd34' },
+      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'e7f84b91d030fdcc' },
       { id: 'domain-graph', kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: ['requirements_graph.json'], depends_on: ['coverage'], role: 'neutral', skill_ref: 'wicked-garden-domain-modeler', allowed_skills: [], validator_pin: null },
     ],
   },
