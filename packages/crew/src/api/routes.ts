@@ -6,9 +6,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ChatUnsupportedError, CoreAdapter } from '../core/adapter.js';
+import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
+import type { ElicitationCache } from './elicitation-cache.js';
 import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
@@ -153,7 +154,12 @@ const ResizeTerminalSchema = z.object({
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
  * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
  */
-export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateCache: GateCache): void {
+export function registerRoutes(
+  app: FastifyInstance,
+  adapter: CoreAdapter,
+  gateCache: GateCache,
+  elicitationCache: ElicitationCache,
+): void {
   // Liveness — also proves the actor + event pump are up.
   app.get(`${V}/health`, async () => {
     const ping = await adapter.ping();
@@ -248,10 +254,12 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
     }
   });
 
-  // Run list (replaces GET /sessions). Actionable-first; reconciles the gate cache.
+  // Run list (replaces GET /sessions). Actionable-first; reconciles the gate and elicitation caches
+  // so that terminal-run entries are pruned even when their terminal CoreEvent was missed.
   app.get(`${V}/runs`, async () => {
     const views = await adapter.sessionsDetail();
     gateCache.reconcile(views);
+    elicitationCache.reconcile(views);
     return { runs: sortActionableFirst(views) };
   });
 
@@ -502,6 +510,108 @@ export function registerRoutes(app: FastifyInstance, adapter: CoreAdapter, gateC
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
     return { runId: id, ...replayed };
+  });
+
+  // ── Elicitation (DES-002) ────────────────────────────────────────────────────
+  //
+  // GET returns the current pending elicitation prompt for a run (display-store read).
+  // POST resolves it: the body carries the elicitationId to guard against stale tabs,
+  // the action (accept|decline|cancel), and — for accept — the operator's response.
+
+  app.get(`${V}/runs/:id/elicitation`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const entry = elicitationCache.get(id);
+    // `entry` already carries `runId`; return it directly to avoid TS2783
+    // ("runId is specified more than once") from a redundant spread.
+    if (entry) return entry;
+    // Cache miss: check existence before returning 404.
+    // Use sessions() (IDs only) — cheaper than sessionsDetail() on this read path.
+    const ids = await adapter.sessions();
+    if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
+    return reply.code(404).send({ error: 'No pending elicitation for this run' });
+  });
+
+  const ElicitationRespondSchema = z
+    .object({
+      /** Guards against stale-tab submissions: must match the current elicitation's id. */
+      elicitationId: z.string().min(1),
+      action: z.enum(['accept', 'decline', 'cancel']),
+      /** Required when action is "accept" (response must be non-empty); must be absent for decline/cancel. */
+      content: z.object({ response: z.string().min(1) }).optional(),
+    })
+    .strict()
+    .superRefine((val, ctx) => {
+      if (val.action !== 'accept' && val.content !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['content'],
+          message: 'content must only be provided when action is "accept"',
+        });
+      }
+    });
+
+  app.post(`${V}/runs/:id/elicitation`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+
+    // 1. Validate body.
+    const parsed = ElicitationRespondSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    const body = parsed.data;
+
+    // 1b. Accept requires content.response — validated here, before any state query, so
+    //     the 400 is deterministic regardless of run-existence / cache state (P2).
+    if (body.action === 'accept' && !body.content?.response) {
+      return reply.code(400).send({ error: 'action:accept requires content.response' });
+    }
+
+    // 2. Existence check (IDs only — cheaper than sessionsDetail).
+    const ids = await adapter.sessions();
+    if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
+
+    // 3. Atomically take the pending elicitation.
+    const taken = elicitationCache.take(id);
+    if (!taken) return reply.code(409).send({ error: 'No pending elicitation for this run' });
+
+    // 4. Stale-tab check: submitted elicitationId must match the one we just took.
+    if (body.elicitationId !== taken.entry.elicitationId) {
+      elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
+      return reply
+        .code(409)
+        .send({ error: 'Elicitation superseded; fetch the current prompt and resubmit' });
+    }
+
+    // 5. Accept-specific validation.
+    if (body.action === 'accept') {
+      // 5a. content.response must be present.
+      if (typeof body.content?.response !== 'string') {
+        elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
+        return reply.code(400).send({ error: 'action:accept requires content.response' });
+      }
+      // 5b. Enum check: if the schema constrained the response, honour it.
+      if (
+        taken.entry.options !== null &&
+        !taken.entry.options.includes(body.content.response)
+      ) {
+        elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
+        return reply.code(400).send({ error: 'response must be one of the allowed options' });
+      }
+    }
+
+    const response = body.action === 'accept' ? body.content!.response : null;
+
+    // 6. Forward to the actor.
+    try {
+      await adapter.resolveElicitation(id, taken.entry.elicitationId, body.action, response);
+    } catch (err) {
+      elicitationCache.restoreIfUnchanged(id, taken.entry, taken.gen);
+      const code = err instanceof ElicitationUnsupportedError ? 501 : 500;
+      return reply.code(code).send({ error: message(err) });
+    }
+
+    // 7. Done.
+    return { status: 'resolved' };
   });
 
   // The durable history of one run (FINDING-057).

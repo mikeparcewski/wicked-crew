@@ -323,6 +323,20 @@ export class ChatUnsupportedError extends Error {
   }
 }
 
+/**
+ * `resolveElicitation` is not available in this deployment — the NAPI binding has not
+ * landed in the installed `wicked-core-ts` yet (DES-002 §4 P-1 stub).
+ *
+ * Routes map this to HTTP 501 so an operator knows to upgrade rather than to fix a
+ * call that was already correct.
+ */
+export class ElicitationUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ElicitationUnsupportedError';
+  }
+}
+
 /** The engine's own way of reporting a build that cannot do chat, raised at call time. */
 const ENGINE_CHAT_UNSUPPORTED = /chat unsupported/i;
 
@@ -692,6 +706,32 @@ export class CoreAdapter {
 
   async chatClose(chatId: string): Promise<void> {
     await this.core.chatClose(chatId);
+  }
+
+  /**
+   * Forward the operator's elicitation response to the actor (DES-002 §4 P-1).
+   *
+   * NAPI flat signature: `resolve_elicitation(run_id, elicitation_id, action, response)`.
+   * `response` is `null` for `decline` and `cancel` actions; a non-empty string for `accept`.
+   *
+   * Throws `ElicitationUnsupportedError` until the NAPI binding is present in the installed
+   * `wicked-core-ts`. Routes map that to HTTP 501.
+   */
+  async resolveElicitation(
+    _runId: string,
+    _elicitationId: string,
+    _action: string,
+    _response: string | null,
+  ): Promise<void> {
+    // Consume stub params to satisfy @typescript-eslint/no-unused-vars; the
+    // parameter names are part of the public interface and must not be dropped.
+    void _runId; void _elicitationId; void _action; void _response;
+    // The NAPI binding (`this.core.resolveElicitation`) will land with the actor-side
+    // work in a follow-on. Until then, every call throws so the route surfaces 501 and
+    // an operator knows to upgrade rather than to keep retrying.
+    throw new ElicitationUnsupportedError(
+      'resolveElicitation is not yet bound in this wicked-core build; upgrade wicked-core-ts to enable it',
+    );
   }
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */
