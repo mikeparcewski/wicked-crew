@@ -55,7 +55,9 @@ on:
       - 'bridges-v*'
 
 permissions:
-  contents: write
+  # `contents: read` deliberately: this workflow creates no release, pushes no tag and opens no PR,
+  # so write would be privilege it never exercises (review).
+  contents: read
   # OIDC trusted publishing + `npm publish --provenance`, the same tokenless path wicked-crew and
   # wicked-core-ts already use. Neither repo holds an NPM_TOKEN.
   id-token: write
@@ -67,22 +69,32 @@ jobs:
       run:
         working-directory: packages/agent-acp-bridges
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned to match ci.yml — a release workflow is the last place to float an action tag.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: '22'
+          # Match ci.yml. Releasing on a different Node major than the one that proved the code
+          # green is the same class of mismatch as FINDING-072 (review).
+          node-version: '24'
           registry-url: https://registry.npmjs.org
 
-      # `npm publish --provenance` needs a newer npm than the runner ships.
+      # `npm publish --provenance` and OIDC trusted publishing need a newer npm than the runner
+      # ships. Pinned to a MAJOR rather than `@latest`: npm 12.0.2 shipped recently, so `@latest`
+      # silently changes major underneath a release job — the exact non-reproducibility review
+      # flagged. 12 is the major that published wicked-core-ts 0.4.1 through this same tokenless
+      # path today, so it is known-good here rather than merely current.
       - name: Upgrade npm (provenance-capable)
-        run: npm install -g npm@latest
+        run: npm install -g npm@12
         working-directory: .
 
       # The workspace install is what vitest needs; this package has no build step (`files` is the
       # two committed .mjs files), so there is nothing to compile before publish.
+      #
+      # `npm ci` rather than `npm install`, matching ci.yml: a release must install what the
+      # lockfile pins, not whatever resolves at release time (review).
       - name: Install workspace
-        run: npm install
+        run: npm ci
         working-directory: .
 
       - name: Test
