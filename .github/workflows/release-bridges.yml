@@ -1,0 +1,73 @@
+# agent-acp-bridges — npm release caller (FINDING-096).
+#
+# ── Why this workflow exists ────────────────────────────────────────────────────────────────────
+#
+# `packages/crew` declares `agent-acp-bridges: ^1.0.0` as a RUNTIME dependency, and has since
+# 0.3.x. The package is a workspace member, so it resolves from the workspace in CI, in local dev,
+# and in the release job's own test step. It was never published to npm.
+#
+# The consequence went unnoticed through every release: a clean
+#
+#     npm install wicked-crew
+#
+# in an empty project aborts with `404 agent-acp-bridges@^1.0.0`. Every published wicked-crew has
+# been uninstallable. Nothing could observe it, because no path ever installed the ARTIFACT from a
+# clean registry — every path resolves the dependency from the workspace. The release pipeline
+# tested the repo; it never tested the product.
+#
+# The bridge is not incidental: `packages/crew/src/core/bridge-path.ts` documents that the ACP
+# bridges "ship as npm packages (dependencies of this package)" so their launcher shims land in
+# `node_modules/.bin` and the engine can spawn them by bare name. crew declares FOUR bridge
+# packages; three are external and published —
+#
+#   @agentclientprotocol/claude-agent-acp   -> claude-agent-acp
+#   @agentclientprotocol/codex-acp          -> codex-acp
+#   pi-acp                                  -> pi-acp
+#
+# — and the fourth is this one, ours, providing `agy-acp` for Antigravity. It is the only declared
+# bridge that was never published. (An earlier draft of this comment said "four of five"; review
+# caught the miscount. The five is the count of bridge NAMES in bridge-path.ts's prose, which
+# includes `opencode-acp` — a binary NO declared package provides and which is absent from
+# node_modules/.bin. That is stale prose, tracked separately; it is not part of this fix.)
+#
+# ── Why a separate workflow and tag ─────────────────────────────────────────────────────────────
+#
+# `wicked-ci/node-release.yml` publishes exactly one package per call (`publish_working_dir`), so a
+# second publishable package in this workspace needs its own caller and its own tag prefix. Same
+# shape wicked-core uses to publish the engine (`core-ts-v*`) separately from the CLI (`v*`).
+#
+# Publishing this RETROACTIVELY fixes already-published crew versions: they declare `^1.0.0`, so
+# once 1.0.0 exists on the registry, `npm install wicked-crew@0.4.0` resolves. No crew re-release
+# is required.
+#
+# os_matrix is ubuntu-only: the package is two `.mjs` files with a vitest suite and no native or
+# platform-specific parts, so a three-OS matrix would buy nothing.
+
+name: Release bridges
+
+on:
+  push:
+    tags:
+      - 'bridges-v*'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  release:
+    uses: mikeparcewski/wicked-ci/.github/workflows/node-release.yml@v1
+    with:
+      package_name: agent-acp-bridges
+      publish_working_dir: packages/agent-acp-bridges
+      os_matrix: '["ubuntu-latest"]'
+      version_dirs: |
+        packages/agent-acp-bridges
+      # The workspace install is needed for vitest; the package itself has no build step (`files`
+      # is the two committed .mjs files), so there is nothing to compile before publish.
+      install_cmd: 'npm install'
+      test_cmd: 'npm run -w packages/agent-acp-bridges test'
+      enable_sync_pr: true
+    secrets: inherit
