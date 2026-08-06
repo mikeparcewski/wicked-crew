@@ -28,6 +28,7 @@
  */
 
 import type { SessionView, WorkUnit } from '../core/types.js';
+import { API_PREFIX } from './api-prefix.js';
 
 /**
  * The unit a caller's path segment names, or `null`.
@@ -80,7 +81,7 @@ export function unitKeysFor(run: SessionView): string[] {
  */
 export function outputUnavailableReason(unit: WorkUnit): string {
   const where =
-    `The gate decision and the run's event trail are in GET /runs/${unit.session_id}/evidence.`;
+    `The gate decision and the run's event trail are in GET ${API_PREFIX}/runs/${unit.session_id}/evidence.`;
 
   if (unit.status === 'rejected') {
     const why =
