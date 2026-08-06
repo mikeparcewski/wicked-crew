@@ -122,13 +122,25 @@ function makeFixture(pinInAddon: string = PIN_A, pinDeclared: string = PIN_A): F
   return { pkg, dest, addonPath, artifactPath, dep, depWithSpace };
 }
 
-function run(fx: Fixture, args: string[] = []): { status: number | null; out: string; err: string } {
+function run(
+  fx: Fixture,
+  args: string[] = [],
+  opts: { dest?: string | null } = {},
+): { status: number | null; out: string; err: string } {
   // CARGO_TARGET_DIR would point the identity check away from the fixture's target/; a developer
   // machine setting it globally must not change what this guard observes.
   const env: Record<string, string | undefined> = { ...process.env };
   delete env['CARGO_TARGET_DIR'];
   env['WICKED_CORE_TS_DIR'] = fx.pkg;
-  env['WICKED_CORE_TS_DEST'] = fx.dest;
+  // `dest: null` leaves WICKED_CORE_TS_DEST UNSET so the script resolves its DEFAULT destination
+  // (repoRoot/node_modules/wicked-core-ts) — the path CI and developers actually link into, and the
+  // one every other case here overrides away. Omitting the option sandboxes to the fixture's dest.
+  const dest = 'dest' in opts ? opts.dest : fx.dest;
+  if (dest === null) {
+    delete env['WICKED_CORE_TS_DEST'];
+  } else {
+    env['WICKED_CORE_TS_DEST'] = dest;
+  }
   const r = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8' });
   return { status: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
@@ -230,7 +242,55 @@ describe('use-local-core-ts verifies the addon against the source build (FINDING
     expect(r.err).toContain('LINKED');
     expect(r.err).toContain(PIN_A);
   });
+
+  it('resolves the DEFAULT destination (node_modules/wicked-core-ts) when the override is unset', () => {
+    // Every other case sandboxes the destination via WICKED_CORE_TS_DEST, so the script's DEFAULT
+    // resolution — repoRoot/node_modules/wicked-core-ts, the path CI and developers actually link
+    // into — was never exercised; a bug there (wrong subdir, dropped segment) would pass this file
+    // entirely. Run --check with the override UNSET: it never writes, so it cannot clobber the real
+    // node_modules. The fixture's addon is named `…​.testfixture.node`, which cannot exist under the
+    // real node_modules/wicked-core-ts, so --check resolves the default dest, finds nothing linked
+    // there, and fails closed — naming the resolved path, which is the assertion that the default
+    // resolved to node_modules/wicked-core-ts and not somewhere else.
+    const fx = makeFixture();
+    const r = run(fx, ['--check'], { dest: null });
+    expect(r.status).toBe(1);
+    expect(r.err).toContain('nothing is linked');
+    expect(r.err).toContain(join('node_modules', 'wicked-core-ts', ADDON));
+  });
 });
+
+/** The COMMAND text of every `run:` step in a workflow, inline (`run: <cmd>`) and block-scalar
+ *  (`run: |` / `run: >` followed by indented lines). Comments — whole-line `# …` and shell `#` lines
+ *  inside a block — are NOT commands and are excluded by the caller. This exists so the audit below
+ *  keys off what CI EXECUTES, not off any line that merely contains the script's name: a commented-out
+ *  or documentary mention is not a run step and must not satisfy "CI links the engine". */
+function runStepCommands(yaml: string): string[] {
+  const out: string[] = [];
+  let blockIndent = -1; // indent of the `run:` key while inside its block scalar; -1 = not in one
+  for (const raw of yaml.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const indent = line.length - line.replace(/^\s*/, '').length;
+    if (blockIndent >= 0) {
+      if (line.trim() === '') continue;
+      if (indent > blockIndent) {
+        out.push(line);
+        continue;
+      }
+      blockIndent = -1; // dedented out of the block scalar; fall through and parse this line
+    }
+    const m = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(line);
+    if (!m) continue; // not a `run:` key (comments start with `#`, so they never match)
+    const keyIndent = m[1] ?? '';
+    const value = (m[2] ?? '').trim();
+    if (/^[|>][+-]?\d*$/.test(value)) {
+      blockIndent = keyIndent.length; // block scalar opens; its body is the indented lines that follow
+    } else if (value !== '') {
+      out.push(value); // inline `run: <command>`
+    }
+  }
+  return out;
+}
 
 describe('the verifying link is what CI actually runs', () => {
   // The cases above prove the script verifies; this proves the environment that decides whether
@@ -238,10 +298,20 @@ describe('the verifying link is what CI actually runs', () => {
   // sandbox override pointed away from the node_modules the tests load — guards nothing.
   const workflow = readFileSync(CI_WORKFLOW, 'utf8');
 
-  it('ci.yml links the engine through scripts/use-local-core-ts.mjs, not a bypass', () => {
-    const lines = workflow.split('\n').filter((l) => l.includes('use-local-core-ts.mjs'));
-    expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) expect(line).not.toContain('--check');
+  it('ci.yml INVOKES the engine link as a run step — a real link, not a mention or a --check', () => {
+    // The needle is the COMMAND form (`node scripts/use-local-core-ts.mjs`), built by concatenation
+    // so it can never match this test's own source. The prior audit asked only whether some ci.yml
+    // line CONTAINED the filename, so a commented-out step, a `name:` describing it, or a doc line
+    // passed while CI linked nothing. Key off actual run-step commands instead.
+    const invocation = 'node ' + 'scripts/use-local-core-ts.mjs';
+    const invocations = runStepCommands(workflow)
+      .filter((cmd) => !cmd.trim().startsWith('#')) // a shell comment inside a run block is not a command
+      .filter((cmd) => cmd.includes(invocation));
+    // A REAL LINK carries no `--check`: --check verifies and copies NOTHING, so a CI that only ever
+    // ran --check would leave the workspace on whatever npm installed — the stale published engine
+    // FINDING-072 shipped past. Require at least one run-step invocation that actually links.
+    const realLinks = invocations.filter((cmd) => !/(^|\s)--check(\s|$)/.test(cmd));
+    expect(realLinks.length).toBeGreaterThan(0);
   });
 
   it('ci.yml never sets the test-sandbox destination override', () => {
