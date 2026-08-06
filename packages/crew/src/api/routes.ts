@@ -10,7 +10,8 @@ import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError } from '
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
-import { buildEvidenceBundle, evidenceFilename } from './evidence.js';
+import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
+import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 
@@ -272,9 +273,6 @@ export function registerRoutes(
     return { run };
   });
 
-  // A unit's captured transcript. unitKey is the suffix after `<run>:` — `u<ord>` for free-text
-  // runs, `<phase_id>` for workflow runs (e.g. "survey", "coverage"). Strip any accidental
-  // `<id>:` prefix so both `survey` and `run-1:survey` resolve to the same key.
   // ── Chat sessions (crew#165): warm ACP seat pool + group fan-out (core#134) ──
   // A chat is NOT a run: no council, no gates, no units. Seats warm on open;
   // messages fan out to warm seats; replies stream on /ws as chatDelta/chatReply.
@@ -368,11 +366,31 @@ export function registerRoutes(
     }
   });
 
+  // A unit's captured transcript. `unitKey` accepts the fully-qualified id (`run-1:survey`),
+  // the id suffix (`survey`, `u3`), or the ordinal (`u3`, `3`) — see `resolveUnit`.
+  //
+  // A `null` body is never bare here. An unknown run or an unknown key is a 404 that names the
+  // keys this run does have; a unit that exists but has no stored transcript answers 200 with
+  // `outputUnavailable` saying WHICH cause applies — denied, not finished, or a store that
+  // disagrees with itself. It previously answered `200 {"output": null}` to all four, so the
+  // failed unit an operator opens during triage was the one that told them nothing (FINDING-006).
   app.get(`${V}/runs/:id/units/:unitKey/output`, async (req, reply) => {
     const { id, unitKey } = req.params as { id: string; unitKey: string };
-    const suffix = unitKey.startsWith(`${id}:`) ? unitKey.slice(id.length + 1) : unitKey;
-    const output = await adapter.workOutput(`${id}:${suffix}`);
-    return reply.send({ output });
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    const unit = resolveUnit(run, unitKey);
+    if (!unit) {
+      return reply.code(404).send({
+        error: `Unit '${unitKey}' not found in run ${id}`,
+        units: unitKeysFor(run),
+      });
+    }
+    // Keyed off the unit RECORD (the same derivation the evidence bundle uses), not off the
+    // caller's path segment — the two disagreeing is what made a resolvable unit unreadable.
+    const output = await adapter.workOutput(coreUnitId(id, unit));
+    if (output !== null) return reply.send({ output });
+    return reply.send({ output: null, outputUnavailable: outputUnavailableReason(unit) });
   });
 
   // The whole run as one auditable JSON attachment: the run, its units (each with
