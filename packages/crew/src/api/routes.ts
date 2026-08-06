@@ -16,7 +16,8 @@ import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.j
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 
 
-const V = '/api/v1';
+export const API_PREFIX = '/api/v1';
+const V = API_PREFIX;
 
 // Daemon version reported by /health — read from package.json so it never drifts
 // from the shipped version across releases. Resolves the package root from the

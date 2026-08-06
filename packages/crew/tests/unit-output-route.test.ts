@@ -221,3 +221,24 @@ describe('GET /runs/:id/units/:unitKey/output', () => {
     expect(mockAdapter.workOutput).toHaveBeenCalledWith(`${RUN}:u1`);
   });
 });
+
+// FINDING-006 review follow-up (#215): the operator-facing evidence URL must carry the SAME prefix
+// the route is actually registered under, or a copied URL 404s. Reads BOTH sides (P1), so a prefix
+// change on either cannot silently diverge.
+import { API_PREFIX } from '../src/api/routes.js';
+import { outputUnavailableReason } from '../src/api/unit-output.js';
+import { describe as _d, it as _it, expect as _e } from 'vitest';
+_d('evidence URL matches the registered route prefix (FINDING-006/#215)', () => {
+  _it('names /api/v1/runs/:id/evidence, not a bare /runs path', () => {
+    const msg = outputUnavailableReason({
+      session_id: 'run-x',
+      status: 'rejected',
+      denial_reason: null,
+    } as never);
+    _e(msg).toContain(`${API_PREFIX}/runs/run-x/evidence`);
+    // The bug was a bare 'GET /runs/...' with no prefix. Every '/runs/run-x/evidence' occurrence
+    // in the message must be immediately preceded by the prefix — none bare.
+    const bare = msg.split('/runs/run-x/evidence').slice(0, -1).filter((seg) => !seg.endsWith(API_PREFIX));
+    _e(bare, 'the evidence URL must not appear without the /api/v1 prefix').toEqual([]);
+  });
+});
