@@ -79,10 +79,15 @@ export type EventLoader = (runId: string) => Promise<RecordedEvent[] | null>;
 
 /**
  * The id core keys the transcript store by. Unit ids are already `<run>:<suffix>`;
- * fall back to the free-text `u<ord>` form for any unit that lacks the prefix
- * (mirrors the `/runs/:id/units/:unitKey/output` route's normalisation).
+ * fall back to the free-text `u<ord>` form for any unit that lacks the prefix.
+ *
+ * EXPORTED so `/runs/:id/units/:unitKey/output` calls THIS rather than re-deriving the
+ * key from the caller's path segment. It used to be private and the route built its own
+ * `<run>:<suffix>` string from whatever the operator typed, which meant the two surfaces
+ * could disagree about which unit a key names — and did: a key the bundle resolved
+ * answered `null` on the endpoint (FINDING-006). One derivation, from the unit record.
  */
-function coreUnitId(runId: string, unit: WorkUnit): string {
+export function coreUnitId(runId: string, unit: WorkUnit): string {
   return unit.id.startsWith(`${runId}:`) ? unit.id : `${runId}:u${unit.ord}`;
 }
 

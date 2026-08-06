@@ -2,12 +2,23 @@
  * ACP bridge binary resolution — makes the bridges deployable without any manual step.
  *
  * wicked-core spawns ACP bridge binaries (`claude-agent-acp`, `codex-acp`, `pi-acp`,
- * `agy-acp`, `opencode-acp`) by BARE NAME on PATH. The bridges ship as npm packages
- * (dependencies of this package), so after any normal install their launcher shims
- * land in a `node_modules/.bin` directory — but nothing puts that directory on the
- * daemon's PATH. Requiring users to `npm i -g` the bridge packages (or hand-symlink
- * bins) is exactly the kind of install friction that breaks "clone → npm install →
- * run".
+ * `agy-acp`) by BARE NAME on PATH. The bridges ship as npm packages (dependencies of
+ * this package), so after any normal install their launcher shims land in a
+ * `node_modules/.bin` directory — but nothing puts that directory on the daemon's
+ * PATH. Requiring users to `npm i -g` the bridge packages (or hand-symlink bins) is
+ * exactly the kind of install friction that breaks "clone → npm install → run".
+ *
+ * FOUR names, and the list is exhaustive on purpose. It used to carry a fifth, for the
+ * opencode seat — a bridge that no package declares, that no install produces a shim
+ * for, and that `wicked-core/crates/wicked-council/src/registry.rs` never asks for: the
+ * opencode seat's `[acp]` block spawns `opencode acp`, the CLI's own NATIVE ACP mode,
+ * and so does copilot's (`copilot --acp`). A natively-speaking CLI needs no bridge, so
+ * `ensureBridgesOnPath` could not have helped one and nothing was observed broken — but
+ * the name existed nowhere except this comment, which is the failure mode the rest of
+ * this file exists to prevent: a claim about what is installable that no artifact backs
+ * (FINDING-097). Dropped rather than shipped, and the phantom is not respelled here —
+ * `bridge-names.test.ts` audits THIS comment for `*-acp` tokens, so writing the dead
+ * name to explain it would fail the guard that exists to catch it.
  *
  * `ensureBridgesOnPath()` closes the gap at daemon startup: it walks up from this
  * module looking for a `node_modules/.bin` that contains a bridge shim and prepends
