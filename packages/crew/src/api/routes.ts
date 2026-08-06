@@ -14,9 +14,11 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+// Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
+// value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
+export { API_PREFIX } from './api-prefix.js';
+import { API_PREFIX } from './api-prefix.js';
 
-
-export const API_PREFIX = '/api/v1';
 const V = API_PREFIX;
 
 // Daemon version reported by /health — read from package.json so it never drifts

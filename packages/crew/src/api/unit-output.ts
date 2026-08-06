@@ -28,7 +28,7 @@
  */
 
 import type { SessionView, WorkUnit } from '../core/types.js';
-import { API_PREFIX } from './routes.js';
+import { API_PREFIX } from './api-prefix.js';
 
 /**
  * The unit a caller's path segment names, or `null`.
