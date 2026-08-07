@@ -295,11 +295,17 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
     id: 'domain-extraction',
     phases: [
-      { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['legacy-graph.digest.txt'], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
-      { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['analysis-report.json'], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
-      { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: ['annotations.jsonl'], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
+      // required_deliverables reconciled with core (wicked-core/workflows/domain-extraction.json):
+      // survey/analyze/extract annotate the estate STORE and domain-graph now PERSISTS the graph
+      // into the store (not a JSON file), so their evidence is DB state — verified by the coverage
+      // gate (reads the store) and domain-graph's fail-closed-on-coverage<1.0 — not a worktree file.
+      // Only coverage emits a genuine standalone report the deterministic floor reads. Declaring
+      // phantom files failed every phase under core's FINDING-101 deliverable gate.
+      { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
+      { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
+      { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
       { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'adaf3e9b6d088f1a' },
-      { id: 'domain-graph', kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: ['requirements_graph.json'], depends_on: ['coverage'], role: 'neutral', skill_ref: 'wicked-garden-domain-modeler', allowed_skills: [], validator_pin: null },
+      { id: 'domain-graph', kind: 'build', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['coverage'], role: 'neutral', skill_ref: 'wicked-garden-domain-modeler', allowed_skills: [], validator_pin: null },
     ],
   },
 ];
