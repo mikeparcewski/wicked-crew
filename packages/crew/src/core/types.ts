@@ -372,6 +372,10 @@ export interface PhaseDef {
   executor?: PhaseExecutor;
   id: string;
   kind: StageKindPhase;
+  /** Per-phase agent instructions folded into the unit prompt by the engine (core PhaseDef.instructions,
+   * Option<String>). Absent = no extra instruction. Mirrors of core drop-ins that carry it (e.g.
+   * survey-repo) MUST reproduce it verbatim or the runtime def diverges from core's — FINDING-011. */
+  instructions?: string | null;
   gate_type: GateType | null;
   gate: GateSpec;
   executes_code: boolean;
