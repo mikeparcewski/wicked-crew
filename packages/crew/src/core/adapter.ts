@@ -274,12 +274,19 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     ],
   },
   {
+    // MUST stay byte-identical to wicked-core/workflows/survey-repo.json — crew's overlay write is the
+    // ONLY def the engine resolves at runtime (core does not seed survey-repo), so a stale mirror here
+    // silently runs the OLD def. The pre-fix mirror carried 3 phases with no `instructions` and no
+    // `synthesize`, so survey-repo ran 3 near-identical prompts and produced no run-level synthesis —
+    // exactly FINDING-011, still live because the fix only landed in the core JSON the runtime ignores.
+    // Guarded by builtin-overlay-shadow.test.ts (survey-repo is now in MIRRORED_IDS).
     id: 'survey-repo',
     is_system: true,
     phases: [
-      { id: 'structure', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'stack', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'conventions', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['stack'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'structure', kind: 'recon', instructions: 'Map the repository layout only: top-level directories, entry points, and where source, tests, config, and docs live. Do not analyze languages, dependencies, or conventions — later phases cover those.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'stack', kind: 'recon', instructions: 'Identify the technology stack from the manifests (package.json, Cargo.toml, pyproject.toml, ...): languages, frameworks, build tools, key dependencies. Build on the structure summary provided as prior context; do not re-map the layout.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'conventions', kind: 'recon', instructions: 'Identify the working conventions: naming, module boundaries, test placement and style, lint/format configuration, CI expectations. Build on the prior phases\' outputs provided as context; do not re-survey structure or stack.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['stack'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'synthesize', kind: 'recon', instructions: 'Do not re-survey the repository. Merge the three prior phase outputs provided as context into one coherent survey — structure, then stack, then conventions — resolving overlaps and flagging any contradictions between them.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure', 'stack', 'conventions'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {

@@ -117,7 +117,18 @@ function normalized(def: WorkflowDef): unknown {
  * ONE list, consumed by both the fixture loader and the assertions below. Two hardcoded lists that
  * must agree is precisely the defect this file exists to document.
  */
-const MIRRORED_IDS = ['feature', 'bug', 'migration', 'domain-extraction', 'domain-graph-slice'];
+const MIRRORED_IDS = [
+  'feature',
+  'bug',
+  'migration',
+  'domain-extraction',
+  'domain-graph-slice',
+  // survey-repo is a core DROP-IN crew writes (its overlay write is the only def the engine resolves
+  // at runtime), so its mirror CAN reach the engine — yet it was excluded here, which is why the
+  // stale 3-phase mirror (no instructions, no synthesize) ran in production while the 4-phase fix sat
+  // unused in core's JSON (FINDING-011). Guarding it makes the mirror drift a build failure.
+  'survey-repo',
+];
 
 const coreDefs: Record<string, WorkflowDef | null> = Object.fromEntries(
   MIRRORED_IDS.map((id) =>
