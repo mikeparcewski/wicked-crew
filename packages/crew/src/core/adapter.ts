@@ -485,6 +485,25 @@ function quarantineStaleOnboardingOverlay(): void {
  * endpoint and the WS fan-out funnel through this stable API — so when the
  * in-flight core-ts subscribe/teardown signature lands, only this file changes.
  */
+/** The ids of a workflow's phases that carry a HUMAN gate (`human_confirm` unconditional, or the
+ * conditional `human_confirm_if`) — i.e. the phases that will PAUSE for a person.
+ *
+ * FINDING-023 (residual): core#208 made a workflow's phase gate deliberately WIN over a run-level
+ * `humanConfirm: none` (it pauses, with a self-disclosing note), but there was no way to learn a
+ * workflow's gates BEFORE launching it — an operator picking `none` for an unattended run only found
+ * out when it paused. Surfacing this on `GET /workflows/:id` is that missing launch-time signal.
+ * `'auto'` (the string form) is NOT a human gate. */
+export function humanGatePhaseIds(wf: WorkflowDef): string[] {
+  return wf.phases
+    .filter(
+      (p) =>
+        typeof p.gate === 'object' &&
+        p.gate !== null &&
+        ('human_confirm' in p.gate || 'human_confirm_if' in p.gate),
+    )
+    .map((p) => p.id);
+}
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;

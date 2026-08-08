@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError } from '../core/adapter.js';
+import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -773,7 +773,9 @@ export function registerRoutes(
     const { id } = req.params as { id: string };
     const workflow = adapter.getWorkflow(id);
     if (!workflow) return reply.code(404).send({ error: `workflow '${id}' not found` });
-    return { workflow };
+    // humanGates: the phases that will PAUSE for a person even under humanConfirm:none (core#208).
+    // Surfaced so an operator can see a workflow's gates BEFORE launching it (FINDING-023).
+    return { workflow, humanGates: humanGatePhaseIds(workflow) };
   });
 
   // Register (or replace) a user-authored workflow definition.
