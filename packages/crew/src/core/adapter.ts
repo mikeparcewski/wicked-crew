@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { mkdir, access, readFile, writeFile, chmod, rm } from 'node:fs/promises';
-import { existsSync, readFileSync, renameSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -47,6 +47,39 @@ function workflowOverlayDir(): string {
 
 function settingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
+}
+
+/** Read user-registered workflow overlays from `dir` (the same dir `registerWorkflow` writes to).
+ *
+ * Skips: files whose id matches a built-in (those are `_writeBuiltinOverlay` artifacts written FOR
+ * the Rust actor, not user workflows — including them would duplicate a built-in in `listWorkflows`),
+ * non-`.json` files, and any file that does not parse into a `{id, phases[]}` shape (the Rust actor
+ * skips an unreadable overlay too, so crew must not surface one it can't). A missing dir yields `[]`.
+ *
+ * Exported so the FINDING-002 restart-hydration path is unit-testable without spawning a Core. */
+export function readOverlayWorkflows(
+  dir: string,
+  builtinIds: ReadonlySet<string>,
+): WorkflowDef[] {
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return []; // no overlay dir yet → nothing registered
+  }
+  const out: WorkflowDef[] = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const id = file.slice(0, -'.json'.length);
+    if (builtinIds.has(id)) continue; // a built-in overlay, not a user workflow
+    try {
+      const def = JSON.parse(readFileSync(join(dir, file), 'utf8')) as WorkflowDef;
+      if (def && typeof def.id === 'string' && Array.isArray(def.phases)) out.push(def);
+    } catch {
+      // Unparseable overlay — core would skip it at load, so crew skips it too.
+    }
+  }
+  return out;
 }
 
 /** Find the wicked-core standalone binary for the gate-hook command.
@@ -974,7 +1007,28 @@ export class CoreAdapter {
 
   private readonly userWorkflows = new Map<string, WorkflowDef>();
 
+  /** Whether {@link hydrateFromOverlay} has run this process lifetime. */
+  private overlayHydrated = false;
+
+  /** Load user-registered workflows persisted to the overlay dir into `userWorkflows`, ONCE.
+   *
+   * FINDING-002 residual: `registerWorkflow` writes each def to the overlay dir AND to the in-memory
+   * `userWorkflows` Map, but the Map is process-local and empty on every daemon restart, and nothing
+   * read the dir back. So after a restart the Rust actor (which DOES load the overlay dir at startup)
+   * would launch a user workflow that `listWorkflows()`/`GET /workflows` no longer showed — it
+   * vanished from the registry while remaining runnable. Hydrating from the same dir the writer uses
+   * makes the two views agree again. */
+  private hydrateFromOverlay(): void {
+    if (this.overlayHydrated) return;
+    this.overlayHydrated = true;
+    const builtinIds = new Set(BUILTIN_WORKFLOWS.map((w) => w.id));
+    for (const def of readOverlayWorkflows(workflowOverlayDir(), builtinIds)) {
+      if (!this.userWorkflows.has(def.id)) this.userWorkflows.set(def.id, def);
+    }
+  }
+
   listWorkflows(): WorkflowDef[] {
+    this.hydrateFromOverlay();
     // Builtins first (stable ordering), but user-registered workflows take precedence when
     // ids conflict — consistent with getWorkflow() which prefers userWorkflows.get().
     const seen = new Set<string>();
@@ -990,6 +1044,7 @@ export class CoreAdapter {
   }
 
   getWorkflow(id: string): WorkflowDef | null {
+    this.hydrateFromOverlay();
     return this.userWorkflows.get(id) ?? BUILTIN_WORKFLOWS.find((w) => w.id === id) ?? null;
   }
 
