@@ -17,6 +17,7 @@ import type {
   ConformanceRule,
   GovernanceClaim,
   CoverageReport,
+  GraphKind,
   WorkflowDef,
   SystemSettings,
 } from './types.js';
@@ -124,6 +125,9 @@ type GovernanceMethods = {
   // FINDING-009: coverage for ONE registered repo, computed over that repo's OWN code graph (not the
   // vacuous daemon store). Returns a JSON string like `getCoverageReport`; an unknown repo REJECTS.
   getCoverageReportForRepo(repoRef: string): Promise<string>;
+  // #122: node-count-by-kind summary of ONE repo's code graph, over that repo's OWN store. Returns a
+  // JSON string (array of {kind,count}); an unknown repo REJECTS.
+  getGraphKindsForRepo(repoRef: string): Promise<string>;
   // crew#42 write seam
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
@@ -1005,6 +1009,19 @@ export class CoreAdapter {
       );
     }
     return JSON.parse(raw) as CoverageReport | null;
+  }
+
+  /**
+   * Node-count-by-kind summary of ONE registered repo's code graph, over that repo's OWN store
+   * (#122) — what the estate graph actually holds for the repo, so an operator can see it was
+   * populated. The core rejects an unknown repo, so this throws for a bad ref.
+   */
+  async getGraphKindsForRepo(repoRef: string): Promise<GraphKind[]> {
+    const raw = await this.core.getGraphKindsForRepo(repoRef);
+    if (typeof raw !== 'string') {
+      throw new Error(`getGraphKindsForRepo: expected a JSON string from the engine, got ${typeof raw}`);
+    }
+    return JSON.parse(raw) as GraphKind[];
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────

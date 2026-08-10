@@ -724,6 +724,24 @@ export function registerRoutes(
     return { report };
   });
 
+  app.get(`${V}/governance/graph`, async (req, reply) => {
+    // #122: node-count-by-kind summary of a repo's OWN code graph. Repo-scoped ONLY — there is no
+    // meaningful daemon-wide graph view (the daemon store holds run/governance nodes, not a repo's
+    // code graph), so a missing `?repo=` is a 400 and an unknown repo a 404 (core rejects it, never
+    // a silent empty summary). Array-query normalized like the coverage route.
+    const rawRepo = (req.query as { repo?: string | string[] } | undefined)?.repo;
+    const repo = Array.isArray(rawRepo) ? rawRepo[0] : rawRepo;
+    if (!repo || !repo.trim()) {
+      return reply.code(400).send({ error: 'governance/graph requires a ?repo=<ref>' });
+    }
+    try {
+      const kinds = await adapter.getGraphKindsForRepo(repo);
+      return { kinds };
+    } catch (err) {
+      return reply.code(404).send({ error: message(err) });
+    }
+  });
+
   // ── Governance writes (crew#42) ────────────────────────────────────────────
 
   app.post(`${V}/governance/policies`, async (req, reply) => {
