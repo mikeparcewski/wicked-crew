@@ -703,21 +703,31 @@ export function registerRoutes(
     return { claims };
   });
 
+  // Normalize a `?repo=` query: Fastify parses a repeated `?repo=a&repo=b` into a `string[]` (take
+  // the first), and the value is TRIMMED so it's both validated and PASSED trimmed — a `?repo=%20x%20`
+  // must not pass the guard then miss the registry lookup on whitespace (Copilot #227).
+  const repoParam = (req: { query?: unknown }): string | undefined => {
+    const raw = (req.query as { repo?: string | string[] } | undefined)?.repo;
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const trimmed = first?.trim();
+    return trimmed ? trimmed : undefined;
+  };
+  // An unknown repo is the CALLER's error (404); a binding/parse failure is OURS (500). Don't collapse
+  // them (Copilot #227). Core spells the not-found case `no registered repo '<ref>'`.
+  const repoReadStatus = (msg: string): number => (/no registered repo/i.test(msg) ? 404 : 500);
+
   app.get(`${V}/governance/coverage`, async (req, reply) => {
     // FINDING-009: with `?repo=<ref>`, report coverage over THAT repo's own code graph. The bare
     // endpoint reads the daemon store and reports a vacuous `coverage: 1.0` that names no repo — the
-    // real gate lives per-repo. An unknown repo is an ERROR in core (never a silent vacuous report),
-    // surfaced here as 404 rather than a misleading success.
-    // Fastify parses a repeated `?repo=a&repo=b` into a `string[]`; take the first so `.trim()`
-    // never throws on an array (Copilot review). A single value stays a string; absent stays undefined.
-    const rawRepo = (req.query as { repo?: string | string[] } | undefined)?.repo;
-    const repo = Array.isArray(rawRepo) ? rawRepo[0] : rawRepo;
-    if (repo && repo.trim()) {
+    // real gate lives per-repo. An unknown repo is an ERROR in core (never a silent vacuous report).
+    const repo = repoParam(req);
+    if (repo) {
       try {
         const report = await adapter.getCoverageReportForRepo(repo);
         return { report };
       } catch (err) {
-        return reply.code(404).send({ error: message(err) });
+        const msg = message(err);
+        return reply.code(repoReadStatus(msg)).send({ error: msg });
       }
     }
     const report = await adapter.getCoverageReport();
@@ -727,18 +737,18 @@ export function registerRoutes(
   app.get(`${V}/governance/graph`, async (req, reply) => {
     // #122: node-count-by-kind summary of a repo's OWN code graph. Repo-scoped ONLY — there is no
     // meaningful daemon-wide graph view (the daemon store holds run/governance nodes, not a repo's
-    // code graph), so a missing `?repo=` is a 400 and an unknown repo a 404 (core rejects it, never
-    // a silent empty summary). Array-query normalized like the coverage route.
-    const rawRepo = (req.query as { repo?: string | string[] } | undefined)?.repo;
-    const repo = Array.isArray(rawRepo) ? rawRepo[0] : rawRepo;
-    if (!repo || !repo.trim()) {
+    // code graph), so a missing `?repo=` is a 400, an unknown repo a 404, and an engine/binding
+    // failure a 500 (not masked as 404).
+    const repo = repoParam(req);
+    if (!repo) {
       return reply.code(400).send({ error: 'governance/graph requires a ?repo=<ref>' });
     }
     try {
       const kinds = await adapter.getGraphKindsForRepo(repo);
       return { kinds };
     } catch (err) {
-      return reply.code(404).send({ error: message(err) });
+      const msg = message(err);
+      return reply.code(repoReadStatus(msg)).send({ error: msg });
     }
   });
 

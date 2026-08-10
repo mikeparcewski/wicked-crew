@@ -34,6 +34,8 @@ beforeAll(async () => {
   adapter.getGraphKindsForRepo = async (repoRef: string) => {
     lastRepoRef = repoRef;
     if (repoRef === 'no-such-repo') throw new Error(`no registered repo '${repoRef}'`);
+    // A non-not-found failure (binding/parse drift) is OURS → the route must 500, not 404.
+    if (repoRef === 'boom') throw new Error('getGraphKindsForRepo: engine returned invalid JSON');
     return KINDS;
   };
 
@@ -80,5 +82,17 @@ describe('GET /governance/graph', () => {
     const res = await get('/api/v1/governance/graph?repo=no-such-repo');
     expect(res.status).toBe(404);
     expect(res.body['error']).toMatch(/no registered repo/);
+  });
+
+  it('trims a padded repo before the registry lookup', async () => {
+    lastRepoRef = null;
+    const res = await get('/api/v1/governance/graph?repo=%20autogpt%20');
+    expect(res.status).toBe(200);
+    expect(lastRepoRef).toBe('autogpt'); // trimmed, not " autogpt "
+  });
+
+  it('maps an internal (non-not-found) failure to 500, not 404', async () => {
+    const res = await get('/api/v1/governance/graph?repo=boom');
+    expect(res.status).toBe(500);
   });
 });
