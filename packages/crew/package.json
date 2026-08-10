@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "wicked-crew daemon \u2014 thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
   "repository": {
     "type": "git",
