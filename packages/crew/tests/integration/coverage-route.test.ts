@@ -33,8 +33,9 @@ beforeAll(async () => {
   adapter.getCoverageReport = async () => DAEMON_REPORT;
   adapter.getCoverageReportForRepo = async (repoRef: string) => {
     lastRepoRef = repoRef;
-    // Core rejects an unknown repo — never a silent vacuous report (FINDING-009).
-    if (repoRef === 'no-such-repo') throw new Error(`unknown repo: ${repoRef}`);
+    // Core rejects an unknown repo — never a silent vacuous report (FINDING-009). The message
+    // mirrors the real engine text (`no registered repo '<ref>'`), which the route maps to 404.
+    if (repoRef === 'no-such-repo') throw new Error(`no registered repo '${repoRef}'`);
     return REPO_REPORT;
   };
 
@@ -69,7 +70,7 @@ describe('GET /governance/coverage', () => {
   it('maps an unknown repo to 404 rather than a misleading success', async () => {
     const res = await get('/api/v1/governance/coverage?repo=no-such-repo');
     expect(res.status).toBe(404);
-    expect(res.body['error']).toMatch(/unknown repo/);
+    expect(res.body['error']).toMatch(/no registered repo/);
   });
 
   it('tolerates a repeated ?repo= (array) without throwing — takes the first', async () => {

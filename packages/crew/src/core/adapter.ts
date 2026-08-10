@@ -17,6 +17,7 @@ import type {
   ConformanceRule,
   GovernanceClaim,
   CoverageReport,
+  GraphKind,
   WorkflowDef,
   SystemSettings,
 } from './types.js';
@@ -29,6 +30,25 @@ import { execCapped } from './exec.js';
 function wickedDir(...parts: string[]): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
   return join(home, '.wicked', ...parts);
+}
+
+/**
+ * Parse a JSON string a napi binding returned. The bindings type their return loosely (`unknown`
+ * until a `ts_return_type` regen), so guard BOTH a non-string return and invalid JSON with an error
+ * that names the method — a bare `JSON.parse` throw is an unactionable "Unexpected token" (crew#227
+ * review). At the current engine contract `raw` is always a valid JSON string.
+ */
+function parseEngineJson<T>(raw: unknown, method: string): T {
+  if (typeof raw !== 'string') {
+    throw new Error(`${method}: expected a JSON string from the engine, got ${typeof raw}`);
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch (e) {
+    throw new Error(
+      `${method}: engine returned invalid JSON (${e instanceof Error ? e.message : String(e)})`,
+    );
+  }
 }
 
 /**
@@ -124,6 +144,9 @@ type GovernanceMethods = {
   // FINDING-009: coverage for ONE registered repo, computed over that repo's OWN code graph (not the
   // vacuous daemon store). Returns a JSON string like `getCoverageReport`; an unknown repo REJECTS.
   getCoverageReportForRepo(repoRef: string): Promise<string>;
+  // #122: node-count-by-kind summary of ONE repo's code graph, over that repo's OWN store. Returns a
+  // JSON string (array of {kind,count}); an unknown repo REJECTS.
+  getGraphKindsForRepo(repoRef: string): Promise<string>;
   // crew#42 write seam
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
@@ -991,20 +1014,24 @@ export class CoreAdapter {
    * The core rejects an unknown repo (never a silent vacuous report), so this throws for a bad ref.
    */
   async getCoverageReportForRepo(repoRef: string): Promise<CoverageReport | null> {
-    // The napi binding returns a JSON string (`serde_json::to_string`), but its generated `.d.ts`
-    // types it `Promise<unknown>` (the binding lacks a `ts_return_type` annotation that
-    // `getCoverageReport` has); cast to the string it actually is. The core annotation is being added
-    // in parallel so a future regen types this properly.
-    const raw = await this.core.getCoverageReportForRepo(repoRef);
-    // The binding types its return `unknown` (no `ts_return_type` annotation), so the compiler can't
-    // catch a contract drift; guard at runtime with an actionable error instead of a bare JSON.parse
-    // throw (Copilot review). At the current contract `raw` is always the JSON string below.
-    if (typeof raw !== 'string') {
-      throw new Error(
-        `getCoverageReportForRepo: expected a JSON string from the engine, got ${typeof raw}`,
-      );
-    }
-    return JSON.parse(raw) as CoverageReport | null;
+    // The napi binding returns a JSON string (`serde_json::to_string`); parse it with a guard that
+    // names the method on either a non-string return or invalid JSON (Copilot #227).
+    return parseEngineJson<CoverageReport | null>(
+      await this.core.getCoverageReportForRepo(repoRef),
+      'getCoverageReportForRepo',
+    );
+  }
+
+  /**
+   * Node-count-by-kind summary of ONE registered repo's code graph, over that repo's OWN store
+   * (#122) — what the estate graph actually holds for the repo, so an operator can see it was
+   * populated. The core rejects an unknown repo, so this throws for a bad ref.
+   */
+  async getGraphKindsForRepo(repoRef: string): Promise<GraphKind[]> {
+    return parseEngineJson<GraphKind[]>(
+      await this.core.getGraphKindsForRepo(repoRef),
+      'getGraphKindsForRepo',
+    );
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────
