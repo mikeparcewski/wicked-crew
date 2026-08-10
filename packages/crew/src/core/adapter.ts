@@ -995,8 +995,16 @@ export class CoreAdapter {
     // types it `Promise<unknown>` (the binding lacks a `ts_return_type` annotation that
     // `getCoverageReport` has); cast to the string it actually is. The core annotation is being added
     // in parallel so a future regen types this properly.
-    const json = (await this.core.getCoverageReportForRepo(repoRef)) as string;
-    return JSON.parse(json) as CoverageReport | null;
+    const raw = await this.core.getCoverageReportForRepo(repoRef);
+    // The binding types its return `unknown` (no `ts_return_type` annotation), so the compiler can't
+    // catch a contract drift; guard at runtime with an actionable error instead of a bare JSON.parse
+    // throw (Copilot review). At the current contract `raw` is always the JSON string below.
+    if (typeof raw !== 'string') {
+      throw new Error(
+        `getCoverageReportForRepo: expected a JSON string from the engine, got ${typeof raw}`,
+      );
+    }
+    return JSON.parse(raw) as CoverageReport | null;
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────

@@ -72,6 +72,14 @@ describe('GET /governance/coverage', () => {
     expect(res.body['error']).toMatch(/unknown repo/);
   });
 
+  it('tolerates a repeated ?repo= (array) without throwing — takes the first', async () => {
+    // Fastify parses `?repo=a&repo=b` into a string[]; a naive `repo.trim()` would throw (Copilot).
+    lastRepoRef = null;
+    const res = await get('/api/v1/governance/coverage?repo=autogpt&repo=other');
+    expect(res.status).toBe(200);
+    expect(lastRepoRef).toBe('autogpt'); // first value, not the array
+  });
+
   it('without ?repo= still serves the daemon-wide report (backward compatible)', async () => {
     lastRepoRef = null;
     const res = await get('/api/v1/governance/coverage');

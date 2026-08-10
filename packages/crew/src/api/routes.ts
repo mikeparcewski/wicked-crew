@@ -708,7 +708,10 @@ export function registerRoutes(
     // endpoint reads the daemon store and reports a vacuous `coverage: 1.0` that names no repo — the
     // real gate lives per-repo. An unknown repo is an ERROR in core (never a silent vacuous report),
     // surfaced here as 404 rather than a misleading success.
-    const repo = (req.query as { repo?: string } | undefined)?.repo;
+    // Fastify parses a repeated `?repo=a&repo=b` into a `string[]`; take the first so `.trim()`
+    // never throws on an array (Copilot review). A single value stays a string; absent stays undefined.
+    const rawRepo = (req.query as { repo?: string | string[] } | undefined)?.repo;
+    const repo = Array.isArray(rawRepo) ? rawRepo[0] : rawRepo;
     if (repo && repo.trim()) {
       try {
         const report = await adapter.getCoverageReportForRepo(repo);
