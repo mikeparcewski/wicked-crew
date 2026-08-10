@@ -121,6 +121,9 @@ type GovernanceMethods = {
   listConformanceRules(): Promise<string>;
   listConformanceClaims(): Promise<string>;
   getCoverageReport(): Promise<string>;
+  // FINDING-009: coverage for ONE registered repo, computed over that repo's OWN code graph (not the
+  // vacuous daemon store). Returns a JSON string like `getCoverageReport`; an unknown repo REJECTS.
+  getCoverageReportForRepo(repoRef: string): Promise<string>;
   // crew#42 write seam
   upsertPolicy(policyJson: string): Promise<string>;
   upsertConformanceRule(ruleJson: string): Promise<string>;
@@ -979,6 +982,29 @@ export class CoreAdapter {
   /** Front-half coverage gate report; null when the store has no graph nodes. */
   async getCoverageReport(): Promise<CoverageReport | null> {
     return JSON.parse(await this.core.getCoverageReport()) as CoverageReport | null;
+  }
+
+  /**
+   * Coverage for ONE registered repo, computed over that repo's OWN code graph (FINDING-009). Unlike
+   * {@link getCoverageReport} — which reads the daemon store and reports a vacuous `coverage: 1.0` that
+   * names no repo — this resolves `repoRef` in the registry and recomputes over its `code_graph_db`.
+   * The core rejects an unknown repo (never a silent vacuous report), so this throws for a bad ref.
+   */
+  async getCoverageReportForRepo(repoRef: string): Promise<CoverageReport | null> {
+    // The napi binding returns a JSON string (`serde_json::to_string`), but its generated `.d.ts`
+    // types it `Promise<unknown>` (the binding lacks a `ts_return_type` annotation that
+    // `getCoverageReport` has); cast to the string it actually is. The core annotation is being added
+    // in parallel so a future regen types this properly.
+    const raw = await this.core.getCoverageReportForRepo(repoRef);
+    // The binding types its return `unknown` (no `ts_return_type` annotation), so the compiler can't
+    // catch a contract drift; guard at runtime with an actionable error instead of a bare JSON.parse
+    // throw (Copilot review). At the current contract `raw` is always the JSON string below.
+    if (typeof raw !== 'string') {
+      throw new Error(
+        `getCoverageReportForRepo: expected a JSON string from the engine, got ${typeof raw}`,
+      );
+    }
+    return JSON.parse(raw) as CoverageReport | null;
   }
 
   // ── Governance writes (crew#42) ────────────────────────────────────────────
