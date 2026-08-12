@@ -185,9 +185,12 @@ export async function createServer(
             repoRef !== null
               ? ((await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path ?? null)
               : null;
+          // The STORED scope, not a derived spelling: `Project.scope` is the designed tenancy
+          // seam (ADR §3.1 — a future `org:<o>/project:<id>` prefix must not strand pointers).
+          const project = await adapter.projectGet(projectId);
           await writeRunEvidencePointer(
             adapter,
-            `project:${projectId}`,
+            project?.scope ?? `project:${projectId}`,
             session,
             repoRoot,
             (m) => app.log.warn(m),

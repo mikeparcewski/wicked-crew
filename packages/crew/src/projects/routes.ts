@@ -127,21 +127,35 @@ export function registerProjectRoutes(
     return filed;
   }
 
-  /** The synthesized default project's members: every run with no membership row (computed). */
+  /** The synthesized default project's members (ADR §7: "all runs/chats known to the engine
+   *  that have no explicit membership row" — computed, never stored). Runs come from the store;
+   *  chats from the LIVE pool (chats are not persisted), guarded because the chat surface is an
+   *  optional engine capability. */
   async function defaultMembers(): Promise<ProjectMember[]> {
     const filed = await filedRunRefs();
-    const ids = await adapter.sessions();
-    return ids
+    const synthesize = (kind: string, ref: string): ProjectMember => ({
+      id: `default:${kind}:${ref}`,
+      project_id: DEFAULT_PROJECT_ID,
+      member_kind: kind,
+      member_ref: ref,
+      meta: null,
+      attached_at: 0,
+      attached_by: 'api',
+    });
+    const members = (await adapter.sessions())
       .filter((id) => !filed.has(id))
-      .map((id) => ({
-        id: `default:crew.run:${id}`,
-        project_id: DEFAULT_PROJECT_ID,
-        member_kind: 'crew.run',
-        member_ref: id,
-        meta: null,
-        attached_at: 0,
-        attached_by: 'api',
-      }));
+      .map((id) => synthesize('crew.run', id));
+    try {
+      for (const chat of await adapter.chatList()) {
+        const chatId = (chat as { chatId?: string }).chatId;
+        if (typeof chatId === 'string' && !filed.has(chatId)) {
+          members.push(synthesize('crew.chat', chatId));
+        }
+      }
+    } catch {
+      // No chat surface on this build (ChatUnsupportedError) — runs alone are the honest set.
+    }
+    return members;
   }
 
   /** Resolve a project's run/chat member refs (real or synthesized default). */
@@ -362,16 +376,21 @@ export function registerProjectRoutes(
     try {
       const refs = await memberRunRefs(id);
       if (refs === null) return reply.code(404).send({ error: `Project ${id} not found` });
-      const open = await adapter.interactionRequests(undefined, 'open');
-      if (open === null) {
-        // Distinguish "cannot read the durable table" from "no prompts" — the FINDING-050 rule.
-        return reply.code(501).send({
-          error:
-            'The durable prompt inbox needs a wicked-core build with the interaction_requests binding (wicked-core-ts >= 0.6.0)',
-        });
+      // Per-member queries, not a daemon-wide scan filtered in-process: the cost scales with
+      // THIS project's members, never with global open-prompt volume (Copilot, #243).
+      const prompts: InteractionRequest[] = [];
+      for (const ref of refs) {
+        const rows = await adapter.interactionRequests(ref, 'open');
+        if (rows === null) {
+          // Distinguish "cannot read the durable table" from "no prompts" — the FINDING-050 rule.
+          return reply.code(501).send({
+            error:
+              'The durable prompt inbox needs a wicked-core build with the interaction_requests binding (wicked-core-ts >= 0.6.0)',
+          });
+        }
+        prompts.push(...rows);
       }
-      const memberSet = new Set(refs);
-      const prompts: InteractionRequest[] = open.filter((r) => memberSet.has(r.session_id));
+      prompts.sort((a, b) => b.created_at - a.created_at);
       return { projectId: id, prompts };
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });

@@ -23,7 +23,9 @@
 import { broadcast } from '../events/bus.js';
 import type { CoreEvent } from '../core/types.js';
 
-/** Crew's own bus identity (`wicked.<domain>.<noun>.<verb>` with domain `crew`). */
+/** Crew's bus DOMAIN COLUMN value — the product-scoped plugin name, matching the repo precedent
+ *  (`INTERACTIVE_DOMAIN = 'wicked-interactive'`). The EVENT TYPES carry the §4 grammar's bare
+ *  `crew` segment (`wicked.crew.project.created`); the two spellings are different fields. */
 export const CREW_BUS_DOMAIN = 'wicked-crew';
 const CREW_PRODUCER = 'wicked-crew';
 /** The subscriber identity of the /ws liveness bridge. */
