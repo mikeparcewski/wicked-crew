@@ -4,10 +4,12 @@
 # locally-run tests.
 #
 # `build` runs crew's `build:with-studio` (task #84 severed the default `build` down to plain `tsc`;
-# the studio SPA is an independent client and is no longer built as a side effect of building the
-# daemon). `build:with-studio` runs scripts/bundle-studio.mjs (builds the studio SPA + copies its
-# dist into packages/crew/dist/studio) — so CI still proves the v0.2.0 serving bundle assembles,
-# which is what the release tarball ships.
+# task #98 carved the studio SPA out to its own repo — github.com/mikeparcewski/wicked-studio — so
+# it is a separate product now, not a workspace member). `build:with-studio` runs
+# scripts/bundle-studio.mjs, which copies the INSTALLED `wicked-studio` package's dist/ into
+# packages/crew/dist/studio — so CI still proves the serving bundle assembles from the published
+# artifact, which is what the release tarball ships. Studio's own lint/typecheck/test run in its
+# own repo's CI.
 #
 # ── Why this checks out two sibling repos ────────────────────────────────────────────────────────
 #
@@ -112,21 +114,21 @@ jobs:
         env:
           WICKED_CORE_TS_DIR: ${{ github.workspace }}/wicked-core/crates/wicked-core-ts
 
-      - name: Lint (eslint — both packages)
+      - name: Lint (eslint)
         working-directory: wicked-crew
-        run: npm run -w packages/crew lint && npm run -w packages/studio lint
+        run: npm run -w packages/crew lint
 
-      - name: Typecheck (tsc --noEmit — both packages)
+      - name: Typecheck (tsc --noEmit)
         working-directory: wicked-crew
-        run: npm run -w packages/crew typecheck && npm run -w packages/studio typecheck
+        run: npm run -w packages/crew typecheck
 
-      # Builds the studio SPA and bundles it into packages/crew/dist/studio (the v0.2.0 serving
-      # artifact). Deliberately `build:with-studio`, not the default `build` (which is plain tsc,
-      # task #84): CI must keep proving the release-shaped bundle assembles.
-      - name: Build (crew + studio bundle)
+      # Copies the installed wicked-studio package's dist into packages/crew/dist/studio (the
+      # serving artifact). Deliberately `build:with-studio`, not the default `build` (which is
+      # plain tsc, task #84): CI must keep proving the release-shaped bundle assembles.
+      - name: Build (crew + bundled studio dist)
         working-directory: wicked-crew
         run: npm run -w packages/crew build:with-studio
 
-      - name: Test (both packages)
+      - name: Test
         working-directory: wicked-crew
-        run: npm run -w packages/crew test && npm run -w packages/studio test
+        run: npm run -w packages/crew test

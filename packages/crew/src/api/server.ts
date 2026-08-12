@@ -25,7 +25,9 @@ const LOOPBACK_ORIGIN = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
 /**
  * The bundled studio SPA lives at `dist/studio` next to the compiled server
  * (`dist/api/server.js` → `../studio`). See DES-STUDIO-SERVING-001 §2.3/§3.1
- * and `scripts/bundle-studio.mjs` which copies `packages/studio/dist` there.
+ * and `scripts/bundle-studio.mjs`, which copies the installed `wicked-studio`
+ * package's `dist/` there (the SPA is its own product since the #98 carve —
+ * github.com/mikeparcewski/wicked-studio — consumed as a dist artifact).
  */
 export function defaultStudioRoot(): string {
   return fileURLToPath(new URL('../studio', import.meta.url));

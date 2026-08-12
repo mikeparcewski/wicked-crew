@@ -1,4 +1,6 @@
-// Flat ESLint config for the wicked-crew workspace (crew daemon + studio SPA).
+// Flat ESLint config for the wicked-crew workspace (crew daemon; the studio SPA
+// carved out to its own repo — github.com/mikeparcewski/wicked-studio — carries
+// this rule set with it, plus its React-specific block).
 // typescript-eslint's `recommended` set — correctness-focused (unused vars, unsafe
 // patterns, misused promises-lite), not opinionated style. Fast: no type-info project
 // wiring, so it runs the same locally and in CI.
@@ -9,7 +11,6 @@
 // check should have been (FINDING-071). Tests are now linted here and typechecked through
 // `tsconfig.test.json`. Build scripts under `packages/*/scripts/` remain ignored below, deliberately.
 import tseslint from 'typescript-eslint';
-import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
   {
@@ -22,14 +23,4 @@ export default tseslint.config(
     ],
   },
   ...tseslint.configs.recommended,
-  {
-    // Studio is React — enforce the Rules of Hooks (a real bug class) and keep
-    // exhaustive-deps advisory (warn) so intentional per-line disables stay valid.
-    files: ['packages/studio/**/*.{ts,tsx}'],
-    plugins: { 'react-hooks': reactHooks },
-    rules: {
-      'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
-    },
-  },
 );
