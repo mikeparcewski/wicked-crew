@@ -314,6 +314,8 @@ describe('InteractiveHandoffLedger (shared with the draft leg)', () => {
           'doc-null': null,
           'doc-string': 'not-a-row',
           'doc-no-run': { launchedAt: 't0' },
+          'doc-empty-run': { runId: '', launchedAt: 't0' },
+          'doc-no-launch': { runId: 'run-9' },
           'doc-good:v2': { runId: 'run-1', launchedAt: 't0', emittedAt: 't1' },
         },
       }),
@@ -324,6 +326,8 @@ describe('InteractiveHandoffLedger (shared with the draft leg)', () => {
     expect(ledger.has('doc-null')).toBe(false);
     expect(ledger.has('doc-string')).toBe(false);
     expect(ledger.has('doc-no-run')).toBe(false);
+    expect(ledger.has('doc-empty-run')).toBe(false);
+    expect(ledger.has('doc-no-launch')).toBe(false);
     expect(ledger.size()).toBe(1);
   });
 });
