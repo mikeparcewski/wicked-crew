@@ -1,0 +1,12 @@
+{
+  "id": "7ae4f27c-57f4-4e36-bfea-3e3d6c4deb48",
+  "run_id": "7ec47687-fb15-4592-bf69-5121359f8bab",
+  "verdict": "PASS",
+  "evidence_path": ".wicked-testing/evidence/7ec47687-fb15-4592-bf69-5121359f8bab",
+  "reviewer": "wicked-garden-qe-acceptance-test-reviewer",
+  "reason": "15/15 assertions passed (5 prerequisite + 10 step); A1 rows=3, A2 sum[amount]=40, A3 exit-2 + stderr names missing_col. Evidence-only review; no contamination.",
+  "created_at": "2026-08-12T02:31:41.339Z",
+  "updated_at": "2026-08-12T02:31:41.339Z",
+  "deleted": 0,
+  "deleted_at": null
+}

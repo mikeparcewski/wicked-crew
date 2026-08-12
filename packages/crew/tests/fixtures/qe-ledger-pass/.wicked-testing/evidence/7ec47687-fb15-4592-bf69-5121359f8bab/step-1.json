@@ -1,0 +1,13 @@
+{
+  "step_id": "STEP-1",
+  "description": "Row count reports rows=3 with exit 0",
+  "executed_at": "2026-08-12T02:25:29.667207+00:00",
+  "duration_ms": 49,
+  "action": "python3 csv_stats.py data/orders.csv --count (cwd = fixture root)",
+  "evidence": {
+    "step-1-stdout": "rows=3\n",
+    "step-1-stderr": "",
+    "step-1-exit": "0"
+  },
+  "execution_notes": ""
+}

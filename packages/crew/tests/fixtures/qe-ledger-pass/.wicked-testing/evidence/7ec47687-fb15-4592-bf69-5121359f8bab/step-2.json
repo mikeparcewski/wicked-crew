@@ -1,0 +1,13 @@
+{
+  "step_id": "STEP-2",
+  "description": "Column sum reports sum[amount]=40 with exit 0",
+  "executed_at": "2026-08-12T02:25:29.721791+00:00",
+  "duration_ms": 31,
+  "action": "python3 csv_stats.py data/orders.csv --sum amount (cwd = fixture root)",
+  "evidence": {
+    "step-2-stdout": "sum[amount]=40\n",
+    "step-2-stderr": "",
+    "step-2-exit": "0"
+  },
+  "execution_notes": ""
+}

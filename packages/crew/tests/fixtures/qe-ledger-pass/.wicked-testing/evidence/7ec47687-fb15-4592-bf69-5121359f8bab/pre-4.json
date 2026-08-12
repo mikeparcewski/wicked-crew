@@ -1,0 +1,16 @@
+{
+  "step_id": "PRE-4",
+  "description": "Working directory is the fixture root",
+  "executed_at": "2026-08-12T02:25:29.642837+00:00",
+  "duration_ms": 19,
+  "action": "pwd (run with the same cwd used for all test steps)",
+  "evidence": {
+    "pre-4-cwd": {
+      "stdout": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture\n",
+      "stderr": "",
+      "exit_code": 0,
+      "cwd_used_for_all_steps": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture"
+    }
+  },
+  "execution_notes": ""
+}
