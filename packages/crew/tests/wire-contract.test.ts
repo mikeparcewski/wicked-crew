@@ -28,6 +28,8 @@ import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, LaunchSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { LOCAL_ACTOR } from '../src/api/auth.js';
+import type { AuditLog } from '../src/api/audit.js';
 import type {
   AttachMemberSchema,
   CreateProjectSchema,
@@ -94,6 +96,11 @@ respondsWith<
   Wire.InteractionRequest[] | null,
   Awaited<ReturnType<CoreAdapter['interactionRequests']>>
 >();
+
+// Identity/actor contract (task #88): the implicit local actor and the audit
+// trail's read shape must satisfy what the contract publishes.
+respondsWith<Wire.Actor, typeof LOCAL_ACTOR>();
+respondsWith<Wire.AuditEntry[], Awaited<ReturnType<AuditLog['read']>>>();
 
 // ── Request direction: client → daemon ─────────────────────────────────────────
 //

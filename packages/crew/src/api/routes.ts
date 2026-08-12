@@ -19,6 +19,8 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
+import { AuditLog } from './audit.js';
+import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
@@ -165,6 +167,12 @@ const ResizeTerminalSchema = z.object({
   rows: z.number().int().positive(),
 }).strict();
 
+/** The actor/audit deps (task #88) — threaded from `createServer`. */
+export interface SecurityDeps {
+  audit: AuditLog;
+  authMode: AuthMode;
+}
+
 /**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
  * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
@@ -181,11 +189,52 @@ export function registerRoutes(
   // Defaulted for the same reason: tests that drive this function directly get
   // the projects surface with no bus (events skipped) and a fresh index.
   projects: ProjectRoutesDeps = { bus: null, index: new MembershipIndex(), log: () => undefined },
+  // Defaulted likewise: a directly-driven route set audits to the default
+  // trail as the implicit local actor — same behavior as an auth-off daemon.
+  security: SecurityDeps = { audit: new AuditLog(), authMode: 'off' },
 ): void {
+  const { audit } = security;
+  // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
+  // driving this function directly (tests) has no hooks, so downstream code
+  // still gets the ONE actor shape via this accessor.
+  const actorOf = (req: { actor?: import('../core/types.js').Actor }) => req.actor ?? LOCAL_ACTOR;
   // Liveness — also proves the actor + event pump are up.
   app.get(`${V}/health`, async () => {
     const ping = await adapter.ping();
     return { status: 'ok', version: PKG_VERSION, ping };
+  });
+
+  // Who am I talking to the daemon as? (task #88). In local mode this is
+  // always the implicit full-trust local actor; in required mode it names the
+  // token's actor — the cheap probe a skin uses to decide what to render.
+  app.get(`${V}/whoami`, async (req) => ({
+    actor: actorOf(req),
+    authMode: security.authMode,
+  }));
+
+  // The actor audit trail (task #88): who launched/steered/governed what.
+  // Read-only (observer trust); newest first; `?runId=` / `?action=` / `?limit=`.
+  app.get(`${V}/audit`, async (req, reply) => {
+    const q = req.query as { runId?: string | string[]; action?: string | string[]; limit?: string | string[] };
+    const first = (v: string | string[] | undefined): string | undefined =>
+      (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
+    const runId = first(q.runId);
+    const action = first(q.action);
+    const limitRaw = first(q.limit);
+    const limit = limitRaw !== undefined ? Number.parseInt(limitRaw, 10) : undefined;
+    if (limitRaw !== undefined && (!Number.isFinite(limit) || (limit as number) < 1)) {
+      return reply.code(400).send({ error: '`limit` must be a positive integer' });
+    }
+    try {
+      const entries = await audit.read({
+        ...(runId !== undefined ? { runId } : {}),
+        ...(action !== undefined ? { action } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+      return { entries };
+    } catch (err) {
+      return reply.code(500).send({ error: message(err) });
+    }
   });
 
   // Report the actually-bound port/host (honours --port / CREW_PORT / port 0).
@@ -269,6 +318,17 @@ export function registerRoutes(
     if (b.projectId !== undefined) input.projectId = b.projectId;
     try {
       const runId = await adapter.launchRun(input);
+      // Who launched it — the engine's LaunchOptions carries no actor field
+      // (checked, wicked-core-ts 0.6.0), so the crew-side trail is the system
+      // of record for run provenance (task #88).
+      audit.record('run.launched', actorOf(req), {
+        runId,
+        detail: {
+          ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
+          ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
+          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+        },
+      });
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and
@@ -276,7 +336,9 @@ export function registerRoutes(
         projects.index.set(runId, b.projectId);
         projects.bus?.emit(
           MEMBERSHIP_ATTACHED,
-          { project_id: b.projectId, member: { kind: 'crew.run', ref: runId }, actor: 'api' },
+          // The AUTHENTICATED actor id, not a caller-supplied string — locked
+          // decision #6 replaces spoofable actor strings on the event surface.
+          { project_id: b.projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
           membershipAttachedKey(b.projectId, 'crew.run', runId, Date.now()),
         );
       }
@@ -375,7 +437,7 @@ export function registerRoutes(
             projects.index.set(chatId, b.projectId);
             projects.bus?.emit(
               MEMBERSHIP_ATTACHED,
-              { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: 'api' },
+              { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
               membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
             );
           }
@@ -554,6 +616,17 @@ export function registerRoutes(
     }
     try {
       const status = await adapter.confirmGate(id, parsed.data.approve, parsed.data.amend);
+      // WHO approved/rejected — the gate-decision audit (task #88). The engine
+      // records THAT the gate resolved (interaction_requests / gateDecided);
+      // only this HTTP layer knows the authenticated principal behind it.
+      audit.record('gate.decided', actorOf(req), {
+        runId: id,
+        detail: {
+          approve: parsed.data.approve,
+          ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
+          status,
+        },
+      });
       return reply.send({ status });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -568,6 +641,7 @@ export function registerRoutes(
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     try {
       const status = await adapter.cancelRun(id);
+      audit.record('run.cancelled', actorOf(req), { runId: id, detail: { status } });
       return reply.send({ status });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -582,10 +656,14 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     try {
-      const status =
-        run.session.status === 'awaiting_human'
-          ? await adapter.confirmGate(id, true)
-          : await adapter.resumeRun(id);
+      const gated = run.session.status === 'awaiting_human';
+      const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
+      // A resume of a gated run IS a gate approval — audit it as one, so the
+      // "who approved" trail has no side door (task #88).
+      audit.record(gated ? 'gate.decided' : 'run.resumed', actorOf(req), {
+        runId: id,
+        detail: gated ? { approve: true, via: 'resume', status } : { status },
+      });
       return reply.send({ status });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -605,6 +683,7 @@ export function registerRoutes(
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
     try {
       await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
+      audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target } });
       return reply.send({ status: 'ok' });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
@@ -799,6 +878,10 @@ export function registerRoutes(
     }
 
     // 7. Done.
+    audit.record('elicitation.resolved', actorOf(req), {
+      runId: id,
+      detail: { elicitationId: taken.entry.elicitationId, action: body.action },
+    });
     return { status: 'resolved' };
   });
 
@@ -923,7 +1006,9 @@ export function registerRoutes(
 
   app.post(`${V}/governance/policies`, async (req, reply) => {
     try {
-      await adapter.upsertPolicy(req.body as import('../core/types.js').GovernancePolicy);
+      const policy = req.body as import('../core/types.js').GovernancePolicy;
+      await adapter.upsertPolicy(policy);
+      audit.record('governance.policy.upserted', actorOf(req), { detail: { id: policy?.id } });
       return { status: 'ok' };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -932,7 +1017,9 @@ export function registerRoutes(
 
   app.post(`${V}/governance/rules`, async (req, reply) => {
     try {
-      await adapter.upsertConformanceRule(req.body as import('../core/types.js').ConformanceRule);
+      const rule = req.body as import('../core/types.js').ConformanceRule;
+      await adapter.upsertConformanceRule(rule);
+      audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
       return { status: 'ok' };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -946,6 +1033,7 @@ export function registerRoutes(
     try {
       const existed = await adapter.retirePolicy(id);
       if (!existed) return reply.code(404).send({ error: `policy '${id}' not found` });
+      audit.record('governance.policy.retired', actorOf(req), { detail: { id } });
       return { status: 'retired', id };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -957,6 +1045,7 @@ export function registerRoutes(
     try {
       const existed = await adapter.retireConformanceRule(id);
       if (!existed) return reply.code(404).send({ error: `conformance rule '${id}' not found` });
+      audit.record('governance.rule.retired', actorOf(req), { detail: { id } });
       return { status: 'retired', id };
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -1002,6 +1091,7 @@ export function registerRoutes(
     }
     try {
       const id = await adapter.registerWorkflow(body as import('../core/types.js').WorkflowDef);
+      audit.record('workflow.registered', actorOf(req), { detail: { id } });
       return reply.code(201).send({ id, status: 'registered' });
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -1391,9 +1481,11 @@ export function registerRoutes(
     for (const key of allowed) {
       if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
     }
-    return { settings: await adapter.updateSettings(safe) };
+    const settings = await adapter.updateSettings(safe);
+    audit.record('settings.updated', actorOf(req), { detail: { changed: Object.keys(safe) } });
+    return { settings };
   });
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
-  registerProjectRoutes(app, adapter, projects);
+  registerProjectRoutes(app, adapter, projects, security);
 }

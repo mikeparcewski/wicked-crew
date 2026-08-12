@@ -26,6 +26,69 @@
  * the daemon's produced types stop satisfying this contract.
  */
 
+// ── Identity / actor contract (task #88, locked decision #6) ───────────────────
+
+/** What kind of principal an actor is: a person (OAuth/OIDC or local operator) or a workload. */
+export type ActorKind = 'human' | 'agent';
+
+/**
+ * The minimal trust ladder: `admin` > `operator` > `observer`.
+ *
+ * - `observer` — read-only: every GET, and the `/ws` event stream.
+ * - `operator` — does the work: launch/steer/cancel runs, answer gates and
+ *   elicitations, open chats and terminals, register repos and workflows.
+ * - `admin` — governs the system: governance writes (policies/rules),
+ *   settings writes, and project archive/restore.
+ *
+ * Deliberately minimal and enumerated here rather than per-route: unknown
+ * mutating routes default to `operator`, reads to `observer` (docs/auth.md).
+ */
+export type TrustLevel = 'observer' | 'operator' | 'admin';
+
+/**
+ * The ONE actor shape every authenticated (or implicitly local) request carries
+ * — replacing free-text actor strings, which any caller could spoof. In local
+ * no-auth mode every request acts as `{id:"local", kind:"human", trust:"admin"}`
+ * (full trust), so downstream consumers never branch on "was there auth".
+ */
+export interface Actor {
+  /** Stable principal id (token-file `actor.id`, or an OIDC subject once that seam lands). */
+  id: string;
+  kind: ActorKind;
+  trust: TrustLevel;
+}
+
+/** `GET /whoami` — the actor this request authenticated as, and the daemon's auth mode. */
+export interface WhoAmI {
+  actor: Actor;
+  /** `required` (team/hosted: bearer token mandatory) | `off` (local loopback default). */
+  authMode: 'required' | 'off';
+}
+
+/**
+ * One line of the daemon's append-only audit trail (`GET /audit`): who did what,
+ * to which run, when. Written crew-side because the engine's `LaunchOptions`
+ * carries no actor field — this is the system of record for "who approved that
+ * gate" / "who launched that run".
+ */
+export interface AuditEntry {
+  /** Unix millis. */
+  ts: number;
+  /** Dotted verb, e.g. `run.launched`, `gate.decided`, `governance.policy.upserted`. */
+  action: string;
+  actor: Actor;
+  /** The run the action addressed, when it addressed one. */
+  runId?: string;
+  /** Action-specific fields (`approve`, `amend`, ids, …). */
+  detail?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+/** `GET /audit` — newest first, filterable by `?runId=` / `?action=` / `?limit=`. */
+export interface AuditPage {
+  entries: AuditEntry[];
+}
+
 /** Run-level lifecycle status (`SessionStatus`, snake_case serde token). */
 export type SessionStatus =
   | 'planning'

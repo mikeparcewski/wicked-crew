@@ -7,6 +7,8 @@ import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
 import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
+import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
+import { AuditLog } from './audit.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
@@ -110,6 +112,15 @@ export interface CreateServerOptions {
     /** Poll cadence for the /ws activity bridge, ms (tests shorten it). */
     pollIntervalMs?: number;
   };
+  /**
+   * The identity/actor seam (task #88). Omit for full env/file resolution:
+   * OFF by default (the local loopback deployment — nothing changes), REQUIRED
+   * under `WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required`. See
+   * `src/api/auth.ts` + docs/auth.md.
+   */
+  auth?: AuthOptions;
+  /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
+  auditPath?: string;
 }
 
 export async function createServer(
@@ -121,6 +132,19 @@ export async function createServer(
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   const qeGateCache = new QeGateCache();
+
+  // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
+  // a malformed token file or a configured-but-unimplemented OIDC block must
+  // fail the boot here, never a request mid-flight. In the default local mode
+  // this reads no file and installs a hook that only pins the local actor.
+  const auth = resolveAuth(options?.auth, (m) => app.log.warn(m));
+  if (auth.mode === 'required') {
+    app.log.info('auth REQUIRED: bearer tokens enforced on /api/v1 and /ws');
+  }
+  const audit = new AuditLog(options?.auditPath, (m) => app.log.warn(m));
+  app.addHook('onClose', async () => {
+    await audit.flush(); // don't lose the trail's tail on shutdown
+  });
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
   // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
@@ -155,6 +179,9 @@ export async function createServer(
     membershipIndex.set(runId, projectId);
     projectBus?.emit(
       MEMBERSHIP_ATTACHED,
+      // A daemon-internal launcher (the interactive-edit/draft subscribers),
+      // not an HTTP caller — the id is set server-side, so it stays honest
+      // under the task #88 rule that event actors are never caller-supplied.
       { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: 'interactive' },
       membershipAttachedKey(projectId, 'crew.run', runId, Date.now()),
     );
@@ -277,11 +304,22 @@ export async function createServer(
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
-    if (origin && LOOPBACK_ORIGIN.test(origin)) {
+    // Loopback origins are always allowed (the studio on another localhost
+    // port). NON-loopback origins are allowed ONLY when auth is required — the
+    // R2 pairing: a hosted skin needs CORS, and CORS beyond the machine is
+    // safe exactly when every request must carry a bearer token (no ambient
+    // credential exists for a foreign page to ride). An explicit allowlist
+    // (`allowedOrigins` / WICKED_CREW_ALLOWED_ORIGINS) narrows it further.
+    const allowed =
+      origin !== undefined &&
+      (LOOPBACK_ORIGIN.test(origin) ||
+        (auth.mode === 'required' &&
+          (auth.allowedOrigins === null || auth.allowedOrigins.includes(origin))));
+    if (origin && allowed) {
       reply.header('Access-Control-Allow-Origin', origin);
       reply.header('Vary', 'Origin');
-      reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-      reply.header('Access-Control-Allow-Headers', 'Content-Type');
+      reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     }
     if (req.method === 'OPTIONS') {
       await reply.code(204).send();
@@ -301,6 +339,15 @@ export async function createServer(
 
   await app.register(fastifyWebsocket);
 
+  // Identity (401) + trust (403) hooks. Ordering is load-bearing twice over:
+  // AFTER the CORS hook, so an OPTIONS preflight (which carries no
+  // Authorization by design) is answered 204 above and never reaches the token
+  // check — and AFTER the websocket plugin, whose own onRequest hook flags
+  // upgrade requests (`request.ws`); if auth 401s first, that flag is never
+  // set and the plugin's onResponse cleanup skips destroying the raw upgrade
+  // socket, which then holds `app.close()` open forever.
+  registerAuthHooks(app, auth);
+
   app.get('/ws', { websocket: true }, (socket) => {
     // Late-join gets no replay; the studio reconciles with a one-shot GET /runs.
     registerClient(socket as unknown as WebSocket);
@@ -309,11 +356,19 @@ export async function createServer(
   // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
   registerTerminalWs(app, adapter, terminals);
 
-  registerRoutes(app, adapter, gateCache, elicitationCache, qeGateCache, {
-    bus: projectBus,
-    index: membershipIndex,
-    log: (m) => app.log.warn(m),
-  });
+  registerRoutes(
+    app,
+    adapter,
+    gateCache,
+    elicitationCache,
+    qeGateCache,
+    {
+      bus: projectBus,
+      index: membershipIndex,
+      log: (m) => app.log.warn(m),
+    },
+    { audit, authMode: auth.mode },
+  );
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:

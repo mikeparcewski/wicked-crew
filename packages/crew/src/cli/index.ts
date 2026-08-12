@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { startServer } from '../api/server.js';
+import { resolveAuthMode } from '../api/auth.js';
 import type { LaunchRunInput } from '../core/types.js';
 
 const [, , command, ...argv] = process.argv;
@@ -194,6 +195,9 @@ async function main(): Promise<void> {
       port,
       db: opts.dbPath,
       stub: opts.stub,
+      // The identity seam's resolved mode (task #88): `required` under
+      // WICKED_RUNTIME=team / WICKED_CREW_AUTH=required, else `off` (local).
+      auth: resolveAuthMode(),
       engineExec: adapter.engineExec,
       busDb: adapter.engineExec ? adapter.busDbPath : undefined,
       qeGateEvents: opts.qeGateEvents || undefined,
