@@ -134,6 +134,11 @@ export function parseStructuralFeedback(eventType: string, payload: unknown): St
   if (eventType !== FEEDBACK_PROCESSED) return null;
   if (typeof payload !== 'object' || payload === null) return null;
   const p = payload as Record<string, unknown>;
+  // The declared handoff size is the explicit gate: a frame carrying structural_items while
+  // announcing `awaiting_structural: 0` (or omitting it) is producer drift, not a handoff —
+  // never launch a governed run off an inconsistent frame.
+  const awaiting = p['awaiting_structural'];
+  if (typeof awaiting !== 'number' || !Number.isInteger(awaiting) || awaiting <= 0) return null;
   const documentId = typeof p['document_id'] === 'string' ? p['document_id'] : '';
   if (!DOC_NAME.test(documentId)) return null;
   const version = p['version'];

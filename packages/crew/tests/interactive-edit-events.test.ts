@@ -87,6 +87,15 @@ describe('parseStructuralFeedback', () => {
     ).toBeNull();
   });
 
+  it('refuses an inconsistent frame: structural_items present but awaiting_structural 0/absent/garbage', () => {
+    // Producer drift must never launch a governed run — the declared size is the explicit gate.
+    expect(parseStructuralFeedback(FEEDBACK_PROCESSED, { ...payload, awaiting_structural: 0 })).toBeNull();
+    const { awaiting_structural: _omitted, ...withoutAwaiting } = payload;
+    expect(parseStructuralFeedback(FEEDBACK_PROCESSED, withoutAwaiting)).toBeNull();
+    expect(parseStructuralFeedback(FEEDBACK_PROCESSED, { ...payload, awaiting_structural: '1' })).toBeNull();
+    expect(parseStructuralFeedback(FEEDBACK_PROCESSED, { ...payload, awaiting_structural: 1.5 })).toBeNull();
+  });
+
   it('drops items whose fragment the service could not extract, and nulls out when none survive', () => {
     const one = parseStructuralFeedback(FEEDBACK_PROCESSED, {
       ...payload,
