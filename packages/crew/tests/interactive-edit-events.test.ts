@@ -304,6 +304,28 @@ describe('InteractiveHandoffLedger (shared with the draft leg)', () => {
     const ledger = new InteractiveHandoffLedger(path);
     expect(ledger.get('doc-a')?.emittedAt).toBe('t1');
   });
+
+  it('a malformed row costs that row alone — the valid rows still dedupe replays', () => {
+    const path = join(dir, 'ledger.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        docs: {
+          'doc-null': null,
+          'doc-string': 'not-a-row',
+          'doc-no-run': { launchedAt: 't0' },
+          'doc-good:v2': { runId: 'run-1', launchedAt: 't0', emittedAt: 't1' },
+        },
+      }),
+      'utf8',
+    );
+    const ledger = new InteractiveHandoffLedger(path);
+    expect(ledger.has('doc-good:v2')).toBe(true); // replay-dedup survives the bad neighbors
+    expect(ledger.has('doc-null')).toBe(false);
+    expect(ledger.has('doc-string')).toBe(false);
+    expect(ledger.has('doc-no-run')).toBe(false);
+    expect(ledger.size()).toBe(1);
+  });
 });
 
 // ── The loop over a real (temp) bus, with a fake engine ─────────────────────────────────────
