@@ -1,12 +1,14 @@
-/* wicked-crew content styles (wc.wickedagile.com) — THE CONTROL ROOM.
-   Positioning: crew is the control room for governed agent delivery — an agentic
-   execution platform (the IDE of the future) that DRIVES your agent harnesses
-   (YOUR installed CLIs) as governed workers through durable, data-driven
-   workflows. Intent in, verified work out.
+/* wicked-crew content styles (wc.wickedagile.com) — THE CONTROL PLANE.
+   Positioning: crew is the CONTROL PLANE of the wicked platform — the harness
+   for your agent harnesses. Intent in → governed, verified work out: YOUR
+   installed CLIs run as governed workers through durable, data-driven
+   workflows; evaluator ≠ creator; deny-dominates gates fed by the QE
+   evidence ledger; one public API (/api/v1) with two skins.
 
-   Aesthetic: an execution control surface. Two signal colors — amber
-   (--accent) = pass / current-flowing / verified, and terracotta (--deny) =
-   deny / veto — on deep ink surfaces, mono labels for machine facts. A neutral
+   Aesthetic: an execution control surface. Signal colors — amber (--accent)
+   = pass / current-flowing / verified energy, terracotta (--deny) = deny /
+   veto, and the chrome's plane-violet (--ctrl, from --plane-control) = the
+   governance voice: kickers, the ledger feed, the plane story. A neutral
    link-blue marks the LLM seat that can never approve.
 
    The shared wicked-web chrome (Base/Topbar/Footer + tokens.css) owns theming
@@ -37,7 +39,7 @@ body { padding-top: var(--topbar-h); }
    every crew section fits the viewport, so this never traps. Mobile falls back
    to natural scroll (scroll-snap-type: none). scroll-padding offsets the topbar. */
 html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
-.hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
+.hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
   min-height: calc(100svh - var(--topbar-h));
   scroll-snap-align: start;
   display: flex;
@@ -50,7 +52,7 @@ html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
 .idd, .console-sec, .rail-sec, .studio { background: color-mix(in oklab, #000 7%, transparent); }
 @media (max-width: 760px) {
   html { scroll-snap-type: none; }
-  .hero, .idd, .probs, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
+  .hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get { min-height: 0; }
 }
 
 /* ── Crew background — ITS OWN motif: an EXECUTION / HARNESS SCHEMATIC ──────
@@ -109,6 +111,20 @@ body::after {
   --ok: #3fb950;
   --deny: #f85149;
   --seat: var(--link, #79c0ff); /* the neutral LLM-seat color: never "approve" */
+  /* The CONTROL-plane hue from the shared chrome (tokens.css): violet marks
+     governance — gates, verdicts, audit, the plane itself. Brand yellow
+     (--accent) STAYS the energy color: current flowing, PASS, CTAs. */
+  --ctrl: var(--plane-control, #d2a8ff);
+}
+
+/* Section kickers speak in the control plane's voice (violet), matching the
+   chrome's four-plane grammar. SameGarden's own kicker keeps its accent rule. */
+.kicker { color: color-mix(in oklab, var(--ctrl) 78%, var(--ink)); }
+.kicker--plane::before {
+  content: ''; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  margin-right: 9px; margin-bottom: 1px; vertical-align: baseline;
+  border: 2px solid var(--ctrl);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ctrl) 16%, transparent);
 }
 
 h1, h2, h3 {
@@ -550,8 +566,43 @@ code {
 .plea-result { color: var(--ink); border-top: 1px dashed var(--hairline-strong); margin-top: 6px; padding-top: 10px; }
 .plea-result b { color: var(--accent); }
 
-/* --- explainer cards that DRIVE the console animation --- */
-.gc-cards { list-style: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: clamp(10px, 1.4vw, 16px); margin-top: clamp(12px, 1.8svh, 20px); padding: 0; }
+/* --- the acceptance feed: verdict.json is READ from the QE evidence ledger.
+       Violet = the control plane's governance voice; the verdict pill carries
+       the live reading (PASS amber · CONDITIONAL violet · FAIL terracotta). --- */
+.gc-ledger {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid color-mix(in oklab, var(--ctrl) 30%, var(--hairline-strong));
+  border-radius: 10px; padding: 10px 14px;
+  background: color-mix(in oklab, var(--ctrl) 6%, transparent);
+}
+.gc-ledger-k {
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em;
+  text-transform: uppercase; font-weight: 700;
+  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
+}
+.gc-ledger-call {
+  font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
+  border: 1px solid var(--hairline); border-radius: 6px; padding: 3px 9px;
+}
+.gc-ledger-arr { color: var(--faint); font-family: var(--font-mono); font-size: 0.72rem; }
+.gc-ledger-verdict {
+  font-family: var(--font-mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em;
+  border-radius: 999px; padding: 3px 11px;
+  color: var(--accent-ink); background: var(--accent);
+  transition: background .24s var(--ease), color .24s var(--ease);
+}
+.gc-ledger-verdict[data-v="conditional"] { color: var(--accent-ink); background: var(--ctrl); }
+.gc-ledger-verdict[data-v="fail"] { color: #fff; background: var(--deny); }
+@media (max-width: 560px) {
+  .gc-ledger { padding: 9px 12px; gap: 8px; }
+  .gc-ledger-call { font-size: 0.62rem; overflow-wrap: anywhere; }
+}
+
+/* --- explainer cards that DRIVE the console animation (5: series, deny,
+       judge, ledger, opt-in) --- */
+.gc-cards { list-style: none; display: grid; grid-template-columns: repeat(5, 1fr); gap: clamp(10px, 1.4vw, 16px); margin-top: clamp(12px, 1.8svh, 20px); padding: 0; }
+@media (max-width: 1100px) { .gc-cards { grid-template-columns: repeat(3, 1fr); } }
 .gc-card {
   width: 100%; height: 100%; text-align: left; display: flex; flex-direction: column; gap: 6px;
   border: 1px solid var(--hairline-strong); border-radius: 14px; padding: 13px 14px 14px; cursor: pointer;
@@ -1029,6 +1080,13 @@ code {
 .gcs-stamp { flex: 0 0 auto; font-family: var(--font-mono); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.08em; color: #fff; background: var(--deny); border-radius: 6px; padding: 4px 10px; }
 .gcs-vtext { font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.5; color: color-mix(in oklab, var(--ink) 78%, transparent); }
 .gcs-vtext b { color: var(--ink); }
+.gcs-ledger {
+  margin: 0; padding: 10px 14px; border-top: 1px solid var(--hairline);
+  background: color-mix(in oklab, var(--ctrl) 7%, transparent);
+  font-family: var(--font-mono); font-size: 0.66rem; line-height: 1.5;
+  color: color-mix(in oklab, var(--ink) 78%, transparent);
+}
+.gcs-ledger b { color: color-mix(in oklab, var(--ctrl) 85%, var(--ink)); }
 
 .sts-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .sts-steps li { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--hairline-strong); border-radius: 12px; padding: 13px 14px; background: color-mix(in oklab, var(--surface) 58%, transparent); }
@@ -1082,6 +1140,84 @@ code {
 }
 .op-k { font-weight: 700; font-size: 13px; letter-spacing: .02em; color: var(--accent); }
 .op-t { font-size: 13px; line-height: 1.5; opacity: .9; }
+
+/* ── One public API, two skins ─────────────────────────────────────────────
+   The control plane's single contract (/api/v1) with two pure clients: the
+   studio (coder skin, ships inside crew) and wicked-interactive (creator
+   skin — governed generation answered its bus, proven). Violet marks the
+   plane's governance voice; the trace panel reuses the feed's mono grammar. */
+.skins-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+}
+.skin-card {
+  display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--hairline-strong);
+  border-top: 3px solid color-mix(in oklab, var(--ctrl) 55%, var(--hairline-strong));
+  border-radius: 12px; padding: 16px 18px;
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+}
+.skin-k {
+  font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.08em;
+  text-transform: uppercase; font-weight: 700;
+  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
+}
+.skin-name { font-family: var(--font-display); font-weight: 900; font-stretch: 115%; font-size: 1.35rem; color: var(--ink); line-height: 1; }
+.skin-t { margin: 0; font-size: 0.88rem; line-height: 1.55; color: color-mix(in oklab, var(--ink) 78%, transparent); }
+.skin-t b { color: var(--ink); }
+
+/* the governed-generation bus trace — the two-skins proof, full width */
+.skin-trace {
+  grid-column: 1 / -1; overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--ctrl) 30%, var(--hairline-strong));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--canvas) 45%, transparent);
+}
+.skin-trace-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--hairline);
+  background: color-mix(in oklab, var(--ctrl) 7%, transparent);
+}
+.skin-trace-k {
+  font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.08em;
+  text-transform: uppercase; font-weight: 700;
+  color: color-mix(in oklab, var(--ctrl) 82%, var(--ink));
+}
+.skin-trace-tag { margin-left: auto; font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+.skin-trace-rows { list-style: none; margin: 0; padding: 8px 0; counter-reset: str; }
+.skin-trace-rows li {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 7px 16px; font-family: var(--font-mono); font-size: 0.78rem;
+}
+.skin-trace-rows li::before {
+  counter-increment: str; content: counter(str, decimal-leading-zero);
+  flex: 0 0 auto; font-size: 0.62rem; color: var(--faint);
+}
+.skin-trace-rows code { background: none; border: none; padding: 0; font-size: 0.78rem; color: var(--ink); }
+.str-note { font-size: 0.66rem; color: color-mix(in oklab, var(--ink) 58%, transparent); }
+.skin-trace-rows li.str-final code { color: var(--accent); font-weight: 700; }
+.skin-trace-rows li.str-final::before { color: var(--accent); }
+
+/* the Project-model strip — landing, said honestly. Block flow (not flex):
+   the strip is a sentence with an inline chip, and flex would break the text
+   nodes into their own wrapped items. */
+.skins-landing {
+  display: block; margin: 16px 0 0; font-size: 0.85rem; line-height: 1.6;
+  color: color-mix(in oklab, var(--ink) 74%, transparent);
+  border-left: 3px solid color-mix(in oklab, var(--ctrl) 55%, var(--hairline-strong));
+  padding-left: 14px;
+}
+.skins-landing b { color: var(--ink); }
+.skins-landing-chip {
+  display: inline-block; margin-right: 8px; vertical-align: 1px;
+  font-family: var(--font-mono); font-size: 0.58rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--ctrl); border-radius: 999px; padding: 3px 10px;
+}
+@media (max-width: 760px) {
+  .skins-grid { grid-template-columns: 1fr; gap: 10px; }
+  .skin-trace-rows li { padding: 6px 14px; }
+  .str-note { flex-basis: 100%; padding-left: 26px; }
+}
 
 /* ── Council routing-seat votes (profile ballots) ──────────────────────── */
 .council-seat.is-p1 .cs-vote, .council-seat.is-p2 .cs-vote, .council-seat.is-p3 .cs-vote {

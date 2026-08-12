@@ -24,7 +24,7 @@ test.describe('reduced motion', () => {
     await expect(gc.locator('[data-stamp]')).toHaveText('DENY');
 
     // Every key section is present and visible.
-    for (const sel of ['[data-studio]', '[data-byo]', '[data-wf]', '[data-rail]', '[data-council]', '.install--primary']) {
+    for (const sel of ['[data-studio]', '[data-skins]', '[data-byo]', '[data-wf]', '[data-rail]', '[data-council]', '.same-garden', '.install--primary']) {
       const loc = page.locator(sel);
       await bringIntoView(loc);
       await expect(loc).toBeVisible();
