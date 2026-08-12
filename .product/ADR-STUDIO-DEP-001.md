@@ -81,7 +81,7 @@ checked in CI.
 ```bash
 # Fail if studio's package.json lists wicked-crew (not wicked-crew-api-types)
 node -e "
-  const pkg = require('./packages/studio/package.json');
+  const pkg = require('./package.json');
   const all = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies };
   if ('wicked-crew' in all) { console.error('studio must not depend on wicked-crew source'); process.exit(1); }
 "
