@@ -736,6 +736,12 @@ export interface LaunchRunBody {
   repoRef?: string;
   /** Built-in workflow id (`feature` | `bug` | `migration`); omit for free-text single-unit mode. */
   workflow?: string;
+  /**
+   * The project to file this run into (DES-PROJECT-001 §2.2). The `crew.run` membership is
+   * attached atomically with the launch record; an unknown or archived project fails the launch
+   * (4xx) — never a silent unfiled run. Omit for an unfiled run (the synthesized `default`).
+   */
+  projectId?: string;
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────
@@ -988,4 +994,155 @@ export interface ElicitationResponse {
   elicitationId: string;
   action: 'accept' | 'decline' | 'cancel';
   content?: { response: string };
+}
+
+// ── Projects (DES-PROJECT-001) — the experience-plane keystone ─────────────────
+
+/** Project lifecycle: `active ⇄ archived`, no hard delete (ADR §1.3). */
+export type ProjectLifecycle = 'active' | 'archived';
+
+/**
+ * A named, control-plane-owned container whose members are work units from any
+ * plane (`GET /projects`, `GET /projects/:id`). Mirrors wicked-core's serde
+ * shape (`project.rs`) — Rust `Option` fields arrive as `null`, never absent.
+ * The synthesized `default` project ("Unfiled") appears in lists with
+ * `id: "default"`, `scope: ""`, and zero timestamps; it rejects PATCH/attach.
+ */
+export interface Project {
+  /** `proj_<sortable>` — minted by control at create; or the reserved `default`. */
+  id: string;
+  name: string;
+  description: string | null;
+  status: ProjectLifecycle;
+  /** The estate scope path of this project's record (`project:<id>`; `""` for `default`). */
+  scope: string;
+  /** Unix millis. */
+  created_at: number;
+  /** Unix millis. */
+  updated_at: number;
+  [k: string]: unknown;
+}
+
+/**
+ * A typed, opaque membership reference (ADR §1.2). `member_kind` is the open
+ * `<product>.<noun>` grammar (`crew.run`, `crew.chat`, `crew.repo`,
+ * `crew.workflow`, `interactive.doc`, reserved `studio.session`).
+ */
+export interface ProjectMember {
+  /** Derived from `(project_id, member_kind, member_ref)` — the UNIQUE constraint. */
+  id: string;
+  project_id: string;
+  member_kind: string;
+  /** Opaque to the engine; `crew.*` refs are checked at the API layer at attach time. */
+  member_ref: string;
+  /** Skin hints (doc root, display title, …) as JSON text; `null` when none. */
+  meta: string | null;
+  /** Unix millis. */
+  attached_at: number;
+  /** The attaching surface: `studio` | `interactive` | `cli` | `api`. */
+  attached_by: string;
+  [k: string]: unknown;
+}
+
+/** `GET /projects/:id` — detail + members (ADR §5.2). */
+export interface ProjectDetail {
+  project: Project;
+  members: ProjectMember[];
+}
+
+/** `POST /projects` body. */
+export interface CreateProjectBody {
+  /** 1–120 chars; unique among ACTIVE projects (409 on collision). */
+  name: string;
+  description?: string;
+}
+
+/** `PATCH /projects/:id` body — rename / describe / archive / restore. */
+export interface UpdateProjectBody {
+  name?: string;
+  /** `""` clears the description. */
+  description?: string;
+  status?: ProjectLifecycle;
+}
+
+/** `POST /projects/:id/members` body. */
+export interface AttachMemberBody {
+  /** `<product>.<noun>` (open grammar). */
+  kind: string;
+  ref: string;
+  /** Skin hints, carried opaquely. */
+  meta?: Record<string, unknown>;
+  /** The attaching surface; defaults to `api`. */
+  attachedBy?: 'studio' | 'interactive' | 'cli' | 'api';
+}
+
+/**
+ * One normalized entry of the merged project activity feed
+ * (`GET /projects/:id/activity`, ADR §5.2): core events of member runs/chats
+ * ∪ bus `wicked.interactive.*` events carrying this `project_id`.
+ */
+export interface ActivityEntry {
+  /** Stable entry id (`crew:<run>:<seq>` | `bus:<event_id>`) — the cursor tiebreaker. */
+  id: string;
+  /** Unix millis. */
+  ts: number;
+  source: 'crew' | 'interactive';
+  /** The event type (`awaitingHuman`, `wicked.interactive.version.created`, …). */
+  kind: string;
+  /** The member the entry belongs to (run id, doc name). */
+  ref: string;
+  summary: string;
+  /** The original frame/payload, verbatim. */
+  raw: unknown;
+}
+
+/** `GET /projects/:id/activity` — newest-first, cursor-paginated on `(ts, id)`. */
+export interface ActivityPage {
+  projectId: string;
+  entries: ActivityEntry[];
+  /** Opaque; pass back as `?cursor=`. `null` ⇒ no older entries. */
+  nextCursor: string | null;
+}
+
+/**
+ * A durable interaction request (DES-PROJECT-001 §5.3) as the engine persists
+ * it — written in the same transaction as the run's `awaiting_human`
+ * transition, resolved in the same transaction as the gate decision. The
+ * prompt inbox (`GET /projects/:id/prompts`) returns the OPEN ones across the
+ * project's member runs.
+ */
+export interface InteractionRequest {
+  /** `ir_<derived>` — stable across re-pauses of the same `(run, kind, ord)`. */
+  id: string;
+  /** The owning run. */
+  session_id: string;
+  kind: 'gate' | 'elicitation';
+  /** The unit ordinal the gate pauses before; `null` when not unit-bound. */
+  ord: number | null;
+  /** The already-run unit the gate reviews, when attributable. */
+  reviewing_ord: number | null;
+  prompt: string;
+  status: 'open' | 'answered' | 'expired' | 'cancelled';
+  /** The decision payload (JSON text, e.g. `{"approve":true,"amend":null}`) once resolved. */
+  answer: string | null;
+  /** Unix millis. */
+  created_at: number;
+  /** Unix millis; `null` while open. */
+  resolved_at: number | null;
+  [k: string]: unknown;
+}
+
+/** `GET /projects/:id/prompts` — the open prompt inbox across member runs. */
+export interface ProjectPrompts {
+  projectId: string;
+  prompts: InteractionRequest[];
+}
+
+/** `POST /chats` body (gains `projectId` with DES-PROJECT-001). */
+export interface ChatOpenBody {
+  chatId?: string;
+  clis?: string[];
+  repoRef?: string;
+  /** File the chat into a project (`crew.chat` membership, attached on open). */
+  projectId?: string;
 }
