@@ -131,11 +131,19 @@ describe('trust ladder', () => {
     expect(requiredTrust('PUT', '/api/v1/settings', {})).toBe('admin');
   });
 
-  it('/ws/terminals/:id requires operator regardless of method (stdin-write channel)', () => {
-    // WS upgrades are GET, but the socket proxies raw PTY stdin — must be operator.
+  it('/ws/terminals/:id requires operator (WS upgrade is GET but socket is stdin-write)', () => {
     expect(requiredTrust('GET', '/ws/terminals/abc123', undefined)).toBe('operator');
+  });
+
+  it('/ws/terminals sub-paths require operator', () => {
     expect(requiredTrust('GET', '/ws/terminals/abc123/stdin', undefined)).toBe('operator');
-    // The main /ws stream itself is still observer (read-only CoreEvent fan-out).
+  });
+
+  it('/ws/terminals exact path (no trailing slash) requires operator', () => {
+    expect(requiredTrust('GET', '/ws/terminals', undefined)).toBe('operator');
+  });
+
+  it('/ws and /ws/events (read-only CoreEvent fan-out) remain observer', () => {
     expect(requiredTrust('GET', '/ws', undefined)).toBe('observer');
     expect(requiredTrust('GET', '/ws/events', undefined)).toBe('observer');
   });
