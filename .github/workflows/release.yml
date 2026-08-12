@@ -9,10 +9,12 @@
 #   2. packages/crew's core-ts dep is flipped `file:../../../wicked-core/crates/wicked-core-ts` → `^0.1`
 #      so a clean CI checkout resolves the native addon (+ its platform package) from npm.
 #   3. wicked-ci `@v1` is re-tagged to include `publish_working_dir` (merge feat/publish-working-dir).
-#   4. DONE (v0.2.0, DES-STUDIO-SERVING-001): crew's `build` runs `scripts/bundle-studio.mjs`, which
+#   4. DONE (v0.2.0, DES-STUDIO-SERVING-001; re-wired by task #84): `scripts/bundle-studio.mjs`
 #      builds packages/studio and copies its `dist/` → `packages/crew/dist/studio/`. Nested under
-#      `dist/`, so the existing `files: ["dist"]` carries it in the published tarball. Because the
-#      bundle step builds studio itself, `build_cmd` stays the single crew build below (no CI change).
+#      `dist/`, so the existing `files: ["dist"]` carries it in the published tarball. Since task
+#      #84 the DEFAULT crew `build` is plain `tsc` (studio is an independent client, not a build
+#      side effect); the bundling lives in `build:with-studio`, which is what `build_cmd` below
+#      runs — the PUBLISHED package still ships the studio UI, end users lose nothing.
 #
 # os_matrix is narrowed to ubuntu+macos: the PTY terminal path is unix-first (Windows ConPTY parity is
 # a wicked-core follow-up), so crew's terminal tests aren't Windows-clean yet. Widen when it is.
@@ -39,8 +41,9 @@ jobs:
       version_dirs: |
         .
         packages/crew
+        packages/crew-api-types
         packages/studio
-      build_cmd: 'npm install && npm run -w packages/crew build'
+      build_cmd: 'npm install && npm run -w packages/crew build:with-studio'
       # The test job of wicked-ci's node-release.yml is a bare single-repo checkout, unlike crew's
       # own ci.yml which checks crew and wicked-core out as true siblings. Crew's cross-repo drift
       # guards read core's shipped artifacts, so without a sibling checkout they cannot run — and on

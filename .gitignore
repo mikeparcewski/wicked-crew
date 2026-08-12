@@ -8,6 +8,7 @@ coverage/
 *.db-shm
 .DS_Store
 *.log
+.wicked-qe/evidence/
 .wicked-testing/evidence/
 packages/*/.wicked-vault/
 coverage-report.json

@@ -1,0 +1,13 @@
+{
+  "step_id": "STEP-3",
+  "description": "Missing column fails loudly \u2014 exit 2, error naming the column on stderr",
+  "executed_at": "2026-08-12T02:25:29.758453+00:00",
+  "duration_ms": 38,
+  "action": "python3 csv_stats.py data/orders.csv --sum missing_col (cwd = fixture root; non-zero exit captured, not treated as abort)",
+  "evidence": {
+    "step-3-stdout": "",
+    "step-3-stderr": "error: no such column: missing_col\n",
+    "step-3-exit": "2"
+  },
+  "execution_notes": ""
+}

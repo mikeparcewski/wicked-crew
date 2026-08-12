@@ -10,6 +10,8 @@ import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, humanGa
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
+import { QeGateCache } from '../qe/gate-events.js';
+import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
@@ -118,7 +120,10 @@ const RegisterRepoSchema = z
  * schema does not accept — so `.strict()` is what turns that trip into a 400 instead of an
  * unworkflowed run reported as `201`.
  */
-const LaunchSchema = z.object({
+// The request-body schemas below are exported so `tests/wire-contract.test.ts` can prove, at
+// compile time, that every body the published contract (`wicked-crew-api-types`) lets a client
+// send is a body these schemas accept — the request-direction half of the drift guard (task #84).
+export const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
   clisJson: z.string().min(1).optional(),
@@ -128,7 +133,7 @@ const LaunchSchema = z.object({
   workflow: z.string().min(1).optional(),
 }).strict();
 
-const GateSchema = z.object({
+export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
 }).strict();
@@ -139,7 +144,7 @@ const InjectSchema = z.object({
   target: z.string().min(1).default('all'),
 }).strict();
 
-const OpenTerminalSchema = z.object({
+export const OpenTerminalSchema = z.object({
   cwd: z.string().min(1),
   cmd: z.array(z.string().min(1)).min(1).optional(),
   cols: z.number().int().positive(),
@@ -163,6 +168,10 @@ export function registerRoutes(
   adapter: CoreAdapter,
   gateCache: GateCache,
   elicitationCache: ElicitationCache,
+  // Defaulted so a caller that never arms the bus seam (tests drive this
+  // function directly) gets the same behavior as an unarmed daemon: an empty
+  // cache, `busEvent: null`, and the lazy ledger read doing all the work.
+  qeGateEvents: QeGateCache = new QeGateCache(),
 ): void {
   // Liveness — also proves the actor + event pump are up.
   app.get(`${V}/health`, async () => {
@@ -412,6 +421,47 @@ export function registerRoutes(
     return reply
       .header('Content-Disposition', `attachment; filename="${evidenceFilename(id)}"`)
       .send(bundle);
+  });
+
+  // ── Acceptance gate read (Phase 6a) ─────────────────────────────────────────
+  // The QE evidence ledger's verdict + manifest for THIS run's repo, plus the
+  // gate's deny-dominates resolution of the workflow's acceptance requirement.
+  // Sits beside `/runs/:id/evidence` deliberately: evidence is what the RUN
+  // recorded about itself; acceptance is what the QE pipeline recorded about
+  // the repo the run worked on — two different systems of record, two routes.
+  //
+  // Always a 200 for a known run: "no ledger", "no verdict" and "FAIL" are
+  // real answers about the gate (each a deny with its own reason), not errors
+  // in the request. Only an unknown run 404s. `?qeRun=<id>` pins the read to
+  // one QE run's newest verdict instead of the repo's newest overall.
+  app.get(`${V}/runs/:id/acceptance`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { qeRun?: string | string[] };
+    const qeRunRaw = Array.isArray(q.qeRun) ? q.qeRun[0] : q.qeRun;
+    const qeRunId = qeRunRaw?.trim();
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+
+    // `sessionsDetail()` patches workflow_id back to the definition name for
+    // BUILT-INS; runs of user-registered workflows still carry the instance id,
+    // so resolve by phase sequence over the full registry. A free-text run
+    // resolves to no workflow, which reads as "declares no requirement".
+    const workflow = resolveRunWorkflow(run, adapter.listWorkflows());
+
+    let repo = null;
+    if (run.session.repo_ref !== null) {
+      const repos = await adapter.listRepos();
+      repo = repos.find((r) => r.id === run.session.repo_ref) ?? null;
+    }
+
+    return buildAcceptanceView({
+      runId: id,
+      repo,
+      workflow,
+      gateEvents: qeGateEvents,
+      ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}),
+    });
   });
 
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).

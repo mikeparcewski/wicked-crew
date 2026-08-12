@@ -6,7 +6,10 @@
 // workspace build order. Cross-platform: pure Node `fs` — NO shell cp/rm
 // (repo CLAUDE.md cross-platform rule).
 //
-// Wiring: crew `build` = `tsc -p tsconfig.json && node scripts/bundle-studio.mjs`.
+// Wiring (task #84 — studio is an independent client): crew's default `build` is
+// `tsc` ONLY; this script runs via `build:with-studio`, the RELEASE-time build
+// the CI/release workflows use so the published tarball still ships the UI.
+// A crew built without it serves headless API+WS (server.ts degrades gracefully).
 
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, rmSync } from 'node:fs';

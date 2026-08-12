@@ -15,7 +15,8 @@
     "skills"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
+    "build": "tsc -p tsconfig.json",
+    "build:with-studio": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src tests",
     "test": "vitest run",
@@ -31,7 +32,9 @@
     "agent-acp-bridges": "^1.0.0",
     "fastify": "^5.0.0",
     "pi-acp": "^0.0.32",
+    "wicked-bus": "^2.3.1",
     "wicked-core-ts": "^0.5.0",
+    "wicked-ledger": "github:mikeparcewski/wicked-ledger#v0.2.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
@@ -42,7 +45,8 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "undici": "^6.28.0",
-    "vitest": "^3.2.6"
+    "vitest": "^3.2.6",
+    "wicked-crew-api-types": "*"
   },
   "engines": {
     "node": ">=22.0.0"

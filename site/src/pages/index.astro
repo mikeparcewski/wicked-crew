@@ -2,36 +2,50 @@
 /**
  * index.astro — the wicked-crew landing page (wc.wickedagile.com).
  *
- * POSITIONING (v0.3.0): the STUDIO is the centerpiece — the operator console
- * where you launch, watch, steer, and export the evidence. crew is the GOVERN
- * arc underneath it: your own installed CLIs run as governed workers over
- * persistent ACP sessions, through durable multi-agent workflows where "done"
- * is re-derived from evidence, never self-graded. Intent in, verified work out
- * — on the wicked-core engine.
+ * POSITIONING (four-plane era): crew IS the CONTROL PLANE of the wicked
+ * platform — the harness for your agent harnesses. Intent in → governed,
+ * verified work out. Evaluator ≠ creator, deny-dominates dual gates, durable
+ * runs that survive crashes, and the CLIs you already have running as governed
+ * workers over persistent ACP sessions. The studio console is crew's coder
+ * SKIN — a pure client of the same public /api/v1 every other skin uses.
  *
  * The daemon (`wicked-crew serve`) is the SUBSTRATE, never the pitch.
  *
- * HONEST BOUNDARIES honored on this page (updated for v0.3.0):
+ * HONEST BOUNDARIES honored on this page:
  *  - Local-first today (loopback, in-process engine, local workers/bus). The
  *    execution seam is built for a remote runner — gestured, never claimed as
  *    shipped.
  *  - Workers run over PERSISTENT ACP sessions via ecosystem adapters (official
  *    claude-agent-acp + codex-acp, community pi-acp, native copilot/opencode);
  *    wicked owns only the agy bridge. Never depict one-shot `-p` dispatch.
- *  - The studio HAS a workflow selector (10 built-ins incl. collab) + insight
- *    rail (Decisions/Burn/Assumptions/Files/Term/Cov) + evidence export.
+ *  - The acceptance gate READS the QE evidence ledger (wicked-ledger) at
+ *    GET /api/v1/runs/:id/acceptance and resolves it deny-dominates:
+ *    anything that isn't a clean PASS (FAIL, CONDITIONAL, PARTIAL,
+ *    INCONCLUSIVE, missing) holds the run. CONDITIONAL is "approve with
+ *    listed fixes" — deliberately NOT a pass (qe/acceptance.ts).
+ *  - Governed generation is PROVEN, not projected: a crew-governed run
+ *    answered wicked-interactive's `wicked.interactive.doc.created` bus event
+ *    with a real first draft (`wicked.interactive.draft.completed`), zero
+ *    interactive-service changes (interactive/draft-events.ts).
+ *  - The Project model is LANDING (ADR in flight) — say "landing", never
+ *    "shipped": projects grouping runs + docs across both skins, durable
+ *    gate prompts surviving restarts.
  *  - BYO-CLI: crew runs whatever CLI you've authed, under your plan. It has no
  *    billing and manages no subscriptions. Programmatic use of some CLIs may
  *    conflict with their ToS (noted on-page).
+ *  - Retired-product hygiene: the QE specialist fleet lives in wicked-garden
+ *    (wg.wickedagile.com) — never reference wicked-testing/brain/bus as
+ *    products.
  */
 import Base from 'wicked-web/layouts/Base.astro';
 import Topbar from 'wicked-web/components/Topbar.astro';
 import Footer from 'wicked-web/components/Footer.astro';
+import SameGarden from 'wicked-web/components/SameGarden.astro';
 import '../styles/crew.css';
 
-const title = 'wicked-crew studio — launch, watch, steer, export the evidence';
+const title = 'wicked-crew — the control plane: intent in, verified work out';
 const description =
-  'wicked-crew studio is the operator console for governed agent delivery: launch a run, watch every agent stream live over persistent ACP sessions, answer steering gates, see cost and rework as they accrue, and export the evidence bundle when it lands. Underneath: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers in git worktrees through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded — the agent that wrote the code is never the agent that approves it. Workflows are data. Crash-resumable by construction. The engine underneath is wicked-core. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. One public API, two skins: the studio console ships inside crew as the coder skin, a pure client of /api/v1; governed generation already answers the creator skin over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -40,7 +54,7 @@ const POLICIES = [
   { id: 'security',      note: 'No secret, no disallowed dependency.' },
   { id: 'coverage',      note: 'Coverage at or above the approved floor.' },
   { id: 'schema-drift',  note: 'Migration matches the checked-in schema.' },
-  { id: 'verdict.json',  note: 'wicked-testing acceptance verdict = PASS.' },
+  { id: 'verdict.json',  note: 'QE acceptance verdict from the evidence ledger = PASS. Anything else — FAIL, CONDITIONAL, missing — holds.' },
 ];
 
 // The bring-your-own roster. crew runs whatever CLI you've installed + authed.
@@ -108,6 +122,7 @@ const GATE_CARDS = [
   { k: 'series',  title: 'Every check is a switch',   line: 'Policies sit in series across a phase gate. Close them all and current reaches the next phase.' },
   { k: 'deny',    title: 'Deny dominates',            line: 'Open one switch and the whole track goes dark. One failing check is the whole answer — not a score you out-vote.' },
   { k: 'agent',   title: 'The judge can veto only',   line: 'An LLM seat sits on the track. It can break it (fail the gate) — it can never be the thing that closes it. No model approves.' },
+  { k: 'ledger',  title: 'Evidence feeds the gate',   line: 'The verdict.json switch is read from the QE evidence ledger — GET /api/v1/runs/:id/acceptance. A CONDITIONAL verdict is unmet work: the hold stands until a clean PASS lands.' },
   { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated. Turn the gate off and the transition passes without evaluation — gating is a choice you make per phase.' },
 ];
 ---
@@ -119,12 +134,13 @@ const GATE_CARDS = [
   <section class="hero">
     <div class="grid-floor" aria-hidden="true"></div>
     <div class="wrap hero-head">
-      <div class="kicker">wicked-crew · the control plane</div>
-      <h1>Launch. Watch. Steer.<br><span class="y">Export the evidence.</span></h1>
+      <div class="kicker kicker--plane">wicked-crew · the control plane of the wicked platform</div>
+      <h1>Intent in.<br><span class="y">Verified work out.</span></h1>
       <p class="lede">
         The control plane for governed agent delivery — <b>the harness for your agent
-        harnesses</b>. This is the console, live; drive it. Your own CLIs do the work; the
-        thing that grades it is <b>never</b> the thing that did it.
+        harnesses</b>. Your own CLIs do the work through durable, governed workflows; the
+        thing that grades it is <b>never</b> the thing that did it, and “done” is re-derived
+        from evidence, never asserted. This is the console, live — drive it.
       </p>
     </div>
 
@@ -197,7 +213,8 @@ const GATE_CARDS = [
       <div class="hero-tags" role="list">
         <span role="listitem">bring your own CLI</span>
         <span role="listitem">can’t self-grade</span>
-        <span role="listitem">live token streaming</span>
+        <span role="listitem">deny-dominates gates</span>
+        <span role="listitem">crash-resumable</span>
         <span role="listitem">evidence export</span>
         <span role="listitem">local-first</span>
       </div>
@@ -292,6 +309,69 @@ const GATE_CARDS = [
     </div>
   </section>
 
+  <!-- ── One public API, two skins ─────────────────────────────────────────
+       The control plane has ONE contract: /api/v1. The studio is crew's coder
+       SKIN — a pure client, nothing privileged. The creator skin (interactive)
+       is already answered over the bus by a governed run: the trace below is
+       the real event vocabulary from interactive/draft-events.ts. -->
+  <section class="skins" data-skins aria-labelledby="skins-h">
+    <div class="wrap">
+      <div class="sec-head sec-head--wide">
+        <div class="kicker kicker--plane">One public API · two skins</div>
+        <h2 id="skins-h">The studio is a skin. The API is the product.</h2>
+        <p class="sec-sub">
+          Everything the console can do rides <b>one public contract</b> — <code>/api/v1</code>.
+          The studio ships inside crew as the <b>coder skin</b> and holds no privileged access:
+          if the skin can show it, the API serves it. The <b>creator skin</b> is already real —
+          not a diagram: a crew-governed run answers <a href="https://wi.wickedagile.com">wicked-interactive</a>’s
+          bus and delivers the first draft.
+        </p>
+      </div>
+
+      <div class="skins-grid">
+        <div class="skin-card" role="group" aria-label="The coder skin — studio">
+          <span class="skin-k">coder skin · ships inside crew</span>
+          <span class="skin-name">studio</span>
+          <p class="skin-t">
+            The run board: submit intent, watch phases stream, answer gates, export evidence.
+            A <b>pure client</b> of <code>GET /api/v1/…</code> — launch, events, steering,
+            acceptance — the same endpoints your own tooling can call.
+          </p>
+        </div>
+
+        <div class="skin-card" role="group" aria-label="The creator skin — wicked-interactive">
+          <span class="skin-k">creator skin · governed generation, proven</span>
+          <span class="skin-name">wicked-interactive</span>
+          <p class="skin-t">
+            When interactive creates a doc, <b>a governed crew run answers the bus with a real
+            first draft</b> — heartbeats while it works, an idempotency-keyed delivery, zero
+            changes to the interactive service. The two-skins story, observed end-to-end.
+          </p>
+        </div>
+
+        <div class="skin-trace" role="group" aria-label="The governed-generation bus trace">
+          <div class="skin-trace-bar">
+            <span class="skin-trace-k">the proof · one doc, over the bus</span>
+            <span class="skin-trace-tag">opt-in seam · real vocabulary</span>
+          </div>
+          <ol class="skin-trace-rows">
+            <li><code>wicked.interactive.doc.created</code><span class="str-note">← the creator skin asks for a first draft</span></li>
+            <li><code>crew · governed run launched</code><span class="str-note">worker session in an isolated worktree</span></li>
+            <li><code>wicked.interactive.status.posted</code><span class="str-note">narrated heartbeats — the canvas never freezes</span></li>
+            <li class="str-final"><code>wicked.interactive.draft.completed</code><span class="str-note">a real draft, idempotency-keyed — replays can’t double-deliver</span></li>
+          </ol>
+        </div>
+      </div>
+
+      <p class="skins-landing">
+        <span class="skins-landing-chip">landing</span>
+        <b>The Project model</b> — projects that group runs and docs across both skins, with
+        durable gate prompts that survive restarts. The ADR is in flight; it’s the experience-plane
+        keystone, not yet a shipped claim.
+      </p>
+    </div>
+  </section>
+
 
   <!-- ── Bring your own agent (BYO-CLI) ────────────────────────────────── -->
   <section class="byo" aria-labelledby="byo-h">
@@ -300,8 +380,8 @@ const GATE_CARDS = [
         <div class="kicker">Bring your own agent · one protocol</div>
         <h2 id="byo-h">crew runs the CLIs you already have — over ACP.</h2>
         <p class="sec-sub">
-          Not a new model, not a subscription. Your <b>installed</b> CLIs run as
-          <b>persistent <a href="https://agentclientprotocol.com">Agent Client Protocol</a> sessions</b> in
+          Not a new model, not a subscription. Your <b>installed</b> CLIs run
+          as <b>persistent <a href="https://agentclientprotocol.com">Agent Client Protocol</a> sessions</b> in
           isolated git worktrees, under <b>your own auth and plan</b> — streamed token-level output,
           structured usage, cross-agent context injected between units. The adapters come from the
           ecosystem where they exist (official <code>claude-agent-acp</code> + <code>codex-acp</code>,
@@ -355,8 +435,11 @@ const GATE_CARDS = [
         <h2 id="gc-h">“Done” is re-derived — and no model can approve it.</h2>
         <p class="sec-sub">
           A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>: an
-          approved deterministic check re-verified against the worktree, plus an LLM judge that can
-          <b>fail</b> a gate but can <b>never approve</b> one. It plays itself. Click a switch to take over.
+          approved deterministic check re-verified against the worktree, plus an LLM judge that
+          can <b>fail</b> a gate but can <b>never approve</b> one. The <code>verdict.json</code> switch isn’t
+          asserted by any agent — crew <b>reads it from the QE evidence ledger</b>
+          (<code>GET /api/v1/runs/:id/acceptance</code>), written by <a href="https://wg.wickedagile.com">wicked-garden’s
+          QE specialist fleet</a>. It plays itself. Click a switch to take over.
         </p>
       </div>
 
@@ -424,6 +507,15 @@ const GATE_CARDS = [
             </div>
           </div>
 
+          <!-- The acceptance feed: verdict.json's value is READ from the evidence
+               ledger, never asserted. The chip mirrors the switch live. -->
+          <div class="gc-ledger" data-gc-ledger>
+            <span class="gc-ledger-k">acceptance · read from the ledger</span>
+            <code class="gc-ledger-call">GET /api/v1/runs/r-4f2a/acceptance</code>
+            <span class="gc-ledger-arr" aria-hidden="true">→</span>
+            <span class="gc-ledger-verdict" data-gc-ledger-verdict>PASS</span>
+          </div>
+
           <div class="gc-actions">
             <button type="button" class="gc-btn gc-argue" data-argue>Let the model argue its case →</button>
           </div>
@@ -450,6 +542,7 @@ const GATE_CARDS = [
           <span class="gcs-stamp">HELD</span>
           <span class="gcs-vtext">1 check failed — the series breaks, held for a human. An LLM judge can <b>fail</b> a gate, never <b>approve</b> one.</span>
         </div>
+        <p class="gcs-ledger"><code>verdict.json</code> is read from the QE evidence ledger — deny-dominates, and a <b>CONDITIONAL</b> verdict holds until a clean PASS lands.</p>
       </div>
 
       <!-- Explainer cards drive the console. Click one to play its point. -->
@@ -475,8 +568,8 @@ const GATE_CARDS = [
         <h2 id="wf-h">Drop a <code>*.json</code>. It’s a workflow.</h2>
         <p class="sec-sub">
           <b>10 built-ins ship</b> — feature, bug, migration, onboarding, <b>collab</b> (a real
-          propose → critique → revise → verdict discussion between two CLIs) and more — each as
-          <b>validated JSON</b> you pick in the studio’s workflow selector. Add your own by dropping a
+          propose → critique → revise → verdict discussion between two CLIs) and more — each
+          as <b>validated JSON</b> you pick in the studio’s workflow selector. Add your own by dropping a
           file in <code>~/.config/wicked-core/workflows/</code>; the plan is <b>acyclic-validated</b> with
           loud, per-file errors. It auto-cycles the defs below — click one to pin it.
         </p>
@@ -611,6 +704,12 @@ const GATE_CARDS = [
     </div>
   </section>
 
+  <!-- ── Where crew sits: THE four-plane map (shared chrome, canonical) ──
+       current="wicked-crew" renders the control-plane card as the
+       "you are here" marker — the map stays complete, the site never
+       promotes itself. -->
+  <SameGarden current="wicked-crew" />
+
   <!-- ── Get it ────────────────────────────────────────────────────────── -->
   <div class="finale">
     <section class="get" id="get">
@@ -620,8 +719,8 @@ const GATE_CARDS = [
           <h2>Start with the family installer. The studio comes with it.</h2>
           <p>
             The simplest way in is <b><code>npx wicked-installer</code></b> — the interactive, cross-CLI
-            installer for the whole wicked-* family. Already know you want just this one? Install
-            <b>wicked-crew</b> directly (needs Node ≥ 22) — either way the <b>studio console ships
+            installer for the whole wicked-* family. Already know you want just this one?
+            Install <b>wicked-crew</b> directly (needs Node ≥ 22) — either way the <b>studio console ships
             inside it</b>, served on your machine. Install whichever agent CLIs you want on the roster;
             crew degrades gracefully to whatever it finds.
           </p>
@@ -678,6 +777,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var pleaEl = root.querySelector('[data-plea]');
       var phaseEl = root.querySelector('[data-gc-phase]');
       var modeEl = root.querySelector('[data-gc-mode]');
+      var ledgerEl = root.querySelector('[data-gc-ledger-verdict]');
       var cards = Array.prototype.slice.call(document.querySelectorAll('[data-gc-card]'));
       if (!switches.length || !stamp) return;
 
@@ -685,6 +785,9 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       var timer = null;   // auto-cycle timer; null = not auto-playing
       var manual = false; // user has taken hands-on control of the switches
       var scene = 0;
+      // The ledger scene: verdict.json is open because the QE ledger returned
+      // CONDITIONAL (approve-with-listed-fixes) — not a FAIL, still a hold.
+      var condLedger = false;
       var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
       function byId(id) {
@@ -700,6 +803,18 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
       // the first open switch kills all current downstream. The agent seat is
       // just another switch in series — it can BREAK the track (veto) but can
       // never be the reason current flows, so no model can approve.
+      // The ledger chip mirrors verdict.json live: its value is READ from the
+      // QE evidence ledger, never asserted — closed = PASS, open under the
+      // ledger scene = CONDITIONAL (still a hold), open by hand = FAIL.
+      function updateLedger() {
+        if (!ledgerEl) return;
+        var sw = byId('verdict.json');
+        if (!sw) return;
+        var v = isClosed(sw) ? 'PASS' : (condLedger ? 'CONDITIONAL' : 'FAIL');
+        ledgerEl.textContent = v;
+        ledgerEl.setAttribute('data-v', v.toLowerCase());
+      }
+
       function recompute() {
         // Ungated phase: the gate is bypassed, transition passes without evaluation.
         if (!gated) {
@@ -715,6 +830,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
           stamp.textContent = 'OPEN';
           vline.textContent = 'This phase is not gated — the transition passes without evaluation.';
           if (phaseEl) phaseEl.innerHTML = 'gate · build → ship · <b>off</b>';
+          updateLedger();
           return;
         }
 
@@ -723,18 +839,21 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
 
         var live = true;
         segs[0].classList.toggle('is-live', live);
-        var openCount = 0, agentVeto = false;
+        var openCount = 0, agentVeto = false, ledgerCond = false;
         for (var i = 0; i < switches.length; i++) {
           var sw = switches[i];
           var reached = live;
           sw.classList.toggle('is-hot', reached);
           var closed = isClosed(sw);
-          if (!closed) { openCount++; if (isAgent(sw)) agentVeto = true; }
+          var isLedgerCond = !closed && condLedger &&
+            sw.getAttribute('data-policy') === 'verdict.json';
+          if (!closed) { openCount++; if (isAgent(sw)) agentVeto = true; if (isLedgerCond) ledgerCond = true; }
           live = reached && closed;
           var afterSeg = segs[i + 1];
           if (afterSeg) afterSeg.classList.toggle('is-live', live);
           var st = sw.querySelector('[data-state]');
-          if (st) st.textContent = isAgent(sw) ? (closed ? 'ABSTAIN' : 'VETO') : (closed ? 'PASS' : 'FAIL');
+          if (st) st.textContent = isAgent(sw) ? (closed ? 'ABSTAIN' : 'VETO')
+            : (closed ? 'PASS' : (isLedgerCond ? 'COND' : 'FAIL'));
           sw.setAttribute('aria-pressed', closed ? 'true' : 'false');
         }
         var allow = live;
@@ -743,6 +862,8 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         stamp.textContent = allow ? 'ALLOW' : 'DENY';
         if (allow) {
           vline.textContent = 'Every check closed — current reaches ship. Transition allowed.';
+        } else if (ledgerCond && openCount === 1) {
+          vline.textContent = 'Ledger verdict CONDITIONAL — approve-with-listed-fixes is not a PASS. Held until a clean PASS lands or a human approves with the conditions in view.';
         } else if (agentVeto && openCount === 1) {
           vline.textContent = 'The LLM judge vetoed — gate failed. A model can fail, never approve.';
         } else if (openCount === 1) {
@@ -750,6 +871,7 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         } else {
           vline.textContent = openCount + ' checks failed — the series breaks. Transition held.';
         }
+        updateLedger();
       }
 
       // A scene = full state the console is set to. Each card owns one scene.
@@ -757,12 +879,14 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
         { gated: true,  open: [] },                 // series: all closed → ALLOW
         { gated: true,  open: ['schema-drift'] },   // deny-dominates
         { gated: true,  open: ['llm-judge'] },      // veto-only agent seat
+        { gated: true,  open: ['verdict.json'], cond: true }, // ledger CONDITIONAL → hold
         { gated: false, open: [] },                 // opt-in per phase (ungated)
       ];
 
       function applyScene(idx) {
         var sc = SCENES[idx] || SCENES[0];
         gated = sc.gated;
+        condLedger = !!sc.cond;
         switches.forEach(function (sw) {
           var id = sw.getAttribute('data-policy');
           sw.classList.toggle('is-open', sc.open.indexOf(id) !== -1);
@@ -794,6 +918,9 @@ wicked-crew serve   <span class="c"># the studio console, served on your machine
           takeControl();
           root.removeAttribute('data-argued');
           if (!gated) gated = true;
+          // Hand-toggling verdict.json leaves the ledger scene: a hand-opened
+          // switch is a plain FAIL, not the ledger's CONDITIONAL reading.
+          if (sw.getAttribute('data-policy') === 'verdict.json') condLedger = false;
           sw.classList.toggle('is-open');
           recompute();
         });

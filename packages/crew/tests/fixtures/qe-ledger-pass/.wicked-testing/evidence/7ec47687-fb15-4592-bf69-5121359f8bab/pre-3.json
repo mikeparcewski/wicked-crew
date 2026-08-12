@@ -1,0 +1,15 @@
+{
+  "step_id": "PRE-3",
+  "description": "Fixture data is exactly the expected 3-row orders file",
+  "executed_at": "2026-08-12T02:25:29.634118+00:00",
+  "duration_ms": 2,
+  "action": "capture verbatim file content of /workspace/qe-fixture/data/orders.csv",
+  "evidence": {
+    "pre-3-content": {
+      "path": "/workspace/qe-fixture/data/orders.csv",
+      "exists": true,
+      "content": "order_id,amount,region\n1001,25.50,east\n1002,10.00,west\n1003,4.50,east\n"
+    }
+  },
+  "execution_notes": ""
+}

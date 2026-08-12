@@ -1,0 +1,15 @@
+{
+  "step_id": "PRE-1",
+  "description": "python3 is available",
+  "executed_at": "2026-08-12T02:27:39.942548+00:00",
+  "duration_ms": 85,
+  "action": "python3 --version (stdout+stderr combined, exit code captured)",
+  "evidence": {
+    "pre-1-check": {
+      "combined_stdout_stderr": "Python 3.14.6\n",
+      "exit_code": 0
+    },
+    "pre-1-exit": "0"
+  },
+  "execution_notes": "Retry: first capture attempt at 2026-08-12T02:25:29.624083+00:00 failed to launch due to an executor-harness subprocess argument bug (capture_output combined with stderr); the command itself never ran on that attempt. This record is from the corrected capture."
+}

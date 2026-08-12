@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "scenario": "csv-stats-basic",
+  "run_id": "7ec47687-fb15-4592-bf69-5121359f8bab",
+  "started_at": "2026-08-12T02:25:29.623720+00:00",
+  "finished_at": "2026-08-12T02:27:40.080782+00:00",
+  "executor": "acceptance-test-executor",
+  "steps_executed": 3,
+  "steps_skipped": 0,
+  "prerequisites_executed": 4,
+  "evidence_directory": "/workspace/qe-fixture/.wicked-testing/evidence/7ec47687-fb15-4592-bf69-5121359f8bab",
+  "step_files": [
+    "step-1.json",
+    "step-2.json",
+    "step-3.json"
+  ],
+  "prerequisite_files": [
+    "pre-1.json",
+    "pre-2.json",
+    "pre-3.json",
+    "pre-4.json"
+  ]
+}
