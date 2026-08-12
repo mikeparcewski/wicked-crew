@@ -118,7 +118,10 @@ const RegisterRepoSchema = z
  * schema does not accept — so `.strict()` is what turns that trip into a 400 instead of an
  * unworkflowed run reported as `201`.
  */
-const LaunchSchema = z.object({
+// The request-body schemas below are exported so `tests/wire-contract.test.ts` can prove, at
+// compile time, that every body the published contract (`wicked-crew-api-types`) lets a client
+// send is a body these schemas accept — the request-direction half of the drift guard (task #84).
+export const LaunchSchema = z.object({
   problem: z.string().min(1),
   sessionId: z.string().min(1).optional(),
   clisJson: z.string().min(1).optional(),
@@ -128,7 +131,7 @@ const LaunchSchema = z.object({
   workflow: z.string().min(1).optional(),
 }).strict();
 
-const GateSchema = z.object({
+export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
 }).strict();
@@ -139,7 +142,7 @@ const InjectSchema = z.object({
   target: z.string().min(1).default('all'),
 }).strict();
 
-const OpenTerminalSchema = z.object({
+export const OpenTerminalSchema = z.object({
   cwd: z.string().min(1),
   cmd: z.array(z.string().min(1)).min(1).optional(),
   cols: z.number().int().positive(),
