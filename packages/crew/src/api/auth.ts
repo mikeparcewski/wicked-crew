@@ -305,7 +305,16 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
   let configJson: string | null = null;
   try {
     configJson = readFileSync(configPath, 'utf8');
-  } catch {
+  } catch (err) {
+    // ONLY a missing file is the ordinary case. An unreadable-but-present
+    // auth.json (EACCES, EISDIR, …) silently skipping a configured OIDC block
+    // would be exactly the quiet misconfiguration this seam refuses to be
+    // (Copilot, #250) — so anything else fails the boot, named.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(
+        `[auth] cannot read ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     configJson = null; // no auth.json — the ordinary case
   }
   if (configJson !== null) {
@@ -442,7 +451,9 @@ export function registerAuthHooks(app: FastifyInstance, auth: ResolvedAuth): voi
     // already answered 401 (which skips the rest of the lifecycle).
     const need = requiredTrust(req.method, path, req.body);
     if (!trustAtLeast(req.actor, need)) {
-      await reply.code(403).send({
+      // RETURN the reply — the idiomatic guarantee that the lifecycle stops
+      // here and the route handler is never reached (Copilot, #250).
+      return reply.code(403).send({
         error: `Insufficient trust: this action requires '${need}' (you are '${req.actor.trust}')`,
       });
     }

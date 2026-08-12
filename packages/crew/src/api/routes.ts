@@ -189,9 +189,11 @@ export function registerRoutes(
   // Defaulted for the same reason: tests that drive this function directly get
   // the projects surface with no bus (events skipped) and a fresh index.
   projects: ProjectRoutesDeps = { bus: null, index: new MembershipIndex(), log: () => undefined },
-  // Defaulted likewise: a directly-driven route set audits to the default
-  // trail as the implicit local actor — same behavior as an auth-off daemon.
-  security: SecurityDeps = { audit: new AuditLog(), authMode: 'off' },
+  // Defaulted likewise — to a NOOP trail, deliberately: a directly-driven
+  // route set (unit tests) must never write the operator's real
+  // ~/.wicked-crew/audit.log or leave appends pending after close. The real
+  // trail always arrives from `createServer`.
+  security: SecurityDeps = { audit: AuditLog.noop(), authMode: 'off' },
 ): void {
   const { audit } = security;
   // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
@@ -221,8 +223,10 @@ export function registerRoutes(
     const runId = first(q.runId);
     const action = first(q.action);
     const limitRaw = first(q.limit);
-    const limit = limitRaw !== undefined ? Number.parseInt(limitRaw, 10) : undefined;
-    if (limitRaw !== undefined && (!Number.isFinite(limit) || (limit as number) < 1)) {
+    // Reject partial-numeric strings like "10abc" — parseInt accepts those,
+    // Number() is strict and returns NaN for them (Copilot, #250).
+    const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+    if (limitRaw !== undefined && (!Number.isFinite(limit) || (limit as number) < 1 || !Number.isInteger(limit))) {
       return reply.code(400).send({ error: '`limit` must be a positive integer' });
     }
     try {

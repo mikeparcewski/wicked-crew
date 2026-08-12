@@ -114,9 +114,10 @@ export function registerProjectRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
   deps: ProjectRoutesDeps,
-  // Defaulted like the deps above: a directly-driven route set audits to the
-  // default trail as the implicit local actor (task #88).
-  security: { audit: AuditLog } = { audit: new AuditLog() },
+  // Defaulted like the deps above — to a NOOP trail, so a directly-driven
+  // route set (unit tests) never writes the real ~/.wicked-crew/audit.log
+  // (task #88). The real trail always arrives from `createServer`.
+  security: { audit: AuditLog } = { audit: AuditLog.noop() },
 ): void {
   const { bus, index, log } = deps;
   const { audit } = security;

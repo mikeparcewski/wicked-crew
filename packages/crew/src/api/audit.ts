@@ -33,6 +33,7 @@ export interface AuditReadFilter {
 export class AuditLog {
   private chain: Promise<void> = Promise.resolve();
   private dirReady = false;
+  private disabled = false;
 
   constructor(
     readonly path: string = defaultAuditPath(),
@@ -40,11 +41,25 @@ export class AuditLog {
   ) {}
 
   /**
+   * A trail that records nothing and reads back empty — the DEFAULT for
+   * directly-driven route sets (unit tests call `registerRoutes` without a
+   * server), so they never write the operator's real `~/.wicked-crew/audit.log`
+   * or leave appends pending after close (Copilot, #250). `createServer`
+   * always builds a real one; this never rides a production path.
+   */
+  static noop(): AuditLog {
+    const log = new AuditLog();
+    log.disabled = true;
+    return log;
+  }
+
+  /**
    * Record one action. Fire-and-forget by design (the route's answer must not
    * wait on fsync of a sidecar), serialized so lines never interleave, loud on
    * failure. `flush()` awaits the chain — tests and shutdown use it.
    */
   record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): void {
+    if (this.disabled) return;
     const entry: AuditEntry = {
       ts: Date.now(),
       action,
@@ -79,6 +94,7 @@ export class AuditLog {
    * still answers.
    */
   async read(filter?: AuditReadFilter): Promise<AuditEntry[]> {
+    if (this.disabled) return [];
     await this.flush();
     let raw: string;
     try {

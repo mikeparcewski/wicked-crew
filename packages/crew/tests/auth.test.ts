@@ -188,6 +188,13 @@ describe('AuditLog', () => {
     expect(entries).toHaveLength(1);
   });
 
+  it('noop() records nothing and reads empty — the directly-driven default never touches the real trail', async () => {
+    const log = AuditLog.noop();
+    log.record('run.launched', OPERATOR, { runId: 'r1' });
+    await log.flush();
+    expect(await log.read()).toEqual([]);
+  });
+
   it('an unwritable path is LOUD but never fails the action (flush still resolves)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'audit-'));
     const warnings: string[] = [];
