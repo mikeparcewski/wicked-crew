@@ -324,6 +324,9 @@ export function resolveAuth(options: AuthOptions | undefined, warn: (msg: string
 
 // ── The trust ladder over routes ─────────────────────────────────────────────
 
+/** `PATCH /projects/:id` (exactly one segment after /projects) — see {@link requiredTrust}. */
+const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
+
 /**
  * Minimum trust for a request. Minimal by design (the task's rule: no
  * deny-by-default registry over unknown routes):
@@ -343,7 +346,7 @@ export function requiredTrust(method: string, path: string, body: unknown): Trus
   if (path === `${API_PREFIX}/settings`) return 'admin';
   if (
     method === 'PATCH' &&
-    new RegExp(`^${API_PREFIX}/projects/[^/]+$`).test(path) &&
+    PROJECT_DETAIL_PATH.test(path) &&
     typeof body === 'object' &&
     body !== null &&
     'status' in body
