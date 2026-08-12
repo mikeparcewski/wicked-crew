@@ -140,7 +140,12 @@ while time.time() < deadline:
 if not ready:
     daemon.kill()
     fail("daemon", "daemon never printed WICKED_CREW_READY within 60s")
-threading.Thread(target=lambda: [None for _ in daemon.stdout], daemon=True).start()  # drain
+def _drain(stream):  # keep the daemon from blocking on a full stdout pipe, retain nothing
+    for _ in stream:
+        pass
+
+
+threading.Thread(target=_drain, args=(daemon.stdout,), daemon=True).start()
 report["steps"]["daemon"] = {
     "ok": True, "origin": CREW_ORIGIN, "stub": True,
     "bin": "packages/crew/dist/cli/index.js serve",
