@@ -277,11 +277,26 @@ try {
     return run ? run.session.id : null;
   }, 30_000);
 
-  // Pick targets from the REAL instrumented markup: the CTA heading (structural) and the
-  // hero heading (deterministic style-edit).
-  const ctaWid = (v1.match(/<h2[^>]*data-wid="([^"]+)"[^>]*>One bus/) ?? [])[1];
-  const heroWid = (v1.match(/<h1[^>]*data-wid="([^"]+)"[^>]*>The wicked ecosystem/) ?? [])[1];
-  if (!ctaWid || !heroWid) throw new Error(`could not locate target wids in _v1.html (cta=${ctaWid}, hero=${heroWid})`);
+  // Pick targets from the REAL instrumented markup (content is seat-authored, so no text
+  // pinning): the first leaf block (structural rewrite) and the first h1 (deterministic
+  // style-edit) — falling back to any other anchor when the draft carries no h1.
+  const pickLeaf = (html) => {
+    for (const tag of ['h2', 'p', 'li']) {
+      const m = html.match(new RegExp(`<${tag}[^>]*data-wid="([^"]+)"`));
+      if (m) return { tag, wid: m[1] };
+    }
+    return null;
+  };
+  const target = pickLeaf(v1);
+  const heroWid =
+    (v1.match(/<h1[^>]*data-wid="([^"]+)"/) ?? [])[1] ??
+    [...new Set(v1Wids)].find((w) => w !== target?.wid);
+  if (!target || !heroWid || target.wid === heroWid) {
+    throw new Error(`could not pick distinct target wids in _v1.html (leaf=${target?.wid}, hero=${heroWid})`);
+  }
+  const ctaWid = target.wid;
+  const innerOf = (html) =>
+    (html.match(new RegExp(`<${target.tag}[^>]*data-wid="${ctaWid}"[^>]*>([\\s\\S]*?)</${target.tag}>`)) ?? [])[1];
 
   // ── 5. the trigger: ONE feedback batch — deterministic + structural ────────
   const fbRes = await fetch(`${WI_BASE}/api/events`, {
@@ -293,7 +308,7 @@ try {
         document_id: DOC,
         items: [
           { selector: heroWid, type: 'style-edit', style: { color: '#c00000' } },
-          { selector: ctaWid, type: 'structural-change', instruction: 'Make this heading punchier' },
+          { selector: ctaWid, type: 'structural-change', instruction: 'Rewrite this block to be punchier and more concrete' },
         ],
       },
     }),
@@ -341,7 +356,8 @@ try {
   const v3Wids = new Set(widsOf(v3));
   const missing = [...new Set(v1Wids)].filter((w) => !v3Wids.has(w));
   check('INV-2 at scale: EVERY _v1 data-wid survives into _v3 byte-exact', missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : `${new Set(v1Wids).size} anchors preserved`);
-  check('the requested change applied in _v3', REAL ? !v3.includes('One bus, many hands') || v3 !== v2 : v3.includes(MARKER), REAL ? 'real-seat rewrite landed' : `marker "${MARKER}" present`);
+  const changed = innerOf(v3) !== undefined && innerOf(v3) !== innerOf(v2);
+  check('the requested change applied in _v3', REAL ? changed : v3.includes(MARKER), REAL ? `target ${ctaWid} rewritten by the real seat` : `marker "${MARKER}" present`);
   check('the deterministic edit persists through the structural version', v3.includes('#c00000'), 'style-edit still applied');
   const versions = await (await fetch(`${WI_BASE}/d/${DOC}/api/versions`)).json();
   check('manifest head is v3 (draft → partial → structural)', versions.head === 3, `head=${versions.head}`);
