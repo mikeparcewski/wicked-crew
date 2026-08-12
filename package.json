@@ -3,6 +3,7 @@
   "version": "0.5.0",
   "private": true,
   "workspaces": [
+    "packages/crew-api-types",
     "packages/crew",
     "packages/studio",
     "packages/agent-acp-bridges"
@@ -10,6 +11,7 @@
   "scripts": {
     "use-local-core-ts": "node scripts/use-local-core-ts.mjs",
     "build": "npm run build -w packages/studio && npm run build -w packages/crew",
+    "build:with-studio": "npm run build:with-studio -w packages/crew",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present"

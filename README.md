@@ -116,6 +116,32 @@ driving **Antigravity (`agy`)** headless/programmatically may conflict with its 
 review Google's current terms before enabling that seat, and remove it from your roster
 if in doubt. The engine works identically with any subset of the roster.
 
+## Building from source: two build modes
+
+The studio SPA is a formally independent client of the daemon (task #84): it compiles against the
+shared wire contract in `packages/crew-api-types`, not against the daemon's source, and building the
+daemon does not build the UI.
+
+| mode | command | what you get |
+|---|---|---|
+| **default (dev)** | `npm run -w packages/crew build` | plain `tsc` — the daemon only. Without a bundle at `dist/studio` it serves **headless API + WS** and logs that it is doing so. |
+| **release-shaped** | `npm run -w packages/crew build:with-studio` (or `npm run build:with-studio` at the root) | `tsc` + `scripts/bundle-studio.mjs`, which builds `packages/studio` and copies its `dist/` → `packages/crew/dist/studio/` — the daemon then serves the SPA same-origin, exactly what the published npm tarball ships (`files: ["dist"]`). |
+
+The root `npm run build` builds both workspaces (studio via vite, crew via tsc) without bundling.
+CI and the release workflow run `build:with-studio`, so **npm consumers still get the studio UI
+inside `wicked-crew`** — the severing changes the default dev build and the dependency direction,
+not the shipped artifact.
+
+To work on the studio against a running daemon, `npm run -w packages/studio dev` (vite on :4200,
+pointed at the daemon by `VITE_API_HOST`, CORS-allowed for any loopback origin) — or build it
+standalone and serve `packages/studio/dist` from any static server (see
+`e2e/studio_standalone_test.py` for a scripted proof of that mode).
+
+Shared types live in `packages/crew-api-types` — a types-only (zero-runtime, unpublished) workspace
+package defining every `/api/v1` + `/ws` wire shape. Both the daemon's route layer and the studio
+import it; `packages/crew/tests/wire-contract.test.ts` fails the typecheck if the daemon's
+responses ever stop satisfying it.
+
 ## Where things are
 
 - `.product/` — requirements, design, and evidence:

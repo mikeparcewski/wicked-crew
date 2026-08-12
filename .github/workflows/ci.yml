@@ -3,8 +3,11 @@
 # Until this existed, wicked-crew had NO build/test on PRs — only GitGuardian. Merges rode on
 # locally-run tests.
 #
-# `build` runs crew's build, which runs scripts/bundle-studio.mjs (builds the studio SPA + copies its
-# dist into packages/crew/dist/studio) — so this also proves the v0.2.0 serving bundle assembles.
+# `build` runs crew's `build:with-studio` (task #84 severed the default `build` down to plain `tsc`;
+# the studio SPA is an independent client and is no longer built as a side effect of building the
+# daemon). `build:with-studio` runs scripts/bundle-studio.mjs (builds the studio SPA + copies its
+# dist into packages/crew/dist/studio) — so CI still proves the v0.2.0 serving bundle assembles,
+# which is what the release tarball ships.
 #
 # ── Why this checks out two sibling repos ────────────────────────────────────────────────────────
 #
@@ -135,10 +138,12 @@ jobs:
         working-directory: wicked-crew
         run: npm run -w packages/crew typecheck && npm run -w packages/studio typecheck
 
-      # Builds the studio SPA and bundles it into packages/crew/dist/studio (the v0.2.0 serving artifact).
+      # Builds the studio SPA and bundles it into packages/crew/dist/studio (the v0.2.0 serving
+      # artifact). Deliberately `build:with-studio`, not the default `build` (which is plain tsc,
+      # task #84): CI must keep proving the release-shaped bundle assembles.
       - name: Build (crew + studio bundle)
         working-directory: wicked-crew
-        run: npm run -w packages/crew build
+        run: npm run -w packages/crew build:with-studio
 
       - name: Test (both packages)
         working-directory: wicked-crew

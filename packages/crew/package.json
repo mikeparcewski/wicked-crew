@@ -15,7 +15,8 @@
     "skills"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
+    "build": "tsc -p tsconfig.json",
+    "build:with-studio": "tsc -p tsconfig.json && node scripts/bundle-studio.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src tests",
     "test": "vitest run",
@@ -42,7 +43,8 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "undici": "^6.28.0",
-    "vitest": "^3.2.6"
+    "vitest": "^3.2.6",
+    "wicked-crew-api-types": "*"
   },
   "engines": {
     "node": ">=22.0.0"
