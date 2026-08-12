@@ -43,6 +43,9 @@ import {
 import type { MembershipIndex } from './membership-index.js';
 import { buildActivityPage } from './activity.js';
 import { writeCharter } from './charter.js';
+import { AuditLog } from '../api/audit.js';
+import { LOCAL_ACTOR } from '../api/auth.js';
+import type { Actor } from '../core/types.js';
 
 const V = API_PREFIX;
 
@@ -111,8 +114,17 @@ export function registerProjectRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
   deps: ProjectRoutesDeps,
+  // Defaulted like the deps above — to a NOOP trail, so a directly-driven
+  // route set (unit tests) never writes the real ~/.wicked-crew/audit.log
+  // (task #88). The real trail always arrives from `createServer`.
+  security: { audit: AuditLog } = { audit: AuditLog.noop() },
 ): void {
   const { bus, index, log } = deps;
+  const { audit } = security;
+  // The AUTHENTICATED actor for event/audit stamping — locked decision #6
+  // replaces the hardcoded 'api' strings these emits used to carry. Falls back
+  // to the local actor when no auth hooks are installed (direct-driven tests).
+  const actorOf = (req: { actor?: Actor }): Actor => req.actor ?? LOCAL_ACTOR;
 
   /** All explicit `crew.run`/`crew.chat` member refs across every stored project. */
   async function filedRunRefs(): Promise<Set<string>> {
@@ -182,9 +194,10 @@ export function registerProjectRoutes(
       // Post-commit, in order: bus event, then the (best-effort) foundation charter.
       bus?.emit(
         PROJECT_CREATED,
-        { project_id: project.id, name: project.name, scope: project.scope, actor: 'api' },
+        { project_id: project.id, name: project.name, scope: project.scope, actor: actorOf(req).id },
         projectCreatedKey(project.id),
       );
+      audit.record('project.created', actorOf(req), { detail: { projectId: project.id, name: project.name } });
       void writeCharter(adapter, project, 'created', log);
       return reply.code(201).send({ project });
     } catch (err) {
@@ -238,9 +251,11 @@ export function registerProjectRoutes(
       if (parsed.data.status === 'archived' && before?.status !== 'archived') {
         bus?.emit(
           PROJECT_ARCHIVED,
-          { project_id: project.id, actor: 'api' },
+          { project_id: project.id, actor: actorOf(req).id },
           projectArchivedKey(project.id, project.updated_at),
         );
+        // Archive is the admin-gated write (task #88) — WHO archived it is audit-worthy.
+        audit.record('project.archived', actorOf(req), { detail: { projectId: project.id } });
         void writeCharter(adapter, project, 'archived', log);
       } else {
         const changed: Record<string, unknown> = {};
@@ -249,7 +264,7 @@ export function registerProjectRoutes(
         if (parsed.data.status !== undefined) changed['status'] = parsed.data.status;
         bus?.emit(
           PROJECT_UPDATED,
-          { project_id: project.id, changed, actor: 'api' },
+          { project_id: project.id, changed, actor: actorOf(req).id },
           projectUpdatedKey(project.id, project.updated_at),
         );
         void writeCharter(
@@ -305,7 +320,11 @@ export function registerProjectRoutes(
         if (kind === 'crew.run' || kind === 'crew.chat') index.set(ref, id);
         bus?.emit(
           MEMBERSHIP_ATTACHED,
-          { project_id: id, member: { kind, ref }, actor: attachedBy ?? 'api' },
+          // `attachedBy` stays what it is — the SURFACE that attached (studio/
+          // interactive/cli/api), persisted on the row. The event's `actor` is
+          // now the authenticated principal, not that caller-supplied label
+          // (locked decision #6: no more spoofable actor strings).
+          { project_id: id, member: { kind, ref }, actor: actorOf(req).id, surface: attachedBy ?? 'api' },
           membershipAttachedKey(id, kind, ref, member.attached_at),
         );
       }
@@ -338,7 +357,7 @@ export function registerProjectRoutes(
         {
           project_id: id,
           member: { kind: member?.member_kind ?? 'unknown', ref: member?.member_ref ?? mid },
-          actor: 'api',
+          actor: actorOf(req).id,
         },
         membershipDetachedKey(id, mid, Date.now()),
       );
