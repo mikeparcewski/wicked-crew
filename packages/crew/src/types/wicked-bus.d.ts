@@ -54,7 +54,7 @@ declare module 'wicked-bus' {
   /** Merged config (file + defaults); `emit` requires one. */
   export function loadConfig(overrides?: Record<string, unknown>): Record<string, unknown>;
 
-  /** Emit one event (used by tests to stage real bus traffic). */
+  /** Emit one event (tests stage real bus traffic; the interactive-draft seam announces with it). */
   export function emit(
     db: BusDb,
     config: Record<string, unknown>,
@@ -64,6 +64,10 @@ declare module 'wicked-bus' {
       subdomain?: string;
       payload: unknown;
       idempotency_key?: string;
+      /** Producer identity stamped on the row (loop-safety: consumers drop their own emissions). */
+      producer_id?: string;
+      correlation_id?: string;
+      session_id?: string;
     },
   ): { event_id: number; idempotency_key: string };
 
