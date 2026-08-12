@@ -1,12 +1,18 @@
 ---
 id: DES-PROJECT-001
 title: The Project model — keystone of the experience plane (ADR)
-status: draft
+status: accepted
 phase: design
-version: 0.1
+version: 1.0
 date: 2026-08-11
+accepted: 2026-08-12
 author: michael.parcewski@accenture.com
 review-required: true
+implemented-by:
+  - mikeparcewski/wicked-core#246 (engine: project/membership/interaction_request records, LaunchSpec.project_id, napi surface; merged, wicked-core-ts 0.6.0)
+  - mikeparcewski/wicked-crew#243 (daemon: /api/v1/projects ×9, prompt inbox, activity feed, bus vocabulary, cache demotion, api-types 0.6.0, the §8 e2e)
+  - mikeparcewski/wicked-interactive#148 (service: --project, project.json breadcrumb, event enrichment, adopt)
+evidence: e2e/project_model_e2e.mjs — all ten §8 steps, 25/25 assertions (Phase-7 gate, task #87)
 decides:
   - what a Project IS (identity, membership, lifecycle) and which plane owns it
   - where project state lives and how interactive's doc dirs attach
@@ -472,3 +478,57 @@ looking, survived a restart, and was answered by the skin that didn't launch the
   eventually consistent with the state, best-effort writes with retry via the bus), no doc
   content in control, no project-level ACLs (single-operator assumption holds until the org
   runtime), no hard delete.
+
+---
+
+## 11. Changelog
+
+### 1.0 — accepted (2026-08-12)
+
+Implemented across mikeparcewski/wicked-core#246 (merged; released as wicked-core-ts 0.6.0),
+mikeparcewski/wicked-crew#243, and mikeparcewski/wicked-interactive#148. The §8 functional test
+runs verbatim as `e2e/project_model_e2e.mjs` — all ten steps, 25/25 assertions, including
+restart survival (step 5) and answered-from-the-creator-skin (step 8).
+
+**Deviations from the draft text, with reasons — none change the decided shape:**
+
+1. **Physical representation (§2.1).** The ADR wrote `CREATE TABLE` DDL; wicked-core's
+   single-writer store is the estate GRAPH (nodes + `ToNode`/`FromNode`), not relational SQL —
+   there are no SQL migrations for domain data in that engine at all. `projects`,
+   `project_members`, and `interaction_requests` are therefore node kinds (`project`,
+   `project_member`, `interaction_request`) following the engine's own `RepoEntry` idiom: same
+   fields, same semantics, same core.db, same single writer. The DDL in §2.1/§5.3 reads as the
+   logical schema.
+2. **UNIQUE and DELETE in a graph store (§1.2/§1.3).** The membership UNIQUE constraint is
+   structural: a member's node id is derived from exactly `(project_id, member_kind,
+   member_ref)` (`pm_<hash16>`), so a duplicate attach upserts the same node (idempotent, with
+   a `created` flag so the bus event fires once). The store has no node deletion, so DETACH is
+   a tombstone (`detached_at`) — the graph idiom's retire-not-delete, externally identical
+   (detached members never list; a second detach 404s; re-attach revives as a new attachment).
+3. **Id formats (§1.1).** `proj_<ulid>` → `proj_<millis13><seq05>` (lowercase, time-sortable,
+   no new dependency — the engine's sortable-id idiom), with uniqueness VERIFIED against the
+   store at create (re-mint on collision) rather than assumed from the format.
+   `pm_<ulid>`/`ir_<ulid>` → derived hashes (deviation 2; an interaction request derives from
+   `(session, kind, ord)` so a re-pause reopens the same logical row).
+4. **`POST /chats` filing is not atomic (§2.2).** Chats have no launch record — the engine's
+   chat pool is in-memory — so there is nothing for the membership to commit atomically WITH.
+   The route validates the project up-front (404/409 before any seat warms) and attaches
+   immediately after open; an attach failure is reported on the 201 body
+   (`projectAttachError`), never silent. Runs keep the full atomic guarantee.
+5. **Elicitations in v1 (§5.3).** The engine has no elicitation surface yet (the resolve path
+   answers 501), so it writes `gate` rows only; `kind: elicitation` is reserved and the
+   daemon's elicitation route already carries the durable probe — when the engine grows the
+   surface, restart survival holds with no route change. GateCache demotion is complete;
+   ElicitationCache demotion is structural.
+6. **The coverage probe (§8 step 9).** `memory.coverage scope_prefix=` is an estate-MCP
+   operation the daemon does not speak; the e2e asserts the same fact through the engine's own
+   surface (`listMemories("project:<id>")` count > 0 — memories land there via the charter
+   write and the scope-prefixed run-outcome capture). Multi-project runs get their outcome
+   memory under EVERY holding project's scope (membership is many-to-many, §9.4).
+7. **`create --project` seeds static HTML (§2.3).** The single-file artifact template renders
+   client-side from a `wi-data` JSON block, which the serve loop's `data-wid` instrumentation
+   cannot anchor — so the bound WORKSPACE DOC is seeded from a static server-side rendering of
+   the same wi-content (the doc-dir form is what `interactive.doc` refs and what `serve`
+   iterates). The unbound single-file artifact path is untouched.
+8. **Bus `domain` column.** Events carry `domain: "wicked-crew"` (the bus's plugin-name
+   convention, matching `wicked-interactive`'s usage); event TYPES are exactly the §4 grammar.
