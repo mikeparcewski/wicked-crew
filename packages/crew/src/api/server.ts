@@ -9,6 +9,7 @@ import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
+import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import type { CoreAdapter } from '../core/adapter.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
@@ -28,6 +29,19 @@ export function defaultStudioRoot(): string {
 export interface CreateServerOptions {
   /** Override the studio asset root (tests point this at a temp fixture dir). */
   studioRoot?: string;
+  /**
+   * Opt-in QE gate-event consumption over wicked-bus (Phase 6a). When enabled,
+   * a durable subscriber folds `wicked.qe.gate.*` / `wicked.qe.deploy.completed`
+   * into the acceptance route's freshness cache; when absent (the default),
+   * the route's lazy ledger read stands alone — same answers, read on demand.
+   */
+  qeGateEvents?: {
+    enabled: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution. */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+  };
 }
 
 export async function createServer(
@@ -38,16 +52,41 @@ export async function createServer(
   const gateCache = new GateCache();
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
+  const qeGateCache = new QeGateCache();
+
+  // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
+  // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
+  if (options?.qeGateEvents?.enabled === true) {
+    const { dbPath, pollIntervalMs } = options.qeGateEvents;
+    const sub = await startQeGateSubscriber(qeGateCache, {
+      ...(dbPath !== undefined ? { dbPath } : {}),
+      ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+      log: (m) => app.log.warn(m),
+    });
+    if (sub !== null) {
+      app.log.info(`qe gate-event subscription armed (filter wicked.qe.**)`);
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
 
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts
   // (§3.3), cache elicitation prompts (DES-002), route terminal frames to their owning
   // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame verbatim
   // to all `/ws` clients (§2.1).
-  adapter.onEvent((event) => {
+  //
+  // Unregistered on close: a process can build more than one server over the same
+  // adapter (tests do), and a closed server's caches must stop consuming events —
+  // otherwise every discarded server keeps folding state forever (listener leak).
+  const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     terminals.route(event);
     broadcast(event);
+  });
+  app.addHook('onClose', async () => {
+    offEvent();
   });
 
   app.addHook('onRequest', async (req, reply) => {
@@ -84,7 +123,7 @@ export async function createServer(
   // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
   registerTerminalWs(app, adapter, terminals);
 
-  registerRoutes(app, adapter, gateCache, elicitationCache);
+  registerRoutes(app, adapter, gateCache, elicitationCache, qeGateCache);
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:
@@ -155,8 +194,9 @@ export async function startServer(
   adapter: CoreAdapter,
   port = 7701,
   host = '127.0.0.1',
+  options?: CreateServerOptions,
 ): Promise<StartedServer> {
-  const app = await createServer(adapter);
+  const app = await createServer(adapter, options);
   await app.listen({ port, host });
   const addr = app.server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;

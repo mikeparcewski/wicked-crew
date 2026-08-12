@@ -1,0 +1,97 @@
+{
+  "manifest_version": "1.1.0",
+  "run_id": "7ec47687-fb15-4592-bf69-5121359f8bab",
+  "project_id": "da838fff-9bd7-45df-a452-853516bdd7ae",
+  "scenario_id": "ba5a76f6-086e-4eac-8203-8fddf689c43e",
+  "scenario_name": "csv-stats-basic",
+  "scenario_path": "scenarios/csv-stats-basic.md",
+  "started_at": "2026-08-12T02:17:34.799Z",
+  "finished_at": "2026-08-12T02:31:39.130Z",
+  "duration_ms": 844331,
+  "status": "passed",
+  "verdict": {
+    "value": "PASS",
+    "reviewer": "wicked-garden-qe-acceptance-test-reviewer",
+    "reason": "15/15 assertions passed (5 prerequisite + 10 step); A1 rows=3, A2 sum[amount]=40, A3 exit-2 + stderr names missing_col. Evidence-only review; no contamination.",
+    "recorded_at": "2026-08-12T02:31:41.339Z"
+  },
+  "environment": {
+    "os": "darwin 25.5.0",
+    "node": "26.0.0",
+    "wicked_testing_version": "wicked-garden-qe/6b-functional-test"
+  },
+  "artifacts": [
+    {
+      "name": "evidence.json",
+      "kind": "misc",
+      "path": "evidence.json",
+      "bytes": 629,
+      "sha256": "b8908b14f540a8e456393701bd5bb9fa90137559582dffd944dad1304483b2e7",
+      "captured_at": "2026-08-12T02:27:40.086Z"
+    },
+    {
+      "name": "pre-1.json",
+      "kind": "misc",
+      "path": "pre-1.json",
+      "bytes": 645,
+      "sha256": "4f2c967b47037c834e69a1c6324ad3c40aa43fa88bb70cf5da1a4c0c27a99222",
+      "captured_at": "2026-08-12T02:27:40.069Z"
+    },
+    {
+      "name": "pre-2.json",
+      "kind": "misc",
+      "path": "pre-2.json",
+      "bytes": 375,
+      "sha256": "a14c17d30ccd7fd0148046ff96ed1208a946aa453a225854ef7a8a98b2c6ec89",
+      "captured_at": "2026-08-12T02:25:29.634Z"
+    },
+    {
+      "name": "pre-3.json",
+      "kind": "misc",
+      "path": "pre-3.json",
+      "bytes": 504,
+      "sha256": "dc674dfdc8994ccdfaa0b13cc10d90baa501e25e0821ab27ffd499fd5af4db18",
+      "captured_at": "2026-08-12T02:25:29.642Z"
+    },
+    {
+      "name": "pre-4.json",
+      "kind": "misc",
+      "path": "pre-4.json",
+      "bytes": 435,
+      "sha256": "f6fed21a3239b8b56b67d21d8fa790d56a54a8011dcd87f9f22476852b398914",
+      "captured_at": "2026-08-12T02:25:29.667Z"
+    },
+    {
+      "name": "step-1.json",
+      "kind": "misc",
+      "path": "step-1.json",
+      "bytes": 364,
+      "sha256": "be21392c2df3aa0b941b1e3f7ea2ca2ec379d58827cf27fb10d6f9f4fd026695",
+      "captured_at": "2026-08-12T02:25:29.721Z"
+    },
+    {
+      "name": "step-2.json",
+      "kind": "misc",
+      "path": "step-2.json",
+      "bytes": 386,
+      "sha256": "fd094d623abf4d4df61e4efbc16f673e999d2be3ba0d282c9db7971f6be4ec40",
+      "captured_at": "2026-08-12T02:25:29.758Z"
+    },
+    {
+      "name": "step-3.json",
+      "kind": "misc",
+      "path": "step-3.json",
+      "bytes": 488,
+      "sha256": "b238e14428d793c51d225c72a62445c50c8d071c0f6f83f51d5b70c8785a61ab",
+      "captured_at": "2026-08-12T02:25:29.802Z"
+    },
+    {
+      "name": "test-plan.md",
+      "kind": "misc",
+      "path": "test-plan.md",
+      "bytes": 7586,
+      "sha256": "19710be05e5ba4cda0c70ebb25ee26411e12f38096d894262829fc1832d6bba7",
+      "captured_at": "2026-08-12T02:20:54.343Z"
+    }
+  ]
+}
