@@ -131,6 +131,23 @@ describe('trust ladder', () => {
     expect(requiredTrust('PUT', '/api/v1/settings', {})).toBe('admin');
   });
 
+  it('/ws/terminals/:id requires operator (WS upgrade is GET but socket is stdin-write)', () => {
+    expect(requiredTrust('GET', '/ws/terminals/abc123', undefined)).toBe('operator');
+  });
+
+  it('/ws/terminals sub-paths require operator', () => {
+    expect(requiredTrust('GET', '/ws/terminals/abc123/stdin', undefined)).toBe('operator');
+  });
+
+  it('/ws/terminals exact path (no trailing slash) requires operator', () => {
+    expect(requiredTrust('GET', '/ws/terminals', undefined)).toBe('operator');
+  });
+
+  it('/ws and /ws/events (read-only CoreEvent fan-out) remain observer', () => {
+    expect(requiredTrust('GET', '/ws', undefined)).toBe('observer');
+    expect(requiredTrust('GET', '/ws/events', undefined)).toBe('observer');
+  });
+
   it('project PATCH: rename is operator work; touching status (archive/restore) is admin', () => {
     expect(requiredTrust('PATCH', '/api/v1/projects/p1', { name: 'renamed' })).toBe('operator');
     expect(requiredTrust('PATCH', '/api/v1/projects/p1', { status: 'archived' })).toBe('admin');

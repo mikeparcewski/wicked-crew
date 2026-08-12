@@ -340,7 +340,9 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
  * Minimum trust for a request. Minimal by design (the task's rule: no
  * deny-by-default registry over unknown routes):
  *
- * - reads (GET/HEAD) and the `/ws` streams → `observer`
+ * - `/ws/terminals` and any sub-path → `operator` (write-capable WS channel;
+ *   inbound frames are raw PTY stdin regardless of the GET upgrade method)
+ * - reads (GET/HEAD) and the main `/ws` stream → `observer`
  * - governance writes, settings writes, project archive/restore → `admin`
  * - every other mutation (launch, gate, cancel, chats, terminals, repos,
  *   workflows, project CRUD/membership) → `operator`
@@ -350,6 +352,10 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
  * restore), which changes what the whole team can attach work to — `admin`.
  */
 export function requiredTrust(method: string, path: string, body: unknown): TrustLevel {
+  // /ws/terminals and any sub-path (e.g. /ws/terminals/:id) are write-capable WS
+  // channels — inbound frames are raw PTY stdin. The HTTP upgrade uses GET but the
+  // socket carries operator-level writes. Guard both with and without trailing slash.
+  if (path === '/ws/terminals' || path.startsWith('/ws/terminals/')) return 'operator';
   if (method === 'GET' || method === 'HEAD') return 'observer';
   if (path.startsWith(`${API_PREFIX}/governance/`)) return 'admin';
   if (path === `${API_PREFIX}/settings`) return 'admin';
