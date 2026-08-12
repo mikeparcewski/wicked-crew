@@ -47,6 +47,19 @@ export class InteractiveHandoffLedger {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as { docs?: Record<string, LegacyEntry> };
       if (parsed && typeof parsed === 'object' && parsed.docs && typeof parsed.docs === 'object') {
         for (const [key, entry] of Object.entries(parsed.docs)) {
+          // Per-row validation: one malformed row (null, primitive, missing/empty fields) costs
+          // that row alone — letting it throw into the outer catch would blank the WHOLE ledger
+          // and defeat replay-dedup for every handoff already answered. A kept row must satisfy
+          // the full HandoffLedgerEntry contract (non-empty runId + launchedAt strings).
+          if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            typeof entry.runId !== 'string' ||
+            entry.runId.length === 0 ||
+            typeof entry.launchedAt !== 'string'
+          ) {
+            continue;
+          }
           const { draftEmittedAt, ...rest } = entry;
           this.entries[key] = {
             ...rest,
