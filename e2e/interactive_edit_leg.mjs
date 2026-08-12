@@ -188,8 +188,9 @@ try {
   const { CoreAdapter } = await import('../packages/crew/src/core/adapter.ts');
   const { createServer } = await import('../packages/crew/src/api/server.ts');
   adapter = new CoreAdapter({ dbPath: join(T, 'core.db'), stub: false });
-  const seatOverride = REAL ? {} : { clisJson: STUB_SEATS };
   crewApp = await createServer(adapter, {
+    // The draft leg is this harness's PREREQUISITE, not its subject — it stays on the stub
+    // seat even in real mode (its own real-seat evidence is the spike's, PR #241).
     interactiveDraftEvents: {
       enabled: true,
       dbPath: BUS_DB,
@@ -197,8 +198,9 @@ try {
       heartbeatMs: 5_000,
       ledgerPath: join(T, 'draft-ledger.json'),
       draftDir: DRAFTS,
-      ...seatOverride,
+      clisJson: STUB_SEATS,
     },
+    // The EDIT seam is the leg under test: real council roster when WI_EDIT_REAL=1.
     interactiveEditEvents: {
       enabled: true,
       dbPath: BUS_DB,
@@ -206,7 +208,7 @@ try {
       heartbeatMs: 5_000,
       ledgerPath: join(T, 'edit-ledger.json'),
       editDir: EDITS,
-      ...seatOverride,
+      ...(REAL ? {} : { clisJson: STUB_SEATS }),
     },
     projectEvents: { dbPath: BUS_DB },
   });
