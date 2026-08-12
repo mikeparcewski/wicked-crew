@@ -309,7 +309,7 @@ function defaultStateDir(): string {
 /** The production council roster, resolved lazily through the adapter's own class so this module
  *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
 function rosterOf(adapter: CoreAdapter): unknown[] {
-  return (adapter.constructor as typeof CoreAdapter).roster();
+  return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
 /**
