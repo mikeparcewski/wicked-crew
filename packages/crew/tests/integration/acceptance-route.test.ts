@@ -52,6 +52,7 @@ beforeAll(async () => {
   // Two workspaces: one carrying a copy of the fixture ledger, one bare.
   const withLedger = join(dir, 'with-ledger');
   mkdirSync(withLedger);
+  // Deliberately the LEGACY dirname: the route must dual-read a pre-6c ledger.
   cpSync(join(FIXTURE, '.wicked-testing'), join(withLedger, '.wicked-testing'), { recursive: true });
   const bare = join(dir, 'bare');
   mkdirSync(bare);
