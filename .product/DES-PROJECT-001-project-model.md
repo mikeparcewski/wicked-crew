@@ -25,7 +25,7 @@ decides:
 grounded-in:
   - packages/crew/src/core/types.ts (SessionView:98 — "the read a UI builds its project list from"; RepoEntry:104)
   - packages/crew/src/api/routes.ts (the 52-route /api/v1 surface; gate/elicitation/chats/governance routes)
-  - packages/crew/src/api/gate-cache.ts + elicitation-cache.ts (FINDING-051 rebuild; lifecycle deferred)
+  - packages/crew/src/api/gate-cache.ts + packages/crew/src/api/elicitation-cache.ts (FINDING-051 rebuild; lifecycle deferred)
   - wicked-core/.product/DES-EXEC-001 (workflows-as-data, single-writer actor, bus edge table)
   - wicked-interactive src/service/events.js (wicked.interactive.* vocabulary) + ~/wicked-interactive/docs/<doc>/ layout (versions.json parent-pointer manifest, write-once _v{n}.html)
   - wicked-estate crates/wicked-estate-memory-core/src/scope.rs (kind:id slash-path scopes, parse_strict) + .product/REQ-003 (memory.erase/coverage scope_prefix subtree ops)
@@ -159,7 +159,7 @@ CREATE TABLE project_members (
   member_ref  TEXT NOT NULL,             -- opaque
   meta        TEXT,                      -- JSON: skin hints (doc root, display title…)
   attached_at INTEGER NOT NULL,
-  attached_by TEXT NOT NULL,             -- 'studio' | 'interactive' | 'cli' | 'api'
+  attached_by TEXT NOT NULL,             -- 'studio' | 'interactive' | 'cli' | 'api' (closed set enforced at the API layer; see §11.1 — the physical store is a graph, so the DDL here is logical)
   UNIQUE (project_id, member_kind, member_ref)
 );
 ```
@@ -341,7 +341,7 @@ untenable: a prompt must be *addressable state*, because the skin that renders i
 the skin that was connected when it fired.
 
 **Decision:** the engine persists interaction requests as a first-class table in core.db,
-written by the actor in the same transaction that emits `awaitingHuman` / elicitation-request,
+written by the actor in the same transaction that sets the run's `awaiting_human` STATUS and emits the `awaitingHuman` EVENT frame (two spellings, two things: the persisted `SessionStatus` serde token vs the CoreEvent discriminant) / elicitation-request,
 and resolved in the same transaction as the gate/elicitation decision:
 
 ```sql
