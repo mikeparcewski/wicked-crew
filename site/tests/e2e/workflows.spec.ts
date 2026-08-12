@@ -29,7 +29,8 @@ test.describe('workflows-as-data [data-wf]', () => {
     await expect(status).toContainText('auto-playing');
 
     // Pin a specific def: bug.json renders exactly its 4 phases.
-    await wf.locator('[data-wf-file]').nth(2).click();
+    // Select by visible name, not position — tab order may change.
+    await wf.locator('[data-wf-file]', { hasText: 'bug.json' }).click();
     await expect(page.locator('[data-wf-name]')).toHaveText('bug.json');
     await expect(page.locator('[data-wf-phases] .wf-phase')).toHaveCount(4);
     await expect(page.locator('[data-wf-phases] .wf-phase').first()).toHaveText('reproduce');
