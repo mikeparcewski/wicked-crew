@@ -11,7 +11,8 @@ import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
-import { startProjectBus } from '../projects/events.js';
+import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -72,7 +73,32 @@ export interface CreateServerOptions {
     clisJson?: string;
   };
   /**
-   * The project bus seam (DES-PROJECT-001 §4/§5.2). DEFAULT-ON, unlike the two opt-in seams
+   * Opt-in governed answering of wicked-interactive STRUCTURAL edits (task #86, Phase 7c final
+   * leg). When enabled, a durable subscriber answers `wicked.interactive.feedback.processed`
+   * (awaiting_structural > 0) with a governed `interactive-edit` run that ends in
+   * `wicked.interactive.edit.completed` — after a deterministic INV-2 pre-emit self-check;
+   * when absent (the default), interactive's own assist loop remains the answerer.
+   * Deterministic (content/style/remove) edits never reach this seam at all: the model-free
+   * service applies those instantly and hands off only the structural remainder.
+   */
+  interactiveEditEvents?: {
+    enabled: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+    /** Heartbeat narration cadence, ms (default 15000). */
+    heartbeatMs?: number;
+    /** Durable replay-dedup ledger path (default ~/.wicked-crew/interactive-edit-ledger.json). */
+    ledgerPath?: string;
+    /** Where handoff files land and workers write edited fragments
+     *  (default ~/.wicked-crew/interactive-edits). */
+    editDir?: string;
+    /** Seat roster override (JSON array); omit for the production council roster. */
+    clisJson?: string;
+  };
+  /**
+   * The project bus seam (DES-PROJECT-001 §4/§5.2). DEFAULT-ON, unlike the opt-in seams
    * above: the ADR's event vocabulary and the live activity bridge are part of the surface, not
    * an integration experiment — but the posture stays LOUD-non-fatal (no wicked-bus / broken db
    * ⇒ project CRUD works, events don't ride). `disabled: true` turns the whole seam off (tests).
@@ -95,6 +121,44 @@ export async function createServer(
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   const qeGateCache = new QeGateCache();
+
+  // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
+  // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
+  // from the engine so a restarted daemon tags correctly from the first frame. Created BEFORE
+  // the interactive seams below: their project-bound launches share the launch route's
+  // post-commit half (index tag + membership.attached emit) via `fileRun`.
+  const membershipIndex = new MembershipIndex();
+  await membershipIndex.hydrate(adapter, (m) => app.log.warn(m));
+  const projectBus =
+    options?.projectEvents?.disabled === true
+      ? null
+      : await startProjectBus({
+          ...(options?.projectEvents?.dbPath !== undefined
+            ? { dbPath: options.projectEvents.dbPath }
+            : {}),
+          ...(options?.projectEvents?.pollIntervalMs !== undefined
+            ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
+            : {}),
+          log: (m) => app.log.warn(m),
+        });
+  if (projectBus !== null) {
+    app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
+    app.addHook('onClose', async () => {
+      await projectBus.stop();
+    });
+  }
+
+  /** The post-commit half of a project-FILED launch, shared with the launch route (§2.2/§4):
+   *  the engine already attached the crew.run membership atomically with the launch — here we
+   *  tag future /ws frames and announce the attach on the project bus. */
+  const fileRun = (runId: string, projectId: string): void => {
+    membershipIndex.set(runId, projectId);
+    projectBus?.emit(
+      MEMBERSHIP_ATTACHED,
+      { project_id: projectId, member: { kind: 'crew.run', ref: runId }, actor: 'interactive' },
+      membershipAttachedKey(projectId, 'crew.run', runId, Date.now()),
+    );
+  };
 
   // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
   // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
@@ -125,6 +189,7 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.draftDir !== undefined ? { draftDir: o.draftDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
     if (sub !== null) {
@@ -135,28 +200,27 @@ export async function createServer(
     }
   }
 
-  // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
-  // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
-  // from the engine so a restarted daemon tags correctly from the first frame.
-  const membershipIndex = new MembershipIndex();
-  await membershipIndex.hydrate(adapter, (m) => app.log.warn(m));
-  const projectBus =
-    options?.projectEvents?.disabled === true
-      ? null
-      : await startProjectBus({
-          ...(options?.projectEvents?.dbPath !== undefined
-            ? { dbPath: options.projectEvents.dbPath }
-            : {}),
-          ...(options?.projectEvents?.pollIntervalMs !== undefined
-            ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
-            : {}),
-          log: (m) => app.log.warn(m),
-        });
-  if (projectBus !== null) {
-    app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
-    app.addHook('onClose', async () => {
-      await projectBus.stop();
+  // Arm the opt-in interactive STRUCTURAL-edit answering seam (task #86 final leg). Same
+  // posture as the draft seam: failure to arm is LOUD but non-fatal — interactive's assist
+  // loop is the fallback answerer, and this daemon must boot on a machine whose bus is broken.
+  if (options?.interactiveEditEvents?.enabled === true) {
+    const o = options.interactiveEditEvents;
+    const sub = await startInteractiveEditSubscriber(adapter, {
+      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
+      ...(o.editDir !== undefined ? { editDir: o.editDir } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      onRunFiled: fileRun,
+      log: (m) => app.log.warn(m),
     });
+    if (sub !== null) {
+      app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
   }
 
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts

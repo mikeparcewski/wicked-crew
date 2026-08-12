@@ -28,7 +28,7 @@ import {
   INTERACTIVE_PRODUCER,
   INTERACTIVE_DRAFT_WORKFLOW,
   INTERACTIVE_DRAFT_WORKFLOW_DEF,
-  InteractiveDraftLedger,
+  InteractiveHandoffLedger,
   parseSourceDocCreated,
   draftProblem,
   draftIdempotencyKey,
@@ -80,6 +80,12 @@ describe('parseSourceDocCreated', () => {
       source_paths: ['/ok', 42, null, ''],
     });
     expect(doc?.sourcePaths).toEqual(['/ok']);
+  });
+
+  it('carries project_id when the doc was created project-bound (P7 gate DEFECT-1)', () => {
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: 'proj-7' })?.projectId).toBe('proj-7');
+    expect(parseSourceDocCreated(DOC_CREATED, payload)?.projectId).toBeUndefined();
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })?.projectId).toBeUndefined();
   });
 });
 
@@ -161,7 +167,7 @@ describe('bus identity constants', () => {
   });
 });
 
-describe('InteractiveDraftLedger', () => {
+describe('InteractiveHandoffLedger', () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'crew-idl-'));
@@ -172,24 +178,24 @@ describe('InteractiveDraftLedger', () => {
 
   it('records a launch durably — a fresh load sees it (restart-safe replay dedupe)', () => {
     const path = join(dir, 'ledger.json');
-    const ledger = new InteractiveDraftLedger(path);
+    const ledger = new InteractiveHandoffLedger(path);
     expect(ledger.has('doc-a')).toBe(false);
     ledger.recordLaunch('doc-a', 'run-1');
-    const reloaded = new InteractiveDraftLedger(path);
+    const reloaded = new InteractiveHandoffLedger(path);
     expect(reloaded.has('doc-a')).toBe(true);
     expect(reloaded.get('doc-a')?.runId).toBe('run-1');
-    expect(reloaded.get('doc-a')?.draftEmittedAt).toBeUndefined();
+    expect(reloaded.get('doc-a')?.emittedAt).toBeUndefined();
   });
 
   it('tracks the emit and failure lifecycle', () => {
     const path = join(dir, 'ledger.json');
-    const ledger = new InteractiveDraftLedger(path);
+    const ledger = new InteractiveHandoffLedger(path);
     ledger.recordLaunch('doc-a', 'run-1');
-    ledger.recordDraftEmitted('doc-a');
+    ledger.recordEmitted('doc-a');
     ledger.recordLaunch('doc-b', 'run-2');
     ledger.recordFailure('doc-b');
-    const reloaded = new InteractiveDraftLedger(path);
-    expect(reloaded.get('doc-a')?.draftEmittedAt).toBeTruthy();
+    const reloaded = new InteractiveHandoffLedger(path);
+    expect(reloaded.get('doc-a')?.emittedAt).toBeTruthy();
     expect(reloaded.get('doc-b')?.failedAt).toBeTruthy();
     expect(reloaded.size()).toBe(2);
   });
@@ -197,7 +203,7 @@ describe('InteractiveDraftLedger', () => {
   it('starts empty on a malformed file rather than killing the daemon', () => {
     const path = join(dir, 'ledger.json');
     writeFileSync(path, '{not json', 'utf8');
-    const ledger = new InteractiveDraftLedger(path);
+    const ledger = new InteractiveHandoffLedger(path);
     expect(ledger.size()).toBe(0);
     // …and recovers the file on the next write.
     ledger.recordLaunch('doc-a', 'run-1');
@@ -272,7 +278,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  async function emitDocCreated(bus: typeof import('wicked-bus'), documentId = 'spike-doc') {
+  async function emitDocCreated(
+    bus: typeof import('wicked-bus'),
+    documentId = 'spike-doc',
+    overrides: Record<string, unknown> = {},
+  ) {
     const db = bus.openDb({ db_path: busDb });
     const config = bus.loadConfig({ db_path: busDb });
     bus.emit(db, config, {
@@ -286,6 +296,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
         source_paths: [],
         style: 'web',
         ts: new Date().toISOString(),
+        ...overrides,
       },
       producer_id: 'wi-service',
     });
@@ -386,7 +397,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
           (e.payload as { state?: string }).state === 'complete',
       ),
     );
-    expect(sub!.ledger.get('spike-doc')?.draftEmittedAt).toBeTruthy();
+    expect(sub!.ledger.get('spike-doc')?.emittedAt).toBeTruthy();
   });
 
   it('a REPLAYED doc.created launches no second run (ledger dedupe), and a second completion emits no second draft', async () => {
@@ -418,7 +429,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     mkdirSync(draftDir, { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
-    await waitFor(() => sub!.ledger.get('spike-doc')?.draftEmittedAt !== undefined);
+    await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
     engine.fire({ type: 'sessionCompleted', session: runId }); // in-flight entry is gone — a no-op
     armProbe(bus);
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -505,6 +516,35 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // …and no ledger row exists, so a later replay (e.g. DLQ redrive) gets a real retry.
     expect(sub!.ledger.has('spike-doc')).toBe(false);
     expect(engine.launches.length).toBe(0);
+  });
+
+  it('FILES the run when doc.created carries project_id — and reports it via onRunFiled (P7 DEFECT-1 regression)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const filed: Array<[string, string]> = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      onRunFiled: (runId, projectId) => filed.push([runId, projectId]),
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    // Project-bound doc → the launch carries projectId and the post-commit hook fires.
+    await emitDocCreated(bus, 'bound-doc', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    expect(engine.launches[0]!.projectId).toBe('proj-7');
+    expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-7']]);
+
+    // Unbound doc → no projectId on the launch, no post-commit hook.
+    await emitDocCreated(bus, 'unbound-doc');
+    await waitFor(() => engine.launches.length === 2);
+    expect(engine.launches[1]!.projectId).toBeUndefined();
+    expect(filed).toHaveLength(1);
   });
 
   it('a completed run whose worker wrote NO file posts an error instead of announcing a phantom draft', async () => {

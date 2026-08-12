@@ -31,7 +31,10 @@ interface BootstrapOpts {
   qeBusDbPath: string | undefined;
   /** OPT-IN (task #86 spike): answer wicked-interactive doc.created with a governed draft run. */
   interactiveDraftEvents: boolean;
-  /** Seat roster override for the draft runs (JSON array); `undefined` = production roster. */
+  /** OPT-IN (task #86 final leg): answer wicked-interactive structural feedback handoffs
+   *  (feedback.processed, awaiting_structural > 0) with a governed edit run. */
+  interactiveEditEvents: boolean;
+  /** Seat roster override for the draft/edit runs (JSON array); `undefined` = production roster. */
   interactiveSeats: string | undefined;
 }
 
@@ -79,11 +82,18 @@ function parseBootstrap(args: string[]): BootstrapOpts {
     hasFlag(args, '--interactive-draft-events') ||
     (process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== undefined &&
       process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== '');
+  // OPT-IN (task #86 final leg, same shape): answer wicked-interactive's structural feedback
+  // handoffs (`feedback.processed`, awaiting_structural > 0) with a governed `interactive-edit`
+  // run — the deterministic remainder of every batch stays inside the model-free service.
+  const interactiveEditEvents =
+    hasFlag(args, '--interactive-edit-events') ||
+    (process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== undefined &&
+      process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== '');
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
     dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath,
-    interactiveDraftEvents, interactiveSeats,
+    interactiveDraftEvents, interactiveEditEvents, interactiveSeats,
   };
 }
 
@@ -114,6 +124,16 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     ...(opts.interactiveDraftEvents
       ? {
           interactiveDraftEvents: {
+            enabled: true,
+            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
+            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
+          },
+        }
+      : {}),
+    ...(opts.interactiveEditEvents
+      ? {
+          interactiveEditEvents: {
             enabled: true,
             // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
             ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
@@ -178,6 +198,7 @@ async function main(): Promise<void> {
       busDb: adapter.engineExec ? adapter.busDbPath : undefined,
       qeGateEvents: opts.qeGateEvents || undefined,
       interactiveDraftEvents: opts.interactiveDraftEvents || undefined,
+      interactiveEditEvents: opts.interactiveEditEvents || undefined,
       startupMs: Math.round(performance.now() - t0),
     });
   } else if (command === 'start') {
