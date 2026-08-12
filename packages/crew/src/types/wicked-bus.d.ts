@@ -73,4 +73,7 @@ declare module 'wicked-bus' {
 
   /** Managed long-running subscriber (durable cursor; at-least-once). */
   export function subscribe(opts: SubscribeOptions): BusSubscription;
+
+  /** The bus SQLite file a config resolves to (`config.db_path` or `<dataDir>/bus.db`). */
+  export function resolveDbPath(config?: Record<string, unknown>): string;
 }

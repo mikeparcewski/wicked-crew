@@ -16,6 +16,9 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { MembershipIndex } from '../projects/membership-index.js';
+import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
 export { API_PREFIX } from './api-prefix.js';
@@ -131,6 +134,9 @@ export const LaunchSchema = z.object({
   humanConfirm: z.string().min(1).optional(),
   repoRef: z.string().min(1).optional(),
   workflow: z.string().min(1).optional(),
+  /** DES-PROJECT-001 §2.2 — file the run into a project; membership attaches atomically with
+   *  the launch record. Unknown/archived ⇒ the launch fails (never a silent unfiled run). */
+  projectId: z.string().min(1).optional(),
 }).strict();
 
 export const GateSchema = z.object({
@@ -172,6 +178,9 @@ export function registerRoutes(
   // function directly) gets the same behavior as an unarmed daemon: an empty
   // cache, `busEvent: null`, and the lazy ledger read doing all the work.
   qeGateEvents: QeGateCache = new QeGateCache(),
+  // Defaulted for the same reason: tests that drive this function directly get
+  // the projects surface with no bus (events skipped) and a fresh index.
+  projects: ProjectRoutesDeps = { bus: null, index: new MembershipIndex(), log: () => undefined },
 ): void {
   // Liveness — also proves the actor + event pump are up.
   app.get(`${V}/health`, async () => {
@@ -257,11 +266,31 @@ export function registerRoutes(
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
+    if (b.projectId !== undefined) input.projectId = b.projectId;
     try {
       const runId = await adapter.launchRun(input);
+      if (b.projectId !== undefined) {
+        // The engine attached the crew.run membership ATOMICALLY with the launch record
+        // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and
+        // emit the membership event (auto-attach at launch is an attach, §4).
+        projects.index.set(runId, b.projectId);
+        projects.bus?.emit(
+          MEMBERSHIP_ATTACHED,
+          { project_id: b.projectId, member: { kind: 'crew.run', ref: runId }, actor: 'api' },
+          membershipAttachedKey(b.projectId, 'crew.run', runId, Date.now()),
+        );
+      }
       return reply.code(201).send({ runId });
     } catch (err) {
       const msg = message(err);
+      // An unknown/archived project is a state conflict on a real resource, not a malformed
+      // request: 404/409 per the projects error mapping; anything else keeps the launch 400/409.
+      if (b.projectId !== undefined && /project.*not registered/i.test(msg)) {
+        return reply.code(404).send({ error: msg });
+      }
+      if (b.projectId !== undefined && /archived|'default'|synthesized/i.test(msg)) {
+        return reply.code(409).send({ error: msg });
+      }
       const busy = /busy|in flight|already/i.test(msg);
       return reply.code(busy ? 409 : 400).send({ error: msg });
     }
@@ -292,6 +321,8 @@ export function registerRoutes(
     chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
     clis: z.array(z.string().min(1)).min(1).max(8).optional(),
     repoRef: z.string().optional(),
+    /** DES-PROJECT-001 §2.2 — file the chat into a project (`crew.chat` membership). */
+    projectId: z.string().min(1).optional(),
   }).strict();
   app.post(`${V}/chats`, async (req, reply) => {
     const parsed = ChatOpenSchema.safeParse(req.body ?? {});
@@ -307,6 +338,25 @@ export function registerRoutes(
       if (!repo) return reply.code(404).send({ error: `Repo ${b.repoRef} not found` });
       cwd = repo.root_path;
     }
+    // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
+    // attach against atomically (chats are an in-memory seat pool), so the route validates
+    // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
+    // changelog. Fail here and no seats were warmed for a filing that could never happen.
+    if (b.projectId !== undefined) {
+      try {
+        const project = await adapter.projectGet(b.projectId);
+        if (project === null) {
+          return reply.code(404).send({ error: `Project ${b.projectId} not found` });
+        }
+        if (project.status === 'archived') {
+          return reply
+            .code(409)
+            .send({ error: `project ${b.projectId} is archived and blocks new attachments` });
+        }
+      } catch (err) {
+        return reply.code(501).send({ error: message(err) });
+      }
+    }
     const clis =
       b.clis ??
       (CoreAdapter.roster() as { key?: string }[])
@@ -314,6 +364,29 @@ export function registerRoutes(
         .filter((k): k is string => typeof k === 'string');
     try {
       const seats = await adapter.chatOpen(chatId, clis, cwd);
+      if (b.projectId !== undefined) {
+        try {
+          const { member, created } = await adapter.projectMemberAttach(
+            b.projectId,
+            'crew.chat',
+            chatId,
+          );
+          if (created) {
+            projects.index.set(chatId, b.projectId);
+            projects.bus?.emit(
+              MEMBERSHIP_ATTACHED,
+              { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: 'api' },
+              membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
+            );
+          }
+        } catch (err) {
+          // The chat is open and usable; the filing failed. Say so instead of failing the open —
+          // the caller can re-attach via POST /projects/:id/members.
+          return reply
+            .code(201)
+            .send({ chatId, seats, projectAttachError: message(err) });
+        }
+      }
       return reply.code(201).send({ chatId, seats });
     } catch (err) {
       return reply.code(400).send({ error: message(err) });
@@ -565,6 +638,30 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'No open gate for this run' });
     }
 
+    // DURABLE TRUTH FIRST (DES-PROJECT-001 §5.3): the engine persists the open prompt in
+    // `interaction_requests`, written in the same transaction as the `awaiting_human` pause —
+    // so a daemon restart reads it back directly instead of replaying the event log. The cache
+    // adopts the row (latency layer over durable truth — its comments finally true). The replay
+    // below stays as the FALLBACK, not just for engines predating the binding: a run parked
+    // BEFORE the engine grew the table is awaiting_human with no row, and answering 404 there
+    // would re-open FINDING-051 for exactly the runs mid-upgrade. Row → serve it; no row →
+    // fall through and let the log speak.
+    const durableRows =
+      typeof adapter.interactionRequests === 'function'
+        ? await adapter.interactionRequests(id, 'open')
+        : null;
+    const durableGate = durableRows?.find((r) => r.kind === 'gate');
+    if (durableGate !== undefined) {
+      const entry = {
+        ord: durableGate.ord ?? 0,
+        prompt: durableGate.prompt,
+        lifecycle: 'open' as const,
+        receivedAt: new Date(durableGate.created_at).toISOString(),
+      };
+      gateCache.adopt(id, entry);
+      return { runId: id, ...entry };
+    }
+
     const events = await adapter.runEvents(id);
     if (events === null) {
       // Now — and only now — 503 is the honest answer: this run really is holding for a human, and
@@ -599,6 +696,26 @@ export function registerRoutes(
     // Use sessions() (IDs only) — cheaper than sessionsDetail() on this read path.
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
+    // Durable probe (DES-PROJECT-001 §5.3): `interaction_requests` reserves kind `elicitation`.
+    // The engine writes no elicitation rows yet (its elicitation surface is future work — the
+    // resolve path still answers 501), so this read is empty today; it exists so the cache is
+    // STRUCTURALLY a latency layer, and the day the engine writes the rows, restart survival
+    // holds here exactly as it does for gates, with no route change. Guarded like `runEvents`:
+    // a partial-stub adapter (tests) or a pre-0.6.0 addon simply has no durable half.
+    const durable =
+      typeof adapter.interactionRequests === 'function'
+        ? await adapter.interactionRequests(id, 'open')
+        : null;
+    const pending = durable?.find((r) => r.kind === 'elicitation');
+    if (pending !== undefined) {
+      return {
+        runId: id,
+        elicitationId: pending.id,
+        message: pending.prompt,
+        options: null,
+        receivedAt: new Date(pending.created_at).toISOString(),
+      };
+    }
     return reply.code(404).send({ error: 'No pending elicitation for this run' });
   });
 
@@ -1276,4 +1393,7 @@ export function registerRoutes(
     }
     return { settings: await adapter.updateSettings(safe) };
   });
+
+  // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
+  registerProjectRoutes(app, adapter, projects);
 }

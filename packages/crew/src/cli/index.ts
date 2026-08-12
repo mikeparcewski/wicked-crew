@@ -121,6 +121,14 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
           },
         }
       : {}),
+    // Projects (DES-PROJECT-001): default-ON, loud-non-fatal. Bus-db resolution follows the
+    // cross-product seams above (explicit --bus-db / WICKED_BUS_DB wins; otherwise wicked-bus's
+    // own default, where interactive's service also lands) — NOT the exec seam's crew-private
+    // fallback: `wicked.crew.project.*` and the interactive activity bridge are cross-product
+    // traffic, and the two skins must meet on one db.
+    ...(opts.qeBusDbPath !== undefined
+      ? { projectEvents: { dbPath: opts.qeBusDbPath } }
+      : {}),
   };
   const { port } = await startServer(
     adapter,

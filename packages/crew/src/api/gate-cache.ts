@@ -109,6 +109,17 @@ export class GateCache {
     return this.entries.get(runId);
   }
 
+  /**
+   * Adopt an entry hydrated from the DURABLE `interaction_requests` table (DES-PROJECT-001
+   * §5.3). With that table, this cache is finally what its own comments always claimed — a
+   * latency layer over durable truth: the route reads the table on a miss and parks the result
+   * here so the next poll is a map hit. `rebuild` (event-log replay) remains the fallback for
+   * engines predating the table.
+   */
+  adopt(runId: string, entry: GateCacheEntry): void {
+    this.entries.set(runId, entry);
+  }
+
   /** Drop cache entries whose run is no longer `awaiting_human` (self-healing on reconcile). */
   reconcile(views: SessionView[]): void {
     const awaiting = new Set(
