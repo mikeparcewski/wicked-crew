@@ -350,6 +350,9 @@ const PROJECT_DETAIL_PATH = new RegExp(`^${API_PREFIX}/projects/[^/]+$`);
  * restore), which changes what the whole team can attach work to — `admin`.
  */
 export function requiredTrust(method: string, path: string, body: unknown): TrustLevel {
+  // /ws/terminals/:id is a write-capable WS channel — inbound frames are raw PTY
+  // stdin. The HTTP upgrade uses GET but the socket carries operator-level writes.
+  if (path.startsWith('/ws/terminals/')) return 'operator';
   if (method === 'GET' || method === 'HEAD') return 'observer';
   if (path.startsWith(`${API_PREFIX}/governance/`)) return 'admin';
   if (path === `${API_PREFIX}/settings`) return 'admin';

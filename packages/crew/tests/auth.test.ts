@@ -131,6 +131,15 @@ describe('trust ladder', () => {
     expect(requiredTrust('PUT', '/api/v1/settings', {})).toBe('admin');
   });
 
+  it('/ws/terminals/:id requires operator regardless of method (stdin-write channel)', () => {
+    // WS upgrades are GET, but the socket proxies raw PTY stdin — must be operator.
+    expect(requiredTrust('GET', '/ws/terminals/abc123', undefined)).toBe('operator');
+    expect(requiredTrust('GET', '/ws/terminals/abc123/stdin', undefined)).toBe('operator');
+    // The main /ws stream itself is still observer (read-only CoreEvent fan-out).
+    expect(requiredTrust('GET', '/ws', undefined)).toBe('observer');
+    expect(requiredTrust('GET', '/ws/events', undefined)).toBe('observer');
+  });
+
   it('project PATCH: rename is operator work; touching status (archive/restore) is admin', () => {
     expect(requiredTrust('PATCH', '/api/v1/projects/p1', { name: 'renamed' })).toBe('operator');
     expect(requiredTrust('PATCH', '/api/v1/projects/p1', { status: 'archived' })).toBe('admin');
