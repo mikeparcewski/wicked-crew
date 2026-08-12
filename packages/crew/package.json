@@ -34,7 +34,7 @@
     "pi-acp": "^0.0.32",
     "wicked-bus": "^2.3.1",
     "wicked-core-ts": "^0.5.0",
-    "wicked-ledger": "git+https://github.com/mikeparcewski/wicked-ledger.git#v0.1.1",
+    "wicked-ledger": "git+https://github.com/mikeparcewski/wicked-ledger.git#v0.2.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

@@ -2,8 +2,9 @@
  * Read-only view over a repo's QE evidence ledger (wicked-ledger).
  *
  * The ledger is the data contract between the QE pipeline (wicked-garden's qe
- * skills, formerly wicked-testing) and the acceptance gate this daemon owns:
- * a DomainStore rooted at `<repo>/.wicked-testing/` holding `runs` and
+ * skills, formerly the retired wicked-testing package) and the acceptance gate
+ * this daemon owns: a DomainStore rooted at `<repo>/.wicked-qe/` (legacy
+ * `<repo>/.wicked-testing/` — see qeLedgerRoot) holding `runs` and
  * `verdicts`, plus the public evidence manifest at
  * `<root>/evidence/<run-id>/manifest.json`. This module reads that state
  * through the wicked-ledger package API (public entry, no deep imports) and
@@ -25,13 +26,14 @@ import type { EvidenceManifest, RunRecord, VerdictRecord } from 'wicked-ledger';
 /**
  * The ledger root directory name under a repo root.
  *
- * `.wicked-testing` is the wire contract today — the path garden's qe skills
- * write and every downstream consumer reads. Phase 6c renames it as part of
- * the wicked-testing retirement, which is why this is a single configurable
- * constant rather than a literal at each use site: when 6c lands, the flip is
- * one default (or one env var during the transition), not a grep.
+ * Phase 6c (the wicked-testing retirement) renamed the wire contract to
+ * `.wicked-qe`; `.wicked-testing` is the legacy dirname repos written by the
+ * retired package (and pre-6c garden qe skills) still carry. Resolution is
+ * dual-read and mirrors wicked-ledger's `resolveLedgerRoot`: the new name
+ * wins, an existing legacy root is honored, fresh repos get the new name.
  */
-export const DEFAULT_QE_LEDGER_DIRNAME = '.wicked-testing';
+export const DEFAULT_QE_LEDGER_DIRNAME = '.wicked-qe';
+export const LEGACY_QE_LEDGER_DIRNAME = '.wicked-testing';
 
 /** The configured ledger dir name: `WICKED_QE_LEDGER_DIR` env override, else the default. */
 export function qeLedgerDirName(): string {
@@ -39,9 +41,22 @@ export function qeLedgerDirName(): string {
   return env !== undefined && env !== '' ? env : DEFAULT_QE_LEDGER_DIRNAME;
 }
 
-/** Absolute ledger root for a repo. */
+/**
+ * Absolute ledger root for a repo (dual-read, Phase 6c).
+ *
+ * An explicit `WICKED_QE_LEDGER_DIR` pins the dirname exactly — the operator
+ * is driving, no fallback probing. Otherwise: `<repo>/.wicked-qe` when it
+ * exists; else an existing legacy `<repo>/.wicked-testing` (that ledger keeps
+ * its root — a store must never split across two dirs); else `.wicked-qe`.
+ */
 export function qeLedgerRoot(repoRoot: string): string {
-  return join(repoRoot, qeLedgerDirName());
+  const env = process.env['WICKED_QE_LEDGER_DIR']?.trim();
+  if (env !== undefined && env !== '') return join(repoRoot, env);
+  const current = join(repoRoot, DEFAULT_QE_LEDGER_DIRNAME);
+  if (existsSync(current)) return current;
+  const legacy = join(repoRoot, LEGACY_QE_LEDGER_DIRNAME);
+  if (existsSync(legacy)) return legacy;
+  return current;
 }
 
 /**

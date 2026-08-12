@@ -23,7 +23,7 @@ import type { SessionView, WorkflowDef } from '../src/core/types.js';
 /** A minimal ledger state carrying one verdict. */
 function stateWith(verdict: string, reason: string | null = null): QeAcceptanceState {
   return {
-    root: '/repo/.wicked-testing',
+    root: '/repo/.wicked-qe',
     found: true,
     run: null,
     verdict: {
@@ -85,7 +85,7 @@ describe('resolveAcceptanceGate', () => {
 
   it('denies a missing ledger, naming the path it probed', () => {
     const res = resolveAcceptanceGate(true, {
-      root: '/repo/.wicked-testing',
+      root: '/repo/.wicked-qe',
       found: false,
       run: null,
       verdict: null,
@@ -93,7 +93,7 @@ describe('resolveAcceptanceGate', () => {
       manifestPath: null,
     });
     expect(res.satisfied).toBe(false);
-    expect(res.reason).toContain('/repo/.wicked-testing');
+    expect(res.reason).toContain('/repo/.wicked-qe');
     expect(res.reason).toMatch(/missing ⇒ deny/);
   });
 
@@ -101,7 +101,7 @@ describe('resolveAcceptanceGate', () => {
     // Unreadable and absent have different remedies (fix the store vs run QE);
     // conflating them sends the operator to the wrong one.
     const res = resolveAcceptanceGate(true, {
-      root: '/repo/.wicked-testing',
+      root: '/repo/.wicked-qe',
       found: true,
       run: null,
       verdict: null,
@@ -116,7 +116,7 @@ describe('resolveAcceptanceGate', () => {
 
   it('denies a ledger with no verdict rows', () => {
     const res = resolveAcceptanceGate(true, {
-      root: '/repo/.wicked-testing',
+      root: '/repo/.wicked-qe',
       found: true,
       run: null,
       verdict: null,

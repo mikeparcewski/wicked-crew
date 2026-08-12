@@ -2,9 +2,9 @@
  * Opt-in consumption of the QE gate's wicked-bus events.
  *
  * The QE pipeline announces gate results on the bus — the wire contract the
- * old wicked-testing `lib/gate.mjs` established and garden's qe skills now
- * emit (event names and payload fields are NOT renamed here; Phase 6c owns
- * any rebrand):
+ * retired wicked-testing package's `lib/gate.mjs` established and garden's qe
+ * skills now emit (Phase 6c kept these event names and payload fields STABLE
+ * by decision — only the emitters' `domain` stamp rebranded to `qe`):
  *
  *   wicked.qe.gate.passed | wicked.qe.gate.failed | wicked.qe.gate.conditional
  *     payload (8 canonical fields): run_id, context, gate_verdict, exit_code,

@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_QE_LEDGER_DIRNAME,
+  LEGACY_QE_LEDGER_DIRNAME,
   qeLedgerDirName,
   qeLedgerRoot,
   readAcceptanceState,
@@ -31,11 +32,16 @@ let dir: string;
 /** Prior value of the ledger-dir override, restored after each test (never clobber the harness env). */
 let priorLedgerDirEnv: string | undefined;
 
-/** A fresh workspace holding a copy of the fixture ledger (never mutate the committed fixture). */
-function workspaceWithLedger(): string {
+/**
+ * A fresh workspace holding a copy of the fixture ledger (never mutate the
+ * committed fixture). The FIXTURE keeps the legacy `.wicked-testing` dirname —
+ * it is the 6b run the retired package's era wrote — so copying it under the
+ * default (new) dirname is a rename, and copying it as-is exercises dual-read.
+ */
+function workspaceWithLedger(dirname: string = DEFAULT_QE_LEDGER_DIRNAME): string {
   const ws = join(dir, 'ws');
   mkdirSync(ws, { recursive: true });
-  cpSync(join(FIXTURE, DEFAULT_QE_LEDGER_DIRNAME), join(ws, DEFAULT_QE_LEDGER_DIRNAME), {
+  cpSync(join(FIXTURE, LEGACY_QE_LEDGER_DIRNAME), join(ws, dirname), {
     recursive: true,
   });
   return ws;
@@ -52,22 +58,36 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('qeLedgerDirName', () => {
-  it('defaults to the .wicked-testing wire contract', () => {
-    expect(qeLedgerDirName()).toBe('.wicked-testing');
-    expect(qeLedgerRoot('/repo')).toBe(join('/repo', '.wicked-testing'));
+describe('qeLedgerDirName / qeLedgerRoot', () => {
+  it('defaults to the .wicked-qe dirname (Phase 6c rename)', () => {
+    expect(qeLedgerDirName()).toBe('.wicked-qe');
+    // No ledger dir on disk at all → the new name, never the legacy one.
+    expect(qeLedgerRoot(dir)).toBe(join(dir, '.wicked-qe'));
   });
 
-  // The 6c rename lands as a config flip, not a grep — this pins that the seam exists.
-  it('honours the WICKED_QE_LEDGER_DIR override', () => {
-    process.env['WICKED_QE_LEDGER_DIR'] = '.wicked-qe';
-    expect(qeLedgerDirName()).toBe('.wicked-qe');
-    expect(qeLedgerRoot('/repo')).toBe(join('/repo', '.wicked-qe'));
+  it('honours the WICKED_QE_LEDGER_DIR override exactly (no fallback probing)', () => {
+    process.env['WICKED_QE_LEDGER_DIR'] = '.custom-ledger';
+    expect(qeLedgerDirName()).toBe('.custom-ledger');
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    expect(qeLedgerRoot(ws)).toBe(join(ws, '.custom-ledger'));
   });
 
   it('treats a blank override as unset', () => {
     process.env['WICKED_QE_LEDGER_DIR'] = '  ';
     expect(qeLedgerDirName()).toBe(DEFAULT_QE_LEDGER_DIRNAME);
+  });
+
+  // Dual-read (Phase 6c): a repo written under the retired package's dirname
+  // keeps resolving — reads AND writes stay in that root.
+  it('resolves an existing legacy .wicked-testing root when no .wicked-qe exists', () => {
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    expect(qeLedgerRoot(ws)).toBe(join(ws, LEGACY_QE_LEDGER_DIRNAME));
+  });
+
+  it('prefers .wicked-qe when both dirnames exist', () => {
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    mkdirSync(join(ws, DEFAULT_QE_LEDGER_DIRNAME), { recursive: true });
+    expect(qeLedgerRoot(ws)).toBe(join(ws, DEFAULT_QE_LEDGER_DIRNAME));
   });
 });
 
@@ -142,6 +162,15 @@ describe('readAcceptanceState', () => {
     const pinned = await readAcceptanceState(ws, { qeRunId: QE_RUN_ID });
     expect(pinned.verdict?.verdict).toBe('PASS');
     expect(pinned.run?.id).toBe(QE_RUN_ID);
+  });
+
+  it('reads a legacy-dirname ledger end to end (dual-read)', async () => {
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    const state = await readAcceptanceState(ws);
+    expect(state.root).toBe(join(ws, LEGACY_QE_LEDGER_DIRNAME));
+    expect(state.found).toBe(true);
+    expect(state.verdict?.verdict).toBe('PASS');
+    expect(state.manifest).not.toBeNull();
   });
 
   it('heals a stale SQLite index from canonical JSON instead of reporting an empty ledger', async () => {

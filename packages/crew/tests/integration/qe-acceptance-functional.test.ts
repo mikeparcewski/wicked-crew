@@ -78,6 +78,7 @@ beforeAll(async () => {
   // A real git repo whose worktree carries the fixture ledger.
   workspace = join(dir, 'workspace');
   mkdirSync(workspace);
+  // Deliberately the LEGACY dirname: the gate must dual-read a pre-6c ledger.
   cpSync(join(FIXTURE, '.wicked-testing'), join(workspace, '.wicked-testing'), { recursive: true });
   writeFileSync(join(workspace, 'README.md'), '# qe acceptance functional workspace\n');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: workspace, stdio: 'pipe' });

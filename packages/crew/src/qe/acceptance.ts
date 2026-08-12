@@ -1,7 +1,8 @@
 /**
  * The acceptance gate: deny-dominates resolution of a workflow's acceptance
- * requirement from the QE evidence ledger (Phase 6a — crew becomes the
- * control-plane owner of the gate before wicked-testing retires in 6c).
+ * requirement from the QE evidence ledger (Phase 6a made crew the
+ * control-plane owner of the gate; Phase 6c retired wicked-testing, so the
+ * QE pipeline is garden's qe skills writing through wicked-ledger).
  *
  * A workflow DECLARES an acceptance requirement through its phases: any phase
  * carrying `verified_evidence: true` requires its "done" to be re-derived from
@@ -37,8 +38,9 @@
 import type { Verdict } from 'wicked-ledger';
 import { VERDICT_VALUES } from 'wicked-ledger';
 import type { RepoEntry, SessionView, WorkflowDef } from '../core/types.js';
+import { basename } from 'node:path';
 import type { QeAcceptanceState, QeManifestSummary } from './ledger.js';
-import { qeLedgerDirName, readAcceptanceState, summarizeManifest } from './ledger.js';
+import { readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
 
 /**
@@ -294,7 +296,9 @@ export async function buildAcceptanceView(opts: {
     acceptance:
       state !== null
         ? {
-            ledgerDir: qeLedgerDirName(),
+            // The dirname actually resolved (dual-read may have picked the
+            // legacy `.wicked-testing` root) — not the configured default.
+            ledgerDir: basename(state.root),
             ledgerRoot: state.root,
             found: state.found,
             qeRun:
