@@ -473,6 +473,40 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(sub!.ledger.get('spike-doc')?.failedAt).toBeTruthy();
   });
 
+  it('a FAILED LAUNCH closes the thread with an error status and writes no ledger row (a replay can retry)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const adapter = engine.asAdapter();
+    (adapter as unknown as { launchRun: unknown }).launchRun = async () => {
+      throw new Error('engine is busy');
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus);
+    // The 'processing' pickup was posted, then the launch failure closed it out as an error…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('engine is busy'),
+      ),
+    );
+    // …and no ledger row exists, so a later replay (e.g. DLQ redrive) gets a real retry.
+    expect(sub!.ledger.has('spike-doc')).toBe(false);
+    expect(engine.launches.length).toBe(0);
+  });
+
   it('a completed run whose worker wrote NO file posts an error instead of announcing a phantom draft', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();

@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 // Functional spike gate for the interactive-draft seam (task #86, Phase 7c first leg).
 //
 // End-to-end on a SCRATCH stack — nothing touches the operator's real docs root, bus,

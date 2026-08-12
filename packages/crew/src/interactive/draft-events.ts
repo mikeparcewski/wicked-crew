@@ -525,13 +525,29 @@ export async function startInteractiveDraftSubscriber(
       message: 'A governed crew picked up your brief — planning the draft…',
     });
 
-    await adapter.launchRun({
-      problem: draftProblem(doc, outPath),
-      sessionId: runId,
-      clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
-      workflow: INTERACTIVE_DRAFT_WORKFLOW,
-    });
-    // Record AFTER the launch resolved: a failed launch leaves no ledger row, so the next
+    try {
+      await adapter.launchRun({
+        problem: draftProblem(doc, outPath),
+        sessionId: runId,
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        workflow: INTERACTIVE_DRAFT_WORKFLOW,
+      });
+    } catch (err) {
+      // The 'processing' status is already on the thread — close it out honestly so the
+      // canvas never sits in an in-between state on a launch that went nowhere.
+      const reason = err instanceof Error ? err.message : String(err);
+      emitInteractive(STATUS_POSTED, {
+        document_id: doc.documentId,
+        state: 'error',
+        message: `Crew could not start a run for this document: ${reason}. The assist loop can still take over.`,
+      });
+      // DELIBERATELY no ledger write: only an answered doc earns a row, so an operator can
+      // replay the dead-lettered doc.created after fixing the daemon and get a real retry.
+      // Re-throw so the bus (maxRetries 0) dead-letters the frame — visible, replayable,
+      // and incapable of hot-looping.
+      throw err;
+    }
+    // Record AFTER the launch resolved: a failed launch leaves no ledger row, so a replayed
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
