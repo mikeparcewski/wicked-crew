@@ -3,10 +3,10 @@
   "description": "csv_stats.py exists at the fixture root",
   "executed_at": "2026-08-12T02:25:29.629768+00:00",
   "duration_ms": 0,
-  "action": "file_exists check for /private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/csv_stats.py",
+  "action": "file_exists check for /workspace/qe-fixture/csv_stats.py",
   "evidence": {
     "pre-2-check": {
-      "path": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/csv_stats.py",
+      "path": "/workspace/qe-fixture/csv_stats.py",
       "exists": true
     }
   },

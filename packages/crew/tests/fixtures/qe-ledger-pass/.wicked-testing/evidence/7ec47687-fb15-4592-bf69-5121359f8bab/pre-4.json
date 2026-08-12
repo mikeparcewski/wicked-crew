@@ -6,10 +6,10 @@
   "action": "pwd (run with the same cwd used for all test steps)",
   "evidence": {
     "pre-4-cwd": {
-      "stdout": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture\n",
+      "stdout": "/workspace/qe-fixture\n",
       "stderr": "",
       "exit_code": 0,
-      "cwd_used_for_all_steps": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture"
+      "cwd_used_for_all_steps": "/workspace/qe-fixture"
     }
   },
   "execution_notes": ""

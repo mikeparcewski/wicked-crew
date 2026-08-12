@@ -75,11 +75,18 @@ export async function createServer(
   // (§3.3), cache elicitation prompts (DES-002), route terminal frames to their owning
   // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame verbatim
   // to all `/ws` clients (§2.1).
-  adapter.onEvent((event) => {
+  //
+  // Unregistered on close: a process can build more than one server over the same
+  // adapter (tests do), and a closed server's caches must stop consuming events —
+  // otherwise every discarded server keeps folding state forever (listener leak).
+  const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     terminals.route(event);
     broadcast(event);
+  });
+  app.addHook('onClose', async () => {
+    offEvent();
   });
 
   app.addHook('onRequest', async (req, reply) => {

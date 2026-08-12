@@ -28,6 +28,8 @@ const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
 const QE_VERDICT_ID = '7ae4f27c-57f4-4e36-bfea-3e3d6c4deb48';
 
 let dir: string;
+/** Prior value of the ledger-dir override, restored after each test (never clobber the harness env). */
+let priorLedgerDirEnv: string | undefined;
 
 /** A fresh workspace holding a copy of the fixture ledger (never mutate the committed fixture). */
 function workspaceWithLedger(): string {
@@ -40,11 +42,13 @@ function workspaceWithLedger(): string {
 }
 
 beforeEach(() => {
+  priorLedgerDirEnv = process.env['WICKED_QE_LEDGER_DIR'];
   dir = mkdtempSync(join(tmpdir(), 'qe-ledger-'));
 });
 
 afterEach(() => {
-  delete process.env['WICKED_QE_LEDGER_DIR'];
+  if (priorLedgerDirEnv === undefined) delete process.env['WICKED_QE_LEDGER_DIR'];
+  else process.env['WICKED_QE_LEDGER_DIR'] = priorLedgerDirEnv;
   rmSync(dir, { recursive: true, force: true });
 });
 

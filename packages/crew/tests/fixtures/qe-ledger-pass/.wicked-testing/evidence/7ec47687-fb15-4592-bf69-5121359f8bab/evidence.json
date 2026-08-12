@@ -8,7 +8,7 @@
   "steps_executed": 3,
   "steps_skipped": 0,
   "prerequisites_executed": 4,
-  "evidence_directory": "/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/.wicked-testing/evidence/7ec47687-fb15-4592-bf69-5121359f8bab",
+  "evidence_directory": "/workspace/qe-fixture/.wicked-testing/evidence/7ec47687-fb15-4592-bf69-5121359f8bab",
   "step_files": [
     "step-1.json",
     "step-2.json",

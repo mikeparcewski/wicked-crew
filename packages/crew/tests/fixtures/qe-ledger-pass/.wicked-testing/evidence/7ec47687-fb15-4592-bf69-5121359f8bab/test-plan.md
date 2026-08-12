@@ -1,11 +1,11 @@
 # Test Plan: csv-stats-basic
 
 ## Metadata
-- **Source**: /private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/scenarios/csv-stats-basic.md
+- **Source**: /workspace/qe-fixture/scenarios/csv-stats-basic.md
 - **Generated**: 2026-08-11 (ISO date; wall-clock time unavailable to the write-phase agent)
 - **Implementation files**:
-  - /private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/csv_stats.py
-  - /private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/data/orders.csv
+  - /workspace/qe-fixture/csv_stats.py
+  - /workspace/qe-fixture/data/orders.csv
 
 ## Suspected injection
 
@@ -29,13 +29,13 @@ None. The scenario body contains only test-relevant prose; no passage attempts t
   - `pre-1-exit` EQUALS `0`
 
 ### PRE-2: csv_stats.py exists at the fixture root
-- **Check**: Test for file existence at `/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/csv_stats.py`.
+- **Check**: Test for file existence at `/workspace/qe-fixture/csv_stats.py`.
 - **Evidence**: `pre-2-check` — file_exists record for that absolute path (path + exists boolean).
 - **Assert**: `pre-2-check` EXISTS
 
 ### PRE-3: Fixture data is exactly the expected 3-row orders file
 - **Check**: Capture the full content of `data/orders.csv` from the fixture root.
-- **Evidence**: `pre-3-content` — verbatim file content of `/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture/data/orders.csv`.
+- **Evidence**: `pre-3-content` — verbatim file content of `/workspace/qe-fixture/data/orders.csv`.
 - **Assert**:
   - `pre-3-content` MATCHES `^order_id,amount,region\n1001,25\.50,east\n1002,10\.00,west\n1003,4\.50,east\n?$`
   (anchored: exactly one header + exactly the three expected data rows — guards A1's `rows=3` and A2's sum of 40 against fixture drift)
@@ -43,7 +43,7 @@ None. The scenario body contains only test-relevant prose; no passage attempts t
 ### PRE-4: Working directory is the fixture root
 - **Check**: From the shell that will run all test steps, run `pwd` (or platform equivalent) and capture output.
 - **Evidence**: `pre-4-cwd` — captured working-directory path.
-- **Assert**: `pre-4-cwd` EQUALS `/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/71f5123a-192c-4f7f-b8eb-c6c62daeb90c/scratchpad/qe-fixture`
+- **Assert**: `pre-4-cwd` EQUALS `/workspace/qe-fixture`
 
 ## Test Steps
 
