@@ -495,16 +495,30 @@ export async function startInteractiveEditSubscriber(
       { document_id: documentId, version, results },
       editIdempotencyKey(documentId, version),
     );
-    if (emitted) {
-      ledger.recordEmitted(key);
+    if (!emitted) {
+      // The bus refused the announce (non-WB-002): the edit exists on disk but never reached
+      // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
+      // silently eat every replay of this handoff (the launch gate is `ledger.has`).
+      ledger.recordFailure(key);
       emitInteractive(STATUS_POSTED, {
         document_id: documentId,
         version,
-        state: 'complete',
-        message: 'Edit is in — landing the new version on the canvas now.',
+        state: 'error',
+        message:
+          `Crew finished the edit but could not announce it on the bus (run ${runId}); ` +
+          `the document is unchanged. Inspect the crew daemon log, then resubmit the edit.`,
       });
-      log(`[interactive-edit] edit.completed emitted for ${key} (run ${runId}, ${results.length} fragment(s))`);
+      log(`[interactive-edit] edit.completed emit FAILED for ${key} (run ${runId}) — recorded as failure`);
+      return;
     }
+    ledger.recordEmitted(key);
+    emitInteractive(STATUS_POSTED, {
+      document_id: documentId,
+      version,
+      state: 'complete',
+      message: 'Edit is in — landing the new version on the canvas now.',
+    });
+    log(`[interactive-edit] edit.completed emitted for ${key} (run ${runId}, ${results.length} fragment(s))`);
   }
 
   async function handleFeedbackProcessed(event: BusEvent): Promise<void> {

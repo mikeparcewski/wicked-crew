@@ -429,15 +429,28 @@ export async function startInteractiveDraftSubscriber(
       { document_id: documentId, html_path: outPath },
       draftIdempotencyKey(documentId),
     );
-    if (emitted) {
-      ledger.recordEmitted(documentId);
+    if (!emitted) {
+      // The bus refused the announce (non-WB-002): the draft exists on disk but never reached
+      // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
+      // silently eat every replay of this doc (the launch gate is `ledger.has`).
+      ledger.recordFailure(documentId);
       emitInteractive(STATUS_POSTED, {
         document_id: documentId,
-        state: 'complete',
-        message: 'First draft is in — landing it on the canvas now. Click any block to refine it.',
+        state: 'error',
+        message:
+          `Crew finished the draft but could not announce it on the bus (run ${runId}); ` +
+          `the draft file is at ${outPath}. Inspect the crew daemon log.`,
       });
-      log(`[interactive-draft] draft.completed emitted for doc ${documentId} (run ${runId})`);
+      log(`[interactive-draft] draft.completed emit FAILED for doc ${documentId} (run ${runId}) — recorded as failure`);
+      return;
     }
+    ledger.recordEmitted(documentId);
+    emitInteractive(STATUS_POSTED, {
+      document_id: documentId,
+      state: 'complete',
+      message: 'First draft is in — landing it on the canvas now. Click any block to refine it.',
+    });
+    log(`[interactive-draft] draft.completed emitted for doc ${documentId} (run ${runId})`);
   }
 
   async function handleDocCreated(event: BusEvent): Promise<void> {
