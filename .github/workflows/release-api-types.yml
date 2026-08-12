@@ -1,0 +1,104 @@
+# wicked-crew-api-types — npm release (P9 conditional #3).
+#
+# ── Why this workflow exists ────────────────────────────────────────────────────────────────────
+#
+# `wicked-studio` declared `wicked-crew-api-types` as a git reference
+# (`github:mikeparcewski/wicked-crew#api-types-v0.1.0`), which means:
+#   - Any operator cloning studio without prior npm-install history must have git access to the
+#     wicked-crew repo — a private source tree is a dependency of a published package.
+#   - `npm audit` cannot inspect the dependency tree past the git boundary.
+#   - Pinning by commit/tag gives no semver range resolution; upstream breakage silently lurks.
+#
+# Publishing to the npm registry fixes all three: studio can declare `^0.2.0`, the dependency
+# is public, auditable, and range-resolved like every other dep in the ecosystem.
+#
+# ── Why self-contained rather than a wicked-ci caller ───────────────────────────────────────────
+#
+# The shared `node-release.yml` strips a leading `v` from the tag (e.g. `v0.2.0` → `0.2.0`).
+# This repo already owns `v*` for the main `wicked-crew` package.  A second tag namespace
+# (`api-types-v*`) would need a different prefix strip, and wicked-ci's reusable workflow does
+# not expose a `tag_prefix` parameter.  `release-bridges.yml` hit this exact constraint and went
+# self-contained; this workflow follows the same precedent.
+
+name: Release api-types
+
+on:
+  push:
+    tags:
+      - 'api-types-v*'
+
+permissions:
+  # No release notes, no sync PR — read access is all this job needs for the checkout.
+  contents: read
+  # OIDC trusted publishing + `npm publish --provenance`: the same tokenless path that
+  # `wicked-crew` (node-release.yml) and `agent-acp-bridges` (release-bridges.yml) already use.
+  # No NPM_TOKEN is stored in this repo.
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/crew-api-types
+    steps:
+      # SHA-pinned to match ci.yml — a release workflow is the last place to float an action tag.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          # Match ci.yml. Releasing on a different Node major than CI proved green on is the
+          # same class of mismatch as FINDING-072.
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      # npm 12 is the major that published wicked-core-ts and agent-acp-bridges through this
+      # tokenless OIDC path — pinned to a major, not @latest, for reproducibility.
+      - name: Upgrade npm (provenance-capable)
+        run: npm install -g npm@12
+        working-directory: .
+
+      # Workspace install to pull in the typescript devDependency used by the typecheck step.
+      # `npm ci` — release must install what the lockfile pins, not whatever resolves today.
+      - name: Install workspace
+        run: npm ci
+        working-directory: .
+
+      # The package is declaration-only (index.d.ts).  The typecheck step compiles the
+      # declarations against the tsconfig to catch any structural error before publish.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Guard: the tag and the package.json version must agree exactly.  Deriving the version
+      # from the tag and stamping silently would let `api-types-v9.9.9` publish whatever the
+      # manifest happens to say.  Fail loudly instead.
+      - name: Tag and manifest must agree
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#api-types-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "  tag      : ${GITHUB_REF_NAME}  -> ${TAG_VERSION}"
+          echo "  manifest : ${PKG_VERSION}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} implies ${TAG_VERSION} but package.json says ${PKG_VERSION}. Bump the manifest and re-tag rather than publishing a version the tag does not name."
+            exit 1
+          fi
+
+      - name: Publish to npm (trusted publisher + provenance)
+        run: npm publish --access public --provenance
+
+      # Prove the registry can actually serve the package — not just that publish exited 0.
+      # Mirrors the post-publish probe in release-bridges.yml (FINDING-096 precedent).
+      - name: The registry can actually serve it
+        working-directory: .
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#api-types-v}"
+          for i in 1 2 3 4 5 6; do
+            if npm view "wicked-crew-api-types@${TAG_VERSION}" version; then
+              echo "  ok — obtainable from the registry"
+              exit 0
+            fi
+            echo "  not visible yet (attempt $i), waiting…"
+            sleep 10
+          done
+          echo "::error::wicked-crew-api-types@${TAG_VERSION} is still not resolvable after publish. This is the exact failure mode FINDING-096 describes: a green publish for something no operator can install."
+          exit 1

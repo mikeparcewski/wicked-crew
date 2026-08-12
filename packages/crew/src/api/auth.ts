@@ -56,7 +56,7 @@ export const LOCAL_ACTOR: Actor = Object.freeze({
 }) as Actor;
 
 const TRUST_RANK: Record<TrustLevel, number> = { observer: 0, operator: 1, admin: 2 };
-const KINDS: ReadonlySet<string> = new Set<ActorKind>(['human', 'agent']);
+const KINDS: ReadonlySet<string> = new Set<ActorKind>(['human', 'agent', 'system']);
 const TRUSTS: ReadonlySet<string> = new Set<TrustLevel>(['observer', 'operator', 'admin']);
 
 /** True when `actor` sits at or above `min` on the ladder. */
@@ -150,7 +150,7 @@ export function parseTokenFile(json: string, source: string): Map<string, Actor>
       throw new Error(`${at}: 'actor.id' must be a non-empty string (≤128 chars)`);
     }
     if (typeof a.kind !== 'string' || !KINDS.has(a.kind)) {
-      throw new Error(`${at}: 'actor.kind' must be 'human' | 'agent'`);
+      throw new Error(`${at}: 'actor.kind' must be 'human' | 'agent' | 'system'`);
     }
     if (typeof a.trust !== 'string' || !TRUSTS.has(a.trust)) {
       throw new Error(`${at}: 'actor.trust' must be 'observer' | 'operator' | 'admin'`);

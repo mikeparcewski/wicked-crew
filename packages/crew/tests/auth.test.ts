@@ -67,6 +67,12 @@ describe('token file (hashed at rest)', () => {
     expect(await verifier.verify('secret-2')).toBeNull();
   });
 
+  it("a 'system' actor kind parses and verifies — internal process actors use this kind", async () => {
+    const json = JSON.stringify(entry({ actor: { id: 'bus-bridge', kind: 'system', trust: 'operator' } }));
+    const verifier = createStaticVerifier(parseTokenFile(json, 'test'));
+    expect(await verifier.verify('secret-1')).toEqual({ id: 'bus-bridge', kind: 'system', trust: 'operator' });
+  });
+
   it.each([
     [{ sha256: 'abc' }, /sha256/],
     [{ actor: { id: '', kind: 'agent', trust: 'operator' } }, /actor\.id/],

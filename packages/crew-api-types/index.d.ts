@@ -28,8 +28,8 @@
 
 // ── Identity / actor contract (task #88, locked decision #6) ───────────────────
 
-/** What kind of principal an actor is: a person (OAuth/OIDC or local operator) or a workload. */
-export type ActorKind = 'human' | 'agent';
+/** What kind of principal an actor is: a person (OAuth/OIDC or local operator), a workload, or an internal process. */
+export type ActorKind = 'human' | 'agent' | 'system';
 
 /**
  * The minimal trust ladder: `admin` > `operator` > `observer`.
