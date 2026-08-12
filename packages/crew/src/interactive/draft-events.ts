@@ -26,14 +26,15 @@
  *  - INV-2 (`data-wid`): first drafts are whole documents with no pre-existing anchors — the
  *    service instruments fresh ones — so the worker contract explicitly forbids inventing
  *    `data-wid` attributes rather than requiring preservation. The feedback→edit leg (fragment
- *    preservation at scale) is the LATER structural leg, after the Project-model ADR.
+ *    preservation at scale) is the structural seam next door: edit-events.ts.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
+import { InteractiveHandoffLedger } from './ledger.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 
@@ -57,8 +58,9 @@ export const INTERACTIVE_BUS_PLUGIN = 'wicked-crew-interactive-draft';
 export const INTERACTIVE_PRODUCER = 'wi-crew';
 
 /** Interactive's doc-name grammar (server.js DOC_NAME) — re-checked before any launch so a
- *  malformed document_id can't name a ledger key or a draft file path. */
-const DOC_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+ *  malformed document_id can't name a ledger key or a draft file path. Shared with the
+ *  structural-edit seam (edit-events.ts), which guards the same identity. */
+export const DOC_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
@@ -130,6 +132,9 @@ export interface SourceDocCreated {
   brief: string;
   sourcePaths: string[];
   style: string;
+  /** Present when the doc was created bound to a crew project (interactive's DES-PROJECT-001
+   *  enrichment) — the run is then FILED via LaunchOptions.projectId (P7 gate DEFECT-1). */
+  projectId?: string;
 }
 
 /**
@@ -149,13 +154,15 @@ export function parseSourceDocCreated(eventType: string, payload: unknown): Sour
     ? p['source_paths'].filter((s): s is string => typeof s === 'string' && s.length > 0)
     : [];
   const style = typeof p['style'] === 'string' && p['style'].length > 0 ? p['style'] : 'web';
-  return { documentId, brief, sourcePaths, style };
+  const projectId =
+    typeof p['project_id'] === 'string' && p['project_id'].length > 0 ? p['project_id'] : undefined;
+  return { documentId, brief, sourcePaths, style, ...(projectId !== undefined ? { projectId } : {}) };
 }
 
 /** Collapse whitespace/newlines to single spaces and cap length — the intent must stay a
  *  single line (the PTY seat runner refuses embedded newlines) and a pasted-novel brief must
- *  not balloon the worker prompt. */
-function oneLine(text: string, cap: number): string {
+ *  not balloon the worker prompt. Shared with the structural-edit seam. */
+export function oneLine(text: string, cap: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > cap ? `${flat.slice(0, cap)}…` : flat;
 }
@@ -184,84 +191,12 @@ export function draftIdempotencyKey(documentId: string): string {
 }
 
 // ── Durable per-doc ledger (replay-dedup across redelivery AND daemon restarts) ──────────────
+//
+// The ledger implementation now lives in ledger.ts (shared with the structural-edit seam);
+// this leg keys it by DOCUMENT ID — one first draft per document lifetime. Re-exported here so
+// the seam's public surface stays one module.
 
-/** One ledger row — the lifecycle of a doc this seam answered. */
-export interface DraftLedgerEntry {
-  runId: string;
-  launchedAt: string;
-  /** Set once `draft.completed` was emitted (or the run failed — see `failedAt`). */
-  draftEmittedAt?: string;
-  /** Set when the governed run ended without a usable draft; kept so a redelivered
-   *  `doc.created` does not silently relaunch a run an operator should look at first. */
-  failedAt?: string;
-}
-
-/**
- * Durable map `document_id → DraftLedgerEntry`, JSON on disk, written atomically
- * (tmp + rename). The bus cursor alone cannot carry this: at-least-once delivery means the
- * same `doc.created` can arrive again after a crash between handling and cursor advance, and
- * `emitted-hash` state in memory dies with the process. The ledger is the system of record for
- * "this doc was answered"; the cache-like in-flight map is just the live half.
- */
-export class InteractiveDraftLedger {
-  private readonly path: string;
-  private docs: Record<string, DraftLedgerEntry>;
-
-  constructor(path: string) {
-    this.path = path;
-    this.docs = {};
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { docs?: Record<string, DraftLedgerEntry> };
-      if (parsed && typeof parsed === 'object' && parsed.docs && typeof parsed.docs === 'object') {
-        this.docs = parsed.docs;
-      }
-    } catch {
-      // Missing or malformed ledger — start empty. Malformed is deliberately NOT fatal: a
-      // corrupt ledger must not stop the daemon, and the worst case is one duplicate draft
-      // emit, which the deterministic bus idempotency key still dedupes.
-    }
-  }
-
-  has(documentId: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.docs, documentId);
-  }
-
-  get(documentId: string): DraftLedgerEntry | undefined {
-    return this.docs[documentId];
-  }
-
-  recordLaunch(documentId: string, runId: string): void {
-    this.docs[documentId] = { runId, launchedAt: new Date().toISOString() };
-    this.persist();
-  }
-
-  recordDraftEmitted(documentId: string): void {
-    const entry = this.docs[documentId];
-    if (entry) {
-      entry.draftEmittedAt = new Date().toISOString();
-      this.persist();
-    }
-  }
-
-  recordFailure(documentId: string): void {
-    const entry = this.docs[documentId];
-    if (entry) {
-      entry.failedAt = new Date().toISOString();
-      this.persist();
-    }
-  }
-
-  size(): number {
-    return Object.keys(this.docs).length;
-  }
-
-  private persist(): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify({ docs: this.docs }, null, 2), 'utf8');
-    renameSync(tmp, this.path);
-  }
-}
+export { InteractiveHandoffLedger, type HandoffLedgerEntry } from './ledger.js';
 
 // ── The subscriber ────────────────────────────────────────────────────────────────────────────
 
@@ -283,6 +218,11 @@ export interface InteractiveDraftOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** Called after a launch that FILED the run into a project (doc.created carried
+   *  `project_id`). The server wires this to the same post-commit half the launch route
+   *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
+   *  (the engine already attached the crew.run membership atomically with the launch). */
+  onRunFiled?: (runId: string, projectId: string) => void;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
 }
@@ -291,7 +231,7 @@ export interface InteractiveDraftOptions {
 export interface InteractiveDraftSubscription {
   stop(): Promise<void> | void;
   /** The durable ledger (diagnostics / tests). */
-  ledger: InteractiveDraftLedger;
+  ledger: InteractiveHandoffLedger;
 }
 
 interface InFlight {
@@ -366,7 +306,7 @@ export async function startInteractiveDraftSubscriber(
     return null;
   }
 
-  const ledger = new InteractiveDraftLedger(
+  const ledger = new InteractiveHandoffLedger(
     opts.ledgerPath ?? join(defaultStateDir(), 'interactive-draft-ledger.json'),
   );
   const draftDir = opts.draftDir ?? join(defaultStateDir(), 'interactive-drafts');
@@ -489,7 +429,7 @@ export async function startInteractiveDraftSubscriber(
       draftIdempotencyKey(documentId),
     );
     if (emitted) {
-      ledger.recordDraftEmitted(documentId);
+      ledger.recordEmitted(documentId);
       emitInteractive(STATUS_POSTED, {
         document_id: documentId,
         state: 'complete',
@@ -531,6 +471,10 @@ export async function startInteractiveDraftSubscriber(
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
+        // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
+        // the crew.run membership atomically with the launch, so the run shows up in the
+        // project's activity feed instead of floating unattributed.
+        ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the
@@ -551,6 +495,7 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
+    if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
 
     const flight: InFlight = {
       documentId: doc.documentId,
