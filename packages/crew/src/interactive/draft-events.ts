@@ -52,9 +52,10 @@ export const INTERACTIVE_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
  *  seams advance independent cursors and stopping one never strands the other. */
 export const INTERACTIVE_BUS_PLUGIN = 'wicked-crew-interactive-draft';
 
-/** The producer identity stamped on every event this module emits. Must appear in interactive's
- *  events.js ownership table for DRAFT_COMPLETED and STATUS_POSTED (the one interactive change
- *  this spike is allowed). */
+/** The producer identity stamped on every event crew's interactive seams emit (this module and
+ *  edit-events.ts). Must appear in interactive's events.js ownership table for DRAFT_COMPLETED,
+ *  EDIT_COMPLETED, and STATUS_POSTED — the additive vocabulary rows that are the only
+ *  interactive changes Phase 7c is allowed. */
 export const INTERACTIVE_PRODUCER = 'wi-crew';
 
 /** Interactive's doc-name grammar (server.js DOC_NAME) — re-checked before any launch so a
