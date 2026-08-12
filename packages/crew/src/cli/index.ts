@@ -29,6 +29,10 @@ interface BootstrapOpts {
   qeGateEvents: boolean;
   /** Bus db for the QE subscription; `undefined` = wicked-bus's own default resolution. */
   qeBusDbPath: string | undefined;
+  /** OPT-IN (task #86 spike): answer wicked-interactive doc.created with a governed draft run. */
+  interactiveDraftEvents: boolean;
+  /** Seat roster override for the draft runs (JSON array); `undefined` = production roster. */
+  interactiveSeats: string | undefined;
 }
 
 /** Durable state home (~/.wicked-crew) — runs/evidence must survive a reboot, which the
@@ -66,7 +70,21 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
   // events are cross-product traffic that never lands there.
   const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
-  return { dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath };
+  // OPT-IN (task #86 spike, same shape as --qe-gate-events): answer wicked-interactive's
+  // `doc.created` (kind:source) with a governed `interactive-draft` run. The subscription's bus
+  // db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
+  // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's
+  // service resolves its bus exactly that way, so by default the two meet on the same db.
+  const interactiveDraftEvents =
+    hasFlag(args, '--interactive-draft-events') ||
+    (process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== undefined &&
+      process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== '');
+  // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
+  const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
+  return {
+    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath,
+    interactiveDraftEvents, interactiveSeats,
+  };
 }
 
 let adapterRef: CoreAdapter | undefined;
@@ -84,18 +102,31 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     busDbPath: opts.busDbPath,
   });
   adapterRef = adapter;
-  const { port } = await startServer(
-    adapter,
-    opts.port,
-    undefined,
-    opts.qeGateEvents
+  const serverOptions = {
+    ...(opts.qeGateEvents
       ? {
           qeGateEvents: {
             enabled: true,
             ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
           },
         }
-      : undefined,
+      : {}),
+    ...(opts.interactiveDraftEvents
+      ? {
+          interactiveDraftEvents: {
+            enabled: true,
+            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
+            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
+          },
+        }
+      : {}),
+  };
+  const { port } = await startServer(
+    adapter,
+    opts.port,
+    undefined,
+    Object.keys(serverOptions).length > 0 ? serverOptions : undefined,
   );
   installShutdownHandlers();
   return { adapter, port };
@@ -138,6 +169,7 @@ async function main(): Promise<void> {
       engineExec: adapter.engineExec,
       busDb: adapter.engineExec ? adapter.busDbPath : undefined,
       qeGateEvents: opts.qeGateEvents || undefined,
+      interactiveDraftEvents: opts.interactiveDraftEvents || undefined,
       startupMs: Math.round(performance.now() - t0),
     });
   } else if (command === 'start') {

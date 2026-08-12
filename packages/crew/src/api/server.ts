@@ -10,6 +10,7 @@ import { ElicitationCache } from './elicitation-cache.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
+import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import type { CoreAdapter } from '../core/adapter.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
@@ -42,6 +43,28 @@ export interface CreateServerOptions {
     /** Poll cadence, ms (tests shorten it). */
     pollIntervalMs?: number;
   };
+  /**
+   * Opt-in governed answering of wicked-interactive first-draft generation (task #86 spike,
+   * Phase 7c). When enabled, a durable subscriber answers `wicked.interactive.doc.created`
+   * (kind:source) with a governed `interactive-draft` run that ends in
+   * `wicked.interactive.draft.completed`; when absent (the default), interactive's own assist
+   * loop remains the answerer and crew never touches that bus traffic.
+   */
+  interactiveDraftEvents?: {
+    enabled: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+    /** Heartbeat narration cadence, ms (default 15000). */
+    heartbeatMs?: number;
+    /** Durable replay-dedup ledger path (default ~/.wicked-crew/interactive-draft-ledger.json). */
+    ledgerPath?: string;
+    /** Where governed workers write finished drafts (default ~/.wicked-crew/interactive-drafts). */
+    draftDir?: string;
+    /** Seat roster override (JSON array); omit for the production council roster. */
+    clisJson?: string;
+  };
 }
 
 export async function createServer(
@@ -65,6 +88,28 @@ export async function createServer(
     });
     if (sub !== null) {
       app.log.info(`qe gate-event subscription armed (filter wicked.qe.**)`);
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
+
+  // Arm the opt-in interactive-draft answering seam (task #86 spike). Same posture as the QE
+  // seam: failure to arm is LOUD but non-fatal — interactive's assist loop is the fallback
+  // answerer, and this daemon must boot on a machine whose bus is broken.
+  if (options?.interactiveDraftEvents?.enabled === true) {
+    const o = options.interactiveDraftEvents;
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
+      ...(o.draftDir !== undefined ? { draftDir: o.draftDir } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      log: (m) => app.log.warn(m),
+    });
+    if (sub !== null) {
+      app.log.info('interactive-draft subscription armed (filter wicked.interactive.doc.created)');
       app.addHook('onClose', async () => {
         await sub.stop();
       });
