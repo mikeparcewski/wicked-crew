@@ -19,9 +19,9 @@
 # with CI passing, because no test touched it. CI proved that broken code compiles (FINDING-072,
 # wicked-crew#187).
 #
-# So CI now builds `wicked-core-ts` from source and links it in, exactly as wicked-core's own CI
-# checks out wicked-estate as a sibling for its path deps. `tests/engine-contract.test.ts` fails
-# loudly if that linking ever silently stops happening.
+# So CI now builds `wicked-core-ts` from source and links it in. (wicked-estate needs no sibling
+# checkout since wicked-core#245 — core resolves estate from crates.io.) `tests/engine-contract.test.ts`
+# fails loudly if that linking ever silently stops happening.
 #
 # That fix has a blind spot, which is FINDING-088: because BOTH CI and local dev replace the
 # installed engine with a source build, neither can observe the DECLARED range at all. It drifted
@@ -71,30 +71,12 @@ jobs:
           ref: ${{ env.WICKED_CORE_REF }}
           path: wicked-core
 
-      # wicked-core resolves wicked-estate through relative path deps, three of which are
-      # `publish = false` — so building the addon needs estate as a sibling too. The ref is READ OUT
-      # of wicked-core's own CI rather than copied here: this file having its own WICKED_ESTATE_REF
-      # would be a third copy of a constant that must agree, with nothing failing when it drifts.
-      # One producer, one consumer.
-      - name: Resolve the estate ref wicked-core pins
-        id: estate
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import re, sys
-          src = open('wicked-core/.github/workflows/ci.yml', encoding='utf-8').read()
-          m = re.search(r'^\s*WICKED_ESTATE_REF:\s*(\S+)', src, re.M)
-          if not m:
-              sys.exit("wicked-core/.github/workflows/ci.yml no longer declares WICKED_ESTATE_REF — "
-                       "the pin moved; update this step to read it from wherever it lives now.")
-          print(f"ref={m.group(1)}")
-          PY
-
-      - name: Checkout wicked-estate (sibling — wicked-core's path deps build from source)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          repository: mikeparcewski/wicked-estate
-          ref: ${{ steps.estate.outputs.ref }}
-          path: wicked-estate
+      # No estate sibling checkout: wicked-core resolves wicked-estate from crates.io (published
+      # semver deps, wicked-core#245 — its `lockstep.rs` guards that no workflow reintroduces a raw
+      # estate ref). This job used to read WICKED_ESTATE_REF out of wicked-core's own CI and check
+      # estate out as a second sibling; when core#245 removed that constant, the reader here failed
+      # closed (by design) and took every crew PR and main push with it. The registry release the
+      # napi build compiles against is the same one wicked-core's own CI and releases resolve.
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
