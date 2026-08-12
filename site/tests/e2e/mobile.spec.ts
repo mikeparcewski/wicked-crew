@@ -39,5 +39,25 @@ test.describe('mobile (390×844)', () => {
     await expect(gcStatic).toBeVisible();
     await expect(gcStatic.locator('.gcs-stamp')).toHaveText('HELD');
     await expect(gcStatic.locator('.gcs-list li.is-fail')).toHaveCount(1);
+    // The ledger line rides the static panel too: CONDITIONAL is a hold.
+    await expect(gcStatic.locator('.gcs-ledger')).toContainText('CONDITIONAL');
+  });
+
+  test('the skins section and four-plane map render on a phone', async ({ page }) => {
+    await page.goto('/');
+
+    // Two-skins story: cards stack single-column but stay fully present.
+    const skins = page.locator('[data-skins]');
+    await bringIntoView(skins);
+    await expect(skins).toBeVisible();
+    await expect(skins.locator('.skin-card')).toHaveCount(2);
+    await expect(skins.locator('.skin-trace-rows li')).toHaveCount(4);
+
+    // SameGarden is CSS-only and degrades — all four planes visible.
+    const map = page.locator('.same-garden');
+    await bringIntoView(map);
+    await expect(map).toBeVisible();
+    await expect(map.locator('.sg-plane')).toHaveCount(4);
+    await expect(map.locator('.sg-card--here')).toBeVisible();
   });
 });

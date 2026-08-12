@@ -42,6 +42,38 @@ test.describe('gate console [data-gc]', () => {
     await expect(gc).toHaveClass(/is-manual/);
   });
 
+  test('the ledger card shows the CONDITIONAL hold; hand-driving degrades it to a plain FAIL', async ({ page }) => {
+    await page.goto('/');
+    const gc = page.locator('[data-gc]');
+    await bringIntoView(gc);
+
+    const stamp = gc.locator('[data-stamp]');
+    const chip = gc.locator('[data-gc-ledger-verdict]');
+    const sw = gc.locator('[data-sw][data-policy="verdict.json"]');
+
+    // Settle on the ledger scene: verdict.json open because the QE evidence
+    // ledger returned CONDITIONAL — a hold, not a FAIL.
+    await page.locator('[data-gc-card][data-card="ledger"]').click();
+    await expect(stamp).toHaveText('DENY');
+    await expect(sw.locator('[data-state]')).toHaveText('COND');
+    await expect(gc.locator('[data-vline]')).toContainText('CONDITIONAL');
+    await expect(chip).toHaveText('CONDITIONAL');
+    await expect(chip).toHaveAttribute('data-v', 'conditional');
+
+    // Closing the switch by hand: a clean PASS — the chip mirrors it live.
+    await sw.click();
+    await expect(stamp).toHaveText('ALLOW');
+    await expect(sw.locator('[data-state]')).toHaveText('PASS');
+    await expect(chip).toHaveText('PASS');
+
+    // Re-opening by hand is a plain FAIL, not the ledger's CONDITIONAL reading.
+    await sw.click();
+    await expect(stamp).toHaveText('DENY');
+    await expect(sw.locator('[data-state]')).toHaveText('FAIL');
+    await expect(chip).toHaveText('FAIL');
+    await expect(chip).toHaveAttribute('data-v', 'fail');
+  });
+
   test('the LLM judge seat can veto but never approve', async ({ page }) => {
     await page.goto('/');
     const gc = page.locator('[data-gc]');
