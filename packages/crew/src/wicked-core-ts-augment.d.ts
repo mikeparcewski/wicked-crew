@@ -4,6 +4,8 @@ export {};
 declare module 'wicked-core-ts' {
   interface LaunchOptions {
     workflow?: string;
+    /** DES-PROJECT-001 §2.2 — file the run into a project (attached atomically with the launch). */
+    projectId?: string;
   }
   interface Core {
     /**

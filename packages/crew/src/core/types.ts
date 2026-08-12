@@ -45,6 +45,12 @@ export interface LaunchRunInput {
   repoRef?: string;
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
+  /**
+   * Project to file this run into (DES-PROJECT-001 §2.2). The engine attaches the `crew.run`
+   * membership atomically with the launch record; unknown/archived ⇒ the launch fails with no
+   * session persisted. Omit ⇒ unfiled (the synthesized `default` project).
+   */
+  projectId?: string;
 }
 
 export const DEFAULT_SETTINGS: SystemSettings = {

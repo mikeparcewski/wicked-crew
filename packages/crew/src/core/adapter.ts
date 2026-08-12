@@ -20,6 +20,9 @@ import type {
   GraphKind,
   WorkflowDef,
   SystemSettings,
+  Project,
+  ProjectMember,
+  InteractionRequest,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
@@ -188,7 +191,44 @@ type EventLogMethods = {
   runEvents?(runId: string): Promise<string>;
 };
 
-type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods & EventLogMethods;
+/**
+ * Projects + durable interaction requests (DES-PROJECT-001).
+ *
+ * ALL optional, deliberately: these bindings land with wicked-core-ts 0.6.0, so an installed
+ * addon at ≤0.5.x has none of them at runtime. Required declarations would type away the
+ * `typeof … !== 'function'` guards below — the FINDING-042 shape. Every method resolves a JSON
+ * string (the addon's uniform marshalling).
+ */
+type ProjectMethods = {
+  projectCreate?(name: string, description?: string | null): Promise<string>;
+  projectUpdate?(
+    id: string,
+    name?: string | null,
+    description?: string | null,
+    status?: string | null,
+  ): Promise<string>;
+  projectList?(): Promise<string>;
+  projectGet?(id: string): Promise<string>;
+  projectMembers?(projectId: string): Promise<string>;
+  projectMemberAttach?(
+    projectId: string,
+    memberKind: string,
+    memberRef: string,
+    metaJson?: string | null,
+    attachedBy?: string | null,
+  ): Promise<string>;
+  projectMemberDetach?(projectId: string, memberId: string): Promise<string>;
+  memberProjects?(memberKind: string, memberRef: string): Promise<string>;
+  interactionRequests?(sessionId?: string | null, status?: string | null): Promise<string>;
+  // The foundation-record seam (ADR §3.2): charter writes + record probes ride the actor's
+  // existing memory/knowledge stores (single-writer sidecars the daemon must never open itself).
+  captureMemory?(content: string, scope: string): Promise<string>;
+  listMemories?(scope: string, limit: number): Promise<string>;
+  ingestKnowledge?(title: string, chunksJson: string): Promise<string>;
+  recallKnowledge?(query: string, k: number): Promise<string>;
+};
+
+type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods & EventLogMethods & ProjectMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
@@ -395,6 +435,18 @@ export class ChatUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ChatUnsupportedError';
+  }
+}
+
+/**
+ * The project surface (DES-PROJECT-001) is not available in this deployment — the installed
+ * wicked-core-ts predates 0.6.0. Typed for the same reason as `ChatUnsupportedError`: the routes
+ * answer 501 ("upgrade the engine") on this, never 400 ("fix your request").
+ */
+export class ProjectsUnsupportedError extends Error {
+  constructor(what: string) {
+    super(`${what} is not supported by this wicked-core build (needs wicked-core-ts >= 0.6.0)`);
+    this.name = 'ProjectsUnsupportedError';
   }
 }
 
@@ -634,6 +686,14 @@ export class CoreAdapter {
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
+    if (input.projectId !== undefined) {
+      // Fail CLOSED on an old addon: silently dropping projectId would launch an unfiled run the
+      // caller believed was filed — the exact failure §2.2 exists to prevent.
+      if (typeof this.core.projectCreate !== 'function') {
+        throw new ProjectsUnsupportedError('Filing a run into a project');
+      }
+      opts.projectId = input.projectId;
+    }
     if (input.workflow !== undefined) {
       opts.workflow = input.workflow;
       // Ensure DROP-IN workflow definitions are present in the Rust overlay dir on first use.
@@ -737,6 +797,135 @@ export class CoreAdapter {
   /** A unit's captured transcript (string, or `null`). */
   async workOutput(unitId: string): Promise<string | null> {
     return JSON.parse(await this.core.workOutput(unitId)) as string | null;
+  }
+
+  // ── Projects (DES-PROJECT-001) ──────────────────────────────────────────────
+  // 1:1 maps of the 0.6.0 engine surface. Writes ride the single-writer actor;
+  // reads are read-only store opens inside the addon. Every method throws
+  // ProjectsUnsupportedError on a pre-0.6.0 addon (routes answer 501).
+
+  /** True when the installed addon carries the project surface (0.6.0+). */
+  projectsSupported(): boolean {
+    return typeof this.core.projectCreate === 'function';
+  }
+
+  private requireProjects<T>(fn: T | undefined, what: string): T {
+    if (typeof fn !== 'function') throw new ProjectsUnsupportedError(what);
+    return fn;
+  }
+
+  async projectCreate(name: string, description?: string): Promise<Project> {
+    const fn = this.requireProjects(this.core.projectCreate, 'Creating a project');
+    return JSON.parse(await fn.call(this.core, name, description ?? null)) as Project;
+  }
+
+  async projectUpdate(
+    id: string,
+    patch: { name?: string | undefined; description?: string | undefined; status?: string | undefined },
+  ): Promise<Project> {
+    const fn = this.requireProjects(this.core.projectUpdate, 'Updating a project');
+    return JSON.parse(
+      await fn.call(this.core, id, patch.name ?? null, patch.description ?? null, patch.status ?? null),
+    ) as Project;
+  }
+
+  /** Every stored project (all statuses, newest first). The `default` project is NOT here — the
+   *  route layer synthesizes it (ADR §7: computed, never stored). */
+  async projectList(): Promise<Project[]> {
+    const fn = this.requireProjects(this.core.projectList, 'Listing projects');
+    return JSON.parse(await fn.call(this.core)) as Project[];
+  }
+
+  async projectGet(id: string): Promise<Project | null> {
+    const fn = this.requireProjects(this.core.projectGet, 'Reading a project');
+    return JSON.parse(await fn.call(this.core, id)) as Project | null;
+  }
+
+  async projectMembers(projectId: string): Promise<ProjectMember[]> {
+    const fn = this.requireProjects(this.core.projectMembers, 'Listing project members');
+    return JSON.parse(await fn.call(this.core, projectId)) as ProjectMember[];
+  }
+
+  /** Attach a member. `created:false` = the idempotent duplicate hit (emit no event for it). */
+  async projectMemberAttach(
+    projectId: string,
+    kind: string,
+    ref: string,
+    meta?: Record<string, unknown>,
+    attachedBy?: string,
+  ): Promise<{ member: ProjectMember; created: boolean }> {
+    const fn = this.requireProjects(this.core.projectMemberAttach, 'Attaching a project member');
+    return JSON.parse(
+      await fn.call(
+        this.core,
+        projectId,
+        kind,
+        ref,
+        meta !== undefined ? JSON.stringify(meta) : null,
+        attachedBy ?? null,
+      ),
+    ) as { member: ProjectMember; created: boolean };
+  }
+
+  /** Detach (tombstone). `false` = no such live member on that project (the route's 404). */
+  async projectMemberDetach(projectId: string, memberId: string): Promise<boolean> {
+    const fn = this.requireProjects(this.core.projectMemberDetach, 'Detaching a project member');
+    return JSON.parse(await fn.call(this.core, projectId, memberId)) as boolean;
+  }
+
+  /** The projects holding a live `(kind, ref)` membership — the run→project reverse read. */
+  async memberProjects(kind: string, ref: string): Promise<string[]> {
+    const fn = this.requireProjects(this.core.memberProjects, 'Resolving a member’s projects');
+    return JSON.parse(await fn.call(this.core, kind, ref)) as string[];
+  }
+
+  /**
+   * Durable interaction requests (ADR §5.3), newest first — or `null` when this addon predates
+   * the binding (the `runEvents` convention: a missing capability must stay distinguishable from
+   * "no open prompts", or the caches' fallback chain misreports upgrades as empty inboxes).
+   */
+  async interactionRequests(
+    sessionId?: string,
+    status?: string,
+  ): Promise<InteractionRequest[] | null> {
+    if (typeof this.core.interactionRequests !== 'function') return null;
+    return JSON.parse(
+      await this.core.interactionRequests(sessionId ?? null, status ?? null),
+    ) as InteractionRequest[];
+  }
+
+  // ── The foundation record (ADR §3.2): charter writes + record probes ────────
+
+  /** Capture a memory at a STRICT `kind:id[/…]` scope (the engine refuses malformed segments). */
+  async captureMemory(content: string, scope: string): Promise<void> {
+    const fn = this.requireProjects(this.core.captureMemory, 'Capturing a memory');
+    await fn.call(this.core, content, scope);
+  }
+
+  /** Memories within `scope`'s subtree, newest first — the ADR's memory.coverage probe. */
+  async listMemories(scope: string, limit: number): Promise<{ content: string; score: number; tier: string }[]> {
+    const fn = this.requireProjects(this.core.listMemories, 'Listing memories');
+    return JSON.parse(await fn.call(this.core, scope, limit)) as {
+      content: string;
+      score: number;
+      tier: string;
+    }[];
+  }
+
+  /** Ingest a document (title + chunks) into the knowledge store. Returns the chunk count. */
+  async ingestKnowledge(title: string, chunks: string[]): Promise<number> {
+    const fn = this.requireProjects(this.core.ingestKnowledge, 'Ingesting knowledge');
+    return JSON.parse(await fn.call(this.core, title, JSON.stringify(chunks))) as number;
+  }
+
+  /** Recall up to `k` knowledge chunks relevant to `query`. */
+  async recallKnowledge(query: string, k: number): Promise<{ content: string; score: number; source: string }[]> {
+    const fn = this.requireProjects(this.core.recallKnowledge, 'Recalling knowledge');
+    return JSON.parse(await fn.call(this.core, query, k)) as {
+      content: string;
+      score: number;
+      source: string;
+    }[];
   }
 
   // ── Chat sessions (core#134 / crew#165) ────────────────────────────────────
