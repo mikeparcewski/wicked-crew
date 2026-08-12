@@ -20,7 +20,9 @@ function loadPlaywright() {
 const EVIDENCE_DIR = resolve(REPO_ROOT, '.product/evidence/dod/sc-studio-hitl');
 mkdirSync(EVIDENCE_DIR, { recursive: true });
 const write = (name, obj) => writeFileSync(resolve(EVIDENCE_DIR, name), JSON.stringify(obj, null, 2));
-const DIST = resolve(REPO_ROOT, 'packages/studio/dist');
+// The bundled studio dist (build:with-studio output; SPA source lives in its own
+// repo since the #98 carve). Override with STUDIO_DIST for any other built dist.
+const DIST = process.env.STUDIO_DIST ?? resolve(REPO_ROOT, 'packages/crew/dist/studio');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
 function serveStudio(port) {

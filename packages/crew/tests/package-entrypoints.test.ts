@@ -26,7 +26,7 @@ interface Pkg {
 }
 
 /** Every workspace package.json, by directory. */
-const PACKAGES = ['packages/crew', 'packages/studio', 'packages/agent-acp-bridges'].filter((d) =>
+const PACKAGES = ['packages/crew', 'packages/agent-acp-bridges'].filter((d) =>
   existsSync(join(workspaceRoot, d, 'package.json')),
 );
 

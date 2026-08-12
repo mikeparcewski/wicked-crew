@@ -20,13 +20,16 @@ export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Serve the built studio SPA (packages/studio/dist) from a tiny static server,
-// so browser harnesses are self-contained (no external `vite preview`).
+// Serve the bundled studio SPA (packages/crew/dist/studio, produced by
+// `build:with-studio` from the installed wicked-studio package — the SPA source
+// lives in its own repo since the #98 carve) from a tiny static server, so
+// browser harnesses are self-contained (no external `vite preview`).
+// Override with STUDIO_DIST to point at any other built dist.
 export async function serveStudioDist(port) {
   const { createServer } = await import('node:http');
   const { readFileSync, existsSync } = await import('node:fs');
   const { join, extname } = await import('node:path');
-  const dist = resolve(REPO_ROOT, 'packages/studio/dist');
+  const dist = process.env.STUDIO_DIST ?? resolve(REPO_ROOT, 'packages/crew/dist/studio');
   const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
   const server = createServer((req, res) => {
     const urlPath = req.url.split('?')[0];
