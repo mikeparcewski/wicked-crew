@@ -11,7 +11,11 @@ import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
+import { startProjectBus } from '../projects/events.js';
+import { MembershipIndex } from '../projects/membership-index.js';
+import { writeRunEvidencePointer } from '../projects/charter.js';
 import type { CoreAdapter } from '../core/adapter.js';
+import type { CoreEvent } from '../core/types.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -65,6 +69,19 @@ export interface CreateServerOptions {
     /** Seat roster override (JSON array); omit for the production council roster. */
     clisJson?: string;
   };
+  /**
+   * The project bus seam (DES-PROJECT-001 §4/§5.2). DEFAULT-ON, unlike the two opt-in seams
+   * above: the ADR's event vocabulary and the live activity bridge are part of the surface, not
+   * an integration experiment — but the posture stays LOUD-non-fatal (no wicked-bus / broken db
+   * ⇒ project CRUD works, events don't ride). `disabled: true` turns the whole seam off (tests).
+   */
+  projectEvents?: {
+    disabled?: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    dbPath?: string;
+    /** Poll cadence for the /ws activity bridge, ms (tests shorten it). */
+    pollIntervalMs?: number;
+  };
 }
 
 export async function createServer(
@@ -116,10 +133,35 @@ export async function createServer(
     }
   }
 
+  // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
+  // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
+  // from the engine so a restarted daemon tags correctly from the first frame.
+  const membershipIndex = new MembershipIndex();
+  await membershipIndex.hydrate(adapter, (m) => app.log.warn(m));
+  const projectBus =
+    options?.projectEvents?.disabled === true
+      ? null
+      : await startProjectBus({
+          ...(options?.projectEvents?.dbPath !== undefined
+            ? { dbPath: options.projectEvents.dbPath }
+            : {}),
+          ...(options?.projectEvents?.pollIntervalMs !== undefined
+            ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
+            : {}),
+          log: (m) => app.log.warn(m),
+        });
+  if (projectBus !== null) {
+    app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
+    app.addHook('onClose', async () => {
+      await projectBus.stop();
+    });
+  }
+
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts
   // (§3.3), cache elicitation prompts (DES-002), route terminal frames to their owning
-  // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame verbatim
-  // to all `/ws` clients (§2.1).
+  // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame — tagged
+  // with its run's `project_id` when the membership table files it (DES-PROJECT-001
+  // §5.2; no new socket, additive field) — to all `/ws` clients (§2.1).
   //
   // Unregistered on close: a process can build more than one server over the same
   // adapter (tests do), and a closed server's caches must stop consuming events —
@@ -128,7 +170,40 @@ export async function createServer(
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     terminals.route(event);
-    broadcast(event);
+    const session = typeof event.session === 'string' ? event.session : undefined;
+    const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
+    broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
+    // The foundation record's evidence pointer (§3.2 row 3): a project-bound run that completes
+    // gets its run-scope pointer written, best-effort, off the hot path.
+    if (event.type === 'sessionCompleted' && session !== undefined && projectId !== undefined) {
+      void (async () => {
+        try {
+          const views = await adapter.sessionsDetail();
+          const view = views.find((v) => v.session.id === session);
+          const repoRef = view?.session.repo_ref ?? null;
+          const repoRoot =
+            repoRef !== null
+              ? ((await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path ?? null)
+              : null;
+          // The STORED scope, not a derived spelling: `Project.scope` is the designed tenancy
+          // seam (ADR §3.1 — a future `org:<o>/project:<id>` prefix must not strand pointers).
+          const project = await adapter.projectGet(projectId);
+          await writeRunEvidencePointer(
+            adapter,
+            project?.scope ?? `project:${projectId}`,
+            session,
+            repoRoot,
+            (m) => app.log.warn(m),
+          );
+        } catch (err) {
+          app.log.warn(
+            `[projects] evidence-pointer lookup for ${session} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      })();
+    }
   });
   app.addHook('onClose', async () => {
     offEvent();
@@ -168,7 +243,11 @@ export async function createServer(
   // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
   registerTerminalWs(app, adapter, terminals);
 
-  registerRoutes(app, adapter, gateCache, elicitationCache, qeGateCache);
+  registerRoutes(app, adapter, gateCache, elicitationCache, qeGateCache, {
+    bus: projectBus,
+    index: membershipIndex,
+    log: (m) => app.log.warn(m),
+  });
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:

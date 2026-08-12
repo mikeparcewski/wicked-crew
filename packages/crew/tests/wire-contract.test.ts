@@ -28,6 +28,11 @@ import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, LaunchSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type {
+  AttachMemberSchema,
+  CreateProjectSchema,
+  UpdateProjectSchema,
+} from '../src/projects/routes.js';
 import type { DEFAULT_SETTINGS } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
@@ -75,6 +80,21 @@ respondsWith<Wire.RequirementDetail, RequirementDetail>();
 // GET/PUT /settings — persisted system settings (defaults applied server-side).
 respondsWith<Wire.SystemSettings, typeof DEFAULT_SETTINGS>();
 
+// Projects (DES-PROJECT-001 §5.2) — the 9-route surface's reads.
+respondsWith<Wire.Project, Awaited<ReturnType<CoreAdapter['projectCreate']>>>();
+respondsWith<Wire.Project[], Awaited<ReturnType<CoreAdapter['projectList']>>>();
+respondsWith<Wire.Project | null, Awaited<ReturnType<CoreAdapter['projectGet']>>>();
+respondsWith<Wire.ProjectMember[], Awaited<ReturnType<CoreAdapter['projectMembers']>>>();
+respondsWith<
+  { member: Wire.ProjectMember; created: boolean },
+  Awaited<ReturnType<CoreAdapter['projectMemberAttach']>>
+>();
+// GET /projects/:id/prompts — the durable prompt inbox rows, verbatim engine shape.
+respondsWith<
+  Wire.InteractionRequest[] | null,
+  Awaited<ReturnType<CoreAdapter['interactionRequests']>>
+>();
+
 // ── Request direction: client → daemon ─────────────────────────────────────────
 //
 // The contract tells a client what it may send; the zod schemas decide what the daemon
@@ -83,6 +103,10 @@ respondsWith<Wire.SystemSettings, typeof DEFAULT_SETTINGS>();
 accepts<z.input<typeof LaunchSchema>, Wire.LaunchRunBody>();
 accepts<z.input<typeof GateSchema>, Wire.GateDecision>();
 accepts<z.input<typeof OpenTerminalSchema>, Wire.OpenTerminalBody>();
+// Projects (DES-PROJECT-001): every body the contract lets a client send must parse.
+accepts<z.input<typeof CreateProjectSchema>, Wire.CreateProjectBody>();
+accepts<z.input<typeof UpdateProjectSchema>, Wire.UpdateProjectBody>();
+accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {
