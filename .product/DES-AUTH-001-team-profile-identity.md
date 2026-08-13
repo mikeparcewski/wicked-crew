@@ -84,26 +84,27 @@ Static bearer tokens mapped to actors in
 
 ```json
 {
+  "version": 1,
   "tokens": [
-    { "hash": "<sha256(bearer-value)>", "actor": { "id": "ci-pipeline", "kind": "agent", "trust": "operator" } }
+    { "sha256": "<64-char-hex>", "actor": { "id": "ci-pipeline", "kind": "agent", "trust": "operator" } }
   ]
 }
 ```
 
 The file is read once at boot; restart the daemon after editing.
 
-Generating a token:
+Generating a token and its stored hash:
 
 ```bash
-openssl rand -hex 32   # → BEARER_VALUE
-printf '%s' BEARER_VALUE | sha256sum -   # → HASH for tokens.json
+TOKEN=$(openssl rand -hex 32)           # the bearer value — keep secret
+printf '%s' "$TOKEN" | sha256sum        # → 64-char hex for "sha256" in tokens.json
 ```
 
 ## 6. OIDC seam (DESIGNED, not yet implemented — crew#249)
 
 OAuth/OIDC for humans is **designed but not implemented**. The pieces exist:
 
-- `TokenVerifier` (`src/api/auth.ts`) — the pluggable interface all
+- `TokenVerifier` (`packages/crew/src/api/auth.ts`) — the pluggable interface all
   verification goes through. The static-token verifier implements it; the
   OIDC verifier will be a second implementation.
 - `OidcConfig` in `~/.config/wicked-crew/auth.json`:
