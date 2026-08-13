@@ -25,7 +25,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { constants, createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor, ActorKind, TrustLevel } from '../core/types.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -321,7 +321,7 @@ function verifySignature(headerPayload: string, sig: Buffer, jwk: Jwk, alg: stri
   try {
     const key = createPublicKey({ key: jwk, format: 'jwk' });
     const opts = alg.startsWith('PS')
-      ? ({ dsaEncoding: 'ieee-p1363', padding: 4 /* RSA_PKCS1_PSS_PADDING */ } as object)
+      ? ({ padding: constants.RSA_PKCS1_PSS_PADDING } as object)
       : alg.startsWith('ES')
         ? ({ dsaEncoding: 'ieee-p1363' } as object)
         : ({} as object);
