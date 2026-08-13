@@ -167,7 +167,7 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
       return [id, def.phases.filter((p) => p.validator_pin !== null).map((p) => p.id)];
     });
     expect(gated).toEqual([
-      ['feature', ['adversarial-review']],
+      ['feature', ['adversarial-review', 'test']],
       ['bug', ['verify']],
       ['migration', ['verify']],
     ]);
