@@ -47,23 +47,29 @@ describe('parseSourceDocCreated', () => {
     ts: '2026-08-12T00:00:00Z',
   };
 
-  it('accepts a kind:source creation and carries brief/sources/style', () => {
-    expect(parseSourceDocCreated(DOC_CREATED, payload)).toEqual({
+  it('accepts a project-bound kind:source creation and carries brief/sources/style/projectId', () => {
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: 'proj-7' })).toEqual({
       documentId: 'q3-board-deck',
       brief: 'a Q3 board deck',
       sourcePaths: ['/tmp/q3.md'],
       style: 'ppt',
+      projectId: 'proj-7',
     });
   });
 
-  it('defaults style to web and tolerates a brief-only creation', () => {
-    const doc = parseSourceDocCreated(DOC_CREATED, { document_id: 'a-doc', kind: 'source' });
-    expect(doc).toEqual({ documentId: 'a-doc', brief: '', sourcePaths: [], style: 'web' });
+  it('defaults style to web and tolerates a brief-only project-bound creation', () => {
+    const doc = parseSourceDocCreated(DOC_CREATED, { document_id: 'a-doc', kind: 'source', project_id: 'proj-1' });
+    expect(doc).toEqual({ documentId: 'a-doc', brief: '', sourcePaths: [], style: 'web', projectId: 'proj-1' });
   });
 
-  it('ignores demo and html creations — those are the assist loop’s, not this seam’s', () => {
+  it('ignores demo and html doc creations -- those belong to the assist loop', () => {
     expect(parseSourceDocCreated(DOC_CREATED, { ...payload, kind: 'demo' })).toBeNull();
     expect(parseSourceDocCreated(DOC_CREATED, { ...payload, kind: 'html' })).toBeNull();
+  });
+
+  it('ignores unbound source docs -- crew only takes project-bound docs; unbound docs are the assist skill solo business', () => {
+    expect(parseSourceDocCreated(DOC_CREATED, payload)).toBeNull();
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })).toBeNull();
   });
 
   it('ignores other event types, malformed payloads, and slug-invalid document ids', () => {
@@ -77,20 +83,22 @@ describe('parseSourceDocCreated', () => {
   it('drops non-string entries from source_paths rather than forwarding them to a prompt', () => {
     const doc = parseSourceDocCreated(DOC_CREATED, {
       ...payload,
+      project_id: 'proj-x',
       source_paths: ['/ok', 42, null, ''],
     });
     expect(doc?.sourcePaths).toEqual(['/ok']);
   });
 
-  it('carries project_id when the doc was created project-bound (P7 gate DEFECT-1)', () => {
-    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: 'proj-7' })?.projectId).toBe('proj-7');
-    expect(parseSourceDocCreated(DOC_CREATED, payload)?.projectId).toBeUndefined();
-    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })?.projectId).toBeUndefined();
+  it('always includes projectId in the result -- absent or empty project_id returns null (crew only takes project-bound docs)', () => {
+    const bound = parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: 'proj-7' });
+    expect(bound?.projectId).toBe('proj-7');
+    expect(parseSourceDocCreated(DOC_CREATED, payload)).toBeNull();
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })).toBeNull();
   });
 });
 
 describe('draftProblem (the worker prompt seed)', () => {
-  const doc = { documentId: 'my-doc', brief: 'line one\nline two\n\ttabbed', sourcePaths: [], style: 'web' };
+  const doc = { documentId: 'my-doc', brief: 'line one\nline two\n\ttabbed', sourcePaths: [], style: 'web', projectId: 'proj-test' };
 
   it('is ALWAYS single-line — a PTY seat refuses embedded newlines (FINDING-011)', () => {
     const problem = draftProblem(doc, '/tmp/out.html');
@@ -344,7 +352,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // The workflow def rode the normal registration path before the cursor armed.
     expect(engine.registered.map((w) => w.id)).toEqual([INTERACTIVE_DRAFT_WORKFLOW]);
 
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
     const launch = engine.launches[0]!;
     expect(launch.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
@@ -415,11 +423,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     });
     subs.push(sub!);
 
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
 
     // Redelivery/replay: the same creation arrives again (at-least-once semantics).
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length, 'a replayed doc.created must not double-launch').toBe(1);
 
@@ -451,7 +459,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       log: () => {},
     });
     subs.push(sub2!);
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await new Promise((r) => setTimeout(r, 300));
     expect(engine2.launches.length, 'the durable ledger survives a restart').toBe(0);
   });
@@ -471,7 +479,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     subs.push(sub!);
     armProbe(bus);
 
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
     engine.fire({ type: 'sessionFailed', session: engine.launches[0]!.sessionId, ord: 1 });
     await waitFor(() =>
@@ -503,7 +511,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     subs.push(sub!);
     armProbe(bus);
 
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     // The 'processing' pickup was posted, then the launch failure closed it out as an error…
     await waitFor(() =>
       probeEvents.some(
@@ -540,10 +548,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(engine.launches[0]!.projectId).toBe('proj-7');
     expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-7']]);
 
-    // Unbound doc → no projectId on the launch, no post-commit hook.
+    // Unbound doc → crew ignores it entirely (the assist skill handles it solo).
     await emitDocCreated(bus, 'unbound-doc');
-    await waitFor(() => engine.launches.length === 2);
-    expect(engine.launches[1]!.projectId).toBeUndefined();
+    // Give the subscriber a moment to process; launch count must stay at 1.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(engine.launches.length).toBe(1);
     expect(filed).toHaveLength(1);
   });
 
@@ -562,7 +571,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     subs.push(sub!);
     armProbe(bus);
 
-    await emitDocCreated(bus);
+    await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
     expect(existsSync(join(dir, 'drafts', 'spike-doc-v1.html'))).toBe(false);
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
