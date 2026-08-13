@@ -127,30 +127,38 @@ describe('the OIDC verifier', () => {
     expect(await v.verify('a.b.c')).toBeNull();
   });
 
-  it('returns null for a syntactically valid JWT with unreachable issuer', async () => {
-    // A well-formed JWT against a fake issuer fails at the JWKS fetch step
-    // (network error); verifyJwt throws, the verifier catches and returns null.
+  it('returns null for a syntactically valid JWT with guaranteed-unreachable issuer', async () => {
+    // Use 127.0.0.1:1 (no listener) so the JWKS fetch fails immediately without
+    // an external DNS or network dependency — avoids 10s timeout flakiness in CI.
+    const v = createOidcVerifier({ issuer: 'https://127.0.0.1:1', audience: 'wicked-crew' });
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'k1' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({
-      iss: 'https://idp.example.com',
+      iss: 'https://127.0.0.1:1',
       aud: 'wicked-crew',
       sub: 'u1',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })).toString('base64url');
-    const v = createOidcVerifier({ issuer: 'https://idp.example.com', audience: 'wicked-crew' });
     expect(await v.verify(`${header}.${payload}.fakesig`)).toBeNull();
-  });
+  }, 3000);
 
-  it('throws at creation when issuer is not an http(s) URL', () => {
+  it('throws at creation when issuer is not an https:// URL', () => {
     expect(() => createOidcVerifier({ issuer: 'not-a-url', audience: 'wicked-crew' })).toThrow(/issuer/);
     expect(() => createOidcVerifier({ issuer: '', audience: 'wicked-crew' })).toThrow(/issuer/);
+    expect(() => createOidcVerifier({ issuer: 'http://idp.example.com', audience: 'wicked-crew' })).toThrow(/issuer/);
   });
 
   it('throws at creation when audience is empty', () => {
     expect(() => createOidcVerifier({ issuer: 'https://idp.example.com', audience: '' })).toThrow(/audience/);
   });
 
-  it('accepts defaultTrust without throwing', () => {
+  it('throws at creation when defaultTrust is not a valid trust level', () => {
+    expect(() => createOidcVerifier({
+      issuer: 'https://idp.example.com', audience: 'wicked-crew',
+      defaultTrust: 'superadmin' as never,
+    })).toThrow(/defaultTrust/);
+  });
+
+  it('accepts valid defaultTrust without throwing', () => {
     const v = createOidcVerifier({
       issuer: 'https://idp.example.com',
       audience: 'wicked-crew',

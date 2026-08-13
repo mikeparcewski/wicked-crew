@@ -256,7 +256,7 @@ interface DiscoveryDoc { jwks_uri: string }
 
 /** Per-issuer JWKS cache: keys indexed by kid (or by alg when kid is absent). */
 const JWKS_CACHE = new Map<string, { keys: Map<string, Jwk>; fetchedAt: number }>();
-const JWKS_TTL_MS = 5 * 60 * 1000; // 5-min TTL before background refresh
+const JWKS_TTL_MS = 5 * 60 * 1000; // 5-min TTL; synchronous re-fetch on stale or unknown kid
 
 function base64urlDecode(s: string): Buffer {
   const pad = (4 - (s.length % 4)) % 4;
@@ -321,7 +321,7 @@ function verifySignature(headerPayload: string, sig: Buffer, jwk: Jwk, alg: stri
   try {
     const key = createPublicKey({ key: jwk, format: 'jwk' });
     const opts = alg.startsWith('PS')
-      ? ({ padding: constants.RSA_PKCS1_PSS_PADDING } as object)
+      ? ({ padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: constants.RSA_PSS_SALTLEN_DIGEST } as object)
       : alg.startsWith('ES')
         ? ({ dsaEncoding: 'ieee-p1363' } as object)
         : ({} as object);
@@ -381,7 +381,10 @@ async function verifyJwt(token: string, config: OidcConfig): Promise<JwtPayload>
   if (!audList.includes(config.audience)) {
     throw new Error(`JWT audience mismatch: expected ${config.audience}, got ${JSON.stringify(payload.aud)}`);
   }
-  if (typeof payload.exp === 'number' && payload.exp < now) {
+  if (typeof payload.exp !== 'number') {
+    throw new Error('JWT is missing required exp claim');
+  }
+  if (payload.exp <= now) {
     throw new Error('JWT has expired (exp)');
   }
   if (typeof payload.nbf === 'number' && payload.nbf > now) {
@@ -400,7 +403,8 @@ function mapOidcActor(payload: JwtPayload, config: OidcConfig): Actor {
   const trustClaim = config.claims?.trust;
   const rawTrust = trustClaim ? payload[trustClaim] : undefined;
   const defaultTrust = config.defaultTrust ?? 'observer';
-  const trust: TrustLevel = TRUSTS.has(String(rawTrust)) ? (rawTrust as TrustLevel) : defaultTrust;
+  const rawTrustStr = String(rawTrust);
+  const trust: TrustLevel = TRUSTS.has(rawTrustStr) ? (rawTrustStr as TrustLevel) : defaultTrust;
 
   return Object.freeze({ id, kind: 'human', trust }) as Actor;
 }
@@ -413,8 +417,11 @@ function mapOidcActor(payload: JwtPayload, config: OidcConfig): Actor {
 export function createOidcVerifier(config: OidcConfig): TokenVerifier {
   // Validate config at creation time — a misconfigured issuer URL is caught
   // immediately at boot rather than silently during the first verification.
-  if (!config.issuer || !config.issuer.startsWith('http')) {
+  if (!config.issuer || !config.issuer.startsWith('https://')) {
     throw new Error(`[auth] OIDC config: 'issuer' must be an https:// URL (got ${JSON.stringify(config.issuer)})`);
+  }
+  if (config.defaultTrust !== undefined && !TRUSTS.has(config.defaultTrust)) {
+    throw new Error(`[auth] OIDC config: 'defaultTrust' must be observer|operator|admin (got ${JSON.stringify(config.defaultTrust)})`);
   }
   if (!config.audience) {
     throw new Error(`[auth] OIDC config: 'audience' is required`);

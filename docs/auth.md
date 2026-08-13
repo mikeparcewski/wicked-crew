@@ -122,7 +122,6 @@ Configure it in `~/.config/wicked-crew/auth.json` (override: `WICKED_CREW_AUTH_C
 
 ```json
 {
-  "auth": "required",
   "oidc": {
     "issuer": "https://idp.example.com",
     "audience": "wicked-crew",
@@ -132,6 +131,8 @@ Configure it in `~/.config/wicked-crew/auth.json` (override: `WICKED_CREW_AUTH_C
   }
 }
 ```
+
+Auth mode (`WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required`) is controlled by environment variables, not by this file.
 
 - **`issuer`** (required) — must match the `iss` claim in the JWT. Used for
   OIDC discovery (`{issuer}/.well-known/openid-configuration`) when `jwksUri`
