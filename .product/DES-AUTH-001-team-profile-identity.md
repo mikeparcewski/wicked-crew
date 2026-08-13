@@ -25,7 +25,7 @@ merely varies.
 |---|---|---|
 | Trigger | nothing — zero config | `WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required` |
 | Bind / CORS | `127.0.0.1`, loopback origins only | any origin (or allowlist) |
-| Token | none | `Authorization: Bearer <token>` on every `/api/v1` and `/ws` |
+| Token | none | `Authorization: Bearer <token>` on every `/api/v1`; `/ws` paths also accept `?access_token=<token>` (query-param — browsers cannot set headers on WebSocket upgrades; header wins when both are present) |
 | Actor | implicit `{id:"local", kind:"human", trust:"admin"}` | resolved from the token |
 
 **Local is sacred.** The zero-config deployment behaves exactly as before:
@@ -86,7 +86,7 @@ Static bearer tokens mapped to actors in
 {
   "version": 1,
   "tokens": [
-    { "sha256": "<64-char-hex>", "actor": { "id": "ci-pipeline", "kind": "agent", "trust": "operator" } }
+    { "sha256": "<64-char lowercase hex>", "actor": { "id": "ci-pipeline", "kind": "agent", "trust": "operator" } }
   ]
 }
 ```
@@ -97,7 +97,7 @@ Generating a token and its stored hash:
 
 ```bash
 TOKEN=$(openssl rand -hex 32)           # the bearer value — keep secret
-printf '%s' "$TOKEN" | sha256sum        # → 64-char hex for "sha256" in tokens.json
+printf '%s' "$TOKEN" | sha256sum        # → 64-char lowercase hex for "sha256" in tokens.json
 ```
 
 ## 6. OIDC seam (DESIGNED, not yet implemented — crew#249)
