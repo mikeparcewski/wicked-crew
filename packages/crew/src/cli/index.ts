@@ -8,6 +8,7 @@ import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
+import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
 const [, , command, ...argv] = process.argv;
@@ -244,9 +245,17 @@ async function main(): Promise<void> {
     await runGate(argv);
   } else if (command === 'status') {
     await runStatus(argv);
+  } else if (command === 'mcp') {
+    const portStr = flag(argv, '--port');
+    const port = portStr !== undefined ? Number(portStr) : 7701;
+    if (!Number.isFinite(port) || !Number.isInteger(port) || port < 1 || port > 65535) {
+      console.error(`--port must be an integer between 1 and 65535 (got: ${portStr ?? '(missing)'})`);
+      process.exit(1);
+    }
+    await runMcpServer(port);
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: wicked-crew serve|start|resume|gate|status');
+    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp');
     process.exit(1);
   }
 }
