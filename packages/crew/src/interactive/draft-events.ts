@@ -133,9 +133,9 @@ export interface SourceDocCreated {
   brief: string;
   sourcePaths: string[];
   style: string;
-  /** Present when the doc was created bound to a crew project (interactive's DES-PROJECT-001
-   *  enrichment) — the run is then FILED via LaunchOptions.projectId (P7 gate DEFECT-1). */
-  projectId?: string;
+  /** The crew project this doc is bound to (required — parseSourceDocCreated returns null when
+   *  absent; unbound docs are handled solo by the assist skill, not by this seam). */
+  projectId: string;
 }
 
 /**
@@ -157,7 +157,9 @@ export function parseSourceDocCreated(eventType: string, payload: unknown): Sour
   const style = typeof p['style'] === 'string' && p['style'].length > 0 ? p['style'] : 'web';
   const projectId =
     typeof p['project_id'] === 'string' && p['project_id'].length > 0 ? p['project_id'] : undefined;
-  return { documentId, brief, sourcePaths, style, ...(projectId !== undefined ? { projectId } : {}) };
+  // Only project-bound docs route through crew; unbound docs are the assist skill's solo business.
+  if (projectId === undefined) return null;
+  return { documentId, brief, sourcePaths, style, projectId };
 }
 
 /** Collapse whitespace/newlines to single spaces and cap length — the intent must stay a
@@ -488,7 +490,7 @@ export async function startInteractiveDraftSubscriber(
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the
         // project's activity feed instead of floating unattributed.
-        ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
+        projectId: doc.projectId,
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the
@@ -509,7 +511,7 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
-    if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
+    opts.onRunFiled?.(runId, doc.projectId);
 
     const flight: InFlight = {
       documentId: doc.documentId,
