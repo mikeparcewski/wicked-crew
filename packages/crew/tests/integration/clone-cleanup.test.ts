@@ -28,7 +28,7 @@ beforeAll(() => {
 
 afterAll(() => {
   adapter.close();
-  rmSync(dbDir, { recursive: true, force: true });
+  rmSync(dbDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe('cloneAndRegisterRepo cleanup', () => {
