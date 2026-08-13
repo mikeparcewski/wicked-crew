@@ -29,8 +29,11 @@ Every request under `/api/v1` and `/ws` acts as an **actor**:
   caller could spoof (locked decision #6): bus events
   (`wicked.crew.project.*`) and the audit trail now carry the *authenticated*
   id, never a caller-supplied label.
-- `kind` — `human` (a person: local operator, or OIDC once that seam lands) or
-  `agent` (a workload: CI, a bot, another daemon).
+- `kind` — `human` (a person: local operator, or OIDC once that seam lands),
+  `agent` (a workload: CI, a bot, another daemon), or `system` (an internal
+  process actor: the wicked-core bus bridge, daemon-internal lifecycle emitters,
+  and other principal-less system components that must be distinguishable from
+  workload agents in the audit trail).
 - `trust` — a rung on the ladder below.
 
 `GET /api/v1/whoami` answers the actor a request authenticated as, plus the
@@ -82,6 +85,11 @@ Static bearer tokens, mapped to actors in
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "actor": { "id": "ci-runner", "kind": "agent", "trust": "operator" },
       "label": "nightly CI"
+    },
+    {
+      "sha256": "...",
+      "actor": { "id": "bus-bridge", "kind": "system", "trust": "operator" },
+      "label": "wicked-core bus bridge"
     }
   ]
 }
