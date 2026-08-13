@@ -54,10 +54,14 @@ async function withMcpServer(
   try {
     await fn(send, () => lines);
   } finally {
-    proc.kill();
-    // Guard against already-exited to avoid a hang if exit fired before finally.
+    proc.kill('SIGTERM');
+    // Guard against already-exited. Bound the wait and escalate to SIGKILL if SIGTERM is ignored.
     if (proc.exitCode === null) {
-      await new Promise<void>((res) => proc.once('exit', res));
+      const exited = await Promise.race([
+        new Promise<boolean>((res) => proc.once('exit', () => res(true))),
+        new Promise<boolean>((res) => setTimeout(() => res(false), 2000)),
+      ]);
+      if (!exited) proc.kill('SIGKILL');
     }
   }
 }

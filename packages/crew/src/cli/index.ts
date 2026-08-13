@@ -246,7 +246,12 @@ async function main(): Promise<void> {
   } else if (command === 'status') {
     await runStatus(argv);
   } else if (command === 'mcp') {
-    const port = flag(argv, '--port') !== undefined ? Number(flag(argv, '--port')) : 7701;
+    const portStr = flag(argv, '--port');
+    const port = portStr !== undefined ? Number(portStr) : 7701;
+    if (!Number.isFinite(port) || !Number.isInteger(port) || port < 1 || port > 65535) {
+      console.error(`--port must be an integer between 1 and 65535 (got: ${portStr ?? '(missing)'})`);
+      process.exit(1);
+    }
     await runMcpServer(port);
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);

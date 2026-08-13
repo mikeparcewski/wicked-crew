@@ -53,8 +53,11 @@ export async function runMcpServer(port: number): Promise<void> {
   const client = new CrewClient(port);
 
   // Probe the daemon before advertising ourselves — fail loudly if unreachable.
+  // Capture the version from the health response so serverInfo stays in sync with the daemon.
+  let daemonVersion = '0.0.0';
   try {
-    await client.get('/health');
+    const health = await client.get('/health') as { version?: string };
+    if (typeof health.version === 'string') daemonVersion = health.version;
   } catch {
     throw new Error(
       `[wicked-crew mcp] Cannot reach daemon at port ${port}. ` +
@@ -62,7 +65,7 @@ export async function runMcpServer(port: number): Promise<void> {
     );
   }
 
-  const server = new McpServer({ name: 'wicked-crew', version: '0.5.0' });
+  const server = new McpServer({ name: 'wicked-crew', version: daemonVersion });
 
   // ── launch_run ─────────────────────────────────────────────────────────────
   server.tool(
