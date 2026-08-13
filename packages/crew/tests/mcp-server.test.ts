@@ -68,7 +68,6 @@ function waitFor(
   timeoutMs = 3000,
 ): Promise<McpMessage> {
   return new Promise((resolve, reject) => {
-    const deadline = setTimeout(() => reject(new Error('timeout waiting for message')), timeoutMs);
     const poll = setInterval(() => {
       const found = predicate(getLines());
       if (found) {
@@ -77,6 +76,10 @@ function waitFor(
         resolve(found);
       }
     }, 50);
+    const deadline = setTimeout(() => {
+      clearInterval(poll);
+      reject(new Error('timeout waiting for message'));
+    }, timeoutMs);
   });
 }
 
