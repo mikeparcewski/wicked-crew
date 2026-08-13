@@ -98,7 +98,7 @@ describe('parseSourceDocCreated', () => {
 });
 
 describe('draftProblem (the worker prompt seed)', () => {
-  const doc = { documentId: 'my-doc', brief: 'line one\nline two\n\ttabbed', sourcePaths: [], style: 'web' };
+  const doc = { documentId: 'my-doc', brief: 'line one\nline two\n\ttabbed', sourcePaths: [], style: 'web', projectId: 'proj-test' };
 
   it('is ALWAYS single-line — a PTY seat refuses embedded newlines (FINDING-011)', () => {
     const problem = draftProblem(doc, '/tmp/out.html');
