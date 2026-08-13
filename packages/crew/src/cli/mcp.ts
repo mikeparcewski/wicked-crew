@@ -116,16 +116,20 @@ export async function runMcpServer(port: number): Promise<void> {
   server.tool(
     'run_events',
     'Return the durable event trail for a run. ' +
-    'Useful for inspecting exactly what happened during a governed workflow.',
+    'Useful for inspecting exactly what happened during a governed workflow. ' +
+    'The daemon returns all events; `limit` truncates client-side (most-recent last).',
     {
       run_id: z.string().min(1).describe('The run ID'),
       limit: z.number().int().min(1).max(1000).optional().describe(
-        'Maximum number of events to return (default 200)',
+        'Maximum number of events to return. Truncated from the tail (most-recent). Default: all.',
       ),
     },
     async ({ run_id, limit }) => {
-      const q = limit !== undefined ? `?limit=${limit}` : '';
-      return ok(await client.get(`/runs/${run_id}/events${q}`));
+      const data = await client.get(`/runs/${run_id}/events`) as {
+        runId: string; total: number; returned: number; events: unknown[];
+      };
+      const events = limit !== undefined ? data.events.slice(-limit) : data.events;
+      return ok({ ...data, returned: events.length, events });
     },
   );
 
