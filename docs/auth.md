@@ -29,7 +29,7 @@ Every request under `/api/v1` and `/ws` acts as an **actor**:
   caller could spoof (locked decision #6): bus events
   (`wicked.crew.project.*`) and the audit trail now carry the *authenticated*
   id, never a caller-supplied label.
-- `kind` — `human` (a person: local operator, or OIDC once that seam lands),
+- `kind` — `human` (a person: local operator or an OIDC-authenticated user),
   `agent` (a workload: CI, a bot, another daemon), or `system` (an internal
   process actor: the wicked-core bus bridge, daemon-internal lifecycle emitters,
   and other principal-less system components that must be distinguishable from
@@ -117,36 +117,40 @@ Rules the loader enforces:
 
 ## The OIDC seam
 
-OAuth/OIDC for humans is **designed but not implemented** — the daemon ships
-the seam, not a fake. The pieces that exist today:
+OAuth/OIDC for humans is **implemented** (shipped in [wicked-crew#249](https://github.com/mikeparcewski/wicked-crew/issues/249)).
+Configure it in `~/.config/wicked-crew/auth.json` (override: `WICKED_CREW_AUTH_CONFIG`):
 
-- `TokenVerifier` (`src/api/auth.ts`) — the pluggable interface all
-  verification goes through. The static-token verifier implements it; the
-  OIDC verifier will be a second implementation behind the same seam, so no
-  route or hook changes when it lands.
-- `OidcConfig` — the config shape, accepted in
-  `~/.config/wicked-crew/auth.json` (override: `WICKED_CREW_AUTH_CONFIG`):
-
-  ```json
-  {
-    "oidc": {
-      "issuer": "https://idp.example.com",
-      "audience": "wicked-crew",
-      "jwksUri": "https://idp.example.com/.well-known/jwks.json",
-      "claims": { "id": "sub", "trust": "wicked_trust" },
-      "defaultTrust": "observer"
-    }
+```json
+{
+  "auth": "required",
+  "oidc": {
+    "issuer": "https://idp.example.com",
+    "audience": "wicked-crew",
+    "jwksUri": "https://idp.example.com/.well-known/jwks.json",
+    "claims": { "id": "sub", "trust": "wicked_trust" },
+    "defaultTrust": "observer"
   }
-  ```
+}
+```
 
-- The contract: bearer JWTs verified against the issuer's JWKS, `aud` checked
-  against `audience`, actor `id` from the `claims.id` claim (default `sub`),
-  `kind` always `human` (workloads use tokens), `trust` from the `claims.trust`
-  claim falling back to `defaultTrust` (default `observer` — least privilege).
+- **`issuer`** (required) — must match the `iss` claim in the JWT. Used for
+  OIDC discovery (`{issuer}/.well-known/openid-configuration`) when `jwksUri`
+  is not provided explicitly.
+- **`audience`** (required) — checked against the JWT `aud` claim.
+- **`jwksUri`** (optional) — skip OIDC discovery and fetch keys directly.
+- **`claims.id`** (default `sub`) — JWT claim used as the actor `id`.
+- **`claims.trust`** (optional) — JWT claim that maps to `observer` / `operator` /
+  `admin`; values not in that set fall back to `defaultTrust`.
+- **`defaultTrust`** (default `observer`) — trust assigned when no valid
+  `claims.trust` value is present. Least-privilege default.
 
-Configuring `oidc` today **fails the boot loudly** with a pointer here — a
-daemon must never pretend an IdP was consulted. The implementation is the
-named follow-up: [wicked-crew#249](https://github.com/mikeparcewski/wicked-crew/issues/249).
+Supported algorithms: RS256/384/512, ES256/384/512, PS256/384/512.
+JWKS keys are cached per issuer with a 5-minute TTL; an unknown `kid` triggers
+one immediate re-fetch before failing.
+
+The verifier sits behind `TokenVerifier` (`src/api/auth.ts`) — the same
+pluggable interface the static-token verifier uses. No route or hook changes
+are needed when switching from static tokens to OIDC.
 
 ## Actor threading: where the identity lands
 

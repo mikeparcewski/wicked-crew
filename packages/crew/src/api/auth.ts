@@ -25,7 +25,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Actor, ActorKind, TrustLevel } from '../core/types.js';
 import { API_PREFIX } from './api-prefix.js';
@@ -207,12 +207,11 @@ export function createStaticVerifier(entries: Map<string, Actor>): TokenVerifier
   };
 }
 
-// ── The OIDC seam (interface + config shape; implementation is a follow-up) ──
+// ── The OIDC verifier (crew#249) ─────────────────────────────────────────────
 
 /**
- * The OIDC verifier's config shape — DEFINED so team deployments can be
- * specified against it today, NOT implemented: {@link createOidcVerifier}
- * refuses loudly. Lives in `~/.config/wicked-crew/auth.json` as `{ "oidc": … }`.
+ * The OIDC verifier's config shape. Lives in `~/.config/wicked-crew/auth.json`
+ * as `{ "oidc": … }`.
  */
 export interface OidcConfig {
   /** The issuer URL — discovery happens at `<issuer>/.well-known/openid-configuration`. */
@@ -236,17 +235,208 @@ export function defaultAuthConfigPath(env: NodeJS.ProcessEnv = process.env): str
   return env['WICKED_CREW_AUTH_CONFIG'] ?? join(homedir(), '.config', 'wicked-crew', 'auth.json');
 }
 
+// ── OIDC internals ────────────────────────────────────────────────────────────
+
+/** JSON Web Key (RFC 7517). Only the fields needed for verification. */
+interface Jwk {
+  kty: string;
+  kid?: string;
+  alg?: string;
+  use?: string;
+  n?: string;
+  e?: string;
+  crv?: string;
+  x?: string;
+  y?: string;
+  [key: string]: unknown;
+}
+
+interface JwksResponse { keys: Jwk[] }
+interface DiscoveryDoc { jwks_uri: string }
+
+/** Per-issuer JWKS cache: keys indexed by kid (or by alg when kid is absent). */
+const JWKS_CACHE = new Map<string, { keys: Map<string, Jwk>; fetchedAt: number }>();
+const JWKS_TTL_MS = 5 * 60 * 1000; // 5-min TTL before background refresh
+
+function base64urlDecode(s: string): Buffer {
+  const pad = (4 - (s.length % 4)) % 4;
+  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(pad), 'base64');
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  return res.json() as Promise<T>;
+}
+
+async function fetchJwks(jwksUri: string): Promise<Map<string, Jwk>> {
+  const doc = await fetchJson<JwksResponse>(jwksUri);
+  const map = new Map<string, Jwk>();
+  for (const key of doc.keys ?? []) {
+    if (key.use !== undefined && key.use !== 'sig') continue;
+    // Index by kid; fall back to alg when kid is absent.
+    const index = key.kid ?? key.alg ?? key.kty;
+    map.set(index, key);
+  }
+  return map;
+}
+
+async function resolveJwksUri(config: OidcConfig): Promise<string> {
+  if (config.jwksUri) return config.jwksUri;
+  const discovery = await fetchJson<DiscoveryDoc>(
+    `${config.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`,
+  );
+  return discovery.jwks_uri;
+}
+
+async function getJwk(
+  config: OidcConfig,
+  kid: string,
+  allowRefresh: boolean,
+): Promise<Jwk | null> {
+  const cached = JWKS_CACHE.get(config.issuer);
+  const stale = !cached || Date.now() - cached.fetchedAt > JWKS_TTL_MS;
+  if (cached && !stale) {
+    const hit = cached.keys.get(kid);
+    if (hit) return hit;
+    if (!allowRefresh) return null;
+  }
+  // Fetch (or re-fetch on stale/miss).
+  const uri = await resolveJwksUri(config);
+  const keys = await fetchJwks(uri);
+  JWKS_CACHE.set(config.issuer, { keys, fetchedAt: Date.now() });
+  return keys.get(kid) ?? null;
+}
+
+// Supported algorithm → hash algorithm pairs.
+const ALG_HASH: Record<string, string> = {
+  RS256: 'SHA256', RS384: 'SHA384', RS512: 'SHA512',
+  ES256: 'SHA256', ES384: 'SHA384', ES512: 'SHA512',
+  PS256: 'SHA256', PS384: 'SHA384', PS512: 'SHA512',
+};
+
+function verifySignature(headerPayload: string, sig: Buffer, jwk: Jwk, alg: string): boolean {
+  const hashAlg = ALG_HASH[alg];
+  if (!hashAlg) return false;
+  try {
+    const key = createPublicKey({ key: jwk, format: 'jwk' });
+    const opts = alg.startsWith('PS')
+      ? ({ dsaEncoding: 'ieee-p1363', padding: 4 /* RSA_PKCS1_PSS_PADDING */ } as object)
+      : alg.startsWith('ES')
+        ? ({ dsaEncoding: 'ieee-p1363' } as object)
+        : ({} as object);
+    return cryptoVerify(hashAlg, Buffer.from(headerPayload), { key, ...opts }, sig);
+  } catch {
+    return false;
+  }
+}
+
+interface JwtPayload {
+  iss?: string;
+  aud?: string | string[];
+  sub?: string;
+  exp?: number;
+  nbf?: number;
+  [claim: string]: unknown;
+}
+
 /**
- * The declared-but-unimplemented half of the verifier seam. Throwing here —
- * at BOOT, when the operator configures `oidc` — is the honest contract: a
- * daemon must never pretend an IdP was consulted. Tracked as the named
- * follow-up wicked-crew#249 (see docs/auth.md § "The OIDC seam").
+ * Verify a raw JWT string against the issuer's JWKS. Returns the decoded
+ * payload on success or throws a descriptive error on failure.
+ */
+async function verifyJwt(token: string, config: OidcConfig): Promise<JwtPayload> {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('malformed JWT: expected 3 dot-separated parts');
+
+  let header: { kid?: string; alg?: string };
+  let payload: JwtPayload;
+  try {
+    header = JSON.parse(base64urlDecode(parts[0]!).toString('utf8')) as typeof header;
+    payload = JSON.parse(base64urlDecode(parts[1]!).toString('utf8')) as JwtPayload;
+  } catch {
+    throw new Error('malformed JWT: header or payload is not valid base64url JSON');
+  }
+
+  const alg = header.alg ?? '';
+  if (!ALG_HASH[alg]) throw new Error(`unsupported JWT algorithm: ${alg}`);
+
+  const kid = header.kid ?? alg;
+  const sig = base64urlDecode(parts[2]!);
+  const headerPayload = `${parts[0]}.${parts[1]}`;
+
+  // Try cached key first; re-fetch once on unknown kid.
+  let jwk = await getJwk(config, kid, true);
+  if (!jwk) throw new Error(`no JWKS key found for kid=${JSON.stringify(kid)}`);
+
+  if (!verifySignature(headerPayload, sig, jwk, alg)) {
+    throw new Error('JWT signature verification failed');
+  }
+
+  // Claim validation.
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.iss !== 'string' || payload.iss !== config.issuer) {
+    throw new Error(`JWT issuer mismatch: expected ${config.issuer}, got ${JSON.stringify(payload.iss)}`);
+  }
+  const audList = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!audList.includes(config.audience)) {
+    throw new Error(`JWT audience mismatch: expected ${config.audience}, got ${JSON.stringify(payload.aud)}`);
+  }
+  if (typeof payload.exp === 'number' && payload.exp < now) {
+    throw new Error('JWT has expired (exp)');
+  }
+  if (typeof payload.nbf === 'number' && payload.nbf > now) {
+    throw new Error('JWT is not yet valid (nbf)');
+  }
+
+  return payload;
+}
+
+function mapOidcActor(payload: JwtPayload, config: OidcConfig): Actor {
+  const idClaim = config.claims?.id ?? 'sub';
+  const rawId = payload[idClaim];
+  const id = typeof rawId === 'string' && rawId.length > 0 ? rawId : payload.sub ?? '';
+  if (!id) throw new Error(`JWT has no value for id claim '${idClaim}' or 'sub'`);
+
+  const trustClaim = config.claims?.trust;
+  const rawTrust = trustClaim ? payload[trustClaim] : undefined;
+  const defaultTrust = config.defaultTrust ?? 'observer';
+  const trust: TrustLevel = TRUSTS.has(String(rawTrust)) ? (rawTrust as TrustLevel) : defaultTrust;
+
+  return Object.freeze({ id, kind: 'human', trust }) as Actor;
+}
+
+/**
+ * Create an OIDC verifier that validates JWTs against the issuer's JWKS.
+ * Supports RS256/384/512, ES256/384/512, PS256/384/512. JWKS keys are cached
+ * per issuer with a 5-minute TTL and auto-refreshed on unknown kid.
  */
 export function createOidcVerifier(config: OidcConfig): TokenVerifier {
-  throw new Error(
-    `[auth] OIDC verification (issuer ${config.issuer}) is a declared seam, not yet implemented — ` +
-      `use workload tokens (tokens.json) for now. Follow-up: wicked-crew#249 (docs/auth.md § "The OIDC seam").`,
-  );
+  // Validate config at creation time — a misconfigured issuer URL is caught
+  // immediately at boot rather than silently during the first verification.
+  if (!config.issuer || !config.issuer.startsWith('http')) {
+    throw new Error(`[auth] OIDC config: 'issuer' must be an https:// URL (got ${JSON.stringify(config.issuer)})`);
+  }
+  if (!config.audience) {
+    throw new Error(`[auth] OIDC config: 'audience' is required`);
+  }
+  return {
+    name: 'oidc',
+    async verify(token: string): Promise<Actor | null> {
+      // A JWT has exactly 3 base64url segments separated by dots. Static
+      // workload tokens are opaque strings and won't have this shape — the
+      // verifier chain tries static-tokens first, so if we get called the
+      // token isn't a known workload token. But don't assume it's a JWT either.
+      if (!token.includes('.')) return null; // clearly not a JWT; pass through
+      try {
+        const payload = await verifyJwt(token, config);
+        return mapOidcActor(payload, config);
+      } catch {
+        // Any verification failure → null so the chain can try the next
+        // verifier (or 401 if none match). The deny-401 path logs the failure.
+        return null;
+      }
+    },
+  };
 }
 
 // ── Resolution + hook installation ───────────────────────────────────────────
