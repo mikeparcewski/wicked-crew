@@ -365,7 +365,7 @@ async function verifyJwt(token: string, config: OidcConfig): Promise<JwtPayload>
   const headerPayload = `${parts[0]}.${parts[1]}`;
 
   // Try cached key first; re-fetch once on unknown kid.
-  let jwk = await getJwk(config, kid, true);
+  const jwk = await getJwk(config, kid, true);
   if (!jwk) throw new Error(`no JWKS key found for kid=${JSON.stringify(kid)}`);
 
   if (!verifySignature(headerPayload, sig, jwk, alg)) {
