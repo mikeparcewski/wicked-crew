@@ -22,11 +22,12 @@ function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
-/** `true` when an env var is set to a falsy string: "0", "false", "no", "off" (case-insensitive, trimmed). */
+/** `true` when an env var is set to a falsy string: "", "0", "false", "no", "off" (case-insensitive, trimmed).
+ *  An empty / whitespace-only value is treated as falsy so `VAR=` (common shell unset idiom) disables the feature. */
 function isFalsy(val: string | undefined): boolean {
   if (val === undefined) return false;
   const v = val.trim().toLowerCase();
-  return v === '0' || v === 'false' || v === 'no' || v === 'off';
+  return v === '' || v === '0' || v === 'false' || v === 'no' || v === 'off';
 }
 
 interface BootstrapOpts {
@@ -84,7 +85,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source, project-bound)
   // with a governed `interactive-draft` run. The bus is already required for the project bridge,
   // and only project-bound docs trigger runs — unbound docs are ignored. Opt-out:
-  //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false
+  //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false|no|off|""
   // The bus db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
   // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's service
   // resolves its bus exactly that way, so by default the two meet on the same db.
@@ -93,7 +94,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
     !isFalsy(process.env['WICKED_INTERACTIVE_DRAFT_EVENTS']);
   // DEFAULT ON (closes #261, same rationale): answer wicked-interactive's structural feedback
   // handoffs (`feedback.processed`, awaiting_structural > 0) with a governed `interactive-edit`
-  // run. Opt-out: --no-interactive-edit-events or WICKED_INTERACTIVE_EDIT_EVENTS=0|false
+  // run. Opt-out: --no-interactive-edit-events or WICKED_INTERACTIVE_EDIT_EVENTS=0|false|no|off|""
   const interactiveEditEvents =
     !hasFlag(args, '--no-interactive-edit-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_EDIT_EVENTS']);
