@@ -767,6 +767,21 @@ export class CoreAdapter {
     return this.core.cancelRun(runId);
   }
 
+  /**
+   * Archive (or unarchive) a TERMINAL run (crew#265) — write-off, not delete. Resolves `true`
+   * when the session existed, `false` for an unknown id (→ 404); REJECTS when the run is
+   * non-terminal (the route answers 409). Fail-closed on an old addon: method-presence guard,
+   * same doctrine as `injectWorkerMessage`.
+   */
+  async archiveRun(runId: string, archived: boolean, note?: string): Promise<boolean> {
+    const archive = (this.core as { archiveRun?: (id: string, a: boolean, n?: string | null) => Promise<string> }).archiveRun;
+    if (typeof archive !== 'function') {
+      throw new Error('Run archival needs wicked-core-ts >= 0.6.2; this build does not support it');
+    }
+    // JSON-encoded bool by contract (parse, never truthiness-test — 'false' is truthy).
+    return JSON.parse(await archive.call(this.core, runId, archived, note ?? null)) as boolean;
+  }
+
   /** Inject an operator message into a run's active PTY worker(s). target="all" or a CLI key. */
   injectWorkerMessage(runId: string, message: string, target: string): Promise<string> {
     if (typeof this.core.injectWorkerMessage !== 'function') {

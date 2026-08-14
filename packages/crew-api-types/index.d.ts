@@ -151,6 +151,16 @@ export interface AgentSession {
   attempt: number;
   workdir: string | null;
   repo_ref: string | null;
+  /** Launcher-declared extra write roots for the run's deliverables (wicked-core#259). */
+  extra_write_roots: string[];
+  /**
+   * When the operator ARCHIVED this run (crew#265) — a write-off, not a delete: the run stays
+   * fully readable but default run listings exclude it. Unix millis; `null` = live. Guard with
+   * `== null` (the live API sends `null`, never omits the key).
+   */
+  archived_at: number | null;
+  /** Optional operator note recorded at archival. */
+  archive_note: string | null;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
