@@ -251,7 +251,12 @@ function addonSupportsExtraWriteRoots(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pkg = require('wicked-core-ts/package.json') as { version?: string };
-    const [maj = 0, min = 0, pat = 0] = (pkg.version ?? '0.0.0').split('.').map(Number);
+    // Match only the numeric MAJOR.MINOR.PATCH prefix: `split('.').map(Number)` returns NaN on
+    // pre-release/build suffixes (`0.6.1-beta.1`), which would fail-closed a capable addon
+    // (Copilot). No match ⇒ unparseable ⇒ fail closed.
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(pkg.version ?? '');
+    if (!m) return false;
+    const [maj, min, pat] = [Number(m[1]), Number(m[2]), Number(m[3])];
     return maj > 0 || min > 6 || (min === 6 && pat >= 1);
   } catch {
     return false;
