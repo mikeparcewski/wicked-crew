@@ -364,11 +364,70 @@ export function registerRoutes(
 
   // Run list (replaces GET /sessions). Actionable-first; reconciles the gate and elicitation caches
   // so that terminal-run entries are pruned even when their terminal CoreEvent was missed.
-  app.get(`${V}/runs`, async () => {
+  app.get(`${V}/runs`, async (req) => {
     const views = await adapter.sessionsDetail();
     gateCache.reconcile(views);
     elicitationCache.reconcile(views);
-    return { runs: sortActionableFirst(views) };
+    // Archived runs are WRITTEN OFF (crew#265): excluded from the default view so finished
+    // history doesn't drown live signal, returned in full with `?include=archived`. The caches
+    // above reconcile over the COMPLETE set either way — a gate on an archived run must still
+    // resolve, not leak.
+    // Fastify parses a REPEATED query param as string[] — normalize so `?include=archived`
+    // and `?include=archived&include=archived` behave identically (Copilot).
+    const { include } = req.query as { include?: string | string[] };
+    const includeArchived = (Array.isArray(include) ? include : [include]).includes('archived');
+    const visible = includeArchived
+      ? views
+      : views.filter((v) => v.session.archived_at == null);
+    return { runs: sortActionableFirst(visible) };
+  });
+
+  // ── Run archival (crew#265) — write-off, not delete ────────────────────────
+  const ArchiveSchema = z.object({
+    archived: z.boolean(),
+    note: z.string().max(500).optional(),
+  }).strict();
+  app.post(`${V}/runs/:id/archive`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = ArchiveSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    try {
+      const found = await adapter.archiveRun(id, parsed.data.archived, parsed.data.note);
+      if (!found) return reply.code(404).send({ error: 'Run not found' });
+      return { runId: id, archived: parsed.data.archived };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // The engine names a NON-terminal status ("run X is Executing — only a terminal run…"):
+      // a state conflict on a real resource, not a bad request (write-off must never hide
+      // live work). Anything else — including the old-addon guard — is a real 500.
+      if (/only a terminal run/i.test(msg)) return reply.code(409).send({ error: msg });
+      return reply.code(500).send({ error: msg });
+    }
+  });
+  // Bulk write-off for campaign backlogs — explicit ids only, never implicit age selection.
+  const BulkArchiveSchema = z.object({
+    ids: z.array(z.string().min(1)).min(1).max(200),
+    note: z.string().max(500).optional(),
+  }).strict();
+  app.post(`${V}/runs/archive`, async (req, reply) => {
+    const parsed = BulkArchiveSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    // Per-id outcomes rather than all-or-nothing: a batch of 45 with one live run in it
+    // should archive 44 and NAME the refusal, not roll back the write-off.
+    const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+    for (const id of parsed.data.ids) {
+      try {
+        const found = await adapter.archiveRun(id, true, parsed.data.note);
+        results.push(found ? { id, ok: true } : { id, ok: false, error: 'not found' });
+      } catch (e: unknown) {
+        results.push({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return { results, archived: results.filter((r) => r.ok).length };
   });
 
   // One run's detail.

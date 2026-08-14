@@ -59,6 +59,9 @@ function workflowRun(): SessionView {
       attempt: 1,
       workdir: null,
       repo_ref: null,
+    extra_write_roots: [],
+    archived_at: null,
+    archive_note: null,
     },
     units: [
       unit({ ord: 1, id: `${RUN}:index`, status: 'done' }),
