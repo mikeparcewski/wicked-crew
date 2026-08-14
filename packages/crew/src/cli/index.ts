@@ -22,6 +22,13 @@ function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+/** `true` when an env var is set to a falsy string: "0", "false", "no", "off" (case-insensitive, trimmed). */
+function isFalsy(val: string | undefined): boolean {
+  if (val === undefined) return false;
+  const v = val.trim().toLowerCase();
+  return v === '0' || v === 'false' || v === 'no' || v === 'off';
+}
+
 interface BootstrapOpts {
   dbPath: string;
   port: number;
@@ -83,15 +90,13 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // resolves its bus exactly that way, so by default the two meet on the same db.
   const interactiveDraftEvents =
     !hasFlag(args, '--no-interactive-draft-events') &&
-    process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== '0' &&
-    process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== 'false';
+    !isFalsy(process.env['WICKED_INTERACTIVE_DRAFT_EVENTS']);
   // DEFAULT ON (closes #261, same rationale): answer wicked-interactive's structural feedback
   // handoffs (`feedback.processed`, awaiting_structural > 0) with a governed `interactive-edit`
   // run. Opt-out: --no-interactive-edit-events or WICKED_INTERACTIVE_EDIT_EVENTS=0|false
   const interactiveEditEvents =
     !hasFlag(args, '--no-interactive-edit-events') &&
-    process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== '0' &&
-    process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== 'false';
+    !isFalsy(process.env['WICKED_INTERACTIVE_EDIT_EVENTS']);
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
