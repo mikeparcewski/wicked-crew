@@ -31,10 +31,9 @@ interface BootstrapOpts {
   qeGateEvents: boolean;
   /** Bus db for the QE subscription; `undefined` = wicked-bus's own default resolution. */
   qeBusDbPath: string | undefined;
-  /** OPT-IN (task #86 spike): answer wicked-interactive doc.created with a governed draft run. */
+  /** DEFAULT ON (#261): answer project-bound wicked-interactive doc.created with a governed draft run. */
   interactiveDraftEvents: boolean;
-  /** OPT-IN (task #86 final leg): answer wicked-interactive structural feedback handoffs
-   *  (feedback.processed, awaiting_structural > 0) with a governed edit run. */
+  /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
   interactiveEditEvents: boolean;
   /** Seat roster override for the draft/edit runs (JSON array); `undefined` = production roster. */
   interactiveSeats: string | undefined;
@@ -75,22 +74,24 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
   // events are cross-product traffic that never lands there.
   const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
-  // OPT-IN (task #86 spike, same shape as --qe-gate-events): answer wicked-interactive's
-  // `doc.created` (kind:source) with a governed `interactive-draft` run. The subscription's bus
-  // db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
-  // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's
-  // service resolves its bus exactly that way, so by default the two meet on the same db.
+  // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source, project-bound)
+  // with a governed `interactive-draft` run. The bus is already required for the project bridge,
+  // and only project-bound docs trigger runs — unbound docs are ignored. Opt-out:
+  //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false
+  // The bus db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
+  // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's service
+  // resolves its bus exactly that way, so by default the two meet on the same db.
   const interactiveDraftEvents =
-    hasFlag(args, '--interactive-draft-events') ||
-    (process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== undefined &&
-      process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== '');
-  // OPT-IN (task #86 final leg, same shape): answer wicked-interactive's structural feedback
+    !hasFlag(args, '--no-interactive-draft-events') &&
+    process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== '0' &&
+    process.env['WICKED_INTERACTIVE_DRAFT_EVENTS'] !== 'false';
+  // DEFAULT ON (closes #261, same rationale): answer wicked-interactive's structural feedback
   // handoffs (`feedback.processed`, awaiting_structural > 0) with a governed `interactive-edit`
-  // run — the deterministic remainder of every batch stays inside the model-free service.
+  // run. Opt-out: --no-interactive-edit-events or WICKED_INTERACTIVE_EDIT_EVENTS=0|false
   const interactiveEditEvents =
-    hasFlag(args, '--interactive-edit-events') ||
-    (process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== undefined &&
-      process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== '');
+    !hasFlag(args, '--no-interactive-edit-events') &&
+    process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== '0' &&
+    process.env['WICKED_INTERACTIVE_EDIT_EVENTS'] !== 'false';
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
