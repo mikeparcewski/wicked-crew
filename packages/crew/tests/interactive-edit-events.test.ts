@@ -475,6 +475,10 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     expect(launch.problem).toContain('"spike-doc"');
     const handoffPath = join(dir, 'edits', 'spike-doc-v2-handoff.json');
     expect(launch.problem).toContain(handoffPath);
+    // crew#263: the edit inbox rides the launch as a declared write root — the task names the
+    // handoff JSON + output files under editDir, all outside the unit sandbox; without the
+    // declaration the wrapped-CLI boundary denies both the reads and the deliverable writes.
+    expect(launch.extraWriteRoots).toEqual([join(dir, 'edits')]);
 
     // The handoff FILE carries the fragments + index-named output paths.
     const handoffFile = JSON.parse(readFileSync(handoffPath, 'utf8')) as {

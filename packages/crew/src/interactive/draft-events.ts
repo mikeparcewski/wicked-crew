@@ -491,6 +491,12 @@ export async function startInteractiveDraftSubscriber(
         // the crew.run membership atomically with the launch, so the run shows up in the
         // project's activity feed instead of floating unattributed.
         projectId: doc.projectId,
+        // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
+        // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
+        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox
+        // so the engine widens the boundary by exactly this root (validated launch-side,
+        // wicked-core#259).
+        extraWriteRoots: [draftDir],
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the
