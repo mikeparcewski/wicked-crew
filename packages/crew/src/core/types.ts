@@ -51,6 +51,14 @@ export interface LaunchRunInput {
    * session persisted. Omit ⇒ unfiled (the synthesized `default` project).
    */
   projectId?: string;
+  /**
+   * ADDITIONAL absolute write roots for the run's deliverables (wicked-core#259 / crew#263) —
+   * e.g. the interactive-draft inbox the workflow contract names as the output destination.
+   * The engine validates each root at launch (absolute, never the engine config/pin tree) and
+   * widens the governed units' filesystem boundary by exactly these roots; an invalid root
+   * fails the launch with no session persisted. Omit for runs that deliver inside their workdir.
+   */
+  extraWriteRoots?: string[];
 }
 
 export const DEFAULT_SETTINGS: SystemSettings = {

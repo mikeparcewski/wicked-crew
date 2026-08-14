@@ -566,6 +566,11 @@ export async function startInteractiveEditSubscriber(
         // The 7b surface: a project-bound doc's governed edits are FILED — the run lands in
         // the project's activity feed instead of floating unattributed.
         ...(handoff.projectId !== undefined ? { projectId: handoff.projectId } : {}),
+        // The task names the handoff JSON + per-block output files under `editDir`, which sits
+        // OUTSIDE the unit's sandbox — the wrapped-CLI boundary would deny both the reads and
+        // the deliverable writes (crew#263, same shape as the draft path). One declared root
+        // covers both: write roots are readable (wicked-core#259).
+        extraWriteRoots: [editDir],
       };
       await adapter.launchRun(input);
     } catch (err) {

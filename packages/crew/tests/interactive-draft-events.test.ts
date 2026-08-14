@@ -547,6 +547,10 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
     expect(engine.launches[0]!.projectId).toBe('proj-7');
     expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-7']]);
+    // crew#263: the launch DECLARES the draft inbox as an extra write root. Without it the
+    // wrapped-CLI boundary denies the deliverable write and fails the run AFTER the draft is
+    // produced (run eed69dfa) — the declared outPath must be inside a declared root.
+    expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts')]);
 
     // Unbound doc → crew ignores it entirely (the assist skill handles it solo).
     await emitDocCreated(bus, 'unbound-doc');

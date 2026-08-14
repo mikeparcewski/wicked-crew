@@ -239,6 +239,25 @@ interface CoreConstructor {
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
 
+/**
+ * Does the installed wicked-core-ts addon understand `LaunchOptions.extraWriteRoots` (≥ 0.6.1)?
+ *
+ * A napi object silently IGNORES fields the addon doesn't declare, so passing the option to an
+ * older addon would launch a run whose boundary never widened — the worker then gets a boundary
+ * deny on the very deliverable path the caller declared (the crew#263 failure, resurrected
+ * silently). Fail CLOSED on version instead: same doctrine as the `projectId` guard below.
+ */
+function addonSupportsExtraWriteRoots(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pkg = require('wicked-core-ts/package.json') as { version?: string };
+    const [maj = 0, min = 0, pat = 0] = (pkg.version ?? '0.0.0').split('.').map(Number);
+    return maj > 0 || min > 6 || (min === 6 && pat >= 1);
+  } catch {
+    return false;
+  }
+}
+
 // ── Built-in workflow definitions (crew#44) ──────────────────────────────────
 // Static mirrors of wicked-core workflow defs: feature, bug, migration, survey-repo,
 // domain-graph-slice, memories, collab, onboarding, chat, and domain-extraction.
@@ -693,6 +712,17 @@ export class CoreAdapter {
         throw new ProjectsUnsupportedError('Filing a run into a project');
       }
       opts.projectId = input.projectId;
+    }
+    if (input.extraWriteRoots !== undefined && input.extraWriteRoots.length > 0) {
+      // Fail CLOSED on an old addon (napi ignores undeclared fields): a silently-dropped
+      // widening resurrects the crew#263 boundary deny on the declared deliverable path.
+      if (!addonSupportsExtraWriteRoots()) {
+        throw new Error(
+          'extraWriteRoots needs wicked-core-ts >= 0.6.1; the installed addon would silently ' +
+            'ignore it and the run would be denied writing its own deliverable',
+        );
+      }
+      opts.extraWriteRoots = input.extraWriteRoots;
     }
     if (input.workflow !== undefined) {
       opts.workflow = input.workflow;
