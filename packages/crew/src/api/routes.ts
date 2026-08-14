@@ -372,9 +372,13 @@ export function registerRoutes(
     // history doesn't drown live signal, returned in full with `?include=archived`. The caches
     // above reconcile over the COMPLETE set either way — a gate on an archived run must still
     // resolve, not leak.
-    const { include } = req.query as { include?: string };
-    const visible =
-      include === 'archived' ? views : views.filter((v) => v.session.archived_at == null);
+    // Fastify parses a REPEATED query param as string[] — normalize so `?include=archived`
+    // and `?include=archived&include=archived` behave identically (Copilot).
+    const { include } = req.query as { include?: string | string[] };
+    const includeArchived = (Array.isArray(include) ? include : [include]).includes('archived');
+    const visible = includeArchived
+      ? views
+      : views.filter((v) => v.session.archived_at == null);
     return { runs: sortActionableFirst(visible) };
   });
 
