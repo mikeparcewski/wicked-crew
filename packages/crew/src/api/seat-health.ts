@@ -99,8 +99,13 @@ export class SeatHealthTracker {
         return;
       }
       case 'unitReassigned': {
-        // `newCli: null` means the council re-convenes — the follow-up unitDistributed will set it.
+        // `newCli: null` means the council re-convenes — the follow-up unitDistributed will set
+        // the new seat. DROP the stale assignment meanwhile: leaving it in place would attribute
+        // the interregnum's events to the seat that was just taken off the unit (Copilot, #279).
         const newCli = str((event as { newCli?: unknown }).newCli);
+        if (session !== undefined && ord !== undefined && newCli === undefined) {
+          this.assignments.delete(`${session}:${ord}`);
+        }
         if (session !== undefined && ord !== undefined && newCli !== undefined) {
           this.assignments.set(`${session}:${ord}`, newCli);
         }
