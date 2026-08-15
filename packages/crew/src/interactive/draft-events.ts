@@ -383,8 +383,8 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'councilConvened') {
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
-      // "0-seat council" reads like a bug — generic phrasing whenever clis is missing, empty,
-      // or zero-length (Copilot ×2: the condition covers more than "unknown").
+      // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
+      // (Copilot, #269).
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
