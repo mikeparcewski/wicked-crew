@@ -1,3 +1,6 @@
+import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 // crew#273 — POST /open: open a file/folder with the OS default app, daemon-side.
 //
 // Fastify inject() with a mock adapter and a STUBBED opener (no process is ever spawned here).
@@ -182,5 +185,25 @@ describe('isInsideRoot (the containment rule)', () => {
 
   it('does not wrongly exclude a child whose name merely starts with dots', () => {
     expect(isInsideRoot('/a/b', '/a/b/..hidden')).toBe(true);
+  });
+
+  it('judges REAL paths — a symlink out of the root does not smuggle its target in', () => {
+    // Real filesystem fixture: root/link → outside/secret.txt. Lexically root/link is inside;
+    // its REAL path is not (Copilot, PR#279).
+    const base = mkdtempSync(join(tmpdir(), 'open-symlink-'));
+    const root = join(base, 'root');
+    const outside = join(base, 'outside');
+    mkdirSync(root);
+    mkdirSync(outside);
+    const secret = join(outside, 'secret.txt');
+    writeFileSync(secret, 'x');
+    const link = join(root, 'link');
+    symlinkSync(secret, link);
+    try {
+      expect(isInsideRoot(root, link)).toBe(false);
+      expect(isInsideRoot(root, join(root, 'real-child.txt'))).toBe(true); // missing → lexical
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
