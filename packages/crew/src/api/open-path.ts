@@ -21,17 +21,24 @@ export function isInsideRoot(root: string, target: string): boolean {
   // leaf resolves through its deepest EXISTING ancestor (never a bare lexical fallback:
   // on macOS the tmpdir itself sits under the /var → /private/var symlink, and a lexical
   // fallback on one side of the comparison would break containment for real children).
-  const real = (p: string): string => {
+  // Only ENOENT falls to the ancestor walk; any OTHER filesystem error (EACCES, ELOOP, …)
+  // fails CLOSED — an unresolvable-but-existing path must not be judged lexically (Copilot).
+  const real = (p: string): string | null => {
     const abs = resolve(p);
     try {
       return realpathSync(abs);
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
       const parent = dirname(abs);
       if (parent === abs) return abs;
-      return join(real(parent), basename(abs));
+      const rp = real(parent);
+      return rp === null ? null : join(rp, basename(abs));
     }
   };
-  const rel = relative(real(root), real(target));
+  const realRoot = real(root);
+  const realTarget = real(target);
+  if (realRoot === null || realTarget === null) return false;
+  const rel = relative(realRoot, realTarget);
   if (rel === '') return true; // the root itself
   if (isAbsolute(rel)) return false; // different drive/tree entirely (win32)
   return rel.split(sep)[0] !== '..';

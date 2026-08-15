@@ -198,7 +198,7 @@ describe('isInsideRoot (the containment rule)', () => {
     const secret = join(outside, 'secret.txt');
     writeFileSync(secret, 'x');
     const link = join(root, 'link');
-    symlinkSync(secret, link);
+    symlinkSync(secret, link, 'file');
     try {
       expect(isInsideRoot(root, link)).toBe(false);
       expect(isInsideRoot(root, join(root, 'real-child.txt'))).toBe(true); // missing → lexical
