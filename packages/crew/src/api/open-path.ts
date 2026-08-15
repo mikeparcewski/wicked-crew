@@ -7,7 +7,8 @@
 // receive the path verbatim as one argument.
 
 import { spawn } from 'node:child_process';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Is `target` inside `root` (or `root` itself), after normalization? Traversal-safe: the check is
@@ -15,7 +16,29 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
  * whose name merely starts with dots (`/a/..hidden`) is not wrongly excluded.
  */
 export function isInsideRoot(root: string, target: string): boolean {
-  const rel = relative(resolve(root), resolve(target));
+  // Symlink-safe (Copilot, PR#279): containment is judged on REAL paths, or a
+  // `<root>/symlink-to-outside` opens a file the validation never looked at. A missing
+  // leaf resolves through its deepest EXISTING ancestor (never a bare lexical fallback:
+  // on macOS the tmpdir itself sits under the /var → /private/var symlink, and a lexical
+  // fallback on one side of the comparison would break containment for real children).
+  // Only ENOENT falls to the ancestor walk; any OTHER filesystem error (EACCES, ELOOP, …)
+  // fails CLOSED — an unresolvable-but-existing path must not be judged lexically (Copilot).
+  const real = (p: string): string | null => {
+    const abs = resolve(p);
+    try {
+      return realpathSync(abs);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = dirname(abs);
+      if (parent === abs) return abs;
+      const rp = real(parent);
+      return rp === null ? null : join(rp, basename(abs));
+    }
+  };
+  const realRoot = real(root);
+  const realTarget = real(target);
+  if (realRoot === null || realTarget === null) return false;
+  const rel = relative(realRoot, realTarget);
   if (rel === '') return true; // the root itself
   if (isAbsolute(rel)) return false; // different drive/tree entirely (win32)
   return rel.split(sep)[0] !== '..';
