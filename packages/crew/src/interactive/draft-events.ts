@@ -383,9 +383,11 @@ export async function startInteractiveDraftSubscriber(
     if (event.type === 'councilConvened') {
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
+      // "0-seat council" reads like a bug — fall back to generic phrasing when unknown (Copilot).
+      const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening a ${seats}-seat council to pick who ${ord >= phaseCount ? 'writes the draft' : 'plans the outline'}…`,
+        `Convening ${council} to pick who ${ord >= phaseCount ? 'writes the draft' : 'plans the outline'}…`,
       );
       return;
     }

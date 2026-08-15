@@ -446,7 +446,9 @@ export async function startInteractiveEditSubscriber(
 
     if (event.type === 'councilConvened') {
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
-      narrate(flight, `Convening a ${seats}-seat council to pick who reworks ${blocks}…`);
+      // "0-seat council" reads like a bug — fall back to generic phrasing when unknown (Copilot).
+      const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
+      narrate(flight, `Convening ${council} to pick who reworks ${blocks}…`);
       return;
     }
 
