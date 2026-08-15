@@ -374,15 +374,68 @@ export async function startInteractiveDraftSubscriber(
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
 
+    // Narration ladder (#user-feedback 2026-08-14): the heartbeat repeats the LATEST line, and
+    // the interactive transcript dedups consecutive repeats — so the more the line ADVANCES with
+    // the run's real events, the more the thread reads as progress instead of a stuck echo.
+    const phaseName = (ord: number): string =>
+      INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`;
+
+    if (event.type === 'councilConvened') {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const seats = Array.isArray(event.clis) ? event.clis.length : 0;
+      narrate(
+        flight,
+        `Convening a ${seats}-seat council to pick who ${ord >= phaseCount ? 'writes the draft' : 'plans the outline'}…`,
+      );
+      return;
+    }
+
+    if (event.type === 'unitDistributed') {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const who = typeof event.cli === 'string' ? event.cli : 'a worker';
+      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
+      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}…`);
+      return;
+    }
+
     if (event.type === 'unitDispatched') {
       const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const phase = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`;
+      const phase = phaseName(ord);
       narrate(
         flight,
         ord >= phaseCount
           ? `Crew phase ${ord}/${phaseCount}: writing the draft (${phase})…`
           : `Crew phase ${ord}/${phaseCount}: ${phase} — planning the document…`,
       );
+      return;
+    }
+
+    if (event.type === 'toolInvoked') {
+      const tools = Array.isArray(event.tools) ? [...new Set(event.tools)].join(', ') : '';
+      if (tools) narrate(flight, `Worker is using ${tools} on your document…`);
+      return;
+    }
+
+    if (event.type === 'unitOutputCaptured') {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      narrate(flight, `${phaseName(ord)} finished — the governance gate is reviewing it…`);
+      return;
+    }
+
+    if (event.type === 'gateDecided' && event.allow === true) {
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      narrate(
+        flight,
+        ord >= phaseCount
+          ? 'Gate approved the draft — landing it now…'
+          : `Gate approved ${phaseName(ord)} — moving on…`,
+      );
+      return;
+    }
+
+    if (event.type === 'acpFallback') {
+      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
+      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
       return;
     }
 
