@@ -4,7 +4,7 @@ import { listRequirements, getRequirement, patchRequirement } from './requiremen
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
@@ -14,8 +14,10 @@ import { QeGateCache } from '../qe/gate-events.js';
 import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
-import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
+import type { LaunchRunInput, RosterSeat, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { SeatHealthTracker } from './seat-health.js';
+import { isInsideRoot, openWithSystemDefault } from './open-path.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -167,10 +169,26 @@ const ResizeTerminalSchema = z.object({
   rows: z.number().int().positive(),
 }).strict();
 
+/** `POST /open` (crew#273) — the studio Files tab's "open with the OS default app" body. */
+export const OpenPathSchema = z.object({
+  path: z.string().min(1),
+  runId: z.string().min(1).optional(),
+}).strict();
+
 /** The actor/audit deps (task #88) — threaded from `createServer`. */
 export interface SecurityDeps {
   audit: AuditLog;
   authMode: AuthMode;
+}
+
+/**
+ * Daemon-runtime deps the routes read but `createServer` owns: the seat-health fold (crew#274,
+ * fed by the daemon's single CoreEvent subscription) and the OS opener for `/open` (crew#273,
+ * injectable so tests never actually open anything).
+ */
+export interface RuntimeDeps {
+  seatHealth?: SeatHealthTracker;
+  openWithOs?: (target: string) => Promise<void>;
 }
 
 /**
@@ -194,8 +212,13 @@ export function registerRoutes(
   // ~/.wicked-crew/audit.log or leave appends pending after close. The real
   // trail always arrives from `createServer`.
   security: SecurityDeps = { audit: AuditLog.noop(), authMode: 'off' },
+  // Defaulted likewise: a directly-driven route set gets a fresh (all-active) health map and the
+  // real OS opener — tests inject both through this seam.
+  runtime: RuntimeDeps = {},
 ): void {
   const { audit } = security;
+  const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
+  const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
@@ -249,8 +272,65 @@ export function registerRoutes(
     return { port, host };
   });
 
-  // The council seats for the launch form (static production roster).
-  app.get(`${V}/roster`, async () => ({ roster: CoreAdapter.roster() }));
+  // The council seats for the launch form (static production roster), each carrying its RUNTIME
+  // health (crew#274). The roster is declarative — every configured seat is listed — and `health`
+  // is what the platform has observed: default active with no message; inactive + the error
+  // excerpt after a seat-level failure, until an ok output or the recovery probe flips it back.
+  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch).
+  app.get(`${V}/roster`, async () => ({
+    roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
+      ...seat,
+      health: seatHealth.healthFor(String(seat.key)),
+    })),
+  }));
+
+  // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
+  // click-to-open. The open MUST happen daemon-side (the SPA cannot spawn a process), which is
+  // why the path is validated first: absolute, and inside one of the caller-visible roots — the
+  // run's workdir + extra write roots (when `runId` is given) or a registered repo root. The
+  // run's QE evidence/decisions dirs (`.wicked-qe`/`.wicked-testing`) live under the repo root,
+  // so the repo-root rule covers them. Never an arbitrary path.
+  app.post(`${V}/open`, async (req, reply) => {
+    const parsed = OpenPathSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid open request'));
+    }
+    const { path: rawPath, runId } = parsed.data;
+    if (!isAbsolute(rawPath)) {
+      return reply.code(400).send({ error: '`path` must be an absolute path' });
+    }
+    const target = resolve(rawPath);
+    const roots: string[] = [];
+    try {
+      if (runId !== undefined) {
+        const views = await adapter.sessionsDetail();
+        const view = views.find((v) => v.session.id === runId);
+        if (view === undefined) {
+          return reply.code(404).send({ error: `unknown run: ${runId}` });
+        }
+        const workdir = view.session.workdir;
+        if (typeof workdir === 'string' && workdir.length > 0) roots.push(workdir);
+        for (const r of view.session.extra_write_roots ?? []) {
+          if (typeof r === 'string' && r.length > 0) roots.push(r);
+        }
+      }
+      for (const repo of await adapter.listRepos()) roots.push(repo.root_path);
+    } catch (err) {
+      return reply.code(500).send({ error: message(err) });
+    }
+    if (!roots.some((root) => isInsideRoot(root, target))) {
+      return reply.code(403).send({
+        error:
+          "path is outside every allowed root (the run's workdir/write roots and the registered repos)",
+      });
+    }
+    try {
+      await openWithOs(target);
+    } catch (err) {
+      return reply.code(502).send({ error: `could not open ${target}: ${message(err)}` });
+    }
+    return { status: 'opened' };
+  });
 
   // Registered repos → target-repo picker.
   app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));

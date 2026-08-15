@@ -27,7 +27,7 @@ import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
-import type { GateSchema, LaunchSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { GateSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -64,6 +64,13 @@ respondsWith<Wire.ElicitationInfo, ElicitationEntry>();
 
 // GET /repos — registered repositories.
 respondsWith<Wire.RepoEntry[], Awaited<ReturnType<CoreAdapter['listRepos']>>>();
+
+// GET /roster — every seat carries its runtime health (crew#274); the produced entry is the
+// seat verbatim plus a REQUIRED health field, which must satisfy the contract's optional one.
+respondsWith<
+  { roster: Wire.RosterSeat[] },
+  { roster: (Wire.RosterSeat & { health: Wire.SeatHealth })[] }
+>();
 
 // GET /workflows — built-ins (drop-ins are parsed into the same type).
 respondsWith<Wire.WorkflowDef[], typeof BUILTIN_WORKFLOWS>();
@@ -110,6 +117,8 @@ respondsWith<Wire.AuditEntry[], Awaited<ReturnType<AuditLog['read']>>>();
 accepts<z.input<typeof LaunchSchema>, Wire.LaunchRunBody>();
 accepts<z.input<typeof GateSchema>, Wire.GateDecision>();
 accepts<z.input<typeof OpenTerminalSchema>, Wire.OpenTerminalBody>();
+// POST /open (crew#273) — every body the contract lets the studio Files tab send must parse.
+accepts<z.input<typeof OpenPathSchema>, Wire.OpenPathBody>();
 // Projects (DES-PROJECT-001): every body the contract lets a client send must parse.
 accepts<z.input<typeof CreateProjectSchema>, Wire.CreateProjectBody>();
 accepts<z.input<typeof UpdateProjectSchema>, Wire.UpdateProjectBody>();
