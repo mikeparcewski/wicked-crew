@@ -65,6 +65,13 @@ respondsWith<Wire.ElicitationInfo, ElicitationEntry>();
 // GET /repos — registered repositories.
 respondsWith<Wire.RepoEntry[], Awaited<ReturnType<CoreAdapter['listRepos']>>>();
 
+// GET /roster — every seat carries its runtime health (crew#274); the produced entry is the
+// seat verbatim plus a REQUIRED health field, which must satisfy the contract's optional one.
+respondsWith<
+  { roster: Wire.RosterSeat[] },
+  { roster: (Wire.RosterSeat & { health: Wire.SeatHealth })[] }
+>();
+
 // GET /workflows — built-ins (drop-ins are parsed into the same type).
 respondsWith<Wire.WorkflowDef[], typeof BUILTIN_WORKFLOWS>();
 

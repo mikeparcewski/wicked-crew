@@ -222,6 +222,26 @@ export interface OnboardRef {
 }
 
 /**
+ * Runtime health of one council seat (crew#274).
+ *
+ * Derived by the daemon from the live CoreEvent stream — NEVER from config. The roster is
+ * declarative: every configured CLI stays listed and enabled in `clis.toml`; quota/auth/runtime
+ * errors are runtime state the platform detects and displays as `inactive` + the error excerpt.
+ * Recovery is automatic: a captured-ok unit output for the seat, or an exit-0 `version_probe`
+ * from the daemon's low-frequency recovery probe, flips the seat back to `active` and clears
+ * the message — no operator hand-edit involved.
+ */
+export interface SeatHealth {
+  status: 'active' | 'inactive';
+  /** Bounded excerpt of the last seat-level error; present while `inactive`. */
+  message?: string;
+  /** When the seat entered its current status (ISO-8601). */
+  since: string;
+  /** When the last seat-level error was observed (ISO-8601), if any was. */
+  lastErrorAt?: string;
+}
+
+/**
  * A council seat (`AgenticCli`) as returned by `GET /roster`. Only the fields
  * the launch form uses are named; the index signature keeps the (large) rest of
  * the seat intact so it round-trips verbatim into `clisJson` on launch.
@@ -232,6 +252,12 @@ export interface RosterSeat {
   binary: string;
   enabled_for_council: boolean;
   category?: string;
+  /**
+   * Runtime health (crew#274). Additive: absent on a daemon predating the field, and safe to
+   * round-trip into `clisJson` (the engine's `AgenticCli` deserializer ignores unknown fields).
+   * Absent-or-default reads as `active` with no message.
+   */
+  health?: SeatHealth;
   [k: string]: unknown;
 }
 

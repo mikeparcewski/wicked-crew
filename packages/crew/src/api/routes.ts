@@ -14,8 +14,9 @@ import { QeGateCache } from '../qe/gate-events.js';
 import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
-import type { LaunchRunInput, SessionStatus, SessionView } from '../core/types.js';
+import type { LaunchRunInput, RosterSeat, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { SeatHealthTracker } from './seat-health.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -174,6 +175,14 @@ export interface SecurityDeps {
 }
 
 /**
+ * Daemon-runtime deps the routes read but `createServer` owns: the seat-health fold (crew#274),
+ * fed by the daemon's single CoreEvent subscription.
+ */
+export interface RuntimeDeps {
+  seatHealth?: SeatHealthTracker;
+}
+
+/**
  * The daemon REST surface. Every endpoint is a thin wrapper over one adapter /
  * core-ts call (DES-STUDIO-001 §2). `session`/`phase` nouns are now `run`/`unit`.
  */
@@ -194,8 +203,12 @@ export function registerRoutes(
   // ~/.wicked-crew/audit.log or leave appends pending after close. The real
   // trail always arrives from `createServer`.
   security: SecurityDeps = { audit: AuditLog.noop(), authMode: 'off' },
+  // Defaulted likewise: a directly-driven route set gets a fresh (all-active) health map and the
+  // real OS opener — tests inject both through this seam.
+  runtime: RuntimeDeps = {},
 ): void {
   const { audit } = security;
+  const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
@@ -249,8 +262,17 @@ export function registerRoutes(
     return { port, host };
   });
 
-  // The council seats for the launch form (static production roster).
-  app.get(`${V}/roster`, async () => ({ roster: CoreAdapter.roster() }));
+  // The council seats for the launch form (static production roster), each carrying its RUNTIME
+  // health (crew#274). The roster is declarative — every configured seat is listed — and `health`
+  // is what the platform has observed: default active with no message; inactive + the error
+  // excerpt after a seat-level failure, until an ok output or the recovery probe flips it back.
+  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch).
+  app.get(`${V}/roster`, async () => ({
+    roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
+      ...seat,
+      health: seatHealth.healthFor(String(seat.key)),
+    })),
+  }));
 
   // Registered repos → target-repo picker.
   app.get(`${V}/repos`, async () => ({ repos: await adapter.listRepos() }));

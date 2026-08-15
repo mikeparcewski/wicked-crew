@@ -17,8 +17,9 @@ import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
-import type { CoreAdapter } from '../core/adapter.js';
+import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
+import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-health.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -121,6 +122,17 @@ export interface CreateServerOptions {
   auth?: AuthOptions;
   /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
   auditPath?: string;
+  /**
+   * The seat-health recovery probe (crew#274): every `intervalMs` (default 10 min), INACTIVE
+   * seats only, run the seat's `version_probe`; exit 0 flips the seat active again. `enabled`
+   * defaults to ON in the daemon and OFF under a test runner (VITEST / NODE_ENV=test), so a
+   * test-built server never spawns CLI probes unless it opts in explicitly.
+   */
+  seatHealthProbe?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    timeoutMs?: number;
+  };
 }
 
 export async function createServer(
@@ -132,6 +144,9 @@ export async function createServer(
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();
   const qeGateCache = new QeGateCache();
+  // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
+  // surfaced on GET /roster, recovered by the low-frequency probe armed further down.
+  const seatHealth = new SeatHealthTracker();
 
   // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
   // a malformed token file or a configured-but-unimplemented OIDC block must
@@ -262,6 +277,7 @@ export async function createServer(
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
+    seatHealth.ingest(event);
     terminals.route(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
@@ -301,6 +317,27 @@ export async function createServer(
   app.addHook('onClose', async () => {
     offEvent();
   });
+
+  // The seat-health recovery probe (crew#274 §3). A plain setInterval, unref'd, torn down on
+  // close. Default ON in the daemon, OFF under a test runner — a test suite building servers
+  // must never spawn `<cli> --version` children unless it opts in with `enabled: true`.
+  const probeCfg = options?.seatHealthProbe;
+  const underTestRunner =
+    process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test';
+  if (probeCfg?.enabled ?? !underTestRunner) {
+    const probe = startSeatHealthProbe(
+      seatHealth,
+      () => CoreAdapter.roster() as ProbeSeat[],
+      {
+        ...(probeCfg?.intervalMs !== undefined ? { intervalMs: probeCfg.intervalMs } : {}),
+        ...(probeCfg?.timeoutMs !== undefined ? { timeoutMs: probeCfg.timeoutMs } : {}),
+        log: (m) => app.log.warn(m),
+      },
+    );
+    app.addHook('onClose', async () => {
+      probe.stop();
+    });
+  }
 
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
@@ -368,6 +405,7 @@ export async function createServer(
       log: (m) => app.log.warn(m),
     },
     { audit, authMode: auth.mode },
+    { seatHealth },
   );
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
