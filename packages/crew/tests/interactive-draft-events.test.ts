@@ -386,6 +386,23 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
       ),
     );
 
+    // Narration LADDER: council, seat choice, tools, gate — each event ADVANCES the line, so
+    // the heartbeat repeats progress instead of echoing one thin phrase (user feedback).
+    const narrated = (needle: string) => () =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes(needle),
+      );
+    engine.fire({ type: 'councilConvened', session: launch.sessionId, ord: 2, clis: ['a', 'b', 'c'] });
+    await waitFor(narrated('3-seat council'));
+    engine.fire({ type: 'unitDistributed', session: launch.sessionId, ord: 2, cli: 'stub', agreement_pct: 100 });
+    await waitFor(narrated('picked stub'));
+    engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
+    await waitFor(narrated('using Write, Read'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('landing it now'));
+
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
     mkdirSync(draftDir, { recursive: true });
     writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');

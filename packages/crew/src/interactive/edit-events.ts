@@ -439,11 +439,48 @@ export async function startInteractiveEditSubscriber(
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
 
+    // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
+    // line and the transcript dedups repeats, so advancing the line = visible progress.
+    const blocks =
+      flight.items.length === 1 ? 'the targeted block' : `${flight.items.length} targeted blocks`;
+
+    if (event.type === 'councilConvened') {
+      const seats = Array.isArray(event.clis) ? event.clis.length : 0;
+      narrate(flight, `Convening a ${seats}-seat council to pick who reworks ${blocks}…`);
+      return;
+    }
+
+    if (event.type === 'unitDistributed') {
+      const who = typeof event.cli === 'string' ? event.cli : 'a worker';
+      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
+      narrate(flight, `Council picked ${who} to rework ${blocks}${pct}…`);
+      return;
+    }
+
     if (event.type === 'unitDispatched') {
-      narrate(
-        flight,
-        `Crew is reworking ${flight.items.length === 1 ? 'the targeted block' : `${flight.items.length} targeted blocks`}…`,
-      );
+      narrate(flight, `Crew is reworking ${blocks}…`);
+      return;
+    }
+
+    if (event.type === 'toolInvoked') {
+      const tools = Array.isArray(event.tools) ? [...new Set(event.tools)].join(', ') : '';
+      if (tools) narrate(flight, `Worker is using ${tools} on ${blocks}…`);
+      return;
+    }
+
+    if (event.type === 'unitOutputCaptured') {
+      narrate(flight, `Rework finished — the governance gate is reviewing it…`);
+      return;
+    }
+
+    if (event.type === 'gateDecided' && event.allow === true) {
+      narrate(flight, 'Gate approved the edit — landing the new version now…');
+      return;
+    }
+
+    if (event.type === 'acpFallback') {
+      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
+      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
       return;
     }
 
