@@ -261,6 +261,17 @@ export interface RosterSeat {
   [k: string]: unknown;
 }
 
+/** Body for `POST /open` — open a file/folder with the OS default application (crew#273). */
+export interface OpenPathBody {
+  /**
+   * ABSOLUTE path to open. Validated daemon-side: it must resolve inside the run's workdir /
+   * extra write roots (when `runId` is given) or a registered repo root — never an arbitrary path.
+   */
+  path: string;
+  /** Widen validation to this run's workdir + extra write roots. Unknown id ⇒ 404. */
+  runId?: string;
+}
+
 /** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
 export interface GateInfo {
   runId: string;
