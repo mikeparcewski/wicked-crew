@@ -44,7 +44,9 @@ function buildApp(tracker: SeatHealthTracker): FastifyInstance {
     undefined,
     undefined,
     undefined,
-    { seatHealth: tracker },
+    // signedIn stubbed to "unknown" so this suite stays about HEALTH and never reads the
+    // developer's real dotfiles (the sign-in surface has its own suites).
+    { seatHealth: tracker, signedIn: () => null },
   );
   return app;
 }

@@ -68,7 +68,9 @@ function workflowOverlayDir(): string {
   return join(home, '.config', 'wicked-core', 'workflows');
 }
 
-function settingsFilePath(): string {
+/** Where the daemon persists system settings. Exported so tests write fixtures to the ONE
+ *  spelling of this path (the tests/ tree is audited against spelling core paths itself). */
+export function settingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 
@@ -1520,6 +1522,13 @@ export class CoreAdapter {
       if ('graphNodeLimit' in parsed) {
         const v = parsed.graphNodeLimit;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
+      }
+      // worker_config_root (seat sign-in): absolute path or "" (= engine default). A hand-edited
+      // relative path is dropped rather than exported as WICKED_WORKER_HOME, where the engine
+      // would resolve it against an arbitrary spawn cwd.
+      if ('worker_config_root' in parsed) {
+        const r = parsed.worker_config_root;
+        if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
       }
       return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {

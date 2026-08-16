@@ -17,6 +17,7 @@ import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output
 import type { LaunchRunInput, RosterSeat, SessionStatus, SessionView } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { SeatHealthTracker } from './seat-health.js';
+import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { isInsideRoot, openWithSystemDefault } from './open-path.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
@@ -189,6 +190,9 @@ export interface SecurityDeps {
 export interface RuntimeDeps {
   seatHealth?: SeatHealthTracker;
   openWithOs?: (target: string) => Promise<void>;
+  /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
+   *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
+  signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
 }
 
 /**
@@ -219,6 +223,7 @@ export function registerRoutes(
   const { audit } = security;
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
+  const signedIn = runtime.signedIn ?? signedInHeuristic;
   // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
@@ -276,13 +281,22 @@ export function registerRoutes(
   // health (crew#274). The roster is declarative — every configured seat is listed — and `health`
   // is what the platform has observed: default active with no message; inactive + the error
   // excerpt after a seat-level failure, until an ok output or the recovery probe flips it back.
-  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch).
-  app.get(`${V}/roster`, async () => ({
-    roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
-      ...seat,
-      health: seatHealth.healthFor(String(seat.key)),
-    })),
-  }));
+  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch)
+  // — the spread is deliberately NOT a field whitelist, which is what lets the engine's
+  // `login_invocation` (seat sign-in, wicked-core PR#278) pass through untouched. Each seat also
+  // gains `signed_in`: the cheap file/env presence heuristic, computed against the LIVE
+  // `WICKED_WORKER_HOME` env — the same value the engine reads at the next worker spawn, kept
+  // current by `applyWorkerConfigRoot` at boot and on every settings change.
+  app.get(`${V}/roster`, async () => {
+    const workerRoot = process.env['WICKED_WORKER_HOME'];
+    return {
+      roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
+        ...seat,
+        health: seatHealth.healthFor(String(seat.key)),
+        signed_in: signedIn(String(seat.key), workerRoot === '' ? undefined : workerRoot),
+      })),
+    };
+  });
 
   // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
   // click-to-open. The open MUST happen daemon-side (the SPA cannot spawn a process), which is
@@ -1618,13 +1632,28 @@ export function registerRoutes(
         return reply.code(400).send({ error: 'graphNodeLimit must be an integer between 20 and 500' });
       }
     }
+    if ('worker_config_root' in patch) {
+      const root = patch.worker_config_root;
+      if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
+        return reply.code(400).send({
+          error: 'worker_config_root must be an absolute path, or "" for the default (~/.wicked-worker)',
+        });
+      }
+    }
     // Only allow known keys through.
-    const allowed: (keyof import('../core/types.js').SystemSettings)[] = ['graphNodeLimit'];
+    const allowed: (keyof import('../core/types.js').SystemSettings)[] = [
+      'graphNodeLimit',
+      'worker_config_root',
+    ];
     const safe: Partial<import('../core/types.js').SystemSettings> = {};
     for (const key of allowed) {
       if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
     }
     const settings = await adapter.updateSettings(safe);
+    // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
+    // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
+    // at the next spawn: no daemon restart, no engine restart.
+    applyWorkerConfigRoot(settings.worker_config_root);
     audit.record('settings.updated', actorOf(req), { detail: { changed: Object.keys(safe) } });
     return { settings };
   });
