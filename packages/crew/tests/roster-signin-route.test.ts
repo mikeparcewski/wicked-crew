@@ -54,7 +54,7 @@ function buildApp(signedIn: (seatKey: string, workerConfigRoot?: string) => bool
 }
 
 describe('GET /roster with seat sign-in (seat sign-in)', () => {
-  let app: FastifyInstance;
+  let app: FastifyInstance | undefined;
   const savedWorkerHome = process.env['WICKED_WORKER_HOME'];
 
   beforeEach(() => {
@@ -62,7 +62,10 @@ describe('GET /roster with seat sign-in (seat sign-in)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    // Guarded: a test that throws before assigning `app` must not have its real failure
+    // masked by a cleanup TypeError (Copilot, PR#281).
+    await app?.close();
+    app = undefined;
     vi.restoreAllMocks();
     if (savedWorkerHome === undefined) delete process.env['WICKED_WORKER_HOME'];
     else process.env['WICKED_WORKER_HOME'] = savedWorkerHome;

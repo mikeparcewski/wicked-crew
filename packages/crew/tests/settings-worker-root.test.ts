@@ -49,7 +49,7 @@ function buildApp(adapter: CoreAdapter): FastifyInstance {
 }
 
 describe('PUT/GET /settings worker_config_root', () => {
-  let app: FastifyInstance;
+  let app: FastifyInstance | undefined;
   let dir: string;
 
   beforeEach(() => {
@@ -57,7 +57,9 @@ describe('PUT/GET /settings worker_config_root', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    // Guarded: a pre-assignment failure must surface itself, not this cleanup (Copilot).
+    await app?.close();
+    app = undefined;
     rmSync(dir, { recursive: true, force: true });
     restoreWorkerHome();
   });
