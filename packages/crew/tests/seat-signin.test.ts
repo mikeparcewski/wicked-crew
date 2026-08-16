@@ -83,9 +83,36 @@ describe('copilot — env token, else keychain-unknowable', () => {
     expect(signedInHeuristic('copilot', undefined, { home, env: { GH_TOKEN: '' } })).toBe(false);
   });
 
-  it('null (NOT false) when installed but no env — the keychain state is unknowable cheaply', () => {
+  it('null (NOT false) when installed but no recorded user — the keychain state is unknowable cheaply', () => {
     mkdirSync(join(home, '.copilot'), { recursive: true });
     writeFileSync(join(home, '.copilot', 'config.json'), '{}');
+    expect(probe('copilot')).toBeNull();
+  });
+
+  it('TRUE when config.json records a logged-in user (JSONC with comment header, field shape)', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '// User settings belong in settings.json\n{"lastLoggedInUser": "octocat", "loggedInUsers": ["octocat"], "trustedFolders": []}',
+    );
+    expect(probe('copilot')).toBe(true);
+  });
+
+  it('an EMPTY loggedInUsers array does not count as signed in', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '{"loggedInUsers": [], "lastLoggedInUser": ""}',
+    );
+    expect(probe('copilot')).toBeNull();
+  });
+
+  it('an array of EMPTY STRINGS does not count as signed in either', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '{"loggedInUsers": [""], "lastLoggedInUser": ""}',
+    );
     expect(probe('copilot')).toBeNull();
   });
 

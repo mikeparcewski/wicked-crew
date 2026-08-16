@@ -88,9 +88,29 @@ export function signedInHeuristic(
         const v = env[key];
         if (typeof v === 'string' && v !== '') return true;
       }
-      // Installed (config exists) but no env: `copilot login` stores the credential in the OS
-      // keychain, which this module will not open — unknowable cheaply is `null`, NOT `false`.
-      if (existsSync(join(home, '.copilot', 'config.json'))) return null;
+      // `copilot login` stores the TOKEN in the OS keychain, but it also records the logged-in
+      // USER in config.json (`lastLoggedInUser` / `loggedInUsers`) — verified in the field: a
+      // successful sign-in left the chip on null-neutral and the Sign in button up, reading as
+      // "didn't work". The file is JSONC (comment header), so this parses key-presence
+      // leniently rather than JSON.parse-ing the whole document.
+      const cfg = join(home, '.copilot', 'config.json');
+      if (existsSync(cfg)) {
+        try {
+          const raw = readFileSync(cfg, 'utf8');
+          // A non-empty STRING user, or an array whose first entry is a non-empty string —
+          // `[""]` must not read as signed in (Copilot, PR#282).
+          if (
+            /"lastLoggedInUser"\s*:\s*"[^"]+"/.test(raw) ||
+            /"loggedInUsers"\s*:\s*\[\s*"[^"]+"/.test(raw)
+          ) {
+            return true;
+          }
+        } catch {
+          /* unreadable config falls through to null */
+        }
+        // Installed but no recorded user and no env: the keychain half stays unknowable.
+        return null;
+      }
       return false; // no env, no config dir: nothing suggests this seat ever signed in
     }
 
