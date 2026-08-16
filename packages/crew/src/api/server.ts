@@ -20,6 +20,7 @@ import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-health.js';
+import { applyWorkerConfigRoot } from './seat-signin.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -160,6 +161,13 @@ export async function createServer(
   app.addHook('onClose', async () => {
     await audit.flush(); // don't lose the trail's tail on shutdown
   });
+
+  // Seat sign-in: export the persisted worker-config root as WICKED_WORKER_HOME at boot (the
+  // PUT /settings route re-applies it on every change). The engine reads the env PER SPAWN
+  // (acp_runner.rs claude_worker_home), so boot + on-change application is sufficient — no
+  // engine restart is ever needed. settings.json is the source of truth: unset/empty deletes
+  // the env, restoring the engine default ~/.wicked-worker.
+  applyWorkerConfigRoot((await adapter.getSettings()).worker_config_root);
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
   // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated

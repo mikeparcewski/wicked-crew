@@ -258,6 +258,22 @@ export interface RosterSeat {
    * Absent-or-default reads as `active` with no message.
    */
   health?: SeatHealth;
+  /**
+   * The shell invocation that runs this seat's own interactive login flow (seat sign-in;
+   * wicked-core PR#278 `AgenticCli.login_invocation`). Passed through from the engine roster
+   * VERBATIM — the daemon never synthesizes one. The studio hosts it in a PTY terminal
+   * (`POST /terminals`) so every CLI's native sign-in gets one uniform surface. Absent on an
+   * engine predating the field (serde omits `None`) and on seats with no known login flow.
+   */
+  login_invocation?: string;
+  /**
+   * Whether the seat LOOKS signed in — a cheap file/env-presence HEURISTIC computed by the
+   * daemon (`seat-signin.ts`), never a spawned probe and never proof the credential still
+   * works. Three-valued on purpose: `true`/`false` when the seat's auth state is observable
+   * from files or env, `null`/absent when it is unknowable cheaply (keychain-backed seats,
+   * unknown seat keys, or a daemon predating the field).
+   */
+  signed_in?: boolean | null;
   [k: string]: unknown;
 }
 
@@ -1035,6 +1051,14 @@ export interface GitContributor {
 export interface SystemSettings {
   /** Max nodes returned by wicked-estate graph-view (default 150). */
   graphNodeLimit: number;
+  /**
+   * Base directory for the ENGINE-OWNED worker CLI config homes (the claude worker home is
+   * `<root>/claude`). The daemon applies it as env `WICKED_WORKER_HOME` at boot and on every
+   * settings change; the engine reads that env per worker spawn (acp_runner.rs), so a change
+   * takes effect on the next spawn with no restart. Absolute path when set; `""` or absent =
+   * the engine default `~/.wicked-worker`.
+   */
+  worker_config_root?: string;
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──

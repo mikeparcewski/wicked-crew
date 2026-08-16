@@ -65,11 +65,19 @@ respondsWith<Wire.ElicitationInfo, ElicitationEntry>();
 // GET /repos — registered repositories.
 respondsWith<Wire.RepoEntry[], Awaited<ReturnType<CoreAdapter['listRepos']>>>();
 
-// GET /roster — every seat carries its runtime health (crew#274); the produced entry is the
-// seat verbatim plus a REQUIRED health field, which must satisfy the contract's optional one.
+// GET /roster — every seat carries its runtime health (crew#274) and its sign-in presence
+// (seat sign-in, api-types 0.5.0); the produced entry is the seat verbatim — which is what
+// lets the engine's `login_invocation` ride through — plus REQUIRED health and signed_in
+// fields, which must satisfy the contract's optional ones.
 respondsWith<
   { roster: Wire.RosterSeat[] },
-  { roster: (Wire.RosterSeat & { health: Wire.SeatHealth })[] }
+  {
+    roster: (Wire.RosterSeat & {
+      health: Wire.SeatHealth;
+      signed_in: boolean | null;
+      login_invocation?: string;
+    })[];
+  }
 >();
 
 // GET /workflows — built-ins (drop-ins are parsed into the same type).
@@ -86,8 +94,11 @@ respondsWith<Wire.GraphKind[], Awaited<ReturnType<CoreAdapter['getGraphKindsForR
 respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();
 
-// GET/PUT /settings — persisted system settings (defaults applied server-side).
+// GET/PUT /settings — persisted system settings (defaults applied server-side). Checked twice:
+// the compiled-in defaults, and the adapter's read shape (defaults + persisted patch), which
+// carries the additive `worker_config_root` (seat sign-in, api-types 0.5.0).
 respondsWith<Wire.SystemSettings, typeof DEFAULT_SETTINGS>();
+respondsWith<Wire.SystemSettings, Awaited<ReturnType<CoreAdapter['getSettings']>>>();
 
 // Projects (DES-PROJECT-001 §5.2) — the 9-route surface's reads.
 respondsWith<Wire.Project, Awaited<ReturnType<CoreAdapter['projectCreate']>>>();
