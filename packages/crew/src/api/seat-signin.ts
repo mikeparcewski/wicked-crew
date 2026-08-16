@@ -97,7 +97,12 @@ export function signedInHeuristic(
       if (existsSync(cfg)) {
         try {
           const raw = readFileSync(cfg, 'utf8');
-          if (/"(?:lastLoggedInUser|loggedInUsers)"\s*:\s*(?:"[^"]+"|\[\s*[^\]\s])/.test(raw)) {
+          // A non-empty STRING user, or an array whose first entry is a non-empty string —
+          // `[""]` must not read as signed in (Copilot, PR#282).
+          if (
+            /"lastLoggedInUser"\s*:\s*"[^"]+"/.test(raw) ||
+            /"loggedInUsers"\s*:\s*\[\s*"[^"]+"/.test(raw)
+          ) {
             return true;
           }
         } catch {

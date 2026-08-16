@@ -107,6 +107,15 @@ describe('copilot — env token, else keychain-unknowable', () => {
     expect(probe('copilot')).toBeNull();
   });
 
+  it('an array of EMPTY STRINGS does not count as signed in either', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '{"loggedInUsers": [""], "lastLoggedInUser": ""}',
+    );
+    expect(probe('copilot')).toBeNull();
+  });
+
   it('false when there is no env token and no config dir at all', () => {
     expect(probe('copilot')).toBe(false);
   });
