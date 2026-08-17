@@ -3,8 +3,8 @@
  *
  * A bridge is a local `wicked-interactive serve` process that records itself in
  * `<root>/.wi-serve.json` = `{ port, host, pid, startedAt, version }` (ADR-0022). Its port is
- * DYNAMIC — first free from 4400 up — which is precisely why crew, a server process that can
- * read that lockfile, proxies it instead of the browser dialling a port literal.
+ * DYNAMIC — the first free port above its base — which is precisely why crew, a server process
+ * that can read that lockfile, proxies it instead of the browser dialling a port literal.
  *
  * LOCAL-ONLY BY DESIGN. Every mechanism here (a pid, a file in a directory, spawning a child)
  * is single-host. That is the slice-1 posture, not an oversight: when the execution seam goes

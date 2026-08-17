@@ -65,3 +65,5 @@
 {"ts": "2026-08-17T13:18:46.620500Z", "session_id": "default", "tool": "Bash", "event": "PostToolUse"}
 {"ts": "2026-08-17T13:18:54.933271Z", "session_id": "default", "tool": "Bash", "event": "PostToolUse"}
 {"ts": "2026-08-17T13:19:00.216371Z", "session_id": "default", "tool": "Bash", "event": "PostToolUse"}
+{"ts": "2026-08-17T13:24:44.445880Z", "session_id": "default", "tool": "Bash", "event": "PostToolUse"}
+{"ts": "2026-08-17T13:24:55.495319Z", "session_id": "default", "tool": "Bash", "event": "PostToolUse"}

@@ -4,8 +4,8 @@
  *
  * PURE TRANSPORT. Nothing user-visible moves in this slice: what changes is that interactive's
  * HTTP surface becomes reachable through crew's OWN origin, so the studio client never learns a
- * second origin, never needs CORS, and never carries a `:4400` literal — ADR-0022's dynamic port
- * is honored rather than worked around, and the bridge stops being browser-reachable at all.
+ * second origin, never needs CORS, and never carries a bridge port literal — ADR-0022's dynamic
+ * port is honored rather than worked around, and the bridge stops being browser-reachable at all.
  *
  * The path encodes the project (§7.2) because the ROOT is a per-project setting: the same proxy
  * mount serves N interactive instances, one bridge per resolved root.
