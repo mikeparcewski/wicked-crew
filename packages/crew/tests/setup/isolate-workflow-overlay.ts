@@ -46,3 +46,8 @@ if (slot[KEY] === undefined) {
 // Re-asserted per file, not just per process: a test that points `WICKED_WORKFLOWS_DIR` somewhere of
 // its own must not leak that choice into whatever file the worker picks up next.
 process.env['WICKED_WORKFLOWS_DIR'] = slot[KEY];
+
+// Same discipline for the crew-side project settings store (DES-MERGE-001 §7.1): its default is
+// `~/.wicked-crew/project-settings.json`, so a PATCH in any route test would otherwise rewrite the
+// developer's real project→interactiveRoot bindings.
+process.env['WICKED_CREW_PROJECT_SETTINGS'] = join(slot[KEY], 'project-settings.json');
