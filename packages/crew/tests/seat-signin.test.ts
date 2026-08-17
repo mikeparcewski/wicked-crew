@@ -116,6 +116,15 @@ describe('copilot — env token, else keychain-unknowable', () => {
     expect(probe('copilot')).toBe(true);
   });
 
+  it('an unrelated "login" string OUTSIDE the user containers does not count', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '{"someFeature": {"login": "banner-text"}, "loggedInUsers": [], "lastLoggedInUser": null}',
+    );
+    expect(probe('copilot')).toBeNull();
+  });
+
   it('an array of EMPTY STRINGS does not count as signed in either', () => {
     mkdirSync(join(home, '.copilot'), { recursive: true });
     writeFileSync(

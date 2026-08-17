@@ -105,7 +105,10 @@ export function signedInHeuristic(
           if (
             /"lastLoggedInUser"\s*:\s*"[^"]+"/.test(raw) ||
             /"loggedInUsers"\s*:\s*\[\s*"[^"]+"/.test(raw) ||
-            /"login"\s*:\s*"[^"]+"/.test(raw)
+            // Object shapes, SCOPED to the user containers (an unrelated "login" string
+            // elsewhere in the config must not read as signed in — Copilot, PR#283).
+            /"lastLoggedInUser"\s*:\s*\{[^}]*"login"\s*:\s*"[^"]+"/.test(raw) ||
+            /"loggedInUsers"\s*:\s*\[\s*\{[^}]*"login"\s*:\s*"[^"]+"/.test(raw)
           ) {
             return true;
           }
