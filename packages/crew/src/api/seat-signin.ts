@@ -99,9 +99,13 @@ export function signedInHeuristic(
           const raw = readFileSync(cfg, 'utf8');
           // A non-empty STRING user, or an array whose first entry is a non-empty string —
           // `[""]` must not read as signed in (Copilot, PR#282).
+          // Both shapes seen in the field: a plain string user, OR an OBJECT user
+          // ({host, login} — the live config on macOS). A non-empty "login" string inside
+          // either container is the common observable.
           if (
             /"lastLoggedInUser"\s*:\s*"[^"]+"/.test(raw) ||
-            /"loggedInUsers"\s*:\s*\[\s*"[^"]+"/.test(raw)
+            /"loggedInUsers"\s*:\s*\[\s*"[^"]+"/.test(raw) ||
+            /"login"\s*:\s*"[^"]+"/.test(raw)
           ) {
             return true;
           }

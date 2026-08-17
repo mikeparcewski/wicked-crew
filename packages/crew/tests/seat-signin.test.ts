@@ -107,6 +107,15 @@ describe('copilot — env token, else keychain-unknowable', () => {
     expect(probe('copilot')).toBeNull();
   });
 
+  it('TRUE when the recorded user is an OBJECT ({host, login}) — the live macOS shape', () => {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      '// comment\n{"loggedInUsers": [{"host": "github.com", "login": "octocat"}], "lastLoggedInUser": {"host": "github.com", "login": "octocat"}}',
+    );
+    expect(probe('copilot')).toBe(true);
+  });
+
   it('an array of EMPTY STRINGS does not count as signed in either', () => {
     mkdirSync(join(home, '.copilot'), { recursive: true });
     writeFileSync(
