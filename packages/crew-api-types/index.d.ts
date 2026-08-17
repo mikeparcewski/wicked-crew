@@ -399,6 +399,8 @@ export interface CoreEvent {
   // unitOutputCaptured (EVT-013)
   outputBytes?: number;
   stepStatus?: 'ok' | 'failed' | 'cancelled';
+  /** `unitOutputDelta` (api-types 0.5.1): one streamed chunk of a worker's live output text. */
+  text?: string;
   // unitPlanned enrichment fields — the wire spelling is camelCase (event_to_json);
   // the snake_case variants are kept for older daemons.
   stage?: string;
@@ -729,6 +731,22 @@ export interface UnitOutputCapturedEvent {
   outputBytes: number;
   stepStatus: 'ok' | 'failed' | 'cancelled';
   governed: boolean;
+}
+
+/**
+ * A live streamed chunk of a worker's output for one dispatch of a unit, relayed verbatim over
+ * `/ws` (api-types 0.5.1). High-volume live-stream frame: chunks arrive in emission order within
+ * one `(session, ord, attempt)` scope; `attempt` separates a re-dispatch's stream from the
+ * original's. The daemon's relay is allowlist-free, so this frame reaches `/ws` clients
+ * unmodified even before a consumer names it (`tests/ws-relay-passthrough.test.ts`).
+ */
+export interface UnitOutputDeltaEvent {
+  type: 'unitOutputDelta';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The streamed output text chunk. */
+  text: string;
 }
 
 /** Foundation wave: a unit was planned with full phase metadata. */
