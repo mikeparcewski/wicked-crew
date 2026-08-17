@@ -24,3 +24,6 @@ e2e/shots/
 # local wicked-brain server artifacts
 .wicked-brain/
 packages/crew/*.tgz
+
+# runtime scratch (node compile cache, session/trace dumps, jiti)
+tmp/

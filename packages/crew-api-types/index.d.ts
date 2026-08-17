@@ -1172,6 +1172,12 @@ export interface Project {
   created_at: number;
   /** Unix millis. */
   updated_at: number;
+  /**
+   * DES-MERGE-001 §7.1 — the wicked-interactive docs root this project speaks to; `null` ⇒
+   * the shared default root (ADR-0025). Held crew-side and merged onto the engine's row at the
+   * route boundary, so the wire carries ONE project shape. Always present on a read.
+   */
+  interactiveRoot?: string | null;
   [k: string]: unknown;
 }
 
@@ -1215,6 +1221,9 @@ export interface UpdateProjectBody {
   /** `""` clears the description. */
   description?: string;
   status?: ProjectLifecycle;
+  /** DES-MERGE-001 §7.1 — bind this project to a wicked-interactive docs root.
+   *  `null` clears the binding back to the shared default root. */
+  interactiveRoot?: string | null;
 }
 
 /** `POST /projects/:id/members` body. */

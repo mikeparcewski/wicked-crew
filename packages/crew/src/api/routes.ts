@@ -20,6 +20,9 @@ import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { isInsideRoot, openWithSystemDefault } from './open-path.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { ProjectSettingsStore } from '../projects/settings.js';
+import { InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { AuditLog } from './audit.js';
@@ -193,6 +196,10 @@ export interface RuntimeDeps {
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
+  /** The wicked-interactive bridge pool behind `/projects/:id/interactive/*` (DES-MERGE-001
+   *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
+   *  spawning a real `npx wicked-interactive serve`. */
+  interactiveBridges?: InteractiveBridgePool;
 }
 
 /**
@@ -224,6 +231,10 @@ export function registerRoutes(
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
+  // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
+  // interactive proxy (which resolves a root from it) — two stores would let a PATCH land in one
+  // and the proxy keep reading the other.
+  const projectSettings = projects.settings ?? new ProjectSettingsStore();
   // `req.actor` is pinned by the auth hooks `createServer` installs; a caller
   // driving this function directly (tests) has no hooks, so downstream code
   // still gets the ONE actor shape via this accessor.
@@ -1659,5 +1670,14 @@ export function registerRoutes(
   });
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
-  registerProjectRoutes(app, adapter, projects, security);
+  registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
+
+  // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
+  // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one
+  // origin, one auth hook, and one CORS posture — the whole point of slice 1.
+  registerInteractiveProxy(app, adapter, {
+    settings: projectSettings,
+    pool: runtime.interactiveBridges ?? new InteractiveBridgePool({ log: (m) => app.log.warn(m) }),
+    log: (m) => app.log.warn(m),
+  });
 }

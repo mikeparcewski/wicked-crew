@@ -41,6 +41,7 @@ import {
   projectUpdatedKey,
 } from './events.js';
 import type { MembershipIndex } from './membership-index.js';
+import { ProjectSettingsStore } from './settings.js';
 import { buildActivityPage } from './activity.js';
 import { writeCharter } from './charter.js';
 import { AuditLog } from '../api/audit.js';
@@ -65,6 +66,10 @@ export const UpdateProjectSchema = z
     name: z.string().min(1).max(120).optional(),
     description: z.string().optional(),
     status: z.enum(['active', 'archived']).optional(),
+    /** DES-MERGE-001 §7.1 — the project's wicked-interactive docs root. Explicitly NULLABLE:
+     *  null clears the binding back to the shared default root, which is a different act from
+     *  omitting the key (leave it alone). Stored crew-side (see settings.ts), not in the engine. */
+    interactiveRoot: z.string().min(1).nullable().optional(),
   })
   .strict();
 
@@ -108,6 +113,10 @@ export interface ProjectRoutesDeps {
   bus: ProjectBus | null;
   index: MembershipIndex;
   log: (msg: string) => void;
+  /** Crew-side per-project settings (DES-MERGE-001 §7.1's `interactiveRoot`). Optional so the
+   *  route-level unit tests keep their existing two-line deps; `registerRoutes` always supplies
+   *  the SAME instance the interactive proxy reads. */
+  settings?: ProjectSettingsStore;
 }
 
 export function registerProjectRoutes(
@@ -121,6 +130,15 @@ export function registerProjectRoutes(
 ): void {
   const { bus, index, log } = deps;
   const { audit } = security;
+  const settings = deps.settings ?? new ProjectSettingsStore();
+
+  /** The engine's row plus its crew-side settings — the ONE `Project` shape the wire carries
+   *  (§7.1). `interactiveRoot` is always present and explicitly null when unbound, so a client
+   *  can tell "shared default" from "this field does not exist on this daemon". */
+  const withSettings = (project: Project): Project => ({
+    ...project,
+    interactiveRoot: settings.get(project.id).interactiveRoot ?? null,
+  });
   // The AUTHENTICATED actor for event/audit stamping — locked decision #6
   // replaces the hardcoded 'api' strings these emits used to carry. Falls back
   // to the local actor when no auth hooks are installed (direct-driven tests).
@@ -213,7 +231,7 @@ export function registerProjectRoutes(
     try {
       const stored = await adapter.projectList();
       const all = [defaultProject(), ...stored];
-      const projects = status === undefined ? all : all.filter((p) => p.status === status);
+      const projects = (status === undefined ? all : all.filter((p) => p.status === status)).map(withSettings);
       return { projects };
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });
@@ -224,11 +242,11 @@ export function registerProjectRoutes(
     const { id } = req.params as { id: string };
     try {
       if (id === DEFAULT_PROJECT_ID) {
-        return { project: defaultProject(), members: await defaultMembers() };
+        return { project: withSettings(defaultProject()), members: await defaultMembers() };
       }
       const project = await adapter.projectGet(id);
       if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
-      return { project, members: await adapter.projectMembers(id) };
+      return { project: withSettings(project), members: await adapter.projectMembers(id) };
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });
     }
@@ -245,6 +263,22 @@ export function registerProjectRoutes(
     }
     try {
       const before = await adapter.projectGet(id);
+      if (before === null) return reply.code(404).send({ error: `Project ${id} not found` });
+      // The crew-side half of the patch, applied before the engine half so a settings-only
+      // PATCH never needs an engine round-trip at all (§7.1).
+      if (parsed.data.interactiveRoot !== undefined) {
+        settings.set(id, { interactiveRoot: parsed.data.interactiveRoot });
+      }
+      const touchesEngine =
+        parsed.data.name !== undefined ||
+        parsed.data.description !== undefined ||
+        parsed.data.status !== undefined;
+      if (!touchesEngine) {
+        // Settings-only: no engine write (an all-null projectUpdate would bump updated_at for
+        // nothing) and no `project.updated` emit — `interactiveRoot` is a crew-side binding,
+        // not part of ADR §4's project event vocabulary.
+        return { project: withSettings(before) };
+      }
       const project = await adapter.projectUpdate(id, parsed.data);
       // Archive gets its own event type; everything else (rename/describe/restore) is `updated`
       // with the changed fields named (ADR §4).
@@ -274,7 +308,7 @@ export function registerProjectRoutes(
           log,
         );
       }
-      return { project };
+      return { project: withSettings(project) };
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });
     }
