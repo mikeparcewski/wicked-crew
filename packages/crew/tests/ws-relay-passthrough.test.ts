@@ -62,8 +62,19 @@ function waitForRaw(pred: (s: string) => boolean, label: string, ms = 5000): Pro
   const found = raw.find(pred);
   if (found !== undefined) return Promise.resolve(found);
   return new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out (${ms}ms) waiting for: ${label}`)), ms);
-    waiters.push({ pred, resolve, timer });
+    // The timeout handler deregisters its own waiter before rejecting — a match arriving after
+    // the timeout must not "resolve" an already-rejected promise, and a never-matching waiter
+    // must not linger in the array for the rest of the suite.
+    const waiter = {
+      pred,
+      resolve,
+      timer: setTimeout(() => {
+        const i = waiters.indexOf(waiter);
+        if (i !== -1) waiters.splice(i, 1);
+        reject(new Error(`timed out (${ms}ms) waiting for: ${label}`));
+      }, ms),
+    };
+    waiters.push(waiter);
   });
 }
 

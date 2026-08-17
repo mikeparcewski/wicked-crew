@@ -59,9 +59,13 @@ respondsWith<Wire.RecordedEvent[] | null, Awaited<ReturnType<CoreAdapter['runEve
 // /ws unitOutputDelta (api-types 0.5.1) — the live streamed-output delta frame. The daemon fans
 // CoreEvent frames out verbatim, so every field of the discriminated interface must satisfy the
 // permissive CoreEvent the relay and the studio's event switches are typed against (its `text`
-// chunk rides the named optional field, not just the index signature). Spelled as a mapped type
-// because an interface never gets an implicit index signature; the mapped copy of its fields
-// does, which is exactly the field-by-field compatibility being asserted. Runtime half:
+// chunk rides the named optional field, not just the index signature). The mapped-type spelling
+// is LOAD-BEARING, not style: `CoreEvent` carries an explicit `[k: string]: unknown` index
+// signature, and TypeScript rejects assigning an interface to an index-signature type
+// (`respondsWith<Wire.CoreEvent, Wire.UnitOutputDeltaEvent>()` fails with TS2344 "Type
+// 'UnitOutputDeltaEvent' does not satisfy the constraint 'CoreEvent'") because only anonymous
+// object types — the mapped copy is one — are treated as having an inferable index signature.
+// The mapped copy keeps the exact field set, so the check stays field-by-field. Runtime half:
 // tests/ws-relay-passthrough.test.ts proves the frame reaches a WS client unmodified.
 respondsWith<Wire.CoreEvent, { [K in keyof Wire.UnitOutputDeltaEvent]: Wire.UnitOutputDeltaEvent[K] }>();
 
