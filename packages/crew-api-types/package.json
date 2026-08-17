@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew-api-types",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "The wire contract of the wicked-crew daemon's /api/v1 REST surface and /ws CoreEvent frames — types only, zero runtime",
   "type": "module",
   "types": "./index.d.ts",

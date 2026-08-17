@@ -56,6 +56,15 @@ respondsWith<Wire.SessionView[], Awaited<ReturnType<CoreAdapter['sessionsDetail'
 respondsWith<Wire.CoreEvent[] | null, Awaited<ReturnType<CoreAdapter['runEvents']>>>();
 respondsWith<Wire.RecordedEvent[] | null, Awaited<ReturnType<CoreAdapter['runEvents']>>>();
 
+// /ws unitOutputDelta (api-types 0.5.1) — the live streamed-output delta frame. The daemon fans
+// CoreEvent frames out verbatim, so every field of the discriminated interface must satisfy the
+// permissive CoreEvent the relay and the studio's event switches are typed against (its `text`
+// chunk rides the named optional field, not just the index signature). Spelled as a mapped type
+// because an interface never gets an implicit index signature; the mapped copy of its fields
+// does, which is exactly the field-by-field compatibility being asserted. Runtime half:
+// tests/ws-relay-passthrough.test.ts proves the frame reaches a WS client unmodified.
+respondsWith<Wire.CoreEvent, { [K in keyof Wire.UnitOutputDeltaEvent]: Wire.UnitOutputDeltaEvent[K] }>();
+
 // GET /runs/:id/gate — the route spreads the cache entry over `{ runId }`.
 respondsWith<Wire.GateInfo, { runId: string } & GateCacheEntry>();
 
