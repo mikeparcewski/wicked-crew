@@ -306,7 +306,7 @@ const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboardin
  * moves. This is display only: as of FINDING-049 these defs are never written to core's overlay dir
  * (see CORE_SEEDED_WORKFLOWS), so a stale value here cannot reach the engine.
  */
-const EVIDENCE_FLOOR_PIN = '2fcde907d57f3ee2';
+const EVIDENCE_FLOOR_PIN = 'e2e7af1db9e48454';
 
 export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
