@@ -1,2 +1,0 @@
-{"ts": "2026-08-17T13:10:32.965239Z", "session": "unknown", "domain": "bootstrap", "level": "normal", "event": "storage.local", "ok": true, "ms": null, "detail": null}
-{"ts": "2026-08-17T13:10:39.851036Z", "session": "unknown", "domain": "bootstrap", "level": "normal", "event": "onboarding.status", "ok": false, "ms": null, "detail": {"has_memories": true, "has_index": false}}
