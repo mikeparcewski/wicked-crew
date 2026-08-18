@@ -15,6 +15,7 @@ import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
+import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
@@ -115,6 +116,18 @@ export interface CreateServerOptions {
     pollIntervalMs?: number;
   };
   /**
+   * DES-MERGE-001 §5.4/§6.1 (slice 3) — the interactive /ws relay. DEFAULT-ON: every
+   * wicked.interactive.** bus event is bridged onto the /ws stream as an `interactiveEvent`
+   * frame so the studio needs exactly ONE socket. `disabled: true` turns it off (tests).
+   */
+  interactiveWsRelay?: {
+    disabled?: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution. */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+  };
+  /**
    * The identity/actor seam (task #88). Omit for full env/file resolution:
    * OFF by default (the local loopback deployment — nothing changes), REQUIRED
    * under `WICKED_RUNTIME=team` or `WICKED_CREW_AUTH=required`. See
@@ -192,6 +205,30 @@ export async function createServer(
     app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
     app.addHook('onClose', async () => {
       await projectBus.stop();
+    });
+  }
+
+  // The interactive relay seam (DES-MERGE-001 §5.4/§6.1, slice 3): every wicked.interactive.**
+  // bus event becomes an `interactiveEvent` frame on the SAME /ws socket the studio already
+  // holds, and POST /projects/:id/interactive-events puts a whitelisted UI event back on the bus.
+  // Default ON — the merged skin needs it to render a generating doc — with the seam's usual
+  // posture: a machine without wicked-bus gets a logged null and boots anyway.
+  const interactiveRelay =
+    options?.interactiveWsRelay?.disabled === true
+      ? null
+      : await startInteractiveWsRelay({
+          ...(options?.interactiveWsRelay?.dbPath !== undefined
+            ? { dbPath: options.interactiveWsRelay.dbPath }
+            : {}),
+          ...(options?.interactiveWsRelay?.pollIntervalMs !== undefined
+            ? { pollIntervalMs: options.interactiveWsRelay.pollIntervalMs }
+            : {}),
+          log: (m) => app.log.warn(m),
+        });
+  if (interactiveRelay !== null) {
+    app.log.info('interactive /ws relay armed (filter wicked.interactive.** → interactiveEvent)');
+    app.addHook('onClose', async () => {
+      await interactiveRelay.stop();
     });
   }
 
@@ -415,6 +452,10 @@ export async function createServer(
     { audit, authMode: auth.mode },
     { seatHealth },
   );
+
+  // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
+  // answers 503, not 404) and BEFORE the static/SPA fallback below, like every other API route.
+  registerInteractiveEventRoutes(app, interactiveRelay);
 
   // Serve the bundled studio SPA same-origin (DES-STUDIO-SERVING-001 §3). The
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:

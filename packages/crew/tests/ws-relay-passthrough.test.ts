@@ -79,7 +79,12 @@ function waitForRaw(pred: (s: string) => boolean, label: string, ms = 5000): Pro
 }
 
 beforeAll(async () => {
-  app = await createServer(mockAdapter, { projectEvents: { disabled: true } });
+  // Both bus seams off: this suite is about the CoreEvent pump → broadcast path only, and a
+  // subscriber on the developer's real bus db would put foreign frames on the socket under test.
+  app = await createServer(mockAdapter, {
+    projectEvents: { disabled: true },
+    interactiveWsRelay: { disabled: true },
+  });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
