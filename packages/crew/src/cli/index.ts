@@ -6,6 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
+import { bridgeReaper } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { runMcpServer } from './mcp.js';
@@ -174,17 +175,36 @@ function installShutdownHandlers(): void {
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    // Close the single subscription so the pump thread + tsfn release and the
-    // process can exit on its own.
-    try {
-      adapterRef?.close();
-    } catch {
-      /* already closed */
-    }
-    process.exit(0);
+    void (async () => {
+      // Reap ACP bridge children BEFORE this process goes away (crew#285): the engine's
+      // in-memory kill handles die with the daemon, so this is the last actor that can
+      // still find the bridges (they are our direct OS children). SIGTERM, a ~2 s grace,
+      // then SIGKILL for anything that ignored it. Best-effort — a reap failure must
+      // never block shutdown.
+      try {
+        await bridgeReaper.shutdown();
+      } catch {
+        /* reaping is best-effort */
+      }
+      // Close the single subscription so the pump thread + tsfn release and the
+      // process can exit on its own.
+      try {
+        adapterRef?.close();
+      } catch {
+        /* already closed */
+      }
+      process.exit(0);
+    })();
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+  // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
+  // await, so this is the synchronous SIGTERM sweep. After the graceful path above it is
+  // a no-op re-scan; on a plain exit it is the only reaping that happens, and the
+  // bridges' own stdin-EOF watchdog (packages/agent-acp-bridges) is the final backstop.
+  process.on('exit', () => {
+    bridgeReaper.sweepSync();
+  });
 }
 
 function printReady(fields: Record<string, unknown>): void {
