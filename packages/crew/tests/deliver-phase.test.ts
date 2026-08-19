@@ -25,7 +25,7 @@ describe('deliverPrScript (the hardened field script)', () => {
   });
 
   it('REFUSES to push main/master (and a detached-HEAD empty name)', () => {
-    expect(script).toMatch(/case "\$B" in ""\|main\|master\)/);
+    expect(script).toMatch(/case "\$B" in ""\|main\|master\|"\$DEF"\)/);
     expect(script).toContain('refusing to push');
     // The refusal exits non-zero — a printed warning that still pushes is no guard at all.
     expect(script).toMatch(/refusing to push[^\n]*"; exit 1;;/);
@@ -126,5 +126,23 @@ describe('composeDeliverWorkflow (per-run composition)', () => {
       phases: [...feature.phases, deliverPrPhase(['review'])],
     };
     expect(() => composeDeliverWorkflow(alreadyDelivering, 'run-123')).toThrow(/already has/);
+  });
+});
+
+
+describe('deliver review follow-ups (#303)', () => {
+  it('refuses the derived default branch, not only main/master', () => {
+    const script = deliverPrScript();
+    expect(script).toContain('DEF="${D#origin/}"');
+    expect(script).toContain('"$DEF"');
+    // derivation must precede the refusal so $DEF is bound when the case runs
+    expect(script.indexOf('DEF=')).toBeLessThan(script.indexOf('case "$B"'));
+  });
+  it('caps the composed workflow id at 128 chars', () => {
+    const base = { id: 'feature', phases: [{ id: 'build' }] } as never;
+    const longRun = 'r'.repeat(300);
+    const composed = composeDeliverWorkflow(base, longRun);
+    expect(composed.id.length).toBeLessThanOrEqual(128);
+    expect(composed.id.startsWith('feature-deliver-')).toBe(true);
   });
 });

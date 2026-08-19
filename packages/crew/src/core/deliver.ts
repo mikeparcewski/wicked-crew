@@ -49,14 +49,17 @@ export function deliverPrScript(): string {
     // falling back to the currently checked-out branch when that ref does not exist.
     'B="wicked/$(basename "$PWD")"',
     'git rev-parse --verify "$B" >/dev/null 2>&1 || B=$(git branch --show-current)',
-    // (b) Refuse the default branch — and an empty name (detached HEAD), which would otherwise
-    // turn the push into a garbage ref.
-    'case "$B" in ""|main|master) echo "deliver: refusing to push branch \'$B\' — the deliver phase only pushes run branches, never main/master"; exit 1;; esac',
+    // Derive origin's default branch FIRST — the refusal below must cover a repo whose
+    // default is trunk/develop/anything, not just main/master (Copilot on #303).
+    'git fetch origin',
+    'D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)',
+    'DEF="${D#origin/}"',
+    // (b) Refuse the repo's own default branch (by derived name), the classic names, and an
+    // empty name (detached HEAD), which would otherwise turn the push into a garbage ref.
+    'case "$B" in ""|main|master|"$DEF") echo "deliver: refusing to push branch \'$B\' — the deliver phase only pushes run branches, never the default branch"; exit 1;; esac',
     // (c) Rebase onto origin's default branch so the PR opens mergeable. A conflict must fail
     // the phase VISIBLY with nothing pushed — the abort leaves the worktree on the pre-rebase
     // branch tip instead of mid-rebase.
-    'git fetch origin',
-    'D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)',
     'git rebase "$D" "$B" || { git rebase --abort >/dev/null 2>&1 || true; echo "deliver: rebase of $B onto $D failed (conflicts) — resolve on the branch and re-run; nothing was pushed"; exit 1; }',
     // (d) + (e) + (f): push, open the PR, and print its URL as the last line.
     'git push -u origin "$B"',
@@ -109,10 +112,13 @@ export function composeDeliverWorkflow(base: WorkflowDef, runId: string): Workfl
   // Run ids are UUIDs from the route, but the CLI path accepts caller-supplied ids — keep the
   // composed id inside the same safe charset `registerWorkflow` enforces for user defs.
   const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  // registerWorkflow enforces id.length <= 128; a caller-supplied CLI session id can be long.
+  // Truncate the run-id TAIL, keeping the base+marker prefix intact (Copilot on #303).
+  const composedId = `${base.id}-deliver-${safeRunId}`.slice(0, 128);
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the
     // composed def is engine-input, not catalog data.
-    id: `${base.id}-deliver-${safeRunId}`,
+    id: composedId,
     phases: [...base.phases, deliverPrPhase(last !== undefined ? [last.id] : [])],
   };
 }
