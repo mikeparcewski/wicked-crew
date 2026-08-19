@@ -52,6 +52,6 @@ jobs:
       # silently skipped. Fetch the checkout so the release gates on the same evidence CI does
       # (FINDING-094). `tests/core-checkout-policy.test.ts` fails loudly if this ever stops working.
       install_cmd: 'node scripts/fetch-core-checkout.mjs && npm install'
-      test_cmd: 'npm run -w packages/crew test'
+      test_cmd: 'npm run -w packages/crew build && npm run -w packages/crew test'
       enable_sync_pr: true
     secrets: inherit
