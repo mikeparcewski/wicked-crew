@@ -71,13 +71,14 @@ function createTestBridge(invocationFn = () => ({ bin: process.execPath, args: [
     if (received.length > 0) return Promise.resolve(received.shift());
     return new Promise((resolve, reject) => {
       waiters.push(resolve);
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         const idx = waiters.indexOf(resolve);
         if (idx !== -1) {
           waiters.splice(idx, 1);
           reject(new Error('bridge next() timed out'));
         }
       }, timeoutMs);
+      timer.unref();
     });
   }
 
