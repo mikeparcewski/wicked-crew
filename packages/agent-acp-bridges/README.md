@@ -45,3 +45,16 @@ JSON-RPC 2.0 ndjson over stdin/stdout:
 
 `--settings <path>` is accepted and ignored (Claude-format gate hooks these CLIs
 cannot execute). ANSI escape sequences are stripped from streamed output.
+
+## Tolerance policy
+
+Unknown input never kills the bridge (crew#290 — a mid-turn exit degrades the
+whole governed run to single-shot fallback). The wire vocabulary grows over
+time, so the dispatch is tolerant-by-default:
+
+- unparseable lines, non-JSON-RPC frames (e.g. a stray stream-json
+  `system`/`vcs_state_changed` frame), and unknown notification methods are
+  logged to stderr and dropped;
+- unknown request methods get a JSON-RPC `-32601` error response;
+- a handler error is answered with `-32603` and the session keeps serving —
+  the next `session/prompt` on the same session still works.

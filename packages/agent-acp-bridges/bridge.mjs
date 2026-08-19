@@ -65,6 +65,12 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
   const pendingElicitations = new Map();
 
   // ── Wire protocol helpers ────────────────────────────────────────────────────
+  // A dying peer surfaces as an async 'error' on the output stream (EPIPE);
+  // without a listener that throws and crashes the bridge instead of letting
+  // the stdin-close path drive a clean exit (crew#290 tolerance audit).
+  _output.on('error', (err) => {
+    console.error(`[bridge] output stream error: ${err?.code ?? String(err)}`);
+  });
   function send(obj) {
     _output.write(JSON.stringify(obj) + '\n');
   }
@@ -81,8 +87,12 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
   // ── session/prompt execution ─────────────────────────────────────────────────
   function execTurn(rpcId, promptBlocks) {
     return new Promise((resolve) => {
+      // Tolerant block filter (crew#290): the prompt vocabulary grows over time
+      // (new content-block types, null padding from buggy clients). Unknown or
+      // malformed entries are skipped, not fatal — the turn runs on whatever
+      // text blocks are readable.
       const promptText = promptBlocks
-        .filter((b) => b.type === 'text' && b.text)
+        .filter((b) => b != null && b.type === 'text' && typeof b.text === 'string' && b.text)
         .map((b) => b.text)
         .join('\n\n')
         .trim();
@@ -146,6 +156,18 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
     try {
       msg = JSON.parse(line);
     } catch {
+      // Not JSON — a stray log line or partial frame. Ignore and keep serving
+      // (crew#290: nothing on this stream may be fatal).
+      console.error('[bridge] ignoring unparseable input line');
+      return;
+    }
+
+    // Valid JSON but not an object (a bare `null`, number, string, or boolean
+    // literal) is not a JSON-RPC frame. Guard before destructuring: `null`
+    // would throw OUTSIDE the dispatch try/catch below and kill the bridge
+    // (crew#290: nothing on this stream may be fatal).
+    if (msg === null || typeof msg !== 'object') {
+      console.error('[bridge] ignoring non-object input frame');
       return;
     }
 
@@ -176,7 +198,16 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
         }
 
         case 'session/prompt':
-          if (!isNotification) await execTurn(id, params?.prompt ?? []);
+          if (!isNotification) {
+            // A non-array prompt is a client bug: answer with invalid-params
+            // instead of throwing (the throw would kill the bridge and take the
+            // whole session down with it — crew#290's failure class).
+            if (params?.prompt != null && !Array.isArray(params.prompt)) {
+              respondError(id, -32602, 'session/prompt: params.prompt must be an array of content blocks');
+              break;
+            }
+            await execTurn(id, params?.prompt ?? []);
+          }
           break;
 
         case 'session/create_elicitation': {
@@ -318,7 +349,27 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
         }
 
         default:
+          // Tolerant-by-default (crew#290): the frame vocabulary grows over
+          // time. An unknown REQUEST gets a JSON-RPC error response (the
+          // caller needs a terminal answer); an unknown notification — or a
+          // frame that isn't JSON-RPC at all, e.g. a stream-json frame piped
+          // here by mistake — is logged and dropped. Neither may exit.
           if (!isNotification) respondError(id, -32601, `Method not found: ${method}`);
+          else console.error(`[bridge] ignoring unknown frame (method: ${String(method)})`);
+      }
+    } catch (err) {
+      // No handler error may escape this callback: readline neither awaits nor
+      // guards its listeners, so an escaped throw becomes an uncaught
+      // exception (or unhandled rejection) and kills the bridge mid-session —
+      // the engine then sees Broken pipe and degrades to single-shot
+      // (crew#290). Answer requests with -32603 and keep serving.
+      console.error(`[bridge] error handling ${String(method)}: ${err?.stack ?? String(err)}`);
+      if (!isNotification) {
+        try {
+          respondError(id, -32603, `Internal error handling ${String(method)}: ${err?.message ?? String(err)}`);
+        } catch {
+          // Output stream is gone; stdin close will drive the exit path.
+        }
       }
     } finally {
       pending--;
