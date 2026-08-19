@@ -19,10 +19,16 @@
  * live pid earns three 1.5 s attempts before the bridge is declared dead. Identity is checked
  * too: `/api/health` must report THIS root, or a recycled port belonging to some other service
  * would be proxied as if it were ours.
+ *
+ * On start/adopt the pool also records the daemon's own origin with the bridge (crew#298,
+ * `POST /api/studio-origin`, interactive ≥ 0.8.0) so the bridge's `GET /` redirects a direct
+ * visitor into studio instead of its API-only fallback page. Fire-and-forget, once per pooled
+ * bridge: recording can never fail — or slow down — a proxied request.
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 
 export const LOCK_NAME = '.wi-serve.json';
@@ -61,6 +67,30 @@ export interface BridgePoolIo {
   startTimeoutMs?: number;
   healthTimeoutMs?: number;
   log?: (msg: string) => void;
+  /** Lower-severity channel for EXPECTED skips (a pre-0.8.0 bridge without the endpoint, #298). */
+  debug?: (msg: string) => void;
+  /**
+   * The daemon's own origin (`http://<bound host>:<bound port>`), resolved LAZILY — the pool is
+   * built before `listen`, but only consulted while serving a request, i.e. after the address is
+   * bound. Null (or absent) means "nothing to record" and the pool never POSTs (#298).
+   */
+  studioOrigin?: () => string | null;
+}
+
+/**
+ * The daemon's own http origin from its bound server address, or null before `listen`. Wildcard
+ * binds (`0.0.0.0` / `::`) are not dialable from a browser, so they normalize to loopback — the
+ * bridge is local-only anyway, so whoever hits its port can reach the daemon at 127.0.0.1 too.
+ */
+export function boundOrigin(addr: AddressInfo | string | null): string | null {
+  if (addr === null || typeof addr === 'string') return null;
+  const host =
+    addr.address === '' || addr.address === '0.0.0.0' || addr.address === '::'
+      ? '127.0.0.1'
+      : addr.address.includes(':')
+        ? `[${addr.address}]`
+        : addr.address;
+  return `http://${host}:${addr.port}`;
 }
 
 /** `<root>/.wi-serve.json`, or null when absent/unparseable/incomplete. */
@@ -101,10 +131,17 @@ async function bridgeIdentity(bridge: LiveBridge, timeoutMs: number): Promise<st
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** A pool entry: the live bridge plus per-entry bookkeeping that dies with it. */
+interface PooledBridge {
+  bridge: LiveBridge;
+  /** #298: the studio origin has been POSTed to this pooled bridge (at most once per entry). */
+  originRecorded: boolean;
+}
+
 export class InteractiveBridgePool {
   private readonly io: BridgePoolIo;
   /** Last bridge known good per root — the fast path that keeps the proxy off `fetch` per request. */
-  private readonly live = new Map<string, LiveBridge>();
+  private readonly live = new Map<string, PooledBridge>();
   /** In-flight resolutions per root, so a burst of first requests starts ONE bridge, not N. */
   private readonly inflight = new Map<string, Promise<LiveBridge>>();
 
@@ -117,7 +154,7 @@ export class InteractiveBridgePool {
     // Fast path: we started/adopted it and its pid is still alive. A full health round-trip on
     // every proxied request would put a 1.5 s timeout budget in front of every asset fetch.
     const cached = this.live.get(root);
-    if (cached && pidAlive(cached.pid)) return cached;
+    if (cached && pidAlive(cached.bridge.pid)) return cached.bridge;
     this.live.delete(root);
 
     const pending = this.inflight.get(root);
@@ -138,14 +175,52 @@ export class InteractiveBridgePool {
   }
 
   private async resolveOrStart(root: string): Promise<LiveBridge> {
-    const adopted = await this.healthy(root);
-    if (adopted) {
-      this.live.set(root, adopted);
-      return adopted;
-    }
-    const started = await this.start(root);
-    this.live.set(root, started);
-    return started;
+    // Adopt-or-start; either way the bridge just answered `/api/health` for this root, which is
+    // exactly the moment #298 wants the studio origin recorded — fire-and-forget, so recording
+    // can never delay (let alone fail) the proxied request that triggered the resolution.
+    const bridge = (await this.healthy(root)) ?? (await this.start(root));
+    const entry: PooledBridge = { bridge, originRecorded: false };
+    this.live.set(root, entry);
+    this.recordStudioOrigin(entry);
+    return bridge;
+  }
+
+  /**
+   * POST the daemon's own origin to the bridge's `/api/studio-origin` (#298), so the bridge's
+   * `GET /` redirects a direct visitor into studio instead of the API-only fallback page.
+   * At most one attempt per pooled bridge per process; 404/405 means the bridge predates the
+   * endpoint (interactive < 0.8.0) and is an expected skip, any other failure is a warn — never
+   * an error, because origin recording must never fail a proxy request.
+   */
+  private recordStudioOrigin(entry: PooledBridge): void {
+    if (entry.originRecorded) return;
+    entry.originRecorded = true;
+    const origin = this.io.studioOrigin?.() ?? null;
+    if (origin === null) return; // no origin to record (pool not bootstrapped from a listening daemon)
+    const { host, port } = entry.bridge;
+    const timeout = this.io.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
+    void (async () => {
+      try {
+        const res = await fetch(`http://${host}:${port}/api/studio-origin`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ origin }),
+          signal: AbortSignal.timeout(timeout),
+        });
+        await res.arrayBuffer().catch(() => undefined); // drain, so the connection is released
+        if (res.status === 404 || res.status === 405) {
+          this.io.debug?.(
+            `bridge at ${host}:${port} has no /api/studio-origin (interactive < 0.8.0) — skipping origin record`,
+          );
+        } else if (!res.ok) {
+          this.io.log?.(`recording studio origin ${origin} with the bridge at ${host}:${port} failed: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        this.io.log?.(
+          `recording studio origin ${origin} with the bridge at ${host}:${port} failed: ${(err as Error).message}`,
+        );
+      }
+    })();
   }
 
   /** The lockfile points at a bridge that is alive, answering, and serving THIS root. */

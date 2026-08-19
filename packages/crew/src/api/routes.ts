@@ -21,7 +21,7 @@ import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { isInsideRoot, openWithSystemDefault } from './open-path.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
-import { InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -1688,7 +1688,17 @@ export function registerRoutes(
   // origin, one auth hook, and one CORS posture — the whole point of slice 1.
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
-    pool: runtime.interactiveBridges ?? new InteractiveBridgePool({ log: (m) => app.log.warn(m) }),
+    pool:
+      runtime.interactiveBridges ??
+      new InteractiveBridgePool({
+        log: (m) => app.log.warn(m),
+        debug: (m) => app.log.debug(m),
+        // #298: the daemon's own origin, read LAZILY off the bound server — the pool is built
+        // before `listen`, but only consulted while serving a request, i.e. once bound. The
+        // pool POSTs it to the bridge's /api/studio-origin on start/adopt so the bridge's
+        // `GET /` redirects into studio.
+        studioOrigin: () => boundOrigin(app.server.address()),
+      }),
     log: (m) => app.log.warn(m),
   });
 }
