@@ -447,7 +447,7 @@ export function runBridge({ name, version, invocation, _streams, _exit, _killGra
   // the shared test process. Windows never delivers a catchable SIGTERM (process.kill
   // is already lethal there), so the handler is inert by construction on win32.
   if (_streams === undefined) {
-    process.on('SIGTERM', () => {
+    process.once('SIGTERM', () => {
       stdinClosed = true;
       for (const slot of pendingElicitations.values()) slot.resolve({ action: 'cancel' });
       pendingElicitations.clear();

@@ -123,6 +123,44 @@ export function discoverBridgeChildren(parentPid: number = process.pid): number[
   return listing === null ? [] : parseBridgeChildren(listing, parentPid);
 }
 
+/**
+ * Pids of bridge processes ORPHANED by a previous daemon generation: reparented to
+ * init (ppid 1). Deliberately conservative — a bridge owned by another LIVE daemon
+ * still has that daemon as its parent and is never matched, so a boot sweep cannot
+ * shoot a neighbour's workers (#285, Copilot review: shutdown-only reaping leaves
+ * pre-existing orphans alive forever).
+ */
+export function parseOrphanedBridges(listing: string): number[] {
+  const pids: number[] = [];
+  for (const line of listing.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (m === null) continue;
+    const pid = Number(m[1]);
+    const ppid = Number(m[2]);
+    const command = m[3] as string;
+    if (ppid !== 1 || pid === process.pid) continue;
+    if (BRIDGE_BINS.some((bin) => command.includes(bin))) pids.push(pid);
+  }
+  return pids;
+}
+
+/** Boot-time sweep: SIGTERM every orphaned bridge from a prior daemon generation. */
+export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
+  const listing = listProcesses();
+  if (listing === null) return [];
+  const orphans = parseOrphanedBridges(listing);
+  const reaped: number[] = [];
+  for (const pid of orphans) {
+    try {
+      (io.kill ?? process.kill)(pid, 'SIGTERM');
+      reaped.push(pid);
+    } catch {
+      // ESRCH (already gone) / EPERM (not ours): skip silently — fail open.
+    }
+  }
+  return reaped;
+}
+
 /** Injectable seams so the reaper is testable without signalling real bridges. */
 export interface BridgeReaperIo {
   /** Signal sender; must throw like `process.kill` (ESRCH when the pid is gone). */
@@ -141,6 +179,8 @@ export interface ReapReport {
   terminated: number[];
   /** Pids that ignored SIGTERM and were SIGKILLed. */
   killed: number[];
+  /** Pids whose SIGKILL could not be delivered (e.g. EPERM) — still possibly alive. */
+  undeliverable?: number[];
 }
 
 /**
@@ -172,13 +212,18 @@ export class BridgeReaper {
     return [...this.tracked];
   }
 
-  /** Deliver `signal`; true while the pid exists (EPERM = alive but not ours). */
+  /**
+   * Deliver `signal`. For the signal-0 liveness probe, EPERM means "alive but not
+   * ours" and counts as existing; for real signals EPERM means the kill was NOT
+   * delivered and must not be reported as success (Copilot review on #300).
+   */
   private signal(pid: number, signal: NodeJS.Signals | 0): boolean {
     try {
       (this.io.kill ?? process.kill)(pid, signal);
       return true;
     } catch (err) {
-      return (err as NodeJS.ErrnoException).code === 'EPERM';
+      const eperm = (err as NodeJS.ErrnoException).code === 'EPERM';
+      return signal === 0 ? eperm : false;
     }
   }
 
@@ -209,11 +254,12 @@ export class BridgeReaper {
       survivors = survivors.filter((pid) => this.signal(pid, 0));
     }
 
-    for (const pid of survivors) this.signal(pid, 'SIGKILL');
+    const killed = survivors.filter((pid) => this.signal(pid, 'SIGKILL'));
     this.tracked.clear();
     return {
       terminated: targets.filter((pid) => !survivors.includes(pid)),
-      killed: survivors,
+      killed,
+      undeliverable: survivors.filter((pid) => !killed.includes(pid)),
     };
   }
 

@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
-import { bridgeReaper } from '../core/bridge-reaper.js';
+import { bridgeReaper, reapOrphansAtBoot } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { runMcpServer } from './mcp.js';
@@ -217,6 +217,12 @@ async function main(): Promise<void> {
 
   if (command === 'serve') {
     const opts = parseBootstrap(argv);
+    // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
+    // reparented to init and would otherwise live forever — shutdown-path reaping
+    // can never see them. Conservative: only ppid==1 matches, so another live
+    // daemon's bridges are untouched.
+    const orphans = reapOrphansAtBoot();
+    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge(s) from a previous daemon: ${orphans.join(', ')}`);
     const { adapter, port } = await bootstrap(opts);
     printReady({
       mode: 'serve',
