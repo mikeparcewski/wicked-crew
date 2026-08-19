@@ -61,6 +61,26 @@ export interface LaunchRunInput {
   extraWriteRoots?: string[];
 }
 
-export const DEFAULT_SETTINGS: SystemSettings = {
+/** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */
+export const DEFAULT_WORKER_STALL_MINUTES = 15;
+
+/**
+ * LOCAL extension of the published `SystemSettings` (wicked-crew-api-types 0.6.0): the crew#287
+ * stall-watchdog knob is daemon-owned until the contract picks it up. NOTE for the next
+ * api-types release: fold `workerStallMinutes` into `SystemSettings` (and the synthetic
+ * `workerStalled` /ws frame — see `api/stall-watchdog.ts` `WorkerStalledFrame` — into the
+ * event documentation). Extra fields are forward-additive on the wire (DES-STUDIO-001 §5.1),
+ * so shipping it daemon-side first breaks no consumer.
+ */
+export interface CrewSystemSettings extends SystemSettings {
+  /**
+   * Minutes a run in `executing` may go without ANY engine event on the daemon's relay before
+   * a synthetic `workerStalled` frame is broadcast on /ws (detection only; default 15).
+   */
+  workerStallMinutes?: number;
+}
+
+export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
+  workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
 };
