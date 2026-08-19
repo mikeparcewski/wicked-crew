@@ -145,7 +145,14 @@ export const LaunchSchema = z.object({
   /** DES-PROJECT-001 §2.2 — file the run into a project; membership attaches atomically with
    *  the launch record. Unknown/archived ⇒ the launch fails (never a silent unfiled run). */
   projectId: z.string().min(1).optional(),
-}).strict();
+  /** crew#293 — `"pr"` appends the hardened deliver Tool phase (push run branch + `gh pr create`)
+   *  to a PER-RUN copy of the selected workflow. Requires `workflow` (enforced by the refine
+   *  below, so the 400 happens at parse time, not after the adapter is consulted). */
+  deliver: z.literal('pr').optional(),
+}).strict().refine((b) => b.deliver === undefined || b.workflow !== undefined, {
+  message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
+  path: ['deliver'],
+});
 
 export const GateSchema = z.object({
   approve: z.boolean(),
@@ -425,6 +432,7 @@ export function registerRoutes(
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
     if (b.projectId !== undefined) input.projectId = b.projectId;
+    if (b.deliver !== undefined) input.deliver = b.deliver;
     try {
       const runId = await adapter.launchRun(input);
       // Who launched it — the engine's LaunchOptions carries no actor field
@@ -436,6 +444,7 @@ export function registerRoutes(
           ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+          ...(b.deliver !== undefined ? { deliver: b.deliver } : {}),
         },
       });
       if (b.projectId !== undefined) {

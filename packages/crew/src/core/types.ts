@@ -59,6 +59,13 @@ export interface LaunchRunInput {
    * fails the launch with no session persisted. Omit for runs that deliver inside their workdir.
    */
   extraWriteRoots?: string[];
+  /**
+   * Delivery mode (crew#293). `"pr"` ⇒ the adapter appends the hardened deliver Tool phase
+   * (push the run branch + `gh pr create`, see `core/deliver.ts`) to a PER-RUN copy of the
+   * selected workflow def and launches that copy — the shared def is never mutated. Requires
+   * `workflow`; a free-text run has no def to append to. Omit ⇒ no delivery phase (default).
+   */
+  deliver?: 'pr';
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

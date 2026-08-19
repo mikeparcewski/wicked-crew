@@ -886,6 +886,18 @@ export interface LaunchRunBody {
    * (4xx) — never a silent unfiled run. Omit for an unfiled run (the synthesized `default`).
    */
   projectId?: string;
+  /**
+   * Delivery mode (crew#293). `"pr"` ⇒ the daemon appends a hardened deliver Tool phase (push
+   * the run's branch, rebase onto origin's default branch, `gh pr create`; the PR URL is the
+   * phase output's last line) to a PER-RUN copy of the selected workflow def — the shared def
+   * is never mutated, and merge stays human. Requires `workflow`; sending `deliver` without it
+   * is a 400. Omit ⇒ no delivery phase.
+   *
+   * NOTE for the next api-types release: added daemon-side first (workspace copy, 0.6.0 +
+   * crew#293) — fold into the published `LaunchRunBody` when 0.7.0 cuts. Optional, so the
+   * field is forward-additive on the wire (DES-STUDIO-001 §5.1).
+   */
+  deliver?: 'pr';
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────

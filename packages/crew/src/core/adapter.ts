@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
+import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 
 
 
@@ -732,24 +733,60 @@ export class CoreAdapter {
       opts.extraWriteRoots = input.extraWriteRoots;
     }
     if (input.workflow !== undefined) {
-      opts.workflow = input.workflow;
-      // Ensure DROP-IN workflow definitions are present in the Rust overlay dir on first use.
-      // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
-      // which would duplicate them in listWorkflows(). The write is skipped after the first call
-      // per process lifetime.
-      //
-      // Ids core seeds itself are excluded: writing them shadows the real def with this stale
-      // mirror — see CORE_SEEDED_WORKFLOWS. Core resolves those from its own registry, so there is
-      // nothing to write and never was.
-      const builtinDef = CORE_SEEDED_WORKFLOWS.has(input.workflow)
-        ? undefined
-        : BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
-      if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
-        // Mark before await so concurrent launchRun() calls for the same builtin
-        // don't both pass the has() check and race to write the same file.
-        this._builtinOverlayWritten.add(input.workflow);
-        await this._writeBuiltinOverlay(builtinDef);
+      let workflowId = input.workflow;
+      if (input.deliver === 'pr') {
+        // First-class delivery (crew#293): compose a PER-RUN def — the selected workflow's
+        // phases plus the hardened deliver Tool phase appended last — and arm it with the
+        // engine under a run-scoped id. The shared def is NEVER mutated, and the composed def
+        // is hot-registered only (no overlay file, no userWorkflows entry): it exists for this
+        // launch, not for the catalog.
+        const base = this.getWorkflow(input.workflow);
+        if (base === null) {
+          throw new Error(
+            `deliver: "pr" needs a registered workflow to append the deliver phase to — ` +
+              `'${input.workflow}' is not registered`,
+          );
+        }
+        if (base.phases.some((p) => p.id === DELIVER_PHASE_ID)) {
+          // The def already delivers (an operator's own feature-pr-style overlay). Appending a
+          // second `deliver` phase would collide on id — launch the def as-is; the intent
+          // ("this run opens its PR") is already satisfied.
+        } else {
+          const composed = composeDeliverWorkflow(base, input.sessionId);
+          await this._armPerRunWorkflow(composed);
+          workflowId = composed.id;
+        }
       }
+      opts.workflow = workflowId;
+      if (workflowId === input.workflow) {
+        // Ensure DROP-IN workflow definitions are present in the Rust overlay dir on first use.
+        // Uses a dedicated helper (not registerWorkflow) to avoid adding built-ins to userWorkflows,
+        // which would duplicate them in listWorkflows(). The write is skipped after the first call
+        // per process lifetime.
+        //
+        // Ids core seeds itself are excluded: writing them shadows the real def with this stale
+        // mirror — see CORE_SEEDED_WORKFLOWS. Core resolves those from its own registry, so there is
+        // nothing to write and never was.
+        //
+        // Skipped entirely on the per-run deliver path above (workflowId !== input.workflow):
+        // the composed def carries the base's full phase list, so the run resolves its own
+        // registration and the base drop-in is not consulted.
+        const builtinDef = CORE_SEEDED_WORKFLOWS.has(input.workflow)
+          ? undefined
+          : BUILTIN_WORKFLOWS.find((w) => w.id === input.workflow);
+        if (builtinDef && !this._builtinOverlayWritten.has(input.workflow)) {
+          // Mark before await so concurrent launchRun() calls for the same builtin
+          // don't both pass the has() check and race to write the same file.
+          this._builtinOverlayWritten.add(input.workflow);
+          await this._writeBuiltinOverlay(builtinDef);
+        }
+      }
+    } else if (input.deliver === 'pr') {
+      // Fail loud, not silent: dropping the option would run to completion with the caller
+      // believing a PR opens at the end — the exact operator gap crew#293 closes.
+      throw new Error(
+        'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
+      );
     }
     return this.core.launchRun(opts);
   }
@@ -1402,6 +1439,32 @@ export class CoreAdapter {
     // id, so a refusal turns a silent ungating into a hard "unknown workflow" — exactly the
     // regression FINDING-084's first attempted fix caused.
     await writeFile(join(dir, `${def.id}.json`), JSON.stringify(overlayDef, null, 2), 'utf8');
+  }
+
+  /**
+   * Arm a PER-RUN composed workflow def (crew#293 deliver) with the engine — hot registration
+   * ONLY. Deliberately neither of the other two paths:
+   *   - not `registerWorkflow()`: the composed def must not enter `userWorkflows` or the overlay
+   *     dir — it is launch input for one run, and persisting it would grow the catalog and the
+   *     overlay dir by one entry per delivered run;
+   *   - not `_writeBuiltinOverlay()`: same reason, no file.
+   * The engine's `registerWorkflow` binding validates the def server-side and makes it visible
+   * to the next `launchRun` with no restart — exactly the lifetime a per-run def needs. (The
+   * def is consumed at PLANNING time; a later daemon restart resumes the run from its persisted
+   * units, so the in-memory registration expiring with the process is fine.)
+   */
+  private async _armPerRunWorkflow(def: WorkflowDef): Promise<void> {
+    const core = this.core as unknown as Record<string, unknown>;
+    const register = core['registerWorkflow'];
+    if (typeof register !== 'function') {
+      // Same doctrine as registerWorkflow(): no validator ⇒ refuse loudly. Silently launching
+      // the BASE workflow instead would drop the delivery the caller explicitly asked for.
+      throw new Error(
+        'deliver: "pr" needs a wicked-core build with the registerWorkflow binding — ' +
+          'the per-run deliver workflow cannot be armed',
+      );
+    }
+    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(def));
   }
 
   /**
