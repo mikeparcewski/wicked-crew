@@ -15,6 +15,20 @@
  * an MCP server inside the ACP session requests elicitation/create. The bridge blocks
  * on the pending promise and replies only after session/elicitation_resolved arrives.
  *
+ * Parent death (crew#285): stdin EOF is the portable parent-death signal — wicked-core
+ * holds this bridge's stdin open for the whole session and ends it only by killing the
+ * process, so EOF means the daemon is gone. A half-closing client (ndjson piped in from
+ * a shell, the integration suite) is still legitimate though, so the watchdog is
+ * two-stage: an in-flight turn first gets a short grace to finish and flush normally;
+ * one that outlives it is SIGTERMed, then SIGKILLed after a second grace, and the
+ * bridge exits itself rather than lingering as a detached orphan until the CLI is done.
+ *
+ * Parent-initiated termination (also crew#285): the daemon's shutdown reaper ends
+ * bridges with SIGTERM → grace → SIGKILL. Node's default SIGTERM disposition would
+ * kill this process WITHOUT reaping the in-flight CLI child — the same orphan one
+ * level down — so a handler reaps immediately (no completion grace; the parent is
+ * leaving now) and exits within the reaper's escalation budget.
+ *
  * `--settings <path>` is accepted and IGNORED: wicked-core prepends it when input
  * governance is armed, but the settings file declares Claude-format PreToolUse
  * hooks that these CLIs don't understand. Governance for them stays at the same
@@ -34,6 +48,15 @@ import { randomUUID } from 'crypto';
 const ANSI = /\u001B\[[0-9;?]*[A-Za-z]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)?/g;
 
 /**
+ * Per-stage grace window for the parent-death watchdog (crew#285). When stdin closes
+ * while a CLI turn is executing, the turn gets this long to complete and flush
+ * normally; a CLI that outlives it is SIGTERMed, gets this long again to exit, and is
+ * then SIGKILLed as the bridge force-exits. Worst-case bridge lifetime after parent
+ * death is therefore ~2 windows, not the CLI's own (potentially unbounded) runtime.
+ */
+export const PARENT_DEATH_KILL_GRACE_MS = 2000;
+
+/**
  * Run the bridge for one CLI.
  *
  * @param {object} config
@@ -45,12 +68,28 @@ const ANSI = /\u001B\[[0-9;?]*[A-Za-z]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\
  *   Injectable streams for testing. Defaults to process.stdin / process.stdout.
  * @param {(code: number) => void} [config._exit]
  *   Injectable exit function for testing. Defaults to process.exit.
+ * @param {number} [config._killGraceMs]
+ *   Injectable per-stage watchdog grace (completion wait, then SIGTERM→SIGKILL) for
+ *   testing. Defaults to PARENT_DEATH_KILL_GRACE_MS.
  */
-export function runBridge({ name, version, invocation, _streams, _exit }) {
+export function runBridge({ name, version, invocation, _streams, _exit, _killGraceMs }) {
   // ── Injectable I/O (testability seam, DES-002 §4 P-4) ───────────────────────
   const _input = _streams?.input ?? process.stdin;
   const _output = _streams?.output ?? process.stdout;
   const _exitFn = _exit ?? process.exit.bind(process);
+  const killGraceMs = _killGraceMs ?? PARENT_DEATH_KILL_GRACE_MS;
+
+  // Parent death (crew#285) breaks the stdout pipe as well as stdin. Without a
+  // listener the resulting EPIPE surfaces as an uncaught exception that kills the
+  // bridge WITHOUT reaping its CLI child — the exact orphan this watchdog exists to
+  // prevent. Exit is handled deliberately by the stdin-EOF path below.
+  _output.on?.('error', () => {});
+
+  // In-flight CLI children, so parent death can reap them instead of waiting them out.
+  const liveChildren = new Set();
+  /** Pending watchdog stage (completion grace, then SIGTERM→SIGKILL); cleared when
+   *  the bridge drains and exits cleanly first. */
+  let reapTimer = null;
 
   let sessionCwd = process.cwd();
 
@@ -72,7 +111,13 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
     console.error(`[bridge] output stream error: ${err?.code ?? String(err)}`);
   });
   function send(obj) {
-    _output.write(JSON.stringify(obj) + '\n');
+    // A write after parent death can throw EPIPE synchronously; there is nobody left
+    // to read the reply, so swallow it — exit is the stdin-EOF watchdog's job.
+    try {
+      _output.write(JSON.stringify(obj) + '\n');
+    } catch {
+      /* broken pipe after parent death */
+    }
   }
   function respond(id, result) {
     send({ jsonrpc: '2.0', id, result });
@@ -111,6 +156,8 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
         return;
       }
 
+      liveChildren.add(child);
+
       child.stdout.on('data', (data) => {
         const text = String(data).replace(ANSI, '');
         if (!text) return;
@@ -123,6 +170,7 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
       });
 
       child.on('close', (code) => {
+        liveChildren.delete(child);
         // Only a clean exit is a completed turn. `code === null` means the CLI was
         // killed by a signal (timeout, mid-stream kill) — reporting end_turn there
         // would mask a truncated response as a successful one.
@@ -132,6 +180,7 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
       });
 
       child.on('error', (err) => {
+        liveChildren.delete(child);
         respondError(rpcId, -32603, `${bin} spawn error: ${err.message}`);
         resolve();
       });
@@ -142,11 +191,26 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
   const rl = createInterface({ input: _input, terminal: false });
 
   // Track in-flight async handlers so exit waits for running turns (stdin EOF can
-  // arrive while a CLI subprocess is still working).
+  // arrive while a CLI subprocess is still working). The parent-death watchdog in the
+  // rl 'close' handler bounds that wait — it no longer stretches to the CLI's runtime.
   let pending = 0;
   let stdinClosed = false;
+  let exited = false;
+  // Exactly-once exit: the watchdog escalation and the normal drain path can both
+  // reach exit (a SIGKILLed child still emits 'close', draining `pending` after the
+  // timer already fired). Real `process.exit` makes the second call moot; injected
+  // test exits do not.
+  function exitOnce(code) {
+    if (exited) return;
+    exited = true;
+    _exitFn(code);
+  }
   function maybeExit() {
-    if (stdinClosed && pending === 0) _exitFn(0);
+    if (stdinClosed && pending === 0) {
+      // Turns drained before the escalation fired — don't SIGKILL dead pids later.
+      if (reapTimer !== null) clearTimeout(reapTimer);
+      exitOnce(0);
+    }
   }
 
   rl.on('line', async (line) => {
@@ -383,6 +447,84 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
     // the pending counter can reach zero, letting maybeExit fire.
     for (const slot of pendingElicitations.values()) slot.resolve({ action: 'cancel' });
     pendingElicitations.clear();
+    // Parent-death watchdog (crew#285): stdin EOF is the portable parent-death signal —
+    // wicked-core holds this bridge's stdin open for the whole session and ends it only
+    // by killing the process. But EOF is ALSO how a half-closing client (ndjson piped in
+    // from a shell) says "no more requests", and that client still expects the in-flight
+    // turn to flush. Two-stage escalation serves both: the turn gets one grace window to
+    // complete normally (a fast CLI drains `pending` and maybeExit clears the timers); a
+    // CLI that outlives it is presumed orphan-bound — SIGTERM first so it can clean up
+    // its own children, SIGKILL + force-exit one more window later for anything that
+    // ignored that. The bridge must never outlive its parent by more than ~2 windows.
+    if (liveChildren.size > 0) {
+      reapTimer = setTimeout(() => {
+        for (const child of liveChildren) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* already gone */
+          }
+        }
+        reapTimer = setTimeout(() => {
+          for (const child of liveChildren) {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          exitOnce(0);
+        }, killGraceMs);
+        reapTimer.unref?.();
+      }, killGraceMs);
+      // The escalation must never hold an otherwise-finished bridge process open.
+      reapTimer.unref?.();
+    }
     maybeExit();
   });
+
+  // ── Parent-initiated termination (crew#285) ─────────────────────────────────
+  // The daemon-side reaper (wicked-crew's BridgeReaper) shuts bridges down with
+  // SIGTERM → ~2s grace → SIGKILL. Node's default SIGTERM disposition kills this
+  // process WITHOUT running any JS — the in-flight CLI child would be orphaned for
+  // its whole remaining runtime, exactly the defect class this file exists to close.
+  // So: reap the children NOW (no completion grace — the parent chose to terminate
+  // us and its own SIGKILL lands in ~one window), SIGKILL + exit half a window later
+  // so the whole escalation finishes inside the reaper's budget. A drained child
+  // exits us earlier via maybeExit (stdinClosed is forced true — after SIGTERM no
+  // further input will be served).
+  //
+  // Real-process mode only: in-process test bridges must not stack live listeners on
+  // the shared test process. Windows never delivers a catchable SIGTERM (process.kill
+  // is already lethal there), so the handler is inert by construction on win32.
+  if (_streams === undefined) {
+    process.once('SIGTERM', () => {
+      stdinClosed = true;
+      for (const slot of pendingElicitations.values()) slot.resolve({ action: 'cancel' });
+      pendingElicitations.clear();
+      if (liveChildren.size > 0) {
+        for (const child of liveChildren) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* already gone */
+          }
+        }
+        // Supersede any pending stdin-EOF stage: termination is already escalating.
+        if (reapTimer !== null) clearTimeout(reapTimer);
+        reapTimer = setTimeout(() => {
+          for (const child of liveChildren) {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          exitOnce(0);
+        }, Math.max(1, Math.floor(killGraceMs / 2)));
+        reapTimer.unref?.();
+      }
+      maybeExit();
+    });
+  }
 }
