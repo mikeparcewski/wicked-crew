@@ -21,9 +21,17 @@
  * harness, so no real process.exit fires.
  */
 
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { runBridge } from '../bridge.mjs';
+
+const PKG_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // ── Harness (same shape as bridge-elicitation.test.mjs) ────────────────────────
 
@@ -216,6 +224,85 @@ describe('bridge parent-death watchdog (crew#285)', () => {
       await new Promise((r) => setTimeout(r, 100));
       expect(b.exitSpy).toHaveBeenCalledTimes(1);
       expect(b.exitSpy).toHaveBeenCalledWith(0);
+    },
+  );
+
+  // The daemon-side reaper (wicked-crew's BridgeReaper) terminates bridges with
+  // SIGTERM. Node's DEFAULT disposition would kill the bridge without reaping its
+  // in-flight CLI — orphaning it for the CLI's whole remaining runtime, the very
+  // defect crew#285 is about. This test drives the REAL production artifact
+  // (agy-acp.mjs as a subprocess, a fake `agy` on PATH), so it exercises the actual
+  // signal disposition rather than an in-process seam. POSIX-only: on Windows
+  // process.kill('SIGTERM') is unconditionally lethal and uncatchable.
+  it.skipIf(process.platform === 'win32')(
+    'SIGTERM from the daemon reaper reaps the in-flight CLI and exits the real bridge cleanly',
+    async () => {
+      const binDir = await mkdtemp(join(tmpdir(), 'bridge-sigterm-'));
+      try {
+        // Fake `agy`: announce pid, then hang forever (a turn that would outlive us).
+        await writeFile(
+          join(binDir, 'agy'),
+          '#!/usr/bin/env node\n' +
+            "process.stdout.write(String(process.pid) + '\\n'); setInterval(() => {}, 1000);\n",
+          { mode: 0o755 },
+        );
+        const bridge = spawn(process.execPath, [join(PKG_DIR, 'agy-acp.mjs')], {
+          env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+          stdio: ['pipe', 'pipe', 'inherit'],
+        });
+        try {
+          const waiters = [];
+          const received = [];
+          let buf = '';
+          bridge.stdout.on('data', (chunk) => {
+            buf += chunk.toString();
+            const parts = buf.split('\n');
+            buf = parts.pop() ?? '';
+            for (const line of parts) {
+              if (!line.trim()) continue;
+              const msg = JSON.parse(line);
+              if (waiters.length > 0) waiters.shift()(msg);
+              else received.push(msg);
+            }
+          });
+          const next = () =>
+            received.length > 0
+              ? Promise.resolve(received.shift())
+              : new Promise((resolve, reject) => {
+                  waiters.push(resolve);
+                  setTimeout(() => reject(new Error('real-bridge next() timed out')), 5000);
+                });
+          const send = (msg) => bridge.stdin.write(JSON.stringify(msg) + '\n');
+
+          send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+          await next();
+          send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: {} });
+          await next();
+          send({
+            jsonrpc: '2.0',
+            id: 3,
+            method: 'session/prompt',
+            params: { prompt: [{ type: 'text', text: 'go' }] },
+          });
+          const chunk = await next();
+          const match = /(\d+)/.exec(chunk.params.update.content.text);
+          expect(match).not.toBeNull();
+          const cliPid = Number(match[1]);
+          expect(pidAlive(cliPid)).toBe(true);
+
+          bridge.kill('SIGTERM'); // exactly what BridgeReaper.shutdown() sends
+
+          const [code, signal] = await once(bridge, 'exit');
+          // A deliberate clean exit — NOT death by default signal disposition.
+          expect(signal).toBeNull();
+          expect(code).toBe(0);
+          await waitFor(() => !pidAlive(cliPid), 'CLI child reaped after bridge SIGTERM');
+        } finally {
+          bridge.kill('SIGKILL');
+        }
+      } finally {
+        await rm(binDir, { recursive: true, force: true });
+      }
     },
   );
 });

@@ -23,6 +23,12 @@
  * one that outlives it is SIGTERMed, then SIGKILLed after a second grace, and the
  * bridge exits itself rather than lingering as a detached orphan until the CLI is done.
  *
+ * Parent-initiated termination (also crew#285): the daemon's shutdown reaper ends
+ * bridges with SIGTERM → grace → SIGKILL. Node's default SIGTERM disposition would
+ * kill this process WITHOUT reaping the in-flight CLI child — the same orphan one
+ * level down — so a handler reaps immediately (no completion grace; the parent is
+ * leaving now) and exits within the reaper's escalation budget.
+ *
  * `--settings <path>` is accepted and IGNORED: wicked-core prepends it when input
  * governance is armed, but the settings file declares Claude-format PreToolUse
  * hooks that these CLIs don't understand. Governance for them stays at the same
@@ -425,4 +431,49 @@ export function runBridge({ name, version, invocation, _streams, _exit, _killGra
     }
     maybeExit();
   });
+
+  // ── Parent-initiated termination (crew#285) ─────────────────────────────────
+  // The daemon-side reaper (wicked-crew's BridgeReaper) shuts bridges down with
+  // SIGTERM → ~2s grace → SIGKILL. Node's default SIGTERM disposition kills this
+  // process WITHOUT running any JS — the in-flight CLI child would be orphaned for
+  // its whole remaining runtime, exactly the defect class this file exists to close.
+  // So: reap the children NOW (no completion grace — the parent chose to terminate
+  // us and its own SIGKILL lands in ~one window), SIGKILL + exit half a window later
+  // so the whole escalation finishes inside the reaper's budget. A drained child
+  // exits us earlier via maybeExit (stdinClosed is forced true — after SIGTERM no
+  // further input will be served).
+  //
+  // Real-process mode only: in-process test bridges must not stack live listeners on
+  // the shared test process. Windows never delivers a catchable SIGTERM (process.kill
+  // is already lethal there), so the handler is inert by construction on win32.
+  if (_streams === undefined) {
+    process.on('SIGTERM', () => {
+      stdinClosed = true;
+      for (const slot of pendingElicitations.values()) slot.resolve({ action: 'cancel' });
+      pendingElicitations.clear();
+      if (liveChildren.size > 0) {
+        for (const child of liveChildren) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* already gone */
+          }
+        }
+        // Supersede any pending stdin-EOF stage: termination is already escalating.
+        if (reapTimer !== null) clearTimeout(reapTimer);
+        reapTimer = setTimeout(() => {
+          for (const child of liveChildren) {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          exitOnce(0);
+        }, Math.max(1, Math.floor(killGraceMs / 2)));
+        reapTimer.unref?.();
+      }
+      maybeExit();
+    });
+  }
 }
