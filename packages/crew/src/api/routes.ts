@@ -1633,7 +1633,7 @@ export function registerRoutes(
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings() }));
 
   app.put(`${V}/settings`, async (req, reply) => {
-    const patch = req.body as Partial<import('../core/types.js').SystemSettings>;
+    const patch = req.body as Partial<import('../core/types.js').CrewSystemSettings>;
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       return reply.code(400).send({ error: 'body must be a JSON object' });
     }
@@ -1651,12 +1651,23 @@ export function registerRoutes(
         });
       }
     }
+    // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
+    // a huge value is "off in practice", which should be a deliberate choice, not a typo.
+    if ('workerStallMinutes' in patch) {
+      const mins = patch.workerStallMinutes;
+      if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 1 || mins > 1440) {
+        return reply
+          .code(400)
+          .send({ error: 'workerStallMinutes must be an integer between 1 and 1440' });
+      }
+    }
     // Only allow known keys through.
-    const allowed: (keyof import('../core/types.js').SystemSettings)[] = [
+    const allowed: (keyof import('../core/types.js').CrewSystemSettings)[] = [
       'graphNodeLimit',
       'worker_config_root',
+      'workerStallMinutes',
     ];
-    const safe: Partial<import('../core/types.js').SystemSettings> = {};
+    const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
       if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
     }

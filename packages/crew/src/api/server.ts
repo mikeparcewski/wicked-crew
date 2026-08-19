@@ -21,7 +21,9 @@ import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-health.js';
+import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
+import { DEFAULT_WORKER_STALL_MINUTES } from '../core/types.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -146,6 +148,22 @@ export interface CreateServerOptions {
     enabled?: boolean;
     intervalMs?: number;
     timeoutMs?: number;
+  };
+  /**
+   * The worker stall watchdog (crew#287): DETECTION ONLY. For every run whose engine status is
+   * `executing`, the daemon tracks the last CoreEvent observed on its own relay (any frame for
+   * that run, `unitOutputDelta` included); silence past `workerStallMinutes` (setting, default
+   * 15) broadcasts ONE synthetic `{ type: "workerStalled", session, ord?, quietForMs }` frame
+   * on /ws per quiet period and logs at warn. Any new event re-arms. The run is never killed
+   * or mutated — the operator decides. `enabled` defaults to ON in the daemon and OFF under a
+   * test runner (VITEST / NODE_ENV=test), the seat-health-probe posture.
+   */
+  stallWatchdog?: {
+    enabled?: boolean;
+    /** Sweep cadence, ms (default 30 s; tests shorten it). */
+    sweepIntervalMs?: number;
+    /** Threshold override, minutes — bypasses the settings read (tests). */
+    stallMinutes?: number;
   };
 }
 
@@ -310,6 +328,23 @@ export async function createServer(
     }
   }
 
+  // The worker stall watchdog (crew#287). Built BEFORE the single CoreEvent subscription below
+  // so every relayed frame stamps its run's liveness clock; armed (sweep interval) further down
+  // beside the seat-health probe, under the same test-runner gate. Detection only: its sole
+  // outputs are one synthetic `workerStalled` /ws frame per quiet period and a warn log.
+  const stallWatchdog = new WorkerStallWatchdog({
+    listExecuting: async () =>
+      (await adapter.sessionsDetail())
+        .filter((v) => v.session.status === 'executing')
+        .map((v) => ({ id: v.session.id, ord: v.session.unit_ix })),
+    broadcast: (frame) => broadcast(frame),
+    stallMinutes: async () =>
+      options?.stallWatchdog?.stallMinutes ??
+      (await adapter.getSettings()).workerStallMinutes ??
+      DEFAULT_WORKER_STALL_MINUTES,
+    log: (m) => app.log.warn(m),
+  });
+
   // The daemon's single CoreEvent subscription fans out here: cache gate prompts
   // (§3.3), cache elicitation prompts (DES-002), route terminal frames to their owning
   // per-terminal socket (by id, DES-TERMINAL-001 §6), then forward every frame — tagged
@@ -319,10 +354,17 @@ export async function createServer(
   // Unregistered on close: a process can build more than one server over the same
   // adapter (tests do), and a closed server's caches must stop consuming events —
   // otherwise every discarded server keeps folding state forever (listener leak).
+  const stallWatchdogArmed =
+    options?.stallWatchdog?.enabled ??
+    !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
+    // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
+    // prunes its per-run maps, so ingesting while disabled grows without bound
+    // (Copilot on #301).
+    if (stallWatchdogArmed) stallWatchdog.ingest(event);
     terminals.route(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
@@ -381,6 +423,17 @@ export async function createServer(
     );
     app.addHook('onClose', async () => {
       probe.stop();
+    });
+  }
+
+  // Arm the stall watchdog's sweep (crew#287). Same gate as the probe: ON in the daemon, OFF
+  // under a test runner unless a test opts in — a suite building servers over stub adapters
+  // must not have a background interval calling `sessionsDetail()` on them.
+  const stallCfg = options?.stallWatchdog;
+  if (stallWatchdogArmed) {
+    stallWatchdog.start(stallCfg?.sweepIntervalMs);
+    app.addHook('onClose', async () => {
+      stallWatchdog.stop();
     });
   }
 

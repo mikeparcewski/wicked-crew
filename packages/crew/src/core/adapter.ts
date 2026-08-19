@@ -19,7 +19,7 @@ import type {
   CoverageReport,
   GraphKind,
   WorkflowDef,
-  SystemSettings,
+  CrewSystemSettings,
   Project,
   ProjectMember,
   InteractionRequest,
@@ -1514,14 +1514,24 @@ export class CoreAdapter {
 
   // ── System settings ───────────────────────────────────────────────────────
 
-  async getSettings(): Promise<SystemSettings> {
+  async getSettings(): Promise<CrewSystemSettings> {
     try {
       const raw = await readFile(settingsFilePath(), 'utf8');
-      const parsed = JSON.parse(raw) as Partial<SystemSettings>;
+      const parsed = JSON.parse(raw) as Partial<CrewSystemSettings>;
       // Validate numeric fields; drop anything out-of-range rather than propagate bad values.
       if ('graphNodeLimit' in parsed) {
         const v = parsed.graphNodeLimit;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10000) delete parsed.graphNodeLimit;
+      }
+      // workerStallMinutes (crew#287): positive minutes; a hand-edited zero/negative/NaN would
+      // make the stall watchdog fire on every sweep, so drop it and fall back to the default.
+      if ('workerStallMinutes' in parsed) {
+        // Same bounds the PUT /settings route enforces (integer, 1..1440) — a hand-edited
+        // settings.json must not enable values the API rejects (Copilot on #301).
+        const v = parsed.workerStallMinutes;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 1440) {
+          delete parsed.workerStallMinutes;
+        }
       }
       // worker_config_root (seat sign-in): absolute path or "" (= engine default). A hand-edited
       // relative path is dropped rather than exported as WICKED_WORKER_HOME, where the engine
@@ -1536,7 +1546,7 @@ export class CoreAdapter {
     }
   }
 
-  async updateSettings(patch: Partial<SystemSettings>): Promise<SystemSettings> {
+  async updateSettings(patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> {
     const current = await this.getSettings();
     const next = { ...current, ...patch };
     const path = settingsFilePath();
