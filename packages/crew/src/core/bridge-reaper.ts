@@ -144,11 +144,38 @@ export function parseOrphanedBridges(listing: string): number[] {
   return pids;
 }
 
-/** Boot-time sweep: SIGTERM every orphaned bridge from a prior daemon generation. */
+/**
+ * True when `pid`'s working directory sits inside an engine run worktree — the cwd
+ * contract of every engine-spawned bridge. A user's own nohup'd `*-acp` process also
+ * reparents to init but runs from an arbitrary cwd, so this is the discriminator that
+ * keeps the boot sweep from shooting it (Copilot review on #300). POSIX only (lsof);
+ * anywhere the cwd cannot be read the answer is false — never kill on uncertainty.
+ */
+function pidRunsInRunWorktree(pid: number): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    const out = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+    });
+    if (out.error !== undefined || out.status !== 0 || typeof out.stdout !== 'string') return false;
+    const cwd = out.stdout.split('\n').find((l) => l.startsWith('n'))?.slice(1) ?? '';
+    return cwd.includes('wicked-worktrees');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Boot-time sweep: SIGTERM orphaned bridges from a prior daemon generation — ppid 1
+ * AND cwd inside a run worktree, so user-started bridges are never matched.
+ */
 export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
   const listing = listProcesses();
   if (listing === null) return [];
-  const orphans = parseOrphanedBridges(listing);
+  const orphans = parseOrphanedBridges(listing).filter(
+    (pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid),
+  );
   const reaped: number[] = [];
   for (const pid of orphans) {
     try {
@@ -167,6 +194,8 @@ export interface BridgeReaperIo {
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   /** Bridge-child discovery; defaults to the process-table sweep above. */
   discover?: (parentPid: number) => number[];
+  /** Boot-sweep worktree-cwd discriminator; injectable so tests avoid real lsof. */
+  cwdInWorktree?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
 }
