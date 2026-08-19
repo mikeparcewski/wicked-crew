@@ -1526,8 +1526,10 @@ export class CoreAdapter {
       // workerStallMinutes (crew#287): positive minutes; a hand-edited zero/negative/NaN would
       // make the stall watchdog fire on every sweep, so drop it and fall back to the default.
       if ('workerStallMinutes' in parsed) {
+        // Same bounds the PUT /settings route enforces (integer, 1..1440) — a hand-edited
+        // settings.json must not enable values the API rejects (Copilot on #301).
         const v = parsed.workerStallMinutes;
-        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 10080) {
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 1440) {
           delete parsed.workerStallMinutes;
         }
       }

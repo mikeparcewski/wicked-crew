@@ -354,11 +354,17 @@ export async function createServer(
   // Unregistered on close: a process can build more than one server over the same
   // adapter (tests do), and a closed server's caches must stop consuming events —
   // otherwise every discarded server keeps folding state forever (listener leak).
+  const stallWatchdogArmed =
+    options?.stallWatchdog?.enabled ??
+    !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
-    stallWatchdog.ingest(event);
+    // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
+    // prunes its per-run maps, so ingesting while disabled grows without bound
+    // (Copilot on #301).
+    if (stallWatchdogArmed) stallWatchdog.ingest(event);
     terminals.route(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
@@ -424,7 +430,7 @@ export async function createServer(
   // under a test runner unless a test opts in — a suite building servers over stub adapters
   // must not have a background interval calling `sessionsDetail()` on them.
   const stallCfg = options?.stallWatchdog;
-  if (stallCfg?.enabled ?? !underTestRunner) {
+  if (stallWatchdogArmed) {
     stallWatchdog.start(stallCfg?.sweepIntervalMs);
     app.addHook('onClose', async () => {
       stallWatchdog.stop();

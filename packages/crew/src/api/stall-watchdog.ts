@@ -148,7 +148,9 @@ export class WorkerStallWatchdog {
   start(intervalMs = DEFAULT_SWEEP_INTERVAL_MS): void {
     if (this.handle !== null) return;
     this.handle = setInterval(() => {
-      void this.sweep();
+      this.sweep().catch((err: unknown) => {
+        this.log(`[stall-watchdog] sweep failed: ${String(err)}`);
+      });
     }, intervalMs);
     this.handle.unref?.();
   }
