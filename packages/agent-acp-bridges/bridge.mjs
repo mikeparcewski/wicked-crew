@@ -162,6 +162,15 @@ export function runBridge({ name, version, invocation, _streams, _exit }) {
       return;
     }
 
+    // Valid JSON but not an object (a bare `null`, number, string, or boolean
+    // literal) is not a JSON-RPC frame. Guard before destructuring: `null`
+    // would throw OUTSIDE the dispatch try/catch below and kill the bridge
+    // (crew#290: nothing on this stream may be fatal).
+    if (msg === null || typeof msg !== 'object') {
+      console.error('[bridge] ignoring non-object input frame');
+      return;
+    }
+
     const { id, method, params } = msg;
     // JSON-RPC 2.0: messages without an id are notifications — never respond.
     const isNotification = id == null;

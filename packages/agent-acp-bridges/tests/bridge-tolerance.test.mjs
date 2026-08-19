@@ -20,6 +20,8 @@
  *       still serves afterwards — never process death
  *   8.  two consecutive turns interleaved with hostile frames both complete
  *       (turn 2 works after unknown frames — crew#288 probe)
+ *   9.  bare JSON primitive lines (null / number / string / bool) → ignored;
+ *       destructuring a parsed `null` must not escape the dispatch guard
  */
 
 import { PassThrough } from 'node:stream';
@@ -236,6 +238,26 @@ describe('bridge tolerance: unknown frames never kill the session (crew#290)', (
     b.send({ jsonrpc: '2.0', method: 'session/some_future_notification', params: {} });
     const turn2 = await runTurn(b, 4, [{ type: 'text', text: 'turn two' }]);
     expect(turn2.response.result.stopReason).toBe('end_turn');
+    expect(b.exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('9. bare JSON primitive lines (null, number, string, bool) are ignored', async () => {
+    const b = createTestBridge();
+    await handshake(b);
+
+    // JSON.parse succeeds on these but they are not JSON-RPC objects. Before
+    // the non-object guard, destructuring the parsed `null` threw OUTSIDE the
+    // dispatch try/catch and killed the bridge (unhandled rejection in the
+    // async line listener) — the crew#290 fatal class.
+    b.sendRaw('null');
+    b.sendRaw('42');
+    b.sendRaw('"a stray string"');
+    b.sendRaw('true');
+
+    b.send({ jsonrpc: '2.0', id: 3, method: 'initialize', params: {} });
+    const res = await b.next();
+    expect(res.id).toBe(3);
+    expect(res.result).toBeDefined();
     expect(b.exitSpy).not.toHaveBeenCalled();
   });
 });
