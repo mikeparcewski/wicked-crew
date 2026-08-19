@@ -302,3 +302,18 @@ describe('discoverBridgeChildren (real process table)', () => {
     }
   });
 });
+
+describe('bridge token boundaries (#300 post-merge review)', () => {
+  it('pi-acp does not match inside api-acp', () => {
+    const listing = [
+      '  11 10 node /x/api-acp serve',        // NOT a bridge — contains pi-acp as substring
+      '  12 10 node /x/bin/pi-acp',           // bridge, path-prefixed
+      '  13 10 pi-acp --flag',                // bridge, bare token
+      '  14 10 node copy-of-pi-acp-backup',   // NOT a bridge — embedded token
+      String.raw`  15 10 "C:\shims\pi-acp.cmd" serve`, // bridge — quoted Windows shim
+      String.raw`  16 10 C:\bin\pi-acp.exe`,           // bridge — launcher extension
+      '  17 10 node api-acp.cmd',              // NOT a bridge — api-acp with extension
+    ].join('\n');
+    expect(parseBridgeChildren(listing, 10)).toEqual([12, 13, 15, 16]);
+  });
+});

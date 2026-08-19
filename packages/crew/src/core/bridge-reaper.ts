@@ -69,6 +69,20 @@ const POLL_INTERVAL_MS = 100;
  * `parentPid` whose command line names a bridge binary. Pure, so the parsing is
  * testable without a real process table.
  */
+/**
+ * Matches `bin` as a whole command token, never a substring: start/whitespace/path-sep/
+ * quote before; an optional Windows launcher extension (.cmd/.exe/.bat) and then
+ * end/whitespace/path-sep/quote after — so `pi-acp`, `/x/pi-acp`, `"C:\\x\\pi-acp.cmd"`
+ * all match while `api-acp` and `copy-of-pi-acp-backup` never do.
+ */
+function bridgeTokenRe(bin: string): RegExp {
+  const esc = bin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s/\\\\"'])${esc}(?:\\.(?:cmd|exe|bat))?(?:[\\s/\\\\"']|$)`, 'i');
+}
+
+/** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */
+const BRIDGE_TOKEN_RES: readonly RegExp[] = BRIDGE_BINS.map((bin) => bridgeTokenRe(bin));
+
 export function parseBridgeChildren(listing: string, parentPid: number): number[] {
   const pids: number[] = [];
   for (const line of listing.split('\n')) {
@@ -78,10 +92,10 @@ export function parseBridgeChildren(listing: string, parentPid: number): number[
     const ppid = Number(m[2]);
     const command = m[3] as string;
     if (ppid !== parentPid || pid === parentPid) continue;
-    // Substring match is enough: within the direct children of THIS daemon, a command
-    // line mentioning a bridge binary (bare invocation or a path through the package
-    // directory) is a bridge. The ppid filter is what prevents false positives.
-    if (BRIDGE_BINS.some((bin) => command.includes(bin))) pids.push(pid);
+    // Token-boundary match: `pi-acp` must not match inside `api-acp` (Copilot review
+    // on #300 post-merge). A bridge binary appears as its own token — start-of-line,
+    // whitespace, or a path separator before it; end-of-token after.
+    if (BRIDGE_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
   }
   return pids;
 }
@@ -139,7 +153,7 @@ export function parseOrphanedBridges(listing: string): number[] {
     const ppid = Number(m[2]);
     const command = m[3] as string;
     if (ppid !== 1 || pid === process.pid) continue;
-    if (BRIDGE_BINS.some((bin) => command.includes(bin))) pids.push(pid);
+    if (BRIDGE_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
   }
   return pids;
 }
