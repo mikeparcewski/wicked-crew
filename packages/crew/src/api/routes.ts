@@ -1,10 +1,10 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
@@ -18,7 +18,8 @@ import type { LaunchRunInput, RosterSeat, SessionStatus, SessionView } from '../
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
-import { isInsideRoot, openWithSystemDefault } from './open-path.js';
+import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
+import { NotARegularFileError, readFileCapped, worktreeDiff } from './run-files.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -332,21 +333,18 @@ export function registerRoutes(
       return reply.code(400).send({ error: '`path` must be an absolute path' });
     }
     const target = resolve(rawPath);
-    const roots: string[] = [];
+    let roots: string[];
     try {
+      let session: SessionView['session'] | undefined;
       if (runId !== undefined) {
         const views = await adapter.sessionsDetail();
         const view = views.find((v) => v.session.id === runId);
         if (view === undefined) {
           return reply.code(404).send({ error: `unknown run: ${runId}` });
         }
-        const workdir = view.session.workdir;
-        if (typeof workdir === 'string' && workdir.length > 0) roots.push(workdir);
-        for (const r of view.session.extra_write_roots ?? []) {
-          if (typeof r === 'string' && r.length > 0) roots.push(r);
-        }
+        session = view.session;
       }
-      for (const repo of await adapter.listRepos()) roots.push(repo.root_path);
+      roots = allowedRootsFor(session, await adapter.listRepos());
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
@@ -362,6 +360,137 @@ export function registerRoutes(
       return reply.code(502).send({ error: `could not open ${target}: ${message(err)}` });
     }
     return { status: 'opened' };
+  });
+
+  // ── Run file & diff reads (DES-FEEDBACK-002 CREW-1) ────────────────────────
+  // The studio's in-app viewer (P0-3). Both routes are GET-only assembly of reviewed machinery:
+  // the SAME containment `POST /open` runs (`allowedRootsFor` + fail-closed `isInsideRoot`) over
+  // the SAME root set (run workdir + extra write roots + registered repo roots), capped payloads,
+  // and `execCapped` git with argv arrays. Threat delta over /open is strictly smaller: these only
+  // return bytes the daemon can already read inside the same containment — no OS opener, no write.
+
+  /** Resolve `:id` → the run's session, and the contained target from `?path=` when present.
+   *  Shared by both routes so their validation ladders (404 unknown run → 400 non-absolute →
+   *  403 outside every root) cannot drift. Returns `null` after replying. */
+  const resolveRunPath = async (
+    reply: FastifyReply,
+    id: string,
+    rawPath: string | undefined,
+  ): Promise<{ session: SessionView['session']; target?: string } | null> => {
+    let session: SessionView['session'];
+    let roots: string[];
+    try {
+      const views = await adapter.sessionsDetail();
+      const view = views.find((v) => v.session.id === id);
+      if (view === undefined) {
+        await reply.code(404).send({ error: `unknown run: ${id}` });
+        return null;
+      }
+      session = view.session;
+      if (rawPath === undefined) return { session };
+      roots = allowedRootsFor(session, await adapter.listRepos());
+    } catch (err) {
+      await reply.code(500).send({ error: message(err) });
+      return null;
+    }
+    if (!isAbsolute(rawPath)) {
+      await reply.code(400).send({ error: '`path` must be an absolute path' });
+      return null;
+    }
+    const target = resolve(rawPath);
+    if (!roots.some((root) => isInsideRoot(root, target))) {
+      await reply.code(403).send({
+        error:
+          "path is outside every allowed root (the run's workdir/write roots and the registered repos)",
+      });
+      return null;
+    }
+    return { session, target };
+  };
+
+  // Fastify parses a repeated param as string[] (Copilot, #250/#266). These are FILE-READ
+  // routes: `?path=a&path=b` is rejected outright (400) rather than silently reading as
+  // either (Copilot, #305).
+  const REPEATED_PATH = Symbol('repeated path param');
+  const singlePathQ = (
+    v: string | string[] | undefined,
+  ): string | undefined | typeof REPEATED_PATH =>
+    Array.isArray(v) ? REPEATED_PATH : v?.trim() || undefined;
+
+  // File content from the run's contained roots: 512 KB cap (`truncated: true` past it, first
+  // 512 KB served), NUL-in-first-8KB binary sniff (`binary: true`, `content: ""`). Read-only by
+  // construction (`fs` read); no directory listing — the studio already has the file list.
+  app.get(`${V}/runs/:id/files`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
+    if (rawPath === REPEATED_PATH) {
+      return reply.code(400).send({ error: '`path` may be given at most once' });
+    }
+    if (rawPath === undefined) {
+      return reply.code(400).send({ error: '`path` query parameter is required' });
+    }
+    const resolved = await resolveRunPath(reply, id, rawPath);
+    if (resolved === null) return reply;
+    const target = resolved.target as string;
+    try {
+      const read = await readFileCapped(target);
+      return { path: target, ...read };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return reply.code(404).send({ error: `no such file: ${target}` });
+      }
+      if (err instanceof NotARegularFileError) {
+        return reply.code(400).send({ error: `\`path\` is not a regular file: ${target}` });
+      }
+      return reply.code(500).send({ error: message(err) });
+    }
+  });
+
+  // The run's worktree diff against HEAD (staged + unstaged; untracked appended as all-addition
+  // `--no-index` hunks), whole-tree or `?path=` narrowed. 1 MB output cap. `diff: ""` is a real
+  // answer (clean tree), not an error. 409 — not 404 — when the run has no workdir or the workdir
+  // has been reaped: the RUN exists; what is gone is the thing to diff against.
+  app.get(`${V}/runs/:id/diff`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
+    if (rawPath === REPEATED_PATH) {
+      return reply.code(400).send({ error: '`path` may be given at most once' });
+    }
+    const resolved = await resolveRunPath(reply, id, rawPath);
+    if (resolved === null) return reply;
+    const workdir = resolved.session.workdir;
+    if (typeof workdir !== 'string' || workdir.length === 0) {
+      return reply.code(409).send({ error: `run ${id} has no workdir — nothing to diff` });
+    }
+    if (!existsSync(workdir)) {
+      return reply.code(409).send({ error: `run ${id}'s workdir no longer exists: ${workdir}` });
+    }
+    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
+    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
+    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
+    // "outside repository" error as a 500 (Copilot, #305).
+    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
+      return reply.code(400).send({
+        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
+      });
+    }
+    const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
+    try {
+      return await worktreeDiff(workdir, rel);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return reply.code(500).send({ error: 'git executable not found on server' });
+      }
+      // execCapped throws (no partial output attached) past its 64 MiB daemon-wide buffer —
+      // beyond graceful truncation, so the answer is an explicit, actionable refusal
+      // rather than a generic 500 (Copilot, #305).
+      if (err instanceof ExecOutputTooLarge) {
+        return reply.code(507).send({
+          error: "diff output exceeds the server's execution buffer — narrow the request with ?path=",
+        });
+      }
+      return reply.code(500).send({ error: message(err) });
+    }
   });
 
   // Registered repos → target-repo picker.

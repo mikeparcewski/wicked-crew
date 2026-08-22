@@ -288,6 +288,39 @@ export interface OpenPathBody {
   runId?: string;
 }
 
+/**
+ * Response of `GET /runs/:id/files?path=<abs>` (DES-FEEDBACK-002 CREW-1) — a capped, read-only
+ * file read contained against the SAME root set `POST /open` validates (run workdir + extra
+ * write roots + registered repo roots). 404 unknown run / missing file; 400 non-absolute path;
+ * 403 outside every allowed root (fail-closed, symlink-safe).
+ */
+export interface RunFileContent {
+  /** The resolved absolute path that was served. */
+  path: string;
+  /** UTF-8 file text — the first 512 KB when `truncated`, `""` when `binary`. */
+  content: string;
+  /** The file's FULL size in bytes (not the served slice's). */
+  size: number;
+  /** The file exceeds the 512 KB cap and `content` holds only the first 512 KB. */
+  truncated: boolean;
+  /** NUL byte in the first 8 KB — render "binary file · open externally", never the content. */
+  binary: boolean;
+}
+
+/**
+ * Response of `GET /runs/:id/diff` / `GET /runs/:id/diff?path=<abs>` (DES-FEEDBACK-002 CREW-1) —
+ * the run worktree's unified diff against HEAD (staged + unstaged), with untracked files appended
+ * as all-addition `--no-index` hunks. `diff: ""` = clean tree (a real answer, not an error).
+ * 404 unknown run; 409 when the run has no workdir or it no longer exists; with `path`, the same
+ * 400/403 containment as `RunFileContent`.
+ */
+export interface RunDiff {
+  /** Unified diff text (`git diff --no-color --no-ext-diff HEAD`), cut at 1 MB when `truncated`. */
+  diff: string;
+  /** The diff exceeded the 1 MB output cap and was cut. */
+  truncated: boolean;
+}
+
 /** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
 export interface GateInfo {
   runId: string;

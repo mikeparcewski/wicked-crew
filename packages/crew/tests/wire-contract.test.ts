@@ -28,6 +28,7 @@ import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -127,6 +128,12 @@ respondsWith<
   Wire.InteractionRequest[] | null,
   Awaited<ReturnType<CoreAdapter['interactionRequests']>>
 >();
+
+// GET /runs/:id/files + GET /runs/:id/diff (DES-FEEDBACK-002 CREW-1, api-types 0.7.0) — the
+// in-studio viewer's capped file read and worktree diff. The routes produce `{path} + read` /
+// the diff shape verbatim, so the machinery types must satisfy the published contract.
+respondsWith<Wire.RunFileContent, { path: string } & CappedFileRead>();
+respondsWith<Wire.RunDiff, WorktreeDiff>();
 
 // Identity/actor contract (task #88): the implicit local actor and the audit
 // trail's read shape must satisfy what the contract publishes.

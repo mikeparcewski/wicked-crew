@@ -44,6 +44,36 @@ export function isInsideRoot(root: string, target: string): boolean {
   return rel.split(sep)[0] !== '..';
 }
 
+/** The session fields the root set is derived from — structural on purpose, so this stays a leaf
+ *  module (routes.ts hands it the wire-shape `SessionView.session`; tests hand it a literal). */
+export interface RootSourceSession {
+  workdir?: string | null;
+  extra_write_roots?: string[] | null;
+}
+
+/**
+ * The ONE root set a caller-supplied path is contained against (DES-FEEDBACK-002 CREW-1):
+ * the run's workdir + its `extra_write_roots` (when a run is in play) + every registered repo
+ * root. Extracted from the `POST /open` handler so `/open`, `GET /runs/:id/files`, and
+ * `GET /runs/:id/diff` cannot drift — three copies of a containment root set is how one of
+ * them quietly widens.
+ */
+export function allowedRootsFor(
+  session: RootSourceSession | undefined,
+  repos: ReadonlyArray<{ root_path: string }>,
+): string[] {
+  const roots: string[] = [];
+  if (session !== undefined) {
+    const workdir = session.workdir;
+    if (typeof workdir === 'string' && workdir.length > 0) roots.push(workdir);
+    for (const r of session.extra_write_roots ?? []) {
+      if (typeof r === 'string' && r.length > 0) roots.push(r);
+    }
+  }
+  for (const repo of repos) roots.push(repo.root_path);
+  return roots;
+}
+
 /** The platform's opener invocation. Exported for tests; args are always a real argv array. */
 export function platformOpenCommand(target: string): { cmd: string; args: string[] } {
   switch (process.platform) {
