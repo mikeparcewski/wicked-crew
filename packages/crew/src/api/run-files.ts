@@ -132,7 +132,8 @@ export async function worktreeDiff(workdir: string, relPath?: string): Promise<W
     .filter((entry) => entry.startsWith('?? '))
     .map((entry) => entry.slice(3));
   for (const file of untracked) {
-    if (out.length > DIFF_OUTPUT_CAP_BYTES) break; // already past the cap — stop spawning
+    // Cap is in BYTES; `out.length` counts UTF-16 code units (Copilot, #305).
+    if (Buffer.byteLength(out, 'utf8') > DIFF_OUTPUT_CAP_BYTES) break; // past the cap — stop spawning
     try {
       const { stdout } = await execCapped(
         'git',
@@ -150,8 +151,15 @@ export async function worktreeDiff(workdir: string, relPath?: string): Promise<W
     }
   }
 
-  if (out.length > DIFF_OUTPUT_CAP_BYTES) {
-    return { diff: out.slice(0, DIFF_OUTPUT_CAP_BYTES), truncated: true };
+  // Byte-accurate cap (Copilot, #305): `slice` on the string counts UTF-16 code units, which
+  // under-enforces for non-ASCII diffs. Cut on the UTF-8 byte buffer, then back off any
+  // incomplete trailing multibyte sequence — decoding a torn tail yields U+FFFD, which
+  // re-encodes LARGER and would breach the cap by a byte.
+  const outBytes = Buffer.from(out, 'utf8');
+  if (outBytes.byteLength > DIFF_OUTPUT_CAP_BYTES) {
+    let end = DIFF_OUTPUT_CAP_BYTES;
+    while (end > 0 && (outBytes[end]! & 0xc0) === 0x80) end--; // land on a sequence boundary
+    return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true };
   }
   return { diff: out, truncated: false };
 }

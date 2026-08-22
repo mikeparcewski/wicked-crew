@@ -408,17 +408,24 @@ export function registerRoutes(
     return { session, target };
   };
 
-  // First query value, trimmed to undefined — Fastify parses a repeated param as string[]
-  // (Copilot, #250/#266), and `?path=a&path=b` must not silently read as either.
-  const firstQ = (v: string | string[] | undefined): string | undefined =>
-    (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
+  // Fastify parses a repeated param as string[] (Copilot, #250/#266). These are FILE-READ
+  // routes: `?path=a&path=b` is rejected outright (400) rather than silently reading as
+  // either (Copilot, #305).
+  const REPEATED_PATH = Symbol('repeated path param');
+  const singlePathQ = (
+    v: string | string[] | undefined,
+  ): string | undefined | typeof REPEATED_PATH =>
+    Array.isArray(v) ? REPEATED_PATH : v?.trim() || undefined;
 
   // File content from the run's contained roots: 512 KB cap (`truncated: true` past it, first
   // 512 KB served), NUL-in-first-8KB binary sniff (`binary: true`, `content: ""`). Read-only by
   // construction (`fs` read); no directory listing — the studio already has the file list.
   app.get(`${V}/runs/:id/files`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rawPath = firstQ((req.query as { path?: string | string[] }).path);
+    const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
+    if (rawPath === REPEATED_PATH) {
+      return reply.code(400).send({ error: '`path` may be given at most once' });
+    }
     if (rawPath === undefined) {
       return reply.code(400).send({ error: '`path` query parameter is required' });
     }
@@ -445,7 +452,10 @@ export function registerRoutes(
   // has been reaped: the RUN exists; what is gone is the thing to diff against.
   app.get(`${V}/runs/:id/diff`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rawPath = firstQ((req.query as { path?: string | string[] }).path);
+    const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
+    if (rawPath === REPEATED_PATH) {
+      return reply.code(400).send({ error: '`path` may be given at most once' });
+    }
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
     const workdir = resolved.session.workdir;
@@ -455,10 +465,15 @@ export function registerRoutes(
     if (!existsSync(workdir)) {
       return reply.code(409).send({ error: `run ${id}'s workdir no longer exists: ${workdir}` });
     }
-    // Narrowing path → workdir-relative, a single argv element after `--` (run-files.ts). A
-    // contained-but-outside-the-worktree path (extra write root / repo root) yields a `../`-
-    // prefixed pathspec git resolves against cwd; outside the repository it errors, which
-    // surfaces as the 500 below — never a widened read.
+    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
+    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
+    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
+    // "outside repository" error as a 500 (Copilot, #305).
+    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
+      return reply.code(400).send({
+        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
+      });
+    }
     const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
     try {
       return await worktreeDiff(workdir, rel);

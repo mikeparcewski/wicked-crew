@@ -382,6 +382,48 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
     expect((await getDiff('run-1', join(outside, 'secret.txt'))).statusCode).toBe(403);
     expect((await getDiff('run-1', join(workdir, '..', 'outside', 'secret.txt'))).statusCode).toBe(403);
   });
+
+  // ── Copilot #305 hardenings ───────────────────────────────────────────────
+
+  it('byte-counts the diff cap: multibyte content past the BYTE cap truncates even when the code-unit length is under it', async () => {
+    // '€' = 1 UTF-16 code unit but 3 UTF-8 bytes: ~0.55×CAP code units ≈ 1.65×CAP bytes.
+    // A code-unit cap would NOT truncate this; the byte cap must.
+    const units = Math.ceil((DIFF_OUTPUT_CAP_BYTES * 0.55) / 121) * 121;
+    const huge = join(workdir, 'huge-multibyte.txt');
+    writeFileSync(huge, `${'€'.repeat(120)}\n`.repeat(units / 121));
+    try {
+      const res = await getDiff('run-1', huge);
+      expect(res.statusCode).toBe(200);
+      const { diff, truncated } = res.json() as { diff: string; truncated: boolean };
+      expect(truncated).toBe(true);
+      const bytes = Buffer.byteLength(diff, 'utf8');
+      expect(bytes).toBeLessThanOrEqual(DIFF_OUTPUT_CAP_BYTES);
+      // The cut is byte-exact up to one (possibly replaced) trailing multibyte character.
+      expect(bytes).toBeGreaterThanOrEqual(DIFF_OUTPUT_CAP_BYTES - 4);
+    } finally {
+      rmSync(huge, { force: true });
+    }
+  });
+
+  it('rejects a repeated ?path=a&path=b with 400 on BOTH read routes — never silently reads either', async () => {
+    const a = join(workdir, 'tracked.txt');
+    const b = join(workdir, 'nested', 'deep.txt');
+    for (const url of [`/api/v1/runs/run-1/files`, `/api/v1/runs/run-1/diff`]) {
+      const res = await app.inject({ method: 'GET', url, query: { path: [a, b] } });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: string }).error).toContain('at most once');
+    }
+  });
+
+  it('400s a diff ?path that is contained but OUTSIDE the worktree (extra root) — explicit, never a git error', async () => {
+    const extraFile = join(extraRoot, 'deliverable.md');
+    // The FILES route serves it (wider root set)…
+    expect((await getFile('run-1', extraFile)).statusCode).toBe(200);
+    // …but as a diff pathspec it has no meaning: explicit 400, not a surfaced git 500.
+    const res = await getDiff('run-1', extraFile);
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toContain("inside the run's worktree");
+  });
 });
 
 describe('allowedRootsFor (the ONE root set /open and both viewer routes share)', () => {
