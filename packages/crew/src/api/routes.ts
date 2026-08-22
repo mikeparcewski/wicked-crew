@@ -481,6 +481,14 @@ export function registerRoutes(
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return reply.code(500).send({ error: 'git executable not found on server' });
       }
+      // execCapped throws (no partial output attached) past its 64 MiB daemon-wide buffer —
+      // beyond graceful truncation, so the answer is an explicit, actionable refusal
+      // rather than a generic 500 (Copilot, #305).
+      if (err instanceof ExecOutputTooLarge) {
+        return reply.code(507).send({
+          error: "diff output exceeds the server's execution buffer — narrow the request with ?path=",
+        });
+      }
       return reply.code(500).send({ error: message(err) });
     }
   });
