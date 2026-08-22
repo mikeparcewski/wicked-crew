@@ -81,8 +81,11 @@ const GIT_TIMEOUT_MS = 10_000;
  *  a repo with no commits yet (`HEAD` unresolvable — every file is untracked and the untracked
  *  pass still runs for the commit-less case). */
 function isEmptyDiffAnswer(msg: string): boolean {
+  // Case-insensitive on the repo check: `git log` says "fatal: not a git repository" but
+  // `git diff` says "warning: Not a git repository. Use --no-index …" — measured, not assumed.
+  const lower = msg.toLowerCase();
   return (
-    msg.includes('not a git repository') ||
+    lower.includes('not a git repository') ||
     msg.includes('does not have any commits') ||
     msg.includes("ambiguous argument 'HEAD'") ||
     msg.includes('unknown revision')
@@ -112,7 +115,7 @@ export async function worktreeDiff(workdir: string, relPath?: string): Promise<W
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err; // git missing — the route's 500
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('not a git repository')) return { diff: '', truncated: false };
+    if (msg.toLowerCase().includes('not a git repository')) return { diff: '', truncated: false };
     if (!isEmptyDiffAnswer(msg)) throw err;
     // No commits yet: tracked diff is vacuously empty; fall through to the untracked pass.
   }
