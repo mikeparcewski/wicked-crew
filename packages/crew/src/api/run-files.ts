@@ -132,8 +132,9 @@ export async function worktreeDiff(workdir: string, relPath?: string): Promise<W
     .filter((entry) => entry.startsWith('?? '))
     .map((entry) => entry.slice(3));
   for (const file of untracked) {
-    // Cap is in BYTES; `out.length` counts UTF-16 code units (Copilot, #305).
-    if (Buffer.byteLength(out, 'utf8') > DIFF_OUTPUT_CAP_BYTES) break; // past the cap — stop spawning
+    // Cap is in BYTES; `out.length` counts UTF-16 code units. `>=`: exactly-at-cap is
+    // already done — spawning one more git only to discard its output is waste (Copilot, #305).
+    if (Buffer.byteLength(out, 'utf8') >= DIFF_OUTPUT_CAP_BYTES) break;
     try {
       const { stdout } = await execCapped(
         'git',
