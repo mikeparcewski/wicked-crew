@@ -3,7 +3,9 @@
 // What these tests pin, and why:
 //  - the TRIGGER contract: only `wicked.interactive.doc.created` with `kind: "source"` and a
 //    slug-valid document_id is actionable — demo/html docs belong to the assist loop, and a
-//    malformed id must never name a ledger key or a file path;
+//    malformed id must never name a ledger key or a file path. UNFILED docs (no `project_id`)
+//    are actionable too — DES-UX-001 slice U creates them through crew's synthesized default
+//    mount with no project field, and this seam is their only answerer (BRIEF-UX-001 J3);
 //  - the WORKER contract: the problem statement and every phase instruction are single-line
 //    (the engine's PTY seat runner REFUSES prompts with embedded newlines — wicked-core
 //    FINDING-011 — so a multi-line brief must be flattened, not forwarded);
@@ -67,9 +69,17 @@ describe('parseSourceDocCreated', () => {
     expect(parseSourceDocCreated(DOC_CREATED, { ...payload, kind: 'html' })).toBeNull();
   });
 
-  it('ignores unbound source docs -- crew only takes project-bound docs; unbound docs are the assist skill solo business', () => {
-    expect(parseSourceDocCreated(DOC_CREATED, payload)).toBeNull();
-    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })).toBeNull();
+  it('accepts UNBOUND source docs with projectId undefined -- unfiled docs are first-class (DES-UX-001 slice U)', () => {
+    const unbound = parseSourceDocCreated(DOC_CREATED, payload);
+    expect(unbound).toEqual({
+      documentId: 'q3-board-deck',
+      brief: 'a Q3 board deck',
+      sourcePaths: ['/tmp/q3.md'],
+      style: 'ppt',
+    });
+    expect(unbound?.projectId).toBeUndefined();
+    // An empty project_id is treated as absent — unfiled, never a fabricated binding.
+    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })?.projectId).toBeUndefined();
   });
 
   it('ignores other event types, malformed payloads, and slug-invalid document ids', () => {
@@ -89,11 +99,13 @@ describe('parseSourceDocCreated', () => {
     expect(doc?.sourcePaths).toEqual(['/ok']);
   });
 
-  it('always includes projectId in the result -- absent or empty project_id returns null (crew only takes project-bound docs)', () => {
+  it('carries projectId only when the doc is bound -- never fabricates one for an unfiled doc', () => {
     const bound = parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: 'proj-7' });
     expect(bound?.projectId).toBe('proj-7');
-    expect(parseSourceDocCreated(DOC_CREATED, payload)).toBeNull();
-    expect(parseSourceDocCreated(DOC_CREATED, { ...payload, project_id: '' })).toBeNull();
+    const unbound = parseSourceDocCreated(DOC_CREATED, payload);
+    expect(unbound).not.toBeNull();
+    expect(unbound && 'projectId' in unbound).toBe(false); // omitted, not present-as-undefined
+    expect(unbound?.projectId).not.toBe('default');
   });
 });
 
@@ -569,12 +581,62 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // produced (run eed69dfa) — the declared outPath must be inside a declared root.
     expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts')]);
 
-    // Unbound doc → crew ignores it entirely (the assist skill handles it solo).
+    // Unbound doc → an UNFILED governed run (DES-UX-001 slice U): the launch happens, the
+    // projectId key is OMITTED (never a fabricated 'default'), and onRunFiled does NOT fire —
+    // there is no project to attach the membership to (CREW-UX-2: project_id null on the DTO).
     await emitDocCreated(bus, 'unbound-doc');
-    // Give the subscriber a moment to process; launch count must stay at 1.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitFor(() => engine.launches.length === 2);
+    const unfiled = engine.launches[1]!;
+    expect(unfiled.projectId).toBeUndefined();
+    expect('projectId' in unfiled).toBe(false);
+    expect(unfiled.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
+    expect(unfiled.problem).toContain('"unbound-doc"');
+    // The launch is otherwise IDENTICAL to the bound one: same declared write root (crew#263)…
+    expect(unfiled.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // …and the same ledger row shape, so replay dedupe works for unfiled docs too.
+    expect(sub!.ledger.get('unbound-doc')?.runId).toBe(unfiled.sessionId);
+    expect(filed).toHaveLength(1); // still only the bound doc's filing
+  });
+
+  it('an UNFILED doc completes the full loop -- draft.completed lands with the same idempotency key discipline', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const filed: Array<[string, string]> = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      onRunFiled: (runId, projectId) => filed.push([runId, projectId]),
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'unfiled-doc'); // no project_id at all — the slice-U shape
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    expect('projectId' in launch).toBe(false);
+
+    // A replayed unbound doc.created must not double-launch (ledger dedupe is project-agnostic).
+    await emitDocCreated(bus, 'unfiled-doc');
+    await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length).toBe(1);
-    expect(filed).toHaveLength(1);
+
+    const outPath = join(draftDir, 'unfiled-doc-v1.html');
+    mkdirSync(draftDir, { recursive: true });
+    writeFileSync(outPath, '<html><body><h1>Unfiled draft</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
+    expect((draft.payload as { document_id?: string }).document_id).toBe('unfiled-doc');
+    expect((draft.payload as { html_path?: string }).html_path).toBe(outPath);
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('unfiled-doc'));
+    expect(sub!.ledger.get('unfiled-doc')?.emittedAt).toBeTruthy();
+    expect(filed).toHaveLength(0); // an unfiled run is never reported as filed
   });
 
   it('a completed run whose worker wrote NO file posts an error instead of announcing a phantom draft', async () => {
