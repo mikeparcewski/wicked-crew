@@ -9,7 +9,7 @@
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
 import { promises as fsp } from 'node:fs';
-import { execCapped } from '../core/exec.js';
+import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
  *  `truncated: true` — the studio renders a labeled truncation banner, never a silent amputation. */
@@ -112,14 +112,20 @@ export function isPlainRef(base: string): boolean {
 }
 
 /** One contained git read: argv array (never a shell string), capped, cwd-scoped to the run's
- *  workdir. Returns trimmed stdout, or `null` when git answered "no" (unresolvable ref, no
- *  merge base, …). Rethrows ENOENT (git missing) and "not a git repository" untouched. */
+ *  workdir. Returns trimmed stdout, or `null` ONLY when git ran to completion and answered "no"
+ *  (unresolvable ref, no merge base, …) — a plain non-zero exit. Operational failures are never
+ *  `null`: ENOENT (git missing), "not a git repository", a timed-out/killed process (`killed`/
+ *  `signal` set), and output-cap overflow all rethrow, so they surface as the route's 500 rather
+ *  than masquerading as a 400 "unresolvable base" (Copilot, #307). */
 async function gitQuery(workdir: string, args: string[]): Promise<string | null> {
   try {
     const { stdout } = await execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: workdir });
     return stdout.trim();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err;
+    if (err instanceof ExecOutputTooLarge) throw err;
+    const proc = err as { killed?: boolean; signal?: string | null };
+    if (proc.killed === true || (proc.signal !== undefined && proc.signal !== null)) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.toLowerCase().includes('not a git repository')) throw err;
     return null;
@@ -222,7 +228,9 @@ export async function worktreeDiff(
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw err; // git missing — 500
       const msg = err instanceof Error ? err.message : String(err);
-      // The route's standing tolerance: a non-repo workdir answers an empty diff, base or not.
+      // The route's standing tolerance: a non-repo workdir answers an empty diff for any
+      // WELL-FORMED base — a malformed base has already thrown InvalidDiffBaseError above,
+      // and that 400 wins over the tolerance (Copilot, #307).
       if (msg.toLowerCase().includes('not a git repository')) return { diff: '', truncated: false };
       throw err;
     }
