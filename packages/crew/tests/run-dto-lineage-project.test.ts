@@ -131,7 +131,7 @@ describe('CREW-UX-2 — project_id on the run DTO (DES-UX-001 §8.2)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    await app?.close();
   });
 
   it('unfiled run → project_id is PRESENT and null on both list and detail', async () => {
@@ -206,7 +206,7 @@ describe('CREW-UX-3 — retryOf lineage (DES-UX-001 §8.3)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    await app?.close();
   });
 
   it('valid lineage round-trips: launch with retryOf → retry_of on both endpoints', async () => {
@@ -263,7 +263,9 @@ describe('CREW-UX-3 — the audit trail carries lineage and hydrates it back', (
   });
 
   afterEach(async () => {
-    await app.close();
+    // Guarded: a test that throws before `app` is assigned must surface ITS error,
+    // not a secondary teardown TypeError masking it (Copilot, #306).
+    await app?.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
