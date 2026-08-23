@@ -27,6 +27,12 @@
  *    service instruments fresh ones — so the worker contract explicitly forbids inventing
  *    `data-wid` attributes rather than requiring preservation. The feedback→edit leg (fragment
  *    preservation at scale) is the structural seam next door: edit-events.ts.
+ *  - UNFILED DOCS ARE ANSWERED TOO: this seam originally rejected `doc.created` frames without
+ *    a `project_id` ("unbound docs are the assist skill's solo business") — superseded by
+ *    DES-UX-001 slice U (wicked-studio, §6.2 + §8.4.1 probe 3), which made unfiled docs a
+ *    first-class path created through crew's synthesized `default` mount with NO project field.
+ *    Nothing else answers those (BRIEF-UX-001 J3 CRITICAL: the doc sat on its placeholder
+ *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
 import { mkdirSync, existsSync, statSync } from 'node:fs';
@@ -133,15 +139,22 @@ export interface SourceDocCreated {
   brief: string;
   sourcePaths: string[];
   style: string;
-  /** The crew project this doc is bound to (required — parseSourceDocCreated returns null when
-   *  absent; unbound docs are handled solo by the assist skill, not by this seam). */
-  projectId: string;
+  /** The crew project this doc is bound to. `undefined` = an UNFILED doc — a first-class path
+   *  since DES-UX-001 slice U (wicked-studio, §6.2 + §8.4.1 probe 3): the Make→Document picker's
+   *  Unfiled option creates through crew's synthesized `default` mount with NO project field,
+   *  and this seam is the only answerer of its generation. Never fabricate 'default' here — the
+   *  governed run is launched unfiled (CREW-UX-2 made `project_id: null` legitimate on the run
+   *  DTO), not filed into a project that is a mount alias, not a membership target. */
+  projectId?: string;
 }
 
 /**
  * Parse a bus frame into a {@link SourceDocCreated}, or `null` when it is not an actionable
  * `doc.created` (wrong type, non-`source` kind, missing/malformed document_id). `kind: "demo"`
- * and plain html docs are the assist loop's business, not this seam's.
+ * and plain html docs are the assist loop's business, not this seam's. A missing `project_id`
+ * is NOT a rejection: unfiled docs (DES-UX-001 slice U) are actionable with `projectId`
+ * undefined — the earlier "unbound docs are the assist skill's solo business" gate is
+ * superseded (nothing else answers a doc created through the default mount; BRIEF-UX-001 J3).
  */
 export function parseSourceDocCreated(eventType: string, payload: unknown): SourceDocCreated | null {
   if (eventType !== DOC_CREATED) return null;
@@ -157,9 +170,7 @@ export function parseSourceDocCreated(eventType: string, payload: unknown): Sour
   const style = typeof p['style'] === 'string' && p['style'].length > 0 ? p['style'] : 'web';
   const projectId =
     typeof p['project_id'] === 'string' && p['project_id'].length > 0 ? p['project_id'] : undefined;
-  // Only project-bound docs route through crew; unbound docs are the assist skill's solo business.
-  if (projectId === undefined) return null;
-  return { documentId, brief, sourcePaths, style, projectId };
+  return { documentId, brief, sourcePaths, style, ...(projectId !== undefined ? { projectId } : {}) };
 }
 
 /** Collapse whitespace/newlines to single spaces and cap length — the intent must stay a
@@ -545,8 +556,11 @@ export async function startInteractiveDraftSubscriber(
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the
-        // project's activity feed instead of floating unattributed.
-        projectId: doc.projectId,
+        // project's activity feed instead of floating unattributed. An UNFILED doc (DES-UX-001
+        // slice U — created through the default mount with no project field) launches with the
+        // key OMITTED: an unfiled governed run (project_id: null on the DTO, CREW-UX-2) — never
+        // a fabricated 'default' membership.
+        ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
         // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
         // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
         // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox
@@ -573,7 +587,7 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
-    opts.onRunFiled?.(runId, doc.projectId);
+    if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
 
     const flight: InFlight = {
       documentId: doc.documentId,
