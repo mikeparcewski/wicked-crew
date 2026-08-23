@@ -44,7 +44,9 @@ interface BootstrapOpts {
   interactiveDraftEvents: boolean;
   /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
   interactiveEditEvents: boolean;
-  /** Seat roster override for the draft/edit runs (JSON array); `undefined` = production roster. */
+  /** DEFAULT ON (CREW-UX-5): answer wicked-interactive conversational iteration asks (chat.posted) with a governed revision run. */
+  interactiveChatEvents: boolean;
+  /** Seat roster override for the draft/edit/chat runs (JSON array); `undefined` = production roster. */
   interactiveSeats: string | undefined;
 }
 
@@ -100,11 +102,19 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const interactiveEditEvents =
     !hasFlag(args, '--no-interactive-edit-events') &&
     !isFalsy(process.env['WICKED_INTERACTIVE_EDIT_EVENTS']);
+  // DEFAULT ON (CREW-UX-5, same rationale): answer wicked-interactive's conversational
+  // iteration asks (`chat.posted`, role:user on an existing kind:source doc) with a governed
+  // `interactive-chat` run — the doc thread's plain send had NO answerer since the ad-hoc
+  // assist agent retired. Opt-out:
+  //   --no-interactive-chat-events or WICKED_INTERACTIVE_CHAT_EVENTS=0|false|no|off|""
+  const interactiveChatEvents =
+    !hasFlag(args, '--no-interactive-chat-events') &&
+    !isFalsy(process.env['WICKED_INTERACTIVE_CHAT_EVENTS']);
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
     dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath,
-    interactiveDraftEvents, interactiveEditEvents, interactiveSeats,
+    interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveSeats,
   };
 }
 
@@ -145,6 +155,16 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     ...(opts.interactiveEditEvents
       ? {
           interactiveEditEvents: {
+            enabled: true,
+            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
+            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
+          },
+        }
+      : {}),
+    ...(opts.interactiveChatEvents
+      ? {
+          interactiveChatEvents: {
             enabled: true,
             // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
             ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
@@ -238,6 +258,7 @@ async function main(): Promise<void> {
       qeGateEvents: opts.qeGateEvents || undefined,
       interactiveDraftEvents: opts.interactiveDraftEvents || undefined,
       interactiveEditEvents: opts.interactiveEditEvents || undefined,
+      interactiveChatEvents: opts.interactiveChatEvents || undefined,
       startupMs: Math.round(performance.now() - t0),
     });
   } else if (command === 'start') {

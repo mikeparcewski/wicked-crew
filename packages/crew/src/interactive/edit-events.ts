@@ -298,6 +298,9 @@ export interface InteractiveEditSubscription {
   stop(): Promise<void> | void;
   /** The durable ledger (diagnostics / tests). */
   ledger: InteractiveHandoffLedger;
+  /** Documents with an edit run currently in flight — the chat seam's per-doc serialization
+   *  (CREW-UX-5 contract (c)) consults this so an iteration ask never races a structural edit. */
+  inFlightDocs(): string[];
 }
 
 interface InFlight {
@@ -679,6 +682,7 @@ export async function startInteractiveEditSubscriber(
 
   return {
     ledger,
+    inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
       offCoreEvents();
       for (const runId of [...inFlight.keys()]) endFlight(runId);

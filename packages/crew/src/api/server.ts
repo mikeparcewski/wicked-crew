@@ -15,6 +15,9 @@ import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
+import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
+import { ProjectSettingsStore } from '../projects/settings.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
@@ -104,6 +107,37 @@ export interface CreateServerOptions {
     editDir?: string;
     /** Seat roster override (JSON array); omit for the production council roster. */
     clisJson?: string;
+  };
+  /**
+   * Opt-in governed answering of wicked-interactive's conversational ITERATION asks
+   * (CREW-UX-5, the doc thread's plain send). When enabled, a durable subscriber answers
+   * `wicked.interactive.chat.posted` (role:user, existing kind:source doc, not an in-flight
+   * doc, not a feedback-batch echo) with a governed `interactive-chat` run —
+   * understand-the-ask → revise — that ends in `wicked.interactive.draft.completed` (the
+   * service lands the revised full HTML as a generated version). Asks on a busy doc queue
+   * FIFO per doc. When absent (the default), the topic goes unanswered — the pre-CREW-UX-5
+   * state.
+   */
+  interactiveChatEvents?: {
+    enabled: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+    /** Heartbeat narration cadence, ms (default 15000). */
+    heartbeatMs?: number;
+    /** Durable replay-dedup ledger path (default ~/.wicked-crew/interactive-chat-ledger.json). */
+    ledgerPath?: string;
+    /** Where head snapshots land and workers write revisions (default ~/.wicked-crew/interactive-chats). */
+    chatDir?: string;
+    /** Seat roster override (JSON array); omit for the production council roster. */
+    clisJson?: string;
+    /** Queue-drain sweep cadence, ms (tests shorten it). */
+    queueSweepMs?: number;
+    /** Post-completion landing-gate timeout, ms (tests shorten it). */
+    landingGateMs?: number;
+    /** Docs-root resolver override (tests); default = per-project `interactiveRoot` setting. */
+    resolveDocsRoot?: (projectId: string | undefined) => string;
   };
   /**
    * The project bus seam (DES-PROJECT-001 §4/§5.2). DEFAULT-ON, unlike the opt-in seams
@@ -208,6 +242,11 @@ export async function createServer(
   // post-commit half (index tag + membership.attached emit) via `fileRun`.
   const membershipIndex = new MembershipIndex();
   await membershipIndex.hydrate(adapter, (m) => app.log.warn(m));
+  // Per-project crew-side settings (DES-MERGE-001 §7.1's `interactiveRoot`). ONE instance,
+  // created here so the chat seam's docs-root resolution below and the routes (project PATCH +
+  // interactive proxy) all read/write the same store — two instances over one file would let a
+  // PATCH land in one while the other keeps serving the stale root.
+  const projectSettings = new ProjectSettingsStore();
   // Retry lineage (CREW-UX-3): hydrated from the audit trail — the durable record the launch
   // route writes — so a restarted daemon still echoes `retry_of` on prior runs' DTOs.
   const retryIndex = new RetryIndex();
@@ -289,10 +328,12 @@ export async function createServer(
 
   // Arm the opt-in interactive-draft answering seam (task #86 spike). Same posture as the QE
   // seam: failure to arm is LOUD but non-fatal — interactive's assist loop is the fallback
-  // answerer, and this daemon must boot on a machine whose bus is broken.
+  // answerer, and this daemon must boot on a machine whose bus is broken. The handle is kept:
+  // the chat seam below consults its in-flight docs (CREW-UX-5 per-doc serialization).
+  let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
   if (options?.interactiveDraftEvents?.enabled === true) {
     const o = options.interactiveDraftEvents;
-    const sub = await startInteractiveDraftSubscriber(adapter, {
+    draftSub = await startInteractiveDraftSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -302,7 +343,8 @@ export async function createServer(
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
-    if (sub !== null) {
+    if (draftSub !== null) {
+      const sub = draftSub;
       app.log.info('interactive-draft subscription armed (filter wicked.interactive.doc.created)');
       app.addHook('onClose', async () => {
         await sub.stop();
@@ -313,9 +355,10 @@ export async function createServer(
   // Arm the opt-in interactive STRUCTURAL-edit answering seam (task #86 final leg). Same
   // posture as the draft seam: failure to arm is LOUD but non-fatal — interactive's assist
   // loop is the fallback answerer, and this daemon must boot on a machine whose bus is broken.
+  let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
   if (options?.interactiveEditEvents?.enabled === true) {
     const o = options.interactiveEditEvents;
-    const sub = await startInteractiveEditSubscriber(adapter, {
+    editSub = await startInteractiveEditSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -325,8 +368,43 @@ export async function createServer(
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
-    if (sub !== null) {
+    if (editSub !== null) {
+      const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
+
+  // Arm the opt-in interactive CHAT answering seam (CREW-UX-5 — the iteration ask). Same
+  // posture again: failure to arm is LOUD but non-fatal. Armed AFTER the sibling seams so the
+  // per-doc serialization contract (no draft/edit/chat run races another on one doc) can
+  // consult their in-flight sets; docs roots resolve through the SAME per-project settings
+  // store the project routes and the interactive proxy share.
+  if (options?.interactiveChatEvents?.enabled === true) {
+    const o = options.interactiveChatEvents;
+    const sub = await startInteractiveChatSubscriber(adapter, {
+      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
+      ...(o.chatDir !== undefined ? { chatDir: o.chatDir } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
+      ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
+      resolveDocsRoot:
+        o.resolveDocsRoot ??
+        ((projectId) =>
+          resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null)),
+      isDocBusy: (documentId) =>
+        (draftSub?.inFlightDocs().includes(documentId) ?? false) ||
+        (editSub?.inFlightDocs().includes(documentId) ?? false),
+      onRunFiled: fileRun,
+      log: (m) => app.log.warn(m),
+    });
+    if (sub !== null) {
+      app.log.info('interactive-chat subscription armed (filter wicked.interactive.chat.posted)');
       app.addHook('onClose', async () => {
         await sub.stop();
       });
@@ -506,6 +584,7 @@ export async function createServer(
       bus: projectBus,
       index: membershipIndex,
       log: (m) => app.log.warn(m),
+      settings: projectSettings,
     },
     { audit, authMode: auth.mode },
     { seatHealth, retryIndex },
