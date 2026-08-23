@@ -83,9 +83,10 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
   // events are cross-product traffic that never lands there.
   const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
-  // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source, project-bound)
-  // with a governed `interactive-draft` run. The bus is already required for the project bridge,
-  // and only project-bound docs trigger runs — unbound docs are ignored. Opt-out:
+  // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
+  // governed `interactive-draft` run. The bus is already required for the project bridge.
+  // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
+  // (CREW-UX-4 — slice U made Unfiled first-class, so nothing else answers them). Opt-out:
   //   --no-interactive-draft-events   or   WICKED_INTERACTIVE_DRAFT_EVENTS=0|false|no|off|""
   // The bus db follows the SAME resolution as the QE seam — explicit --bus-db / WICKED_BUS_DB wins,
   // otherwise wicked-bus's own default (which honors WICKED_BUS_DATA_DIR): interactive's service
