@@ -33,6 +33,7 @@ import {
   chatKey,
   chatIdempotencyKey,
   readDocHead,
+  isAnswerableDocKind,
   chatProblem,
   startInteractiveChatSubscriber,
 } from '../src/interactive/chat-events.js';
@@ -145,9 +146,15 @@ describe('readDocHead (contract b — the versions.json read)', () => {
     });
   });
 
-  it("defaults kind to 'doc' when absent (interactive's own listDocs rule) — which fails the source gate", () => {
-    seedDoc('legacy-doc', { head: 0, versions: [{ version: 0, html_file: '_v0.html' }] });
-    expect(readDocHead(root, 'legacy-doc')?.kind).toBe('doc');
+  it("defaults kind to 'doc' when absent (interactive's own listDocs rule) — the REAL source-doc shape, which PASSES the gate", () => {
+    // Interactive's initManifest records kind ONLY for demo docs: a genuine kind:"source" doc's
+    // versions.json carries no kind field at all (verified against interactive 0.8.0 + main).
+    seedDoc('real-source-doc', { head: 0, versions: [{ version: 0, html_file: '_v0.html' }] });
+    expect(readDocHead(root, 'real-source-doc')?.kind).toBe('doc');
+    expect(isAnswerableDocKind('doc')).toBe(true);
+    expect(isAnswerableDocKind('source')).toBe(true);
+    expect(isAnswerableDocKind('demo')).toBe(false);
+    expect(isAnswerableDocKind('storyboard')).toBe(false);
   });
 
   it('falls back to the _v{head}.html spelling when the head entry is missing', () => {
@@ -307,13 +314,22 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Seed a doc workspace the way interactive's initWorkspace/fork would leave it. */
-  function seedDoc(name: string, { kind = 'source', head = 1, html = '<html><body data-wid="w-root"><h1>v1</h1></body></html>' } = {}): void {
+  /** Seed a doc workspace the way interactive's initWorkspace/fork would leave it. The default
+   *  writes NO `kind` field — the real on-disk shape of a kind:"source" doc (interactive's
+   *  initManifest keeps every non-demo kind implicit). */
+  function seedDoc(
+    name: string,
+    { kind, head = 1, html = '<html><body data-wid="w-root"><h1>v1</h1></body></html>' }: { kind?: string; head?: number; html?: string } = {},
+  ): void {
     const docDir = join(docsRoot, name);
     mkdirSync(docDir, { recursive: true });
     const versions = [];
     for (let v = 0; v <= head; v += 1) versions.push({ version: v, parent: v === 0 ? null : v - 1, html_file: `_v${v}.html` });
-    writeFileSync(join(docDir, 'versions.json'), JSON.stringify({ kind, head, versions }), 'utf8');
+    writeFileSync(
+      join(docDir, 'versions.json'),
+      JSON.stringify({ ...(kind !== undefined ? { kind } : {}), head, versions }),
+      'utf8',
+    );
     writeFileSync(join(docDir, `_v${head}.html`), html, 'utf8');
   }
 
@@ -494,10 +510,11 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
   });
 
-  it('KIND/EXISTENCE FILTER (contract b): demo docs and unknown docs are never answered', async () => {
+  it('KIND/EXISTENCE FILTER (contract b): demo docs and unknown docs are never answered — a kindless (real source) doc is', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
     seedDoc('demo-doc', { kind: 'demo' });
+    seedDoc('kindless-doc'); // the real source-doc manifest shape: no kind field at all
     const sub = await startSub(engine);
     subs.push(sub!);
 
@@ -506,6 +523,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length).toBe(0);
     expect(sub!.ledger.size()).toBe(0);
+
+    // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
+    await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });
+    await waitFor(() => engine.launches.length === 1);
   });
 
   it('LEDGER DEDUPE: a resend reusing the message id launches no second run — and survives a restart', async () => {

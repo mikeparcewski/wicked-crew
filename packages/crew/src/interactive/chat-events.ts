@@ -18,8 +18,14 @@
  *
  *  - THE TRIGGER IS A CONVERSATION LINE, so the actionable filter is layered (the contract):
  *    (a) `role: "user"` only — agent narration echoes also ride chat.posted;
- *    (b) the doc must EXIST under the resolved docs root with `kind: "source"` — demo/html
- *        docs belong to their own loops, and a doc we cannot see is not ours to answer;
+ *    (b) the doc must EXIST under the resolved docs root and not belong to a foreign loop —
+ *        and the disk truth here is subtle: interactive's `initManifest` only ever RECORDS a
+ *        `kind` for demo docs (a real `kind: "source"` doc's versions.json carries NO kind
+ *        field at all — the "source" spelling rides the doc.created EVENT only; verified
+ *        against interactive 0.8.0 and main, src/service/server.js `initWorkspace(dir, html)`).
+ *        So the gate accepts `source` (future manifests may record it) and the absent-default
+ *        `doc`, and rejects explicit foreign kinds (`demo`) — a doc we cannot see is not ours
+ *        to answer either;
  *    (c) per-doc serialization — an ask on a doc whose draft/edit/chat run is still in flight
  *        is QUEUED (FIFO per doc), never raced: two concurrent revisions of one doc would
  *        land as two forks of the same parent and the second would silently drop the first;
@@ -208,8 +214,9 @@ export interface DocHead {
  * Read a doc workspace's manifest (interactive's `versions.json`, fsstore.js shape) and resolve
  * its head html path. `null` when the doc does not exist under this root or the manifest is
  * unreadable — not ours to answer, per contract (b). Follows interactive's own tolerant read:
- * `kind` defaults to `"doc"` when absent (listDocs does the same), which correctly FAILS the
- * `kind: "source"` gate.
+ * `kind` defaults to `"doc"` when absent (listDocs does the same) — and ABSENT is what a real
+ * source doc looks like on disk (interactive records kind only for demo docs), so the caller
+ * gates through {@link isAnswerableDocKind}, never a `=== 'source'` comparison.
  */
 export function readDocHead(docsRoot: string, documentId: string): DocHead | null {
   if (!DOC_NAME.test(documentId)) return null;
@@ -237,6 +244,17 @@ export function readDocHead(docsRoot: string, documentId: string): DocHead | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * Contract (b)'s kind half: `true` when a doc of this manifest kind is this seam's to answer.
+ * `source` is the spec's spelling (recorded by no released interactive yet, accepted for the
+ * day a manifest carries it); `doc` is the absent-default every REAL source (and plain html)
+ * doc reads as — interactive's initManifest keeps non-demo kinds implicit. Explicit foreign
+ * kinds (`demo`, anything future) belong to their own loops.
+ */
+export function isAnswerableDocKind(kind: string): boolean {
+  return kind === 'source' || kind === 'doc';
 }
 
 /**
@@ -348,7 +366,7 @@ function rosterOf(adapter: CoreAdapter): unknown[] {
 /**
  * Arm the seam: register the `interactive-chat` workflow, open a durable
  * `wicked.interactive.chat.posted` subscription, and answer each user ask on an existing
- * `kind: "source"` doc with a governed run that ends in `wicked.interactive.draft.completed`
+ * answerable doc (contract (b)) with a governed run that ends in `wicked.interactive.draft.completed`
  * (the service lands the revised full HTML as a generated version).
  *
  * Graceful degradation mirrors the sibling seams: a missing wicked-bus package or an
@@ -636,7 +654,7 @@ export async function startInteractiveChatSubscriber(
     const { ask, key } = queued;
     const docsRoot = resolveDocsRoot(ask.projectId);
     const doc = readDocHead(docsRoot, ask.documentId);
-    if (doc === null || doc.kind !== 'source') {
+    if (doc === null || !isAnswerableDocKind(doc.kind)) {
       // The doc moved out from under a parked ask (deleted / never ours). Not an error the
       // thread needs — contract (b) simply stopped holding.
       log(
@@ -811,7 +829,7 @@ export async function startInteractiveChatSubscriber(
       if (q.some((entry) => entry.key === key)) return;
     }
 
-    // Contract (b): the doc must exist under the resolved root with kind "source". Checked at
+    // Contract (b): the doc must exist under the resolved root with an answerable kind. Checked at
     // DELIVERY so a demo doc's chat or an unknown doc never even parks; re-checked at launch
     // (the snapshot read) because a parked ask can outlive its doc.
     const docsRoot = resolveDocsRoot(ask.projectId);
@@ -820,8 +838,10 @@ export async function startInteractiveChatSubscriber(
       log(`[interactive-chat] chat.posted for unknown doc ${ask.documentId} under ${docsRoot} — ignored`);
       return;
     }
-    if (doc.kind !== 'source') {
-      log(`[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — only source docs are answered`);
+    if (!isAnswerableDocKind(doc.kind)) {
+      log(
+        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not this seam's to answer`,
+      );
       return;
     }
 
