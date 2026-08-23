@@ -735,8 +735,9 @@ export async function startInteractiveChatSubscriber(
   }
 
   /** `true` when the doc's landing gate (if any) still holds its queue shut. A satisfied or
-   *  expired gate is removed. */
-  function gateHolds(documentId: string): boolean {
+   *  expired gate is removed. `projectId` (when the caller has an ask in hand) beats the
+   *  queue-head lookup — an empty queue must still resolve the right per-project root. */
+  function gateHolds(documentId: string, projectId?: string): boolean {
     const gate = landingGates.get(documentId);
     if (gate === undefined) return false;
     if (Date.now() > gate.until) {
@@ -744,9 +745,10 @@ export async function startInteractiveChatSubscriber(
       log(`[interactive-chat] landing gate for ${documentId} timed out — draining on the current head`);
       return false;
     }
-    // Resolve the root through the FIRST queued ask (all asks on one doc resolve the same way).
+    // Resolve the root through the ask at hand, else the FIRST queued ask (all asks on one
+    // doc resolve the same way).
     const next = queues.get(documentId)?.[0];
-    const docsRoot = resolveDocsRoot(next?.ask.projectId);
+    const docsRoot = resolveDocsRoot(projectId ?? next?.ask.projectId);
     const doc = readDocHead(docsRoot, documentId);
     if (doc !== null && doc.head >= gate.minHead) {
       landingGates.delete(documentId);
@@ -827,7 +829,7 @@ export async function startInteractiveChatSubscriber(
 
     // Contract (c): per-doc serialization, FIFO. A busy doc parks the ask — with an IMMEDIATE
     // narration so the thread never sits silent inside the studio's 90s budget.
-    if (docBusy(ask.documentId) || gateHolds(ask.documentId) || queues.has(ask.documentId)) {
+    if (docBusy(ask.documentId) || gateHolds(ask.documentId, ask.projectId) || queues.has(ask.documentId)) {
       const queue = queues.get(ask.documentId) ?? [];
       queue.push(queued);
       queues.set(ask.documentId, queue);
