@@ -50,7 +50,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
@@ -232,9 +232,16 @@ export function readDocHead(docsRoot: string, documentId: string): DocHead | nul
     const entry = Array.isArray(manifest.versions)
       ? manifest.versions.find((v) => v?.version === head)
       : undefined;
-    const htmlFile =
+    // Containment (Copilot, #310): `html_file` comes from a manifest on disk — a corrupted or
+    // hostile value carrying path separators or `..` must never escape the doc dir. Only a plain
+    // basename is accepted; anything else falls back to the version's canonical spelling.
+    const rawHtmlFile =
       typeof entry?.html_file === 'string' && entry.html_file.length > 0
         ? entry.html_file
+        : `_v${head}.html`;
+    const htmlFile =
+      basename(rawHtmlFile) === rawHtmlFile && !rawHtmlFile.includes('..')
+        ? rawHtmlFile
         : `_v${head}.html`;
     return {
       kind: typeof manifest.kind === 'string' && manifest.kind.length > 0 ? manifest.kind : 'doc',
@@ -800,7 +807,16 @@ export async function startInteractiveChatSubscriber(
 
   // The sweep: foreign runs (draft/edit seams) and landing gates clear OUTSIDE our event flow,
   // so a timer retries parked queues. Unref'd — parked asks never keep the daemon alive.
+  // Expired landing gates are reaped here too (Copilot, #310): gateHolds() only removes a
+  // gate when a queued ask drains, so a doc revised once and never asked again would hold
+  // its entry forever — the map must stay bounded by each gate's own timeout.
   const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const [documentId, gate] of landingGates) {
+      if (now > gate.until && (queues.get(documentId)?.length ?? 0) === 0) {
+        landingGates.delete(documentId);
+      }
+    }
     for (const documentId of [...queues.keys()]) drainDoc(documentId);
   }, opts.queueSweepMs ?? 1000);
   sweep.unref?.();
