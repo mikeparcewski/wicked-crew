@@ -53,6 +53,18 @@ function accepts<SchemaInput, ContractBody extends SchemaInput>(): ContractBody 
 // GET /runs and GET /runs/:id — the run list / run detail payloads.
 respondsWith<Wire.SessionView[], Awaited<ReturnType<CoreAdapter['sessionsDetail']>>>();
 
+// CREW-UX-2/3 (api-types 0.8.0) — the run-DTO joins the routes decorate at assembly. Both
+// directions of each pin so the contract's spelling of the field cannot drift: `project_id`
+// is `string | null` when a 0.8.0 server answers (null = genuinely unfiled) and absent only
+// on older servers; `retry_of` / `retryOf` are `string` or ABSENT — `null` is not a legal
+// spelling of "not a retry" and adding it to the contract must break this file.
+respondsWith<Wire.AgentSession['project_id'], string | null | undefined>();
+respondsWith<string | null | undefined, Wire.AgentSession['project_id']>();
+respondsWith<Wire.AgentSession['retry_of'], string | undefined>();
+respondsWith<string | undefined, Wire.AgentSession['retry_of']>();
+respondsWith<Wire.LaunchRunBody['retryOf'], string | undefined>();
+respondsWith<string | undefined, Wire.LaunchRunBody['retryOf']>();
+
 // GET /runs/:id/events — durable event-log replay (RecordedEvent narrows CoreEvent).
 respondsWith<Wire.CoreEvent[] | null, Awaited<ReturnType<CoreAdapter['runEvents']>>>();
 respondsWith<Wire.RecordedEvent[] | null, Awaited<ReturnType<CoreAdapter['runEvents']>>>();

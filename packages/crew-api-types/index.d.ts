@@ -161,6 +161,23 @@ export interface AgentSession {
   archived_at: number | null;
   /** Optional operator note recorded at archival. */
   archive_note: string | null;
+  /**
+   * The project this run is filed into (DES-UX-001 §8.2, CREW-UX-2; api-types 0.8.0) —
+   * populated by the crew server from the membership record at DTO assembly on BOTH
+   * `GET /runs` and `GET /runs/:id`, so clients no longer re-derive the run→project join.
+   *
+   * `null` = genuinely unfiled (the synthesized `default` project); ABSENT = a pre-0.8.0
+   * server that never joins. Read with `== null` only if "unfiled" and "old server" may
+   * collapse for your surface; a project chip should render only on `typeof === 'string'`.
+   */
+  project_id?: string | null;
+  /**
+   * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this run
+   * was launched as a retry of (`LaunchRunBody.retryOf`, validated at launch to name an
+   * existing run). ABSENT — never `null` — when the run is not a retry: absence is the one
+   * spelling of "no lineage", so `'retry_of' in session` and `!== undefined` agree.
+   */
+  retry_of?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -931,6 +948,15 @@ export interface LaunchRunBody {
    * field is forward-additive on the wire (DES-STUDIO-001 §5.1).
    */
   deliver?: 'pr';
+  /**
+   * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
+   * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
+   * a named error), never a silently unrecorded lineage. The daemon persists it, echoes it
+   * as `AgentSession.retry_of`, and carries it in the `run.launched` audit entry's detail,
+   * so provenance renders "retry of {id}" from the system of record, not prompt equality.
+   * Omit when the launch is not a retry.
+   */
+  retryOf?: string;
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────

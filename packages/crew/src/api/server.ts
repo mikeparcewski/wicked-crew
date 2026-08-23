@@ -9,6 +9,7 @@ import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
+import { RetryIndex } from './retry-index.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
@@ -207,6 +208,10 @@ export async function createServer(
   // post-commit half (index tag + membership.attached emit) via `fileRun`.
   const membershipIndex = new MembershipIndex();
   await membershipIndex.hydrate(adapter, (m) => app.log.warn(m));
+  // Retry lineage (CREW-UX-3): hydrated from the audit trail — the durable record the launch
+  // route writes — so a restarted daemon still echoes `retry_of` on prior runs' DTOs.
+  const retryIndex = new RetryIndex();
+  await retryIndex.hydrate(audit, (m) => app.log.warn(m));
   const projectBus =
     options?.projectEvents?.disabled === true
       ? null
@@ -503,7 +508,7 @@ export async function createServer(
       log: (m) => app.log.warn(m),
     },
     { audit, authMode: auth.mode },
-    { seatHealth },
+    { seatHealth, retryIndex },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay

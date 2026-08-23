@@ -27,6 +27,7 @@ import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { AuditLog } from './audit.js';
+import { RetryIndex } from './retry-index.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
@@ -150,6 +151,10 @@ export const LaunchSchema = z.object({
    *  to a PER-RUN copy of the selected workflow. Requires `workflow` (enforced by the refine
    *  below, so the 400 happens at parse time, not after the adapter is consulted). */
   deliver: z.literal('pr').optional(),
+  /** DES-UX-001 §8.3 (CREW-UX-3) — the run this launch retries. Must name an EXISTING run id
+   *  (the route checks the store and 400s with a named error otherwise); persisted via the
+   *  `run.launched` audit entry + retry index and echoed as `AgentSession.retry_of`. */
+  retryOf: z.string().min(1).optional(),
 }).strict().refine((b) => b.deliver === undefined || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
@@ -200,6 +205,9 @@ export interface SecurityDeps {
  */
 export interface RuntimeDeps {
   seatHealth?: SeatHealthTracker;
+  /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
+   *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
+  retryIndex?: RetryIndex;
   openWithOs?: (target: string) => Promise<void>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
@@ -239,6 +247,18 @@ export function registerRoutes(
   const seatHealth = runtime.seatHealth ?? new SeatHealthTracker();
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
+  const retryIndex = runtime.retryIndex ?? new RetryIndex();
+  // The run-DTO joins (DES-UX-001 §8.2/§8.3): `project_id` from the membership record —
+  // `null` = genuinely unfiled, so the field is ALWAYS present on served runs — and `retry_of`
+  // from the lineage index, set only when known (absent, never null, spells "not a retry").
+  // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
+  // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
+  const decorateRun = (view: SessionView): SessionView => {
+    view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
+    const retryOf = retryIndex.retryOfFor(view.session.id);
+    if (retryOf !== undefined) view.session.retry_of = retryOf;
+    return view;
+  };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
   // interactive proxy (which resolves a root from it) — two stores would let a PATCH land in one
   // and the proxy keep reading the other.
@@ -562,6 +582,17 @@ export function registerRoutes(
     if (b.workflow !== undefined) input.workflow = b.workflow;
     if (b.projectId !== undefined) input.projectId = b.projectId;
     if (b.deliver !== undefined) input.deliver = b.deliver;
+    // Retry lineage (DES-UX-001 §8.3): `retryOf` must name an EXISTING run — recording lineage
+    // to a run that never existed would be provenance pointing at nothing, so the launch fails
+    // loudly (400, before anything is committed) rather than filing a dangling edge.
+    if (b.retryOf !== undefined) {
+      const known = await adapter.sessions();
+      if (!known.includes(b.retryOf)) {
+        return reply.code(400).send({
+          error: `retryOf names an unknown run: ${b.retryOf} — lineage must point at an existing run id`,
+        });
+      }
+    }
     try {
       const runId = await adapter.launchRun(input);
       // Who launched it — the engine's LaunchOptions carries no actor field
@@ -574,8 +605,12 @@ export function registerRoutes(
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
           ...(b.deliver !== undefined ? { deliver: b.deliver } : {}),
+          // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
+          // restarted daemon's hydrate) reads it back from exactly this entry.
+          ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
         },
       });
+      if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and
@@ -622,7 +657,7 @@ export function registerRoutes(
     const visible = includeArchived
       ? views
       : views.filter((v) => v.session.archived_at == null);
-    return { runs: sortActionableFirst(visible) };
+    return { runs: sortActionableFirst(visible).map(decorateRun) };
   });
 
   // ── Run archival (crew#265) — write-off, not delete ────────────────────────
@@ -679,7 +714,7 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    return { run };
+    return { run: decorateRun(run) };
   });
 
   // ── Chat sessions (crew#165): warm ACP seat pool + group fan-out (core#134) ──
