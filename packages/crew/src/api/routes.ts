@@ -19,7 +19,13 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
-import { NotARegularFileError, readFileCapped, worktreeDiff } from './run-files.js';
+import {
+  InvalidDiffBaseError,
+  NotARegularFileError,
+  UnresolvableDiffBaseError,
+  readFileCapped,
+  worktreeDiff,
+} from './run-files.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -466,15 +472,24 @@ export function registerRoutes(
     }
   });
 
-  // The run's worktree diff against HEAD (staged + unstaged; untracked appended as all-addition
-  // `--no-index` hunks), whole-tree or `?path=` narrowed. 1 MB output cap. `diff: ""` is a real
-  // answer (clean tree), not an error. 409 — not 404 — when the run has no workdir or the workdir
-  // has been reaped: the RUN exists; what is gone is the thing to diff against.
+  // The run's worktree diff against HEAD — or, with `?base=` (CREW-UX-1, DES-UX-001 §8.1),
+  // against the run branch's fork point (`base=merge-base`) or a plain in-repo ref, so committed
+  // run work is visible. Staged + unstaged; untracked appended as all-addition `--no-index`
+  // hunks; whole-tree or `?path=` narrowed. 1 MB output cap. `diff: ""` is a real answer (clean
+  // tree), not an error. 409 — not 404 — when the run has no workdir or the workdir has been
+  // reaped: the RUN exists; what is gone is the thing to diff against. `base` is a baseline,
+  // NEVER a command surface: anything that is not the merge-base literal or a plain resolvable
+  // ref (flags, paths, ranges, separators) is a named 400 before any git process sees it.
   app.get(`${V}/runs/:id/diff`, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rawPath = singlePathQ((req.query as { path?: string | string[] }).path);
+    const q = req.query as { path?: string | string[]; base?: string | string[] };
+    const rawPath = singlePathQ(q.path);
     if (rawPath === REPEATED_PATH) {
       return reply.code(400).send({ error: '`path` may be given at most once' });
+    }
+    const rawBase = singlePathQ(q.base);
+    if (rawBase === REPEATED_PATH) {
+      return reply.code(400).send({ error: '`base` may be given at most once' });
     }
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
@@ -496,8 +511,13 @@ export function registerRoutes(
     }
     const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
     try {
-      return await worktreeDiff(workdir, rel);
+      return await worktreeDiff(workdir, rel, rawBase);
     } catch (err) {
+      // Named 400s (§8.1): malformed base (not a plain ref) and well-formed-but-unresolvable
+      // base are both client errors, each with its error name in the body — never a git 500.
+      if (err instanceof InvalidDiffBaseError || err instanceof UnresolvableDiffBaseError) {
+        return reply.code(400).send({ error: `${err.name}: ${message(err)}` });
+      }
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return reply.code(500).send({ error: 'git executable not found on server' });
       }
