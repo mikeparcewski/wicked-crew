@@ -24,8 +24,9 @@
  *     absolute or `..`-escaping path is counted MISSING by construction. The ACP runner — the
  *     path a real seat takes — never consults it. So for a run whose deliverable is an absolute
  *     path under `extraWriteRoots`, declaring it there would fail every run on one runner and
- *     check nothing on the other. That gap is wicked-core's to close; see the follow-up filed
- *     from crew#311. Crew must not paper over it by declaring something that cannot be verified.
+ *     check nothing on the other. That gap is wicked-core's to close
+ *     (wicked-core#297, items 1 and 3); once it is, this phase can retire in favour of the
+ *     engine field. Crew must not paper over it meanwhile by declaring something unverifiable.
  *
  * ## What this module does
  *
@@ -138,8 +139,8 @@ export function deliverableFloorPhase(
     // reason. This phase carries its own re-verification in its exit code.
     verified_evidence: false,
     // NOT the declared paths either: core checks `required_deliverables` relative to the unit's
-    // cwd and counts every absolute path as missing (see the module doc). Declaring them here
-    // would fail the run on the wrapped-CLI path with a message about the wrong thing.
+    // cwd and counts every absolute path as missing (see the module doc; wicked-core#297).
+    // Declaring them here would fail the run on the wrapped-CLI path for the wrong reason.
     required_deliverables: [],
     depends_on: dependsOn,
     role: 'neutral',
