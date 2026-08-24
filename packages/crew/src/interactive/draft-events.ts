@@ -181,20 +181,74 @@ export function oneLine(text: string, cap: number): string {
   return flat.length > cap ? `${flat.slice(0, cap)}…` : flat;
 }
 
+/** A project's repo binding, resolved for a governed launch (CREW-UX-8). */
+export interface ProjectRepo {
+  /** The registered repo id — what `launchRun` takes as `repoRef`. */
+  repoRef: string;
+  /** The repo's root path (worker-facing: where the content actually lives). */
+  rootPath: string;
+}
+
+/**
+ * Resolve the repo a project is bound to (CREW-UX-8): the project's first `crew.repo` member,
+ * verified against the repo registry so a stale membership (repo deleted after attach) never
+ * fabricates a `repoRef` the engine would refuse. `undefined` when the project has no repo
+ * member, the registry no longer knows the ref, or the adapter cannot answer (old addon,
+ * engine hiccup) — every one of those degrades to today's behavior: a repo-less launch.
+ *
+ * WHY: a doc created under a repo-backed project used to launch its governed draft/revision
+ * run with NO repo context at all, so the worker could not read the project's actual code and
+ * generated placeholder content (operator report, wicked-studio project). Shared by the draft
+ * and chat seams.
+ */
+export async function resolveProjectRepo(
+  adapter: CoreAdapter,
+  projectId: string,
+  log?: (message: string) => void,
+): Promise<ProjectRepo | undefined> {
+  try {
+    const members = await adapter.projectMembers(projectId);
+    const repoMember = members.find((m) => m.member_kind === 'crew.repo');
+    if (repoMember === undefined) return undefined;
+    const ref = repoMember.member_ref;
+    const repo = (await adapter.listRepos()).find((r) => r.id === ref);
+    if (repo === undefined) {
+      log?.(
+        `[interactive] project ${projectId} has repo member ${ref} but the registry does not — launching without repo context`,
+      );
+      return undefined;
+    }
+    return { repoRef: ref, rootPath: repo.root_path };
+  } catch (err) {
+    log?.(
+      `[interactive] could not resolve project ${projectId}'s repo — launching without repo context: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
- * the absolute path the finished HTML must land at.
+ * the absolute path the finished HTML must land at. When the doc's project is repo-bound
+ * (CREW-UX-8), a SHORT grounding clause names the repo — the engine binds the run into it via
+ * `repoRef`, but the worker only reads it when the task says to (the placeholder-content bug).
  */
-export function draftProblem(doc: SourceDocCreated, outPath: string): string {
+export function draftProblem(doc: SourceDocCreated, outPath: string, repo?: ProjectRepo): string {
   const sources =
     doc.sourcePaths.length > 0
       ? `Source materials to read: ${doc.sourcePaths.join(', ')}.`
       : 'There are no source files — the brief alone is the spec.';
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
+  const grounding =
+    repo !== undefined
+      ? `Ground the document in the repository at ${oneLine(repo.rootPath, 300)} — read it and use its real content, never placeholders. `
+      : '';
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ` +
+    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -545,6 +599,12 @@ export async function startInteractiveDraftSubscriber(
     const outPath = join(draftDir, `${doc.documentId}-v1.html`);
     const runId = randomUUID();
 
+    // CREW-UX-8: a repo-bound project's doc is grounded in that repo — resolve BEFORE the
+    // launch so the run binds into the repo (`repoRef`) and the task names it. Unbound docs
+    // and repo-less projects resolve to `undefined` and launch exactly as before.
+    const repo =
+      doc.projectId !== undefined ? await resolveProjectRepo(adapter, doc.projectId, log) : undefined;
+
     emitInteractive(STATUS_POSTED, {
       document_id: doc.documentId,
       state: 'processing',
@@ -553,7 +613,7 @@ export async function startInteractiveDraftSubscriber(
 
     try {
       await adapter.launchRun({
-        problem: draftProblem(doc, outPath),
+        problem: draftProblem(doc, outPath, repo),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
@@ -564,6 +624,9 @@ export async function startInteractiveDraftSubscriber(
         // key OMITTED: an unfiled governed run (project_id: null on the DTO, CREW-UX-2) — never
         // a fabricated 'default' membership.
         ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
+        // CREW-UX-8: bind the run into the project's repo so the worker can actually read the
+        // code it is asked to document. Never fabricated — only a verified `crew.repo` member.
+        ...(repo !== undefined ? { repoRef: repo.repoRef } : {}),
         // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
         // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
         // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox

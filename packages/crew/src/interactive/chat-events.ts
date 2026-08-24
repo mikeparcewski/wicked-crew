@@ -61,6 +61,8 @@ import {
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
   oneLine,
+  resolveProjectRepo,
+  type ProjectRepo,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -268,12 +270,25 @@ export function isAnswerableDocKind(kind: string): boolean {
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
  * CURRENT-version snapshot to read, and the absolute path the revised HTML must land at.
+ * When the doc's project is repo-bound (CREW-UX-8), a SHORT grounding clause names the repo —
+ * same rationale as the draft leg: without it the worker revises from generic knowledge and
+ * produces placeholder content.
  */
-export function chatProblem(ask: ChatAsk, currentPath: string, outPath: string): string {
+export function chatProblem(
+  ask: ChatAsk,
+  currentPath: string,
+  outPath: string,
+  repo?: ProjectRepo,
+): string {
+  const grounding =
+    repo !== undefined
+      ? `Ground the revision in the repository at ${oneLine(repo.rootPath, 300)} — read it and use its real content, never placeholders. `
+      : '';
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
     `The user's ask: ${oneLine(ask.text, 2000)} ` +
     `The document's CURRENT version is the HTML file at this absolute path — read it first: ${currentPath} ` +
+    `${grounding}` +
     `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -698,6 +713,12 @@ export async function startInteractiveChatSubscriber(
     copyFileSync(doc.headHtmlPath, currentPath);
     const runId = randomUUID();
 
+    // CREW-UX-8: a repo-bound project's revision is grounded in that repo — resolved at launch
+    // time (like the head snapshot) so the run binds into the repo (`repoRef`) and the task
+    // names it. Unbound docs and repo-less projects resolve to `undefined`: unchanged launch.
+    const repo =
+      ask.projectId !== undefined ? await resolveProjectRepo(adapter, ask.projectId, log) : undefined;
+
     // The studio's 90s silence budget: this pickup line is what keeps the thread honest, so
     // it fires BEFORE the launch resolves.
     emitInteractive(STATUS_POSTED, {
@@ -708,7 +729,7 @@ export async function startInteractiveChatSubscriber(
 
     try {
       await adapter.launchRun({
-        problem: chatProblem(ask, currentPath, outPath),
+        problem: chatProblem(ask, currentPath, outPath, repo),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,
@@ -716,6 +737,9 @@ export async function startInteractiveChatSubscriber(
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
         // never a fabricated 'default' membership.
         ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}),
+        // CREW-UX-8: bind the run into the project's repo so the worker can actually read the
+        // code it is asked to document. Never fabricated — only a verified `crew.repo` member.
+        ...(repo !== undefined ? { repoRef: repo.repoRef } : {}),
         extraWriteRoots: [chatDir],
       });
     } catch (err) {
