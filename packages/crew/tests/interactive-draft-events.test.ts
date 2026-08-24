@@ -34,10 +34,7 @@ import {
   parseSourceDocCreated,
   draftProblem,
   draftIdempotencyKey,
-  inRepoDeliverablePath,
   resolveProjectRepo,
-  resolveRunWorkdir,
-  claimWorktreeDeliverable,
   startInteractiveDraftSubscriber,
 } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -142,23 +139,22 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(big).toContain('…');
   });
 
-  it('names the project repo as grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
+  it('names the project repo as READ grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
     const repo = { repoRef: 'repo-1', rootPath: '/home/me/src/wicked-studio' };
-    // REPO-BOUND: the caller passes the IN-REPO relative deliverable path (wicked-core#293) —
-    // the task must direct the worker INSIDE its worktree, never to an external inbox.
-    const problem = draftProblem(doc, inRepoDeliverablePath('my-doc-v1.html'), repo);
+    // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
+    // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
+    // on the first prompt-needing call, so no write works), and the clause hands the worker
+    // the repo root for READS only.
+    const problem = draftProblem(doc, '/tmp/inbox/my-doc-v1.html', repo);
     expect(problem).toContain('Ground the document in the repository at /home/me/src/wicked-studio — read it');
-    expect(problem).toContain(
-      'written INSIDE the repository working tree you are in, at exactly this path relative to its root: .wicked-drafts/my-doc-v1.html',
-    );
-    expect(problem).not.toContain('absolute file path');
+    expect(problem).toContain('exactly this absolute file path: /tmp/inbox/my-doc-v1.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
     // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
-    const weird = draftProblem(doc, '.wicked-drafts/o.html', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
+    const weird = draftProblem(doc, '/o.html', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
     expect(weird).not.toMatch(/[\n\r]/);
     // WORST CASE stays bounded: pasted-novel brief + oversized root ≤ the capped brief budget
     // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
-    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '.wicked-drafts/o.html', {
+    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', {
       repoRef: 'r',
       rootPath: 'p'.repeat(10_000),
     });
@@ -169,78 +165,6 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(draftProblem(doc, '/tmp/out.html')).not.toContain('Ground the document');
     expect(draftProblem(doc, '/tmp/out.html')).toContain('exactly this absolute file path: /tmp/out.html');
     expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
-  });
-});
-
-describe('inRepoDeliverablePath (wicked-core#293: the repo-bound deliverable inbox)', () => {
-  it('derives a repo-relative path under the in-repo drafts dir', () => {
-    expect(inRepoDeliverablePath('my-doc-v1.html')).toBe('.wicked-drafts/my-doc-v1.html');
-  });
-});
-
-describe('resolveRunWorkdir / claimWorktreeDeliverable (wicked-core#293 finalize half)', () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'crew-wtd-'));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  const adapterWithSessions = (sessions: Array<{ id: string; workdir: string | null }>) =>
-    ({
-      sessionsDetail: async () => sessions.map((s) => ({ session: s, units: [] })),
-    }) as unknown as CoreAdapter;
-
-  it('resolves the run workdir from the run DTO (sessionsDetail) and copies the deliverable into the inbox', async () => {
-    const worktree = join(dir, 'worktree');
-    mkdirSync(join(worktree, '.wicked-drafts'), { recursive: true });
-    writeFileSync(join(worktree, '.wicked-drafts', 'my-doc-v1.html'), '<html>real</html>', 'utf8');
-    const adapter = adapterWithSessions([
-      { id: 'other-run', workdir: '/elsewhere' },
-      { id: 'run-1', workdir: worktree },
-    ]);
-    await expect(resolveRunWorkdir(adapter, 'run-1')).resolves.toBe(worktree);
-
-    const dest = join(dir, 'inbox', 'my-doc-v1.html'); // parent does not exist yet — claim creates it
-    await expect(
-      claimWorktreeDeliverable(adapter, 'run-1', '.wicked-drafts/my-doc-v1.html', dest),
-    ).resolves.toEqual({ ok: true });
-    expect(readFileSync(dest, 'utf8')).toBe('<html>real</html>');
-  });
-
-  it('refuses to claim when the worktree cannot be resolved — unknown run, null workdir, or a dead adapter', async () => {
-    await expect(resolveRunWorkdir(adapterWithSessions([]), 'run-1')).resolves.toBeUndefined();
-    await expect(
-      resolveRunWorkdir(adapterWithSessions([{ id: 'run-1', workdir: null }]), 'run-1'),
-    ).resolves.toBeUndefined();
-    const dead = {
-      sessionsDetail: async () => {
-        throw new Error('engine gone');
-      },
-    } as unknown as CoreAdapter;
-    await expect(resolveRunWorkdir(dead, 'run-1', () => {})).resolves.toBeUndefined();
-
-    const claim = await claimWorktreeDeliverable(dead, 'run-1', '.wicked-drafts/x.html', join(dir, 'x.html'), () => {});
-    expect(claim.ok).toBe(false);
-    expect((claim as { reason: string }).reason).toContain('worktree');
-    expect(existsSync(join(dir, 'x.html'))).toBe(false);
-  });
-
-  it('refuses to claim a missing or empty worktree file — never a phantom inbox copy', async () => {
-    const worktree = join(dir, 'worktree');
-    mkdirSync(join(worktree, '.wicked-drafts'), { recursive: true });
-    const adapter = adapterWithSessions([{ id: 'run-1', workdir: worktree }]);
-    const dest = join(dir, 'inbox.html');
-
-    const missing = await claimWorktreeDeliverable(adapter, 'run-1', '.wicked-drafts/never.html', dest);
-    expect(missing.ok).toBe(false);
-    expect((missing as { reason: string }).reason).toContain('missing or empty');
-
-    writeFileSync(join(worktree, '.wicked-drafts', 'empty.html'), '', 'utf8');
-    const empty = await claimWorktreeDeliverable(adapter, 'run-1', '.wicked-drafts/empty.html', dest);
-    expect(empty.ok).toBe(false);
-    expect(existsSync(dest)).toBe(false);
   });
 });
 
@@ -394,14 +318,11 @@ interface FakeAdapter {
 }
 
 /** Optional project→repo world for the CREW-UX-8 grounding path: projectMembers/listRepos
- *  answer from these fixtures, and `workdir` is what the run DTO reports as every launched
- *  run's worktree (sessionsDetail — the wicked-core#293 finalize copy resolves through it).
- *  Omitted (the default) = an engine that cannot answer any of them — the graceful-degradation
- *  path every pre-existing test rides. */
+ *  answer from these fixtures. Omitted (the default) = an engine that cannot answer either —
+ *  the graceful-degradation path every pre-existing test rides. */
 interface RepoWorld {
   members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
   repos?: Array<{ id: string; root_path: string }>;
-  workdir?: string;
 }
 
 function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
@@ -430,11 +351,6 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
           ? {
               projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
               listRepos: async () => repoWorld.repos ?? [],
-              sessionsDetail: async () =>
-                state.launches.map((l) => ({
-                  session: { id: l.sessionId, workdir: repoWorld.workdir ?? null },
-                  units: [],
-                })),
             }
           : {}),
       } as unknown as CoreAdapter;
@@ -773,7 +689,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(filed).toHaveLength(1); // still only the bound doc's filing
   });
 
-  it('GROUNDS a doc bound to a repo-backed project: repoRef on the launch + the grounding clause (CREW-UX-8)', async () => {
+  it('GROUNDS a doc bound to a repo-backed project: the clause names the repo, the launch stays UNBOUND (CREW-UX-8 v3)', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter({
       members: {
@@ -796,26 +712,26 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     });
     subs.push(sub!);
 
-    // Bound to a repo-backed project → the run binds into the repo AND the task names it —
-    // and the deliverable is IN-REPO with NO external write root (wicked-core#293: declaring
-    // one on a repo-worktree run kills the worker's Write before any hook fires).
+    // Bound to a repo-backed project → the task names the repo root for READS, but the launch
+    // carries NO repoRef and keeps the ONE unbound write shape (external inbox deliverable +
+    // extraWriteRoots): wicked-core#293 — a repoRef-bound run's tool-permission stream closes
+    // on the first prompt-needing call, so no write destination works on a bound run, while
+    // bound READS and the unbound shape are both run-evidence proven.
     await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     const grounded = engine.launches[0]!;
-    expect(grounded.repoRef).toBe('repo-studio');
+    expect('repoRef' in grounded).toBe(false);
     expect(grounded.problem).toContain(
       'Ground the document in the repository at /home/me/src/wicked-studio — read it',
     );
     expect(grounded.problem).toContain(
-      'at exactly this path relative to its root: .wicked-drafts/repo-doc-v1.html',
+      `exactly this absolute file path: ${join(dir, 'drafts', 'repo-doc-v1.html')}`,
     );
-    expect(grounded.problem).not.toContain(join(dir, 'drafts'));
-    expect('extraWriteRoots' in grounded).toBe(false);
+    expect(grounded.extraWriteRoots).toEqual([join(dir, 'drafts')]);
     expect(grounded.problem).not.toMatch(/[\n\r]/);
-    expect(grounded.projectId).toBe('proj-repo');
+    expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
 
-    // Bound to a REPO-LESS project → launches exactly as today: no repoRef, no clause, the
-    // external inbox as deliverable + declared write root (the v1/unbound shape, which works).
+    // Bound to a REPO-LESS project → launches exactly as today: no clause, same write shape.
     await emitDocCreated(bus, 'bare-doc', { project_id: 'proj-bare' });
     await waitFor(() => engine.launches.length === 2);
     const bare = engine.launches[1]!;
@@ -824,7 +740,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(bare.problem).toContain(join(dir, 'drafts', 'bare-doc-v1.html'));
     expect(bare.extraWriteRoots).toEqual([join(dir, 'drafts')]);
 
-    // UNBOUND doc → no membership lookup at all: no repoRef, no clause, no projectId.
+    // UNBOUND doc → no membership lookup at all: no clause, no projectId, same write shape.
     await emitDocCreated(bus, 'free-doc');
     await waitFor(() => engine.launches.length === 3);
     const free = engine.launches[2]!;
@@ -834,13 +750,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(free.extraWriteRoots).toEqual([join(dir, 'drafts')]);
   });
 
-  it('REPO-BOUND finalize COPIES the worktree deliverable into the inbox BEFORE announcing (wicked-core#293)', async () => {
+  it('a GROUNDED doc completes the full loop through the ONE standard finalize — inbox file in, inbox path announced', async () => {
     const bus = await import('wicked-bus');
-    const worktree = join(dir, 'wt-repo-doc');
     const engine = fakeAdapter({
       members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
       repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
-      workdir: worktree,
     });
     const draftDir = join(dir, 'drafts');
     const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
@@ -858,61 +772,19 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
 
-    // The worker wrote IN-REPO (the only write that works on this path — wicked-core#293).
-    mkdirSync(join(worktree, '.wicked-drafts'), { recursive: true });
-    writeFileSync(
-      join(worktree, '.wicked-drafts', 'repo-doc-v1.html'),
-      '<html><body><h1>grounded draft</h1></body></html>',
-      'utf8',
-    );
+    // The worker wrote the external-inbox deliverable — the ONLY write shape v3 has (the
+    // grounded repo is READ-only context; wicked-core#293 killed every bound-write variant).
+    const inboxPath = join(draftDir, 'repo-doc-v1.html');
+    mkdirSync(draftDir, { recursive: true });
+    writeFileSync(inboxPath, '<html><body><h1>grounded draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
 
-    // The announce names the DURABLE INBOX path (never the reapable worktree) and the file
-    // was copied there before the announce, so the service always finds it.
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
     const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
-    const inboxPath = join(draftDir, 'repo-doc-v1.html');
     expect((draft.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded draft');
     expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc'));
     expect(sub!.ledger.get('repo-doc')?.emittedAt).toBeTruthy();
-  });
-
-  it('REPO-BOUND finalize with a MISSING worktree file posts the honest error and announces nothing', async () => {
-    const bus = await import('wicked-bus');
-    const worktree = join(dir, 'wt-repo-doc');
-    mkdirSync(worktree, { recursive: true }); // the worktree exists — the deliverable does not
-    const engine = fakeAdapter({
-      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
-      workdir: worktree,
-    });
-    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
-      dbPath: busDb,
-      pollIntervalMs: 25,
-      heartbeatMs: 60_000,
-      ledgerPath: join(dir, 'ledger.json'),
-      draftDir: join(dir, 'drafts'),
-      clisJson: SEATS,
-      log: () => {},
-    });
-    subs.push(sub!);
-    armProbe(bus);
-
-    await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
-    await waitFor(() => engine.launches.length === 1);
-    engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
-
-    await waitFor(() =>
-      probeEvents.some(
-        (e) =>
-          e.event_type === STATUS_POSTED &&
-          (e.payload as { state?: string }).state === 'error' &&
-          String((e.payload as { message?: string }).message).includes('could not be collected'),
-      ),
-    );
-    expect(probeEvents.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
-    expect(sub!.ledger.get('repo-doc')?.failedAt).toBeTruthy();
   });
 
   it('a STALE repo membership never fabricates a repoRef — the launch degrades to repo-less (CREW-UX-8)', async () => {
