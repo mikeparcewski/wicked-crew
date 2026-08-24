@@ -144,6 +144,38 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
     expect(floorOf(registered[1]!).checked).toEqual(['/inbox/b.html']);
   });
 
+  // The interactive seams' shape: their defs are USER workflows registered at arm time, not
+  // built-ins, so composition has to resolve through `getWorkflow`'s userWorkflows/overlay path.
+  it('composes over a REGISTERED user def too — the interactive seams are not built-ins', async () => {
+    await adapter.registerWorkflow({
+      id: 'interactive-draft-lookalike',
+      phases: [
+        { id: 'outline' },
+        { id: 'draft' },
+      ],
+    } as unknown as WorkflowDef);
+    const registrationsBefore = registered.length;
+
+    await adapter.launchRun({
+      problem: 'p', sessionId: 'run-u', clisJson: '[]',
+      workflow: 'interactive-draft-lookalike',
+      requireDeliverables: ['/inbox/run-u/doc-v1.html'],
+    });
+
+    expect(registered.length).toBe(registrationsBefore + 1);
+    const composed = JSON.parse(registered[registered.length - 1]!) as WorkflowDef;
+    expect(composed.id).toBe('interactive-draft-lookalike-verified-run-u');
+    expect(composed.phases.map((p: PhaseDef) => p.id)).toEqual([
+      'outline', 'draft', DELIVERABLE_FLOOR_PHASE_ID,
+    ]);
+    expect(floorOf(registered[registered.length - 1]!).checked).toEqual([
+      '/inbox/run-u/doc-v1.html',
+    ]);
+    expect(launched[0]!.workflow).toBe('interactive-draft-lookalike-verified-run-u');
+    // The shared user def is untouched — it keeps its two phases for the next launch.
+    expect(adapter.getWorkflow('interactive-draft-lookalike')!.phases).toHaveLength(2);
+  });
+
   it('an EMPTY requireDeliverables is the old path exactly — no composition, no vacuous floor', async () => {
     await adapter.launchRun({
       problem: 'p', sessionId: 'run-1', clisJson: '[]', workflow: 'feature',
