@@ -198,6 +198,17 @@ describe('chatProblem (the worker prompt seed)', () => {
     expect(big.length).toBeLessThan(2500);
     expect(big).toContain('…');
   });
+
+  it('names the project repo as grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
+    const problem = chatProblem(ask, '/i', '/o', { repoRef: 'repo-1', rootPath: '/home/me/src/wicked-studio' });
+    expect(problem).toContain('Ground the revision in the repository at /home/me/src/wicked-studio — read it');
+    expect(problem).not.toMatch(/[\n\r\t]/);
+  });
+
+  it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {
+    expect(chatProblem(ask, '/i', '/o')).not.toContain('Ground the revision');
+    expect(chatProblem(ask, '/i', '/o', undefined)).toBe(chatProblem(ask, '/i', '/o'));
+  });
 });
 
 describe('the interactive-chat workflow def (workflows-as-data)', () => {
@@ -252,7 +263,15 @@ interface FakeAdapter {
   asAdapter(): CoreAdapter;
 }
 
-function fakeAdapter(): FakeAdapter {
+/** Optional project→repo world for the CREW-UX-8 grounding path: projectMembers/listRepos
+ *  answer from these fixtures. Omitted (the default) = an engine that cannot answer either —
+ *  the graceful-degradation path every pre-existing test rides. */
+interface RepoWorld {
+  members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
+  repos?: Array<{ id: string; root_path: string }>;
+}
+
+function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
   const listeners = new Set<(e: CoreEvent) => void>();
   const state: FakeAdapter = {
     launches: [],
@@ -274,6 +293,12 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        ...(repoWorld !== undefined
+          ? {
+              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
+              listRepos: async () => repoWorld.repos ?? [],
+            }
+          : {}),
       } as unknown as CoreAdapter;
     },
   };
@@ -735,5 +760,43 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 2);
     expect(engine.launches[1]!.projectId).toBe('proj-7');
     expect(filed).toEqual([[engine.launches[1]!.sessionId, 'proj-7']]);
+    // Neither launch is repo-grounded: the unbound doc has no project to resolve, and the
+    // bound one's engine cannot answer projectMembers — both degrade to today's launch shape.
+    expect('repoRef' in unfiled).toBe(false);
+    expect('repoRef' in engine.launches[1]!).toBe(false);
+    expect(engine.launches[1]!.problem).not.toContain('Ground the revision');
+  });
+
+  it('GROUNDS an ask on a repo-backed project: repoRef on the launch + the grounding clause (CREW-UX-8)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter({
+      members: {
+        'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }],
+        'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }],
+      },
+      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+    });
+    seedDoc('repo-doc');
+    seedDoc('bare-doc');
+    const sub = await startSub(engine);
+    subs.push(sub!);
+
+    // Repo-backed project → the run binds into the repo AND the task names it.
+    await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r', project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const grounded = engine.launches[0]!;
+    expect(grounded.repoRef).toBe('repo-studio');
+    expect(grounded.problem).toContain(
+      'Ground the revision in the repository at /home/me/src/wicked-studio — read it',
+    );
+    expect(grounded.problem).not.toMatch(/[\n\r]/);
+    expect(grounded.projectId).toBe('proj-repo');
+
+    // Repo-less project → launches exactly as today: no repoRef, no clause.
+    await emitChatPosted(bus, 'bare-doc', { source_message_id: 'm-b', project_id: 'proj-bare' });
+    await waitFor(() => engine.launches.length === 2);
+    const bare = engine.launches[1]!;
+    expect('repoRef' in bare).toBe(false);
+    expect(bare.problem).not.toContain('Ground the revision');
   });
 });

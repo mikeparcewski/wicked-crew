@@ -34,6 +34,7 @@ import {
   parseSourceDocCreated,
   draftProblem,
   draftIdempotencyKey,
+  resolveProjectRepo,
   startInteractiveDraftSubscriber,
 } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -136,6 +137,69 @@ describe('draftProblem (the worker prompt seed)', () => {
     const big = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o');
     expect(big.length).toBeLessThan(2500);
     expect(big).toContain('…');
+  });
+
+  it('names the project repo as grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
+    const repo = { repoRef: 'repo-1', rootPath: '/home/me/src/wicked-studio' };
+    const problem = draftProblem(doc, '/tmp/out.html', repo);
+    expect(problem).toContain('Ground the document in the repository at /home/me/src/wicked-studio — read it');
+    expect(problem).not.toMatch(/[\n\r\t]/);
+    // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
+    const weird = draftProblem(doc, '/o', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
+    expect(weird).not.toMatch(/[\n\r]/);
+  });
+
+  it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {
+    expect(draftProblem(doc, '/tmp/out.html')).not.toContain('Ground the document');
+    expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
+  });
+});
+
+describe('resolveProjectRepo (CREW-UX-8: the project → repo binding)', () => {
+  const adapterWith = (
+    members: Array<{ member_kind: string; member_ref: string }>,
+    repos: Array<{ id: string; root_path: string }>,
+  ) =>
+    ({
+      projectMembers: async () => members,
+      listRepos: async () => repos,
+    }) as unknown as CoreAdapter;
+
+  it('resolves a crew.repo member through the repo registry to {repoRef, rootPath}', async () => {
+    const adapter = adapterWith(
+      [
+        { member_kind: 'crew.run', member_ref: 'run-1' },
+        { member_kind: 'crew.repo', member_ref: 'repo-1' },
+      ],
+      [{ id: 'repo-1', root_path: '/home/me/src/wicked-studio' }],
+    );
+    await expect(resolveProjectRepo(adapter, 'proj-7')).resolves.toEqual({
+      repoRef: 'repo-1',
+      rootPath: '/home/me/src/wicked-studio',
+    });
+  });
+
+  it('returns undefined for a repo-less project (no crew.repo member)', async () => {
+    const adapter = adapterWith([{ member_kind: 'crew.run', member_ref: 'run-1' }], []);
+    await expect(resolveProjectRepo(adapter, 'proj-7')).resolves.toBeUndefined();
+  });
+
+  it('returns undefined for a STALE member whose repo left the registry — never a fabricated ref', async () => {
+    const logged: string[] = [];
+    const adapter = adapterWith([{ member_kind: 'crew.repo', member_ref: 'gone' }], []);
+    await expect(resolveProjectRepo(adapter, 'proj-7', (m) => logged.push(m))).resolves.toBeUndefined();
+    expect(logged.some((m) => m.includes('gone'))).toBe(true);
+  });
+
+  it('degrades to undefined when the adapter cannot answer (old addon / engine hiccup)', async () => {
+    const throwing = {
+      projectMembers: async () => {
+        throw new Error('projects unsupported');
+      },
+    } as unknown as CoreAdapter;
+    await expect(resolveProjectRepo(throwing, 'proj-7', () => {})).resolves.toBeUndefined();
+    // A fake with NO projectMembers at all (the sibling tests' adapters) degrades the same way.
+    await expect(resolveProjectRepo({} as CoreAdapter, 'proj-7', () => {})).resolves.toBeUndefined();
   });
 });
 
@@ -240,7 +304,15 @@ interface FakeAdapter {
   asAdapter(): CoreAdapter;
 }
 
-function fakeAdapter(): FakeAdapter {
+/** Optional project→repo world for the CREW-UX-8 grounding path: projectMembers/listRepos
+ *  answer from these fixtures. Omitted (the default) = an engine that cannot answer either —
+ *  the graceful-degradation path every pre-existing test rides. */
+interface RepoWorld {
+  members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
+  repos?: Array<{ id: string; root_path: string }>;
+}
+
+function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
   const listeners = new Set<(e: CoreEvent) => void>();
   const state: FakeAdapter = {
     launches: [],
@@ -262,6 +334,12 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        ...(repoWorld !== undefined
+          ? {
+              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
+              listRepos: async () => repoWorld.repos ?? [],
+            }
+          : {}),
       } as unknown as CoreAdapter;
     },
   };
@@ -596,6 +674,79 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // …and the same ledger row shape, so replay dedupe works for unfiled docs too.
     expect(sub!.ledger.get('unbound-doc')?.runId).toBe(unfiled.sessionId);
     expect(filed).toHaveLength(1); // still only the bound doc's filing
+  });
+
+  it('GROUNDS a doc bound to a repo-backed project: repoRef on the launch + the grounding clause (CREW-UX-8)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter({
+      members: {
+        'proj-repo': [
+          { member_kind: 'crew.run', member_ref: 'run-0' },
+          { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+        ],
+        'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }],
+      },
+      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+    });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    // Bound to a repo-backed project → the run binds into the repo AND the task names it.
+    await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const grounded = engine.launches[0]!;
+    expect(grounded.repoRef).toBe('repo-studio');
+    expect(grounded.problem).toContain(
+      'Ground the document in the repository at /home/me/src/wicked-studio — read it',
+    );
+    expect(grounded.problem).not.toMatch(/[\n\r]/);
+    expect(grounded.projectId).toBe('proj-repo');
+
+    // Bound to a REPO-LESS project → launches exactly as today: no repoRef, no clause.
+    await emitDocCreated(bus, 'bare-doc', { project_id: 'proj-bare' });
+    await waitFor(() => engine.launches.length === 2);
+    const bare = engine.launches[1]!;
+    expect('repoRef' in bare).toBe(false);
+    expect(bare.problem).not.toContain('Ground the document');
+
+    // UNBOUND doc → no membership lookup at all: no repoRef, no clause, no projectId.
+    await emitDocCreated(bus, 'free-doc');
+    await waitFor(() => engine.launches.length === 3);
+    const free = engine.launches[2]!;
+    expect('repoRef' in free).toBe(false);
+    expect('projectId' in free).toBe(false);
+    expect(free.problem).not.toContain('Ground the document');
+  });
+
+  it('a STALE repo membership never fabricates a repoRef — the launch degrades to repo-less (CREW-UX-8)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'deleted-repo' }] },
+      repos: [], // the registry no longer knows the ref
+    });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'stale-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    expect('repoRef' in engine.launches[0]!).toBe(false);
+    expect(engine.launches[0]!.problem).not.toContain('Ground the document');
   });
 
   it('an UNFILED doc completes the full loop -- draft.completed lands with the same idempotency key discipline', async () => {
