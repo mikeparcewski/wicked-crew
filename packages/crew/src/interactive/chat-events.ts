@@ -268,6 +268,15 @@ export function isAnswerableDocKind(kind: string): boolean {
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
  * CURRENT-version snapshot to read, and the absolute path the revised HTML must land at.
+ *
+ * CREW-UX-8 SPLIT — the revision leg carries NO repo grounding, deliberately. The draft leg
+ * (draft-events.ts) grounds its v1 in a launch-scoped repo snapshot and that shape is proven
+ * live; the SAME shape on the revise turn wedged 2/2 on the real engine (crew#288 comment —
+ * the repo-grounded revise turn hits the known second-turn wedge), while UNGROUNDED revisions
+ * are proven to land (the CREW-UX-5 verification). So bound asks launch exactly like unfiled
+ * ones — head-copy in the external inbox, one write root, no repoRef (wicked-core#293), no
+ * live-repo path in the task (wicked-core#294). Revision grounding returns when either of
+ * those is fixed.
  */
 export function chatProblem(ask: ChatAsk, currentPath: string, outPath: string): string {
   return (
@@ -293,8 +302,11 @@ export interface InteractiveChatOptions {
   heartbeatMs?: number;
   /** Ledger file (default `~/.wicked-crew/interactive-chat-ledger.json`). */
   ledgerPath?: string;
-  /** Where head snapshots land and workers write revised documents
-   *  (default `~/.wicked-crew/interactive-chats`). */
+  /** Root under which each ask gets its own per-run subdirectory (`<chatDir>/<safeKey>/`)
+   *  holding the head snapshot and the revised deliverable; only that subdirectory is declared
+   *  as the run's extra write root (per-run isolation — Copilot, crew#313: declaring the shared
+   *  dir wholesale let one doc's worker read every other doc's head and revision).
+   *  Default `~/.wicked-crew/interactive-chats`. */
   chatDir?: string;
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
@@ -687,14 +699,17 @@ export async function startInteractiveChatSubscriber(
       return;
     }
 
-    mkdirSync(chatDir, { recursive: true });
-    // Both files live under the ONE declared write root: the worker reads the snapshot and
-    // writes the deliverable without ever touching the doc workspace (crew#263 shape; write
-    // roots are readable, wicked-core#259). Names derive from the validated slug + our own
-    // key grammar — never from free bus text.
+    // Both files live under the ONE declared write root — the run's OWN per-ask subdirectory,
+    // never the shared chatDir (per-run isolation — Copilot, crew#313: the wholesale
+    // declaration let any chat worker read every other doc's head snapshot and revision): the
+    // worker reads the snapshot and writes the deliverable without ever touching the doc
+    // workspace (crew#263 shape; write roots are readable, wicked-core#259). Names derive from
+    // the validated slug + our own key grammar — never from free bus text.
     const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '-');
-    const currentPath = join(chatDir, `${safeKey}-current.html`);
-    const outPath = join(chatDir, `${safeKey}-revised.html`);
+    const runDir = join(chatDir, safeKey);
+    mkdirSync(runDir, { recursive: true });
+    const currentPath = join(runDir, 'current.html');
+    const outPath = join(runDir, 'revised.html');
     copyFileSync(doc.headHtmlPath, currentPath);
     const runId = randomUUID();
 
@@ -716,7 +731,19 @@ export async function startInteractiveChatSubscriber(
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
         // never a fabricated 'default' membership.
         ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}),
-        extraWriteRoots: [chatDir],
+        // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
+        // run's tool-permission stream closes on the first prompt-needing call, so no write
+        // destination works (wicked-core#293) — and NO live-repo path in the task either: the
+        // unbound boundary denies those reads (wicked-core#294).
+        //
+        // AND — the CREW-UX-8 split — deliberately NO repo snapshot either, unlike the draft
+        // leg. The draft seam's snapshot grounding is proven live; the SAME grounded prompt on
+        // the REVISE turn wedged 2/2 on the real engine (crew#288 comment: the repo-grounded
+        // revise turn hits the known second-turn wedge), while ungrounded revisions are proven
+        // to land (the CREW-UX-5 verification). So bound asks launch exactly like unfiled ones:
+        // head-copy in the external inbox, the ONE write root below, projectId still filed.
+        // Revision grounding returns when wicked-core#293 or #294 is fixed.
+        extraWriteRoots: [runDir],
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the

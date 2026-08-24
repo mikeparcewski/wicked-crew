@@ -34,6 +34,9 @@ import {
   parseSourceDocCreated,
   draftProblem,
   draftIdempotencyKey,
+  groundablePath,
+  SNAPSHOT_PATH_MAX,
+  resolveProjectRepo,
   startInteractiveDraftSubscriber,
 } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -136,6 +139,89 @@ describe('draftProblem (the worker prompt seed)', () => {
     const big = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o');
     expect(big.length).toBeLessThan(2500);
     expect(big).toContain('…');
+  });
+
+  it('names the repo SNAPSHOT as READ grounding when one was made — and stays single-line (CREW-UX-8 v4)', () => {
+    // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
+    // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
+    // on the first prompt-needing call, so no write works), and the clause hands the worker
+    // the in-inbox SNAPSHOT to read — never the live repo root, which the unbound boundary
+    // denies (wicked-core#294).
+    const problem = draftProblem(doc, '/tmp/inbox/my-doc-v1.html', '/tmp/inbox/my-doc-repo');
+    expect(problem).toContain('Ground the document in the repository snapshot at /tmp/inbox/my-doc-repo — read it');
+    expect(problem).toContain('exactly this absolute file path: /tmp/inbox/my-doc-v1.html');
+    expect(problem).not.toMatch(/[\n\r\t]/);
+    // The PATH rides VERBATIM — never flattened, never truncated (Copilot, crew#313: the
+    // snapshot sits at exactly one spelling; a respelled path grounds the worker on nothing).
+    // The prompt budget is enforced BEFORE snapshotting via groundablePath, not by mangling.
+    const longButLegal = `/inbox/${'p'.repeat(SNAPSHOT_PATH_MAX - 20)}`;
+    expect(draftProblem(doc, '/o.html', longButLegal)).toContain(longButLegal);
+    // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
+    // + fixed words.
+    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
+    expect(worst.length).toBeLessThan(2900);
+  });
+
+  it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
+    expect(groundablePath('/tmp/inbox/my-doc/repo')).toBe(true);
+    expect(groundablePath(`/x/${'p'.repeat(SNAPSHOT_PATH_MAX)}`)).toBe(false); // over budget → degrade, never truncate
+    expect(groundablePath('/tmp/has\nnewline')).toBe(false); // would kill the PTY prompt
+    expect(groundablePath('/tmp/has\ttab')).toBe(false); // oneLine would respell it — refuse instead
+    expect(groundablePath('p'.repeat(SNAPSHOT_PATH_MAX))).toBe(true); // exactly at budget rides
+  });
+
+  it('adds NO grounding clause without a snapshot — unchanged prompt (no fabricated refs)', () => {
+    expect(draftProblem(doc, '/tmp/out.html')).not.toContain('Ground the document');
+    expect(draftProblem(doc, '/tmp/out.html')).toContain('exactly this absolute file path: /tmp/out.html');
+    expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
+  });
+});
+
+describe('resolveProjectRepo (CREW-UX-8: the project → repo binding)', () => {
+  const adapterWith = (
+    members: Array<{ member_kind: string; member_ref: string }>,
+    repos: Array<{ id: string; root_path: string }>,
+  ) =>
+    ({
+      projectMembers: async () => members,
+      listRepos: async () => repos,
+    }) as unknown as CoreAdapter;
+
+  it('resolves a crew.repo member through the repo registry to {repoRef, rootPath}', async () => {
+    const adapter = adapterWith(
+      [
+        { member_kind: 'crew.run', member_ref: 'run-1' },
+        { member_kind: 'crew.repo', member_ref: 'repo-1' },
+      ],
+      [{ id: 'repo-1', root_path: '/home/me/src/wicked-studio' }],
+    );
+    await expect(resolveProjectRepo(adapter, 'proj-7')).resolves.toEqual({
+      repoRef: 'repo-1',
+      rootPath: '/home/me/src/wicked-studio',
+    });
+  });
+
+  it('returns undefined for a repo-less project (no crew.repo member)', async () => {
+    const adapter = adapterWith([{ member_kind: 'crew.run', member_ref: 'run-1' }], []);
+    await expect(resolveProjectRepo(adapter, 'proj-7')).resolves.toBeUndefined();
+  });
+
+  it('returns undefined for a STALE member whose repo left the registry — never a fabricated ref', async () => {
+    const logged: string[] = [];
+    const adapter = adapterWith([{ member_kind: 'crew.repo', member_ref: 'gone' }], []);
+    await expect(resolveProjectRepo(adapter, 'proj-7', (m) => logged.push(m))).resolves.toBeUndefined();
+    expect(logged.some((m) => m.includes('gone'))).toBe(true);
+  });
+
+  it('degrades to undefined when the adapter cannot answer (old addon / engine hiccup)', async () => {
+    const throwing = {
+      projectMembers: async () => {
+        throw new Error('projects unsupported');
+      },
+    } as unknown as CoreAdapter;
+    await expect(resolveProjectRepo(throwing, 'proj-7', () => {})).resolves.toBeUndefined();
+    // A fake with NO projectMembers at all (the sibling tests' adapters) degrades the same way.
+    await expect(resolveProjectRepo({} as CoreAdapter, 'proj-7', () => {})).resolves.toBeUndefined();
   });
 });
 
@@ -240,7 +326,15 @@ interface FakeAdapter {
   asAdapter(): CoreAdapter;
 }
 
-function fakeAdapter(): FakeAdapter {
+/** Optional project→repo world for the CREW-UX-8 grounding path: projectMembers/listRepos
+ *  answer from these fixtures. Omitted (the default) = an engine that cannot answer either —
+ *  the graceful-degradation path every pre-existing test rides. */
+interface RepoWorld {
+  members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
+  repos?: Array<{ id: string; root_path: string }>;
+}
+
+function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
   const listeners = new Set<(e: CoreEvent) => void>();
   const state: FakeAdapter = {
     launches: [],
@@ -262,6 +356,12 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        ...(repoWorld !== undefined
+          ? {
+              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
+              listRepos: async () => repoWorld.repos ?? [],
+            }
+          : {}),
       } as unknown as CoreAdapter;
     },
   };
@@ -370,7 +470,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(launch.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
     expect(launch.clisJson).toBe(SEATS);
     expect(launch.problem).toContain('"spike-doc"');
-    const outPath = join(draftDir, 'spike-doc-v1.html');
+    // Per-run isolation (Copilot, crew#313): the deliverable lives in the run's OWN subdir.
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
     expect(launch.problem).toContain(outPath);
 
     // Narration reached the bus as wi-crew before any engine event: the pickup status.
@@ -416,7 +517,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(narrated('landing it now'));
 
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
-    mkdirSync(draftDir, { recursive: true });
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -462,8 +563,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
     // Complete the run; then complete it "again" (a redelivered terminal event).
     const runId = engine.launches[0]!.sessionId;
-    const outPath = join(draftDir, 'spike-doc-v1.html');
-    mkdirSync(draftDir, { recursive: true });
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
     await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
@@ -578,8 +679,10 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-7']]);
     // crew#263: the launch DECLARES the draft inbox as an extra write root. Without it the
     // wrapped-CLI boundary denies the deliverable write and fails the run AFTER the draft is
-    // produced (run eed69dfa) — the declared outPath must be inside a declared root.
-    expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // produced (run eed69dfa) — the declared outPath must be inside a declared root. And the
+    // root is the run's OWN subdir, never the shared draftDir (Copilot, crew#313: wholesale
+    // declaration = cross-project read/write exposure).
+    expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts', 'bound-doc')]);
 
     // Unbound doc → an UNFILED governed run (DES-UX-001 slice U): the launch happens, the
     // projectId key is OMITTED (never a fabricated 'default'), and onRunFiled does NOT fire —
@@ -591,11 +694,414 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect('projectId' in unfiled).toBe(false);
     expect(unfiled.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
     expect(unfiled.problem).toContain('"unbound-doc"');
-    // The launch is otherwise IDENTICAL to the bound one: same declared write root (crew#263)…
-    expect(unfiled.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // The launch is otherwise IDENTICAL to the bound one: same write-root SHAPE (crew#263) —
+    // its own per-run subdir, disjoint from every other run's (Copilot, crew#313).
+    expect(unfiled.extraWriteRoots).toEqual([join(dir, 'drafts', 'unbound-doc')]);
     // …and the same ledger row shape, so replay dedupe works for unfiled docs too.
     expect(sub!.ledger.get('unbound-doc')?.runId).toBe(unfiled.sessionId);
     expect(filed).toHaveLength(1); // still only the bound doc's filing
+  });
+
+  /** A real (plain-dir) repo fixture the v4 snapshot path can clone/copy from. */
+  function seedRepoFixture(name = 'the-repo'): string {
+    const root = join(dir, name);
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# the real studio project\n', 'utf8');
+    writeFileSync(join(root, 'src', 'main.ts'), 'export const real = true;\n', 'utf8');
+    return root;
+  }
+
+  it('SNAPSHOTS the repo into the inbox BEFORE the launch and grounds the task on the snapshot — the launch stays UNBOUND (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: {
+        'proj-repo': [
+          { member_kind: 'crew.run', member_ref: 'run-0' },
+          { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+        ],
+        'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }],
+      },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    let snapshotExistedAtLaunch = false;
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      // The ORDER is the contract: the snapshot must be on disk before launchRun resolves —
+      // a worker grounded on a path that appears later would race its own recon phase.
+      snapshotExistedAtLaunch = existsSync(join(draftDir, 'repo-doc', 'repo', 'README.md'));
+      return inner(input);
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    // Bound to a repo-backed project → the task names the in-inbox SNAPSHOT to read, and the
+    // launch carries NO repoRef and keeps the ONE unbound write shape (external inbox
+    // deliverable + extraWriteRoots): a repoRef binding kills the session (wicked-core#293)
+    // and the unbound boundary denies live-repo reads (wicked-core#294) — the snapshot sits
+    // inside extraWriteRoots, which are readable (wicked-core#259).
+    await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const grounded = engine.launches[0]!;
+    // Per-run isolation (Copilot, crew#313): snapshot AND deliverable live inside the run's
+    // OWN subdir, which is the ONE declared write root — another project's worker has no path
+    // into this project's source.
+    const runDir = join(draftDir, 'repo-doc');
+    const snapDir = join(runDir, 'repo');
+    expect(snapshotExistedAtLaunch, 'snapshot must exist before launchRun').toBe(true);
+    expect('repoRef' in grounded).toBe(false);
+    expect(grounded.problem).toContain(
+      `Ground the document in the repository snapshot at ${snapDir} — read it`,
+    );
+    expect(grounded.problem).not.toContain(repoRoot); // the live root never reaches the task
+    expect(grounded.problem).toContain(
+      `exactly this absolute file path: ${join(runDir, 'repo-doc-v1.html')}`,
+    );
+    expect(grounded.extraWriteRoots).toEqual([runDir]);
+    expect(grounded.problem).not.toMatch(/[\n\r]/);
+    expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
+    // The snapshot holds the repo's REAL content, inside the readable inbox.
+    expect(readFileSync(join(snapDir, 'README.md'), 'utf8')).toContain('the real studio project');
+    expect(readFileSync(join(snapDir, 'src', 'main.ts'), 'utf8')).toContain('real = true');
+
+    // Bound to a REPO-LESS project → launches exactly as today: no clause, no snapshot dir,
+    // same write shape.
+    await emitDocCreated(bus, 'bare-doc', { project_id: 'proj-bare' });
+    await waitFor(() => engine.launches.length === 2);
+    const bare = engine.launches[1]!;
+    expect('repoRef' in bare).toBe(false);
+    expect(bare.problem).not.toContain('Ground the document');
+    expect(bare.problem).toContain(join(draftDir, 'bare-doc', 'bare-doc-v1.html'));
+    expect(bare.extraWriteRoots).toEqual([join(draftDir, 'bare-doc')]);
+    expect(existsSync(join(draftDir, 'bare-doc', 'repo'))).toBe(false);
+
+    // UNBOUND doc → no membership lookup at all: no clause, no projectId, same write shape.
+    await emitDocCreated(bus, 'free-doc');
+    await waitFor(() => engine.launches.length === 3);
+    const free = engine.launches[2]!;
+    expect('repoRef' in free).toBe(false);
+    expect('projectId' in free).toBe(false);
+    expect(free.problem).not.toContain('Ground the document');
+    expect(free.extraWriteRoots).toEqual([join(draftDir, 'free-doc')]);
+
+    // ISOLATION is the point (Copilot, crew#313): no launch ever declares the SHARED root, and
+    // the grounded run's snapshot is invisible to every other run's declared root.
+    for (const l of engine.launches) expect(l.extraWriteRoots).not.toEqual([draftDir]);
+    expect(free.extraWriteRoots![0]!.startsWith(join(draftDir, 'repo-doc'))).toBe(false);
+  });
+
+  it('DEGRADES HONESTLY when the repo cannot be snapshotted: ungrounded launch + a visible status note (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture(); // ~50 bytes — over a 10-byte budget
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const logged: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      repoSnapshotMaxBytes: 10,
+      log: (m) => logged.push(m),
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'big-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    // The launch HAPPENED — degradation never eats the doc — but ungrounded: no clause, no
+    // snapshot on disk, the standard unbound shape.
+    const launch = engine.launches[0]!;
+    expect(launch.problem).not.toContain('Ground the document');
+    expect(launch.problem).not.toContain(repoRoot);
+    expect(existsSync(join(dir, 'drafts', 'big-doc', 'repo'))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([join(dir, 'drafts', 'big-doc')]);
+    // The user sees WHY the draft is not repo-grounded…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes(
+            'repository too large to snapshot — drafting without repo grounding',
+          ),
+      ),
+    );
+    // …and the operator sees the real reason in the log.
+    expect(logged.some((m) => m.includes('snapshot budget'))).toBe(true);
+    expect(logged.some((m) => m.includes('launching ungrounded'))).toBe(true);
+  });
+
+  it('REFUSES the whole launch when the configured draft dir overlaps the repo — fail closed, no mkdir, no run, no ledger row (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    // The bad config this guards: a draft dir INSIDE the registered repo. An "ungrounded"
+    // degrade would still declare extraWriteRoots inside the live repo — the run must not
+    // happen at all.
+    const draftDir = join(repoRoot, 'drafts');
+    const logged: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: (m) => logged.push(m),
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'trapped-doc', { project_id: 'proj-repo' });
+    // The refusal closes the thread with an error status that names the CONFIG problem…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('overlaps'),
+      ),
+    );
+    const refusal = probeEvents.find(
+      (e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error',
+    )!;
+    expect(String((refusal.payload as { message?: string }).message)).toContain(draftDir);
+    // …and NOTHING else happened: no launch, no ledger row (a replay after the config fix
+    // gets a real retry), no directory materialized inside the live repository, no lingering
+    // busy state.
+    expect(engine.launches.length).toBe(0);
+    expect(sub!.ledger.has('trapped-doc')).toBe(false);
+    expect(existsSync(join(draftDir, 'trapped-doc'))).toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(logged.some((m) => m.includes('REFUSING launch'))).toBe(true);
+    // The live repo content survived the refusal untouched.
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toContain('the real studio project');
+  });
+
+  it('marks the doc BUSY across the whole pre-launch window — a pre-flight placeholder covers the snapshot/launch awaits (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    // Hold launchRun open: everything up to the engine accepting the run is "pre-launch".
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      const p = inner(input);
+      await gate;
+      return p;
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'slow-doc', { project_id: 'proj-repo' });
+    // BEFORE the launch (or even the snapshot) resolves, the doc already reads busy — this is
+    // what the chat seam's isDocBusy consults, so the old post-launch registration left a
+    // double-launch window across the whole snapshot-then-launch stretch.
+    await waitFor(() => sub!.inFlightDocs().includes('slow-doc'));
+    // …and it STAYS busy through the engine call while the launch is held open.
+    await waitFor(() => engine.launches.length === 1);
+    expect(sub!.inFlightDocs()).toContain('slow-doc');
+    // …with no ledger row yet (that still waits for the launch to resolve).
+    expect(sub!.ledger.has('slow-doc')).toBe(false);
+
+    release();
+    await waitFor(() => sub!.ledger.get('slow-doc')?.runId !== undefined);
+    expect(sub!.inFlightDocs()).toEqual(['slow-doc']); // now a live flight with a heartbeat
+  });
+
+  it('stop() during the pre-launch window sweeps the placeholder AND its snapshot, and the wedged launch still earns its dedupe row (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      const p = inner(input);
+      await gate;
+      return p;
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'wedged-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const snap = join(draftDir, 'wedged-doc', 'repo');
+    expect(existsSync(join(snap, 'README.md'))).toBe(true);
+
+    // stop() while the launch is still pending: the sweep sees the PLACEHOLDER (the old code
+    // registered the flight only after launchRun resolved, so this snapshot was stranded).
+    const stopping = sub!.stop();
+    expect(existsSync(snap), 'the shutdown sweep must remove a pre-launch snapshot').toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+
+    // When the wedged launch finally resolves, the closed seam records the ledger row (the
+    // engine DID accept the run — a post-restart redelivery must not double-launch) and goes
+    // quiet: no heartbeat, no filing, no revived flight.
+    release();
+    await stopping;
+    await waitFor(() => sub!.ledger.get('wedged-doc')?.runId !== undefined);
+    expect(sub!.inFlightDocs()).toEqual([]);
+  });
+
+  it('REMOVES the snapshot when the run ends — success AND failure paths (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    // Success path: the run completes with a real deliverable → finalize removes the snapshot.
+    await emitDocCreated(bus, 'ok-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const okSnap = join(draftDir, 'ok-doc', 'repo');
+    expect(existsSync(join(okSnap, 'README.md'))).toBe(true);
+    writeFileSync(join(draftDir, 'ok-doc', 'ok-doc-v1.html'), '<html><body>grounded</body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
+    await waitFor(() => sub!.ledger.get('ok-doc')?.emittedAt !== undefined);
+    expect(existsSync(okSnap), 'success finalize must remove the snapshot').toBe(false);
+
+    // Failure path: the run dies → the failure fold removes the snapshot too.
+    await emitDocCreated(bus, 'dead-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 2);
+    const deadSnap = join(draftDir, 'dead-doc', 'repo');
+    expect(existsSync(join(deadSnap, 'README.md'))).toBe(true);
+    engine.fire({ type: 'sessionFailed', session: engine.launches[1]!.sessionId, ord: 1 });
+    await waitFor(() => sub!.ledger.get('dead-doc')?.failedAt !== undefined);
+    expect(existsSync(deadSnap), 'the failure path must remove the snapshot too').toBe(false);
+
+    // Shutdown path (Copilot, crew#313): stop() with a run STILL IN FLIGHT sweeps its snapshot
+    // too — after a restart the ledger row suppresses redelivery, so nothing would ever
+    // revisit a clone stranded here.
+    await emitDocCreated(bus, 'live-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 3);
+    const liveSnap = join(draftDir, 'live-doc', 'repo');
+    expect(existsSync(join(liveSnap, 'README.md'))).toBe(true);
+    await sub!.stop();
+    expect(existsSync(liveSnap), 'stop() must sweep in-flight snapshots').toBe(false);
+  });
+
+  it('a GROUNDED doc completes the full loop through the ONE standard finalize — inbox file in, inbox path announced, snapshot gone', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: seedRepoFixture() }],
+    });
+    const draftDir = join(dir, 'drafts');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+
+    // The worker wrote the external-inbox deliverable — the ONLY write shape v4 has (the
+    // in-inbox snapshot is READ-only grounding context; wicked-core#293 killed every
+    // bound-write variant and wicked-core#294 killed live-repo reads).
+    const inboxPath = join(draftDir, 'repo-doc', 'repo-doc-v1.html');
+    mkdirSync(join(draftDir, 'repo-doc'), { recursive: true });
+    writeFileSync(inboxPath, '<html><body><h1>grounded draft</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
+
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    const draft = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
+    expect((draft.payload as { html_path?: string }).html_path).toBe(inboxPath);
+    expect(readFileSync(inboxPath, 'utf8')).toContain('grounded draft');
+    expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc'));
+    expect(sub!.ledger.get('repo-doc')?.emittedAt).toBeTruthy();
+    // The launch-scoped snapshot did not outlive its run.
+    expect(existsSync(join(draftDir, 'repo-doc', 'repo'))).toBe(false);
+  });
+
+  it('a STALE repo membership never fabricates a repoRef — the launch degrades to repo-less (CREW-UX-8)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'deleted-repo' }] },
+      repos: [], // the registry no longer knows the ref
+    });
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'stale-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    expect('repoRef' in engine.launches[0]!).toBe(false);
+    expect(engine.launches[0]!.problem).not.toContain('Ground the document');
   });
 
   it('an UNFILED doc completes the full loop -- draft.completed lands with the same idempotency key discipline', async () => {
@@ -626,8 +1132,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length).toBe(1);
 
-    const outPath = join(draftDir, 'unfiled-doc-v1.html');
-    mkdirSync(draftDir, { recursive: true });
+    const outPath = join(draftDir, 'unfiled-doc', 'unfiled-doc-v1.html');
+    mkdirSync(join(draftDir, 'unfiled-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body><h1>Unfiled draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -656,7 +1162,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
     await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
-    expect(existsSync(join(dir, 'drafts', 'spike-doc-v1.html'))).toBe(false);
+    expect(existsSync(join(dir, 'drafts', 'spike-doc', 'spike-doc-v1.html'))).toBe(false);
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() =>
       probeEvents.some(

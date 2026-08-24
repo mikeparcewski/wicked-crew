@@ -11,6 +11,11 @@
 //    the CURRENT-version snapshot to read, and the exact output path; the snapshot is COPIED
 //    into the chat inbox at LAUNCH time so a queued second ask iterates on what the first
 //    landed (J3 "iterate twice") and the one declared write root covers input + deliverable;
+//    a repo-bound project's ask launches EXACTLY like an unfiled one — no repoRef, no repo
+//    snapshot, no grounding clause (CREW-UX-8 v5 SPLIT: the draft leg keeps its proven
+//    snapshot grounding, but the grounded REVISE turn wedged 2/2 on the real engine —
+//    crew#288 comment — while ungrounded revisions are proven to land; grounding returns
+//    when wicked-core#293 or #294 is fixed);
 //  - IDEMPOTENCY: the durable ledger keys the ASK (source_message_id when present, else the
 //    bus event_id), a replayed/resent ask launches no second run, and the announce carries a
 //    deterministic idempotency key;
@@ -198,6 +203,19 @@ describe('chatProblem (the worker prompt seed)', () => {
     expect(big.length).toBeLessThan(2500);
     expect(big).toContain('…');
   });
+
+  it('carries NO repo-grounding clause — the revision prompt is the proven CREW-UX-5 shape (CREW-UX-8 v5 split)', () => {
+    // The draft leg grounds its v1 in a repo snapshot (proven live); the SAME grounded prompt
+    // on the REVISE turn wedged 2/2 on the real engine (crew#288 comment — the repo-grounded
+    // revise turn hits the known second-turn wedge), while ungrounded revisions are proven to
+    // land (the CREW-UX-5 verification). Grounding returns when wicked-core#293 or #294 is fixed.
+    const problem = chatProblem(ask, '/i/current.html', '/tmp/chats/k-revised.html');
+    expect(problem).not.toContain('Ground the revision');
+    expect(problem).not.toContain('repository snapshot');
+    expect(problem).toContain('read it first: /i/current.html');
+    expect(problem).toContain('exactly this absolute file path: /tmp/chats/k-revised.html');
+    expect(problem).not.toMatch(/[\n\r\t]/);
+  });
 });
 
 describe('the interactive-chat workflow def (workflows-as-data)', () => {
@@ -252,7 +270,15 @@ interface FakeAdapter {
   asAdapter(): CoreAdapter;
 }
 
-function fakeAdapter(): FakeAdapter {
+/** Optional project→repo world: projectMembers/listRepos answer from these fixtures. The
+ *  CREW-UX-8 v5 split means the chat seam must IGNORE this world entirely (the revision leg
+ *  launches ungrounded) — the repo-backed test seeds it precisely to prove that. */
+interface RepoWorld {
+  members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
+  repos?: Array<{ id: string; root_path: string }>;
+}
+
+function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
   const listeners = new Set<(e: CoreEvent) => void>();
   const state: FakeAdapter = {
     launches: [],
@@ -274,6 +300,12 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        ...(repoWorld !== undefined
+          ? {
+              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
+              listRepos: async () => repoWorld.repos ?? [],
+            }
+          : {}),
       } as unknown as CoreAdapter;
     },
   };
@@ -426,15 +458,17 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(launch.workflow).toBe(INTERACTIVE_CHAT_WORKFLOW);
     expect(launch.clisJson).toBe(SEATS);
     expect(launch.projectId).toBe('proj-7');
-    expect(launch.extraWriteRoots).toEqual([chatDir]);
     expect(launch.problem).toContain('"iter-doc"');
     expect(launch.problem).toContain('Make the intro punchier.');
 
     // The snapshot is a COPY of the current head, inside the declared write root — the worker
-    // never needs the doc workspace.
+    // never needs the doc workspace. The root is the ask's OWN per-run subdir, never the
+    // shared chatDir (per-run isolation — Copilot, crew#313).
     const key = chatKey('iter-doc', event_id, 'm-1');
-    const currentPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-current.html`);
-    const outPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
+    const runDir = join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'));
+    expect(launch.extraWriteRoots).toEqual([runDir]);
+    const currentPath = join(runDir, 'current.html');
+    const outPath = join(runDir, 'revised.html');
     expect(launch.problem).toContain(currentPath);
     expect(launch.problem).toContain(outPath);
     expect(readFileSync(currentPath, 'utf8')).toContain('data-wid="w-h1"');
@@ -543,8 +577,8 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     // Complete the run so the doc is no longer busy — a duplicate must be stopped by the
     // LEDGER, not by the serialization queue.
     const key = chatKey('iter-doc', 0, 'm-9'); // event_id irrelevant when msg id present
-    const outPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
-    mkdirSync(chatDir, { recursive: true });
+    const outPath = join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html');
+    mkdirSync(join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-')), { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
     await waitFor(() => sub!.ledger.get(key)?.emittedAt !== undefined);
@@ -598,7 +632,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     // the new version (the manifest head advances) — draining on the stale head would drop
     // the revision the user just watched land.
     const key1 = chatKey('iter-doc', 0, 'm-1');
-    const out1 = join(chatDir, `${key1.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
+    const out1 = join(chatDir, key1.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html');
     writeFileSync(out1, '<html><body><h1>after ask 1</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() => sub!.ledger.get(key1)?.emittedAt !== undefined);
@@ -611,8 +645,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const launch2 = engine.launches[2]!;
     expect(launch2.problem).toContain('Second ask.');
     const key2 = chatKey('iter-doc', 0, 'm-2');
-    const current2 = join(chatDir, `${key2.replace(/[^a-zA-Z0-9_-]/g, '-')}-current.html`);
+    const current2 = join(chatDir, key2.replace(/[^a-zA-Z0-9_-]/g, '-'), 'current.html');
     expect(readFileSync(current2, 'utf8')).toContain('landed after ask 1');
+    // Per-run isolation (Copilot, crew#313): ask 2's declared root is ITS dir, not ask 1's.
+    expect(launch2.extraWriteRoots).toEqual([join(chatDir, key2.replace(/[^a-zA-Z0-9_-]/g, '-'))]);
     expect(sub!.queuedCount('iter-doc')).toBe(0);
   });
 
@@ -705,7 +741,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await emitChatPosted(bus, 'iter-doc', { source_message_id: 'm-1' });
     await waitFor(() => engine.launches.length === 1);
     const key = chatKey('iter-doc', 0, 'm-1');
-    expect(existsSync(join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`))).toBe(false);
+    expect(existsSync(join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html'))).toBe(false);
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() =>
       probeEvents.some(
@@ -735,5 +771,72 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 2);
     expect(engine.launches[1]!.projectId).toBe('proj-7');
     expect(filed).toEqual([[engine.launches[1]!.sessionId, 'proj-7']]);
+    // Neither launch is repo-grounded — the CREW-UX-8 v5 split: the revision leg never
+    // resolves a repo binding at all (see the repo-backed test below for the rationale).
+    expect('repoRef' in unfiled).toBe(false);
+    expect('repoRef' in engine.launches[1]!).toBe(false);
+    expect(engine.launches[1]!.problem).not.toContain('Ground the revision');
+  });
+
+  /** A real (plain-dir) repo fixture — present so the test below proves the seam ignores it. */
+  function seedRepoFixture(name = 'the-repo'): string {
+    const root = join(dir, name);
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# the real studio project\n', 'utf8');
+    writeFileSync(join(root, 'src', 'main.ts'), 'export const real = true;\n', 'utf8');
+    return root;
+  }
+
+  it('a REPO-BACKED project launches EXACTLY like an unfiled ask — no repoRef, no snapshot, no clause; filing unaffected (CREW-UX-8 v5 split)', async () => {
+    // The orchestrator split, from live evidence: the draft leg's snapshot grounding is proven
+    // (grounded v1s land — it stays as-is in draft-events.ts), but the SAME grounded prompt on
+    // the REVISE turn wedged 2/2 on the real engine (crew#288 comment — the repo-grounded
+    // revise turn hits the known second-turn wedge), while ungrounded revisions are proven to
+    // land (the CREW-UX-5 verification). So even with a fully resolvable repo binding, the
+    // chat seam launches the proven CREW-UX-5 shape: external-inbox head-copy, the ONE write
+    // root, no repoRef (wicked-core#293), no live-repo path or snapshot (wicked-core#294),
+    // projectId still filed. Revision grounding returns when either core issue is fixed.
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    seedDoc('repo-doc');
+    const filed: Array<[string, string]> = [];
+    const sub = await startSub(engine, { onRunFiled: (runId: string, projectId: string) => filed.push([runId, projectId]) });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r', project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const safeKey = chatKey('repo-doc', 0, 'm-r').replace(/[^a-zA-Z0-9_-]/g, '-');
+    const runDir = join(chatDir, safeKey);
+    // The proven unfiled launch shape, exactly (per-run subdir — Copilot, crew#313):
+    expect('repoRef' in launch).toBe(false);
+    expect(launch.problem).not.toContain('Ground the revision');
+    expect(launch.problem).not.toContain(repoRoot); // the live root never reaches the task
+    expect(launch.problem).toContain(`read it first: ${join(runDir, 'current.html')}`);
+    expect(launch.problem).toContain(
+      `exactly this absolute file path: ${join(runDir, 'revised.html')}`,
+    );
+    expect(launch.extraWriteRoots).toEqual([runDir]);
+    expect(launch.problem).not.toMatch(/[\n\r]/);
+    // No repo snapshot is ever created in the inbox…
+    expect(existsSync(join(runDir, 'repo'))).toBe(false);
+    // …and filing is unaffected by the revert: the run is still project-bound.
+    expect(launch.projectId).toBe('proj-repo');
+    expect(filed).toEqual([[launch.sessionId, 'proj-repo']]);
+
+    // The full loop still closes through the ONE standard finalize: inbox file in, inbox
+    // path announced on the draft wire.
+    const inboxPath = join(runDir, 'revised.html');
+    writeFileSync(inboxPath, '<html><body><h1>ungrounded revision</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    const announce = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
+    expect((announce.payload as { html_path?: string }).html_path).toBe(inboxPath);
+    expect(sub!.ledger.get(chatKey('repo-doc', 0, 'm-r'))?.emittedAt).toBeTruthy();
   });
 });

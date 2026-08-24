@@ -35,12 +35,13 @@
  *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
-import { mkdirSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 
@@ -181,20 +182,113 @@ export function oneLine(text: string, cap: number): string {
   return flat.length > cap ? `${flat.slice(0, cap)}…` : flat;
 }
 
+/** A project's repo binding, resolved for a governed launch (CREW-UX-8). */
+export interface ProjectRepo {
+  /** The registered repo id — the verified registry identity behind `rootPath` (diagnostics
+   *  only: deliberately NEVER passed to `launchRun` as `repoRef` — see {@link resolveProjectRepo}). */
+  repoRef: string;
+  /** The repo's root path — the SOURCE the launch-scoped snapshot is cloned/copied from
+   *  (v4). Never handed to the worker directly: an unbound worker's boundary denies reads of
+   *  it (wicked-core#294) — the grounding clause names the SNAPSHOT inside the inbox instead. */
+  rootPath: string;
+}
+
+/**
+ * Resolve the repo a project is bound to (CREW-UX-8): the project's first `crew.repo` member,
+ * verified against the repo registry so a stale membership (repo deleted after attach) never
+ * grounds the task in a path the registry no longer vouches for. `undefined` when the project
+ * has no repo member, the registry no longer knows the ref, or the adapter cannot answer (old
+ * addon, engine hiccup) — every one of those degrades to today's behavior: an ungrounded launch.
+ *
+ * WHY: a doc created under a repo-backed project used to launch its governed draft/revision
+ * run with NO repo context at all, so the worker could not read the project's actual code and
+ * generated placeholder content (operator report, wicked-studio project). Shared by the draft
+ * and chat seams.
+ *
+ * WHY the result feeds a SNAPSHOT, never a binding and never a direct read path (the v4
+ * design): the launch itself stays UNBOUND (no `repoRef`), even though the project verifiably
+ * has one, because on a repoRef-bound run the worker's ACP tool-permission stream closes on
+ * the FIRST call that needs a permission prompt, so the session dies before any work lands —
+ * no write destination works, not the external inbox, not an in-repo path (wicked-core#293;
+ * v2 of this seam tried both and the adversarial verifier killed each with run evidence).
+ * v3 then handed the unbound worker the absolute `rootPath` to READ — but that rested on a
+ * boundary-context-dependent premise: the "repo reads work" evidence came from BOUND runs,
+ * and an UNBOUND worker's governance boundary is {sandbox, extraWriteRoots,
+ * ~/.claude/plugins}, so its reads of the live repo root are governance-DENIED
+ * (wicked-core#294). What an unbound worker can always read is the inbox the run already
+ * writes to (write roots are readable, wicked-core#259) — so v4 grounds via a capped,
+ * launch-scoped repo SNAPSHOT cloned into the inbox crew-side BEFORE the launch (see
+ * repo-snapshot.ts), and the grounding clause names the snapshot. `rootPath` here is the
+ * clone SOURCE only; `projectId` still passes on the launch — filing is unaffected.
+ */
+export async function resolveProjectRepo(
+  adapter: CoreAdapter,
+  projectId: string,
+  log?: (message: string) => void,
+): Promise<ProjectRepo | undefined> {
+  try {
+    const members = await adapter.projectMembers(projectId);
+    const repoMember = members.find((m) => m.member_kind === 'crew.repo');
+    if (repoMember === undefined) return undefined;
+    const ref = repoMember.member_ref;
+    const repo = (await adapter.listRepos()).find((r) => r.id === ref);
+    if (repo === undefined) {
+      log?.(
+        `[interactive] project ${projectId} has repo member ${ref} but the registry does not — launching without repo context`,
+      );
+      return undefined;
+    }
+    return { repoRef: ref, rootPath: repo.root_path };
+  } catch (err) {
+    log?.(
+      `[interactive] could not resolve project ${projectId}'s repo — launching without repo context: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/** The longest snapshot path the grounding clause will carry. NOT a truncation cap — the
+ *  clause embeds the path VERBATIM or not at all (see {@link groundablePath}): the snapshot
+ *  sits at exactly one spelling, so a flattened/truncated path would ground the worker on a
+ *  directory that does not exist (Copilot, crew#313). The budget exists for the PTY prompt
+ *  length; a dest over it degrades the launch to ungrounded, honestly narrated. */
+export const SNAPSHOT_PATH_MAX = 300;
+
+/** `true` when a snapshot path can ride the grounding clause EXACTLY as spelled: single-line
+ *  (the PTY seat runner refuses embedded newlines — and `oneLine`'s whitespace collapse would
+ *  respell the path, so it is never applied to paths) and within the prompt budget. */
+export function groundablePath(path: string): boolean {
+  return path.length <= SNAPSHOT_PATH_MAX && !/[\n\r\t]/.test(path);
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
- * the absolute path the finished HTML must land at.
+ * the absolute path the finished HTML must land at. When the doc's project is repo-bound
+ * (CREW-UX-8 v4), a SHORT grounding clause names the launch-scoped repo SNAPSHOT inside the
+ * inbox for the worker to READ — the run itself launches unbound (wicked-core#293) and cannot
+ * read the live repo (wicked-core#294), so the snapshot named by this clause is the whole
+ * grounding mechanism, not a nudge on top of an engine binding.
+ *
+ * `snapshotDir` is embedded VERBATIM — never flattened, never truncated (the snapshot exists
+ * at exactly this path; Copilot, crew#313). The caller guards it with {@link groundablePath}
+ * BEFORE snapshotting and skips grounding (honest degrade) when the path cannot ride.
  */
-export function draftProblem(doc: SourceDocCreated, outPath: string): string {
+export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir?: string): string {
   const sources =
     doc.sourcePaths.length > 0
       ? `Source materials to read: ${doc.sourcePaths.join(', ')}.`
       : 'There are no source files — the brief alone is the spec.';
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
+  const grounding =
+    snapshotDir !== undefined
+      ? `Ground the document in the repository snapshot at ${snapshotDir} — read it and use its real content, never placeholders. `
+      : '';
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ` +
+    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -227,11 +321,18 @@ export interface InteractiveDraftOptions {
   heartbeatMs?: number;
   /** Ledger file (default `~/.wicked-crew/interactive-draft-ledger.json`). */
   ledgerPath?: string;
-  /** Where governed workers write finished drafts (default `~/.wicked-crew/interactive-drafts`). */
+  /** Root under which each launch gets its own per-run subdirectory (`<draftDir>/<docId>/`)
+   *  holding the deliverable and, when grounded, the repo snapshot; only that subdirectory is
+   *  declared as the run's extra write root (per-run isolation — Copilot, crew#313).
+   *  Default `~/.wicked-crew/interactive-drafts`. */
   draftDir?: string;
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** Repo-snapshot size budget in bytes (CREW-UX-8 v4; default ~200MB — see
+   *  {@link snapshotRepo}). A repo over budget degrades the launch to ungrounded, narrated.
+   *  Tests shrink it to exercise the degradation path without a 200MB fixture. */
+  repoSnapshotMaxBytes?: number;
   /** Called after a launch that FILED the run into a project (doc.created carried
    *  `project_id`). The server wires this to the same post-commit half the launch route
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
@@ -254,9 +355,16 @@ export interface InteractiveDraftSubscription {
 interface InFlight {
   documentId: string;
   outPath: string;
+  /** The launch-scoped repo snapshot grounding this run (CREW-UX-8 v4): set BEFORE the snapshot
+   *  materializes (so a shutdown sweep can clear a half-made clone — Copilot round 2), cleared
+   *  when the snapshot is refused/degraded, removed on EVERY terminal path. */
+  snapshotDir?: string | undefined;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
-  heartbeat: ReturnType<typeof setInterval>;
+  /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
+   *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
+   *  resolves. */
+  heartbeat?: ReturnType<typeof setInterval> | undefined;
 }
 
 function defaultStateDir(): string {
@@ -329,7 +437,8 @@ export async function startInteractiveDraftSubscriber(
   const draftDir = opts.draftDir ?? join(defaultStateDir(), 'interactive-drafts');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const phaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
-  const inFlight = new Map<string, InFlight>(); // runId → live state
+  const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
@@ -374,10 +483,29 @@ export async function startInteractiveDraftSubscriber(
   function endFlight(runId: string): InFlight | undefined {
     const flight = inFlight.get(runId);
     if (flight) {
-      clearInterval(flight.heartbeat);
+      if (flight.heartbeat !== undefined) clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
     return flight;
+  }
+
+  /** CREW-UX-8 v4: the repo snapshot is launch-scoped — remove it on EVERY terminal path
+   *  (success, no-file, emit-failure, run failure/cancel) so the inbox never accretes dead
+   *  clones. Best-effort: a leftover snapshot is a disk-space wart, never a correctness one. */
+  function removeSnapshot(flight: InFlight): void {
+    const dir = flight.snapshotDir;
+    if (dir === undefined) return;
+    flight.snapshotDir = undefined;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      log(`[interactive-draft] removed repo snapshot ${dir}`);
+    } catch (err) {
+      log(
+        `[interactive-draft] could not remove repo snapshot ${dir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
@@ -464,6 +592,7 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
+      removeSnapshot(flight); // the failure path cleans its snapshot too (CREW-UX-8 v4)
       ledger.recordFailure(flight.documentId);
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
@@ -477,6 +606,8 @@ export async function startInteractiveDraftSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
+    // The run is terminal — its grounding snapshot is done serving reads, on every branch below.
+    removeSnapshot(flight);
     const { documentId, outPath } = flight;
     let ok = false;
     try {
@@ -541,9 +672,34 @@ export async function startInteractiveDraftSubscriber(
       if (f.documentId === doc.documentId) return;
     }
 
-    mkdirSync(draftDir, { recursive: true });
-    const outPath = join(draftDir, `${doc.documentId}-v1.html`);
+    // Per-run ISOLATION (Copilot, crew#313): every launch gets its OWN subdirectory holding
+    // both the deliverable and (when grounded) the repo snapshot, and declares ONLY that
+    // subdirectory as its extra write root below. Declaring the shared draftDir wholesale let
+    // any draft worker read/write every other run's deliverable AND every other project's
+    // snapshot — cross-project exposure through the governance boundary itself.
+    // NOT created here (Copilot round 2): runDir is only mkdir'd after the snapshot helper's
+    // containment check has ruled the location safe — see the pre-launch mkdir below.
+    const runDir = join(draftDir, doc.documentId);
+    const outPath = join(runDir, `${doc.documentId}-v1.html`);
     const runId = randomUUID();
+
+    // PRE-LAUNCH placeholder (Copilot round 2): the awaits below (repo resolution, snapshot)
+    // open a window in which this doc has no `inFlight` entry — so the chat seam's `isDocBusy`
+    // saw it idle (double-launch race) and stop()'s sweep could not find a half-made snapshot.
+    // Register the flight FIRST; every exit path below (refusal, shutdown, launch failure)
+    // must endFlight() it.
+    const flight: InFlight = {
+      documentId: doc.documentId,
+      outPath,
+      narration: 'Crew run launched — working on your draft…',
+    };
+    inFlight.set(runId, flight);
+
+    // CREW-UX-8 v4: a repo-bound project's doc is grounded in a REPO SNAPSHOT — resolve the
+    // binding BEFORE the launch. Unbound docs and repo-less projects resolve to `undefined`
+    // and launch exactly as before.
+    const repo =
+      doc.projectId !== undefined ? await resolveProjectRepo(adapter, doc.projectId, log) : undefined;
 
     emitInteractive(STATUS_POSTED, {
       document_id: doc.documentId,
@@ -551,9 +707,106 @@ export async function startInteractiveDraftSubscriber(
       message: 'A governed crew picked up your brief — planning the draft…',
     });
 
+    // The snapshot happens crew-side, AFTER the pickup narration (a big clone must not starve
+    // the UI's silence budget) and BEFORE launchRun: <runDir>/repo sits inside the run's OWN
+    // declared extra write root, so the unbound worker can read it (write roots are readable,
+    // wicked-core#259) even though the live repo root is boundary-denied (wicked-core#294) —
+    // and NO OTHER run can (per-run isolation, Copilot crew#313). An unsnapshotable repo (over
+    // budget, unreadable, clone+copy failed) degrades HONESTLY: ungrounded launch, a visible
+    // per-cause note on the thread, and the full reason in the log.
+    let snapshotDir: string | undefined;
+    let snapshotDest: string | undefined; // where a snapshot was ATTEMPTED (shutdown cleanup)
+    if (repo !== undefined) {
+      const dest = join(runDir, 'repo');
+      if (!groundablePath(dest)) {
+        // The PATH itself cannot ride the grounding clause (too long for the PTY prompt
+        // budget, or multi-line) — and a truncated spelling would name a nonexistent dir, so
+        // grounding is SKIPPED before any clone happens (Copilot, crew#313).
+        emitInteractive(STATUS_POSTED, {
+          document_id: doc.documentId,
+          state: 'working',
+          message: 'snapshot path too long to hand to the worker — drafting without repo grounding',
+        });
+        log(
+          `[interactive-draft] doc ${doc.documentId}: snapshot dest ${dest} cannot ride the grounding clause — launching ungrounded`,
+        );
+      } else {
+        // Track the dest BEFORE the await (Copilot round 2): stop() during the clone must be
+        // able to sweep the half-made snapshot through the placeholder flight.
+        snapshotDest = dest;
+        flight.snapshotDir = dest;
+        const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
+        if (snap.ok) {
+          snapshotDir = dest;
+        } else {
+          flight.snapshotDir = undefined; // nothing landed — snapshotRepo cleans its partials
+          if (snap.reason === 'dest-overlap') {
+            // FAIL CLOSED (Copilot round 2): the configured draft dir places this run's write
+            // root inside the live repository (or the repo is registered at the inbox). An
+            // "ungrounded" launch would still hand the unbound worker read/write access to
+            // live repo content through `extraWriteRoots: [runDir]` — so the launch is REFUSED
+            // outright: no mkdir, no run, no ledger row. The status names the CONFIG problem;
+            // the thrown error dead-letters the frame, replayable after the config is fixed.
+            endFlight(runId);
+            const message =
+              `Crew refused to draft this document: the configured draft directory (${draftDir}) ` +
+              `overlaps the project's repository (${repo.rootPath}), so launching would give the ` +
+              `worker write access inside the live repo. Point the crew draft directory outside ` +
+              `every registered repository, then replay the request.`;
+            emitInteractive(STATUS_POSTED, {
+              document_id: doc.documentId,
+              state: 'error',
+              message,
+            });
+            log(
+              `[interactive-draft] doc ${doc.documentId}: REFUSING launch — draft dir ${draftDir} overlaps repo ${repo.rootPath} (dest-overlap)`,
+            );
+            throw new Error(message);
+          }
+          // Per-cause operator message (Copilot, crew#313): "too large" was previously
+          // claimed for EVERY failure — a deleted repo is not a large one. (`dest-overlap`
+          // is handled above: it refuses the launch instead of degrading.)
+          const because: Record<Exclude<SnapshotFailureReason, 'dest-overlap'>, string> = {
+            'too-large': 'repository too large to snapshot',
+            'root-unreadable': 'repository path is missing or unreadable',
+            'dest-unclearable': 'a stale snapshot could not be cleared',
+            'copy-failed': 'repository snapshot failed (clone and copy both errored)',
+          };
+          emitInteractive(STATUS_POSTED, {
+            document_id: doc.documentId,
+            state: 'working',
+            message: `${because[snap.reason]} — drafting without repo grounding`,
+          });
+          log(
+            `[interactive-draft] doc ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — launching ungrounded`,
+          );
+        }
+      }
+    }
+
+    // Shutdown gate (Copilot round 2): stop() may have run during the awaits above — its sweep
+    // already dropped the placeholder, but a clone can re-materialize files after that rm, and
+    // a launch must never start once the subscriber detached from the engine's events.
+    if (closed) {
+      endFlight(runId);
+      flight.snapshotDir = undefined;
+      if (snapshotDest !== undefined) {
+        try {
+          rmSync(snapshotDest, { recursive: true, force: true });
+        } catch {
+          // best-effort — a leftover snapshot is a disk-space wart, never a correctness one
+        }
+      }
+      log(`[interactive-draft] doc ${doc.documentId}: subscriber stopped before launch — abandoned (a replay retries)`);
+      return;
+    }
+
+    // Containment is settled (any repo overlap refused above) — the run's write root may exist.
+    mkdirSync(runDir, { recursive: true });
+
     try {
       await adapter.launchRun({
-        problem: draftProblem(doc, outPath),
+        problem: draftProblem(doc, outPath, snapshotDir),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
@@ -564,14 +817,25 @@ export async function startInteractiveDraftSubscriber(
         // key OMITTED: an unfiled governed run (project_id: null on the DTO, CREW-UX-2) — never
         // a fabricated 'default' membership.
         ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
-        // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
+        // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
+        // run's tool-permission stream closes on the first prompt-needing call, so no write
+        // destination works (wicked-core#293) — and NO live-repo path in the task either: the
+        // unbound boundary denies those reads (wicked-core#294). The grounding clause in
+        // `problem` names the in-inbox snapshot instead; this ONE launch shape serves all docs.
+        // The task text names `outPath` (inside runDir) as the deliverable, which sits OUTSIDE
         // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
-        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox
-        // so the engine widens the boundary by exactly this root (validated launch-side,
+        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the
+        // run's OWN subdirectory — never the shared draftDir (Copilot, crew#313: the wholesale
+        // declaration let one project's worker read another's snapshot and deliverables) — so
+        // the engine widens the boundary by exactly this run's inbox (validated launch-side,
         // wicked-core#259).
-        extraWriteRoots: [draftDir],
+        extraWriteRoots: [runDir],
       });
     } catch (err) {
+      // A launch that never happened keeps no flight and no snapshot (a replayed frame
+      // re-registers and re-snapshots fresh).
+      endFlight(runId);
+      removeSnapshot(flight);
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
@@ -590,25 +854,26 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
+    if (closed) {
+      // stop() ran while the engine was accepting the launch: its sweep already dropped the
+      // placeholder and the snapshot, and the engine's workers die with the daemon — the
+      // ledger row above is what keeps a post-restart redelivery from double-launching.
+      return;
+    }
     if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
 
-    const flight: InFlight = {
-      documentId: doc.documentId,
-      outPath,
-      narration: 'Crew run launched — working on your draft…',
-      heartbeat: setInterval(() => {
-        // Repeat the last real narration so the ~20s status.requested window is always fed,
-        // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
-          state: 'working',
-          message: flight.narration,
-        });
-      }, heartbeatMs),
-      // Do not keep the daemon alive for narration alone.
-    };
+    // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
+    flight.heartbeat = setInterval(() => {
+      // Repeat the last real narration so the ~20s status.requested window is always fed,
+      // even mid-phase when the engine is quiet.
+      emitInteractive(STATUS_POSTED, {
+        document_id: flight.documentId,
+        state: 'working',
+        message: flight.narration,
+      });
+    }, heartbeatMs);
+    // Do not keep the daemon alive for narration alone.
     flight.heartbeat.unref?.();
-    inFlight.set(runId, flight);
     log(`[interactive-draft] doc ${doc.documentId} → governed run ${runId} (draft → ${outPath})`);
   }
 
@@ -635,8 +900,19 @@ export async function startInteractiveDraftSubscriber(
     ledger,
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
+      closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)
       offCoreEvents();
-      for (const runId of [...inFlight.keys()]) endFlight(runId);
+      for (const runId of [...inFlight.keys()]) {
+        const flight = endFlight(runId);
+        // Best-effort snapshot sweep (Copilot, crew#313): a graceful shutdown with a run in
+        // flight would otherwise strand the clone forever — after restart the ledger's launch
+        // row suppresses redelivery, so no later fold ever revisits it. Pre-launch
+        // placeholders are in the map too (Copilot round 2), so a snapshot still
+        // materializing is swept as well — and the handler's own closed-gate re-sweeps
+        // whatever the in-flight clone re-materializes after this rm. The engine's workers
+        // die with the daemon, so nothing is still reading the snapshot.
+        if (flight !== undefined) removeSnapshot(flight);
+      }
       await sub.stop();
     },
   };
