@@ -34,6 +34,8 @@ import {
   parseSourceDocCreated,
   draftProblem,
   draftIdempotencyKey,
+  groundablePath,
+  SNAPSHOT_PATH_MAX,
   resolveProjectRepo,
   startInteractiveDraftSubscriber,
 } from '../src/interactive/draft-events.js';
@@ -149,13 +151,23 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(problem).toContain('Ground the document in the repository snapshot at /tmp/inbox/my-doc-repo — read it');
     expect(problem).toContain('exactly this absolute file path: /tmp/inbox/my-doc-v1.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
-    // The clause is SHORT (PTY problem-length budget): a hostile/odd snapshot path is flattened+capped.
-    const weird = draftProblem(doc, '/o.html', 'a\nb'.repeat(400));
-    expect(weird).not.toMatch(/[\n\r]/);
-    // WORST CASE stays bounded: pasted-novel brief + oversized path ≤ the capped brief budget
-    // (2500) plus the ~400-char grounding clause (301-char capped path + fixed words).
-    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', 'p'.repeat(10_000));
+    // The PATH rides VERBATIM — never flattened, never truncated (Copilot, crew#313: the
+    // snapshot sits at exactly one spelling; a respelled path grounds the worker on nothing).
+    // The prompt budget is enforced BEFORE snapshotting via groundablePath, not by mangling.
+    const longButLegal = `/inbox/${'p'.repeat(SNAPSHOT_PATH_MAX - 20)}`;
+    expect(draftProblem(doc, '/o.html', longButLegal)).toContain(longButLegal);
+    // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
+    // + fixed words.
+    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
     expect(worst.length).toBeLessThan(2900);
+  });
+
+  it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
+    expect(groundablePath('/tmp/inbox/my-doc/repo')).toBe(true);
+    expect(groundablePath(`/x/${'p'.repeat(SNAPSHOT_PATH_MAX)}`)).toBe(false); // over budget → degrade, never truncate
+    expect(groundablePath('/tmp/has\nnewline')).toBe(false); // would kill the PTY prompt
+    expect(groundablePath('/tmp/has\ttab')).toBe(false); // oneLine would respell it — refuse instead
+    expect(groundablePath('p'.repeat(SNAPSHOT_PATH_MAX))).toBe(true); // exactly at budget rides
   });
 
   it('adds NO grounding clause without a snapshot — unchanged prompt (no fabricated refs)', () => {
@@ -458,7 +470,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(launch.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
     expect(launch.clisJson).toBe(SEATS);
     expect(launch.problem).toContain('"spike-doc"');
-    const outPath = join(draftDir, 'spike-doc-v1.html');
+    // Per-run isolation (Copilot, crew#313): the deliverable lives in the run's OWN subdir.
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
     expect(launch.problem).toContain(outPath);
 
     // Narration reached the bus as wi-crew before any engine event: the pickup status.
@@ -504,7 +517,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(narrated('landing it now'));
 
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
-    mkdirSync(draftDir, { recursive: true });
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body><h1>Draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -550,8 +563,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
     // Complete the run; then complete it "again" (a redelivered terminal event).
     const runId = engine.launches[0]!.sessionId;
-    const outPath = join(draftDir, 'spike-doc-v1.html');
-    mkdirSync(draftDir, { recursive: true });
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    mkdirSync(join(draftDir, 'spike-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
     await waitFor(() => sub!.ledger.get('spike-doc')?.emittedAt !== undefined);
@@ -666,8 +679,10 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-7']]);
     // crew#263: the launch DECLARES the draft inbox as an extra write root. Without it the
     // wrapped-CLI boundary denies the deliverable write and fails the run AFTER the draft is
-    // produced (run eed69dfa) — the declared outPath must be inside a declared root.
-    expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // produced (run eed69dfa) — the declared outPath must be inside a declared root. And the
+    // root is the run's OWN subdir, never the shared draftDir (Copilot, crew#313: wholesale
+    // declaration = cross-project read/write exposure).
+    expect(engine.launches[0]!.extraWriteRoots).toEqual([join(dir, 'drafts', 'bound-doc')]);
 
     // Unbound doc → an UNFILED governed run (DES-UX-001 slice U): the launch happens, the
     // projectId key is OMITTED (never a fabricated 'default'), and onRunFiled does NOT fire —
@@ -679,8 +694,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect('projectId' in unfiled).toBe(false);
     expect(unfiled.workflow).toBe(INTERACTIVE_DRAFT_WORKFLOW);
     expect(unfiled.problem).toContain('"unbound-doc"');
-    // The launch is otherwise IDENTICAL to the bound one: same declared write root (crew#263)…
-    expect(unfiled.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // The launch is otherwise IDENTICAL to the bound one: same write-root SHAPE (crew#263) —
+    // its own per-run subdir, disjoint from every other run's (Copilot, crew#313).
+    expect(unfiled.extraWriteRoots).toEqual([join(dir, 'drafts', 'unbound-doc')]);
     // …and the same ledger row shape, so replay dedupe works for unfiled docs too.
     expect(sub!.ledger.get('unbound-doc')?.runId).toBe(unfiled.sessionId);
     expect(filed).toHaveLength(1); // still only the bound doc's filing
@@ -715,7 +731,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
       // The ORDER is the contract: the snapshot must be on disk before launchRun resolves —
       // a worker grounded on a path that appears later would race its own recon phase.
-      snapshotExistedAtLaunch = existsSync(join(draftDir, 'repo-doc-repo', 'README.md'));
+      snapshotExistedAtLaunch = existsSync(join(draftDir, 'repo-doc', 'repo', 'README.md'));
       return inner(input);
     };
     const sub = await startInteractiveDraftSubscriber(adapter, {
@@ -737,7 +753,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     const grounded = engine.launches[0]!;
-    const snapDir = join(draftDir, 'repo-doc-repo');
+    // Per-run isolation (Copilot, crew#313): snapshot AND deliverable live inside the run's
+    // OWN subdir, which is the ONE declared write root — another project's worker has no path
+    // into this project's source.
+    const runDir = join(draftDir, 'repo-doc');
+    const snapDir = join(runDir, 'repo');
     expect(snapshotExistedAtLaunch, 'snapshot must exist before launchRun').toBe(true);
     expect('repoRef' in grounded).toBe(false);
     expect(grounded.problem).toContain(
@@ -745,9 +765,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     );
     expect(grounded.problem).not.toContain(repoRoot); // the live root never reaches the task
     expect(grounded.problem).toContain(
-      `exactly this absolute file path: ${join(draftDir, 'repo-doc-v1.html')}`,
+      `exactly this absolute file path: ${join(runDir, 'repo-doc-v1.html')}`,
     );
-    expect(grounded.extraWriteRoots).toEqual([draftDir]);
+    expect(grounded.extraWriteRoots).toEqual([runDir]);
     expect(grounded.problem).not.toMatch(/[\n\r]/);
     expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
     // The snapshot holds the repo's REAL content, inside the readable inbox.
@@ -761,9 +781,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const bare = engine.launches[1]!;
     expect('repoRef' in bare).toBe(false);
     expect(bare.problem).not.toContain('Ground the document');
-    expect(bare.problem).toContain(join(draftDir, 'bare-doc-v1.html'));
-    expect(bare.extraWriteRoots).toEqual([draftDir]);
-    expect(existsSync(join(draftDir, 'bare-doc-repo'))).toBe(false);
+    expect(bare.problem).toContain(join(draftDir, 'bare-doc', 'bare-doc-v1.html'));
+    expect(bare.extraWriteRoots).toEqual([join(draftDir, 'bare-doc')]);
+    expect(existsSync(join(draftDir, 'bare-doc', 'repo'))).toBe(false);
 
     // UNBOUND doc → no membership lookup at all: no clause, no projectId, same write shape.
     await emitDocCreated(bus, 'free-doc');
@@ -772,7 +792,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect('repoRef' in free).toBe(false);
     expect('projectId' in free).toBe(false);
     expect(free.problem).not.toContain('Ground the document');
-    expect(free.extraWriteRoots).toEqual([draftDir]);
+    expect(free.extraWriteRoots).toEqual([join(draftDir, 'free-doc')]);
+
+    // ISOLATION is the point (Copilot, crew#313): no launch ever declares the SHARED root, and
+    // the grounded run's snapshot is invisible to every other run's declared root.
+    for (const l of engine.launches) expect(l.extraWriteRoots).not.toEqual([draftDir]);
+    expect(free.extraWriteRoots![0]!.startsWith(join(draftDir, 'repo-doc'))).toBe(false);
   });
 
   it('DEGRADES HONESTLY when the repo cannot be snapshotted: ungrounded launch + a visible status note (CREW-UX-8 v4)', async () => {
@@ -803,8 +828,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const launch = engine.launches[0]!;
     expect(launch.problem).not.toContain('Ground the document');
     expect(launch.problem).not.toContain(repoRoot);
-    expect(existsSync(join(dir, 'drafts', 'big-doc-repo'))).toBe(false);
-    expect(launch.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    expect(existsSync(join(dir, 'drafts', 'big-doc', 'repo'))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([join(dir, 'drafts', 'big-doc')]);
     // The user sees WHY the draft is not repo-grounded…
     await waitFor(() =>
       probeEvents.some(
@@ -842,9 +867,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // Success path: the run completes with a real deliverable → finalize removes the snapshot.
     await emitDocCreated(bus, 'ok-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
-    const okSnap = join(draftDir, 'ok-doc-repo');
+    const okSnap = join(draftDir, 'ok-doc', 'repo');
     expect(existsSync(join(okSnap, 'README.md'))).toBe(true);
-    writeFileSync(join(draftDir, 'ok-doc-v1.html'), '<html><body>grounded</body></html>', 'utf8');
+    writeFileSync(join(draftDir, 'ok-doc', 'ok-doc-v1.html'), '<html><body>grounded</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() => sub!.ledger.get('ok-doc')?.emittedAt !== undefined);
     expect(existsSync(okSnap), 'success finalize must remove the snapshot').toBe(false);
@@ -852,11 +877,21 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // Failure path: the run dies → the failure fold removes the snapshot too.
     await emitDocCreated(bus, 'dead-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 2);
-    const deadSnap = join(draftDir, 'dead-doc-repo');
+    const deadSnap = join(draftDir, 'dead-doc', 'repo');
     expect(existsSync(join(deadSnap, 'README.md'))).toBe(true);
     engine.fire({ type: 'sessionFailed', session: engine.launches[1]!.sessionId, ord: 1 });
     await waitFor(() => sub!.ledger.get('dead-doc')?.failedAt !== undefined);
     expect(existsSync(deadSnap), 'the failure path must remove the snapshot too').toBe(false);
+
+    // Shutdown path (Copilot, crew#313): stop() with a run STILL IN FLIGHT sweeps its snapshot
+    // too — after a restart the ledger row suppresses redelivery, so nothing would ever
+    // revisit a clone stranded here.
+    await emitDocCreated(bus, 'live-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 3);
+    const liveSnap = join(draftDir, 'live-doc', 'repo');
+    expect(existsSync(join(liveSnap, 'README.md'))).toBe(true);
+    await sub!.stop();
+    expect(existsSync(liveSnap), 'stop() must sweep in-flight snapshots').toBe(false);
   });
 
   it('a GROUNDED doc completes the full loop through the ONE standard finalize — inbox file in, inbox path announced, snapshot gone', async () => {
@@ -884,8 +919,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // The worker wrote the external-inbox deliverable — the ONLY write shape v4 has (the
     // in-inbox snapshot is READ-only grounding context; wicked-core#293 killed every
     // bound-write variant and wicked-core#294 killed live-repo reads).
-    const inboxPath = join(draftDir, 'repo-doc-v1.html');
-    mkdirSync(draftDir, { recursive: true });
+    const inboxPath = join(draftDir, 'repo-doc', 'repo-doc-v1.html');
+    mkdirSync(join(draftDir, 'repo-doc'), { recursive: true });
     writeFileSync(inboxPath, '<html><body><h1>grounded draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
 
@@ -896,7 +931,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc'));
     expect(sub!.ledger.get('repo-doc')?.emittedAt).toBeTruthy();
     // The launch-scoped snapshot did not outlive its run.
-    expect(existsSync(join(draftDir, 'repo-doc-repo'))).toBe(false);
+    expect(existsSync(join(draftDir, 'repo-doc', 'repo'))).toBe(false);
   });
 
   it('a STALE repo membership never fabricates a repoRef — the launch degrades to repo-less (CREW-UX-8)', async () => {
@@ -950,8 +985,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length).toBe(1);
 
-    const outPath = join(draftDir, 'unfiled-doc-v1.html');
-    mkdirSync(draftDir, { recursive: true });
+    const outPath = join(draftDir, 'unfiled-doc', 'unfiled-doc-v1.html');
+    mkdirSync(join(draftDir, 'unfiled-doc'), { recursive: true });
     writeFileSync(outPath, '<html><body><h1>Unfiled draft</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
@@ -980,7 +1015,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
     await emitDocCreated(bus, 'spike-doc', { project_id: 'proj-7' });
     await waitFor(() => engine.launches.length === 1);
-    expect(existsSync(join(dir, 'drafts', 'spike-doc-v1.html'))).toBe(false);
+    expect(existsSync(join(dir, 'drafts', 'spike-doc', 'spike-doc-v1.html'))).toBe(false);
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() =>
       probeEvents.some(

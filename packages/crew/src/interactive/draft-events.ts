@@ -41,7 +41,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
-import { snapshotRepo } from './repo-snapshot.js';
+import { snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 
@@ -249,6 +249,20 @@ export async function resolveProjectRepo(
   }
 }
 
+/** The longest snapshot path the grounding clause will carry. NOT a truncation cap — the
+ *  clause embeds the path VERBATIM or not at all (see {@link groundablePath}): the snapshot
+ *  sits at exactly one spelling, so a flattened/truncated path would ground the worker on a
+ *  directory that does not exist (Copilot, crew#313). The budget exists for the PTY prompt
+ *  length; a dest over it degrades the launch to ungrounded, honestly narrated. */
+export const SNAPSHOT_PATH_MAX = 300;
+
+/** `true` when a snapshot path can ride the grounding clause EXACTLY as spelled: single-line
+ *  (the PTY seat runner refuses embedded newlines — and `oneLine`'s whitespace collapse would
+ *  respell the path, so it is never applied to paths) and within the prompt budget. */
+export function groundablePath(path: string): boolean {
+  return path.length <= SNAPSHOT_PATH_MAX && !/[\n\r\t]/.test(path);
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
@@ -257,6 +271,10 @@ export async function resolveProjectRepo(
  * inbox for the worker to READ — the run itself launches unbound (wicked-core#293) and cannot
  * read the live repo (wicked-core#294), so the snapshot named by this clause is the whole
  * grounding mechanism, not a nudge on top of an engine binding.
+ *
+ * `snapshotDir` is embedded VERBATIM — never flattened, never truncated (the snapshot exists
+ * at exactly this path; Copilot, crew#313). The caller guards it with {@link groundablePath}
+ * BEFORE snapshotting and skips grounding (honest degrade) when the path cannot ride.
  */
 export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir?: string): string {
   const sources =
@@ -266,7 +284,7 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
   const grounding =
     snapshotDir !== undefined
-      ? `Ground the document in the repository snapshot at ${oneLine(snapshotDir, 300)} — read it and use its real content, never placeholders. `
+      ? `Ground the document in the repository snapshot at ${snapshotDir} — read it and use its real content, never placeholders. `
       : '';
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
@@ -303,7 +321,10 @@ export interface InteractiveDraftOptions {
   heartbeatMs?: number;
   /** Ledger file (default `~/.wicked-crew/interactive-draft-ledger.json`). */
   ledgerPath?: string;
-  /** Where governed workers write finished drafts (default `~/.wicked-crew/interactive-drafts`). */
+  /** Root under which each launch gets its own per-run subdirectory (`<draftDir>/<docId>/`)
+   *  holding the deliverable and, when grounded, the repo snapshot; only that subdirectory is
+   *  declared as the run's extra write root (per-run isolation — Copilot, crew#313).
+   *  Default `~/.wicked-crew/interactive-drafts`. */
   draftDir?: string;
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
@@ -646,8 +667,14 @@ export async function startInteractiveDraftSubscriber(
       if (f.documentId === doc.documentId) return;
     }
 
-    mkdirSync(draftDir, { recursive: true });
-    const outPath = join(draftDir, `${doc.documentId}-v1.html`);
+    // Per-run ISOLATION (Copilot, crew#313): every launch gets its OWN subdirectory holding
+    // both the deliverable and (when grounded) the repo snapshot, and declares ONLY that
+    // subdirectory as its extra write root below. Declaring the shared draftDir wholesale let
+    // any draft worker read/write every other run's deliverable AND every other project's
+    // snapshot — cross-project exposure through the governance boundary itself.
+    const runDir = join(draftDir, doc.documentId);
+    mkdirSync(runDir, { recursive: true });
+    const outPath = join(runDir, `${doc.documentId}-v1.html`);
     const runId = randomUUID();
 
     // CREW-UX-8 v4: a repo-bound project's doc is grounded in a REPO SNAPSHOT — resolve the
@@ -663,25 +690,50 @@ export async function startInteractiveDraftSubscriber(
     });
 
     // The snapshot happens crew-side, AFTER the pickup narration (a big clone must not starve
-    // the UI's silence budget) and BEFORE launchRun: <draftDir>/<doc>-repo sits inside the
-    // declared extraWriteRoots, so the unbound worker can read it (write roots are readable,
-    // wicked-core#259) even though the live repo root is boundary-denied (wicked-core#294).
-    // An unsnapshotable repo (over budget, clone+copy failed) degrades HONESTLY: ungrounded
-    // launch, a visible note on the thread, and the real reason in the log.
+    // the UI's silence budget) and BEFORE launchRun: <runDir>/repo sits inside the run's OWN
+    // declared extra write root, so the unbound worker can read it (write roots are readable,
+    // wicked-core#259) even though the live repo root is boundary-denied (wicked-core#294) —
+    // and NO OTHER run can (per-run isolation, Copilot crew#313). An unsnapshotable repo (over
+    // budget, unreadable, clone+copy failed) degrades HONESTLY: ungrounded launch, a visible
+    // per-cause note on the thread, and the full reason in the log.
     let snapshotDir: string | undefined;
     if (repo !== undefined) {
-      const dest = join(draftDir, `${doc.documentId}-repo`);
-      if (snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log })) {
-        snapshotDir = dest;
-      } else {
+      const dest = join(runDir, 'repo');
+      if (!groundablePath(dest)) {
+        // The PATH itself cannot ride the grounding clause (too long for the PTY prompt
+        // budget, or multi-line) — and a truncated spelling would name a nonexistent dir, so
+        // grounding is SKIPPED before any clone happens (Copilot, crew#313).
         emitInteractive(STATUS_POSTED, {
           document_id: doc.documentId,
           state: 'working',
-          message: 'repository too large to snapshot — drafting without repo grounding',
+          message: 'snapshot path too long to hand to the worker — drafting without repo grounding',
         });
         log(
-          `[interactive-draft] doc ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted — launching ungrounded`,
+          `[interactive-draft] doc ${doc.documentId}: snapshot dest ${dest} cannot ride the grounding clause — launching ungrounded`,
         );
+      } else {
+        const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
+        if (snap.ok) {
+          snapshotDir = dest;
+        } else {
+          // Per-cause operator message (Copilot, crew#313): "too large" was previously
+          // claimed for EVERY failure — a deleted repo is not a large one.
+          const because: Record<SnapshotFailureReason, string> = {
+            'too-large': 'repository too large to snapshot',
+            'root-unreadable': 'repository path is missing or unreadable',
+            'dest-overlap': 'snapshot destination overlaps the repository',
+            'dest-unclearable': 'a stale snapshot could not be cleared',
+            'copy-failed': 'repository snapshot failed (clone and copy both errored)',
+          };
+          emitInteractive(STATUS_POSTED, {
+            document_id: doc.documentId,
+            state: 'working',
+            message: `${because[snap.reason]} — drafting without repo grounding`,
+          });
+          log(
+            `[interactive-draft] doc ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — launching ungrounded`,
+          );
+        }
       }
     }
 
@@ -703,12 +755,14 @@ export async function startInteractiveDraftSubscriber(
         // destination works (wicked-core#293) — and NO live-repo path in the task either: the
         // unbound boundary denies those reads (wicked-core#294). The grounding clause in
         // `problem` names the in-inbox snapshot instead; this ONE launch shape serves all docs.
-        // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
+        // The task text names `outPath` (inside runDir) as the deliverable, which sits OUTSIDE
         // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
-        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox
-        // so the engine widens the boundary by exactly this root (validated launch-side,
+        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the
+        // run's OWN subdirectory — never the shared draftDir (Copilot, crew#313: the wholesale
+        // declaration let one project's worker read another's snapshot and deliverables) — so
+        // the engine widens the boundary by exactly this run's inbox (validated launch-side,
         // wicked-core#259).
-        extraWriteRoots: [draftDir],
+        extraWriteRoots: [runDir],
       });
     } catch (err) {
       // A launch that never happened keeps no snapshot (a replayed frame re-snapshots fresh).
@@ -784,7 +838,14 @@ export async function startInteractiveDraftSubscriber(
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
       offCoreEvents();
-      for (const runId of [...inFlight.keys()]) endFlight(runId);
+      for (const runId of [...inFlight.keys()]) {
+        const flight = endFlight(runId);
+        // Best-effort snapshot sweep (Copilot, crew#313): a graceful shutdown with a run in
+        // flight would otherwise strand the clone forever — after restart the ledger's launch
+        // row suppresses redelivery, so no later fold ever revisits it. The engine's workers
+        // die with the daemon, so nothing is still reading the snapshot.
+        if (flight !== undefined) removeSnapshot(flight);
+      }
       await sub.stop();
     },
   };

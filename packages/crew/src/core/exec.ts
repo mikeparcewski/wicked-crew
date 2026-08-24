@@ -74,6 +74,8 @@ type ExecOpts = {
   timeout?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** Suppress the console window a child would open on Windows (git, etc.). */
+  windowsHide?: boolean;
   /** `number | undefined` on purpose: `exactOptionalPropertyTypes` would otherwise reject the very
    *  shape this module defends against, making the guard below untypeable and untestable. */
   maxBuffer?: number | undefined;

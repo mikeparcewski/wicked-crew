@@ -458,15 +458,17 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(launch.workflow).toBe(INTERACTIVE_CHAT_WORKFLOW);
     expect(launch.clisJson).toBe(SEATS);
     expect(launch.projectId).toBe('proj-7');
-    expect(launch.extraWriteRoots).toEqual([chatDir]);
     expect(launch.problem).toContain('"iter-doc"');
     expect(launch.problem).toContain('Make the intro punchier.');
 
     // The snapshot is a COPY of the current head, inside the declared write root — the worker
-    // never needs the doc workspace.
+    // never needs the doc workspace. The root is the ask's OWN per-run subdir, never the
+    // shared chatDir (per-run isolation — Copilot, crew#313).
     const key = chatKey('iter-doc', event_id, 'm-1');
-    const currentPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-current.html`);
-    const outPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
+    const runDir = join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'));
+    expect(launch.extraWriteRoots).toEqual([runDir]);
+    const currentPath = join(runDir, 'current.html');
+    const outPath = join(runDir, 'revised.html');
     expect(launch.problem).toContain(currentPath);
     expect(launch.problem).toContain(outPath);
     expect(readFileSync(currentPath, 'utf8')).toContain('data-wid="w-h1"');
@@ -575,8 +577,8 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     // Complete the run so the doc is no longer busy — a duplicate must be stopped by the
     // LEDGER, not by the serialization queue.
     const key = chatKey('iter-doc', 0, 'm-9'); // event_id irrelevant when msg id present
-    const outPath = join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
-    mkdirSync(chatDir, { recursive: true });
+    const outPath = join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html');
+    mkdirSync(join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-')), { recursive: true });
     writeFileSync(outPath, '<html><body>ok</body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: runId });
     await waitFor(() => sub!.ledger.get(key)?.emittedAt !== undefined);
@@ -630,7 +632,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     // the new version (the manifest head advances) — draining on the stale head would drop
     // the revision the user just watched land.
     const key1 = chatKey('iter-doc', 0, 'm-1');
-    const out1 = join(chatDir, `${key1.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`);
+    const out1 = join(chatDir, key1.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html');
     writeFileSync(out1, '<html><body><h1>after ask 1</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() => sub!.ledger.get(key1)?.emittedAt !== undefined);
@@ -643,8 +645,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const launch2 = engine.launches[2]!;
     expect(launch2.problem).toContain('Second ask.');
     const key2 = chatKey('iter-doc', 0, 'm-2');
-    const current2 = join(chatDir, `${key2.replace(/[^a-zA-Z0-9_-]/g, '-')}-current.html`);
+    const current2 = join(chatDir, key2.replace(/[^a-zA-Z0-9_-]/g, '-'), 'current.html');
     expect(readFileSync(current2, 'utf8')).toContain('landed after ask 1');
+    // Per-run isolation (Copilot, crew#313): ask 2's declared root is ITS dir, not ask 1's.
+    expect(launch2.extraWriteRoots).toEqual([join(chatDir, key2.replace(/[^a-zA-Z0-9_-]/g, '-'))]);
     expect(sub!.queuedCount('iter-doc')).toBe(0);
   });
 
@@ -737,7 +741,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await emitChatPosted(bus, 'iter-doc', { source_message_id: 'm-1' });
     await waitFor(() => engine.launches.length === 1);
     const key = chatKey('iter-doc', 0, 'm-1');
-    expect(existsSync(join(chatDir, `${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-revised.html`))).toBe(false);
+    expect(existsSync(join(chatDir, key.replace(/[^a-zA-Z0-9_-]/g, '-'), 'revised.html'))).toBe(false);
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
     await waitFor(() =>
       probeEvents.some(
@@ -808,25 +812,26 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
     const launch = engine.launches[0]!;
     const safeKey = chatKey('repo-doc', 0, 'm-r').replace(/[^a-zA-Z0-9_-]/g, '-');
-    // The proven unfiled launch shape, exactly:
+    const runDir = join(chatDir, safeKey);
+    // The proven unfiled launch shape, exactly (per-run subdir — Copilot, crew#313):
     expect('repoRef' in launch).toBe(false);
     expect(launch.problem).not.toContain('Ground the revision');
     expect(launch.problem).not.toContain(repoRoot); // the live root never reaches the task
-    expect(launch.problem).toContain(`read it first: ${join(chatDir, `${safeKey}-current.html`)}`);
+    expect(launch.problem).toContain(`read it first: ${join(runDir, 'current.html')}`);
     expect(launch.problem).toContain(
-      `exactly this absolute file path: ${join(chatDir, `${safeKey}-revised.html`)}`,
+      `exactly this absolute file path: ${join(runDir, 'revised.html')}`,
     );
-    expect(launch.extraWriteRoots).toEqual([chatDir]);
+    expect(launch.extraWriteRoots).toEqual([runDir]);
     expect(launch.problem).not.toMatch(/[\n\r]/);
     // No repo snapshot is ever created in the inbox…
-    expect(existsSync(join(chatDir, `${safeKey}-repo`))).toBe(false);
+    expect(existsSync(join(runDir, 'repo'))).toBe(false);
     // …and filing is unaffected by the revert: the run is still project-bound.
     expect(launch.projectId).toBe('proj-repo');
     expect(filed).toEqual([[launch.sessionId, 'proj-repo']]);
 
     // The full loop still closes through the ONE standard finalize: inbox file in, inbox
     // path announced on the draft wire.
-    const inboxPath = join(chatDir, `${safeKey}-revised.html`);
+    const inboxPath = join(runDir, 'revised.html');
     writeFileSync(inboxPath, '<html><body><h1>ungrounded revision</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));

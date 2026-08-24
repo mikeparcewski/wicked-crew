@@ -302,8 +302,11 @@ export interface InteractiveChatOptions {
   heartbeatMs?: number;
   /** Ledger file (default `~/.wicked-crew/interactive-chat-ledger.json`). */
   ledgerPath?: string;
-  /** Where head snapshots land and workers write revised documents
-   *  (default `~/.wicked-crew/interactive-chats`). */
+  /** Root under which each ask gets its own per-run subdirectory (`<chatDir>/<safeKey>/`)
+   *  holding the head snapshot and the revised deliverable; only that subdirectory is declared
+   *  as the run's extra write root (per-run isolation — Copilot, crew#313: declaring the shared
+   *  dir wholesale let one doc's worker read every other doc's head and revision).
+   *  Default `~/.wicked-crew/interactive-chats`. */
   chatDir?: string;
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
@@ -696,14 +699,17 @@ export async function startInteractiveChatSubscriber(
       return;
     }
 
-    mkdirSync(chatDir, { recursive: true });
-    // Both files live under the ONE declared write root: the worker reads the snapshot and
-    // writes the deliverable without ever touching the doc workspace (crew#263 shape; write
-    // roots are readable, wicked-core#259). Names derive from the validated slug + our own
-    // key grammar — never from free bus text.
+    // Both files live under the ONE declared write root — the run's OWN per-ask subdirectory,
+    // never the shared chatDir (per-run isolation — Copilot, crew#313: the wholesale
+    // declaration let any chat worker read every other doc's head snapshot and revision): the
+    // worker reads the snapshot and writes the deliverable without ever touching the doc
+    // workspace (crew#263 shape; write roots are readable, wicked-core#259). Names derive from
+    // the validated slug + our own key grammar — never from free bus text.
     const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '-');
-    const currentPath = join(chatDir, `${safeKey}-current.html`);
-    const outPath = join(chatDir, `${safeKey}-revised.html`);
+    const runDir = join(chatDir, safeKey);
+    mkdirSync(runDir, { recursive: true });
+    const currentPath = join(runDir, 'current.html');
+    const outPath = join(runDir, 'revised.html');
     copyFileSync(doc.headHtmlPath, currentPath);
     const runId = randomUUID();
 
@@ -737,7 +743,7 @@ export async function startInteractiveChatSubscriber(
         // to land (the CREW-UX-5 verification). So bound asks launch exactly like unfiled ones:
         // head-copy in the external inbox, the ONE write root below, projectId still filed.
         // Revision grounding returns when wicked-core#293 or #294 is fixed.
-        extraWriteRoots: [chatDir],
+        extraWriteRoots: [runDir],
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the

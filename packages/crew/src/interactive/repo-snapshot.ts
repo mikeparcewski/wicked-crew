@@ -14,22 +14,40 @@
  *
  * Mechanism, in preference order:
  *  1. `git clone --depth 1 --no-hardlinks file://<root> <dest>` — a shallow LOCAL clone:
- *     one commit of history, tracked content only (no node_modules, no build junk),
- *     `--no-hardlinks` so the snapshot never aliases the live object store.
- *  2. A plain file copy that skips `.git`/`node_modules` — for roots that are not git repos
- *     (or where git itself is unavailable/failing).
+ *     one commit of history, `--no-hardlinks` so the snapshot never aliases the live object
+ *     store. Because a clone checks out EVERY tracked path, the result is then swept: tracked
+ *     `node_modules` trees and every symlink are removed (see below), and the swept snapshot
+ *     is re-measured against the budget before it counts as usable.
+ *  2. A plain file copy that skips `.git`/`node_modules` AND symlinks — for roots that are not
+ *     git repos (or where git itself is unavailable/failing).
  *
- * The snapshot is CAPPED: a working tree whose (`.git`/`node_modules`-excluded) size exceeds
- * the budget is not snapshotted at all — the caller degrades honestly to an ungrounded launch
- * with a visible status note, never a truncated half-repo the worker would mistake for the
- * whole. Snapshots are launch-scoped: the seams remove them when the run reaches a terminal
- * state (finalize/failure folds), so the inbox never accretes dead clones.
+ * SYMLINKS NEVER SURVIVE into a snapshot, on either path (Copilot, crew#313): the snapshot
+ * lands inside the worker-visible inbox, so a repo symlink pointing OUTSIDE the repo would
+ * hand the worker readable reach beyond the governance boundary — and a link to a huge tree
+ * would bypass the size cap the preflight walk (which skips links) enforced. The copy filter
+ * refuses them and the post-clone sweep deletes the ones a clone checked out.
+ *
+ * The snapshot is CAPPED: a working tree whose (`.git`/`node_modules`/symlink-excluded) size
+ * exceeds the budget is not snapshotted at all — the caller degrades honestly to an ungrounded
+ * launch with a visible status note, never a truncated half-repo the worker would mistake for
+ * the whole. Snapshots are launch-scoped: the seams remove them when the run reaches a
+ * terminal state (finalize/failure folds), so the inbox never accretes dead clones.
+ *
+ * OVERLAP REFUSAL: a configured draft dir could place `dest` inside the live repo (or a repo
+ * could be registered AT the inbox). Clearing a stale dest with `rm -rf` before noticing that
+ * would DELETE live repository content — so source/dest containment is checked (realpath'd,
+ * both directions) BEFORE anything is removed, and any overlap refuses the snapshot outright.
+ *
+ * Fully ASYNC on purpose: this runs inline in a bus handler whose process also feeds ~15s UI
+ * heartbeats — a synchronous clone/copy of a big repo would starve the event loop and the
+ * canvas would read frozen (Copilot, crew#313). All I/O is fs/promises; the clone goes through
+ * the daemon's capped exec chokepoint (`execCapped`, FINDING-016).
  */
 
-import { cpSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { cp, lstat, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { execCapped } from '../core/exec.js';
 
 /** Default snapshot budget (~200MB). A repo whose working tree exceeds this is not
  *  snapshotted — the launch proceeds ungrounded, honestly narrated. */
@@ -39,18 +57,37 @@ export const REPO_SNAPSHOT_MAX_BYTES = 200 * 1024 * 1024;
  *  fallback wants working files only) and dependency trees (huge, reproducible, ungrounding). */
 const SNAPSHOT_SKIP = new Set(['.git', 'node_modules']);
 
+/** Why a snapshot was refused — each maps to a DIFFERENT operator-facing degrade message in
+ *  the calling seam, so "too large" is never claimed about a repo that was merely unreadable
+ *  (Copilot, crew#313). */
+export type SnapshotFailureReason =
+  /** `rootPath` does not exist or is not a directory. */
+  | 'root-unreadable'
+  /** The tree (preflight) — or the swept clone (post-check) — exceeds the byte budget. */
+  | 'too-large'
+  /** `rootPath` and `dest` overlap (either direction) — clearing/cloning would eat live data. */
+  | 'dest-overlap'
+  /** The stale `dest` could not be cleared. */
+  | 'dest-unclearable'
+  /** Both the git clone and the file-copy fallback failed. */
+  | 'copy-failed';
+
+/** The honest outcome of {@link snapshotRepo}: usable snapshot, or the reason there is none. */
+export type SnapshotResult = { ok: true } | { ok: false; reason: SnapshotFailureReason };
+
 /** `true` when the tree under `root` exceeds `cap` bytes, skipping {@link SNAPSHOT_SKIP} dirs
- *  and symlinks (a link to a huge tree — or out of the repo — must not distort the estimate),
- *  with an early exit the moment the cap is passed so a 10GB monorepo is never fully walked
- *  just to learn it is too big. */
-function treeExceeds(root: string, cap: number): boolean {
+ *  and symlinks (a link to a huge tree — or out of the repo — must not distort the estimate;
+ *  the copy filter and post-clone sweep exclude exactly the same set, so the preflight counts
+ *  what a snapshot would actually hold), with an early exit the moment the cap is passed so a
+ *  10GB monorepo is never fully walked just to learn it is too big. */
+async function treeExceeds(root: string, cap: number): Promise<boolean> {
   let total = 0;
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries;
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       continue; // unreadable subdir — the clone/copy will surface a real error if it matters
     }
@@ -60,7 +97,7 @@ function treeExceeds(root: string, cap: number): boolean {
         if (!SNAPSHOT_SKIP.has(entry.name)) stack.push(join(dir, entry.name));
       } else if (entry.isFile()) {
         try {
-          total += statSync(join(dir, entry.name)).size;
+          total += (await stat(join(dir, entry.name))).size;
         } catch {
           // raced deletion — ignore
         }
@@ -69,6 +106,60 @@ function treeExceeds(root: string, cap: number): boolean {
     }
   }
   return false;
+}
+
+/** Post-clone sweep: delete every symlink (junctions included — boundary escape, cap bypass)
+ *  and every {@link SNAPSHOT_SKIP} tree a `git clone` checked out (a clone materializes ALL
+ *  tracked paths — tracked `node_modules` ignores the skip list otherwise). The clone's own
+ *  top-level `.git` (its shallow object store) is the one deliberate survivor. */
+async function sweepSnapshot(root: string): Promise<void> {
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const p = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        await rm(p, { recursive: true, force: true });
+      } else if (entry.isDirectory()) {
+        if (dir === root && entry.name === '.git') continue; // the shallow clone's own store
+        if (SNAPSHOT_SKIP.has(entry.name)) {
+          await rm(p, { recursive: true, force: true });
+        } else {
+          stack.push(p);
+        }
+      }
+    }
+  }
+}
+
+/** Resolve `p` through its nearest EXISTING ancestor's realpath (the path itself may not exist
+ *  yet — a fresh dest usually does not), so symlinked parents cannot hide an overlap. */
+async function realpathNearest(p: string): Promise<string> {
+  let existing = resolve(p);
+  const tail: string[] = [];
+  // Walk up until something exists; dirname() at the root returns itself, which always exists.
+  for (;;) {
+    try {
+      const real = await realpath(existing);
+      return tail.length > 0 ? join(real, ...tail) : real;
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) return existing; // unreachable in practice — a root always resolves
+      tail.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+/** `true` when `a` and `b` name the same path or one contains the other. */
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 }
 
 /** Options for {@link snapshotRepo}. */
@@ -81,51 +172,86 @@ export interface SnapshotRepoOptions {
 
 /**
  * Materialize a snapshot of the repo at `rootPath` into `dest` (creating it), for a worker to
- * READ as grounding context. Returns `true` when `dest` now holds a usable snapshot, `false`
- * when it does not — too large, missing root, both clone and copy failed — in which case any
- * partial `dest` has been removed and the caller must launch UNGROUNDED (and say so on the
- * thread). Never throws: a grounding failure must degrade the launch, not kill it.
+ * READ as grounding context. Resolves `{ok: true}` when `dest` now holds a usable snapshot,
+ * `{ok: false, reason}` when it does not — see {@link SnapshotFailureReason}; the reason lets
+ * the caller narrate the RIGHT degrade (too large ≠ unreadable ≠ clone failed) — in which case
+ * any partial `dest` has been removed and the caller must launch UNGROUNDED (and say so on the
+ * thread). Never rejects: a grounding failure must degrade the launch, not kill it.
  *
  * The clone is the git-preferred path, so on a real repo the snapshot is HEAD's tracked
- * content (uncommitted/untracked files are not included); the copy fallback takes the working
- * tree as-is minus `.git`/`node_modules`.
+ * content (uncommitted/untracked files are not included) minus swept symlinks/`node_modules`;
+ * the copy fallback takes the working tree as-is minus `.git`/`node_modules`/symlinks.
  */
-export function snapshotRepo(rootPath: string, dest: string, opts: SnapshotRepoOptions = {}): boolean {
+export async function snapshotRepo(
+  rootPath: string,
+  dest: string,
+  opts: SnapshotRepoOptions = {},
+): Promise<SnapshotResult> {
   const log = opts.log ?? (() => {});
   const maxBytes = opts.maxBytes ?? REPO_SNAPSHOT_MAX_BYTES;
 
-  // A stale snapshot (crashed prior run, replayed key) never survives into a new launch.
   try {
-    rmSync(dest, { recursive: true, force: true });
-  } catch (err) {
-    log(`[repo-snapshot] could not clear ${dest}: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
-
-  try {
-    if (!statSync(rootPath).isDirectory()) {
+    if (!(await stat(rootPath)).isDirectory()) {
       log(`[repo-snapshot] repo root ${rootPath} is not a directory — no snapshot`);
-      return false;
+      return { ok: false, reason: 'root-unreadable' };
     }
   } catch {
     log(`[repo-snapshot] repo root ${rootPath} does not exist — no snapshot`);
-    return false;
+    return { ok: false, reason: 'root-unreadable' };
   }
 
-  if (treeExceeds(rootPath, maxBytes)) {
+  // Overlap refusal comes BEFORE the stale-dest clear (Copilot, crew#313): with a configurable
+  // draft dir, `dest` can sit inside the registered repo (or vice versa) — clearing it first
+  // would `rm -rf` live repository content, and a copy could recurse into its own output.
+  try {
+    const realRoot = await realpath(rootPath);
+    const realDest = await realpathNearest(dest);
+    if (pathsOverlap(realRoot, realDest)) {
+      log(
+        `[repo-snapshot] refusing snapshot: destination ${dest} (${realDest}) overlaps the repo root ${rootPath} (${realRoot})`,
+      );
+      return { ok: false, reason: 'dest-overlap' };
+    }
+  } catch (err) {
+    log(
+      `[repo-snapshot] could not resolve ${rootPath} / ${dest} for the overlap check: ${
+        err instanceof Error ? err.message : String(err)
+      } — no snapshot`,
+    );
+    return { ok: false, reason: 'root-unreadable' };
+  }
+
+  if (await treeExceeds(rootPath, maxBytes)) {
     log(`[repo-snapshot] repo at ${rootPath} exceeds the ${maxBytes}-byte snapshot budget — no snapshot`);
-    return false;
+    return { ok: false, reason: 'too-large' };
+  }
+
+  // A stale snapshot (crashed prior run, replayed key) never survives into a new launch.
+  try {
+    await rm(dest, { recursive: true, force: true });
+  } catch (err) {
+    log(`[repo-snapshot] could not clear ${dest}: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, reason: 'dest-unclearable' };
   }
 
   // Preferred: shallow local clone. `file://` (not a plain path) is what makes --depth honored
   // on a local source; pathToFileURL keeps the URL spelling right on Windows too.
   try {
-    execFileSync('git', ['clone', '--depth', '1', '--no-hardlinks', pathToFileURL(rootPath).href, dest], {
-      stdio: 'pipe',
+    await execCapped('git', ['clone', '--depth', '1', '--no-hardlinks', pathToFileURL(rootPath).href, dest], {
       timeout: 120_000,
       windowsHide: true,
     });
-    return true;
+    // The clone checked out EVERY tracked path — sweep what the snapshot contract excludes
+    // (tracked node_modules, all symlinks), then verify the SWEPT tree against the budget:
+    // the preflight measured the source with these exclusions, so a clean sweep normally
+    // passes, but the honest gate is what actually landed on disk.
+    await sweepSnapshot(dest);
+    if (await treeExceeds(dest, maxBytes)) {
+      log(`[repo-snapshot] clone of ${rootPath} exceeds the ${maxBytes}-byte budget after sweep — no snapshot`);
+      await rm(dest, { recursive: true, force: true }).catch(() => {});
+      return { ok: false, reason: 'too-large' };
+    }
+    return { ok: true };
   } catch (err) {
     log(
       `[repo-snapshot] git clone of ${rootPath} failed (${
@@ -135,23 +261,28 @@ export function snapshotRepo(rootPath: string, dest: string, opts: SnapshotRepoO
   }
 
   try {
-    rmSync(dest, { recursive: true, force: true }); // whatever the failed clone left behind
-    cpSync(rootPath, dest, {
+    await rm(dest, { recursive: true, force: true }); // whatever the failed clone left behind
+    await cp(rootPath, dest, {
       recursive: true,
-      filter: (src) => !SNAPSHOT_SKIP.has(basename(src)),
+      filter: async (src) => {
+        if (SNAPSHOT_SKIP.has(basename(src))) return false;
+        try {
+          // Symlinks NEVER ride into the worker-visible inbox: a link out of the repo is a
+          // boundary escape, a link to a huge tree a cap bypass (Copilot, crew#313).
+          return !(await lstat(src)).isSymbolicLink();
+        } catch {
+          return false; // raced deletion / unreadable — leave it out
+        }
+      },
     });
-    return true;
+    return { ok: true };
   } catch (err) {
     log(
       `[repo-snapshot] file copy of ${rootPath} failed too (${
         err instanceof Error ? err.message : String(err)
       }) — no snapshot`,
     );
-    try {
-      rmSync(dest, { recursive: true, force: true }); // never leave a partial snapshot behind
-    } catch {
-      // best-effort
-    }
-    return false;
+    await rm(dest, { recursive: true, force: true }).catch(() => {}); // never leave a partial snapshot
+    return { ok: false, reason: 'copy-failed' };
   }
 }
