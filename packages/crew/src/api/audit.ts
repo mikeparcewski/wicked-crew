@@ -30,6 +30,9 @@ export interface AuditReadFilter {
   limit?: number;
 }
 
+/** `readAll`'s filter: no limit — the whole point is that nothing gets trimmed. */
+export type AuditScanFilter = Omit<AuditReadFilter, 'limit'>;
+
 export class AuditLog {
   private chain: Promise<void> = Promise.resolve();
   private dirReady = false;
@@ -94,6 +97,25 @@ export class AuditLog {
    * still answers.
    */
   async read(filter?: AuditReadFilter): Promise<AuditEntry[]> {
+    const entries = await this.scan(filter);
+    const limit = Math.min(Math.max(filter?.limit ?? 200, 1), 1000);
+    return entries.slice(0, limit);
+  }
+
+  /**
+   * Read the trail EXHAUSTIVELY, newest first — no read cap. The hydrate path
+   * for the boot-time indexes (`RetryIndex`, `GuidanceIndex`): durable facts
+   * like retry lineage must not vanish because 1000+ newer launches landed on
+   * top of them (BRIEF-UX-002 C5). Same cost class as `read` — that already
+   * parses the whole file and only trims the returned slice — so this is a
+   * one-time full-file scan at boot, measured at ~19ms on a 19k-line live trail.
+   */
+  readAll(filter?: AuditScanFilter): Promise<AuditEntry[]> {
+    return this.scan(filter);
+  }
+
+  /** The shared full-file parse: every matching entry, newest first, uncapped. */
+  private async scan(filter?: AuditScanFilter): Promise<AuditEntry[]> {
     if (this.disabled) return [];
     await this.flush();
     let raw: string;
@@ -117,7 +139,6 @@ export class AuditLog {
       }
     }
     entries.reverse(); // file order is append order; the API answers newest first
-    const limit = Math.min(Math.max(filter?.limit ?? 200, 1), 1000);
-    return entries.slice(0, limit);
+    return entries;
   }
 }
