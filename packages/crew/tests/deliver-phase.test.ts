@@ -20,7 +20,8 @@ describe('deliverPrScript (the hardened field script)', () => {
   const script = deliverPrScript();
 
   it('derives the branch from the worktree run-id with a current-branch fallback', () => {
-    expect(script).toContain('B="wicked/$(basename "$PWD")"');
+    expect(script).toContain('R=$(basename "$PWD")');
+    expect(script).toContain('B="wicked/$R"');
     expect(script).toContain('git branch --show-current');
   });
 
@@ -50,7 +51,63 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('git push -u origin "$B"');
     expect(script).toContain('gh pr create --head "$B" --fill');
     const lines = script.trimEnd().split('\n');
-    expect(lines[lines.length - 1]).toContain('tail -1');
+    expect(lines[lines.length - 1]).toBe('echo "$URL"');
+  });
+
+  // crew#317 — the three defects, pinned as script properties. The BEHAVIOUR of each is driven
+  // for real against temp git repos in deliver-script-exec.test.ts; these keep the shape from
+  // regressing without paying for a git repo per assertion.
+  it('STAGES AND COMMITS the run’s work before it pushes anything', () => {
+    expect(script).toContain('git add -A');
+    expect(script).toContain('git diff --cached --quiet || git commit -q -m "$M"');
+    // The commit precedes both the rebase (which refuses a dirty tree) and the push.
+    expect(script.indexOf('git add -A')).toBeLessThan(script.indexOf('git rebase'));
+    expect(script.indexOf('git commit')).toBeLessThan(script.indexOf('git push -u origin'));
+    // Author identity is the repo's own — crew never bakes one in.
+    expect(script).not.toContain('user.email');
+    expect(script).not.toContain('user.name');
+  });
+
+  it('names the run AND its intent in the commit subject, single-line-safe', () => {
+    const withIntent = deliverPrScript('add the attention-reason helper');
+    expect(withIntent).toContain("I='add the attention-reason helper'");
+    expect(withIntent).toContain('M="wicked-crew run $R: $I"');
+    // No intent ⇒ the run id alone, never a dangling separator.
+    expect(script).toContain("I=''");
+    expect(script).toContain('else M="wicked-crew run $R"');
+    // A hostile intent can neither escape the single-quoted assignment nor add a line.
+    const hostile = deliverPrScript("x'; rm -rf /; echo '\n\nsecond line");
+    expect(hostile).not.toContain("rm -rf /'");
+    const assignment = hostile.split('\n').filter((l) => l.startsWith("I='"));
+    expect(assignment).toHaveLength(1);
+    expect(assignment[0]).toBe("I='x; rm -rf /; echo second line'");
+  });
+
+  it('FAILS LOUDLY with nothing pushed when there is nothing to deliver', () => {
+    expect(script).toContain('deliver: nothing to deliver — the run produced no committed change');
+    // The refusal is asserted BEFORE the push, and it exits non-zero.
+    const nothing = script.indexOf('nothing to deliver');
+    expect(nothing).toBeGreaterThan(-1);
+    expect(nothing).toBeLessThan(script.indexOf('git push -u origin'));
+    expect(script).toMatch(/nothing to deliver[^\n]*nothing was pushed"; exit 1; \}/);
+  });
+
+  it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {
+    expect(script).toContain('if ! OUT=$(gh pr create --head "$B" --fill 2>&1); then');
+    expect(script).toContain('deliver: gh pr create failed for $B — no PR was opened');
+    // The gh invocation must not be piped at all: the phase's verdict is gh's own status.
+    const ghLine = script.split('\n').find((l) => l.includes('gh pr create'))!;
+    expect(ghLine).not.toContain('| tail');
+  });
+
+  it('RE-DERIVES done: a real PR URL and a branch ahead of the remote default', () => {
+    expect(script).toContain("grep -Eo 'https://[^[:space:]]+/pull/[0-9]+'");
+    expect(script).toContain('exited 0 but produced no PR URL');
+    expect(script).toContain('P=$(git rev-list --count "$D".."origin/$B")');
+    expect(script).toContain('is not ahead of $D on the remote after the push');
+    // Both assertions gate the final URL line.
+    const lines = script.split('\n');
+    expect(lines.indexOf('echo "$URL"')).toBe(lines.length - 1);
   });
 
   it('bakes NO account name into crew code — the guard is env-driven (GH_ACCOUNT)', () => {
@@ -63,8 +120,11 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toMatch(/if \[ -n "\$\{GH_ACCOUNT:-\}" \]/);
   });
 
-  it('fails the phase when gh fails despite the tail pipe (pipefail)', () => {
-    expect(script).toContain('set -euo pipefail');
+  // crew#317: the overlay def that shipped run d1bc72c2 began `set -e` with NO pipefail, which
+  // is why its `gh … | tail -1` reported tail's status and the phase passed on a failed PR. This
+  // script has always carried pipefail; it keeps it, and no longer depends on it for the verdict.
+  it('keeps `set -euo pipefail` as line 1 — the overlay that lost a gh failure had only `set -e`', () => {
+    expect(script.split('\n')[0]).toBe('set -euo pipefail');
   });
 });
 
@@ -83,11 +143,30 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
     // The fields core's serde would default are spelled out so the def satisfies crew's own
     // WorkflowDef type without casts.
     expect(phase.gate_type).toBeNull();
-    expect(phase.verified_evidence).toBe(false);
     expect(phase.required_deliverables).toEqual([]);
     expect(phase.skill_ref).toBeNull();
     expect(phase.allowed_skills).toEqual([]);
+  });
+
+  // crew#317 — the delivering phase was the one phase nothing re-derived (`verified_evidence:
+  // false`, `validator_pin: null`, `governed=false`). It now declares verified_evidence, which
+  // core's `enforce_verified_evidence` arms AT REGISTRATION with the built-in evidence floor
+  // (EVIDENCE_FLOOR_PIN — "the run left a change in its worktree"). The pin stays null on OUR
+  // side deliberately: `attach_pinned_validators` is fail-closed on a pin that is not vaulted,
+  // and crew has no provision/approve surface, so a crew-minted pin would bail every run.
+  it('declares verified_evidence so the engine floors it, and mints no pin of its own', () => {
+    const phase = deliverPrPhase(['review']);
+    expect(phase.verified_evidence).toBe(true);
     expect(phase.validator_pin).toBeNull();
+  });
+
+  it('threads the run intent into the script it carries', () => {
+    const phase = deliverPrPhase(['review'], 'ship the deliver fix');
+    expect(phase.executor).toEqual({
+      type: 'tool',
+      cmd: ['bash', '-lc', deliverPrScript('ship the deliver fix')],
+    });
+    expect((phase.executor as { cmd: string[] }).cmd[2]).toContain("I='ship the deliver fix'");
   });
 });
 

@@ -76,7 +76,6 @@ const INTENT_SUBJECT_CAP = 72;
  */
 function commitSubjectIntent(intent: string | undefined): string {
   return (intent ?? '')
-    // eslint-disable-next-line no-control-regex -- stripping control characters IS the point
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/'/g, '')
     .replace(/\s+/g, ' ')
