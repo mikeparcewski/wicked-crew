@@ -35,8 +35,8 @@
  *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
-import { mkdirSync, existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
@@ -116,7 +116,7 @@ export const INTERACTIVE_DRAFT_WORKFLOW_DEF: WorkflowDef = {
       id: 'draft',
       kind: 'build',
       instructions:
-        'Using the outline from the prior phase, write the COMPLETE first-draft HTML document and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: a full self-contained HTML document (inline CSS, no external network resources, no build step); honor the requested style/format and the brief; keep every fact grounded in the brief/sources — never fabricate figures; do NOT add data-wid attributes anywhere (the wicked-interactive service instruments its own anchors); keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
+        'Using the outline from the prior phase, write the COMPLETE first-draft HTML document and SAVE it to the output file named in the task — an absolute path, or a path relative to the root of the repository working tree you are in when the task names a repo-relative path — creating parent directories if needed and overwriting if present; the file on disk is the deliverable, so write it before you finish and end your reply with the path you wrote. Contract: a full self-contained HTML document (inline CSS, no external network resources, no build step); honor the requested style/format and the brief; keep every fact grounded in the brief/sources — never fabricate figures; do NOT add data-wid attributes anywhere (the wicked-interactive service instruments its own anchors); keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
@@ -230,11 +230,96 @@ export async function resolveProjectRepo(
 }
 
 /**
+ * The in-repo deliverable inbox for REPO-BOUND governed runs (wicked-core#293): declaring an
+ * `extraWriteRoots` OUTSIDE the repo on a run whose cwd is a repo worktree kills the worker's
+ * Write to that root deterministically BEFORE any hook fires — the exact combination v1 of
+ * CREW-UX-8 shipped. So a bound run's deliverable lands INSIDE the worktree instead (this dir,
+ * repo-relative — in-repo writes provably work), and crew copies it into the durable external
+ * inbox at finalize, before the announce. Unbound runs keep the external-inbox shape (which
+ * works: no repo worktree in play).
+ */
+export const IN_REPO_DELIVERABLE_DIR = '.wicked-drafts';
+
+/** The repo-relative path a REPO-BOUND run's task names as its deliverable (wicked-core#293). */
+export function inRepoDeliverablePath(fileName: string): string {
+  return `${IN_REPO_DELIVERABLE_DIR}/${fileName}`;
+}
+
+/**
+ * Resolve the worktree a run executed in — the run DTO carries `workdir` on the wire
+ * (`AgentSession.workdir`, populated by the engine for repo-bound runs), and
+ * `adapter.sessionsDetail()` is its daemon-side source. `undefined` when the run is unknown,
+ * has no workdir (repo-less), or the adapter cannot answer — callers must treat that as
+ * "the deliverable cannot be claimed", never guess a path.
+ */
+export async function resolveRunWorkdir(
+  adapter: CoreAdapter,
+  runId: string,
+  log?: (message: string) => void,
+): Promise<string | undefined> {
+  try {
+    const views = await adapter.sessionsDetail();
+    const workdir = views.find((v) => v.session.id === runId)?.session.workdir;
+    return typeof workdir === 'string' && workdir.length > 0 ? workdir : undefined;
+  } catch (err) {
+    log?.(
+      `[interactive] could not resolve run ${runId}'s workdir: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Claim a REPO-BOUND run's deliverable (wicked-core#293 finalize half): resolve the run's
+ * worktree, then COPY `repoRelPath` out of it into the durable `destPath` — BEFORE anything is
+ * announced, so the bridge never depends on a worktree the engine may reap. Shared by the
+ * draft and chat seams. Returns `{ok: false, reason}` (never throws) when the worktree cannot
+ * be resolved, the file is missing/empty, or the copy fails — the caller turns that into the
+ * honest error status instead of announcing a phantom deliverable.
+ */
+export async function claimWorktreeDeliverable(
+  adapter: CoreAdapter,
+  runId: string,
+  repoRelPath: string,
+  destPath: string,
+  log?: (message: string) => void,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const workdir = await resolveRunWorkdir(adapter, runId, log);
+  if (workdir === undefined) {
+    return { ok: false, reason: `could not resolve the run's worktree to collect ${repoRelPath}` };
+  }
+  const src = join(workdir, repoRelPath);
+  let srcOk = false;
+  try {
+    srcOk = existsSync(src) && statSync(src).size > 0;
+  } catch {
+    srcOk = false;
+  }
+  if (!srcOk) {
+    return { ok: false, reason: `no deliverable file at ${src} (missing or empty)` };
+  }
+  try {
+    mkdirSync(dirname(destPath), { recursive: true });
+    copyFileSync(src, destPath);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `could not copy ${src} to ${destPath}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
- * the absolute path the finished HTML must land at. When the doc's project is repo-bound
- * (CREW-UX-8), a SHORT grounding clause names the repo — the engine binds the run into it via
- * `repoRef`, but the worker only reads it when the task says to (the placeholder-content bug).
+ * the path the finished HTML must land at. When the doc's project is repo-bound (CREW-UX-8),
+ * a SHORT grounding clause names the repo — the engine binds the run into it via `repoRef`,
+ * but the worker only reads it when the task says to (the placeholder-content bug) — and
+ * `outPath` is the REPO-RELATIVE deliverable path (wicked-core#293: the worker writes inside
+ * its worktree; crew copies the file out at finalize). Unbound: `outPath` is absolute.
  */
 export function draftProblem(doc: SourceDocCreated, outPath: string, repo?: ProjectRepo): string {
   const sources =
@@ -246,10 +331,14 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, repo?: Proj
     repo !== undefined
       ? `Ground the document in the repository at ${oneLine(repo.rootPath, 300)} — read it and use its real content, never placeholders. `
       : '';
+  const destination =
+    repo !== undefined
+      ? `The finished draft MUST be written INSIDE the repository working tree you are in, at exactly this path relative to its root: ${outPath}`
+      : `The finished draft MUST be written to exactly this absolute file path: ${outPath}`;
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
     `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}` +
-    `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
+    destination
   );
 }
 
@@ -307,7 +396,13 @@ export interface InteractiveDraftSubscription {
 
 interface InFlight {
   documentId: string;
+  /** The durable inbox path the announce names — ALWAYS external (`draftDir`). */
   outPath: string;
+  /** Set on REPO-BOUND runs (wicked-core#293): the repo-relative path the worker wrote inside
+   *  its worktree; finalize copies it into `outPath` before announcing. */
+  repoRelPath?: string;
+  /** Guards the async finalize against a redelivered terminal event (double copy/announce). */
+  finalizing?: boolean;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   heartbeat: ReturnType<typeof setInterval>;
@@ -441,6 +536,10 @@ export async function startInteractiveDraftSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
+    // Finalize is async (the workdir resolution + copy, wicked-core#293): the flight stays in
+    // the map while it runs — so the chat seam's isDocBusy wiring still sees the doc busy — and
+    // this guard makes a redelivered terminal event a no-op instead of a double finalize.
+    if (flight.finalizing === true) return;
 
     // Narration ladder (#user-feedback 2026-08-14): the heartbeat repeats the LATEST line, and
     // the interactive transcript dedups consecutive repeats — so the more the line ADVANCES with
@@ -511,8 +610,19 @@ export async function startInteractiveDraftSubscriber(
     }
 
     if (event.type === 'sessionCompleted') {
-      endFlight(runId);
-      finalize(flight, runId);
+      flight.finalizing = true;
+      clearInterval(flight.heartbeat);
+      void finalize(flight, runId)
+        .catch((err) => {
+          log(
+            `[interactive-draft] finalize for run ${runId} threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        })
+        .finally(() => {
+          inFlight.delete(runId);
+        });
       return;
     }
 
@@ -530,8 +640,25 @@ export async function startInteractiveDraftSubscriber(
     }
   });
 
-  function finalize(flight: InFlight, runId: string): void {
+  async function finalize(flight: InFlight, runId: string): Promise<void> {
     const { documentId, outPath } = flight;
+    // REPO-BOUND runs (wicked-core#293): the worker wrote INSIDE the run's worktree, so copy
+    // the file into the durable inbox BEFORE announcing — the bridge must never depend on a
+    // worktree the engine may reap, and the announce path stays the inbox path the service
+    // already reads. The announce leg below is byte-identical to the unbound path.
+    if (flight.repoRelPath !== undefined) {
+      const claim = await claimWorktreeDeliverable(adapter, runId, flight.repoRelPath, outPath, log);
+      if (!claim.ok) {
+        ledger.recordFailure(documentId);
+        emitInteractive(STATUS_POSTED, {
+          document_id: documentId,
+          state: 'error',
+          message: `The crew run completed but its draft could not be collected from the run's worktree (run ${runId}): ${claim.reason}.`,
+        });
+        log(`[interactive-draft] run ${runId} completed but the worktree deliverable was not claimable: ${claim.reason}`);
+        return;
+      }
+    }
     let ok = false;
     try {
       ok = existsSync(outPath) && statSync(outPath).size > 0;
@@ -604,6 +731,13 @@ export async function startInteractiveDraftSubscriber(
     // and repo-less projects resolve to `undefined` and launch exactly as before.
     const repo =
       doc.projectId !== undefined ? await resolveProjectRepo(adapter, doc.projectId, log) : undefined;
+    // wicked-core#293: a REPO-BOUND run's deliverable moves INSIDE the run's worktree (the
+    // task names this repo-relative path; in-repo writes provably work), because declaring an
+    // external write root on a repo-worktree run kills the worker's Write before any hook
+    // fires. Finalize copies the file from the worktree into `outPath` (the durable inbox)
+    // before the announce, so the announce path is unchanged for the service.
+    const repoRelPath =
+      repo !== undefined ? inRepoDeliverablePath(`${doc.documentId}-v1.html`) : undefined;
 
     emitInteractive(STATUS_POSTED, {
       document_id: doc.documentId,
@@ -613,7 +747,7 @@ export async function startInteractiveDraftSubscriber(
 
     try {
       await adapter.launchRun({
-        problem: draftProblem(doc, outPath, repo),
+        problem: draftProblem(doc, repoRelPath ?? outPath, repo),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
@@ -627,12 +761,14 @@ export async function startInteractiveDraftSubscriber(
         // CREW-UX-8: bind the run into the project's repo so the worker can actually read the
         // code it is asked to document. Never fabricated — only a verified `crew.repo` member.
         ...(repo !== undefined ? { repoRef: repo.repoRef } : {}),
-        // The task text names `outPath` (inside draftDir) as the deliverable, which sits OUTSIDE
-        // the unit's sandbox — on the wrapped-CLI path the boundary denied that exact write and
-        // failed the run AFTER the draft was produced (crew#263, run eed69dfa). Declare the inbox
-        // so the engine widens the boundary by exactly this root (validated launch-side,
-        // wicked-core#259).
-        extraWriteRoots: [draftDir],
+        // UNBOUND runs deliver into the external inbox, which sits OUTSIDE the unit's sandbox —
+        // on the wrapped-CLI path the boundary denied that exact write and failed the run AFTER
+        // the draft was produced (crew#263, run eed69dfa); declaring the inbox widens the
+        // boundary by exactly this root (wicked-core#259). REPO-BOUND runs must NOT declare it:
+        // an external write root combined with a repo-worktree cwd kills the worker's Write
+        // deterministically before any hook fires (wicked-core#293) — those runs deliver
+        // in-repo (`repoRelPath`) instead, and finalize copies the file out.
+        ...(repoRelPath === undefined ? { extraWriteRoots: [draftDir] } : {}),
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the
@@ -658,6 +794,7 @@ export async function startInteractiveDraftSubscriber(
     const flight: InFlight = {
       documentId: doc.documentId,
       outPath,
+      ...(repoRelPath !== undefined ? { repoRelPath } : {}),
       narration: 'Crew run launched — working on your draft…',
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
