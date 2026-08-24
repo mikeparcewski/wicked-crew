@@ -199,23 +199,25 @@ describe('chatProblem (the worker prompt seed)', () => {
     expect(big).toContain('…');
   });
 
-  it('names the project repo as grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
-    // REPO-BOUND: the caller passes the IN-REPO relative deliverable path (wicked-core#293) —
-    // the task directs the worker INSIDE its worktree; the snapshot it READS stays absolute.
-    const problem = chatProblem(ask, '/i/current.html', '.wicked-drafts/k-revised.html', {
+  it('names the project repo as READ grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
+    // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
+    // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
+    // on the first prompt-needing call, so no write works), and the clause hands the worker
+    // the repo root for READS only.
+    const problem = chatProblem(ask, '/i/current.html', '/tmp/chats/k-revised.html', {
       repoRef: 'repo-1',
       rootPath: '/home/me/src/wicked-studio',
     });
     expect(problem).toContain('Ground the revision in the repository at /home/me/src/wicked-studio — read it');
     expect(problem).toContain('read it first: /i/current.html');
-    expect(problem).toContain(
-      'written INSIDE the repository working tree you are in, at exactly this path relative to its root: .wicked-drafts/k-revised.html',
-    );
-    expect(problem).not.toContain('absolute file path');
+    expect(problem).toContain('exactly this absolute file path: /tmp/chats/k-revised.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
+    // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
+    const weird = chatProblem(ask, '/i', '/o.html', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
+    expect(weird).not.toMatch(/[\n\r]/);
     // WORST CASE stays bounded: pasted-novel ask + oversized root ≤ the capped ask budget
     // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
-    const worst = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '.wicked-drafts/o.html', {
+    const worst = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o.html', {
       repoRef: 'r',
       rootPath: 'p'.repeat(10_000),
     });
@@ -282,14 +284,11 @@ interface FakeAdapter {
 }
 
 /** Optional project→repo world for the CREW-UX-8 grounding path: projectMembers/listRepos
- *  answer from these fixtures, and `workdir` is what the run DTO reports as every launched
- *  run's worktree (sessionsDetail — the wicked-core#293 finalize copy resolves through it).
- *  Omitted (the default) = an engine that cannot answer any of them — the graceful-degradation
- *  path every pre-existing test rides. */
+ *  answer from these fixtures. Omitted (the default) = an engine that cannot answer either —
+ *  the graceful-degradation path every pre-existing test rides. */
 interface RepoWorld {
   members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
   repos?: Array<{ id: string; root_path: string }>;
-  workdir?: string;
 }
 
 function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
@@ -318,11 +317,6 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
           ? {
               projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
               listRepos: async () => repoWorld.repos ?? [],
-              sessionsDetail: async () =>
-                state.launches.map((l) => ({
-                  session: { id: l.sessionId, workdir: repoWorld.workdir ?? null },
-                  units: [],
-                })),
             }
           : {}),
       } as unknown as CoreAdapter;
@@ -793,7 +787,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(engine.launches[1]!.problem).not.toContain('Ground the revision');
   });
 
-  it('GROUNDS an ask on a repo-backed project: repoRef on the launch + the grounding clause (CREW-UX-8)', async () => {
+  it('GROUNDS an ask on a repo-backed project: the clause names the repo, the launch stays UNBOUND (CREW-UX-8 v3)', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter({
       members: {
@@ -807,28 +801,28 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const sub = await startSub(engine);
     subs.push(sub!);
 
-    // Repo-backed project → the run binds into the repo AND the task names it — the
-    // deliverable is IN-REPO with NO external write root (wicked-core#293: declaring one on a
-    // repo-worktree run kills the worker's Write before any hook fires); the head SNAPSHOT the
-    // worker READS still lives in the chat inbox.
+    // Repo-backed project → the task names the repo root for READS, but the launch carries
+    // NO repoRef and keeps the ONE unbound write shape (external inbox deliverable +
+    // extraWriteRoots): wicked-core#293 — a repoRef-bound run's tool-permission stream closes
+    // on the first prompt-needing call, so no write destination works on a bound run, while
+    // bound READS and the unbound shape are both run-evidence proven.
     await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r', project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     const grounded = engine.launches[0]!;
-    expect(grounded.repoRef).toBe('repo-studio');
+    expect('repoRef' in grounded).toBe(false);
     expect(grounded.problem).toContain(
       'Ground the revision in the repository at /home/me/src/wicked-studio — read it',
     );
     const groundedKey = chatKey('repo-doc', 0, 'm-r').replace(/[^a-zA-Z0-9_-]/g, '-');
     expect(grounded.problem).toContain(
-      `at exactly this path relative to its root: .wicked-drafts/${groundedKey}-revised.html`,
+      `exactly this absolute file path: ${join(chatDir, `${groundedKey}-revised.html`)}`,
     );
     expect(grounded.problem).toContain(`read it first: ${join(chatDir, `${groundedKey}-current.html`)}`);
-    expect('extraWriteRoots' in grounded).toBe(false);
+    expect(grounded.extraWriteRoots).toEqual([chatDir]);
     expect(grounded.problem).not.toMatch(/[\n\r]/);
-    expect(grounded.projectId).toBe('proj-repo');
+    expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
 
-    // Repo-less project → launches exactly as today: no repoRef, no clause, the external
-    // inbox as deliverable + declared write root (the v1/unbound shape, which works).
+    // Repo-less project → launches exactly as today: no repoRef, no clause, same write shape.
     await emitChatPosted(bus, 'bare-doc', { source_message_id: 'm-b', project_id: 'proj-bare' });
     await waitFor(() => engine.launches.length === 2);
     const bare = engine.launches[1]!;
@@ -837,13 +831,11 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(bare.extraWriteRoots).toEqual([chatDir]);
   });
 
-  it('REPO-BOUND finalize COPIES the worktree revision into the inbox BEFORE announcing (wicked-core#293)', async () => {
+  it('a GROUNDED revision completes the full loop through the ONE standard finalize — inbox file in, inbox path announced', async () => {
     const bus = await import('wicked-bus');
-    const worktree = join(dir, 'wt-repo-doc');
     const engine = fakeAdapter({
       members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
       repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
-      workdir: worktree,
     });
     seedDoc('repo-doc');
     const sub = await startSub(engine);
@@ -855,53 +847,33 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const key = chatKey('repo-doc', 0, 'm-r');
     const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '-');
 
-    // The worker wrote IN-REPO (the only write that works on this path — wicked-core#293).
-    mkdirSync(join(worktree, '.wicked-drafts'), { recursive: true });
-    writeFileSync(
-      join(worktree, '.wicked-drafts', `${safeKey}-revised.html`),
-      '<html><body><h1>grounded revision</h1></body></html>',
-      'utf8',
-    );
+    // The worker wrote the external-inbox deliverable — the ONLY write shape v3 has (the
+    // grounded repo is READ-only context; wicked-core#293 killed every bound-write variant).
+    const inboxPath = join(chatDir, `${safeKey}-revised.html`);
+    writeFileSync(inboxPath, '<html><body><h1>grounded revision</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
 
-    // The announce names the DURABLE INBOX path (never the reapable worktree) and the file
-    // was copied there before the announce, so the service always finds it.
     await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
     const announce = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
-    const inboxPath = join(chatDir, `${safeKey}-revised.html`);
     expect((announce.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded revision');
     expect(sub!.ledger.get(key)?.emittedAt).toBeTruthy();
   });
 
-  it('REPO-BOUND finalize with a MISSING worktree file posts the honest error and announces nothing', async () => {
+  it('a STALE repo membership never fabricates a repoRef — the ask degrades to the repo-less shape (CREW-UX-8)', async () => {
     const bus = await import('wicked-bus');
-    const worktree = join(dir, 'wt-repo-doc');
-    mkdirSync(worktree, { recursive: true }); // the worktree exists — the deliverable does not
     const engine = fakeAdapter({
-      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
-      workdir: worktree,
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'deleted-repo' }] },
+      repos: [], // the registry no longer knows the ref
     });
-    seedDoc('repo-doc');
+    seedDoc('stale-doc');
     const sub = await startSub(engine);
     subs.push(sub!);
-    armProbe(bus);
 
-    await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r', project_id: 'proj-repo' });
+    await emitChatPosted(bus, 'stale-doc', { source_message_id: 'm-s', project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
-    engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
-
-    await waitFor(() =>
-      probeEvents.some(
-        (e) =>
-          e.event_type === STATUS_POSTED &&
-          (e.payload as { state?: string }).state === 'error' &&
-          String((e.payload as { message?: string }).message).includes('could not be collected'),
-      ),
-    );
-    expect(probeEvents.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
-    expect(sub!.ledger.get(chatKey('repo-doc', 0, 'm-r'))?.failedAt).toBeTruthy();
-    expect(sub!.inFlightDocs()).toEqual([]); // the flight is released even on a failed claim
+    expect('repoRef' in engine.launches[0]!).toBe(false);
+    expect(engine.launches[0]!.problem).not.toContain('Ground the revision');
+    expect(engine.launches[0]!.extraWriteRoots).toEqual([chatDir]);
   });
 });
