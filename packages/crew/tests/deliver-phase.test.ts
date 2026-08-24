@@ -6,6 +6,8 @@
 // guard, the rebase-before-push step, and — the one deliberate change from the field overlay —
 // no gh account name baked into crew code (the env-driven GH_ACCOUNT guard replaces it).
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DELIVER_PHASE_ID,
@@ -15,6 +17,7 @@ import {
 } from '../src/core/deliver.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
+import { SKIP_CORE_CHECKS, requireCoreDir } from './support/core-checkout.js';
 
 describe('deliverPrScript (the hardened field script)', () => {
   const script = deliverPrScript();
@@ -223,5 +226,53 @@ describe('deliver review follow-ups (#303)', () => {
     const composed = composeDeliverWorkflow(base, longRun);
     expect(composed.id.length).toBeLessThanOrEqual(128);
     expect(composed.id.startsWith('feature-deliver-')).toBe(true);
+  });
+});
+
+// crew#317 — the deliver phase's governance is a CROSS-REPO claim: crew sets a flag and relies on
+// wicked-core to turn it into a real gate. Transcribing that belief into a comment is the drift
+// this repo keeps paying for (FINDING-049/-084/-088), so it is DERIVED from core's own source, in
+// the established style of the sibling drift guards.
+//
+// The mechanism, in core's `workflow.rs`: `WorkflowRegistry::register` — the choke point every def
+// crosses, including crew's per-run `registerWorkflow` — calls `enforce_verified_evidence`, which
+// pins `builtin_floors::EVIDENCE_FLOOR_PIN` onto any `verified_evidence` phase that names no
+// validator of its own. That is why `deliverPrPhase` can declare the flag and leave the pin null:
+// crew cannot mint a pin (`attach_pinned_validators` is fail-closed on one that is not vaulted,
+// and crew has no provision/approve surface), but it can declare the requirement.
+describe.skipIf(SKIP_CORE_CHECKS)('the engine really arms verified_evidence (cross-repo)', () => {
+  const workflowRs = (): string => {
+    const path = join(requireCoreDir(), 'src', 'workflow.rs');
+    try {
+      return readFileSync(path, 'utf8');
+    } catch (e) {
+      throw new Error(
+        `cannot read core's src/workflow.rs at ${path}: ${e instanceof Error ? e.message : String(e)}\n` +
+          "  The deliver phase's ONLY governance is core arming its verified_evidence flag with " +
+          'the built-in evidence floor. If that moved, follow it — do not delete this guard.',
+      );
+    }
+  };
+
+  it('register() runs enforce_verified_evidence, which floors an unpinned flagged phase', () => {
+    const src = workflowRs();
+    expect(src).toContain('let def = enforce_verified_evidence(def);');
+    expect(src).toContain('fn enforce_verified_evidence(mut def: WorkflowDef) -> WorkflowDef {');
+    // Flagged AND unpinned is exactly the shape deliverPrPhase ships.
+    expect(src).toContain('if !phase.verified_evidence || phase.validator_pin.is_some() {');
+    expect(src).toContain(
+      'phase.validator_pin = Some(crate::builtin_floors::EVIDENCE_FLOOR_PIN.to_string());',
+    );
+  });
+
+  it('the floor it arms re-derives done from the worktree, committed work included', () => {
+    const floors = readFileSync(join(requireCoreDir(), 'src', 'builtin_floors.rs'), 'utf8');
+    // The criterion the deliver phase inherits — the product thesis stated as a check.
+    expect(floors).toContain(
+      'the run left a change in its worktree (done is re-derived from the diff, never asserted)',
+    );
+    // Clause 2 (core#280) is the one that matters here: the deliver phase COMMITS the run's work,
+    // so a floor reading `git status --porcelain` alone would deny every delivered run.
+    expect(floors).toContain("git log --oneline HEAD --not --exclude='wicked/*' --branches");
   });
 });
