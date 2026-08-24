@@ -37,6 +37,8 @@
  * could be registered AT the inbox). Clearing a stale dest with `rm -rf` before noticing that
  * would DELETE live repository content — so source/dest containment is checked (realpath'd,
  * both directions) BEFORE anything is removed, and any overlap refuses the snapshot outright.
+ * For the same reason THIS helper creates `dest`'s parent directory (after the check passes) —
+ * a caller that pre-created it would already have written into the live repo (Copilot round 2).
  *
  * Fully ASYNC on purpose: this runs inline in a bus handler whose process also feeds ~15s UI
  * heartbeats — a synchronous clone/copy of a big repo would starve the event loop and the
@@ -44,8 +46,8 @@
  * the daemon's capped exec chokepoint (`execCapped`, FINDING-016).
  */
 
-import { cp, lstat, readdir, realpath, rm, stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { cp, lstat, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises';
+import path, { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execCapped } from '../core/exec.js';
 
@@ -139,7 +141,11 @@ async function sweepSnapshot(root: string): Promise<void> {
 }
 
 /** Resolve `p` through its nearest EXISTING ancestor's realpath (the path itself may not exist
- *  yet — a fresh dest usually does not), so symlinked parents cannot hide an overlap. */
+ *  yet — a fresh dest usually does not), so symlinked parents cannot hide an overlap. Only
+ *  ENOENT falls to the ancestor walk (the `api/open-path.ts` rule, Copilot round 2): any OTHER
+ *  error (EACCES, ELOOP, …) means an EXISTING component could not be resolved — a lexical
+ *  reconstruction there could miss an overlap through the unresolved link, so it THROWS and
+ *  the caller's overlap-check catch fails closed (no snapshot, degrade). */
 async function realpathNearest(p: string): Promise<string> {
   let existing = resolve(p);
   const tail: string[] = [];
@@ -148,7 +154,8 @@ async function realpathNearest(p: string): Promise<string> {
     try {
       const real = await realpath(existing);
       return tail.length > 0 ? join(real, ...tail) : real;
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const parent = dirname(existing);
       if (parent === existing) return existing; // unreachable in practice — a root always resolves
       tail.unshift(basename(existing));
@@ -157,9 +164,24 @@ async function realpathNearest(p: string): Promise<string> {
   }
 }
 
-/** `true` when `a` and `b` name the same path or one contains the other. */
-function pathsOverlap(a: string, b: string): boolean {
-  return a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
+/** The subset of `node:path` {@link pathsOverlap} needs — injectable so the win32 drive-root
+ *  behavior is unit-testable on any host (`path.win32`). */
+type PathImpl = Pick<typeof path, 'relative' | 'isAbsolute' | 'sep'>;
+
+/** Is `child` equal to `parent` or inside it? `relative()`-based (the `api/open-path.ts`
+ *  containment pattern) — a plain `startsWith(base + sep)` never matches a ROOT base (`/`,
+ *  `C:\`), whose spelling already ends in the separator (Copilot round 2). */
+function contains(parent: string, child: string, p: PathImpl): boolean {
+  const rel = p.relative(parent, child);
+  if (rel === '') return true; // the same path
+  if (p.isAbsolute(rel)) return false; // different drive/tree entirely (win32)
+  return rel !== '..' && !rel.startsWith(`..${p.sep}`);
+}
+
+/** `true` when `a` and `b` name the same path or one contains the other — including when one
+ *  of them is a filesystem root (`/`, a win32 drive root). Exported for its unit tests. */
+export function pathsOverlap(a: string, b: string, p: PathImpl = path): boolean {
+  return contains(a, b, p) || contains(b, a, p);
 }
 
 /** Options for {@link snapshotRepo}. */
@@ -226,6 +248,20 @@ export async function snapshotRepo(
     return { ok: false, reason: 'too-large' };
   }
 
+  // The snapshot's PARENT (the caller's per-run dir) is created HERE — only after containment
+  // was validated. The caller must never pre-create it: with an overlapping config that mkdir
+  // would write into the live repository before the refusal above could fire (Copilot round 2).
+  try {
+    await mkdir(dirname(dest), { recursive: true });
+  } catch (err) {
+    log(
+      `[repo-snapshot] could not create the snapshot parent for ${dest}: ${
+        err instanceof Error ? err.message : String(err)
+      } — no snapshot`,
+    );
+    return { ok: false, reason: 'copy-failed' };
+  }
+
   // A stale snapshot (crashed prior run, replayed key) never survives into a new launch.
   try {
     await rm(dest, { recursive: true, force: true });
@@ -275,6 +311,15 @@ export async function snapshotRepo(
         }
       },
     });
+    // The honest gate is what actually LANDED (same rule as the clone path's post-sweep
+    // re-measure): the preflight walked the SOURCE, and a file that grew between that walk and
+    // the copy would otherwise put an over-budget tree in the worker-visible inbox
+    // (Copilot round 2).
+    if (await treeExceeds(dest, maxBytes)) {
+      log(`[repo-snapshot] copy of ${rootPath} exceeds the ${maxBytes}-byte budget — no snapshot`);
+      await rm(dest, { recursive: true, force: true }).catch(() => {});
+      return { ok: false, reason: 'too-large' };
+    }
     return { ok: true };
   } catch (err) {
     log(

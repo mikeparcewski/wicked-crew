@@ -7,12 +7,26 @@
 // .git/node_modules AND symlinks, a hard size cap, per-cause failure reasons, an overlap
 // refusal that never deletes live repo content, and NEVER a partial snapshot left behind.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { REPO_SNAPSHOT_MAX_BYTES, snapshotRepo } from '../src/interactive/repo-snapshot.js';
+import path, { join } from 'node:path';
+import { REPO_SNAPSHOT_MAX_BYTES, pathsOverlap, snapshotRepo } from '../src/interactive/repo-snapshot.js';
+
+// A seam into the copy fallback (Copilot round 2): the post-copy re-measure guards against a
+// source that GROWS between the preflight walk and the copy — unreproducible with a real
+// filesystem race, so `cp` is wrapped to let one test append to the DEST after the copy lands
+// (equivalent divergence: materialized tree ≠ preflighted tree). Undefined = passthrough.
+const cpHook = vi.hoisted(() => ({ tail: undefined as ((dest: string) => void) | undefined }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  const cp: typeof real.cp = async (src, dest, opts) => {
+    await real.cp(src, dest, opts);
+    cpHook.tail?.(String(dest));
+  };
+  return { ...real, cp };
+});
 
 const gitAvailable = (() => {
   try {
@@ -40,6 +54,7 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     dir = mkdtempSync(join(tmpdir(), 'crew-snap-'));
   });
   afterEach(() => {
+    cpHook.tail = undefined;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -53,7 +68,12 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
 
   it('snapshots a plain (non-git) directory via the copy fallback, skipping .git and node_modules', async () => {
     const root = plainRepo();
-    // Junk that must never ride into the snapshot — at any depth.
+    // Junk that must never ride into the snapshot — at any depth. The `.git` entry is REAL
+    // (Copilot round 2: the fixture previously never created one, so the .git skip branch was
+    // claimed-covered but green under any regression) — a stray metadata dir, not a valid
+    // repo, so the clone still fails through to the copy path this test is about.
+    mkdirSync(join(root, '.git'), { recursive: true });
+    writeFileSync(join(root, '.git', 'HEAD-ish'), 'not a real repo', 'utf8');
     mkdirSync(join(root, 'node_modules', 'left-pad'), { recursive: true });
     writeFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'junk', 'utf8');
     mkdirSync(join(root, 'src', 'node_modules'), { recursive: true });
@@ -64,6 +84,7 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     await expect(snapshotRepo(root, dest, { log: (m) => logged.push(m) })).resolves.toEqual({ ok: true });
     expect(readFileSync(join(dest, 'README.md'), 'utf8')).toContain('real project content');
     expect(readFileSync(join(dest, 'src', 'index.ts'), 'utf8')).toContain('answer = 42');
+    expect(existsSync(join(dest, '.git'))).toBe(false);
     expect(existsSync(join(dest, 'node_modules'))).toBe(false);
     expect(existsSync(join(dest, 'src', 'node_modules'))).toBe(false);
     // The non-git root fell THROUGH the clone to the copy — visibly, in the log. Logged whether
@@ -204,7 +225,71 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     expect(existsSync(join(dest, 'README.md'))).toBe(true);
   });
 
+  it('the copy fallback RE-MEASURES what it materialized — growth between preflight and copy cannot smuggle an over-budget tree into the inbox (Copilot round 2)', async () => {
+    const root = plainRepo(); // ~50 bytes: comfortably under the 4096-byte budget at preflight
+    const dest = join(dir, 'snap');
+    // Simulate a source that grew DURING the copy: the materialized dest ends up over budget
+    // even though the preflight walk passed.
+    cpHook.tail = (copied) => writeFileSync(join(copied, 'grew-mid-copy.bin'), 'x'.repeat(8192), 'utf8');
+    const logged: string[] = [];
+    await expect(snapshotRepo(root, dest, { maxBytes: 4096, log: (m) => logged.push(m) })).resolves.toEqual({
+      ok: false,
+      reason: 'too-large',
+    });
+    expect(existsSync(dest), 'an over-budget copy must not be left behind').toBe(false);
+    expect(logged.some((m) => m.includes('exceeds the 4096-byte budget'))).toBe(true);
+
+    // Passthrough sanity: without growth the same budget succeeds.
+    cpHook.tail = undefined;
+    await expect(snapshotRepo(root, dest, { maxBytes: 4096, log: () => {} })).resolves.toEqual({ ok: true });
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'a NON-ENOENT realpath failure on the dest fails CLOSED (no snapshot) — never judged lexically past an unresolvable parent (Copilot round 2)',
+    async () => {
+      const root = plainRepo();
+      // A dest whose EXISTING parent cannot be traversed: realpath fails with EACCES, not
+      // ENOENT — the old walk-up treated that as "missing" and reconstructed a lexical path
+      // that could hide an overlap behind the unresolvable component.
+      const blocked = join(dir, 'blocked');
+      mkdirSync(blocked, { recursive: true });
+      const dest = join(blocked, 'inner', 'snap');
+      chmodSync(blocked, 0o000);
+      try {
+        const logged: string[] = [];
+        await expect(snapshotRepo(root, dest, { log: (m) => logged.push(m) })).resolves.toEqual({
+          ok: false,
+          reason: 'root-unreadable',
+        });
+        expect(logged.some((m) => m.includes('overlap check'))).toBe(true);
+      } finally {
+        chmodSync(blocked, 0o700); // let afterEach's rmSync clean up
+      }
+    },
+  );
+
   it('ships a ~200MB default budget', () => {
     expect(REPO_SNAPSHOT_MAX_BYTES).toBe(200 * 1024 * 1024);
+  });
+});
+
+describe('pathsOverlap (Copilot round 2: root bases must match)', () => {
+  it('detects containment under a POSIX filesystem ROOT base — `/` never got past the old `base + sep` spelling', () => {
+    expect(pathsOverlap('/', '/tmp/crew-snap/x', path.posix)).toBe(true);
+    expect(pathsOverlap('/tmp/crew-snap/x', '/', path.posix)).toBe(true); // both directions
+    expect(pathsOverlap('/', '/', path.posix)).toBe(true);
+  });
+
+  it('detects containment under a win32 DRIVE-ROOT base (C:\\) and rejects cross-drive paths', () => {
+    expect(pathsOverlap('C:\\', 'C:\\snapshots\\x', path.win32)).toBe(true);
+    expect(pathsOverlap('C:\\snapshots\\x', 'C:\\', path.win32)).toBe(true);
+    expect(pathsOverlap('C:\\', 'D:\\elsewhere', path.win32)).toBe(false); // different drive ≠ overlap
+  });
+
+  it('keeps ordinary containment semantics — and never false-positives on a sibling name prefix', () => {
+    expect(pathsOverlap('/repo', '/repo/sub/dir', path.posix)).toBe(true);
+    expect(pathsOverlap('/repo', '/repo', path.posix)).toBe(true);
+    expect(pathsOverlap('/repo', '/repo-snapshots/x', path.posix)).toBe(false);
+    expect(pathsOverlap('/a/b', '/a/c', path.posix)).toBe(false);
   });
 });

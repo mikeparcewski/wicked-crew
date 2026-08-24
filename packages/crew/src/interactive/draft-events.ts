@@ -355,12 +355,16 @@ export interface InteractiveDraftSubscription {
 interface InFlight {
   documentId: string;
   outPath: string;
-  /** The launch-scoped repo snapshot grounding this run (CREW-UX-8 v4), when the doc's project
-   *  is repo-bound and the snapshot succeeded. Removed on EVERY terminal path. */
+  /** The launch-scoped repo snapshot grounding this run (CREW-UX-8 v4): set BEFORE the snapshot
+   *  materializes (so a shutdown sweep can clear a half-made clone — Copilot round 2), cleared
+   *  when the snapshot is refused/degraded, removed on EVERY terminal path. */
   snapshotDir?: string | undefined;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
-  heartbeat: ReturnType<typeof setInterval>;
+  /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
+   *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
+   *  resolves. */
+  heartbeat?: ReturnType<typeof setInterval> | undefined;
 }
 
 function defaultStateDir(): string {
@@ -433,7 +437,8 @@ export async function startInteractiveDraftSubscriber(
   const draftDir = opts.draftDir ?? join(defaultStateDir(), 'interactive-drafts');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const phaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
-  const inFlight = new Map<string, InFlight>(); // runId → live state
+  const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
@@ -478,7 +483,7 @@ export async function startInteractiveDraftSubscriber(
   function endFlight(runId: string): InFlight | undefined {
     const flight = inFlight.get(runId);
     if (flight) {
-      clearInterval(flight.heartbeat);
+      if (flight.heartbeat !== undefined) clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
     return flight;
@@ -672,10 +677,23 @@ export async function startInteractiveDraftSubscriber(
     // subdirectory as its extra write root below. Declaring the shared draftDir wholesale let
     // any draft worker read/write every other run's deliverable AND every other project's
     // snapshot — cross-project exposure through the governance boundary itself.
+    // NOT created here (Copilot round 2): runDir is only mkdir'd after the snapshot helper's
+    // containment check has ruled the location safe — see the pre-launch mkdir below.
     const runDir = join(draftDir, doc.documentId);
-    mkdirSync(runDir, { recursive: true });
     const outPath = join(runDir, `${doc.documentId}-v1.html`);
     const runId = randomUUID();
+
+    // PRE-LAUNCH placeholder (Copilot round 2): the awaits below (repo resolution, snapshot)
+    // open a window in which this doc has no `inFlight` entry — so the chat seam's `isDocBusy`
+    // saw it idle (double-launch race) and stop()'s sweep could not find a half-made snapshot.
+    // Register the flight FIRST; every exit path below (refusal, shutdown, launch failure)
+    // must endFlight() it.
+    const flight: InFlight = {
+      documentId: doc.documentId,
+      outPath,
+      narration: 'Crew run launched — working on your draft…',
+    };
+    inFlight.set(runId, flight);
 
     // CREW-UX-8 v4: a repo-bound project's doc is grounded in a REPO SNAPSHOT — resolve the
     // binding BEFORE the launch. Unbound docs and repo-less projects resolve to `undefined`
@@ -697,6 +715,7 @@ export async function startInteractiveDraftSubscriber(
     // budget, unreadable, clone+copy failed) degrades HONESTLY: ungrounded launch, a visible
     // per-cause note on the thread, and the full reason in the log.
     let snapshotDir: string | undefined;
+    let snapshotDest: string | undefined; // where a snapshot was ATTEMPTED (shutdown cleanup)
     if (repo !== undefined) {
       const dest = join(runDir, 'repo');
       if (!groundablePath(dest)) {
@@ -712,16 +731,44 @@ export async function startInteractiveDraftSubscriber(
           `[interactive-draft] doc ${doc.documentId}: snapshot dest ${dest} cannot ride the grounding clause — launching ungrounded`,
         );
       } else {
+        // Track the dest BEFORE the await (Copilot round 2): stop() during the clone must be
+        // able to sweep the half-made snapshot through the placeholder flight.
+        snapshotDest = dest;
+        flight.snapshotDir = dest;
         const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
         if (snap.ok) {
           snapshotDir = dest;
         } else {
+          flight.snapshotDir = undefined; // nothing landed — snapshotRepo cleans its partials
+          if (snap.reason === 'dest-overlap') {
+            // FAIL CLOSED (Copilot round 2): the configured draft dir places this run's write
+            // root inside the live repository (or the repo is registered at the inbox). An
+            // "ungrounded" launch would still hand the unbound worker read/write access to
+            // live repo content through `extraWriteRoots: [runDir]` — so the launch is REFUSED
+            // outright: no mkdir, no run, no ledger row. The status names the CONFIG problem;
+            // the thrown error dead-letters the frame, replayable after the config is fixed.
+            endFlight(runId);
+            const message =
+              `Crew refused to draft this document: the configured draft directory (${draftDir}) ` +
+              `overlaps the project's repository (${repo.rootPath}), so launching would give the ` +
+              `worker write access inside the live repo. Point the crew draft directory outside ` +
+              `every registered repository, then replay the request.`;
+            emitInteractive(STATUS_POSTED, {
+              document_id: doc.documentId,
+              state: 'error',
+              message,
+            });
+            log(
+              `[interactive-draft] doc ${doc.documentId}: REFUSING launch — draft dir ${draftDir} overlaps repo ${repo.rootPath} (dest-overlap)`,
+            );
+            throw new Error(message);
+          }
           // Per-cause operator message (Copilot, crew#313): "too large" was previously
-          // claimed for EVERY failure — a deleted repo is not a large one.
-          const because: Record<SnapshotFailureReason, string> = {
+          // claimed for EVERY failure — a deleted repo is not a large one. (`dest-overlap`
+          // is handled above: it refuses the launch instead of degrading.)
+          const because: Record<Exclude<SnapshotFailureReason, 'dest-overlap'>, string> = {
             'too-large': 'repository too large to snapshot',
             'root-unreadable': 'repository path is missing or unreadable',
-            'dest-overlap': 'snapshot destination overlaps the repository',
             'dest-unclearable': 'a stale snapshot could not be cleared',
             'copy-failed': 'repository snapshot failed (clone and copy both errored)',
           };
@@ -736,6 +783,26 @@ export async function startInteractiveDraftSubscriber(
         }
       }
     }
+
+    // Shutdown gate (Copilot round 2): stop() may have run during the awaits above — its sweep
+    // already dropped the placeholder, but a clone can re-materialize files after that rm, and
+    // a launch must never start once the subscriber detached from the engine's events.
+    if (closed) {
+      endFlight(runId);
+      flight.snapshotDir = undefined;
+      if (snapshotDest !== undefined) {
+        try {
+          rmSync(snapshotDest, { recursive: true, force: true });
+        } catch {
+          // best-effort — a leftover snapshot is a disk-space wart, never a correctness one
+        }
+      }
+      log(`[interactive-draft] doc ${doc.documentId}: subscriber stopped before launch — abandoned (a replay retries)`);
+      return;
+    }
+
+    // Containment is settled (any repo overlap refused above) — the run's write root may exist.
+    mkdirSync(runDir, { recursive: true });
 
     try {
       await adapter.launchRun({
@@ -765,14 +832,10 @@ export async function startInteractiveDraftSubscriber(
         extraWriteRoots: [runDir],
       });
     } catch (err) {
-      // A launch that never happened keeps no snapshot (a replayed frame re-snapshots fresh).
-      if (snapshotDir !== undefined) {
-        try {
-          rmSync(snapshotDir, { recursive: true, force: true });
-        } catch {
-          // best-effort
-        }
-      }
+      // A launch that never happened keeps no flight and no snapshot (a replayed frame
+      // re-registers and re-snapshots fresh).
+      endFlight(runId);
+      removeSnapshot(flight);
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
@@ -791,26 +854,26 @@ export async function startInteractiveDraftSubscriber(
     // delivery retries. The crash window between launch and this write is the reason the
     // draft emit ALSO carries a deterministic idempotency key.
     ledger.recordLaunch(doc.documentId, runId);
+    if (closed) {
+      // stop() ran while the engine was accepting the launch: its sweep already dropped the
+      // placeholder and the snapshot, and the engine's workers die with the daemon — the
+      // ledger row above is what keeps a post-restart redelivery from double-launching.
+      return;
+    }
     if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
 
-    const flight: InFlight = {
-      documentId: doc.documentId,
-      outPath,
-      ...(snapshotDir !== undefined ? { snapshotDir } : {}),
-      narration: 'Crew run launched — working on your draft…',
-      heartbeat: setInterval(() => {
-        // Repeat the last real narration so the ~20s status.requested window is always fed,
-        // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
-          state: 'working',
-          message: flight.narration,
-        });
-      }, heartbeatMs),
-      // Do not keep the daemon alive for narration alone.
-    };
+    // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
+    flight.heartbeat = setInterval(() => {
+      // Repeat the last real narration so the ~20s status.requested window is always fed,
+      // even mid-phase when the engine is quiet.
+      emitInteractive(STATUS_POSTED, {
+        document_id: flight.documentId,
+        state: 'working',
+        message: flight.narration,
+      });
+    }, heartbeatMs);
+    // Do not keep the daemon alive for narration alone.
     flight.heartbeat.unref?.();
-    inFlight.set(runId, flight);
     log(`[interactive-draft] doc ${doc.documentId} → governed run ${runId} (draft → ${outPath})`);
   }
 
@@ -837,12 +900,16 @@ export async function startInteractiveDraftSubscriber(
     ledger,
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
+      closed = true; // a handler mid-snapshot sees this and never launches (Copilot round 2)
       offCoreEvents();
       for (const runId of [...inFlight.keys()]) {
         const flight = endFlight(runId);
         // Best-effort snapshot sweep (Copilot, crew#313): a graceful shutdown with a run in
         // flight would otherwise strand the clone forever — after restart the ledger's launch
-        // row suppresses redelivery, so no later fold ever revisits it. The engine's workers
+        // row suppresses redelivery, so no later fold ever revisits it. Pre-launch
+        // placeholders are in the map too (Copilot round 2), so a snapshot still
+        // materializing is swept as well — and the handler's own closed-gate re-sweeps
+        // whatever the in-flight clone re-materializes after this rm. The engine's workers
         // die with the daemon, so nothing is still reading the snapshot.
         if (flight !== undefined) removeSnapshot(flight);
       }

@@ -845,6 +845,153 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(logged.some((m) => m.includes('launching ungrounded'))).toBe(true);
   });
 
+  it('REFUSES the whole launch when the configured draft dir overlaps the repo — fail closed, no mkdir, no run, no ledger row (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    // The bad config this guards: a draft dir INSIDE the registered repo. An "ungrounded"
+    // degrade would still declare extraWriteRoots inside the live repo — the run must not
+    // happen at all.
+    const draftDir = join(repoRoot, 'drafts');
+    const logged: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: (m) => logged.push(m),
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'trapped-doc', { project_id: 'proj-repo' });
+    // The refusal closes the thread with an error status that names the CONFIG problem…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('overlaps'),
+      ),
+    );
+    const refusal = probeEvents.find(
+      (e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error',
+    )!;
+    expect(String((refusal.payload as { message?: string }).message)).toContain(draftDir);
+    // …and NOTHING else happened: no launch, no ledger row (a replay after the config fix
+    // gets a real retry), no directory materialized inside the live repository, no lingering
+    // busy state.
+    expect(engine.launches.length).toBe(0);
+    expect(sub!.ledger.has('trapped-doc')).toBe(false);
+    expect(existsSync(join(draftDir, 'trapped-doc'))).toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(logged.some((m) => m.includes('REFUSING launch'))).toBe(true);
+    // The live repo content survived the refusal untouched.
+    expect(readFileSync(join(repoRoot, 'README.md'), 'utf8')).toContain('the real studio project');
+  });
+
+  it('marks the doc BUSY across the whole pre-launch window — a pre-flight placeholder covers the snapshot/launch awaits (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    // Hold launchRun open: everything up to the engine accepting the run is "pre-launch".
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      const p = inner(input);
+      await gate;
+      return p;
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'slow-doc', { project_id: 'proj-repo' });
+    // BEFORE the launch (or even the snapshot) resolves, the doc already reads busy — this is
+    // what the chat seam's isDocBusy consults, so the old post-launch registration left a
+    // double-launch window across the whole snapshot-then-launch stretch.
+    await waitFor(() => sub!.inFlightDocs().includes('slow-doc'));
+    // …and it STAYS busy through the engine call while the launch is held open.
+    await waitFor(() => engine.launches.length === 1);
+    expect(sub!.inFlightDocs()).toContain('slow-doc');
+    // …with no ledger row yet (that still waits for the launch to resolve).
+    expect(sub!.ledger.has('slow-doc')).toBe(false);
+
+    release();
+    await waitFor(() => sub!.ledger.get('slow-doc')?.runId !== undefined);
+    expect(sub!.inFlightDocs()).toEqual(['slow-doc']); // now a live flight with a heartbeat
+  });
+
+  it('stop() during the pre-launch window sweeps the placeholder AND its snapshot, and the wedged launch still earns its dedupe row (Copilot round 2)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      const p = inner(input);
+      await gate;
+      return p;
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'wedged-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const snap = join(draftDir, 'wedged-doc', 'repo');
+    expect(existsSync(join(snap, 'README.md'))).toBe(true);
+
+    // stop() while the launch is still pending: the sweep sees the PLACEHOLDER (the old code
+    // registered the flight only after launchRun resolved, so this snapshot was stranded).
+    const stopping = sub!.stop();
+    expect(existsSync(snap), 'the shutdown sweep must remove a pre-launch snapshot').toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+
+    // When the wedged launch finally resolves, the closed seam records the ledger row (the
+    // engine DID accept the run — a post-restart redelivery must not double-launch) and goes
+    // quiet: no heartbeat, no filing, no revived flight.
+    release();
+    await stopping;
+    await waitFor(() => sub!.ledger.get('wedged-doc')?.runId !== undefined);
+    expect(sub!.inFlightDocs()).toEqual([]);
+  });
+
   it('REMOVES the snapshot when the run ends — success AND failure paths (CREW-UX-8 v4)', async () => {
     const bus = await import('wicked-bus');
     const repoRoot = seedRepoFixture();
