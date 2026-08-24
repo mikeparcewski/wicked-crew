@@ -60,8 +60,6 @@ import {
   INTERACTIVE_DOMAIN,
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
-  claimWorktreeDeliverable,
-  inRepoDeliverablePath,
   oneLine,
   resolveProjectRepo,
   type ProjectRepo,
@@ -125,7 +123,7 @@ export const INTERACTIVE_CHAT_WORKFLOW_DEF: WorkflowDef = {
       id: 'revise',
       kind: 'build',
       instructions:
-        'Using the plan from the prior phase, write the COMPLETE revised HTML document and SAVE it to the output file named in the task — an absolute path, or a path relative to the root of the repository working tree you are in when the task names a repo-relative path — creating parent directories if needed and overwriting if present; the file on disk is the deliverable, so write it before you finish and end your reply with the path you wrote. Contract: start from the CURRENT document (the absolute input path named in the task) and apply the user\'s ask — change only what the ask touches and keep everything else, including the document\'s style and structure; produce a full self-contained HTML document (inline CSS, no external network resources, no build step); KEEP every existing data-wid attribute byte-for-byte on elements you keep, and add NO data-wid to elements you create (the wicked-interactive service instruments its own anchors); never fabricate facts or figures; keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
+        'Using the plan from the prior phase, write the COMPLETE revised HTML document and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish and end your reply with the absolute path you wrote. Contract: start from the CURRENT document (the absolute input path named in the task) and apply the user\'s ask — change only what the ask touches and keep everything else, including the document\'s style and structure; produce a full self-contained HTML document (inline CSS, no external network resources, no build step); KEEP every existing data-wid attribute byte-for-byte on elements you keep, and add NO data-wid to elements you create (the wicked-interactive service instruments its own anchors); never fabricate facts or figures; keep the markup semantic and well-formed (balanced tags) so the instrumentation pass lands cleanly.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
@@ -272,12 +270,11 @@ export function isAnswerableDocKind(kind: string): boolean {
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
  * CURRENT-version snapshot to read, and the absolute path the revised HTML must land at.
- * When the doc's project is repo-bound (CREW-UX-8), a SHORT grounding clause names the repo —
- * same rationale as the draft leg: without it the worker revises from generic knowledge and
- * produces placeholder content — and `outPath` is the REPO-RELATIVE deliverable path
- * (wicked-core#293: the worker writes inside its worktree; crew copies the file out at
- * finalize). Unbound: `outPath` is absolute. `currentPath` (the head snapshot the worker
- * READS) stays absolute in both shapes — reads are not the #293 failure mode.
+ * When the doc's project is repo-bound (CREW-UX-8), a SHORT grounding clause names the repo's
+ * absolute root for the worker to READ — same rationale as the draft leg: without it the
+ * worker revises from generic knowledge and produces placeholder content. The run itself
+ * launches unbound (no `repoRef` — wicked-core#293, see `resolveProjectRepo` in
+ * draft-events.ts), so the clause is the whole grounding mechanism.
  */
 export function chatProblem(
   ask: ChatAsk,
@@ -289,16 +286,12 @@ export function chatProblem(
     repo !== undefined
       ? `Ground the revision in the repository at ${oneLine(repo.rootPath, 300)} — read it and use its real content, never placeholders. `
       : '';
-  const destination =
-    repo !== undefined
-      ? `The revised COMPLETE document MUST be written INSIDE the repository working tree you are in, at exactly this path relative to its root: ${outPath}`
-      : `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`;
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
     `The user's ask: ${oneLine(ask.text, 2000)} ` +
     `The document's CURRENT version is the HTML file at this absolute path — read it first: ${currentPath} ` +
     `${grounding}` +
-    destination
+    `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
 
@@ -359,13 +352,7 @@ export interface InteractiveChatSubscription {
 interface InFlight {
   key: string;
   documentId: string;
-  /** The durable inbox path the announce names — ALWAYS external (`chatDir`). */
   outPath: string;
-  /** Set on REPO-BOUND runs (wicked-core#293): the repo-relative path the worker wrote inside
-   *  its worktree; finalize copies it into `outPath` before announcing. */
-  repoRelPath?: string;
-  /** Guards the async finalize against a redelivered terminal event (double copy/announce). */
-  finalizing?: boolean;
   /** The manifest head the launch snapshotted — the landing gate's baseline. */
   headAtLaunch: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
@@ -536,10 +523,6 @@ export async function startInteractiveChatSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
-    // Finalize is async (the workdir resolution + copy, wicked-core#293): the flight stays in
-    // the map while it runs — so docBusy holds the doc's queue shut until the landing gate is
-    // armed — and this guard makes a redelivered terminal event a no-op, not a double finalize.
-    if (flight.finalizing === true) return;
 
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress.
@@ -607,23 +590,9 @@ export async function startInteractiveChatSubscriber(
     }
 
     if (event.type === 'sessionCompleted') {
-      // The flight stays in the map (docBusy) until finalize lands the LANDING GATE — deleting
-      // it first would let the sweep drain a queued ask onto the pre-revision head during the
-      // async copy window, which is exactly the race the gate exists to prevent.
-      flight.finalizing = true;
-      clearInterval(flight.heartbeat);
-      void finalize(flight, runId)
-        .catch((err) => {
-          log(
-            `[interactive-chat] finalize for run ${runId} threw: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        })
-        .finally(() => {
-          inFlight.delete(runId);
-          drainDoc(flight.documentId);
-        });
+      endFlight(runId);
+      finalize(flight, runId);
+      drainDoc(flight.documentId);
       return;
     }
 
@@ -644,25 +613,8 @@ export async function startInteractiveChatSubscriber(
     }
   });
 
-  async function finalize(flight: InFlight, runId: string): Promise<void> {
+  function finalize(flight: InFlight, runId: string): void {
     const { key, documentId, outPath } = flight;
-    // REPO-BOUND runs (wicked-core#293): the worker wrote INSIDE the run's worktree, so copy
-    // the file into the durable inbox BEFORE announcing — the bridge must never depend on a
-    // worktree the engine may reap, and the announce path stays the inbox path the service
-    // already reads. The announce leg below is byte-identical to the unbound path.
-    if (flight.repoRelPath !== undefined) {
-      const claim = await claimWorktreeDeliverable(adapter, runId, flight.repoRelPath, outPath, log);
-      if (!claim.ok) {
-        ledger.recordFailure(key);
-        emitInteractive(STATUS_POSTED, {
-          document_id: documentId,
-          state: 'error',
-          message: `The crew run completed but its revision could not be collected from the run's worktree (run ${runId}): ${claim.reason}. Resend the message to retry.`,
-        });
-        log(`[interactive-chat] run ${runId} completed but the worktree deliverable was not claimable: ${claim.reason}`);
-        return;
-      }
-    }
     let ok = false;
     try {
       ok = existsSync(outPath) && statSync(outPath).size > 0;
@@ -764,18 +716,11 @@ export async function startInteractiveChatSubscriber(
     const runId = randomUUID();
 
     // CREW-UX-8: a repo-bound project's revision is grounded in that repo — resolved at launch
-    // time (like the head snapshot) so the run binds into the repo (`repoRef`) and the task
-    // names it. Unbound docs and repo-less projects resolve to `undefined`: unchanged launch.
+    // time (like the head snapshot) so the task can name the repo's absolute root for READS.
+    // The launch itself stays UNBOUND (no repoRef — wicked-core#293, see resolveProjectRepo in
+    // draft-events.ts). Unbound docs and repo-less projects resolve to `undefined`: unchanged.
     const repo =
       ask.projectId !== undefined ? await resolveProjectRepo(adapter, ask.projectId, log) : undefined;
-    // wicked-core#293: a REPO-BOUND run's deliverable moves INSIDE the run's worktree (the task
-    // names this repo-relative path; in-repo writes provably work), because declaring an
-    // external write root on a repo-worktree run kills the worker's Write before any hook
-    // fires. Finalize copies the file from the worktree into `outPath` (the durable inbox)
-    // before the announce, so the announce path is unchanged for the service. The snapshot
-    // (`currentPath`) stays external in both shapes — the worker only READS it.
-    const repoRelPath =
-      repo !== undefined ? inRepoDeliverablePath(`${safeKey}-revised.html`) : undefined;
 
     // The studio's 90s silence budget: this pickup line is what keeps the thread honest, so
     // it fires BEFORE the launch resolves.
@@ -787,7 +732,7 @@ export async function startInteractiveChatSubscriber(
 
     try {
       await adapter.launchRun({
-        problem: chatProblem(ask, currentPath, repoRelPath ?? outPath, repo),
+        problem: chatProblem(ask, currentPath, outPath, repo),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,
@@ -795,14 +740,11 @@ export async function startInteractiveChatSubscriber(
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
         // never a fabricated 'default' membership.
         ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}),
-        // CREW-UX-8: bind the run into the project's repo so the worker can actually read the
-        // code it is asked to document. Never fabricated — only a verified `crew.repo` member.
-        ...(repo !== undefined ? { repoRef: repo.repoRef } : {}),
-        // UNBOUND runs deliver into the external inbox (crew#263 / wicked-core#259). REPO-BOUND
-        // runs must NOT declare it: an external write root combined with a repo-worktree cwd
-        // kills the worker's Write before any hook fires (wicked-core#293) — those deliver
-        // in-repo (`repoRelPath`) instead, and finalize copies the file out.
-        ...(repoRelPath === undefined ? { extraWriteRoots: [chatDir] } : {}),
+        // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
+        // run's tool-permission stream closes on the first prompt-needing call, so no write
+        // destination works (wicked-core#293). The grounding clause in `problem` carries the
+        // repo's absolute root for READS instead; this ONE launch shape serves all asks.
+        extraWriteRoots: [chatDir],
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the
@@ -827,7 +769,6 @@ export async function startInteractiveChatSubscriber(
       key,
       documentId: ask.documentId,
       outPath,
-      ...(repoRelPath !== undefined ? { repoRelPath } : {}),
       headAtLaunch: doc.head,
       narration: 'Crew run launched — working on your revision…',
       heartbeat: setInterval(() => {
