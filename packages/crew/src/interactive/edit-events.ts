@@ -614,6 +614,9 @@ export async function startInteractiveEditSubscriber(
             `enabled (drop --no-interactive-demo-events / WICKED_INTERACTIVE_DEMO_EVENTS), then ` +
             `resubmit this feedback.`,
         });
+        // DELIBERATELY no ledger row: this handoff was NOT answered, it was declined. An
+        // operator who arms the demo seam and replays the frame must get a real re-author run,
+        // and the launch gate is `ledger.has` — a row here would eat that replay forever.
         log(
           `[interactive-edit] doc ${handoff.documentId} is a demo but the demo seam is NOT armed ` +
             `— handoff v${handoff.version} answered with an honest error status, not silently dropped`,

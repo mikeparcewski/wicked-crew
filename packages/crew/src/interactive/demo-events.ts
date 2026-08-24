@@ -63,10 +63,15 @@
  *    `demoSeamArmed` probe): with the demo seam off, a demo doc's handoff would otherwise be
  *    answered by nobody, silently — so the edit seam posts an honest error status instead.
  *
- *  - ONE AGENT PHASE PER LEG (the v2 reshape, wicked-core#293). Both workflow defs below are
- *    single-phase on purpose: a tool-using turn poisons the NEXT turn's permission stream, so
- *    the phase that WRITES the deliverable must carry the first tool use. See the long note on
- *    INTERACTIVE_DEMO_WORKFLOW_DEF — do not re-add a tool-using recon phase.
+ *  - THE PHASE SHAPE IS MEASURED, NOT CHOSEN (wicked-core#293). A tool-using turn poisons a
+ *    later tool-permission request, which is never answered; the worker's turn then ends where
+ *    it stood. The rule that survives on real seats: THE PHASE THAT INSPECTS THE APP MUST BE
+ *    THE PHASE THAT WRITES THE SPEC, and nothing before it may touch a tool. So the first-spec
+ *    workflow is a TOOL-FREE planning phase then an inspect-and-write phase, and the re-author
+ *    workflow is one local-files-only writing phase. Both the "let recon look at the app" and
+ *    the "collapse it all into one phase" shapes were run against a real seat and died. The
+ *    numbers and the failure signatures are on INTERACTIVE_DEMO_WORKFLOW_DEF — read them
+ *    before reshaping either def.
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -120,30 +125,36 @@ export const INTERACTIVE_DEMO_WORKFLOW = 'interactive-demo';
 export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW = 'interactive-demo-reauthor';
 
 /**
- * The governed workflow that authors a demo's FIRST spec. ONE agent phase — `spec` (build,
- * creator role) — that inspects the live app, decomposes the brief into scenes, and writes the
- * Playwright spec in a single turn-chain.
+ * The governed workflow that authors a demo's FIRST spec. TWO agent phases — `scenes` (recon,
+ * neutral: plan from the brief and the URL string, TOUCHING NOTHING) then `spec` (build,
+ * creator: inspect the live app, write the Playwright spec, report).
  *
- * WHY ONE PHASE (v2 reshape — do NOT re-add a tool-using recon phase). The shipped shape was
- * two phases (a `scenes` recon phase, then `spec`). It died 4/4 on real seats, and
- * wicked-core#293 characterizes the mechanism exactly: A TOOL-USING TURN POISONS THE NEXT
- * TURN'S PERMISSION STREAM — the following turn's FIRST tool-permission request is never
- * answered, so the turn hangs until its timeout. The recon phase reads the target app (WebFetch
- * / curl) to plan real click-paths, which makes it a tool-using turn, which strands the phase
- * that actually writes the deliverable. The control experiment (adversarial run, 2026-08-24)
- * confirmed the characterization from both sides: the SAME two-phase workflow with the recon
- * phase forbidden from using ANY tool went 15/15 green end-to-end (spec authored, installed,
- * 436KB webm recorded, storyboard landed, `version.created kind:demo` on the bus).
+ * THE PHASE SPLIT IS LOAD-BEARING AND MEASURED — do not "simplify" it in either direction.
+ * wicked-core#293: A TOOL-USING TURN POISONS A LATER TOOL-PERMISSION REQUEST — the request is
+ * never answered, so the worker's turn ends where it stood. Three shapes have been run against
+ * a real seat on a real stack (adversarial + build verification, 2026-08-24), and only one
+ * survives:
  *
- * That control proves a tool-free first turn is survivable; collapsing to ONE phase is strictly
- * stronger — with a single agent turn there is no *next* turn to poison, so the workflow does
- * not depend on a prompt-level "use no tools" prohibition holding (a soft constraint the model
- * already broke once: the shipped recon instruction said "do not write any files" and the
- * worker fetched the app anyway). The phase that writes the deliverable therefore carries the
- * FIRST tool use, by construction. The scene decomposition is not lost — it is the instruction's
- * mandated middle step and must be recounted in the prose report, so the spec is still written
- * against a stated scene plan instead of one-shotting the brief into a single scene (the exact
- * mistake Step 8a opens with: "Do NOT copy the brief text into a single scene").
+ *   1. recon phase that INSPECTS THE APP, then a spec phase — DEAD 4/4. The recon turn fetches
+ *      the target, and the spec phase's first permission request goes unanswered; nothing is
+ *      ever written.
+ *   2. recon phase forbidden from using ANY TOOL, then a spec phase that curls the app and
+ *      writes — GREEN 15/15 end-to-end: spec authored, installed, a 436KB webm recorded, the
+ *      storyboard landed, `version.created kind:demo` on the bus. THIS IS THE SHAPE BELOW.
+ *   3. ONE phase doing inspect + plan + write together (the obvious "no next turn to poison"
+ *      simplification) — DEAD 3/3, and this is the counter-intuitive result worth writing down:
+ *      the worker curls the pages, narrates "now writing the spec", and the turn ends AT the
+ *      write. Two runs died with an empty inbox and 161-345 byte outputs (one rejected by the
+ *      substance floor as `substanceRejected`, one "completed" with no deliverable and caught
+ *      by finalize). Collapsing the phases does NOT dodge #293 — it just moves the unanswered
+ *      permission request from the next turn into this one.
+ *
+ * So the rule this workflow encodes is narrower than "one phase": THE PHASE THAT INSPECTS THE
+ * APP MUST BE THE PHASE THAT WRITES THE DELIVERABLE, and nothing before it may touch a tool.
+ * Phase 1 therefore plans from the brief and the URL STRING alone and is told so explicitly (a
+ * soft constraint, and the model has broken a weaker one — the shipped wording said only "do
+ * not write any files" and the worker fetched the app anyway — so the prohibition names tools
+ * outright and says what it protects).
  *
  * The phase `instructions` adapt the demo-authoring contract from interactive's assist skill
  * (Step 8a/8b) and demo.js `recordDemo`'s executable contract: ESM exporting `meta` + `async
@@ -172,16 +183,32 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
   is_system: true,
   phases: [
     {
-      id: 'spec',
-      kind: 'build',
+      id: 'scenes',
+      kind: 'recon',
       instructions:
-        'Author the demo in ONE pass — inspect, then plan, then write. FIRST inspect the live target application yourself: fetch the HTML of the URL named in the task and of every further page the brief touches, so every selector you use provably exists on the page — never guess a selector. THEN decompose the brief into 3-6 named scenes, each a short capability label stating what the viewer should take away (good: "Create a document"; bad: "Click the New button"), covering the setup beat, the main value moments, and the payoff; merge trivial setup steps and split compound flows — a demo that is one scene for a multi-step brief is not a demo — and never invent app features the brief and the fetched pages do not support. THEN write the COMPLETE Playwright demo spec and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. FINALLY REPORT IN PROSE, in at least 120 words, what you inspected and what you wrote: name the pages you fetched and the selectors they gave you, list the scenes you settled on, walk the reader through every step in order (its label, the selectors and waits it uses, and the capability its narration states), call out any scene you merged, split, or dropped and why, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Contract (wicked-interactive demo.spec.mjs): a plain, standalone ES module with NO imports that exports const meta = { url, title, and optionally steps, captions, captionHoldMs } and export async function run({ page, step, meta }) — the service supplies page (Playwright) and step; begin run() with await page.goto(meta.url); wrap EVERY meaningful action in await step(label, async () => { ... }, { say, holdMs }) with one step per scene and the scene\'s capability name as the label; narrate the meaningful beats via say (the capability, not the on-screen data); prefer stable selectors (roles, text, ids) and await your waits (waitForURL, waitForSelector) so the recording captures settled UI; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
-      gate_type: 'execution',
+        'Plan the demo — and in this phase USE NO TOOLS AT ALL: no web fetch, no shell, no file reads, no writes. Work from the task text alone (the target application URL and the user\'s brief); inspecting the app is the NEXT phase\'s job, and a tool use here breaks that phase\'s ability to write the spec, which kills the whole demo. Decompose the brief into 3-6 named scenes — each a short capability label stating what the viewer should take away (good: "Create a document"; bad: "Click the New button"), covering setup/context beats, the main value moments, and the payoff. Merge trivial setup steps, split compound flows — a demo that is one scene for a multi-step brief is not a demo. For each scene note the click-path you EXPECT (navigation, the kind of control to look for, waits) and a one-sentence narration line that states the capability, not the on-screen data; say plainly that the selectors are expectations for the next phase to confirm against the live page. Never invent app features the brief and the URL do not support. Output the scene plan as plain text.',
+      gate_type: 'value',
       gate: 'auto',
       executes_code: false,
       verified_evidence: false,
       required_deliverables: [],
       depends_on: [],
+      role: 'neutral',
+      skill_ref: null,
+      allowed_skills: [],
+      validator_pin: null,
+    },
+    {
+      id: 'spec',
+      kind: 'build',
+      instructions:
+        'FIRST inspect the live target application yourself: curl the HTML of the URL named in the task and of every further page the scene plan visits (use curl — the target is often a plain-HTTP or localhost app a web-fetch tool cannot reach), so every selector you use provably exists on the page; never guess a selector, and correct the scene plan wherever the real page contradicts it. THEN, using the scene plan from the prior phase, write the COMPLETE Playwright demo spec and SAVE it to the absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. THEN REPORT IN PROSE, in at least 120 words, what you inspected and what you wrote: name the pages you fetched and the selectors they gave you, walk the reader through every step in order (its label, the selectors and waits it uses, and the capability its narration states), call out any scene-plan beat you merged, split, or dropped and why, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Contract (wicked-interactive demo.spec.mjs): a plain, standalone ES module with NO imports that exports const meta = { url, title, and optionally steps, captions, captionHoldMs } and export async function run({ page, step, meta }) — the service supplies page (Playwright) and step; begin run() with await page.goto(meta.url); wrap EVERY meaningful action in await step(label, async () => { ... }, { say, holdMs }) with one step per scene and the scene\'s capability name as the label; narrate the meaningful beats via say (the capability, not the on-screen data); prefer stable selectors (roles, text, ids) and await your waits (waitForURL, waitForSelector) so the recording captures settled UI; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
+      gate_type: 'execution',
+      gate: 'auto',
+      executes_code: false,
+      verified_evidence: false,
+      required_deliverables: [],
+      depends_on: ['scenes'],
       role: 'creator',
       skill_ref: null,
       allowed_skills: [],
@@ -196,12 +223,16 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
  * instructions are already extracted into files the task names, so a recon phase would only
  * burn a council turn re-reading what the build phase reads anyway.
  *
- * SAME v2 TREATMENT AS THE FIRST-SPEC WORKFLOW (wicked-core#293): this leg is single-phase for
- * the same reason and must stay that way. Its first act is a tool use (reading the current spec
- * and the feedback JSON) and its deliverable write happens in that same turn-chain, so there is
- * no next turn whose permission stream a tool-using predecessor could poison. Re-inspecting the
- * live app when a feedback item needs a selector the current spec lacks is therefore SAFE here
- * and explicitly instructed — it happens inside the one turn that also writes the file.
+ * SAME v2 TREATMENT AS THE FIRST-SPEC WORKFLOW (wicked-core#293), which for this leg means
+ * LEAVING IT ALONE and saying why. Nothing runs before the phase that writes, so no predecessor
+ * turn can poison its permissions — and its own tool use is LOCAL FILE READS inside the run's
+ * declared write root (the same shape as the interactive-edit workflow's single phase, which
+ * reads a handoff JSON and writes fragments in one turn, in production, today). What this leg
+ * must NOT grow is a live re-fetch of the app: the first-spec measurements above show a turn
+ * that fetches the network and then writes losing the write outright (shape 3, dead 3/3). If a
+ * feedback item ever genuinely needs a selector the current spec lacks, the fix is a preceding
+ * TOOL-FREE phase plus inspection moved into this one — the shape 2 arrangement — not a fetch
+ * bolted onto the writing turn.
  */
 export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF: WorkflowDef = {
   id: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW,
@@ -211,7 +242,7 @@ export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF: WorkflowDef = {
       id: 'respec',
       kind: 'build',
       instructions:
-        'Read the current demo spec and the feedback JSON named in the task; re-author the spec so the recorded demo fulfils every feedback item, and SAVE the complete revised spec to the exact absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. If a feedback item needs a selector or a page the current spec does not already use, fetch that page live (the app URL is meta.url in the current spec) and read its HTML before you write — never guess a selector. THEN REPORT IN PROSE, in at least 120 words, what changed: take each feedback item in turn, say which step(s) you altered and how the revised selectors/waits/narration answer it, note anything you deliberately left untouched, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Each feedback item carries the user\'s instruction plus the storyboard fragment of the step it targets (the step\'s label appears in the fragment text) — change the matching step(s) and leave unrelated steps untouched unless the instruction asks for a restructure. Keep the same executable contract as the current spec: a plain, standalone ES module with NO imports exporting const meta = { url, title, ... } and export async function run({ page, step, meta }); begin run() with await page.goto(meta.url); wrap every meaningful action in await step(label, fn, { say, holdMs }); narrate capabilities via say; prefer stable selectors and await your waits; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
+        'Read the current demo spec and the feedback JSON named in the task; re-author the spec so the recorded demo fulfils every feedback item, and SAVE the complete revised spec to the exact absolute output file named in the task (create parent directories if needed, overwrite if present) — the file on disk is the deliverable, so write it before you finish. Work from the two files and the current spec\'s own selectors — do NOT fetch the live application in this phase; if a feedback item needs a control the current spec never touches, choose the most robust selector the item\'s storyboard fragment supports and say so in your report rather than guessing silently. THEN REPORT IN PROSE, in at least 120 words, what changed: take each feedback item in turn, say which step(s) you altered and how the revised selectors/waits/narration answer it, note anything you deliberately left untouched, and end with the absolute path you wrote — a reply that is only the path is an unreviewable phase and will be rejected. Each feedback item carries the user\'s instruction plus the storyboard fragment of the step it targets (the step\'s label appears in the fragment text) — change the matching step(s) and leave unrelated steps untouched unless the instruction asks for a restructure. Keep the same executable contract as the current spec: a plain, standalone ES module with NO imports exporting const meta = { url, title, ... } and export async function run({ page, step, meta }); begin run() with await page.goto(meta.url); wrap every meaningful action in await step(label, fn, { say, holdMs }); narrate capabilities via say; prefer stable selectors and await your waits; NEVER write credentials or secrets into the spec — read them from process.env at run time.',
       gate_type: 'execution',
       gate: 'auto',
       executes_code: false,
@@ -568,15 +599,16 @@ export async function startInteractiveDemoSubscriber(
     }
 
     if (event.type === 'unitDispatched') {
-      // Both legs are SINGLE-phase (the v2 reshape, wicked-core#293) — the one dispatched unit
-      // inspects the app, plans the scenes, and writes the spec. The ord/phaseCount pair still
-      // rides the line so a future multi-phase leg narrates progress without a rewrite.
+      // The first-spec leg plans (tool-free) then inspects-and-writes; the re-author leg is one
+      // writing phase. Narrate whichever the ord actually is rather than assuming a count.
       const ord = typeof event.ord === 'number' ? event.ord : 0;
+      const last = ord >= flight.phaseCount;
+      const line = last
+        ? `inspecting the app and writing ${authoring}…`
+        : 'planning the demo scenes…';
       narrate(
         flight,
-        flight.phaseCount > 1
-          ? `Crew phase ${ord}/${flight.phaseCount}: inspecting the app and writing ${authoring}…`
-          : `Crew is inspecting the app and writing ${authoring}…`,
+        flight.phaseCount > 1 ? `Crew phase ${ord}/${flight.phaseCount}: ${line}` : `Crew is ${line}`,
       );
       return;
     }

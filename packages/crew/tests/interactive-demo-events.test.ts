@@ -209,38 +209,41 @@ describe('specSelfCheck (the pre-install gate — recordDemo would reject these 
 });
 
 describe('the demo workflow defs (workflows-as-data)', () => {
-  it('interactive-demo is ONE creator build phase — the deliverable-writing phase carries the first tool use (wicked-core#293)', () => {
+  it('interactive-demo is scenes → spec, creator-role build second, unique phase ids', () => {
     const def = INTERACTIVE_DEMO_WORKFLOW_DEF;
     expect(def.id).toBe(INTERACTIVE_DEMO_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['spec']);
-    expect(def.phases[0]?.role).toBe('creator');
-    expect(def.phases[0]?.kind).toBe('build');
-    expect(def.phases[0]?.depends_on).toEqual([]);
+    expect(def.phases.map((p) => p.id)).toEqual(['scenes', 'spec']);
+    expect(def.phases[0]?.role).toBe('neutral');
+    expect(def.phases[1]?.role).toBe('creator');
+    expect(def.phases[1]?.depends_on).toEqual(['scenes']);
   });
 
-  it('NEITHER workflow has a phase that precedes the deliverable write — the #293 invariant, as a test', () => {
-    // A tool-using turn poisons the NEXT turn's permission stream (wicked-core#293), so the
-    // phase that writes the file must be the FIRST agent phase. Two phases means the first one
-    // either uses tools (and strands the writer) or is a prompt-level "use no tools" promise
-    // the model can break. One phase cannot be stranded by a predecessor that does not exist.
-    for (const def of [INTERACTIVE_DEMO_WORKFLOW_DEF, INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF]) {
-      expect(def.phases).toHaveLength(1);
-      expect(def.phases[0]?.kind).toBe('build');
-      expect(def.phases[0]?.depends_on).toEqual([]);
-    }
-  });
-
-  it('the first-spec phase orders inspect → plan scenes → write, so inspection cannot become its own turn', () => {
-    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
+  it('THE #293 INVARIANT: the phase that inspects the app IS the phase that writes, and nothing before it may touch a tool', () => {
+    // Measured on a real seat, not reasoned: a recon phase that inspects the app kills the
+    // spec phase's write (4/4), and collapsing inspect+write into ONE phase kills the write
+    // too (3/3 — the turn ends AT the write). Only "tool-free plan, then inspect-and-write"
+    // survives (15/15 end-to-end). These assertions pin that arrangement so a future
+    // simplification has to argue with the evidence in the def's doc comment.
+    const [plan, write] = INTERACTIVE_DEMO_WORKFLOW_DEF.phases;
+    // Phase 1 forbids tools OUTRIGHT (naming them), and says what the prohibition protects.
+    expect(plan?.instructions ?? '').toMatch(/USE NO TOOLS AT ALL/);
+    expect(plan?.instructions ?? '').toMatch(/no web fetch, no shell, no file reads/i);
+    expect(plan?.instructions ?? '').toMatch(/breaks that phase's ability to write/i);
+    expect(plan?.executes_code).toBe(false);
+    // Phase 2 does the inspecting AND the writing, in that order.
+    const spec = write?.instructions ?? '';
     const inspect = spec.indexOf('FIRST inspect the live target application');
-    const scenes = spec.indexOf('decompose the brief into 3-6 named scenes');
-    const write = spec.indexOf('write the COMPLETE Playwright demo spec and SAVE it');
+    const save = spec.indexOf('write the COMPLETE Playwright demo spec and SAVE it');
     const report = spec.indexOf('REPORT IN PROSE');
-    expect(inspect).toBeGreaterThanOrEqual(0);
-    expect(scenes).toBeGreaterThan(inspect);
-    expect(write).toBeGreaterThan(scenes);
-    expect(report).toBeGreaterThan(write);
+    expect(inspect).toBe(0);
+    expect(save).toBeGreaterThan(inspect);
+    expect(report).toBeGreaterThan(save);
     expect(spec).toMatch(/never guess a selector/i);
+    expect(spec).toMatch(/use curl/i);
+    // …and the re-author leg, which writes in its FIRST phase, must not fetch the network
+    // there: that is the shape measured to lose the write.
+    const respec = INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '';
+    expect(respec).toMatch(/do NOT fetch the live application in this phase/i);
   });
 
   it('interactive-demo-reauthor is a single respec build phase — the edit leg\'s rationale', () => {
@@ -275,7 +278,7 @@ describe('the demo workflow defs (workflows-as-data)', () => {
     // UNBOUND (workdir null) and write their deliverable into the inbox, so PROSE is the only
     // substance available: an instruction that invites a bare-path reply fails the run.
     for (const instructions of [
-      INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '',
+      INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '',
       INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '',
     ]) {
       expect(instructions).toMatch(/REPORT IN PROSE/);
@@ -285,7 +288,7 @@ describe('the demo workflow defs (workflows-as-data)', () => {
   });
 
   it('carries the Step 8 authoring contract (assist skill + demo.js recordDemo), adapted', () => {
-    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
+    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '';
     expect(spec).toContain('meta'); // export const meta { url, title, … }
     expect(spec).toContain('run({ page, step, meta })');
     expect(spec).toContain('page.goto(meta.url)');
@@ -293,16 +296,13 @@ describe('the demo workflow defs (workflows-as-data)', () => {
     expect(spec).toContain('say'); // capability narration
     expect(spec).toMatch(/NEVER write credentials/i); // secrets stay in process.env
     expect(spec).toContain('process.env');
-    // Step 8a's scene decomposition survived the collapse into one phase — as the mandated
-    // middle step of the single instruction, not as a separate (turn-poisoning) recon phase.
-    expect(spec).toContain('3-6');
+    const scenes = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
+    expect(scenes).toContain('3-6'); // Step 8a: scene decomposition, not brief-copying
     const respec = INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '';
     expect(respec).toContain('feedback');
     expect(respec).toMatch(/NEVER write credentials/i);
-    // Re-inspection is SAFE on the re-author leg (one phase → the tool use and the write share
-    // a turn), so the instruction asks for it rather than letting the worker guess selectors.
-    expect(respec).toMatch(/fetch that page live/i);
-    expect(respec).toMatch(/never guess a selector/i);
+    // The re-author leg works from files, never the network (see the #293 invariant test).
+    expect(respec).toMatch(/Work from the two files and the current spec's own selectors/i);
   });
 });
 
