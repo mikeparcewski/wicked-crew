@@ -904,3 +904,24 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(engine.launches.length).toBe(0);
   });
 });
+
+// Copilot (#316): `run` must be AWAITABLE — the recorder awaits it, and a synchronous run
+// returns before its step() calls settle, filming an empty page into a valid-looking video.
+describe('specSelfCheck — async run contract', () => {
+  const meta = 'export const meta = { url: "http://x", title: "t" };\n';
+  it('accepts an async function declaration', () => {
+    expect(specSelfCheck(meta + 'export async function run({ page }) {}')).toBeNull();
+  });
+  it('accepts an async arrow binding', () => {
+    expect(specSelfCheck(meta + 'export const run = async ({ page }) => {};')).toBeNull();
+  });
+  it('REJECTS a synchronous function declaration', () => {
+    expect(specSelfCheck(meta + 'export function run({ page }) {}')).toMatch(/async/);
+  });
+  it('REJECTS a synchronous arrow binding', () => {
+    expect(specSelfCheck(meta + 'export const run = ({ page }) => {};')).toMatch(/async/);
+  });
+  it('still accepts the re-export form (asyncness lives at the declaration)', () => {
+    expect(specSelfCheck(meta + 'async function run() {}\nexport { run };')).toBeNull();
+  });
+});

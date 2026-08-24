@@ -383,11 +383,25 @@ export function specSelfCheck(spec: string): string | null {
   const exportsMeta =
     /export\s+(const|let|var)\s+meta\b/.test(spec) || /export\s*\{[^}]*\bmeta\b/.test(spec);
   if (!exportsMeta) return 'the spec does not export `meta`';
-  const exportsRun =
-    /export\s+(async\s+)?function\s+run\b/.test(spec) ||
-    /export\s+(const|let|var)\s+run\b/.test(spec) ||
-    /export\s*\{[^}]*\brun\b/.test(spec);
-  if (!exportsRun) return 'the spec does not export a `run` function';
+  // `run` must be AWAITABLE, not merely present (Copilot, #316): recordDemo awaits it, and a
+  // synchronous `run` returns before its `step()` calls settle — the recorder would then film
+  // an empty page and land a valid-looking but contentless video. A silent bad artifact is
+  // exactly what this seam must not produce, so the async marker is part of the shape check
+  // for the two forms a static read can see. The re-export form (`export { run }`) still
+  // cannot be judged here — its asyncness lives at the declaration — so it stays accepted and
+  // the recording remains its judge.
+  const asyncRunDecl = /export\s+async\s+function\s+run\b/.test(spec);
+  const asyncRunBinding = /export\s+(const|let|var)\s+run\s*=\s*async\b/.test(spec);
+  const runReExport = /export\s*\{[^}]*\brun\b/.test(spec);
+  const syncRunDecl = /export\s+function\s+run\b/.test(spec);
+  const syncRunBinding =
+    /export\s+(const|let|var)\s+run\s*=/.test(spec) && !asyncRunBinding;
+  if (syncRunDecl || syncRunBinding) {
+    return 'the spec exports `run` but not as an async function (the recorder awaits it)';
+  }
+  if (!asyncRunDecl && !asyncRunBinding && !runReExport) {
+    return 'the spec does not export an async `run` function';
+  }
   return null;
 }
 
