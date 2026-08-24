@@ -49,7 +49,7 @@
  *    else the bus `event_id` (pure redelivery). Never the doc lifetime.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -62,8 +62,8 @@ import {
   STATUS_POSTED,
   oneLine,
   resolveProjectRepo,
-  type ProjectRepo,
 } from './draft-events.js';
+import { snapshotRepo } from './repo-snapshot.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -270,21 +270,22 @@ export function isAnswerableDocKind(kind: string): boolean {
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
  * CURRENT-version snapshot to read, and the absolute path the revised HTML must land at.
- * When the doc's project is repo-bound (CREW-UX-8), a SHORT grounding clause names the repo's
- * absolute root for the worker to READ — same rationale as the draft leg: without it the
- * worker revises from generic knowledge and produces placeholder content. The run itself
- * launches unbound (no `repoRef` — wicked-core#293, see `resolveProjectRepo` in
- * draft-events.ts), so the clause is the whole grounding mechanism.
+ * When the doc's project is repo-bound (CREW-UX-8 v4), a SHORT grounding clause names the
+ * launch-scoped repo SNAPSHOT inside the chat inbox for the worker to READ — same rationale
+ * as the draft leg: without it the worker revises from generic knowledge and produces
+ * placeholder content. The run itself launches unbound (wicked-core#293) and cannot read the
+ * live repo (wicked-core#294, see `resolveProjectRepo` in draft-events.ts), so the snapshot
+ * named by this clause is the whole grounding mechanism.
  */
 export function chatProblem(
   ask: ChatAsk,
   currentPath: string,
   outPath: string,
-  repo?: ProjectRepo,
+  snapshotDir?: string,
 ): string {
   const grounding =
-    repo !== undefined
-      ? `Ground the revision in the repository at ${oneLine(repo.rootPath, 300)} — read it and use its real content, never placeholders. `
+    snapshotDir !== undefined
+      ? `Ground the revision in the repository snapshot at ${oneLine(snapshotDir, 300)} — read it and use its real content, never placeholders. `
       : '';
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
@@ -316,6 +317,10 @@ export interface InteractiveChatOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** Repo-snapshot size budget in bytes (CREW-UX-8 v4; default ~200MB — see
+   *  {@link snapshotRepo}). A repo over budget degrades the launch to ungrounded, narrated.
+   *  Tests shrink it to exercise the degradation path without a 200MB fixture. */
+  repoSnapshotMaxBytes?: number;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here so a project on its own root
@@ -353,6 +358,9 @@ interface InFlight {
   key: string;
   documentId: string;
   outPath: string;
+  /** The launch-scoped repo snapshot grounding this run (CREW-UX-8 v4), when the ask's project
+   *  is repo-bound and the snapshot succeeded. Removed on EVERY terminal path. */
+  snapshotDir?: string | undefined;
   /** The manifest head the launch snapshotted — the landing gate's baseline. */
   headAtLaunch: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
@@ -503,6 +511,25 @@ export async function startInteractiveChatSubscriber(
     return flight;
   }
 
+  /** CREW-UX-8 v4: the repo snapshot is launch-scoped — remove it on EVERY terminal path
+   *  (success, no-file, emit-failure, run failure/cancel) so the inbox never accretes dead
+   *  clones. Best-effort: a leftover snapshot is a disk-space wart, never a correctness one. */
+  function removeSnapshot(flight: InFlight): void {
+    const dir = flight.snapshotDir;
+    if (dir === undefined) return;
+    flight.snapshotDir = undefined;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      log(`[interactive-chat] removed repo snapshot ${dir}`);
+    } catch (err) {
+      log(
+        `[interactive-chat] could not remove repo snapshot ${dir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   function docHasFlight(documentId: string): boolean {
     for (const f of inFlight.values()) {
       if (f.documentId === documentId) return true;
@@ -598,6 +625,7 @@ export async function startInteractiveChatSubscriber(
 
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
+      removeSnapshot(flight); // the failure path cleans its snapshot too (CREW-UX-8 v4)
       ledger.recordFailure(flight.key);
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
@@ -614,6 +642,8 @@ export async function startInteractiveChatSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
+    // The run is terminal — its grounding snapshot is done serving reads, on every branch below.
+    removeSnapshot(flight);
     const { key, documentId, outPath } = flight;
     let ok = false;
     try {
@@ -715,10 +745,9 @@ export async function startInteractiveChatSubscriber(
     copyFileSync(doc.headHtmlPath, currentPath);
     const runId = randomUUID();
 
-    // CREW-UX-8: a repo-bound project's revision is grounded in that repo — resolved at launch
-    // time (like the head snapshot) so the task can name the repo's absolute root for READS.
-    // The launch itself stays UNBOUND (no repoRef — wicked-core#293, see resolveProjectRepo in
-    // draft-events.ts). Unbound docs and repo-less projects resolve to `undefined`: unchanged.
+    // CREW-UX-8 v4: a repo-bound project's revision is grounded in a REPO SNAPSHOT — the
+    // binding resolved at launch time (like the head snapshot). Unbound docs and repo-less
+    // projects resolve to `undefined`: unchanged.
     const repo =
       ask.projectId !== undefined ? await resolveProjectRepo(adapter, ask.projectId, log) : undefined;
 
@@ -730,9 +759,35 @@ export async function startInteractiveChatSubscriber(
       message: 'A governed crew picked up your ask — revising the document…',
     });
 
+    // The repo snapshot happens crew-side, AFTER the pickup narration (a big clone must not
+    // starve the silence budget) and BEFORE launchRun: <chatDir>/<key>-repo sits inside the
+    // declared extraWriteRoots, so the unbound worker can read it (write roots are readable,
+    // wicked-core#259) even though the live repo root is boundary-denied (wicked-core#294).
+    // Snapshotted FRESH PER ASK, not per doc: the repo can change between asks (each revision
+    // iterates on a moving codebase), and a launch-scoped snapshot reuses the exact terminal
+    // cleanup the run already has — a doc-scoped one would need its own lifetime (when to
+    // refresh, who removes it when the doc dies). An unsnapshotable repo (over budget,
+    // clone+copy failed) degrades HONESTLY: ungrounded launch, a visible note, a log line.
+    let snapshotDir: string | undefined;
+    if (repo !== undefined) {
+      const dest = join(chatDir, `${safeKey}-repo`);
+      if (snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log })) {
+        snapshotDir = dest;
+      } else {
+        emitInteractive(STATUS_POSTED, {
+          document_id: ask.documentId,
+          state: 'working',
+          message: 'repository too large to snapshot — revising without repo grounding',
+        });
+        log(
+          `[interactive-chat] ask ${key}: repo ${repo.rootPath} could not be snapshotted — launching ungrounded`,
+        );
+      }
+    }
+
     try {
       await adapter.launchRun({
-        problem: chatProblem(ask, currentPath, outPath, repo),
+        problem: chatProblem(ask, currentPath, outPath, snapshotDir),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,
@@ -742,11 +797,20 @@ export async function startInteractiveChatSubscriber(
         ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}),
         // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
         // run's tool-permission stream closes on the first prompt-needing call, so no write
-        // destination works (wicked-core#293). The grounding clause in `problem` carries the
-        // repo's absolute root for READS instead; this ONE launch shape serves all asks.
+        // destination works (wicked-core#293) — and NO live-repo path in the task either: the
+        // unbound boundary denies those reads (wicked-core#294). The grounding clause in
+        // `problem` names the in-inbox snapshot instead; this ONE launch shape serves all asks.
         extraWriteRoots: [chatDir],
       });
     } catch (err) {
+      // A launch that never happened keeps no snapshot (a replayed frame re-snapshots fresh).
+      if (snapshotDir !== undefined) {
+        try {
+          rmSync(snapshotDir, { recursive: true, force: true });
+        } catch {
+          // best-effort
+        }
+      }
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
@@ -769,6 +833,7 @@ export async function startInteractiveChatSubscriber(
       key,
       documentId: ask.documentId,
       outPath,
+      ...(snapshotDir !== undefined ? { snapshotDir } : {}),
       headAtLaunch: doc.head,
       narration: 'Crew run launched — working on your revision…',
       heartbeat: setInterval(() => {
