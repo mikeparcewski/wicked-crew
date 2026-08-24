@@ -66,6 +66,22 @@ export interface LaunchRunInput {
    * `workflow`; a free-text run has no def to append to. Omit ⇒ no delivery phase (default).
    */
   deliver?: 'pr';
+  /**
+   * THE DELIVERABLE FLOOR (crew#311) — absolute paths this run MUST have produced by the time
+   * it finishes. When non-empty (and `workflow` is set), the adapter appends a deterministic
+   * verification Tool phase to a PER-RUN copy of the def (see `core/deliverable-floor.ts`)
+   * which re-derives "done" from the artifacts: every declared path must exist and carry bytes,
+   * or the phase exits non-zero and the RUN FAILS, naming what was expected and what was found.
+   *
+   * This is the instrument for runs whose deliverable is a FILE in a declared write root rather
+   * than a worktree diff — every crew interactive seam. The engine's own two floors do not
+   * reach them: the built-in evidence floor re-verifies a git diff and is fail-closed on a
+   * repo-less run, and `required_deliverables` is checked only by the wrapped-CLI runner and
+   * only against the unit's cwd (an absolute path counts as missing there by construction).
+   *
+   * Omit for runs whose evidence is the worktree diff — those are the engine's to floor.
+   */
+  requireDeliverables?: string[];
 }
 
 /** Default `workerStallMinutes` (crew#287): silent minutes before the stall watchdog fires. */

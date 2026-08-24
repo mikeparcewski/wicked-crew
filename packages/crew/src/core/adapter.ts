@@ -27,6 +27,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
+import { composeDeliverableFloor } from './deliverable-floor.js';
 
 
 
@@ -734,30 +735,55 @@ export class CoreAdapter {
     }
     if (input.workflow !== undefined) {
       let workflowId = input.workflow;
-      if (input.deliver === 'pr') {
+      // Both per-run compositions (deliver + deliverable floor) fold into ONE def and ONE
+      // registration: composing twice would arm two ids and launch the second, leaving the
+      // first as engine litter. `composed` stays null until something actually composes, which
+      // is what keeps the undelivered/unfloored launch byte-for-byte the old path.
+      const requireDeliverables = input.requireDeliverables ?? [];
+      let composed: WorkflowDef | null = null;
+      if (input.deliver === 'pr' || requireDeliverables.length > 0) {
+        const base = this.getWorkflow(input.workflow);
+        if (base === null) {
+          throw new Error(
+            input.deliver === 'pr'
+              ? `deliver: "pr" needs a registered workflow to append the deliver phase to — ` +
+                `'${input.workflow}' is not registered`
+              : `requireDeliverables needs a registered workflow to append the deliverable ` +
+                `floor to — '${input.workflow}' is not registered`,
+          );
+        }
+        composed = base;
+      }
+      if (composed !== null && requireDeliverables.length > 0) {
+        // THE DELIVERABLE FLOOR (crew#311): "done" is re-derived from the artifact. The
+        // launcher declared what this run must produce, so a deterministic Tool phase appended
+        // here re-verifies that those files EXIST and carry bytes, and fails the run naming
+        // what was expected and what was found when they do not. Composed BEFORE the deliver
+        // phase below so the floor sits ahead of it: a run that produced nothing must fail
+        // rather than open a pull request over an empty branch.
+        composed = composeDeliverableFloor(composed, input.sessionId, requireDeliverables);
+      }
+      if (composed !== null && input.deliver === 'pr') {
         // First-class delivery (crew#293): compose a PER-RUN def — the selected workflow's
         // phases plus the hardened deliver Tool phase appended last — and arm it with the
         // engine under a run-scoped id. The shared def is NEVER mutated, and the composed def
         // is hot-registered only (no overlay file, no userWorkflows entry): it exists for this
         // launch, not for the catalog.
-        const base = this.getWorkflow(input.workflow);
-        if (base === null) {
-          throw new Error(
-            `deliver: "pr" needs a registered workflow to append the deliver phase to — ` +
-              `'${input.workflow}' is not registered`,
-          );
-        }
-        if (base.phases.some((p) => p.id === DELIVER_PHASE_ID)) {
+        if (composed.phases.some((p) => p.id === DELIVER_PHASE_ID)) {
           // The def already delivers (an operator's own feature-pr-style overlay). Appending a
           // second `deliver` phase would collide on id — launch the def as-is; the intent
           // ("this run opens its PR") is already satisfied.
         } else {
           // The run's intent rides along so the commit the deliver phase makes NAMES what it
-          // delivered (`wicked-crew run <id>: <intent>`) instead of being an anonymous blob.
-          const composed = composeDeliverWorkflow(base, input.sessionId, input.problem);
-          await this._armPerRunWorkflow(composed);
-          workflowId = composed.id;
+          // delivered (`wicked-crew run <id>: <intent>`, #318) instead of being an anonymous
+          // blob. Composition stays DEFERRED (#319): deliver and the deliverable floor fold
+          // into one def and one registration below, never two armed ids.
+          composed = composeDeliverWorkflow(composed, input.sessionId, input.problem);
         }
+      }
+      if (composed !== null && composed.id !== input.workflow) {
+        await this._armPerRunWorkflow(composed);
+        workflowId = composed.id;
       }
       opts.workflow = workflowId;
       if (workflowId === input.workflow) {
@@ -1444,7 +1470,8 @@ export class CoreAdapter {
   }
 
   /**
-   * Arm a PER-RUN composed workflow def (crew#293 deliver) with the engine — hot registration
+   * Arm a PER-RUN composed workflow def (crew#293 deliver, crew#311 deliverable floor) with the
+   * engine — hot registration
    * ONLY. Deliberately neither of the other two paths:
    *   - not `registerWorkflow()`: the composed def must not enter `userWorkflows` or the overlay
    *     dir — it is launch input for one run, and persisting it would grow the catalog and the
@@ -1460,10 +1487,12 @@ export class CoreAdapter {
     const register = core['registerWorkflow'];
     if (typeof register !== 'function') {
       // Same doctrine as registerWorkflow(): no validator ⇒ refuse loudly. Silently launching
-      // the BASE workflow instead would drop the delivery the caller explicitly asked for.
+      // the BASE workflow instead would drop the delivery the caller explicitly asked for —
+      // and, for crew#311, would drop the deliverable floor, launching a run that can once
+      // again report done over an artifact that was never written.
       throw new Error(
-        'deliver: "pr" needs a wicked-core build with the registerWorkflow binding — ' +
-          'the per-run deliver workflow cannot be armed',
+        'deliver: "pr" / requireDeliverables need a wicked-core build with the registerWorkflow ' +
+          'binding — the per-run workflow cannot be armed',
       );
     }
     await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(def));
