@@ -203,6 +203,13 @@ describe('chatProblem (the worker prompt seed)', () => {
     const problem = chatProblem(ask, '/i', '/o', { repoRef: 'repo-1', rootPath: '/home/me/src/wicked-studio' });
     expect(problem).toContain('Ground the revision in the repository at /home/me/src/wicked-studio — read it');
     expect(problem).not.toMatch(/[\n\r\t]/);
+    // WORST CASE stays bounded: pasted-novel ask + oversized root ≤ the capped ask budget
+    // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
+    const worst = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o', {
+      repoRef: 'r',
+      rootPath: 'p'.repeat(10_000),
+    });
+    expect(worst.length).toBeLessThan(2900);
   });
 
   it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {

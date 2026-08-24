@@ -147,6 +147,13 @@ describe('draftProblem (the worker prompt seed)', () => {
     // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
     const weird = draftProblem(doc, '/o', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
     expect(weird).not.toMatch(/[\n\r]/);
+    // WORST CASE stays bounded: pasted-novel brief + oversized root ≤ the capped brief budget
+    // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
+    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o', {
+      repoRef: 'r',
+      rootPath: 'p'.repeat(10_000),
+    });
+    expect(worst.length).toBeLessThan(2900);
   });
 
   it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {
