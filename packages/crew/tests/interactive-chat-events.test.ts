@@ -11,6 +11,8 @@
 //    the CURRENT-version snapshot to read, and the exact output path; the snapshot is COPIED
 //    into the chat inbox at LAUNCH time so a queued second ask iterates on what the first
 //    landed (J3 "iterate twice") and the one declared write root covers input + deliverable;
+//    a repo-bound project's ask is grounded on a per-ask REPO SNAPSHOT inside the same inbox
+//    (CREW-UX-8 v4 — wicked-core#293/#294), removed when the run reaches a terminal state;
 //  - IDEMPOTENCY: the durable ledger keys the ASK (source_message_id when present, else the
 //    bus event_id), a replayed/resent ask launches no second run, and the announce carries a
 //    deterministic idempotency key;
@@ -199,32 +201,27 @@ describe('chatProblem (the worker prompt seed)', () => {
     expect(big).toContain('…');
   });
 
-  it('names the project repo as READ grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
+  it('names the repo SNAPSHOT as READ grounding when one was made — and stays single-line (CREW-UX-8 v4)', () => {
     // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
     // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
     // on the first prompt-needing call, so no write works), and the clause hands the worker
-    // the repo root for READS only.
-    const problem = chatProblem(ask, '/i/current.html', '/tmp/chats/k-revised.html', {
-      repoRef: 'repo-1',
-      rootPath: '/home/me/src/wicked-studio',
-    });
-    expect(problem).toContain('Ground the revision in the repository at /home/me/src/wicked-studio — read it');
+    // the in-inbox SNAPSHOT to read — never the live repo root, which the unbound boundary
+    // denies (wicked-core#294).
+    const problem = chatProblem(ask, '/i/current.html', '/tmp/chats/k-revised.html', '/tmp/chats/k-repo');
+    expect(problem).toContain('Ground the revision in the repository snapshot at /tmp/chats/k-repo — read it');
     expect(problem).toContain('read it first: /i/current.html');
     expect(problem).toContain('exactly this absolute file path: /tmp/chats/k-revised.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
-    // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
-    const weird = chatProblem(ask, '/i', '/o.html', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
+    // The clause is SHORT (PTY problem-length budget): a hostile/odd snapshot path is flattened+capped.
+    const weird = chatProblem(ask, '/i', '/o.html', 'a\nb'.repeat(400));
     expect(weird).not.toMatch(/[\n\r]/);
-    // WORST CASE stays bounded: pasted-novel ask + oversized root ≤ the capped ask budget
-    // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
-    const worst = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o.html', {
-      repoRef: 'r',
-      rootPath: 'p'.repeat(10_000),
-    });
+    // WORST CASE stays bounded: pasted-novel ask + oversized path ≤ the capped ask budget
+    // (2500) plus the ~400-char grounding clause (301-char capped path + fixed words).
+    const worst = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o.html', 'p'.repeat(10_000));
     expect(worst.length).toBeLessThan(2900);
   });
 
-  it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {
+  it('adds NO grounding clause without a snapshot — unchanged prompt (no fabricated refs)', () => {
     expect(chatProblem(ask, '/i', '/o')).not.toContain('Ground the revision');
     expect(chatProblem(ask, '/i', '/o')).toContain('exactly this absolute file path: /o');
     expect(chatProblem(ask, '/i', '/o', undefined)).toBe(chatProblem(ask, '/i', '/o'));
@@ -787,33 +784,65 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(engine.launches[1]!.problem).not.toContain('Ground the revision');
   });
 
-  it('GROUNDS an ask on a repo-backed project: the clause names the repo, the launch stays UNBOUND (CREW-UX-8 v3)', async () => {
+  /** A real (plain-dir) repo fixture the v4 snapshot path can clone/copy from. */
+  function seedRepoFixture(name = 'the-repo'): string {
+    const root = join(dir, name);
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# the real studio project\n', 'utf8');
+    writeFileSync(join(root, 'src', 'main.ts'), 'export const real = true;\n', 'utf8');
+    return root;
+  }
+
+  it('SNAPSHOTS the repo into the chat inbox BEFORE the launch and grounds the ask on the snapshot — the launch stays UNBOUND (CREW-UX-8 v4)', async () => {
     const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
     const engine = fakeAdapter({
       members: {
         'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }],
         'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }],
       },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
     });
     seedDoc('repo-doc');
     seedDoc('bare-doc');
-    const sub = await startSub(engine);
+    const groundedKey = chatKey('repo-doc', 0, 'm-r').replace(/[^a-zA-Z0-9_-]/g, '-');
+    const snapDir = join(chatDir, `${groundedKey}-repo`);
+    let snapshotExistedAtLaunch = false;
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      // The ORDER is the contract: the snapshot must be on disk before launchRun resolves —
+      // a worker grounded on a path that appears later would race its own recon phase.
+      snapshotExistedAtLaunch = existsSync(join(snapDir, 'README.md'));
+      return inner(input);
+    };
+    const sub = await startInteractiveChatSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      queueSweepMs: 25,
+      ledgerPath: join(dir, 'chat-ledger.json'),
+      chatDir,
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
     subs.push(sub!);
 
-    // Repo-backed project → the task names the repo root for READS, but the launch carries
-    // NO repoRef and keeps the ONE unbound write shape (external inbox deliverable +
-    // extraWriteRoots): wicked-core#293 — a repoRef-bound run's tool-permission stream closes
-    // on the first prompt-needing call, so no write destination works on a bound run, while
-    // bound READS and the unbound shape are both run-evidence proven.
+    // Repo-backed project → the task names the in-inbox SNAPSHOT to read (fresh per ask —
+    // the repo can change between asks), and the launch carries NO repoRef and keeps the ONE
+    // unbound write shape: a repoRef binding kills the session (wicked-core#293) and the
+    // unbound boundary denies live-repo reads (wicked-core#294) — the snapshot sits inside
+    // extraWriteRoots, which are readable (wicked-core#259).
     await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r', project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     const grounded = engine.launches[0]!;
+    expect(snapshotExistedAtLaunch, 'snapshot must exist before launchRun').toBe(true);
     expect('repoRef' in grounded).toBe(false);
     expect(grounded.problem).toContain(
-      'Ground the revision in the repository at /home/me/src/wicked-studio — read it',
+      `Ground the revision in the repository snapshot at ${snapDir} — read it`,
     );
-    const groundedKey = chatKey('repo-doc', 0, 'm-r').replace(/[^a-zA-Z0-9_-]/g, '-');
+    expect(grounded.problem).not.toContain(repoRoot); // the live root never reaches the task
     expect(grounded.problem).toContain(
       `exactly this absolute file path: ${join(chatDir, `${groundedKey}-revised.html`)}`,
     );
@@ -821,21 +850,65 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(grounded.extraWriteRoots).toEqual([chatDir]);
     expect(grounded.problem).not.toMatch(/[\n\r]/);
     expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
+    // The snapshot holds the repo's REAL content, inside the readable chat inbox.
+    expect(readFileSync(join(snapDir, 'README.md'), 'utf8')).toContain('the real studio project');
+    expect(readFileSync(join(snapDir, 'src', 'main.ts'), 'utf8')).toContain('real = true');
 
-    // Repo-less project → launches exactly as today: no repoRef, no clause, same write shape.
+    // Repo-less project → launches exactly as today: no repoRef, no clause, no snapshot dir,
+    // same write shape.
     await emitChatPosted(bus, 'bare-doc', { source_message_id: 'm-b', project_id: 'proj-bare' });
     await waitFor(() => engine.launches.length === 2);
     const bare = engine.launches[1]!;
     expect('repoRef' in bare).toBe(false);
     expect(bare.problem).not.toContain('Ground the revision');
     expect(bare.extraWriteRoots).toEqual([chatDir]);
+    const bareKey = chatKey('bare-doc', 0, 'm-b').replace(/[^a-zA-Z0-9_-]/g, '-');
+    expect(existsSync(join(chatDir, `${bareKey}-repo`))).toBe(false);
   });
 
-  it('a GROUNDED revision completes the full loop through the ONE standard finalize — inbox file in, inbox path announced', async () => {
+  it('DEGRADES HONESTLY when the repo cannot be snapshotted: ungrounded launch + a visible status note (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture(); // ~50 bytes — over a 10-byte budget
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    seedDoc('big-doc');
+    const logged: string[] = [];
+    const sub = await startSub(engine, { repoSnapshotMaxBytes: 10, log: (m: string) => logged.push(m) });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitChatPosted(bus, 'big-doc', { source_message_id: 'm-big', project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    // The launch HAPPENED — degradation never eats the ask — but ungrounded: no clause, no
+    // snapshot on disk, the standard unbound shape.
+    const launch = engine.launches[0]!;
+    expect(launch.problem).not.toContain('Ground the revision');
+    expect(launch.problem).not.toContain(repoRoot);
+    const bigKey = chatKey('big-doc', 0, 'm-big').replace(/[^a-zA-Z0-9_-]/g, '-');
+    expect(existsSync(join(chatDir, `${bigKey}-repo`))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([chatDir]);
+    // The user sees WHY the revision is not repo-grounded…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes(
+            'repository too large to snapshot — revising without repo grounding',
+          ),
+      ),
+    );
+    // …and the operator sees the real reason in the log.
+    expect(logged.some((m) => m.includes('snapshot budget'))).toBe(true);
+    expect(logged.some((m) => m.includes('launching ungrounded'))).toBe(true);
+  });
+
+  it('a GROUNDED revision completes the full loop through the ONE standard finalize — inbox file in, inbox path announced, snapshot gone', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter({
       members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+      repos: [{ id: 'repo-studio', root_path: seedRepoFixture() }],
     });
     seedDoc('repo-doc');
     const sub = await startSub(engine);
@@ -846,9 +919,12 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
     const key = chatKey('repo-doc', 0, 'm-r');
     const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const snapDir = join(chatDir, `${safeKey}-repo`);
+    expect(existsSync(join(snapDir, 'README.md'))).toBe(true);
 
-    // The worker wrote the external-inbox deliverable — the ONLY write shape v3 has (the
-    // grounded repo is READ-only context; wicked-core#293 killed every bound-write variant).
+    // The worker wrote the external-inbox deliverable — the ONLY write shape v4 has (the
+    // in-inbox snapshot is READ-only grounding context; wicked-core#293 killed every
+    // bound-write variant and wicked-core#294 killed live-repo reads).
     const inboxPath = join(chatDir, `${safeKey}-revised.html`);
     writeFileSync(inboxPath, '<html><body><h1>grounded revision</h1></body></html>', 'utf8');
     engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
@@ -858,6 +934,20 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect((announce.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded revision');
     expect(sub!.ledger.get(key)?.emittedAt).toBeTruthy();
+    // The launch-scoped snapshot did not outlive its run…
+    expect(existsSync(snapDir)).toBe(false);
+
+    // …and the FAILURE path cleans its snapshot too. (landVersion opens the landing gate so
+    // the second ask launches instead of parking behind it.)
+    landVersion('repo-doc', '<html><body><h1>landed</h1></body></html>');
+    await emitChatPosted(bus, 'repo-doc', { source_message_id: 'm-r2', project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 2);
+    const key2 = chatKey('repo-doc', 0, 'm-r2').replace(/[^a-zA-Z0-9_-]/g, '-');
+    const snapDir2 = join(chatDir, `${key2}-repo`);
+    expect(existsSync(join(snapDir2, 'README.md'))).toBe(true);
+    engine.fire({ type: 'sessionFailed', session: engine.launches[1]!.sessionId, ord: 1 });
+    await waitFor(() => sub!.ledger.get(chatKey('repo-doc', 0, 'm-r2'))?.failedAt !== undefined);
+    expect(existsSync(snapDir2), 'the failure path must remove the snapshot too').toBe(false);
   });
 
   it('a STALE repo membership never fabricates a repoRef — the ask degrades to the repo-less shape (CREW-UX-8)', async () => {
