@@ -458,8 +458,7 @@ export async function startInteractiveDemoSubscriber(
   );
   const demoDir = opts.demoDir ?? join(defaultStateDir(), 'interactive-demos');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
-  const resolveDocsRoot =
-    opts.resolveDocsRoot ?? ((_projectId: string | undefined) => resolveInteractiveRoot(null));
+  const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   const inFlight = new Map<string, InFlight>(); // runId → live state
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
