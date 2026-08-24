@@ -17,6 +17,7 @@ import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
 import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js';
 import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
+import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -108,6 +109,38 @@ export interface CreateServerOptions {
     editDir?: string;
     /** Seat roster override (JSON array); omit for the production council roster. */
     clisJson?: string;
+    /** Docs-root resolver override (tests); default = per-project `interactiveRoot` setting.
+     *  Used ONLY as the demo-kind gate (CREW-UX-9) — demo docs' step feedback belongs to the
+     *  demo seam. */
+    resolveDocsRoot?: (projectId: string | undefined) => string;
+  };
+  /**
+   * Opt-in governed answering of wicked-interactive DEMO docs (CREW-UX-9 — video generation's
+   * missing brain, the retired assist agent's Step 8). When enabled, a durable subscriber
+   * answers `wicked.interactive.doc.created` (kind:demo) with a governed `interactive-demo`
+   * run that authors `demo.spec.mjs`, installs it into the doc workspace, and ends in
+   * `wicked.interactive.demo.requested` — the model-free service then records the video
+   * (Playwright + ffmpeg) and lands the storyboard version itself. Step feedback on a demo doc
+   * (`feedback.processed`, manifest kind demo) is answered by RE-authoring the spec and
+   * re-emitting demo.requested (assist SKILL.md Step 8c). When absent (the default), demo docs
+   * keep their "Learning …" placeholder — the pre-CREW-UX-9 state.
+   */
+  interactiveDemoEvents?: {
+    enabled: boolean;
+    /** Bus db path; omit for wicked-bus's own default resolution (honors WICKED_BUS_DATA_DIR). */
+    dbPath?: string;
+    /** Poll cadence, ms (tests shorten it). */
+    pollIntervalMs?: number;
+    /** Heartbeat narration cadence, ms (default 15000). */
+    heartbeatMs?: number;
+    /** Durable replay-dedup ledger path (default ~/.wicked-crew/interactive-demo-ledger.json). */
+    ledgerPath?: string;
+    /** Where governed workers write specs (default ~/.wicked-crew/interactive-demos). */
+    demoDir?: string;
+    /** Seat roster override (JSON array); omit for the production council roster. */
+    clisJson?: string;
+    /** Docs-root resolver override (tests); default = per-project `interactiveRoot` setting. */
+    resolveDocsRoot?: (projectId: string | undefined) => string;
   };
   /**
    * Opt-in governed answering of wicked-interactive's conversational ITERATION asks
@@ -314,6 +347,13 @@ export async function createServer(
     );
   };
 
+  /** The docs root a project's interactive docs live under — the SAME per-project settings
+   *  resolution the project routes, the interactive proxy, and the chat seam share
+   *  (DES-MERGE-001 §7.1/§7.2). Shared by the edit seam (demo-kind gate, CREW-UX-9) and the
+   *  demo seam (spec install + manifest reads). */
+  const interactiveDocsRoot = (projectId: string | undefined): string =>
+    resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null);
+
   // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
   // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
   if (options?.qeGateEvents?.enabled === true) {
@@ -370,12 +410,44 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.editDir !== undefined ? { editDir: o.editDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's.
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
     if (editSub !== null) {
       const sub = editSub;
       app.log.info('interactive-edit subscription armed (filter wicked.interactive.feedback.processed)');
+      app.addHook('onClose', async () => {
+        await sub.stop();
+      });
+    }
+  }
+
+  // Arm the opt-in interactive DEMO answering seam (CREW-UX-9 — the retired assist agent's
+  // Step 8). Same posture as the sibling seams: failure to arm is LOUD but non-fatal — a demo
+  // doc then keeps its placeholder, and this daemon must boot on a machine whose bus is
+  // broken. Armed beside the edit seam because the two split `feedback.processed` by the doc
+  // manifest's kind (demo → re-author the spec here; everything else → structural edit there).
+  let demoSub: Awaited<ReturnType<typeof startInteractiveDemoSubscriber>> = null;
+  if (options?.interactiveDemoEvents?.enabled === true) {
+    const o = options.interactiveDemoEvents;
+    demoSub = await startInteractiveDemoSubscriber(adapter, {
+      ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
+      ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
+      ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
+      ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
+      ...(o.demoDir !== undefined ? { demoDir: o.demoDir } : {}),
+      ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
+      onRunFiled: fileRun,
+      log: (m) => app.log.warn(m),
+    });
+    if (demoSub !== null) {
+      const sub = demoSub;
+      app.log.info(
+        'interactive-demo subscription armed (filters wicked.interactive.doc.created + feedback.processed, kind:demo)',
+      );
       app.addHook('onClose', async () => {
         await sub.stop();
       });
