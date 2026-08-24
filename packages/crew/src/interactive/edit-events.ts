@@ -45,6 +45,8 @@ import {
   oneLine,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { readDocHead } from './chat-events.js';
+import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../core/types.js';
 
@@ -284,6 +286,25 @@ export interface InteractiveEditOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The docs root a handoff's doc manifest is read from — the KIND GATE only (CREW-UX-9):
+   *  a doc whose manifest says `kind: "demo"` is the demo seam's to answer (a demo refines by
+   *  re-authoring `demo.spec.mjs` + re-recording, assist SKILL.md Step 8c — a storyboard
+   *  fragment edit would change the chapter list, not the recording). A doc this daemon
+   *  cannot see (missing/unreadable manifest) stays THIS seam's, exactly as before CREW-UX-9
+   *  — and the demo seam requires a readable `kind: "demo"` manifest, so exactly one seam
+   *  answers any handoff. Default: the shared-default resolution
+   *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
+   *  per-project `interactiveRoot` setting through here. */
+  resolveDocsRoot?: (projectId: string | undefined) => string;
+  /** Is the DEMO seam actually armed in this process? Probed per event (the demo seam arms
+   *  after this one, and can fail to arm at all — bus missing, workflow registration refused).
+   *  The kind gate above hands demo docs to that seam; when it is NOT there, handing off is
+   *  handing off to NOBODY — the canvas would sit on a handoff no seam ever answers and no
+   *  status ever closes. So an un-armed demo seam turns the silent skip into an honest error
+   *  status (see `handleFeedbackProcessed`). Default: `() => false` — a caller that does not
+   *  wire the probe has no demo seam to hand anything to, and saying so out loud beats
+   *  guessing. */
+  demoSeamArmed?: () => boolean;
   /** Called after a launch that FILED the run into a project (the handoff carried
    *  `project_id`). The server wires this to the same post-commit half the launch route
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
@@ -567,6 +588,48 @@ export async function startInteractiveEditSubscriber(
   async function handleFeedbackProcessed(event: BusEvent): Promise<void> {
     const handoff = parseStructuralFeedback(event.event_type, event.payload);
     if (handoff === null) return;
+
+    // THE KIND GATE (CREW-UX-9): the frame carries no `kind`, so the doc's own manifest is
+    // the truth. A demo doc's step feedback means "re-author demo.spec.mjs and re-record"
+    // (assist SKILL.md Step 8c) — the demo seam's business; answering it here would land a
+    // storyboard-text edit the next re-record overwrites, while the user's actual ask (change
+    // the demo) dies. Fail-open on an unreadable manifest: that is this seam's pre-CREW-UX-9
+    // behavior, and the demo seam requires a READABLE demo manifest — one answerer either way.
+    const docsRoot = (opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null)))(
+      handoff.projectId,
+    );
+    const head = readDocHead(docsRoot, handoff.documentId);
+    if (head !== null && head.kind === 'demo') {
+      // …but ONLY when the demo seam is actually there to take it. Skipping into a seam that
+      // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
+      if (!(opts.demoSeamArmed ?? (() => false))()) {
+        emitInteractive(STATUS_POSTED, {
+          document_id: handoff.documentId,
+          version: handoff.version,
+          state: 'error',
+          message:
+            `This is a demo document: changing it means re-authoring its demo spec and ` +
+            `re-recording, which the crew's demo seam does — and that seam is not running on ` +
+            `this daemon. Nothing was changed. Start crew with the interactive demo events ` +
+            `enabled (drop --no-interactive-demo-events / WICKED_INTERACTIVE_DEMO_EVENTS), then ` +
+            `resubmit this feedback.`,
+        });
+        // DELIBERATELY no ledger row: this handoff was NOT answered, it was declined. An
+        // operator who arms the demo seam and replays the frame must get a real re-author run,
+        // and the launch gate is `ledger.has` — a row here would eat that replay forever.
+        log(
+          `[interactive-edit] doc ${handoff.documentId} is a demo but the demo seam is NOT armed ` +
+            `— handoff v${handoff.version} answered with an honest error status, not silently dropped`,
+        );
+        return;
+      }
+      log(
+        `[interactive-edit] doc ${handoff.documentId} is a demo — its step feedback re-authors ` +
+          `the spec (demo seam), not the storyboard; handoff v${handoff.version} skipped here`,
+      );
+      return;
+    }
+
     const key = handoffKey(handoff.documentId, handoff.version);
 
     // Replay-dedup: the ledger is the durable gate (redelivery after crash/restart), the
