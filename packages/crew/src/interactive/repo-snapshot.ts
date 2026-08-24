@@ -74,9 +74,9 @@ function treeExceeds(root: string, cap: number): boolean {
 /** Options for {@link snapshotRepo}. */
 export interface SnapshotRepoOptions {
   /** Size budget in bytes (default {@link REPO_SNAPSHOT_MAX_BYTES}; tests shrink it). */
-  maxBytes?: number;
+  maxBytes?: number | undefined;
   /** Diagnostics sink — every degrade path logs its real reason here. */
-  log?: (message: string) => void;
+  log?: ((message: string) => void) | undefined;
 }
 
 /**
