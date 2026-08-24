@@ -25,16 +25,18 @@ export class GuidanceIndex {
   private readonly runToGuidance = new Map<string, string>();
 
   /**
-   * Load guidance from the trail's `guidance.set` entries. The trail answers newest first, so
-   * the FIRST entry seen per run is the current note — later (older) entries for the same run
+   * Load guidance from EVERY `guidance.set` entry in the trail — exhaustively, not capped
+   * (BRIEF-UX-002 C5, same defect as `RetryIndex.hydrate`: a durable note must not vanish
+   * because 1000+ newer writes landed on top of it). The trail answers newest first, so the
+   * FIRST entry seen per run is the current note — later (older) entries for the same run
    * are superseded writes and are skipped, which is also what keeps a cleared note (newest
-   * entry has `text: ''`) from being resurrected by an older non-empty one. Best-effort and
-   * bounded by the trail read cap (newest 1000 writes), like `RetryIndex.hydrate`.
+   * entry has `text: ''`) from being resurrected by an older non-empty one. Still best-effort,
+   * like `RetryIndex.hydrate`; cost is one full-file scan at boot.
    */
   async hydrate(audit: AuditLog, log?: (msg: string) => void): Promise<void> {
     try {
       const superseded = new Set<string>();
-      for (const entry of await audit.read({ action: 'guidance.set', limit: 1000 })) {
+      for (const entry of await audit.readAll({ action: 'guidance.set' })) {
         if (typeof entry.runId !== 'string') continue;
         if (superseded.has(entry.runId)) continue;
         // The NEWEST entry for a run decides — even when its text is malformed. Marking the

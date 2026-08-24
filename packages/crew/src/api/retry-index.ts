@@ -19,13 +19,15 @@ export class RetryIndex {
   private readonly runToRetryOf = new Map<string, string>();
 
   /**
-   * Load lineage from the audit trail's `run.launched` entries. Best-effort and bounded by the
-   * trail read cap (newest 1000 launches): older runs simply read as "not a retry", the same
-   * answer a pre-CREW-UX-3 daemon gave for every run.
+   * Load lineage from EVERY `run.launched` entry in the trail — exhaustively, not capped
+   * (BRIEF-UX-002 C5: a lineage fact 2,678 launches deep must survive a restart; the newest-1000
+   * cap silently dropped it and the chronicle rendered the chain as peer episodes). Still
+   * best-effort: a missing/unreadable trail leaves lineage blank, the pre-CREW-UX-3 answer.
+   * Cost: one full-file scan at boot — `read` already parses the whole file anyway.
    */
   async hydrate(audit: AuditLog, log?: (msg: string) => void): Promise<void> {
     try {
-      for (const entry of await audit.read({ action: 'run.launched', limit: 1000 })) {
+      for (const entry of await audit.readAll({ action: 'run.launched' })) {
         const retryOf = entry.detail?.['retryOf'];
         if (typeof entry.runId === 'string' && typeof retryOf === 'string') {
           this.runToRetryOf.set(entry.runId, retryOf);
