@@ -34,6 +34,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
+import { GuidanceIndex } from './guidance-index.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
@@ -171,6 +172,15 @@ export const GateSchema = z.object({
   amend: z.string().optional(),
 }).strict();
 
+/** `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7) — the durable pre-gate note body.
+ *  The empty string is a legal body: it CLEARS the note. The byte cap is checked in the route
+ *  (not zod's char-counting `max`) so the 400 names the actual limit. */
+export const GuidanceSchema = z.object({
+  text: z.string(),
+}).strict();
+/** ~8KB — a guidance note is operator prose, not a document store. */
+const GUIDANCE_MAX_BYTES = 8192;
+
 const InjectSchema = z.object({
   message: z.string().min(1),
   /** `"all"` broadcasts to every active worker; any other value is a CLI key. */
@@ -214,6 +224,9 @@ export interface RuntimeDeps {
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
   retryIndex?: RetryIndex;
+  /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
+   *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
+  guidanceIndex?: GuidanceIndex;
   openWithOs?: (target: string) => Promise<void>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
@@ -254,15 +267,19 @@ export function registerRoutes(
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
-  // The run-DTO joins (DES-UX-001 §8.2/§8.3): `project_id` from the membership record —
-  // `null` = genuinely unfiled, so the field is ALWAYS present on served runs — and `retry_of`
-  // from the lineage index, set only when known (absent, never null, spells "not a retry").
+  const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
+  // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
+  // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
+  // `retry_of` from the lineage index, and `guidance` from the guidance index, each set only
+  // when known (absent, never null, spells "not a retry" / "no note").
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
   const decorateRun = (view: SessionView): SessionView => {
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
+    const guidance = guidanceIndex.guidanceFor(view.session.id);
+    if (guidance !== undefined) view.session.guidance = guidance;
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
@@ -735,6 +752,38 @@ export function registerRoutes(
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     return { run: decorateRun(run) };
+  });
+
+  // Durable pre-gate guidance (DES-UX-002 §7.2 — spec'd there as CREW-UX-4, implemented as
+  // CREW-UX-7 because crew#308 already spent that id; see guidance-index.ts). Upserts the ONE
+  // operator note on the run; the empty string clears it. The durable record is the
+  // `guidance.set` audit entry (actor + full text); the index is the read-side layer the run
+  // DTOs echo it from.
+  //
+  // GOVERNANCE ISOLATION (deliberate): the governance gate does NOT read this field — the
+  // engine's `LaunchOptions` never sees it, and no gate evaluation consults it. It is
+  // operator-visible context only; the amend text at gate decision (`POST /runs/:id/gate`)
+  // stays the ONE injection point. The studio pre-populates its steer textarea from this note,
+  // and injection still happens only through the governed amend.
+  app.put(`${V}/runs/:id/guidance`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = GuidanceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    const { text } = parsed.data;
+    if (Buffer.byteLength(text, 'utf8') > GUIDANCE_MAX_BYTES) {
+      return reply.code(400).send({
+        error: `guidance exceeds the ${GUIDANCE_MAX_BYTES}-byte cap — a note this size belongs in the problem statement or a linked doc`,
+      });
+    }
+    const known = await adapter.sessions();
+    if (!known.includes(id)) return reply.code(404).send({ error: 'Run not found' });
+    // The trail is the durable record (CREW-UX-3 posture): a restarted daemon's
+    // GuidanceIndex.hydrate reads the note back from exactly this entry.
+    audit.record('guidance.set', actorOf(req), { runId: id, detail: { text } });
+    guidanceIndex.set(id, text);
+    return { runId: id, guidance: text };
   });
 
   // ── Chat sessions (crew#165): warm ACP seat pool + group fan-out (core#134) ──

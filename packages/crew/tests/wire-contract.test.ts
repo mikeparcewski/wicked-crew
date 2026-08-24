@@ -27,7 +27,7 @@ import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
-import type { GateSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -64,6 +64,13 @@ respondsWith<Wire.AgentSession['retry_of'], string | undefined>();
 respondsWith<string | undefined, Wire.AgentSession['retry_of']>();
 respondsWith<Wire.LaunchRunBody['retryOf'], string | undefined>();
 respondsWith<string | undefined, Wire.LaunchRunBody['retryOf']>();
+
+// CREW-UX-7 (api-types 0.9.0) — durable operator guidance on the run DTO: `string` or ABSENT,
+// never `null` (absence spells "no note", covering never-set, cleared, and pre-0.9.0 servers).
+respondsWith<Wire.AgentSession['guidance'], string | undefined>();
+respondsWith<string | undefined, Wire.AgentSession['guidance']>();
+// PUT /runs/:id/guidance — the route echoes what it stored.
+respondsWith<Wire.SetGuidanceResult, { runId: string; guidance: string }>();
 
 // GET /runs/:id/events — durable event-log replay (RecordedEvent narrows CoreEvent).
 respondsWith<Wire.CoreEvent[] | null, Awaited<ReturnType<CoreAdapter['runEvents']>>>();
@@ -159,6 +166,7 @@ respondsWith<Wire.AuditEntry[], Awaited<ReturnType<AuditLog['read']>>>();
 
 accepts<z.input<typeof LaunchSchema>, Wire.LaunchRunBody>();
 accepts<z.input<typeof GateSchema>, Wire.GateDecision>();
+accepts<z.input<typeof GuidanceSchema>, Wire.SetGuidanceBody>();
 accepts<z.input<typeof OpenTerminalSchema>, Wire.OpenTerminalBody>();
 // POST /open (crew#273) — every body the contract lets the studio Files tab send must parse.
 accepts<z.input<typeof OpenPathSchema>, Wire.OpenPathBody>();

@@ -10,6 +10,7 @@ import { ElicitationCache } from './elicitation-cache.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
+import { GuidanceIndex } from './guidance-index.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
@@ -251,6 +252,10 @@ export async function createServer(
   // route writes — so a restarted daemon still echoes `retry_of` on prior runs' DTOs.
   const retryIndex = new RetryIndex();
   await retryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // Operator guidance (CREW-UX-7, DES-UX-002 §7.2): same durable pattern — hydrated from the
+  // trail's `guidance.set` entries so notes survive a daemon restart.
+  const guidanceIndex = new GuidanceIndex();
+  await guidanceIndex.hydrate(audit, (m) => app.log.warn(m));
   const projectBus =
     options?.projectEvents?.disabled === true
       ? null
@@ -587,7 +592,7 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex },
+    { seatHealth, retryIndex, guidanceIndex },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
