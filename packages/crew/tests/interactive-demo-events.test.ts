@@ -521,6 +521,10 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(launch.repoRef).toBeUndefined();
     expect(launch.extraWriteRoots).toEqual([runDir]);
     expect(launch.problem).toContain(outPath);
+    // crew#311: the spec file is DECLARED as the run's deliverable. This leg is the one that
+    // recorded a run "completing" with no spec at 161-345 bytes of output; the floor turns that
+    // into a failed run instead of something only `finalize` noticed after the gate passed it.
+    expect(launch.requireDeliverables).toEqual([outPath]);
     expect(launch.problem).toContain('https://staging.example.com/app');
     expect(launch.problem).toContain('show sign-in, adding the Pro plan, and checkout');
     expect(launch.problem).not.toContain(docsRoot); // no doc-workspace path reaches the worker

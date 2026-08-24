@@ -471,6 +471,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const outPath = join(runDir, 'revised.html');
     expect(launch.problem).toContain(currentPath);
     expect(launch.problem).toContain(outPath);
+    // crew#311: the revised document is DECLARED as the run's deliverable, so the engine runs
+    // crew's floor phase over it. Naming the path in the prompt is an instruction; declaring it
+    // here is the check — without this the run passes on ~200 chars of narration and no file.
+    expect(launch.requireDeliverables).toEqual([outPath]);
     expect(readFileSync(currentPath, 'utf8')).toContain('data-wid="w-h1"');
 
     // Pickup narration reached the bus as wi-crew (the studio's 90s budget rides on this).

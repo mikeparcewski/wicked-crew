@@ -629,6 +629,73 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(sub!.ledger.get('spike-doc')?.failedAt).toBeTruthy();
   });
 
+  // ── crew#311: the deliverable floor ────────────────────────────────────────────────────────
+  //
+  // THE REPRODUCER, at the seam. A draft run's worker had its Write policy-denied, so no file
+  // was ever produced — and the unit still passed its execution gate on ~200 chars of narration.
+  // The seam now DECLARES the draft path as the run's deliverable, so the engine runs crew's
+  // floor phase, that phase exits non-zero, and the RUN FAILS. The thread must say which file
+  // was expected and what was found, and must announce no draft.
+  it('DECLARES the draft file as the run deliverable so a run that writes nothing FAILS its gate', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const draftDir = join(dir, 'drafts');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'spike-doc');
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const outPath = join(draftDir, 'spike-doc', 'spike-doc-v1.html');
+    // The declaration IS the fix: without it the engine composes no floor phase and the only
+    // check left is the 200-char prose floor the reproducer cleared.
+    expect(launch.requireDeliverables).toEqual([outPath]);
+
+    // The engine runs the floor, it finds nothing, and the run fails carrying the floor's own
+    // report as `stepFailed.detail`.
+    const denied =
+      '[wicked-crew] EXPECTED: ' + outPath + '\n' +
+      '[wicked-crew] FOUND:    (nothing)\n' +
+      '[wicked-crew] MISSING:  ' + outPath + ' (does not exist)\n' +
+      '[wicked-crew] DELIVERABLE FLOOR FAILED — the run reported done without producing the artifact(s) it was launched to produce.\n[exit 1]';
+    engine.fire({
+      type: 'stepFailed',
+      session: launch.sessionId,
+      ord: 3,
+      attempt: 0,
+      detail: denied,
+      failureKind: 'workerError',
+    });
+    engine.fire({ type: 'sessionFailed', session: launch.sessionId, ord: 3 });
+
+    await waitFor(() =>
+      probeEvents.some(
+        (e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error',
+      ),
+    );
+    const err = probeEvents.filter(
+      (e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error',
+    ).pop()!;
+    const message = String((err.payload as { message?: string }).message);
+    // HONEST: names the artifact that was expected and says nothing was found.
+    expect(message).toContain(outPath);
+    expect(message).toContain('DELIVERABLE FLOOR FAILED');
+    // `oneLine` collapses the report's runs of whitespace onto the single-line status.
+    expect(message).toContain('FOUND: (nothing)');
+    // No phantom draft, and the ledger records the failure so a replay can retry.
+    expect(probeEvents.some((e) => e.event_type === DRAFT_COMPLETED)).toBe(false);
+    expect(sub!.ledger.get('spike-doc')?.failedAt).toBeTruthy();
+  });
+
   it('a FAILED LAUNCH closes the thread with an error status and writes no ledger row (a replay can retry)', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
