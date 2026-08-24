@@ -477,7 +477,15 @@ export async function startInteractiveEditSubscriber(
     const blocks =
       flight.items.length === 1 ? 'the targeted block' : `${flight.items.length} targeted blocks`;
 
+    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
+    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
+    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node to rework…"
+    // in the reader's thread. Drop those two lines for the floor ord.
+    const isFloorOrd = (e: CoreEvent): boolean =>
+      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+
     if (event.type === 'councilConvened') {
+      if (isFloorOrd(event)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
       // (Copilot, #269).
@@ -487,6 +495,7 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'unitDistributed') {
+      if (isFloorOrd(event)) return;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
       const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
       narrate(flight, `Council picked ${who} to rework ${blocks}${pct}…`);
@@ -494,6 +503,10 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'unitDispatched') {
+      if (isFloorOrd(event)) {
+        narrate(flight, 'Checking the edited fragment files were actually written…');
+        return;
+      }
       narrate(flight, `Crew is reworking ${blocks}…`);
       return;
     }

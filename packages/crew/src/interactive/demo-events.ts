@@ -612,7 +612,17 @@ export async function startInteractiveDemoSubscriber(
     // line and the transcript dedups repeats, so advancing the line = visible progress.
     const authoring = flight.leg === 'spec' ? 'the click-path spec' : 'the revised click-path spec';
 
+    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
+    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
+    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node to write the
+    // click-path spec…" in the reader's thread. Drop those two lines for the floor ord; the
+    // `unitDispatched` line that follows immediately says what the phase actually is.
+    const isFloorOrd = (e: CoreEvent): boolean =>
+      typeof (e as { ord?: unknown }).ord === 'number' &&
+      (e as { ord: number }).ord > flight.agentPhaseCount;
+
     if (event.type === 'councilConvened') {
+      if (isFloorOrd(event)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
       // (Copilot, #269).
@@ -622,6 +632,7 @@ export async function startInteractiveDemoSubscriber(
     }
 
     if (event.type === 'unitDistributed') {
+      if (isFloorOrd(event)) return;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
       const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
       narrate(flight, `Council picked ${who} to write ${authoring}${pct}…`);

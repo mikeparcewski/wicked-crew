@@ -535,7 +535,16 @@ export async function startInteractiveDraftSubscriber(
         ? DELIVERABLE_FLOOR_PHASE_ID
         : (INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`);
 
+    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
+    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
+    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node for
+    // verify-deliverables…" in the reader's thread. Drop those two lines for the floor ord; the
+    // `unitDispatched` line that follows immediately says what the phase actually is.
+    const isFloorOrd = (e: CoreEvent): boolean =>
+      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+
     if (event.type === 'councilConvened') {
+      if (isFloorOrd(event)) return;
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
@@ -549,6 +558,7 @@ export async function startInteractiveDraftSubscriber(
     }
 
     if (event.type === 'unitDistributed') {
+      if (isFloorOrd(event)) return;
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
       const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
