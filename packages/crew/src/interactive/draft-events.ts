@@ -43,6 +43,7 @@ import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import type { CoreAdapter } from '../core/adapter.js';
+import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
@@ -365,6 +366,11 @@ interface InFlight {
    *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
    *  resolves. */
   heartbeat?: ReturnType<typeof setInterval> | undefined;
+  /** The engine's own reason for the most recent failed unit (`stepFailed.detail`, a bounded
+   *  excerpt of the worker/tool output). Carried so the terminal error status names WHY —
+   *  crucially, the crew#311 deliverable-floor report, which says exactly which artifact was
+   *  expected and what was found instead of "the run failed, inspect it via the API". */
+  failureDetail?: string | undefined;
 }
 
 function defaultStateDir(): string {
@@ -436,7 +442,12 @@ export async function startInteractiveDraftSubscriber(
   );
   const draftDir = opts.draftDir ?? join(defaultStateDir(), 'interactive-drafts');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
-  const phaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
+  // The run executes ONE MORE unit than the def declares: the crew#311 deliverable floor,
+  // appended per-run by `launchRun` from `requireDeliverables`. `agentPhaseCount` is what the
+  // council-and-worker narration branches key on (unchanged); `phaseCount` is the run's real
+  // length, so the thread never reports "phase 3/2" or calls the verification "the draft".
+  const agentPhaseCount = INTERACTIVE_DRAFT_WORKFLOW_DEF.phases.length;
+  const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
   let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
@@ -520,7 +531,9 @@ export async function startInteractiveDraftSubscriber(
     // the interactive transcript dedups consecutive repeats — so the more the line ADVANCES with
     // the run's real events, the more the thread reads as progress instead of a stuck echo.
     const phaseName = (ord: number): string =>
-      INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`;
+      ord > agentPhaseCount
+        ? DELIVERABLE_FLOOR_PHASE_ID
+        : (INTERACTIVE_DRAFT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`);
 
     if (event.type === 'councilConvened') {
       const ord = typeof event.ord === 'number' ? event.ord : 0;
@@ -530,7 +543,7 @@ export async function startInteractiveDraftSubscriber(
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening ${council} to pick who ${ord >= phaseCount ? 'writes the draft' : 'plans the outline'}…`,
+        `Convening ${council} to pick who ${ord >= agentPhaseCount ? 'writes the draft' : 'plans the outline'}…`,
       );
       return;
     }
@@ -548,9 +561,11 @@ export async function startInteractiveDraftSubscriber(
       const phase = phaseName(ord);
       narrate(
         flight,
-        ord >= phaseCount
-          ? `Crew phase ${ord}/${phaseCount}: writing the draft (${phase})…`
-          : `Crew phase ${ord}/${phaseCount}: ${phase} — planning the document…`,
+        ord > agentPhaseCount
+          ? `Crew phase ${ord}/${phaseCount}: checking the draft file was actually written (${phase})…`
+          : ord >= agentPhaseCount
+            ? `Crew phase ${ord}/${phaseCount}: writing the draft (${phase})…`
+            : `Crew phase ${ord}/${phaseCount}: ${phase} — planning the document…`,
       );
       return;
     }
@@ -571,9 +586,11 @@ export async function startInteractiveDraftSubscriber(
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       narrate(
         flight,
-        ord >= phaseCount
-          ? 'Gate approved the draft — landing it now…'
-          : `Gate approved ${phaseName(ord)} — moving on…`,
+        ord > agentPhaseCount
+          ? 'Draft file verified on disk — landing it now…'
+          : ord >= agentPhaseCount
+            ? 'Gate approved the draft — checking the file landed…'
+            : `Gate approved ${phaseName(ord)} — moving on…`,
       );
       return;
     }
@@ -590,16 +607,26 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
 
+    if (event.type === 'stepFailed') {
+      // Remember the engine's own reason (crew#311): the terminal status below reads far better
+      // as "the draft file was never written" than as "inspect it via the API".
+      const detail = typeof event.detail === 'string' ? event.detail.trim() : '';
+      if (detail.length > 0) flight.failureDetail = detail;
+      return;
+    }
+
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       removeSnapshot(flight); // the failure path cleans its snapshot too (CREW-UX-8 v4)
       ledger.recordFailure(flight.documentId);
+      const why =
+        flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
         state: 'error',
         message:
           `The crew run answering this document ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
-          `(run ${runId}). Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
+          `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
       });
       log(`[interactive-draft] run ${runId} for doc ${flight.documentId} ended: ${event.type}`);
     }
@@ -830,6 +857,13 @@ export async function startInteractiveDraftSubscriber(
         // the engine widens the boundary by exactly this run's inbox (validated launch-side,
         // wicked-core#259).
         extraWriteRoots: [runDir],
+        // THE DELIVERABLE FLOOR (crew#311): the draft file IS the deliverable, so the run is
+        // not done until it exists. Without this the engine's substance floor is the only
+        // check on this unbound run, and it passes a worker whose Write was denied as long as
+        // ~200 characters of narration came first — the exact reproducer shape. The floor
+        // phase FAILS the run naming this path; `finalize` below stays as the belt-and-braces
+        // check for a run that never reaches the floor at all.
+        requireDeliverables: [outPath],
       });
     } catch (err) {
       // A launch that never happened keeps no flight and no snapshot (a replayed frame

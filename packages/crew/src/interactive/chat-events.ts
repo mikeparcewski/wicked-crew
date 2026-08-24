@@ -65,6 +65,7 @@ import {
 import { InteractiveHandoffLedger } from './ledger.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
+import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
@@ -353,6 +354,10 @@ interface InFlight {
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   heartbeat: ReturnType<typeof setInterval>;
+  /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
+   *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
+   *  which says which artifact was expected and what was found. */
+  failureDetail?: string | undefined;
 }
 
 /** One ask parked behind a busy doc (contract (c): FIFO per doc). In-memory on purpose: the
@@ -444,7 +449,10 @@ export async function startInteractiveChatSubscriber(
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const landingGateMs = opts.landingGateMs ?? 60_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
-  const phaseCount = INTERACTIVE_CHAT_WORKFLOW_DEF.phases.length;
+  // +1 for the crew#311 deliverable floor the adapter appends per-run (`requireDeliverables`):
+  // `agentPhaseCount` drives the council/worker branches, `phaseCount` is the run's real length.
+  const agentPhaseCount = INTERACTIVE_CHAT_WORKFLOW_DEF.phases.length;
+  const phaseCount = agentPhaseCount + 1;
   const inFlight = new Map<string, InFlight>(); // runId → live state
   const queues = new Map<string, QueuedAsk[]>(); // documentId → parked asks, FIFO
   const landingGates = new Map<string, LandingGate>(); // documentId → post-completion gate
@@ -522,7 +530,9 @@ export async function startInteractiveChatSubscriber(
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress.
     const phaseName = (ord: number): string =>
-      INTERACTIVE_CHAT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`;
+      ord > agentPhaseCount
+        ? DELIVERABLE_FLOOR_PHASE_ID
+        : (INTERACTIVE_CHAT_WORKFLOW_DEF.phases[ord - 1]?.id ?? `phase ${ord}`);
 
     if (event.type === 'councilConvened') {
       const ord = typeof event.ord === 'number' ? event.ord : 0;
@@ -530,7 +540,7 @@ export async function startInteractiveChatSubscriber(
       const council = seats > 0 ? `a ${seats}-seat council` : 'a council';
       narrate(
         flight,
-        `Convening ${council} to pick who ${ord >= phaseCount ? 'revises the document' : 'reads your ask'}…`,
+        `Convening ${council} to pick who ${ord >= agentPhaseCount ? 'revises the document' : 'reads your ask'}…`,
       );
       return;
     }
@@ -548,9 +558,11 @@ export async function startInteractiveChatSubscriber(
       const phase = phaseName(ord);
       narrate(
         flight,
-        ord >= phaseCount
-          ? `Crew phase ${ord}/${phaseCount}: revising the document (${phase})…`
-          : `Crew phase ${ord}/${phaseCount}: ${phase} — reading the current version and your ask…`,
+        ord > agentPhaseCount
+          ? `Crew phase ${ord}/${phaseCount}: checking the revised document was actually written (${phase})…`
+          : ord >= agentPhaseCount
+            ? `Crew phase ${ord}/${phaseCount}: revising the document (${phase})…`
+            : `Crew phase ${ord}/${phaseCount}: ${phase} — reading the current version and your ask…`,
       );
       return;
     }
@@ -571,9 +583,11 @@ export async function startInteractiveChatSubscriber(
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       narrate(
         flight,
-        ord >= phaseCount
-          ? 'Gate approved the revision — landing it now…'
-          : `Gate approved ${phaseName(ord)} — moving on…`,
+        ord > agentPhaseCount
+          ? 'Revised document verified on disk — landing it now…'
+          : ord >= agentPhaseCount
+            ? 'Gate approved the revision — checking the file landed…'
+            : `Gate approved ${phaseName(ord)} — moving on…`,
       );
       return;
     }
@@ -591,15 +605,24 @@ export async function startInteractiveChatSubscriber(
       return;
     }
 
+    if (event.type === 'stepFailed') {
+      // Remember the engine's own reason (crew#311) so the terminal status can name it.
+      const detail = typeof event.detail === 'string' ? event.detail.trim() : '';
+      if (detail.length > 0) flight.failureDetail = detail;
+      return;
+    }
+
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       ledger.recordFailure(flight.key);
+      const why =
+        flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
         state: 'error',
         message:
           `The crew run answering your ask ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
-          `(run ${runId}). Inspect it via the crew API (GET /api/v1/runs/${runId}), then resend the message.`,
+          `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}), then resend the message.`,
       });
       log(`[interactive-chat] run ${runId} for ask ${flight.key} ended: ${event.type}`);
       // No landing gate on failure — nothing new is landing; the next queued ask (if any)
@@ -744,6 +767,10 @@ export async function startInteractiveChatSubscriber(
         // head-copy in the external inbox, the ONE write root below, projectId still filed.
         // Revision grounding returns when wicked-core#293 or #294 is fixed.
         extraWriteRoots: [runDir],
+        // THE DELIVERABLE FLOOR (crew#311): the revised document IS the deliverable. Without
+        // it the engine's substance floor passes a worker whose Write was denied as long as it
+        // narrated ~200 characters first; with it the run FAILS naming this path.
+        requireDeliverables: [outPath],
       });
     } catch (err) {
       // The 'processing' status is already on the thread — close it out honestly so the

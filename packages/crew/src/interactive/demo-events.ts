@@ -460,10 +460,18 @@ interface InFlight {
   version?: number | undefined;
   /** Where the worker must leave the spec (inside the per-run inbox). */
   outPath: string;
-  phaseCount: number;
+  /** The def's OWN phase count. The run executes one MORE unit — the crew#311 deliverable
+   *  floor `launchRun` appends per-run from `requireDeliverables` — so this is what the
+   *  "is this the writing phase" branches key on, and `agentPhaseCount + 1` is the run's
+   *  real length for the "phase N/M" display. */
+  agentPhaseCount: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   heartbeat: ReturnType<typeof setInterval>;
+  /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
+   *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
+   *  which says the spec path that was expected and what was found. */
+  failureDetail?: string | undefined;
 }
 
 function defaultStateDir(): string {
@@ -622,16 +630,17 @@ export async function startInteractiveDemoSubscriber(
 
     if (event.type === 'unitDispatched') {
       // The first-spec leg plans (tool-free) then inspects-and-writes; the re-author leg is one
-      // writing phase. Narrate whichever the ord actually is rather than assuming a count.
+      // writing phase; both then run the crew#311 deliverable floor. Narrate whichever the ord
+      // actually is rather than assuming a count.
       const ord = typeof event.ord === 'number' ? event.ord : 0;
-      const last = ord >= flight.phaseCount;
-      const line = last
-        ? `inspecting the app and writing ${authoring}…`
-        : 'planning the demo scenes…';
-      narrate(
-        flight,
-        flight.phaseCount > 1 ? `Crew phase ${ord}/${flight.phaseCount}: ${line}` : `Crew is ${line}`,
-      );
+      const runPhaseCount = flight.agentPhaseCount + 1;
+      const line =
+        ord > flight.agentPhaseCount
+          ? 'checking the spec file was actually written…'
+          : ord >= flight.agentPhaseCount
+            ? `inspecting the app and writing ${authoring}…`
+            : 'planning the demo scenes…';
+      narrate(flight, `Crew phase ${ord}/${runPhaseCount}: ${line}`);
       return;
     }
 
@@ -647,7 +656,13 @@ export async function startInteractiveDemoSubscriber(
     }
 
     if (event.type === 'gateDecided' && event.allow === true) {
-      narrate(flight, 'Gate approved the spec — installing it and starting the recording…');
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      narrate(
+        flight,
+        ord > flight.agentPhaseCount
+          ? 'Spec file verified on disk — installing it and starting the recording…'
+          : 'Gate approved the spec — checking the file landed…',
+      );
       return;
     }
 
@@ -663,15 +678,24 @@ export async function startInteractiveDemoSubscriber(
       return;
     }
 
+    if (event.type === 'stepFailed') {
+      // Remember the engine's own reason (crew#311) so the terminal status can name it.
+      const detail = typeof event.detail === 'string' ? event.detail.trim() : '';
+      if (detail.length > 0) flight.failureDetail = detail;
+      return;
+    }
+
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       ledger.recordFailure(flight.key);
+      const why =
+        flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
         state: 'error',
         message:
           `The crew run authoring this demo's spec ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
-          `(run ${runId}). Inspect it via the crew API (GET /api/v1/runs/${runId}); no recording was triggered.`,
+          `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); no recording was triggered.`,
       });
       log(`[interactive-demo] run ${runId} for ${flight.key} ended: ${event.type}`);
     }
@@ -793,7 +817,7 @@ export async function startInteractiveDemoSubscriber(
       workflow: string;
       runDir: string;
       outPath: string;
-      phaseCount: number;
+      agentPhaseCount: number;
     },
   ): Promise<void> {
     const runId = randomUUID();
@@ -814,6 +838,11 @@ export async function startInteractiveDemoSubscriber(
         // workspace at finalize. Per-run isolation (Copilot, crew#313): ONLY this run's own
         // subdirectory, never the shared demoDir.
         extraWriteRoots: [input.runDir],
+        // THE DELIVERABLE FLOOR (crew#311): the spec file IS the deliverable — and this leg is
+        // the one that PROVED prose can stand in for it (the module doc above records a run
+        // that "completed" with no deliverable at 161-345 bytes and was caught only by
+        // finalize, after the gate had passed it). The floor fails the RUN instead.
+        requireDeliverables: [input.outPath],
       })
       .then(() => {
         // Record AFTER the launch resolved: a failed launch leaves no ledger row, so a replayed
@@ -828,7 +857,7 @@ export async function startInteractiveDemoSubscriber(
           projectId: input.projectId,
           version: input.version,
           outPath: input.outPath,
-          phaseCount: input.phaseCount,
+          agentPhaseCount: input.agentPhaseCount,
           narration:
             input.leg === 'spec'
               ? 'Crew run launched — authoring your demo…'
@@ -900,7 +929,7 @@ export async function startInteractiveDemoSubscriber(
       workflow: INTERACTIVE_DEMO_WORKFLOW,
       runDir,
       outPath,
-      phaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
     });
   }
 
@@ -989,7 +1018,7 @@ export async function startInteractiveDemoSubscriber(
       workflow: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW,
       runDir,
       outPath,
-      phaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
+      agentPhaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
     });
   }
 

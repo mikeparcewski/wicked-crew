@@ -489,13 +489,14 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const before = beats();
     await waitFor(() => beats() >= before + 2);
 
-    // Phase transition narration folds the run's own events into the thread.
+    // Phase transition narration folds the run's own events into the thread. 2/3, not 2/2: the
+    // run carries the crew#311 deliverable floor as a third unit.
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
     await waitFor(() =>
       probeEvents.some(
         (e) =>
           e.event_type === STATUS_POSTED &&
-          String((e.payload as { message?: string }).message).includes('2/2'),
+          String((e.payload as { message?: string }).message).includes('2/3'),
       ),
     );
 
@@ -514,6 +515,12 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     engine.fire({ type: 'toolInvoked', session: launch.sessionId, ord: 2, attempt: 0, tools: ['Write', 'Write', 'Read'] });
     await waitFor(narrated('using Write, Read'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('checking the file landed'));
+    // The floor's own gate is what says "landing it now" — the draft is announced once the
+    // FILE is verified, never on the strength of the worker's reply alone (crew#311).
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
+    await waitFor(narrated('3/3'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
     await waitFor(narrated('landing it now'));
 
     // The worker "wrote" the draft; completion announces it by path with the deterministic key.
