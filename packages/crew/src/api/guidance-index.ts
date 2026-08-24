@@ -35,10 +35,14 @@ export class GuidanceIndex {
     try {
       const superseded = new Set<string>();
       for (const entry of await audit.read({ action: 'guidance.set', limit: 1000 })) {
-        const text = entry.detail?.['text'];
-        if (typeof entry.runId !== 'string' || typeof text !== 'string') continue;
+        if (typeof entry.runId !== 'string') continue;
         if (superseded.has(entry.runId)) continue;
+        // The NEWEST entry for a run decides — even when its text is malformed. Marking the
+        // run seen BEFORE the text check keeps a corrupt newest write from resurrecting an
+        // older superseded note (Copilot, #312): unknowable current note = no note.
         superseded.add(entry.runId);
+        const text = entry.detail?.['text'];
+        if (typeof text !== 'string') continue;
         if (text !== '') this.runToGuidance.set(entry.runId, text);
       }
     } catch (err) {

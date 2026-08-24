@@ -240,3 +240,17 @@ describe('CREW-UX-7 — the audit trail carries guidance and hydrates it back', 
     expect(idx.guidanceFor('run-a')).toBeUndefined();
   });
 });
+
+// Copilot (#312): a corrupt NEWEST guidance.set entry must not let an older
+// superseded note resurrect on hydrate — the newest entry decides, even malformed.
+describe('GuidanceIndex hydrate — corrupt newest entry', () => {
+  it('marks the run seen before the text check, so the older note stays dead', async () => {
+    const idx = new GuidanceIndex();
+    const entries = [
+      { runId: 'r1', action: 'guidance.set', detail: { text: 42 as unknown as string } },
+      { runId: 'r1', action: 'guidance.set', detail: { text: 'stale older note' } },
+    ];
+    await idx.hydrate({ read: async () => entries } as never);
+    expect(idx.guidanceFor('r1')).toBeUndefined();
+  });
+});
