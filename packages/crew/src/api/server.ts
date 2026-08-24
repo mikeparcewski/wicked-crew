@@ -397,6 +397,12 @@ export async function createServer(
     }
   }
 
+  // Declared BEFORE the edit seam it is probed by: the demo seam arms after (it must, so the
+  // per-doc serialization contract can see the edit seam's in-flight set), but the edit seam's
+  // demo-kind gate needs to know at EVENT time whether the demo seam actually came up. A
+  // closure over this binding reads the settled value; a boolean captured here would not.
+  let demoSub: Awaited<ReturnType<typeof startInteractiveDemoSubscriber>> = null;
+
   // Arm the opt-in interactive STRUCTURAL-edit answering seam (task #86 final leg). Same
   // posture as the draft seam: failure to arm is LOUD but non-fatal — interactive's assist
   // loop is the fallback answerer, and this daemon must boot on a machine whose bus is broken.
@@ -410,8 +416,11 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.editDir !== undefined ? { editDir: o.editDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
-      // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's.
+      // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's — but
+      // only when that seam is actually up. Probed per event (the demo seam arms below), so an
+      // un-armed demo seam gets an honest error status instead of a silent, unanswerable drop.
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
+      demoSeamArmed: () => demoSub !== null,
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
@@ -429,7 +438,6 @@ export async function createServer(
   // doc then keeps its placeholder, and this daemon must boot on a machine whose bus is
   // broken. Armed beside the edit seam because the two split `feedback.processed` by the doc
   // manifest's kind (demo → re-author the spec here; everything else → structural edit there).
-  let demoSub: Awaited<ReturnType<typeof startInteractiveDemoSubscriber>> = null;
   if (options?.interactiveDemoEvents?.enabled === true) {
     const o = options.interactiveDemoEvents;
     demoSub = await startInteractiveDemoSubscriber(adapter, {

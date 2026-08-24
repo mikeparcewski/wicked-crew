@@ -296,6 +296,15 @@ export interface InteractiveEditOptions {
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here. */
   resolveDocsRoot?: (projectId: string | undefined) => string;
+  /** Is the DEMO seam actually armed in this process? Probed per event (the demo seam arms
+   *  after this one, and can fail to arm at all — bus missing, workflow registration refused).
+   *  The kind gate above hands demo docs to that seam; when it is NOT there, handing off is
+   *  handing off to NOBODY — the canvas would sit on a handoff no seam ever answers and no
+   *  status ever closes. So an un-armed demo seam turns the silent skip into an honest error
+   *  status (see `handleFeedbackProcessed`). Default: `() => false` — a caller that does not
+   *  wire the probe has no demo seam to hand anything to, and saying so out loud beats
+   *  guessing. */
+  demoSeamArmed?: () => boolean;
   /** Called after a launch that FILED the run into a project (the handoff carried
    *  `project_id`). The server wires this to the same post-commit half the launch route
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
@@ -591,6 +600,26 @@ export async function startInteractiveEditSubscriber(
     );
     const head = readDocHead(docsRoot, handoff.documentId);
     if (head !== null && head.kind === 'demo') {
+      // …but ONLY when the demo seam is actually there to take it. Skipping into a seam that
+      // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
+      if (!(opts.demoSeamArmed ?? (() => false))()) {
+        emitInteractive(STATUS_POSTED, {
+          document_id: handoff.documentId,
+          version: handoff.version,
+          state: 'error',
+          message:
+            `This is a demo document: changing it means re-authoring its demo spec and ` +
+            `re-recording, which the crew's demo seam does — and that seam is not running on ` +
+            `this daemon. Nothing was changed. Start crew with the interactive demo events ` +
+            `enabled (drop --no-interactive-demo-events / WICKED_INTERACTIVE_DEMO_EVENTS), then ` +
+            `resubmit this feedback.`,
+        });
+        log(
+          `[interactive-edit] doc ${handoff.documentId} is a demo but the demo seam is NOT armed ` +
+            `— handoff v${handoff.version} answered with an honest error status, not silently dropped`,
+        );
+        return;
+      }
       log(
         `[interactive-edit] doc ${handoff.documentId} is a demo — its step feedback re-authors ` +
           `the spec (demo seam), not the storyboard; handoff v${handoff.version} skipped here`,

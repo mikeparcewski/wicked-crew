@@ -209,12 +209,38 @@ describe('specSelfCheck (the pre-install gate — recordDemo would reject these 
 });
 
 describe('the demo workflow defs (workflows-as-data)', () => {
-  it('interactive-demo is scenes → spec, creator-role build second, unique phase ids', () => {
+  it('interactive-demo is ONE creator build phase — the deliverable-writing phase carries the first tool use (wicked-core#293)', () => {
     const def = INTERACTIVE_DEMO_WORKFLOW_DEF;
     expect(def.id).toBe(INTERACTIVE_DEMO_WORKFLOW);
-    expect(def.phases.map((p) => p.id)).toEqual(['scenes', 'spec']);
-    expect(def.phases[1]?.role).toBe('creator');
-    expect(def.phases[1]?.depends_on).toEqual(['scenes']);
+    expect(def.phases.map((p) => p.id)).toEqual(['spec']);
+    expect(def.phases[0]?.role).toBe('creator');
+    expect(def.phases[0]?.kind).toBe('build');
+    expect(def.phases[0]?.depends_on).toEqual([]);
+  });
+
+  it('NEITHER workflow has a phase that precedes the deliverable write — the #293 invariant, as a test', () => {
+    // A tool-using turn poisons the NEXT turn's permission stream (wicked-core#293), so the
+    // phase that writes the file must be the FIRST agent phase. Two phases means the first one
+    // either uses tools (and strands the writer) or is a prompt-level "use no tools" promise
+    // the model can break. One phase cannot be stranded by a predecessor that does not exist.
+    for (const def of [INTERACTIVE_DEMO_WORKFLOW_DEF, INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF]) {
+      expect(def.phases).toHaveLength(1);
+      expect(def.phases[0]?.kind).toBe('build');
+      expect(def.phases[0]?.depends_on).toEqual([]);
+    }
+  });
+
+  it('the first-spec phase orders inspect → plan scenes → write, so inspection cannot become its own turn', () => {
+    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
+    const inspect = spec.indexOf('FIRST inspect the live target application');
+    const scenes = spec.indexOf('decompose the brief into 3-6 named scenes');
+    const write = spec.indexOf('write the COMPLETE Playwright demo spec and SAVE it');
+    const report = spec.indexOf('REPORT IN PROSE');
+    expect(inspect).toBeGreaterThanOrEqual(0);
+    expect(scenes).toBeGreaterThan(inspect);
+    expect(write).toBeGreaterThan(scenes);
+    expect(report).toBeGreaterThan(write);
+    expect(spec).toMatch(/never guess a selector/i);
   });
 
   it('interactive-demo-reauthor is a single respec build phase — the edit leg\'s rationale', () => {
@@ -249,7 +275,7 @@ describe('the demo workflow defs (workflows-as-data)', () => {
     // UNBOUND (workdir null) and write their deliverable into the inbox, so PROSE is the only
     // substance available: an instruction that invites a bare-path reply fails the run.
     for (const instructions of [
-      INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '',
+      INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '',
       INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '',
     ]) {
       expect(instructions).toMatch(/REPORT IN PROSE/);
@@ -259,7 +285,7 @@ describe('the demo workflow defs (workflows-as-data)', () => {
   });
 
   it('carries the Step 8 authoring contract (assist skill + demo.js recordDemo), adapted', () => {
-    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '';
+    const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
     expect(spec).toContain('meta'); // export const meta { url, title, … }
     expect(spec).toContain('run({ page, step, meta })');
     expect(spec).toContain('page.goto(meta.url)');
@@ -267,12 +293,16 @@ describe('the demo workflow defs (workflows-as-data)', () => {
     expect(spec).toContain('say'); // capability narration
     expect(spec).toMatch(/NEVER write credentials/i); // secrets stay in process.env
     expect(spec).toContain('process.env');
-    const scenes = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[0]?.instructions ?? '';
-    expect(scenes).toContain('3-6'); // Step 8a: scene decomposition, not brief-copying
-    expect(scenes).toMatch(/Do NOT write any files/i);
+    // Step 8a's scene decomposition survived the collapse into one phase — as the mandated
+    // middle step of the single instruction, not as a separate (turn-poisoning) recon phase.
+    expect(spec).toContain('3-6');
     const respec = INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '';
     expect(respec).toContain('feedback');
     expect(respec).toMatch(/NEVER write credentials/i);
+    // Re-inspection is SAFE on the re-author leg (one phase → the tool use and the write share
+    // a turn), so the instruction asks for it rather than letting the worker guess selectors.
+    expect(respec).toMatch(/fetch that page live/i);
+    expect(respec).toMatch(/never guess a selector/i);
   });
 });
 
@@ -763,6 +793,8 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
       editDir: join(dir, 'edits'),
       clisJson: SEATS,
       resolveDocsRoot: () => docsRoot,
+      // The demo seam IS up in this test (startSub above) — so the kind gate may hand off.
+      demoSeamArmed: () => true,
       log: () => {},
     });
     expect(editSub).not.toBeNull();
@@ -784,6 +816,72 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(editEngine.launches[0]!.workflow).toBe('interactive-edit');
     // No edit.completed rode the bus for the demo doc from either seam.
     expect(probeEvents.filter((e) => e.event_type === EDIT_COMPLETED).length).toBe(0);
+  });
+
+  it('NO SILENT DROP: with the demo seam NOT armed, the edit seam answers a demo handoff with an honest error status', async () => {
+    // The kind gate hands demo docs to the demo seam. When that seam never armed (opted out,
+    // or its bus/workflow registration failed), an unconditional skip drops the user's feedback
+    // into nothing: no run, no status, a canvas waiting forever. The gate must therefore be
+    // conditional on the demo seam actually being there — and say so when it is not.
+    const bus = await import('wicked-bus');
+    makeDemoWorkspace('checkout-demo', { spec: VALID_SPEC });
+    armProbe(bus);
+    const editEngine = fakeAdapter();
+    const editSub = await startInteractiveEditSubscriber(editEngine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'edit-ledger.json'),
+      editDir: join(dir, 'edits'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      demoSeamArmed: () => false, // the demo seam is NOT running on this daemon
+      log: () => {},
+    });
+    expect(editSub).not.toBeNull();
+    subs.push(editSub!);
+
+    await emitFeedbackProcessed(bus, 'checkout-demo');
+    const isDemoError = (e: { event_type: string; payload: unknown }): boolean =>
+      e.event_type === STATUS_POSTED &&
+      (e.payload as { state?: string }).state === 'error' &&
+      (e.payload as { document_id?: string }).document_id === 'checkout-demo';
+    await waitFor(() => probeEvents.some(isDemoError));
+    const err = probeEvents.find(isDemoError)!;
+    // Honest: names the reason (demo seam not running) and that nothing changed.
+    const message = String((err.payload as { message?: string }).message ?? '');
+    expect(message).toMatch(/seam is not running on this daemon/i);
+    expect(message).toMatch(/nothing was changed/i);
+    // …and it stayed a status, not a storyboard rewrite: no run, no edit.completed.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(editEngine.launches.length, 'an un-answerable demo handoff must not become a storyboard edit').toBe(0);
+    expect(probeEvents.filter((e) => e.event_type === EDIT_COMPLETED).length).toBe(0);
+  });
+
+  it('the default demoSeamArmed probe is FALSE — a caller that wires no demo seam is told so, not guessed for', async () => {
+    const bus = await import('wicked-bus');
+    makeDemoWorkspace('checkout-demo', { spec: VALID_SPEC });
+    armProbe(bus);
+    const editEngine = fakeAdapter();
+    const editSub = await startInteractiveEditSubscriber(editEngine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'edit-ledger.json'),
+      editDir: join(dir, 'edits'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      // demoSeamArmed deliberately omitted.
+      log: () => {},
+    });
+    subs.push(editSub!);
+    await emitFeedbackProcessed(bus, 'checkout-demo');
+    await waitFor(() =>
+      probeEvents.some(
+        (e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error',
+      ),
+    );
+    expect(editEngine.launches.length).toBe(0);
   });
 
   it('STEP FEEDBACK honest edge: a demo doc with NO spec yet posts an error and launches nothing', async () => {
