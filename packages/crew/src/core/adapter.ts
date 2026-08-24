@@ -752,7 +752,9 @@ export class CoreAdapter {
           // second `deliver` phase would collide on id — launch the def as-is; the intent
           // ("this run opens its PR") is already satisfied.
         } else {
-          const composed = composeDeliverWorkflow(base, input.sessionId);
+          // The run's intent rides along so the commit the deliver phase makes NAMES what it
+          // delivered (`wicked-crew run <id>: <intent>`) instead of being an anonymous blob.
+          const composed = composeDeliverWorkflow(base, input.sessionId, input.problem);
           await this._armPerRunWorkflow(composed);
           workflowId = composed.id;
         }
