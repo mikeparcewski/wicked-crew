@@ -138,7 +138,7 @@ export function deliverPrScript(intent?: string): string {
     'git diff --cached --quiet || git commit -q -m "$M"',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
-    'A=$(git rev-list --count "$D".."$B")',
+    'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change ($B is not ahead of $D); nothing was pushed"; exit 1; }',
     // (c3) Rebase onto origin's default branch so the PR opens mergeable. A conflict must fail
     // the phase VISIBLY with nothing pushed — the abort leaves the worktree on the pre-rebase
@@ -146,7 +146,7 @@ export function deliverPrScript(intent?: string): string {
     'git rebase "$D" "$B" || { git rebase --abort >/dev/null 2>&1 || true; echo "deliver: rebase of $B onto $D failed (conflicts) — resolve on the branch and re-run; nothing was pushed"; exit 1; }',
     // Re-derive after the rebase: it drops commits already upstream (patch-id equal), so a branch
     // that WAS ahead can come out of a rebase carrying nothing of its own.
-    'A=$(git rev-list --count "$D".."$B")',
+    'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
     // (d) Push.
     'git push -u origin "$B"',
@@ -161,7 +161,7 @@ export function deliverPrScript(intent?: string): string {
     //   2. the ref ON THE REMOTE is ahead of origin's default branch by at least one commit.
     "URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1 || true)",
     '[ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
-    'P=$(git rev-list --count "$D".."origin/$B")',
+    'P=$(git rev-list --count "$D..origin/$B")',
     '[ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
     'echo "$URL"',
   ].join('\n');

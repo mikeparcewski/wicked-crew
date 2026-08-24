@@ -103,7 +103,7 @@ describe('deliverPrScript (the hardened field script)', () => {
   it('RE-DERIVES done: a real PR URL and a branch ahead of the remote default', () => {
     expect(script).toContain("grep -Eo 'https://[^[:space:]]+/pull/[0-9]+'");
     expect(script).toContain('exited 0 but produced no PR URL');
-    expect(script).toContain('P=$(git rev-list --count "$D".."origin/$B")');
+    expect(script).toContain('P=$(git rev-list --count "$D..origin/$B")');
     expect(script).toContain('is not ahead of $D on the remote after the push');
     // Both assertions gate the final URL line.
     const lines = script.split('\n');
