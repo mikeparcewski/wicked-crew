@@ -149,6 +149,13 @@ export const INTERACTIVE_DEMO_REAUTHOR_WORKFLOW = 'interactive-demo-reauthor';
  *      by finalize). Collapsing the phases does NOT dodge #293 — it just moves the unanswered
  *      permission request from the next turn into this one.
  *
+ * A fourth data point narrows what "tool use" means here: the re-author leg's single phase
+ * does `Read` + `Read` + `Write` in one turn and lands green (7/7, run 0704b910 — revised spec
+ * installed, v2 re-recorded). So a turn that reads LOCAL FILES and then writes is fine; it is
+ * the NETWORK fetch that costs the following write, whether that write is in the next turn
+ * (shape 1) or the same one (shape 3). Treat that as the observed discriminator, not a proven
+ * mechanism — #293 is wicked-core's to diagnose; this def only has to survive it.
+ *
  * So the rule this workflow encodes is narrower than "one phase": THE PHASE THAT INSPECTS THE
  * APP MUST BE THE PHASE THAT WRITES THE DELIVERABLE, and nothing before it may touch a tool.
  * Phase 1 therefore plans from the brief and the URL STRING alone and is told so explicitly (a
@@ -229,7 +236,8 @@ export const INTERACTIVE_DEMO_WORKFLOW_DEF: WorkflowDef = {
  * declared write root (the same shape as the interactive-edit workflow's single phase, which
  * reads a handoff JSON and writes fragments in one turn, in production, today). What this leg
  * must NOT grow is a live re-fetch of the app: the first-spec measurements above show a turn
- * that fetches the network and then writes losing the write outright (shape 3, dead 3/3). If a
+ * that fetches the network and then writes losing the write outright (shape 3, dead 3/3),
+ * while this leg's Read+Read+Write turn lands green (7/7 on a real seat, run 0704b910). If a
  * feedback item ever genuinely needs a selector the current spec lacks, the fix is a preceding
  * TOOL-FREE phase plus inspection moved into this one — the shape 2 arrangement — not a fetch
  * bolted onto the writing turn.
