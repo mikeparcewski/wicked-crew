@@ -178,6 +178,18 @@ export interface AgentSession {
    * spelling of "no lineage", so `'retry_of' in session` and `!== undefined` agree.
    */
   retry_of?: string;
+  /**
+   * Durable operator guidance (DES-UX-002 §7.2 — spec'd there as CREW-UX-4, shipped as
+   * CREW-UX-7; api-types 0.9.0): the ONE pre-gate note upserted via `PUT /runs/:id/guidance`,
+   * populated at DTO assembly on both `GET /runs` and `GET /runs/:id`. ABSENT — never `null`
+   * or `''` — when no note is set (never set, cleared, or a pre-0.9.0 server), so old clients
+   * are unaffected and `'guidance' in session` and `!== undefined` agree.
+   *
+   * Operator-visible context ONLY: the governance gate never reads this field; the amend text
+   * at gate decision (`GateDecision.amend`) remains the one injection point. Skins use it to
+   * pre-populate the steer textarea when a gate arrives.
+   */
+  guidance?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -957,6 +969,23 @@ export interface LaunchRunBody {
    * Omit when the launch is not a retry.
    */
   retryOf?: string;
+}
+
+/**
+ * Body for `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7; api-types 0.9.0) — upsert the
+ * run's ONE durable operator guidance note. `text: ''` CLEARS the note (the DTO field returns
+ * to absent). Capped at 8192 UTF-8 bytes — beyond it the daemon answers 400 with a named
+ * error. An unknown run is a 404. The write is audit-trailed (`action: 'guidance.set'` with
+ * the authenticated actor) and survives daemon restart.
+ */
+export interface SetGuidanceBody {
+  text: string;
+}
+
+/** Response of `PUT /runs/:id/guidance` — echoes what was stored (`''` after a clear). */
+export interface SetGuidanceResult {
+  runId: string;
+  guidance: string;
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────
