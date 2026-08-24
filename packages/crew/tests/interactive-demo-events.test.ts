@@ -243,6 +243,21 @@ describe('the demo workflow defs (workflows-as-data)', () => {
     }
   });
 
+  it('every FILE-deliverable phase demands a prose report — the unbound run has no worktree diff to clear the substance floor', () => {
+    // wicked-core rejects a governed creator phase whose fold carries neither a worktree diff
+    // nor >=200 trimmed chars ("phase produced no reviewable substance"). These runs are
+    // UNBOUND (workdir null) and write their deliverable into the inbox, so PROSE is the only
+    // substance available: an instruction that invites a bare-path reply fails the run.
+    for (const instructions of [
+      INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '',
+      INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases[0]?.instructions ?? '',
+    ]) {
+      expect(instructions).toMatch(/REPORT IN PROSE/);
+      expect(instructions).toMatch(/at least 120 words/);
+      expect(instructions).toMatch(/only the path is an unreviewable phase/);
+    }
+  });
+
   it('carries the Step 8 authoring contract (assist skill + demo.js recordDemo), adapted', () => {
     const spec = INTERACTIVE_DEMO_WORKFLOW_DEF.phases[1]?.instructions ?? '';
     expect(spec).toContain('meta'); // export const meta { url, title, … }
