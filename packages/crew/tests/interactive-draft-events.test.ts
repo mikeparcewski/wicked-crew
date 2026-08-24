@@ -139,29 +139,26 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(big).toContain('…');
   });
 
-  it('names the project repo as READ grounding when one is resolved — and stays single-line (CREW-UX-8)', () => {
-    const repo = { repoRef: 'repo-1', rootPath: '/home/me/src/wicked-studio' };
+  it('names the repo SNAPSHOT as READ grounding when one was made — and stays single-line (CREW-UX-8 v4)', () => {
     // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
     // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
     // on the first prompt-needing call, so no write works), and the clause hands the worker
-    // the repo root for READS only.
-    const problem = draftProblem(doc, '/tmp/inbox/my-doc-v1.html', repo);
-    expect(problem).toContain('Ground the document in the repository at /home/me/src/wicked-studio — read it');
+    // the in-inbox SNAPSHOT to read — never the live repo root, which the unbound boundary
+    // denies (wicked-core#294).
+    const problem = draftProblem(doc, '/tmp/inbox/my-doc-v1.html', '/tmp/inbox/my-doc-repo');
+    expect(problem).toContain('Ground the document in the repository snapshot at /tmp/inbox/my-doc-repo — read it');
     expect(problem).toContain('exactly this absolute file path: /tmp/inbox/my-doc-v1.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
-    // The clause is SHORT (PTY problem-length budget): a hostile/odd root path is flattened+capped.
-    const weird = draftProblem(doc, '/o.html', { repoRef: 'r', rootPath: 'a\nb'.repeat(400) });
+    // The clause is SHORT (PTY problem-length budget): a hostile/odd snapshot path is flattened+capped.
+    const weird = draftProblem(doc, '/o.html', 'a\nb'.repeat(400));
     expect(weird).not.toMatch(/[\n\r]/);
-    // WORST CASE stays bounded: pasted-novel brief + oversized root ≤ the capped brief budget
-    // (2500) plus the ~400-char grounding clause (301-char capped root + fixed words).
-    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', {
-      repoRef: 'r',
-      rootPath: 'p'.repeat(10_000),
-    });
+    // WORST CASE stays bounded: pasted-novel brief + oversized path ≤ the capped brief budget
+    // (2500) plus the ~400-char grounding clause (301-char capped path + fixed words).
+    const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', 'p'.repeat(10_000));
     expect(worst.length).toBeLessThan(2900);
   });
 
-  it('adds NO grounding clause without a repo — unchanged prompt (no fabricated refs)', () => {
+  it('adds NO grounding clause without a snapshot — unchanged prompt (no fabricated refs)', () => {
     expect(draftProblem(doc, '/tmp/out.html')).not.toContain('Ground the document');
     expect(draftProblem(doc, '/tmp/out.html')).toContain('exactly this absolute file path: /tmp/out.html');
     expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
@@ -689,8 +686,18 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(filed).toHaveLength(1); // still only the bound doc's filing
   });
 
-  it('GROUNDS a doc bound to a repo-backed project: the clause names the repo, the launch stays UNBOUND (CREW-UX-8 v3)', async () => {
+  /** A real (plain-dir) repo fixture the v4 snapshot path can clone/copy from. */
+  function seedRepoFixture(name = 'the-repo'): string {
+    const root = join(dir, name);
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# the real studio project\n', 'utf8');
+    writeFileSync(join(root, 'src', 'main.ts'), 'export const real = true;\n', 'utf8');
+    return root;
+  }
+
+  it('SNAPSHOTS the repo into the inbox BEFORE the launch and grounds the task on the snapshot — the launch stays UNBOUND (CREW-UX-8 v4)', async () => {
     const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
     const engine = fakeAdapter({
       members: {
         'proj-repo': [
@@ -699,46 +706,64 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
         ],
         'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }],
       },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
     });
-    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+    const draftDir = join(dir, 'drafts');
+    let snapshotExistedAtLaunch = false;
+    const adapter = engine.asAdapter();
+    const inner = adapter.launchRun.bind(adapter);
+    (adapter as unknown as { launchRun: unknown }).launchRun = async (input: LaunchRunInput) => {
+      // The ORDER is the contract: the snapshot must be on disk before launchRun resolves —
+      // a worker grounded on a path that appears later would race its own recon phase.
+      snapshotExistedAtLaunch = existsSync(join(draftDir, 'repo-doc-repo', 'README.md'));
+      return inner(input);
+    };
+    const sub = await startInteractiveDraftSubscriber(adapter, {
       dbPath: busDb,
       pollIntervalMs: 25,
       heartbeatMs: 60_000,
       ledgerPath: join(dir, 'ledger.json'),
-      draftDir: join(dir, 'drafts'),
+      draftDir,
       clisJson: SEATS,
       log: () => {},
     });
     subs.push(sub!);
 
-    // Bound to a repo-backed project → the task names the repo root for READS, but the launch
-    // carries NO repoRef and keeps the ONE unbound write shape (external inbox deliverable +
-    // extraWriteRoots): wicked-core#293 — a repoRef-bound run's tool-permission stream closes
-    // on the first prompt-needing call, so no write destination works on a bound run, while
-    // bound READS and the unbound shape are both run-evidence proven.
+    // Bound to a repo-backed project → the task names the in-inbox SNAPSHOT to read, and the
+    // launch carries NO repoRef and keeps the ONE unbound write shape (external inbox
+    // deliverable + extraWriteRoots): a repoRef binding kills the session (wicked-core#293)
+    // and the unbound boundary denies live-repo reads (wicked-core#294) — the snapshot sits
+    // inside extraWriteRoots, which are readable (wicked-core#259).
     await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     const grounded = engine.launches[0]!;
+    const snapDir = join(draftDir, 'repo-doc-repo');
+    expect(snapshotExistedAtLaunch, 'snapshot must exist before launchRun').toBe(true);
     expect('repoRef' in grounded).toBe(false);
     expect(grounded.problem).toContain(
-      'Ground the document in the repository at /home/me/src/wicked-studio — read it',
+      `Ground the document in the repository snapshot at ${snapDir} — read it`,
     );
+    expect(grounded.problem).not.toContain(repoRoot); // the live root never reaches the task
     expect(grounded.problem).toContain(
-      `exactly this absolute file path: ${join(dir, 'drafts', 'repo-doc-v1.html')}`,
+      `exactly this absolute file path: ${join(draftDir, 'repo-doc-v1.html')}`,
     );
-    expect(grounded.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    expect(grounded.extraWriteRoots).toEqual([draftDir]);
     expect(grounded.problem).not.toMatch(/[\n\r]/);
     expect(grounded.projectId).toBe('proj-repo'); // filing is unaffected by the unbound launch
+    // The snapshot holds the repo's REAL content, inside the readable inbox.
+    expect(readFileSync(join(snapDir, 'README.md'), 'utf8')).toContain('the real studio project');
+    expect(readFileSync(join(snapDir, 'src', 'main.ts'), 'utf8')).toContain('real = true');
 
-    // Bound to a REPO-LESS project → launches exactly as today: no clause, same write shape.
+    // Bound to a REPO-LESS project → launches exactly as today: no clause, no snapshot dir,
+    // same write shape.
     await emitDocCreated(bus, 'bare-doc', { project_id: 'proj-bare' });
     await waitFor(() => engine.launches.length === 2);
     const bare = engine.launches[1]!;
     expect('repoRef' in bare).toBe(false);
     expect(bare.problem).not.toContain('Ground the document');
-    expect(bare.problem).toContain(join(dir, 'drafts', 'bare-doc-v1.html'));
-    expect(bare.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    expect(bare.problem).toContain(join(draftDir, 'bare-doc-v1.html'));
+    expect(bare.extraWriteRoots).toEqual([draftDir]);
+    expect(existsSync(join(draftDir, 'bare-doc-repo'))).toBe(false);
 
     // UNBOUND doc → no membership lookup at all: no clause, no projectId, same write shape.
     await emitDocCreated(bus, 'free-doc');
@@ -747,14 +772,98 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect('repoRef' in free).toBe(false);
     expect('projectId' in free).toBe(false);
     expect(free.problem).not.toContain('Ground the document');
-    expect(free.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    expect(free.extraWriteRoots).toEqual([draftDir]);
   });
 
-  it('a GROUNDED doc completes the full loop through the ONE standard finalize — inbox file in, inbox path announced', async () => {
+  it('DEGRADES HONESTLY when the repo cannot be snapshotted: ungrounded launch + a visible status note (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture(); // ~50 bytes — over a 10-byte budget
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const logged: string[] = [];
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir: join(dir, 'drafts'),
+      clisJson: SEATS,
+      repoSnapshotMaxBytes: 10,
+      log: (m) => logged.push(m),
+    });
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'big-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    // The launch HAPPENED — degradation never eats the doc — but ungrounded: no clause, no
+    // snapshot on disk, the standard unbound shape.
+    const launch = engine.launches[0]!;
+    expect(launch.problem).not.toContain('Ground the document');
+    expect(launch.problem).not.toContain(repoRoot);
+    expect(existsSync(join(dir, 'drafts', 'big-doc-repo'))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([join(dir, 'drafts')]);
+    // The user sees WHY the draft is not repo-grounded…
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          String((e.payload as { message?: string }).message).includes(
+            'repository too large to snapshot — drafting without repo grounding',
+          ),
+      ),
+    );
+    // …and the operator sees the real reason in the log.
+    expect(logged.some((m) => m.includes('snapshot budget'))).toBe(true);
+    expect(logged.some((m) => m.includes('launching ungrounded'))).toBe(true);
+  });
+
+  it('REMOVES the snapshot when the run ends — success AND failure paths (CREW-UX-8 v4)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = seedRepoFixture();
+    const engine = fakeAdapter({
+      members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
+      repos: [{ id: 'repo-studio', root_path: repoRoot }],
+    });
+    const draftDir = join(dir, 'drafts');
+    const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+
+    // Success path: the run completes with a real deliverable → finalize removes the snapshot.
+    await emitDocCreated(bus, 'ok-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 1);
+    const okSnap = join(draftDir, 'ok-doc-repo');
+    expect(existsSync(join(okSnap, 'README.md'))).toBe(true);
+    writeFileSync(join(draftDir, 'ok-doc-v1.html'), '<html><body>grounded</body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: engine.launches[0]!.sessionId });
+    await waitFor(() => sub!.ledger.get('ok-doc')?.emittedAt !== undefined);
+    expect(existsSync(okSnap), 'success finalize must remove the snapshot').toBe(false);
+
+    // Failure path: the run dies → the failure fold removes the snapshot too.
+    await emitDocCreated(bus, 'dead-doc', { project_id: 'proj-repo' });
+    await waitFor(() => engine.launches.length === 2);
+    const deadSnap = join(draftDir, 'dead-doc-repo');
+    expect(existsSync(join(deadSnap, 'README.md'))).toBe(true);
+    engine.fire({ type: 'sessionFailed', session: engine.launches[1]!.sessionId, ord: 1 });
+    await waitFor(() => sub!.ledger.get('dead-doc')?.failedAt !== undefined);
+    expect(existsSync(deadSnap), 'the failure path must remove the snapshot too').toBe(false);
+  });
+
+  it('a GROUNDED doc completes the full loop through the ONE standard finalize — inbox file in, inbox path announced, snapshot gone', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter({
       members: { 'proj-repo': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }] },
-      repos: [{ id: 'repo-studio', root_path: '/home/me/src/wicked-studio' }],
+      repos: [{ id: 'repo-studio', root_path: seedRepoFixture() }],
     });
     const draftDir = join(dir, 'drafts');
     const sub = await startInteractiveDraftSubscriber(engine.asAdapter(), {
@@ -772,8 +881,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await emitDocCreated(bus, 'repo-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
 
-    // The worker wrote the external-inbox deliverable — the ONLY write shape v3 has (the
-    // grounded repo is READ-only context; wicked-core#293 killed every bound-write variant).
+    // The worker wrote the external-inbox deliverable — the ONLY write shape v4 has (the
+    // in-inbox snapshot is READ-only grounding context; wicked-core#293 killed every
+    // bound-write variant and wicked-core#294 killed live-repo reads).
     const inboxPath = join(draftDir, 'repo-doc-v1.html');
     mkdirSync(draftDir, { recursive: true });
     writeFileSync(inboxPath, '<html><body><h1>grounded draft</h1></body></html>', 'utf8');
@@ -785,6 +895,8 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     expect(readFileSync(inboxPath, 'utf8')).toContain('grounded draft');
     expect(draft.idempotency_key).toBe(draftIdempotencyKey('repo-doc'));
     expect(sub!.ledger.get('repo-doc')?.emittedAt).toBeTruthy();
+    // The launch-scoped snapshot did not outlive its run.
+    expect(existsSync(join(draftDir, 'repo-doc-repo'))).toBe(false);
   });
 
   it('a STALE repo membership never fabricates a repoRef — the launch degrades to repo-less (CREW-UX-8)', async () => {
