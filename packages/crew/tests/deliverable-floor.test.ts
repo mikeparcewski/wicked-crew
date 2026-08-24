@@ -5,9 +5,9 @@
 // only greps the program text would pass on a program that never exits non-zero. The phase and
 // composition assertions pin the contract the adapter and wicked-core depend on.
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -30,6 +30,9 @@ function runFloor(paths: string[]): { code: number; out: string } {
 
 describe('the floor script (executed, not grepped)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'deliverable-floor-'));
+  // Fixtures are real files on disk because the script stats them; remove them when the suite
+  // ends so repeated runs do not litter tmpdir (Copilot, #319).
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   it('PASSES when every declared artifact exists with bytes, and says what it found', () => {
     const a = join(dir, 'a.html');
@@ -182,5 +185,26 @@ describe('composeDeliverableFloor (per-run, never mutating the shared def)', () 
     const composed = composeDeliverableFloor(base, 'a/b c:d'.repeat(40), ['/tmp/out.html']);
     expect(composed.id.length).toBeLessThanOrEqual(128);
     expect(composed.id).toMatch(/^[a-zA-Z0-9._-]+$/);
+  });
+});
+
+// Copilot (#319): an enforcement option that is silently ignored leaves the caller worse off
+// than one that was never offered — it watches the run complete believing the artifacts were
+// re-derived. `requireDeliverables` without a workflow must refuse the launch, the same way
+// deliver: "pr" already does.
+describe('requireDeliverables without a workflow', () => {
+  it('refuses the launch instead of dropping the option', async () => {
+    const { CoreAdapter } = await import('../src/core/adapter.js');
+    const adapter = Object.create(CoreAdapter.prototype) as {
+      launchRun: (i: Record<string, unknown>) => Promise<unknown>;
+    };
+    await expect(
+      adapter.launchRun({
+        problem: 'free-text run',
+        sessionId: 'r-nofloor',
+        clisJson: '[]',
+        requireDeliverables: ['/tmp/never-checked.html'],
+      }),
+    ).rejects.toThrow(/requireDeliverables requires a workflow/);
   });
 });

@@ -815,6 +815,15 @@ export class CoreAdapter {
       throw new Error(
         'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
       );
+    } else if ((input.requireDeliverables ?? []).length > 0) {
+      // Same rule for the floor (Copilot, #319): a caller that declares what a run MUST produce
+      // and gets no enforcement is worse off than one that never declared it — it would watch a
+      // free-text run complete and believe the artifacts were re-derived. There is no def to
+      // append the floor phase to, so refuse the launch instead of silently ignoring the option.
+      throw new Error(
+        'requireDeliverables requires a workflow — a free-text run has no def to append the ' +
+          'deliverable floor to',
+      );
     }
     return this.core.launchRun(opts);
   }
