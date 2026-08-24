@@ -332,6 +332,10 @@ interface InFlight {
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   heartbeat: ReturnType<typeof setInterval>;
+  /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
+   *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
+   *  which says which fragment files were expected and what was found. */
+  failureDetail?: string | undefined;
 }
 
 function defaultStateDir(): string {
@@ -403,6 +407,11 @@ export async function startInteractiveEditSubscriber(
   );
   const editDir = opts.editDir ?? join(defaultStateDir(), 'interactive-edits');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
+  // The run executes ONE MORE unit than the def declares: the crew#311 deliverable floor,
+  // appended per-run by `launchRun` from `requireDeliverables`. Narration keys off this so the
+  // "landing the new version" line fires when the FILES are verified, not when the worker
+  // merely stopped talking.
+  const agentPhaseCount = INTERACTIVE_EDIT_WORKFLOW_DEF.phases.length;
   const inFlight = new Map<string, InFlight>(); // runId → live state
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
@@ -468,7 +477,15 @@ export async function startInteractiveEditSubscriber(
     const blocks =
       flight.items.length === 1 ? 'the targeted block' : `${flight.items.length} targeted blocks`;
 
+    // The crew#311 deliverable floor is a DETERMINISTIC tool phase — no seat, no council. Core
+    // still emits the seat-selection events for it (its `cli` is the node interpreter's absolute
+    // path), so narrating them verbatim put "Council picked /opt/homebrew/.../node to rework…"
+    // in the reader's thread. Drop those two lines for the floor ord.
+    const isFloorOrd = (e: CoreEvent): boolean =>
+      typeof (e as { ord?: unknown }).ord === 'number' && (e as { ord: number }).ord > agentPhaseCount;
+
     if (event.type === 'councilConvened') {
+      if (isFloorOrd(event)) return;
       const seats = Array.isArray(event.clis) ? event.clis.length : 0;
       // "0-seat council" reads like a bug — generic phrasing whenever clis is missing or empty
       // (Copilot, #269).
@@ -478,6 +495,7 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'unitDistributed') {
+      if (isFloorOrd(event)) return;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
       const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
       narrate(flight, `Council picked ${who} to rework ${blocks}${pct}…`);
@@ -485,6 +503,10 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'unitDispatched') {
+      if (isFloorOrd(event)) {
+        narrate(flight, 'Checking the edited fragment files were actually written…');
+        return;
+      }
       narrate(flight, `Crew is reworking ${blocks}…`);
       return;
     }
@@ -501,7 +523,14 @@ export async function startInteractiveEditSubscriber(
     }
 
     if (event.type === 'gateDecided' && event.allow === true) {
-      narrate(flight, 'Gate approved the edit — landing the new version now…');
+      const ord = typeof event.ord === 'number' ? event.ord : 0;
+      // ord > the def's own phase count = the crew#311 deliverable floor, appended per-run.
+      narrate(
+        flight,
+        ord > agentPhaseCount
+          ? 'Edited fragments verified on disk — landing the new version now…'
+          : 'Gate approved the edit — checking the fragment files landed…',
+      );
       return;
     }
 
@@ -517,16 +546,25 @@ export async function startInteractiveEditSubscriber(
       return;
     }
 
+    if (event.type === 'stepFailed') {
+      // Remember the engine's own reason (crew#311) so the terminal status can name it.
+      const detail = typeof event.detail === 'string' ? event.detail.trim() : '';
+      if (detail.length > 0) flight.failureDetail = detail;
+      return;
+    }
+
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
       ledger.recordFailure(flight.key);
+      const why =
+        flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
         document_id: flight.documentId,
         version: flight.version,
         state: 'error',
         message:
           `The crew run answering this edit ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
-          `(run ${runId}). Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
+          `(run ${runId}).${why} Inspect it via the crew API (GET /api/v1/runs/${runId}); the assist loop can still take over.`,
       });
       log(`[interactive-edit] run ${runId} for handoff ${flight.key} ended: ${event.type}`);
     }
@@ -677,6 +715,11 @@ export async function startInteractiveEditSubscriber(
         // the deliverable writes (crew#263, same shape as the draft path). One declared root
         // covers both: write roots are readable (wicked-core#259).
         extraWriteRoots: [editDir],
+        // THE DELIVERABLE FLOOR (crew#311): EVERY handed-off fragment file is a deliverable, so
+        // a run that rewrote three blocks and wrote one file fails too — the floor is per-path,
+        // not "did anything land". Without it the engine's substance floor passes a worker
+        // whose Writes were denied as long as it narrated ~200 characters first.
+        requireDeliverables: items.map((i) => i.output_path),
       };
       await adapter.launchRun(input);
     } catch (err) {

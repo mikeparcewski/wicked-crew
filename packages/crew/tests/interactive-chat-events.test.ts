@@ -471,6 +471,10 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const outPath = join(runDir, 'revised.html');
     expect(launch.problem).toContain(currentPath);
     expect(launch.problem).toContain(outPath);
+    // crew#311: the revised document is DECLARED as the run's deliverable, so the engine runs
+    // crew's floor phase over it. Naming the path in the prompt is an instruction; declaring it
+    // here is the check — without this the run passes on ~200 chars of narration and no file.
+    expect(launch.requireDeliverables).toEqual([outPath]);
     expect(readFileSync(currentPath, 'utf8')).toContain('data-wid="w-h1"');
 
     // Pickup narration reached the bus as wi-crew (the studio's 90s budget rides on this).
@@ -498,9 +502,16 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
           e.event_type === STATUS_POSTED &&
           String((e.payload as { message?: string }).message).includes(needle),
       );
+    // 2/3, not 2/2: the run carries the crew#311 deliverable floor as a third unit, and the
+    // "landing it now" line now fires on ITS gate — the revision is announced once the FILE is
+    // verified, never on the strength of the worker's reply alone.
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 2, attempt: 0 });
-    await waitFor(narrated('2/2'));
+    await waitFor(narrated('2/3'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
+    await waitFor(narrated('checking the file landed'));
+    engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });
+    await waitFor(narrated('3/3'));
+    engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 3, allow: true });
     await waitFor(narrated('landing it now'));
 
     // The worker "wrote" the revision; completion announces it by path on the DRAFT wire.

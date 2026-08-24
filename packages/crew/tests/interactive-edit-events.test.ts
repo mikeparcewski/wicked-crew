@@ -488,6 +488,9 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     expect(handoffFile.items[0]?.fragment).toBe(FRAGMENT);
     const outPath = handoffFile.items[0]!.output_path;
     expect(outPath).toBe(join(dir, 'edits', 'spike-doc-v2', 'fragment-1.html'));
+    // crew#311: EVERY handed-off fragment file is declared as a deliverable — the floor is
+    // per-path, so a run that reworked three blocks and wrote one still fails.
+    expect(launch.requireDeliverables).toEqual(handoffFile.items.map((i) => i.output_path));
 
     // Narration reached the bus as wi-crew; the heartbeat keeps feeding the ~20s window.
     await waitFor(() =>
