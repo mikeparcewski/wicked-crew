@@ -674,6 +674,22 @@ export interface ProjectGraphBindingDecision {
 }
 
 /**
+ * What a run actually falls back TO when the project graph is unavailable — which is not the same
+ * sentence for every run, and saying the wrong one misdirects the operator reading it.
+ *
+ * A repo-bound run degrades to its own repo's graph: strictly less than the project's, still a
+ * complete description of the worktree the worker sits in. A repo-LESS run (the interactive
+ * draft/demo seams, which launch with no `repoRef` at all) has no own repo to degrade to, so it
+ * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
+ * exist and sends whoever is debugging it looking for one.
+ */
+function degradedTo(repoRef: string | undefined): string {
+  return repoRef === undefined
+    ? 'This repo-less run gets no code graph.'
+    : "This run uses its own repo's code graph in the meantime.";
+}
+
+/**
  * Decide which code graph a run launched into `projectId` should be bound to.
  *
  * # This never indexes
@@ -698,22 +714,6 @@ export interface ProjectGraphBindingDecision {
  * graph, and the run's own code is described correctly. A graph missing THIS repo is not, because
  * its answers about the worktree the worker is sitting in would all be "nothing found".
  */
-/**
- * What a run actually falls back TO when the project graph is unavailable — which is not the same
- * sentence for every run, and saying the wrong one misdirects the operator reading it.
- *
- * A repo-bound run degrades to its own repo's graph: strictly less than the project's, still a
- * complete description of the worktree the worker sits in. A repo-LESS run (the interactive
- * draft/demo seams, which launch with no `repoRef` at all) has no own repo to degrade to, so it
- * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
- * exist and sends whoever is debugging it looking for one.
- */
-function degradedTo(repoRef: string | undefined): string {
-  return repoRef === undefined
-    ? 'This repo-less run gets no code graph.'
-    : "This run uses its own repo's code graph in the meantime.";
-}
-
 export async function resolveProjectGraphBinding(
   adapter: CoreAdapter,
   projectId: string,
