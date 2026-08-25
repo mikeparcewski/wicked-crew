@@ -129,6 +129,59 @@ Crew still ships a default skin. `packages/crew` declares `wicked-studio` as a d
 whose package carries only its built `dist/`; the release build copies that artifact into the
 daemon's serving tree, so `npx wicked-crew serve` keeps the one-command local UX.
 
+## A project is a context: one code graph over all its repos *(0.7.0)*
+
+Real work spans repos. A change in an engine lands in the daemon that embeds it and the console
+that renders it, and an agent that can only see one of them answers "not found" about the other two
+— confidently, because a per-repo graph has no way to know it was asked about something outside
+itself.
+
+Attach repos to a project as `crew.repo` members and build one **co-located** wicked-estate graph
+over all of them:
+
+```bash
+curl -X POST localhost:7701/api/v1/projects/$PID/members \
+     -H 'content-type: application/json' -d '{"kind":"crew.repo","ref":"wicked-studio"}'
+curl -X POST localhost:7701/api/v1/projects/$PID/graph/refresh   # indexes each member, once
+```
+
+| route | answers |
+|---|---|
+| `GET /projects/:id/graph` | what the graph holds, and for anything missing: why, and the remedy |
+| `GET /projects/:id/graph/search?name=` | symbol resolution across every member repo |
+| `GET /projects/:id/graph/blast-radius?name=` | dependents across every member repo |
+| `POST /projects/:id/graph/refresh` | (re)index members — never happens implicitly at launch |
+
+Every hit is attributed to the repo it came from, and results span languages: one query for
+`register` over studio + crew + core returns TypeScript and Rust hits together, counted per repo.
+
+**Co-located is not linked.** Each repo is indexed under its own label and edges do **not** resolve
+across repos — `studio → wicked-crew-api-types → crew` does not traverse. What you get is per-repo
+results gathered into one answer with the repo named on every hit, which is genuinely useful
+("who calls `record`, anywhere in this project") and is not a cross-repo dependency trace. Every
+response says so in a `linkage: "co-located"` field and a `note`, so a consumer cannot mistake one
+for the other.
+
+**Runs bind to it, and say when they don't.** A run filed into a project is handed the project graph
+instead of its own repo's, and the decision is recorded either way — "this run sees the project" and
+"this run sees one repo, because X" are both facts about what the run could observe, and the second
+is the one you need when a worker reports a sibling repo does not exist:
+
+```
+run 909db7fb: bound to the project graph as 'wicked-studio'.
+run 0df7fb33: repo 'wicked-garden' is not a crew.repo member of project proj_1787…, so the project
+              graph does not describe it; this run uses the repo's own code graph. Attach it with
+              POST /api/v1/projects/proj_1787…/members and refresh the graph to widen future runs.
+```
+
+A refresh is `wicked-estate index` per member, bounded at ten minutes **each**, so it is never
+implicit: a launch that silently indexed N repos would block the response for as long as the
+slowest one takes. A missing or stale graph degrades the run to the per-repo graph and says so.
+
+Requires `wicked-estate` ≥ 0.14.6 (the release that added `--repo` co-location) and `wicked-core-ts` ≥ 0.7.1.
+Both are capability-probed before anything is indexed: an older estate accepts `--repo`, **ignores
+it**, and exits 0, which would silently produce a database holding only the last repo indexed.
+
 ## Building from source: two build modes
 
 | mode | command | what you get |
