@@ -9,8 +9,11 @@
 #
 # Exit 0 = every check passed. Non-zero = the count of failures.
 #
-# Usage:  scripts/verify-ecosystem.sh            # one pass
-#         scripts/verify-ecosystem.sh --loop 900 # re-verify every 15 min until it passes
+# Usage:  scripts/verify-ecosystem.sh                 # one pass, exit code = failure count
+#         scripts/verify-ecosystem-loop.sh 900 8    # retry every 15 min, up to 8 passes
+#
+# This script takes no flags. Looping lives in the sibling script so the single-pass exit code
+# stays meaningful to CI.
 set -uo pipefail
 
 PASS=0; FAIL=0; SKIP=0
@@ -61,10 +64,21 @@ verify_bundle() {
   crewv=$(npm view wicked-crew version 2>/dev/null)
   studiov=$(npm view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null | tr -d '^~')
   [ -z "$studiov" ] && studiov=$(npm view wicked-studio version 2>/dev/null)
-  ( cd "$tmp" \
-    && curl -sL "$(npm view wicked-crew@"$crewv" dist.tarball)" -o c.tgz \
-    && curl -sL "$(npm view wicked-studio@"$studiov" dist.tarball)" -o s.tgz \
-    && mkdir -p c s && tar xzf c.tgz -C c && tar xzf s.tgz -C s ) >/dev/null 2>&1
+  # INFRASTRUCTURE FAILURE IS NOT A VERDICT. If npm is unreachable or a tarball will not extract,
+  # this must SKIP — reporting "bundle DIFFERS" because curl timed out is a false regression, and
+  # a verifier that cries wolf on a network hiccup is one people learn to ignore.
+  local crew_tb studio_tb
+  crew_tb=$(npm view wicked-crew@"$crewv" dist.tarball 2>/dev/null)
+  studio_tb=$(npm view wicked-studio@"$studiov" dist.tarball 2>/dev/null)
+  if [ -z "$crewv" ] || [ -z "$studiov" ] || [ -z "$crew_tb" ] || [ -z "$studio_tb" ]; then
+    skip "crew/studio bundle — npm unreachable (not a verdict)"; rm -rf "$tmp"; return
+  fi
+  if ! ( cd "$tmp" \
+    && curl -fsSL "$crew_tb"   -o c.tgz \
+    && curl -fsSL "$studio_tb" -o s.tgz \
+    && mkdir -p c s && tar xzf c.tgz -C c && tar xzf s.tgz -C s ) >/dev/null 2>&1; then
+    skip "crew/studio bundle — tarball fetch/extract failed (not a verdict)"; rm -rf "$tmp"; return
+  fi
   if [ ! -d "$tmp/c/package/dist/studio" ]; then
     bad "crew $crewv ships no dist/studio"
   elif diff -r "$tmp/s/package/dist" "$tmp/c/package/dist/studio" >/dev/null 2>&1; then
@@ -82,9 +96,20 @@ verify_bundle
 head_ "3 · published artifacts behave"
 verify_installer() {
   local tmp; tmp=$(mktemp -d)
-  ( cd "$tmp" && curl -sL "$(npm view wicked-installer dist.tarball)" -o i.tgz && tar xzf i.tgz \
-    && cd package && npm install --omit=dev --silent ) >/dev/null 2>&1
-  local out; out=$(cd "$tmp/package" && timeout 120 node dist/index.js status 2>/dev/null)
+  local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
+  if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz && tar xzf i.tgz \
+    && cd package && npm install --omit=dev --silent ) >/dev/null 2>&1; then
+    skip "installer status — could not fetch/install the published tarball (not a verdict)"
+    rm -rf "$tmp"; return
+  fi
+  local out rc
+  out=$(cd "$tmp/package" && timeout 120 node dist/index.js status 2>/dev/null); rc=$?
+  # A crash, a timeout, or empty output is a FAILURE of the published artifact — not a machine
+  # with nothing installed. Conflating the two is how a broken `status` would pass this check.
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    bad "installer status exited $rc with $( [ -z "$out" ] && echo "no output" || echo "output" ) — the published artifact does not run"
+    rm -rf "$tmp"; return
+  fi
   # The regression this replaced: everything the switch did not name reported "not installed".
   if grep -q "not installed  wicked-crew" <<<"$out" && command -v wicked-crew >/dev/null 2>&1; then
     bad "installer status says wicked-crew missing while it is on PATH (detection regressed)"
@@ -102,8 +127,10 @@ verify_installer
 head_ "4 · live sites serve the features they document"
 site_has() {
   local url="$1" needle="$2" label="$3"
-  local body; body=$(curl -s -m 20 "$url" 2>/dev/null)
-  if [ -z "$body" ]; then bad "$label — $url unreachable"
+  # -f makes curl fail on 4xx/5xx instead of handing back an error page, which could otherwise
+  # be "reachable" and — with a generic enough needle — even match.
+  local body; body=$(curl -fsSL -m 20 "$url" 2>/dev/null)
+  if [ -z "$body" ]; then bad "$label — $url unreachable or returned an HTTP error"
   elif [[ "$body" == *"$needle"* ]]; then ok "$label"
   else bad "$label — $url served but missing: $needle"; fi
 }
@@ -132,9 +159,16 @@ fi
 
 # ── 6. The frozen archive is intact ──────────────────────────────────────────
 head_ "6 · frozen archive untouched"
-[ -d "$HOME/.wicked-brain" ] \
-  && ok "~/.wicked-brain present (retired, must never be deleted)" \
-  || bad "~/.wicked-brain is GONE — that archive is not recreatable"
+# Only meaningful where the archive EXISTS to be protected. A fresh machine or a CI runner never
+# had one, and failing there would make this script unrunnable in the place it is most useful.
+# WICKED_EXPECT_BRAIN_ARCHIVE=1 turns absence into a failure for machines that should have it.
+if [ -d "$HOME/.wicked-brain" ]; then
+  ok "~/.wicked-brain present (retired, must never be deleted)"
+elif [ "${WICKED_EXPECT_BRAIN_ARCHIVE:-0}" = "1" ]; then
+  bad "~/.wicked-brain is GONE and was expected — that archive is not recreatable"
+else
+  skip "~/.wicked-brain absent (set WICKED_EXPECT_BRAIN_ARCHIVE=1 where it should exist)"
+fi
 
 # ── Result ───────────────────────────────────────────────────────────────────
 printf "\n\033[1m%d passed · %d failed · %d skipped\033[0m\n" "$PASS" "$FAIL" "$SKIP"

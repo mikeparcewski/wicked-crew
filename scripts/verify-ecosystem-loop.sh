@@ -7,7 +7,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INTERVAL="${1:-900}"; MAX="${2:-8}"
-for i in $(seq 1 "$MAX"); do
+# Arithmetic loop rather than `seq`, which is not guaranteed in a minimal container.
+for (( i=1; i<=MAX; i++ )); do
   printf "\n\033[1m── pass %d/%d ──\033[0m\n" "$i" "$MAX"
   if "$HERE/verify-ecosystem.sh"; then
     printf "\n\033[32mecosystem verified on pass %d\033[0m\n" "$i"; exit 0
