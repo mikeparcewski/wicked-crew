@@ -27,6 +27,31 @@ head_() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 # repo SKIP rather than fail when it is absent — a missing checkout is not a broken ecosystem.
 ROOT="${WICKED_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
+# ── Safe extraction of REMOTE tarballs ───────────────────────────────────────
+# These come off the public npm registry, which is the supply-chain shape: a compromised or merely
+# malformed tarball can carry absolute paths, `..` segments, or symlinks that escape the extraction
+# root and write wherever the running user can. A temp dir is not a sandbox. So every member is
+# inspected BEFORE anything is unpacked, and one bad entry rejects the whole archive rather than
+# extracting the "safe" part of a hostile file.
+#
+# Returns non-zero on refusal so callers SKIP — a tarball we would not extract is not evidence of
+# an ecosystem regression.
+safe_untar() { # safe_untar <tarball> <dest-dir>
+  local tb="$1" dest="$2" listing
+  listing=$(tar tzf "$tb" 2>/dev/null) || return 1
+  [ -z "$listing" ] && return 1
+  # Absolute paths and parent-traversal, in any position.
+  if printf '%s\n' "$listing" | grep -qE '(^/|^\.\./|/\.\./|/\.\.$)'; then
+    return 2
+  fi
+  # Links are the subtler escape: a symlink member pointing outside, then a later member written
+  # THROUGH it. `tar -tvzf` marks them with a leading l/h.
+  if tar -tvzf "$tb" 2>/dev/null | grep -qE '^[lh]'; then
+    return 3
+  fi
+  mkdir -p "$dest" && tar xzf "$tb" -C "$dest" 2>/dev/null
+}
+
 # ── 1. Manifest version == what npm actually serves ──────────────────────────
 # A release can publish while `main` keeps the old number: the release-sync PR is a separate PR
 # and can sit unmerged for days. Both crew and garden were in exactly that state.
@@ -93,11 +118,11 @@ verify_bundle() {
   if [ -z "$crewv" ] || [ -z "$studiov" ] || [ -z "$crew_tb" ] || [ -z "$studio_tb" ]; then
     skip "crew/studio bundle — npm unreachable (not a verdict)"; rm -rf "$tmp"; return
   fi
-  if ! ( cd "$tmp" \
-    && curl -fsSL "$crew_tb"   -o c.tgz \
-    && curl -fsSL "$studio_tb" -o s.tgz \
-    && mkdir -p c s && tar xzf c.tgz -C c && tar xzf s.tgz -C s ) >/dev/null 2>&1; then
-    skip "crew/studio bundle — tarball fetch/extract failed (not a verdict)"; rm -rf "$tmp"; return
+  if ! ( cd "$tmp" && curl -fsSL "$crew_tb" -o c.tgz && curl -fsSL "$studio_tb" -o s.tgz ) >/dev/null 2>&1; then
+    skip "crew/studio bundle — tarball fetch failed (not a verdict)"; rm -rf "$tmp"; return
+  fi
+  if ! safe_untar "$tmp/c.tgz" "$tmp/c" || ! safe_untar "$tmp/s.tgz" "$tmp/s"; then
+    skip "crew/studio bundle — tarball refused or unextractable (unsafe members?)"; rm -rf "$tmp"; return
   fi
   if [ ! -d "$tmp/c/package/dist/studio" ]; then
     bad "crew $crewv ships no dist/studio"
@@ -117,9 +142,10 @@ head_ "3 · published artifacts behave"
 verify_installer() {
   local tmp; tmp=$(mktemp -d)
   local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
-  if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz && tar xzf i.tgz \
-    && cd package && npm install --omit=dev --silent ) >/dev/null 2>&1; then
-    skip "installer status — could not fetch/install the published tarball (not a verdict)"
+  if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz ) >/dev/null 2>&1 \
+     || ! safe_untar "$tmp/i.tgz" "$tmp" \
+     || ! ( cd "$tmp/package" && npm install --omit=dev --silent ) >/dev/null 2>&1; then
+    skip "installer status — could not fetch/verify/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi
   # `timeout` is not guaranteed — this script already avoids `seq` for that reason, and treating a
