@@ -32,6 +32,31 @@ import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 
 export const LOCK_NAME = '.wi-serve.json';
+
+/**
+ * The wicked-interactive range crew will start, as an npm spec.
+ *
+ * The spawn used to be a bare `npx --yes wicked-interactive`, which resolves whatever the public
+ * registry calls `latest` AT RUNTIME — no lockfile entry, no integrity hash, no floor. Three things
+ * follow from that, and none of them are theoretical:
+ *
+ *  - a breaking wicked-interactive release changes crew's behaviour with no crew change, no review,
+ *    and nothing in crew's history to point at during the incident;
+ *  - crew has no way to REQUIRE a route it depends on. The learned-theme readback
+ *    (`GET /d/:docId/api/theme/learned`, interactive#181) shipped in 0.8.1; against 0.8.0 the
+ *    brand-learn surface polls forever and degrades silently. A floor turns that into a resolvable
+ *    version, not a mystery;
+ *  - the resolution is a network fetch from a public registry into a long-lived daemon.
+ *
+ * A caret floor is the smallest fix that closes the first two: it pins the MAJOR-compatible range so
+ * a 0.9.0 cannot arrive unannounced, and it states the minimum crew actually needs. It does NOT make
+ * the fetch reproducible — that needs a real dependency with a lockfile entry, which is the
+ * follow-up this comment exists to keep visible.
+ *
+ * Bump this when crew starts depending on a newer interactive route, and say which route in the
+ * commit.
+ */
+export const INTERACTIVE_SPEC = 'wicked-interactive@^0.8.1';
 /** ADR-0025: 1.5 s × 3 while the pid lives. */
 export const HEALTH_TIMEOUT_MS = 1500;
 export const HEALTH_ATTEMPTS = 3;
@@ -58,7 +83,7 @@ export class BridgeUnavailableError extends Error {
 
 /** The one command that reproduces a failed start in a terminal, where its output is visible. */
 function serveCommand(root: string): string {
-  return `npx wicked-interactive serve --root ${root}`;
+  return `npx ${INTERACTIVE_SPEC} serve --root ${root}`;
 }
 
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
@@ -283,7 +308,7 @@ export class InteractiveBridgePool {
 function defaultSpawn(root: string): ChildProcess {
   // `--yes` is load-bearing: without it npx PROMPTS when the package is not installed, and a
   // daemon has no tty to answer with — the request would hang instead of failing to a 503.
-  return nodeSpawn('npx', ['--yes', 'wicked-interactive', 'serve', '--root', root], {
+  return nodeSpawn('npx', ['--yes', INTERACTIVE_SPEC, 'serve', '--root', root], {
     cwd: root,
     detached: true,
     stdio: 'ignore',

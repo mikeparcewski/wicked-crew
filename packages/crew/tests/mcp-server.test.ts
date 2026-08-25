@@ -195,6 +195,20 @@ describe('wicked-crew mcp: tool calls', () => {
 });
 
 describe('wicked-crew mcp: daemon unreachable', () => {
+  /**
+   * What this pins is the BEHAVIOUR — a nonzero exit and a stderr line naming the cause — not a
+   * stopwatch. The budget was 3 s, which is a fine wall-clock for the probe itself (ECONNREFUSED on
+   * port 1 is immediate) but not for `spawn` + Node startup + module load on a machine already
+   * running the rest of this suite in parallel. It failed at 3004 ms, i.e. exactly the timeout,
+   * while passing in 948 ms when run alone — the signature of a budget that measures machine load
+   * rather than the thing under test.
+   *
+   * Raised to 20 s so a loaded CI box cannot fail it spuriously. That does NOT weaken the test: a
+   * regression here is "exits zero" or "says nothing useful", and both are caught by the assertions
+   * below however long the process takes. A hang still fails, just later and honestly.
+   */
+  const EXIT_BUDGET_MS = 20_000;
+
   it('fails loudly when the daemon is not running', async () => {
     // Port 1 has no listener; the probe should fail quickly.
     await new Promise<void>((resolve, reject) => {
@@ -206,8 +220,8 @@ describe('wicked-crew mcp: daemon unreachable', () => {
 
       const timer = setTimeout(() => {
         proc.kill();
-        reject(new Error('process did not exit within 3s'));
-      }, 3000);
+        reject(new Error(`process did not exit within ${EXIT_BUDGET_MS}ms`));
+      }, EXIT_BUDGET_MS);
 
       proc.on('exit', (code) => {
         clearTimeout(timer);
@@ -220,5 +234,5 @@ describe('wicked-crew mcp: daemon unreachable', () => {
         }
       });
     });
-  }, 5000);
+  }, 30_000);
 });

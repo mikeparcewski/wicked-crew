@@ -23,6 +23,7 @@ import {
   LOCK_NAME,
   pidAlive,
   readLock,
+  INTERACTIVE_SPEC,
 } from '../src/interactive/bridge-pool.js';
 
 const NO_ENV: Record<string, string | undefined> = {};
@@ -200,7 +201,7 @@ describe('bridge pool keying + discovery (§7.2)', () => {
     const err = await pool.ensure(dir).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BridgeUnavailableError);
     // The hint has to be runnable, not "try again".
-    expect((err as BridgeUnavailableError).hint).toContain(`npx wicked-interactive serve --root ${dir}`);
+    expect((err as BridgeUnavailableError).hint).toContain(`npx ${INTERACTIVE_SPEC} serve --root ${dir}`);
   });
 
   it('creates a missing docs root rather than failing the spawn opaquely', async () => {
