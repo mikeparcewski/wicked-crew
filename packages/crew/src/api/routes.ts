@@ -1904,13 +1904,13 @@ export function registerRoutes(
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       return reply.code(400).send({ error: 'body must be a JSON object' });
     }
-    if ('graphNodeLimit' in patch) {
+    if (Object.hasOwn(patch, 'graphNodeLimit')) {
       const limit = patch.graphNodeLimit;
       if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 20 || limit > 500) {
         return reply.code(400).send({ error: 'graphNodeLimit must be an integer between 20 and 500' });
       }
     }
-    if ('worker_config_root' in patch) {
+    if (Object.hasOwn(patch, 'worker_config_root')) {
       const root = patch.worker_config_root;
       if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
         return reply.code(400).send({
@@ -1920,7 +1920,7 @@ export function registerRoutes(
     }
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
-    if ('workerStallMinutes' in patch) {
+    if (Object.hasOwn(patch, 'workerStallMinutes')) {
       const mins = patch.workerStallMinutes;
       if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 1 || mins > 1440) {
         return reply
@@ -1966,7 +1966,14 @@ export function registerRoutes(
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
-      if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
+      // `Object.hasOwn`, NOT `key in patch` (Copilot on #324): `in` walks the prototype chain, so
+      // a body whose prototype carries an engine key would be persisted from a value the caller
+      // never sent. Not reachable through the default JSON parser — `JSON.parse` yields a plain
+      // object and Fastify refuses `__proto__` — but this route already accepts custom
+      // content-type parsers, which can produce non-plain objects. Own properties only, and the
+      // same spelling the `ignored` filter below uses, so the two can never disagree about what
+      // "present" means.
+      if (Object.hasOwn(patch, key)) (safe as Record<string, unknown>)[key] = patch[key];
     }
     for (const key of studioKeys) {
       (safe as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];

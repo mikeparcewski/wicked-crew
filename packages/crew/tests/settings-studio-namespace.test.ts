@@ -55,6 +55,12 @@ function buildApp(adapter: CoreAdapter, audit: AuditLog = AuditLog.noop()): Fast
     circular['self'] = circular;
     done(null, { 'studio.appearance': circular });
   });
+  // A body whose PROTOTYPE carries an engine key and whose own properties carry none. `in` would
+  // see `graphNodeLimit` here; `Object.hasOwn` does not. 999 is outside the valid 20..500 range,
+  // so an `in`-based read is forced to reveal itself as a 400 rather than passing silently.
+  app.addContentTypeParser('application/x-proto-engine', { parseAs: 'string' }, (_req, _body, done) => {
+    done(null, Object.create({ graphNodeLimit: 999 }) as Record<string, unknown>);
+  });
   registerRoutes(
     app,
     adapter,
@@ -255,6 +261,28 @@ describe('PUT/GET /settings studio.* namespace', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('ignores an engine key that exists only on the body prototype (Copilot on #324)', async () => {
+    const adapter = memoryAdapter();
+    app = buildApp(adapter);
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/settings',
+      headers: { 'content-type': 'application/x-proto-engine' },
+      payload: 'ignored — the parser fabricates a body with graphNodeLimit on its prototype',
+    });
+
+    // Not a 400: the validator must never even look at an inherited key, so the out-of-range
+    // 999 is not reachable. And not persisted: the caller sent no own properties at all.
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { settings: { graphNodeLimit: number } }).settings.graphNodeLimit).toBe(
+      150,
+    );
+    const stored = await adapter.getSettings();
+    expect(stored.graphNodeLimit).toBe(150);
   });
 
   it('omits `ignored` from the audit entry when nothing was dropped', async () => {
