@@ -40,8 +40,15 @@ safe_untar() { # safe_untar <tarball> <dest-dir>
   local tb="$1" dest="$2" listing
   listing=$(tar tzf "$tb" 2>/dev/null) || return 1
   [ -z "$listing" ] && return 1
-  # Absolute paths and parent-traversal, in any position.
-  if printf '%s\n' "$listing" | grep -qE '(^/|^\.\./|/\.\./|/\.\.$)'; then
+  # Absolute paths and parent-traversal, decided per SEGMENT rather than by pattern-matching the
+  # whole string. Regexes here are whack-a-mole — the first version handled `../x`, `/../`, and a
+  # trailing `/..`, and a bare `..` member slipped past the guard entirely (it was refused, but by
+  # accident, as an unreadable listing). Splitting on `/` and rejecting any segment that IS `..`,
+  # plus any leading `/`, is exhaustive by construction and needs no case analysis.
+  if printf '%s\n' "$listing" | awk -F/ '
+      /^\// { exit 1 }
+      { for (i = 1; i <= NF; i++) if ($i == "..") exit 1 }
+    '; then :; else
     return 2
   fi
   # Links are the subtler escape: a symlink member pointing outside, then a later member written
