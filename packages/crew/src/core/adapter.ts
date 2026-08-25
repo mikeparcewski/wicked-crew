@@ -621,13 +621,6 @@ function quarantineStaleOnboardingOverlay(): void {
   }
 }
 
-/**
- * The single isolation boundary over wicked-core-ts. It holds the ONE `Core`
- * handle, makes the ONE `subscribe()` call for the whole process, parses each
- * CoreEvent, and re-emits it to registered in-daemon listeners. Every REST
- * endpoint and the WS fan-out funnel through this stable API — so when the
- * in-flight core-ts subscribe/teardown signature lands, only this file changes.
- */
 /** The ids of a workflow's phases that carry a HUMAN gate (`human_confirm` unconditional, or the
  * conditional `human_confirm_if`) — i.e. the phases that will PAUSE for a person.
  *
@@ -647,6 +640,13 @@ export function humanGatePhaseIds(wf: WorkflowDef): string[] {
     .map((p) => p.id);
 }
 
+/**
+ * The single isolation boundary over wicked-core-ts. It holds the ONE `Core`
+ * handle, makes the ONE `subscribe()` call for the whole process, parses each
+ * CoreEvent, and re-emits it to registered in-daemon listeners. Every REST
+ * endpoint and the WS fan-out funnel through this stable API — so when the
+ * in-flight core-ts subscribe/teardown signature lands, only this file changes.
+ */
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;

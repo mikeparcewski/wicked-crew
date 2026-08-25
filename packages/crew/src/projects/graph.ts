@@ -674,16 +674,6 @@ export interface ProjectGraphBindingDecision {
 }
 
 /**
- * What a run actually falls back TO when the project graph is unavailable — which is not the same
- * sentence for every run, and saying the wrong one misdirects the operator reading it.
- *
- * A repo-bound run degrades to its own repo's graph: strictly less than the project's, still a
- * complete description of the worktree the worker sits in. A repo-LESS run (the interactive
- * draft/demo seams, which launch with no `repoRef` at all) has no own repo to degrade to, so it
- * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
- * exist and sends whoever is debugging it looking for one.
- */
-/**
  * How many repo labels a binding reason names before it starts counting instead. Eight fits a
  * readable log line and covers every project anyone has built so far; past that the count carries
  * the information and the labels are just volume.
@@ -697,6 +687,16 @@ function labelList(labels: string[]): string {
   return `${shown}, and ${labels.length - MAX_NAMED_LABELS} more`;
 }
 
+/**
+ * What a run actually falls back TO when the project graph is unavailable — which is not the same
+ * sentence for every run, and saying the wrong one misdirects the operator reading it.
+ *
+ * A repo-bound run degrades to its own repo's graph: strictly less than the project's, still a
+ * complete description of the worktree the worker sits in. A repo-LESS run (the interactive
+ * draft/demo seams, which launch with no `repoRef` at all) has no own repo to degrade to, so it
+ * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
+ * exist and sends whoever is debugging it looking for one.
+ */
 function degradedTo(repoRef: string | undefined): string {
   return repoRef === undefined
     ? 'This repo-less run gets no code graph.'

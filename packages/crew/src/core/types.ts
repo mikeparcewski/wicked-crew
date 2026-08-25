@@ -66,12 +66,20 @@ export interface LaunchRunInput {
    *
    * `repoLabel` is optional in the TYPE because a repo-LESS run legitimately has none — there is
    * no own repo to name. It is not optional in MEANING for a repo-bound run: the engine uses it to
-   * confirm the co-located graph actually holds this run's repo, and a repo-bound binding that
-   * arrives without one is refused (the run falls back to its repo graph). TypeScript cannot catch
-   * a missing label here — the invariant ties this field to `repoRef`, a sibling field — so
-   * `CoreAdapter.launchRun` enforces it at RUNTIME instead, and throws: setting `repoRef` without a
-   * `repoLabel`, or passing `projectGraph` without the `projectId` whose graph it is, fails the
-   * launch loudly rather than producing a run that reports one thing and observes another.
+   * confirm the co-located graph actually holds this run's repo.
+   *
+   * TypeScript cannot catch a missing label here — the invariant ties this field to `repoRef`, a
+   * sibling field — so `CoreAdapter.launchRun` enforces it at RUNTIME. Two failure modes, and they
+   * are NOT the same thing:
+   *
+   *  - **crew refuses the launch outright.** Passing `projectGraph` without `projectId`, or with
+   *    `repoRef` set and no `repoLabel`, THROWS: no session is created and nothing runs. These are
+   *    caller bugs with no sensible degraded reading, so they fail before anything is persisted.
+   *  - **the ENGINE declines the binding.** A well-formed binding whose graph turns out not to hold
+   *    the named label is refused engine-side and the run proceeds against its own repo graph — a
+   *    real launch, quietly narrower. That is the fallback; it is not what a missing `repoLabel`
+   *    gets you.
+   *
    * Omit the whole field for the per-repo behaviour.
    */
   projectGraph?: { dbPath: string; repoLabel?: string };
