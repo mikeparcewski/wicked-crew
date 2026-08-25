@@ -769,6 +769,28 @@ export class CoreAdapter {
             'it and the run would see one repo while the daemon logged that it saw the project',
         );
       }
+      // The two invariants the TYPE cannot express, enforced where the launch is actually
+      // assembled (Copilot on #327). Both are cross-field, so `projectGraph`'s own shape can never
+      // carry them, and `core/types.ts` says as much rather than pretending the compiler helps.
+      //
+      // Loud, not lenient. Every one of these is a CALLER bug, and the failure it would otherwise
+      // produce is the silent kind this whole slice exists to end: a run that reports one thing
+      // about what it could see and observes another. `resolveProjectGraphBinding` — the only
+      // producer today — satisfies both on every arm, so a throw here means a new caller got it
+      // wrong, which is exactly when you want to hear about it.
+      if (input.projectId === undefined) {
+        throw new Error(
+          'projectGraph is the PROJECT\'s graph, so the run must be filed into that project: ' +
+            'pass projectId alongside it, or omit projectGraph and let the run use its repo graph',
+        );
+      }
+      if (input.repoRef !== undefined && input.projectGraph.repoLabel === undefined) {
+        throw new Error(
+          `a repo-bound run needs projectGraph.repoLabel: without it the engine cannot confirm the ` +
+            `project graph holds '${input.repoRef}', and a graph that does not would answer ` +
+            `"not found" about the run's own worktree`,
+        );
+      }
       opts.projectGraph = input.projectGraph;
     }
     if (input.workflow !== undefined) {

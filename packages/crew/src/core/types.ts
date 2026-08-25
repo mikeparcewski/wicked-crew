@@ -68,8 +68,10 @@ export interface LaunchRunInput {
    * no own repo to name. It is not optional in MEANING for a repo-bound run: the engine uses it to
    * confirm the co-located graph actually holds this run's repo, and a repo-bound binding that
    * arrives without one is refused (the run falls back to its repo graph). TypeScript cannot catch
-   * a missing label here — the invariant ties this field to `repoRef`, a sibling field — so treat
-   * it as required whenever `repoRef` is set rather than expecting the compiler to say so.
+   * a missing label here — the invariant ties this field to `repoRef`, a sibling field — so
+   * `CoreAdapter.launchRun` enforces it at RUNTIME instead, and throws: setting `repoRef` without a
+   * `repoLabel`, or passing `projectGraph` without the `projectId` whose graph it is, fails the
+   * launch loudly rather than producing a run that reports one thing and observes another.
    * Omit the whole field for the per-repo behaviour.
    */
   projectGraph?: { dbPath: string; repoLabel?: string };
