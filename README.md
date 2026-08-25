@@ -129,7 +129,7 @@ Crew still ships a default skin. `packages/crew` declares `wicked-studio` as a d
 whose package carries only its built `dist/`; the release build copies that artifact into the
 daemon's serving tree, so `npx wicked-crew serve` keeps the one-command local UX.
 
-## A project is a context: one code graph over all its repos *(0.7.0)*
+## A project is a context: one code graph over all its repos *(crew 0.7.0)*
 
 Real work spans repos. A change in an engine lands in the daemon that embeds it and the console
 that renders it, and an agent that can only see one of them answers "not found" about the other two
@@ -147,10 +147,10 @@ curl -X POST localhost:7701/api/v1/projects/$PID/graph/refresh   # indexes each 
 
 | route | answers |
 |---|---|
-| `GET /projects/:id/graph` | what the graph holds, and for anything missing: why, and the remedy |
-| `GET /projects/:id/graph/search?name=` | symbol resolution across every member repo |
-| `GET /projects/:id/graph/blast-radius?name=` | dependents across every member repo |
-| `POST /projects/:id/graph/refresh` | (re)index members — never happens implicitly at launch |
+| `GET /api/v1/projects/:id/graph` | what the graph holds, and for anything missing: why, and the remedy |
+| `GET /api/v1/projects/:id/graph/search?name=` | symbol resolution across every member repo |
+| `GET /api/v1/projects/:id/graph/blast-radius?name=` | dependents across every member repo |
+| `POST /api/v1/projects/:id/graph/refresh` | (re)index members — never happens implicitly at launch |
 
 Every hit is attributed to the repo it came from, and results span languages: one query for
 `register` over studio + crew + core returns TypeScript and Rust hits together, counted per repo.
