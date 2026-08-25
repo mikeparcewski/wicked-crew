@@ -252,16 +252,43 @@ const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
  * silently). Fail CLOSED on version instead: same doctrine as the `projectId` guard below.
  */
 function addonSupportsExtraWriteRoots(): boolean {
+  return addonAtLeast(0, 6, 1);
+}
+
+/**
+ * Does the installed addon understand `LaunchOptions.projectGraph` (≥ 0.7.1)?
+ *
+ * Same doctrine, different cost of being wrong. A silently-dropped binding does not deny anything —
+ * it launches a run whose workers quietly see one repo while the launcher recorded that they see
+ * the project. The daemon would then log "bound to the project graph as 'wicked-core'" for a run
+ * that never was, which is worse than not binding at all: the operator's evidence about what the
+ * run could see becomes false. Fail closed and keep the log honest.
+ */
+function addonSupportsProjectGraph(): boolean {
+  return addonAtLeast(0, 7, 1);
+}
+
+/**
+ * Is the installed `wicked-core-ts` at least `maj.min.pat`?
+ *
+ * ONE version reader for every capability gate, because the parsing rule here is load-bearing and
+ * was already got wrong once: `split('.').map(Number)` returns NaN on a pre-release or build suffix
+ * (`0.6.1-beta.1`), which fails a perfectly capable addon closed (Copilot on #263). Matching only
+ * the numeric MAJOR.MINOR.PATCH prefix fixes that, and a second copy of the fix is a second chance
+ * to lose it. No match ⇒ unparseable ⇒ fail closed.
+ */
+function addonAtLeast(maj: number, min: number, pat: number): boolean {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const pkg = require('wicked-core-ts/package.json') as { version?: string };
-    // Match only the numeric MAJOR.MINOR.PATCH prefix: `split('.').map(Number)` returns NaN on
-    // pre-release/build suffixes (`0.6.1-beta.1`), which would fail-closed a capable addon
-    // (Copilot). No match ⇒ unparseable ⇒ fail closed.
     const m = /^(\d+)\.(\d+)\.(\d+)/.exec(pkg.version ?? '');
     if (!m) return false;
-    const [maj, min, pat] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    return maj > 0 || min > 6 || (min === 6 && pat >= 1);
+    const got = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const want = [maj, min, pat];
+    for (let i = 0; i < 3; i += 1) {
+      if (got[i]! > want[i]!) return true;
+      if (got[i]! < want[i]!) return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -732,6 +759,17 @@ export class CoreAdapter {
         );
       }
       opts.extraWriteRoots = input.extraWriteRoots;
+    }
+    if (input.projectGraph !== undefined) {
+      // Fail CLOSED on an old addon (napi ignores undeclared fields): the run would silently get
+      // its repo's graph while everything on this side recorded that it got the project's.
+      if (!addonSupportsProjectGraph()) {
+        throw new Error(
+          'projectGraph needs wicked-core-ts >= 0.7.1; the installed addon would silently ignore ' +
+            'it and the run would see one repo while the daemon logged that it saw the project',
+        );
+      }
+      opts.projectGraph = input.projectGraph;
     }
     if (input.workflow !== undefined) {
       let workflowId = input.workflow;

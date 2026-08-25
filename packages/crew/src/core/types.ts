@@ -60,6 +60,16 @@ export interface LaunchRunInput {
    */
   extraWriteRoots?: string[];
   /**
+   * The PROJECT's co-located code graph this run's governed workers should query instead of the
+   * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE
+   * thing that knows where a project graph lives and what each repo is labelled inside it.
+   *
+   * `repoLabel` is REQUIRED whenever `repoRef` is set: the engine uses it to confirm the graph
+   * actually holds this run's repo and refuses the binding (falling back to the repo graph) when it
+   * cannot. Omit the whole field for the per-repo behaviour.
+   */
+  projectGraph?: { dbPath: string; repoLabel?: string };
+  /**
    * Delivery mode (crew#293). `"pr"` ⇒ the adapter appends the hardened deliver Tool phase
    * (push the run branch + `gh pr create`, see `core/deliver.ts`) to a PER-RUN copy of the
    * selected workflow def and launches that copy — the shared def is never mutated. Requires

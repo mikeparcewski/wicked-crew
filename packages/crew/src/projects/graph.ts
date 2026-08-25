@@ -640,6 +640,131 @@ async function doRefresh(
   };
 }
 
+// ── Binding a run to the project graph ────────────────────────────────────────
+
+/**
+ * What a launch decided about the project graph, and why. The `reason` is carried on BOTH outcomes
+ * because "you got the project graph" and "you got the repo graph instead, because X" are equally
+ * worth saying, and the operator asking "why can't this run see the sibling repo" needs the second
+ * one to have been recorded somewhere.
+ */
+export interface ProjectGraphBindingDecision {
+  /** Passed to the engine as `LaunchOptions.projectGraph`; `null` ⇒ the run keeps the repo graph. */
+  binding: { dbPath: string; repoLabel?: string } | null;
+  /** One sentence: what the run got, and what would change it. */
+  reason: string;
+}
+
+/**
+ * Decide which code graph a run launched into `projectId` should be bound to.
+ *
+ * # This never indexes
+ *
+ * A refresh is `wicked-estate index` per member repo, bounded at ten minutes EACH. Doing that
+ * inside a launch would turn "start a run" into an unannounced multi-repo indexing job that blocks
+ * the response, and the first thing an operator would learn about it is a request that appears to
+ * hang. So a missing or stale graph DEGRADES the run to the per-repo graph and says so; refreshing
+ * stays an explicit `POST /projects/:id/graph/refresh`.
+ *
+ * # Why the run's OWN repo decides it
+ *
+ * The engine independently verifies whatever it is handed and falls back on its own, so this
+ * function cannot make a run unsafe — but it can make one confusing, and it has information the
+ * engine does not. `projectGraphStatus` knows a repo was attached after the last refresh, that its
+ * registry root moved out from under the label, that its member ref is dangling. Declining HERE,
+ * with that cause attached, is the difference between an operator reading "attached since the last
+ * refresh — not in the graph yet" and reading the engine's generic "no files under that label".
+ *
+ * The rule itself is the engine's, restated on this side: bind when the graph holds THIS RUN'S
+ * repo. A graph missing some OTHER member is still bound — it is strictly more than the per-repo
+ * graph, and the run's own code is described correctly. A graph missing THIS repo is not, because
+ * its answers about the worktree the worker is sitting in would all be "nothing found".
+ */
+export async function resolveProjectGraphBinding(
+  adapter: CoreAdapter,
+  projectId: string,
+  repoRef: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ProjectGraphBindingDecision> {
+  let status: ProjectGraphStatus;
+  try {
+    status = await projectGraphStatus(adapter, projectId, env);
+  } catch (err) {
+    // Resolving the binding is an ENHANCEMENT to the launch. A project whose membership cannot be
+    // read, or an addon too old to vouch for repo graph paths, must not take the run down with it —
+    // the run is still perfectly launchable against its own repo's graph.
+    return {
+      binding: null,
+      reason:
+        `the project graph could not be read (${message(err)}), so this run uses its own repo's ` +
+        `code graph`,
+    };
+  }
+
+  if (status.dbPath === null) {
+    return {
+      binding: null,
+      reason: `${status.detail} This run uses its own repo's code graph in the meantime.`,
+    };
+  }
+
+  // A repo-less run has no own-repo that could be missing from the graph, so any graph with
+  // something in it is a strict gain over the nothing such a run gets today.
+  if (repoRef === undefined) {
+    const indexed = status.repos.filter((r) => r.indexed);
+    if (indexed.length === 0) {
+      return {
+        binding: null,
+        reason: `${status.detail} This repo-less run gets no code graph.`,
+      };
+    }
+    return {
+      binding: { dbPath: status.dbPath },
+      reason:
+        `this repo-less run is bound to the project graph (${indexed.length} repo(s): ` +
+        `${indexed.map((r) => r.label).join(', ')}).`,
+    };
+  }
+
+  const own = status.repos.find((r) => r.repoId === repoRef);
+  if (own === undefined) {
+    // The run targets a repo that is not a member of the project it is filed into. Legal — filing a
+    // run and attaching a repo are separate acts — but the project graph provably does not describe
+    // this repo, so there is nothing to gain and an own-repo blind spot to lose.
+    return {
+      binding: null,
+      reason:
+        `repo '${repoRef}' is not a crew.repo member of project ${projectId}, so the project ` +
+        `graph does not describe it; this run uses the repo's own code graph. Attach it with ` +
+        `POST /api/v1/projects/${projectId}/members and refresh the graph to widen future runs.`,
+    };
+  }
+  if (!own.indexed) {
+    return {
+      binding: null,
+      reason:
+        `the project graph does not hold '${repoRef}' (${own.reason ?? 'not indexed'}), so binding ` +
+        `it would give this run tools that answer "not found" about its own worktree; it uses the ` +
+        `repo's own code graph instead. POST /api/v1/projects/${projectId}/graph/refresh fixes it.`,
+    };
+  }
+
+  // Bound. Staleness is NOT checked: `own.head` is the commit indexed, the worktree is wherever it
+  // is now, and every code graph — including the per-repo one this would fall back to — is behind
+  // its checkout the moment anyone commits. Refusing on drift would disqualify the project graph
+  // after a single commit and hand back a graph with exactly the same drift and less in it.
+  const partial = status.missingRepos.length;
+  return {
+    binding: { dbPath: status.dbPath, repoLabel: own.label },
+    reason:
+      `bound to the project graph as '${own.label}'` +
+      (own.head === undefined ? '' : ` (indexed at ${own.head.slice(0, 8)})`) +
+      (partial === 0
+        ? '.'
+        : `; ${partial} member repo(s) are not in it, so cross-repo answers are partial.`),
+  };
+}
+
 // ── Queries ───────────────────────────────────────────────────────────────────
 
 /**
