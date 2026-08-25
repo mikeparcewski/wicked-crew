@@ -64,9 +64,25 @@ check_version wicked-core        crates/wicked-core-ts/package.json
 head_ "2 · crew bundles the studio version it depends on"
 verify_bundle() {
   local tmp; tmp=$(mktemp -d)
-  local crewv studiov
+  local crewv range studiov
   crewv=$(npm view wicked-crew version 2>/dev/null)
-  studiov=$(npm view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null | tr -d '^~')
+  range=$(npm view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null)
+  # RESOLVE the range; do not strip characters off it. `^0.4.0` does not mean 0.4.0 — npm installs
+  # the highest 0.4.x, so `tr -d '^~'` would compare crew's bundle against the wrong tarball and
+  # report DIFFERS for a correctly-bundled crew. Getting caret semantics wrong inside the check
+  # that exists BECAUSE of caret semantics is precisely the failure to avoid here.
+  if [ -n "$range" ]; then
+    # --json, because the plain form is ambiguous: one match prints a bare version, several print
+    # `pkg@x.y.z 'x.y.z'` lines. Naive `tail -1 | tr -d` on the multi-match form yields
+    # "wicked-garden@12.31.012.31.0" — garbage that would then fail to resolve. The JSON is a
+    # string for one match and an array for many; take the LAST, which is the highest npm would
+    # install for the range.
+    studiov=$(npm view "wicked-studio@${range}" version --json 2>/dev/null | node -e '
+      let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+        try{const v=JSON.parse(s);const out=Array.isArray(v)?v[v.length-1]:v;
+            if(typeof out==="string"&&out)console.log(out);}catch{}
+      })')
+  fi
   [ -z "$studiov" ] && studiov=$(npm view wicked-studio version 2>/dev/null)
   # INFRASTRUCTURE FAILURE IS NOT A VERDICT. If npm is unreachable or a tarball will not extract,
   # this must SKIP — reporting "bundle DIFFERS" because curl timed out is a false regression, and
@@ -106,8 +122,13 @@ verify_installer() {
     skip "installer status — could not fetch/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi
-  local out rc
-  out=$(cd "$tmp/package" && timeout 120 node dist/index.js status 2>/dev/null); rc=$?
+  # `timeout` is not guaranteed — this script already avoids `seq` for that reason, and treating a
+  # missing tool's 127 as "the published artifact does not run" would be a false regression from
+  # local tooling. Use it when present, run bare when not.
+  local out rc runner=()
+  if command -v timeout >/dev/null 2>&1; then runner=(timeout 120)
+  elif command -v gtimeout >/dev/null 2>&1; then runner=(gtimeout 120); fi
+  out=$(cd "$tmp/package" && "${runner[@]}" node dist/index.js status 2>/dev/null); rc=$?
   # A crash, a timeout, or empty output is a FAILURE of the published artifact — not a machine
   # with nothing installed. Conflating the two is how a broken `status` would pass this check.
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
