@@ -52,10 +52,15 @@ safe_untar() { # safe_untar <tarball> <dest-dir>
     return 2
   fi
   # Links are the subtler escape: a symlink member pointing outside, then a later member written
-  # THROUGH it. `tar -tvzf` marks them with a leading l/h.
-  if tar -tvzf "$tb" 2>/dev/null | grep -qE '^[lh]'; then
-    return 3
-  fi
+  # THROUGH it. `tar -tvzf` marks them with a leading l/h. If the VERBOSE listing fails while the
+  # plain one succeeded, refuse — proceeding would skip the link check silently, which is the
+  # worst outcome: an unchecked archive extracted under the appearance of having been checked.
+  local verbose
+  verbose=$(tar -tvzf "$tb" 2>/dev/null) || return 3
+  printf '%s\n' "$verbose" | grep -qE '^[lh]' && return 3
+  # NOTE the check/use boundary: members are inspected from one read and extracted in another.
+  # Safe here only because $tb is a temp file this script just wrote and nothing else touches.
+  # Do not point safe_untar at a path another process can swap between the two reads.
   mkdir -p "$dest" && tar xzf "$tb" -C "$dest" 2>/dev/null
 }
 
@@ -151,7 +156,7 @@ verify_installer() {
   local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
   if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz ) >/dev/null 2>&1 \
      || ! safe_untar "$tmp/i.tgz" "$tmp" \
-     || ! ( cd "$tmp/package" && npm install --omit=dev --silent ) >/dev/null 2>&1; then
+     || ! ( cd "$tmp/package" && npm install --omit=dev --ignore-scripts --silent ) >/dev/null 2>&1; then
     skip "installer status — could not fetch/verify/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi
@@ -184,11 +189,32 @@ verify_installer
 # A deploy can succeed and serve the previous build; Pages fronts a CDN. Assert CONTENT.
 head_ "4 · live sites serve the features they document"
 site_has() {
-  local url="$1" needle="$2" label="$3"
-  # -f makes curl fail on 4xx/5xx instead of handing back an error page, which could otherwise
-  # be "reachable" and — with a generic enough needle — even match.
-  local body; body=$(curl -fsSL -m 20 "$url" 2>/dev/null)
-  if [ -z "$body" ]; then bad "$label — $url unreachable or returned an HTTP error"
+  local url="$1" needle="$2" label="$3" body rc
+  # -f so a 4xx/5xx fails instead of handing back an error page, which would otherwise count as
+  # "reachable" and — with a generic enough needle — could even match it.
+  # A DOWN NETWORK IS NOT A BROKEN SITE, and the honest way to tell them apart is whether the
+  # SERVER ANSWERED — not which exit code curl chose. Mapping exit codes was the first attempt and
+  # it was guesswork: a 404 from Pages came back as 56 (connection reset mid-transfer), which had
+  # been classified as "network", so a genuinely broken page would have been quietly skipped.
+  # `%{http_code}` is unambiguous: non-zero ⇒ the server responded and the verdict is about the
+  # site; 000 ⇒ nothing answered and the verdict is about this machine.
+  # NOTE: no `|| echo 000` fallback. curl ALREADY writes `000` when nothing answered, so appending
+  # on failure yields "000000" — which matches neither branch and falls through to the wrong one.
+  # (The identical `cmd || echo <default>` mistake produced "0\n0" from `grep -c` earlier in this
+  # session: the command emits its own default AND the fallback fires.) Capture, then default only
+  # when the capture is genuinely empty.
+  local code
+  code=$(curl -sSL -o /dev/null -w '%{http_code}' -m 20 "$url" 2>/dev/null)
+  [ -z "$code" ] && code=000
+  if [ "$code" = "000" ]; then
+    skip "$label — no HTTP response at all (offline/DNS? not a verdict)"; return
+  fi
+  if [ "$code" -ge 400 ] 2>/dev/null; then
+    bad "$label — $url returned HTTP $code"; return
+  fi
+  body=$(curl -fsSL -m 20 "$url" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then bad "$label — $url answered $code but the body could not be read (curl $rc)"
+  elif [ -z "$body" ]; then bad "$label — $url answered $code with an empty body"
   elif [[ "$body" == *"$needle"* ]]; then ok "$label"
   else bad "$label — $url served but missing: $needle"; fi
 }
