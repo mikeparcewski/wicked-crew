@@ -38,9 +38,13 @@ check_version() {
   git -C "$dir" fetch -q origin 2>/dev/null
   local name main npmv
   name=$(node -p "require('$dir/$pj').name" 2>/dev/null) || { skip "$repo — unreadable manifest"; return; }
-  main=$(git -C "$dir" show "origin/main:$pj" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version)}catch{console.log("?")}})')
+  # An unreadable `origin/main:$pj` means offline, no origin, or a moved path — NOT a version
+  # mismatch. Reporting "main=? npm=1.2.3" as a failure is the same infrastructure-as-verdict
+  # mistake the bundle and installer checks make below, and it must skip for the same reason.
+  main=$(git -C "$dir" show "origin/main:$pj" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s).version;if(typeof v==="string"&&v)console.log(v)}catch{}})')
+  if [ -z "$main" ]; then skip "$name — cannot read origin/main:$pj (offline? not a verdict)"; return; fi
   npmv=$(npm view "$name" version 2>/dev/null)
-  if [ -z "$npmv" ]; then skip "$name — not on npm"
+  if [ -z "$npmv" ]; then skip "$name — not on npm (or npm unreachable)"
   elif [ "$main" = "$npmv" ]; then ok "$name $npmv"
   else bad "$name — main=$main npm=$npmv (release-sync PR unmerged?)"; fi
 }
@@ -144,12 +148,20 @@ site_has https://wi.wickedagile.com "wicked-interactive"       "interactive site
 head_ "5 · load-bearing code an audit called cruft"
 WI="$ROOT/wicked-interactive"
 if [ -d "$WI" ]; then
-  grep -q 'src/artifact/create.js' "$WI/bin/wicked-interactive.js" 2>/dev/null \
-    && ok "src/artifact/ still backs the create|publish|validate|adopt subcommands" \
-    || bad "bin no longer imports src/artifact — were the CLI subcommands removed?"
-  grep -q 'frontend/dist' "$WI/src/service/server.js" 2>/dev/null \
-    && ok "frontend/dist is still the served static root" \
-    || bad "server.js no longer serves frontend/dist"
+  # Distinguish "the file is gone" (could be a checkout state) from "the file exists and no longer
+  # carries the reference" (a real regression). grep on a missing file returns the same 1 as grep
+  # that found nothing, so the file check has to come first or the two are indistinguishable.
+  wired() { # wired <file> <needle> <ok-msg> <bad-msg>
+    if [ ! -f "$1" ]; then skip "$(basename "$1") not present in this checkout (not a verdict)"
+    elif grep -q "$2" "$1" 2>/dev/null; then ok "$3"
+    else bad "$4"; fi
+  }
+  wired "$WI/bin/wicked-interactive.js" 'src/artifact/create.js' \
+    "src/artifact/ still backs the create|publish|validate|adopt subcommands" \
+    "bin no longer imports src/artifact — were the CLI subcommands removed?"
+  wired "$WI/src/service/server.js" 'frontend/dist' \
+    "frontend/dist is still the served static root" \
+    "server.js no longer serves frontend/dist"
   [ -f "$WI/.github/workflows/pages.yml" ] \
     && ok "site/ still has its Pages deploy" \
     || bad "interactive pages.yml is gone — the live site would stop updating"
