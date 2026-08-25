@@ -1419,3 +1419,140 @@ export interface ChatOpenBody {
   /** File the chat into a project (`crew.chat` membership, attached on open). */
   projectId?: string;
 }
+
+// ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────
+//
+// A project's `crew.repo` members indexed into ONE wicked-estate database, each under a stable
+// label, so one query answers over every repo the project contains.
+//
+// THE LIMIT, stated on the wire because it is not obvious from the results: this is CO-LOCATION,
+// NOT LINKAGE. estate resolves edges within a labelled repo's own nodes only, exactly as if each
+// repo sat in its own database. `studio → wicked-crew-api-types → crew` does NOT traverse; what
+// these shapes carry is per-repo results gathered in one place, with the repo named on every hit.
+// Every response repeats it in `linkage` + `note` so a consumer cannot read a cross-repo answer as
+// a cross-repo TRACE.
+
+/** Co-location, never linkage — a single-valued field so a future linked mode is additive. */
+export type ProjectGraphLinkage = 'co-located';
+
+/**
+ * Why a project graph cannot answer, or the terms on which it can.
+ *
+ * - `ready` — indexed, two or more repos.
+ * - `ready-single-repo` — indexed, exactly one repo: answers are correct but can never be
+ *   cross-repo, which a caller asking a project-scoped question needs told.
+ * - `no-repo-members` — the project has no `crew.repo` member. Not an error and not an empty
+ *   graph: there is nothing to build one from.
+ * - `not-indexed` — it has repo members and no database yet. `POST /projects/:id/graph/refresh`
+ *   is the fix, and the `detail` says so.
+ * - `engine-too-old` — the running wicked-core addon does not publish `code_graph_db` on the repo
+ *   record (wicked-core#170), so its repo-record contract predates this surface.
+ */
+export type ProjectGraphState =
+  | 'ready'
+  | 'ready-single-repo'
+  | 'no-repo-members'
+  | 'not-indexed'
+  | 'engine-too-old';
+
+/** One member repo's standing in the project graph. */
+export interface ProjectGraphRepo {
+  /** Registry id (`RepoEntry.id`) — the member ref this came from. */
+  repoId: string;
+  /** The estate label its rows carry, and the prefix on every `file` path it contributes. */
+  label: string;
+  rootPath: string;
+  /** `false` ⇒ its symbols are NOT in the graph; `reason` says why and results stay partial. */
+  indexed: boolean;
+  /** Commit indexed, when git could answer. */
+  head?: string;
+  /** Unix millis of the index that put these rows in. */
+  indexedAt?: number;
+  /** Present when `indexed` is false: registry miss, index failure, or never refreshed. */
+  reason?: string;
+}
+
+/** `GET /projects/:id/graph` — what the project graph holds and what it cannot answer. */
+export interface ProjectGraphStatus {
+  projectId: string;
+  state: ProjectGraphState;
+  /** One sentence naming the state's cause and its remedy. Always present, never empty. */
+  detail: string;
+  /** Absolute path of the co-located database; `null` when there is none to point at. */
+  dbPath: string | null;
+  repos: ProjectGraphRepo[];
+  /** Member repos absent from the graph — any answer is PARTIAL while this is non-empty. */
+  missingRepos: string[];
+  /** Labels still in the database whose repo is no longer a member; excluded from results. */
+  staleRepos: string[];
+  linkage: ProjectGraphLinkage;
+  note: string;
+  /** Unix millis of the last refresh; `null` when never refreshed. */
+  updatedAt: number | null;
+}
+
+/** `POST /projects/:id/graph/refresh` — an incremental (re)build, repo by repo. */
+export interface ProjectGraphRefreshResult {
+  status: ProjectGraphStatus;
+  /** Labels re-indexed this run. */
+  indexed: string[];
+  /** Labels skipped because the checkout is clean and its HEAD is already in the graph. */
+  skipped: string[];
+  /** Repos that failed to index, with the reason; the graph keeps whatever it already had. */
+  failed: Array<{ repoId: string; label: string; error: string }>;
+}
+
+/** One hit, always attributed: a cross-repo answer that does not say WHERE is not an answer. */
+export interface ProjectGraphHit {
+  /** The repo's registry id. */
+  repoId: string;
+  /** The repo's estate label. */
+  repo: string;
+  /** estate SymbolId — carries the label, so it is unique across the project. */
+  id: string;
+  /**
+   * The graph node's name, VERBATIM from estate. For a `kind: 'file'` node that name IS the
+   * label-prefixed path (`wicked-vault/src/vault/vault.mjs`) — left as estate minted it, because
+   * rewriting it would produce a name that resolves to nothing. Use `repo` + `file` to display it.
+   */
+  name: string;
+  kind: string;
+  /** REPO-RELATIVE path, label stripped — the same spelling `/repos/:id/graph` returns. */
+  file: string;
+  line: number;
+}
+
+/** Per-repo hit counts, so "which repo does this touch" is answerable without scanning hits. */
+export interface ProjectGraphRepoCount {
+  repoId: string;
+  repo: string;
+  count: number;
+}
+
+/** `GET /projects/:id/graph/blast-radius?name=` — dependents across every member repo. */
+export interface ProjectBlastRadius {
+  projectId: string;
+  target: string;
+  dependents: ProjectGraphHit[];
+  byRepo: ProjectGraphRepoCount[];
+  /** Unresolved call-sites referencing the target — an empty `dependents` never means "safe". */
+  unresolved: number;
+  /** Labels actually covered by this answer. */
+  reposSearched: string[];
+  /** Member repos NOT covered — the answer is partial while this is non-empty. */
+  missingRepos: string[];
+  linkage: ProjectGraphLinkage;
+  note: string;
+}
+
+/** `GET /projects/:id/graph/search?name=` — exact-name symbol resolution across member repos. */
+export interface ProjectGraphSearch {
+  projectId: string;
+  query: string;
+  matches: ProjectGraphHit[];
+  byRepo: ProjectGraphRepoCount[];
+  reposSearched: string[];
+  missingRepos: string[];
+  linkage: ProjectGraphLinkage;
+  note: string;
+}

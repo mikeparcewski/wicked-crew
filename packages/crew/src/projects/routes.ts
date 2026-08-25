@@ -11,6 +11,13 @@
  *   GET    /projects/:id/activity       merged feed, cursor-paginated
  *   GET    /projects/:id/prompts        open interaction requests across member runs
  *
+ * …plus the project code graph (projects/graph.ts) — the repo-scoped graph trio, one scope up:
+ *
+ *   GET    /projects/:id/graph               what the co-located graph holds, and what it cannot answer
+ *   POST   /projects/:id/graph/refresh       incremental (re)build over every `crew.repo` member
+ *   GET    /projects/:id/graph/blast-radius  ?name= — dependents across member repos, each attributed
+ *   GET    /projects/:id/graph/search        ?name= — symbol resolution across member repos
+ *
  * Route-layer rules the engine cannot own:
  * - The `default` project ("Unfiled") is SYNTHESIZED here (ADR §7): its members are the runs
  *   with no explicit membership row; it lists, feeds, and prompts, and rejects PATCH/attach.
@@ -43,6 +50,16 @@ import {
 import type { MembershipIndex } from './membership-index.js';
 import { ProjectSettingsStore } from './settings.js';
 import { buildActivityPage } from './activity.js';
+import {
+  CO_LOCATION_NOTE,
+  ProjectGraphEngineTooOldError,
+  projectBlastRadius,
+  projectGraphStatus,
+  projectSymbolSearch,
+  queryable,
+  refreshProjectGraph,
+} from './graph.js';
+import type { ProjectGraphStatus } from '../core/types.js';
 import { writeCharter } from './charter.js';
 import { AuditLog } from '../api/audit.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
@@ -447,6 +464,119 @@ export function registerProjectRoutes(
       return { projectId: id, prompts };
     } catch (err) {
       return reply.code(engineErrorStatus(err)).send({ error: message(err) });
+    }
+  });
+
+  // ── The project code graph — every member repo, co-located, NOT linked ───────
+  //
+  // Mirrors the repo-scoped trio (`/repos/:id/graph`, `/repos/:id/graph/blast-radius`,
+  // `/repos/:id/domain-graph`) in shape, caps and error handling, one scope up. The one thing it
+  // adds to every payload is PROVENANCE: a hit that does not say which repo it came from is not an
+  // answer to a cross-repo question. See projects/graph.ts for the co-location/linkage limit.
+
+  /** The synthesized `default` project can never hold a repo — its membership is computed from
+   *  unfiled runs and chats (ADR §7), and `crew.repo` is not among the kinds it synthesizes. Said
+   *  here, with its own sentence, rather than by handing the engine an id it does not store. */
+  function defaultProjectGraph(): ProjectGraphStatus {
+    return {
+      projectId: DEFAULT_PROJECT_ID,
+      state: 'no-repo-members',
+      detail:
+        "the synthesized 'default' project holds unfiled runs and chats only — it has no repo " +
+        'members and cannot have a code graph. Create a project and attach repos to it.',
+      dbPath: null,
+      repos: [],
+      missingRepos: [],
+      staleRepos: [],
+      linkage: 'co-located',
+      note: CO_LOCATION_NOTE,
+      updatedAt: null,
+    };
+  }
+
+  /** Engine capability gaps map to 501, everything else to the projects mapping. */
+  function graphErrorStatus(err: unknown): number {
+    return err instanceof ProjectGraphEngineTooOldError ? 501 : engineErrorStatus(err);
+  }
+
+  app.get(`${V}/projects/:id/graph`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (id === DEFAULT_PROJECT_ID) return { status: defaultProjectGraph() };
+    try {
+      const project = await adapter.projectGet(id);
+      if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+      // Always 200: "this project has no repos" and "its graph was never built" are ANSWERS about
+      // the graph's standing, which is what this route reports. The query routes below are where
+      // they become a refusal, because there they are the reason a question cannot be answered.
+      return { status: await projectGraphStatus(adapter, id) };
+    } catch (err) {
+      return reply.code(graphErrorStatus(err)).send({ error: message(err) });
+    }
+  });
+
+  app.post(`${V}/projects/:id/graph/refresh`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (id === DEFAULT_PROJECT_ID) {
+      return reply.code(409).send({ error: defaultProjectGraph().detail });
+    }
+    try {
+      const project = await adapter.projectGet(id);
+      if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+      // Synchronous: indexing runs to completion before this answers, so the response describes a
+      // graph that IS built rather than one that was asked for. Bounded per repo by graph.ts's
+      // index timeout; concurrent callers coalesce onto the one in-flight refresh.
+      return await refreshProjectGraph(adapter, id);
+    } catch (err) {
+      return reply.code(graphErrorStatus(err)).send({ error: message(err) });
+    }
+  });
+
+  app.get(`${V}/projects/:id/graph/blast-radius`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { name?: string };
+    if (q.name === undefined || q.name.trim() === '') {
+      return reply.code(400).send({ error: 'name query parameter required' });
+    }
+    if (id === DEFAULT_PROJECT_ID) {
+      return reply.code(404).send({ error: defaultProjectGraph().detail, status: defaultProjectGraph() });
+    }
+    try {
+      const project = await adapter.projectGet(id);
+      if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+      const ready = await queryable(adapter, id);
+      // The FINDING-050 / R3 rule: a project that cannot answer says WHY and HOW TO FIX IT. `[]`
+      // here would be a well-formed reply meaning "nothing depends on this symbol", which is a
+      // different — and dangerous — statement from "there is no graph to ask".
+      if (!ready.ok) {
+        const code = ready.status.state === 'engine-too-old' ? 501 : 404;
+        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+      }
+      return reply.send(await projectBlastRadius(ready, q.name.trim()));
+    } catch (err) {
+      return reply.code(graphErrorStatus(err)).send({ error: message(err) });
+    }
+  });
+
+  app.get(`${V}/projects/:id/graph/search`, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { name?: string };
+    if (q.name === undefined || q.name.trim() === '') {
+      return reply.code(400).send({ error: 'name query parameter required' });
+    }
+    if (id === DEFAULT_PROJECT_ID) {
+      return reply.code(404).send({ error: defaultProjectGraph().detail, status: defaultProjectGraph() });
+    }
+    try {
+      const project = await adapter.projectGet(id);
+      if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
+      const ready = await queryable(adapter, id);
+      if (!ready.ok) {
+        const code = ready.status.state === 'engine-too-old' ? 501 : 404;
+        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+      }
+      return reply.send(await projectSymbolSearch(ready, q.name.trim()));
+    } catch (err) {
+      return reply.code(graphErrorStatus(err)).send({ error: message(err) });
     }
   });
 }
