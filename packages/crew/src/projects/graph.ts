@@ -648,9 +648,19 @@ async function doRefresh(
  * worth saying, and the operator asking "why can't this run see the sibling repo" needs the second
  * one to have been recorded somewhere.
  */
+/**
+ * Passed to the engine as `LaunchOptions.projectGraph`. `repoLabel` names this run's repo inside
+ * the co-located graph so the engine can confirm the graph actually holds it; a repo-less run
+ * carries no label because it has no own repo to confirm.
+ */
+export interface ProjectGraphBinding {
+  dbPath: string;
+  repoLabel?: string;
+}
+
 export interface ProjectGraphBindingDecision {
-  /** Passed to the engine as `LaunchOptions.projectGraph`; `null` ⇒ the run keeps the repo graph. */
-  binding: { dbPath: string; repoLabel?: string } | null;
+  /** The binding to hand the engine; `null` ⇒ the run keeps whatever graph it would have had. */
+  binding: ProjectGraphBinding | null;
   /** One sentence: what the run got, and what would change it. */
   reason: string;
 }
@@ -680,6 +690,22 @@ export interface ProjectGraphBindingDecision {
  * graph, and the run's own code is described correctly. A graph missing THIS repo is not, because
  * its answers about the worktree the worker is sitting in would all be "nothing found".
  */
+/**
+ * What a run actually falls back TO when the project graph is unavailable — which is not the same
+ * sentence for every run, and saying the wrong one misdirects the operator reading it.
+ *
+ * A repo-bound run degrades to its own repo's graph: strictly less than the project's, still a
+ * complete description of the worktree the worker sits in. A repo-LESS run (the interactive
+ * draft/demo seams, which launch with no `repoRef` at all) has no own repo to degrade to, so it
+ * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
+ * exist and sends whoever is debugging it looking for one.
+ */
+function degradedTo(repoRef: string | undefined): string {
+  return repoRef === undefined
+    ? 'This repo-less run gets no code graph.'
+    : "This run uses its own repo's code graph in the meantime.";
+}
+
 export async function resolveProjectGraphBinding(
   adapter: CoreAdapter,
   projectId: string,
@@ -695,16 +721,14 @@ export async function resolveProjectGraphBinding(
     // the run is still perfectly launchable against its own repo's graph.
     return {
       binding: null,
-      reason:
-        `the project graph could not be read (${message(err)}), so this run uses its own repo's ` +
-        `code graph`,
+      reason: `the project graph could not be read (${message(err)}). ${degradedTo(repoRef)}`,
     };
   }
 
   if (status.dbPath === null) {
     return {
       binding: null,
-      reason: `${status.detail} This run uses its own repo's code graph in the meantime.`,
+      reason: `${status.detail} ${degradedTo(repoRef)}`,
     };
   }
 
@@ -715,7 +739,7 @@ export async function resolveProjectGraphBinding(
     if (indexed.length === 0) {
       return {
         binding: null,
-        reason: `${status.detail} This repo-less run gets no code graph.`,
+        reason: `${status.detail} ${degradedTo(repoRef)}`,
       };
     }
     return {

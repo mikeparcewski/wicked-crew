@@ -167,6 +167,43 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     expect(adapter.listRepos).toHaveBeenCalled();
   });
 
+  /**
+   * The same "no graph built yet" degradation, reached by a REPO-LESS run — the interactive
+   * draft/demo seams, which launch with no repoRef at all. Such a run has no own repo to fall
+   * back to, so telling it that it "uses its own repo's code graph" names a graph that does not
+   * exist and sends whoever is debugging it looking for one. It gets nothing, and is told that.
+   */
+  it('tells a repo-less run it gets NOTHING — not that it falls back to a repo it does not have', async () => {
+    const adapter = adapterFor([repoMember('engine-repo')], [repo('engine-repo')]);
+
+    const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined);
+
+    expect(binding).toBeNull();
+    expect(reason).toMatch(/no code graph yet/);
+    expect(reason).toMatch(/repo-less run gets no code graph/);
+    expect(reason).not.toMatch(/own repo's code graph/);
+  });
+
+  /** The unreadable-membership path degrades too, and owes a repo-less run the same honesty. */
+  it('names the right fallback for each run shape when the project graph cannot be read', async () => {
+    const adapter = adapterFor([repoMember('engine-repo')], [repo('engine-repo')]);
+    adapter.listRepos = vi.fn(async () => {
+      throw new Error('registry unreadable');
+    });
+
+    const bound = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'engine-repo');
+    const repoless = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined);
+
+    expect(bound.binding).toBeNull();
+    expect(bound.reason).toMatch(/could not be read/);
+    expect(bound.reason).toMatch(/own repo's code graph/);
+
+    expect(repoless.binding).toBeNull();
+    expect(repoless.reason).toMatch(/could not be read/);
+    expect(repoless.reason).toMatch(/repo-less run gets no code graph/);
+    expect(repoless.reason).not.toMatch(/own repo's code graph/);
+  });
+
   /** Filing a run into a project and attaching its repo are separate acts; one can happen alone. */
   it('refuses when the run’s repo is not a member of the project at all', async () => {
     buildGraph(['daemon-repo']);

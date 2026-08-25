@@ -74,7 +74,7 @@
  *    before reshaping either def.
  */
 
-import { resolveProjectGraphBinding } from '../projects/graph.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -836,12 +836,26 @@ export async function startInteractiveDemoSubscriber(
     // Resolved BEFORE the launch and never indexing — a refresh is `wicked-estate index` per
     // member at up to 600s EACH, so doing it here would turn "record a demo" into an
     // unannounced multi-repo job. Missing or stale degrades to no binding; the run is unaffected.
-    const projectGraphBinding =
-      input.projectId === undefined
-        ? null
-        : await resolveProjectGraphBinding(adapter, input.projectId, undefined)
-            .then((d) => d.binding)
-            .catch(() => null);
+    //
+    // The decision is RECORDED on both outcomes, like the API launch path (`api/routes.ts`):
+    // "this demo sees the project" and "this demo sees nothing, because X" are equally facts about
+    // what the run could observe. An unexpected failure degrades the same way but says so — a
+    // silent `catch(() => null)` would make a broken binding look identical to a project that
+    // simply has no graph yet.
+    let projectGraphBinding: ProjectGraphBinding | null = null;
+    if (input.projectId !== undefined) {
+      const decision = await resolveProjectGraphBinding(adapter, input.projectId, undefined).catch(
+        (err: unknown) => ({
+          binding: null,
+          reason:
+            `the project graph binding could not be resolved ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            `This repo-less run gets no code graph.`,
+        }),
+      );
+      projectGraphBinding = decision.binding;
+      log(`run ${runId}: ${decision.reason}`);
+    }
     return adapter
       .launchRun({
         problem: input.problem,

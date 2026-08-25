@@ -35,7 +35,7 @@
  *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
-import { resolveProjectGraphBinding } from '../projects/graph.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -846,12 +846,27 @@ export async function startInteractiveDraftSubscriber(
     // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
     // "start a draft" into an unannounced multi-repo job). Missing or stale degrades to no
     // binding and the run proceeds exactly as before; the graph is a bonus, never a gate.
-    const projectGraphBinding =
-      doc.projectId === undefined
-        ? null
-        : await resolveProjectGraphBinding(adapter, doc.projectId, undefined)
-            .then((d) => d.binding)
-            .catch(() => null);
+    //
+    // The decision is RECORDED on both outcomes, like the API launch path (`api/routes.ts`).
+    // "this draft sees the project" and "this draft sees nothing, because X" are equally facts
+    // about what the run could observe, and the second is the one someone needs when a worker
+    // reports that a sibling repo does not exist. An unexpected failure degrades the same way,
+    // but says so — a silent `catch(() => null)` would make a broken binding indistinguishable
+    // from a project that simply has no graph yet.
+    let projectGraphBinding: ProjectGraphBinding | null = null;
+    if (doc.projectId !== undefined) {
+      const decision = await resolveProjectGraphBinding(adapter, doc.projectId, undefined).catch(
+        (err: unknown) => ({
+          binding: null,
+          reason:
+            `the project graph binding could not be resolved ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            `This repo-less run gets no code graph.`,
+        }),
+      );
+      projectGraphBinding = decision.binding;
+      log(`run ${runId}: ${decision.reason}`);
+    }
     try {
       await adapter.launchRun({
         problem: draftProblem(doc, outPath, snapshotDir),

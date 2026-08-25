@@ -64,9 +64,13 @@ export interface LaunchRunInput {
    * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE
    * thing that knows where a project graph lives and what each repo is labelled inside it.
    *
-   * `repoLabel` is REQUIRED whenever `repoRef` is set: the engine uses it to confirm the graph
-   * actually holds this run's repo and refuses the binding (falling back to the repo graph) when it
-   * cannot. Omit the whole field for the per-repo behaviour.
+   * `repoLabel` is optional in the TYPE because a repo-LESS run legitimately has none — there is
+   * no own repo to name. It is not optional in MEANING for a repo-bound run: the engine uses it to
+   * confirm the co-located graph actually holds this run's repo, and a repo-bound binding that
+   * arrives without one is refused (the run falls back to its repo graph). TypeScript cannot catch
+   * a missing label here — the invariant ties this field to `repoRef`, a sibling field — so treat
+   * it as required whenever `repoRef` is set rather than expecting the compiler to say so.
+   * Omit the whole field for the per-repo behaviour.
    */
   projectGraph?: { dbPath: string; repoLabel?: string };
   /**
