@@ -215,6 +215,48 @@ describe('PUT/GET /settings studio.* namespace', () => {
     }
   });
 
+  it('names a dropped key even when it collides with an Object.prototype member', async () => {
+    // `k in safe` would report `toString`/`valueOf`/`constructor` as KEPT (the prototype chain
+    // answers for them), so they would be dropped without ever reaching `detail.ignored` — the
+    // silent drop #323 is about. The filter uses Object.hasOwn precisely so this bites.
+    const dir = mkdtempSync(join(tmpdir(), 'studio-settings-proto-'));
+    const audit = new AuditLog(join(dir, 'audit.log'));
+    const adapter = memoryAdapter();
+    app = buildApp(adapter, audit);
+    await app.ready();
+
+    try {
+      const res = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/settings',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          'studio.appearance': { accent: '#111' },
+          toString: 'dropped',
+          valueOf: 'dropped',
+          constructor: 'dropped',
+          hasOwnProperty: 'dropped',
+        }),
+      });
+      expect(res.statusCode).toBe(200);
+      const settings = settingsOf(res);
+      // None of them are persisted...
+      for (const key of ['toString', 'valueOf', 'constructor', 'hasOwnProperty']) {
+        expect(Object.hasOwn(settings, key)).toBe(false);
+      }
+      await audit.flush();
+      const detail = (await audit.read({ action: 'settings.updated' }))[0]?.detail as {
+        changed: string[];
+        ignored?: string[];
+      };
+      expect(detail.changed).toEqual(['studio.appearance']);
+      // ...and every one of them is NAMED as dropped.
+      expect(detail.ignored).toEqual(['toString', 'valueOf', 'constructor', 'hasOwnProperty']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('omits `ignored` from the audit entry when nothing was dropped', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'studio-settings-audit-'));
     const audit = new AuditLog(join(dir, 'audit.log'));

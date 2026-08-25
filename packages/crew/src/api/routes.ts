@@ -222,8 +222,11 @@ const STUDIO_SETTINGS_KEY = /^studio\.[a-z][a-z0-9-]*$/;
  * base64 costs ~33%, so this admits a ~380KB image — a real logo, not a favicon — while a
  * preferences blob like `studio.notifications` spends a few dozen bytes of it. One generous
  * cap covers both because the daemon cannot tell them apart; what it stops is settings.json
- * quietly becoming an asset store. It also stays clear of Fastify's 1MiB default body limit,
- * so a patch may name more than one namespaced key and still be parsed before it is judged.
+ * quietly becoming an asset store. It sits at half of Fastify's 1MiB default body limit, so a
+ * realistic multi-key patch (one blob near the cap plus small preference blobs) is still parsed
+ * before it is judged — but note the two limits COMPOSE: a body whose keys total more than 1MiB
+ * is refused by Fastify with a 413 that this route never sees, so the per-key 400 below is the
+ * ceiling on ONE key, not on the patch.
  */
 const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
 
@@ -1968,7 +1971,10 @@ export function registerRoutes(
     for (const key of studioKeys) {
       (safe as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
     }
-    const ignored = Object.keys(patch).filter((k) => !(k in safe));
+    // `Object.hasOwn`, NOT `k in safe`: `in` walks the prototype chain, so a dropped key named
+    // `toString` / `valueOf` / `constructor` would test as "kept" and vanish from `ignored` —
+    // the exact silent drop this route exists to end.
+    const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k));
     const settings = await adapter.updateSettings(safe);
     // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
