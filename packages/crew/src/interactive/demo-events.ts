@@ -74,6 +74,7 @@
  *    before reshaping either def.
  */
 
+import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -817,7 +818,7 @@ export async function startInteractiveDemoSubscriber(
     return false;
   }
 
-  function launchFlight(
+  async function launchFlight(
     input: {
       key: string;
       leg: 'spec' | 'reauthor';
@@ -832,6 +833,15 @@ export async function startInteractiveDemoSubscriber(
     },
   ): Promise<void> {
     const runId = randomUUID();
+    // Resolved BEFORE the launch and never indexing — a refresh is `wicked-estate index` per
+    // member at up to 600s EACH, so doing it here would turn "record a demo" into an
+    // unannounced multi-repo job. Missing or stale degrades to no binding; the run is unaffected.
+    const projectGraphBinding =
+      input.projectId === undefined
+        ? null
+        : await resolveProjectGraphBinding(adapter, input.projectId, undefined)
+            .then((d) => d.binding)
+            .catch(() => null);
     return adapter
       .launchRun({
         problem: input.problem,
@@ -842,6 +852,10 @@ export async function startInteractiveDemoSubscriber(
         // membership atomically with the launch); an unfiled doc launches with the key OMITTED
         // — never a fabricated 'default' membership (CREW-UX-2).
         ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        // A project-filed run sees the PROJECT's graph, like any other (verification
+        // found this seam launching filed but unbound). These launches are repo-LESS,
+        // which is exactly the case that gets a graph where it previously got none.
+        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
         // THE WRITE-BOUNDARY LESSON, applied (wicked-core#293/#294): deliberately NO `repoRef`
         // and NO doc-workspace path — the run is UNBOUND and its worker can only read/write
         // the per-run inbox declared here (write roots are readable, wicked-core#259). The
