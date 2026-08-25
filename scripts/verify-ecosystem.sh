@@ -79,7 +79,12 @@ check_version() {
     skip "$repo — could not fetch origin (offline? local ref may be stale, not a verdict)"; return
   fi
   local name main npmv
-  name=$(node -p "require('$dir/$pj').name" 2>/dev/null) || { skip "$repo — unreadable manifest"; return; }
+  # The path goes in as an ARGUMENT, not interpolated into a JS string literal: a checkout under
+  # a directory containing a space or an apostrophe ("we ird's") makes the interpolated form throw
+  # a syntax error, which this would then report as an unreadable manifest (verified).
+  name=$(node -e 'const p=require(process.argv[1]);process.stdout.write(String(p.name||""))' "$dir/$pj" 2>/dev/null) \
+    || { skip "$repo — unreadable manifest"; return; }
+  [ -z "$name" ] && { skip "$repo — manifest has no name"; return; }
   # An unreadable `origin/main:$pj` means offline, no origin, or a moved path — NOT a version
   # mismatch. Reporting "main=? npm=1.2.3" as a failure is the same infrastructure-as-verdict
   # mistake the bundle and installer checks make below, and it must skip for the same reason.
@@ -245,7 +250,10 @@ if [ -d "$WI" ]; then
   # that found nothing, so the file check has to come first or the two are indistinguishable.
   wired() { # wired <file> <needle> <ok-msg> <bad-msg>
     if [ ! -f "$1" ]; then skip "$(basename "$1") not present in this checkout (not a verdict)"
-    elif grep -q "$2" "$1" 2>/dev/null; then ok "$3"
+    # -F: the needles are literal PATHS, and in regex mode `create.js` also matches `createXjs`
+    # and `create-js` (verified). A check whose entire purpose is "this exact reference is still
+    # here" must not accept a near-miss — that is a false PASS, the silent kind.
+    elif grep -qF -- "$2" "$1" 2>/dev/null; then ok "$3"
     else bad "$4"; fi
   }
   wired "$WI/bin/wicked-interactive.js" 'src/artifact/create.js' \
