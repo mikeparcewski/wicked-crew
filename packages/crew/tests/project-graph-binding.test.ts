@@ -136,6 +136,48 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
   });
 
   /**
+   * The remedy is per-CAUSE, not a suffix (Copilot on #327). A member ref the registry no longer
+   * knows has no repo to index, so a refresh reports the same dangling member and changes nothing.
+   * Sending an operator mid-incident to run one costs them the time AND the trust to believe the
+   * next message, so this branch names the two actions that DO resolve it.
+   */
+  it('does NOT prescribe a refresh for a dangling member — a refresh cannot fix it', async () => {
+    buildGraph(['daemon-repo']);
+    // 'ghost-repo' is attached as a member but absent from the registry: the dangling shape.
+    const adapter = adapterFor(
+      [repoMember('ghost-repo'), repoMember('daemon-repo')],
+      [repo('daemon-repo')],
+    );
+
+    const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'ghost-repo');
+
+    expect(binding).toBeNull();
+    expect(reason).toMatch(/registry no longer knows this ref/);
+    expect(reason).not.toMatch(/graph\/refresh/);
+    expect(reason).toMatch(/Re-register the repo|DELETE .*\/members\//);
+  });
+
+  /**
+   * The moved-root cause already spells out its own longer remedy (estate refuses to rebind a
+   * label to a new root, so the graph has to be rebuilt). Appending the generic refresh line after
+   * it contradicted the nuance the reason had just supplied.
+   */
+  it('leaves the moved-root reason to carry its own remedy, un-suffixed', async () => {
+    buildGraph(['engine-repo']);
+    // The registry now points somewhere else than the manifest rows were indexed from.
+    const moved: RepoEntry = { ...repo('engine-repo'), root_path: '/repos/engine-repo-moved' };
+    const adapter = adapterFor([repoMember('engine-repo')], [moved]);
+
+    const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'engine-repo');
+
+    expect(binding).toBeNull();
+    expect(reason).toMatch(/describe a different checkout/);
+    // Its own text names the refresh AND the rebuild fallback; what must not appear is the flat
+    // "POST …/graph/refresh fixes it." claim tacked on the end.
+    expect(reason).not.toMatch(/graph\/refresh fixes it\./);
+  });
+
+  /**
    * PARTIAL is bound, deliberately. The run's own repo is described correctly, so the graph is a
    * strict superset of the per-repo graph; refusing would return LESS because it was not enough.
    * The partiality is stated rather than hidden.

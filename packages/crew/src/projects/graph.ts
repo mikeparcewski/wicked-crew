@@ -299,6 +299,9 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
           reason: dbExists
             ? 'attached since the last refresh — not in the graph yet'
             : 'the project graph has never been built',
+          // Both causes are exactly what a refresh is for: the member is registered and its root
+          // is where the registry says, there are simply no rows for it yet.
+          remedy: `POST /api/v1/projects/${projectId}/graph/refresh fixes it.`,
         };
       }
       // The rows under this label were written from a DIFFERENT root than the registry now names.
@@ -339,6 +342,11 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
         rootPath: '',
         indexed: false,
         reason: 'attached as a member, but the repo registry no longer knows this ref',
+        // NOT a refresh: there is no registered repo to index, so a refresh would report the same
+        // dangling member and change nothing. The member ref and the registry have to agree first.
+        remedy:
+          `Re-register the repo under this ref, or drop the member with ` +
+          `DELETE /api/v1/projects/${projectId}/members/${d.repoId}.`,
       }),
     ),
   ];
@@ -764,12 +772,18 @@ export async function resolveProjectGraphBinding(
     };
   }
   if (!own.indexed) {
+    // The remedy comes from the ROW, which knows the cause, and is omitted when no single action
+    // resolves it. Appending "a refresh fixes it" unconditionally — the first cut — was wrong for
+    // two of the four causes: a DANGLING member ref has no registered repo to index, and a MOVED
+    // root carries its own longer remedy (estate refuses to rebind the label, so the graph must be
+    // rebuilt). An operator mid-incident who runs the suggested refresh and sees nothing change
+    // has lost the time and stopped believing the next sentence.
     return {
       binding: null,
       reason:
         `the project graph does not hold '${repoRef}' (${own.reason ?? 'not indexed'}), so binding ` +
         `it would give this run tools that answer "not found" about its own worktree; it uses the ` +
-        `repo's own code graph instead. POST /api/v1/projects/${projectId}/graph/refresh fixes it.`,
+        `repo's own code graph instead.${own.remedy === undefined ? '' : ` ${own.remedy}`}`,
     };
   }
 
