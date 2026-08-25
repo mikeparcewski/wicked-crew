@@ -26,6 +26,7 @@ import {
   readFileCapped,
   worktreeDiff,
 } from './run-files.js';
+import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -639,7 +640,23 @@ export function registerRoutes(
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
-    if (b.projectId !== undefined) input.projectId = b.projectId;
+    if (b.projectId !== undefined) {
+      input.projectId = b.projectId;
+      // A project is a CONTEXT (crew#326): a run filed into one should see the project's whole
+      // co-located graph, not just its own repo's. Resolved — never REFRESHED — at launch: a
+      // launch that silently indexed N repos would block this response for as long as the slowest
+      // of them takes, so a missing or stale graph degrades to the repo graph and says why.
+      //
+      // The decision is recorded either way. "This run sees the project" and "this run sees one
+      // repo, because X" are both facts about what the run could observe, and the second is the one
+      // an operator needs when a worker reports that a sibling repo does not exist.
+      const decision = await resolveProjectGraphBinding(adapter, b.projectId, b.repoRef);
+      if (decision.binding !== null) input.projectGraph = decision.binding;
+      req.log.info(
+        { runId: input.sessionId, projectId: b.projectId, repoRef: b.repoRef ?? null },
+        `run ${input.sessionId}: ${decision.reason}`,
+      );
+    }
     if (b.deliver !== undefined) input.deliver = b.deliver;
     // Retry lineage (DES-UX-001 §8.3): `retryOf` must name an EXISTING run — recording lineage
     // to a run that never existed would be provenance pointing at nothing, so the launch fails

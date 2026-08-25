@@ -1475,6 +1475,16 @@ export interface ProjectGraphRepo {
    * graph keeps the old checkout's symbols until the project graph is rebuilt).
    */
   reason?: string;
+  /**
+   * The action that actually resolves THIS cause, when one action does. Carried per-row because
+   * the causes do not share a remedy: "never refreshed" and "attached since the last refresh" are
+   * fixed by a refresh, a DANGLING member ref is not (the registry no longer knows the ref, so a
+   * refresh indexes nothing new), and a MOVED root needs a rebuild when estate refuses to rebind
+   * the label. Absent ⇒ no single action fixes it, or `reason` already spells the remedy out.
+   * Never assume a refresh: telling an operator mid-incident to run one that cannot work costs
+   * them the time it takes to run it and the trust to believe the next message.
+   */
+  remedy?: string;
 }
 
 /** `GET /projects/:id/graph` — what the project graph holds and what it cannot answer. */

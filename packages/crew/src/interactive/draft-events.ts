@@ -35,6 +35,7 @@
  *    forever), so the launch simply omits `projectId` — an unfiled governed run (CREW-UX-2).
  */
 
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -841,6 +842,31 @@ export async function startInteractiveDraftSubscriber(
     // Containment is settled (any repo overlap refused above) — the run's write root may exist.
     mkdirSync(runDir, { recursive: true });
 
+    // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
+    // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
+    // "start a draft" into an unannounced multi-repo job). Missing or stale degrades to no
+    // binding and the run proceeds exactly as before; the graph is a bonus, never a gate.
+    //
+    // The decision is RECORDED on both outcomes, like the API launch path (`api/routes.ts`).
+    // "this draft sees the project" and "this draft sees nothing, because X" are equally facts
+    // about what the run could observe, and the second is the one someone needs when a worker
+    // reports that a sibling repo does not exist. An unexpected failure degrades the same way,
+    // but says so — a silent `catch(() => null)` would make a broken binding indistinguishable
+    // from a project that simply has no graph yet.
+    let projectGraphBinding: ProjectGraphBinding | null = null;
+    if (doc.projectId !== undefined) {
+      const decision = await resolveProjectGraphBinding(adapter, doc.projectId, undefined).catch(
+        (err: unknown) => ({
+          binding: null,
+          reason:
+            `the project graph binding could not be resolved ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            `This repo-less run gets no code graph.`,
+        }),
+      );
+      projectGraphBinding = decision.binding;
+      log(`run ${runId}: ${decision.reason}`);
+    }
     try {
       await adapter.launchRun({
         problem: draftProblem(doc, outPath, snapshotDir),
@@ -854,6 +880,10 @@ export async function startInteractiveDraftSubscriber(
         // key OMITTED: an unfiled governed run (project_id: null on the DTO, CREW-UX-2) — never
         // a fabricated 'default' membership.
         ...(doc.projectId !== undefined ? { projectId: doc.projectId } : {}),
+        // A project-filed run sees the PROJECT's graph, like any other (verification
+        // found this seam launching filed but unbound). These launches are repo-LESS,
+        // which is exactly the case that gets a graph where it previously got none.
+        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
         // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
         // run's tool-permission stream closes on the first prompt-needing call, so no write
         // destination works (wicked-core#293) — and NO live-repo path in the task either: the

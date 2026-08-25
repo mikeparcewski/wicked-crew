@@ -60,6 +60,30 @@ export interface LaunchRunInput {
    */
   extraWriteRoots?: string[];
   /**
+   * The PROJECT's co-located code graph this run's governed workers should query instead of the
+   * run repo's own — resolved by `projects/graph.ts::resolveProjectGraphBinding`, which is the ONE
+   * thing that knows where a project graph lives and what each repo is labelled inside it.
+   *
+   * `repoLabel` is optional in the TYPE because a repo-LESS run legitimately has none — there is
+   * no own repo to name. It is not optional in MEANING for a repo-bound run: the engine uses it to
+   * confirm the co-located graph actually holds this run's repo.
+   *
+   * TypeScript cannot catch a missing label here — the invariant ties this field to `repoRef`, a
+   * sibling field — so `CoreAdapter.launchRun` enforces it at RUNTIME. Two failure modes, and they
+   * are NOT the same thing:
+   *
+   *  - **crew refuses the launch outright.** Passing `projectGraph` without `projectId`, or with
+   *    `repoRef` set and no `repoLabel`, THROWS: no session is created and nothing runs. These are
+   *    caller bugs with no sensible degraded reading, so they fail before anything is persisted.
+   *  - **the ENGINE declines the binding.** A well-formed binding whose graph turns out not to hold
+   *    the named label is refused engine-side and the run proceeds against its own repo graph — a
+   *    real launch, quietly narrower. That is the fallback; it is not what a missing `repoLabel`
+   *    gets you.
+   *
+   * Omit the whole field for the per-repo behaviour.
+   */
+  projectGraph?: { dbPath: string; repoLabel?: string };
+  /**
    * Delivery mode (crew#293). `"pr"` ⇒ the adapter appends the hardened deliver Tool phase
    * (push the run branch + `gh pr create`, see `core/deliver.ts`) to a PER-RUN copy of the
    * selected workflow def and launches that copy — the shared def is never mutated. Requires
