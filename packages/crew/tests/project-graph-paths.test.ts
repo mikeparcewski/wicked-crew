@@ -138,3 +138,29 @@ describe('project graph paths', () => {
     }
   });
 });
+
+describe('the rejection message names the rule that actually fired (Copilot on #326)', () => {
+  it('a relative path segment is refused for being one, not for its characters', () => {
+    for (const id of ['.', '..']) {
+      let msg = '';
+      try {
+        assertProjectIdIsPathSafe(id);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      expect(msg).toContain('relative path segment');
+      // The charset line would be actively misleading here: `.` and `..` SATISFY it.
+      expect(msg).not.toContain('[A-Za-z0-9._-]');
+    }
+  });
+
+  it('an illegal character is still reported as an illegal character', () => {
+    let msg = '';
+    try {
+      assertProjectIdIsPathSafe('a/b');
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toContain('[A-Za-z0-9._-]');
+  });
+});

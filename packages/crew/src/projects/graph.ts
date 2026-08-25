@@ -531,9 +531,9 @@ async function doRefresh(
     // exits 0, so proceeding would co-locate three repos into a database holding one of them, with
     // nothing in any output to say so.
     throw new Error(
-      `the wicked-estate on PATH does not support 'index --repo <name>' (wicked-estate#117). ` +
+      `${estateExe(env)} does not support 'index --repo <name>' (wicked-estate#117). ` +
         `Older builds ACCEPT the flag, ignore it, and exit 0 — every member repo after the first ` +
-        `would silently overwrite the one before it. Upgrade wicked-estate, or point ` +
+        `would silently overwrite the one before it. Upgrade that binary, or point ` +
         `WICKED_ESTATE_EXE at a build that has it.`,
     );
   }

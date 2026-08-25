@@ -99,9 +99,16 @@ export function repoLabel(repoId: string): string {
  */
 export function assertProjectIdIsPathSafe(projectId: string): void {
   if (!isValidRepoLabel(projectId)) {
+    // Name the ACTUAL rule that rejected it (Copilot on #326). `.` and `..` match the stated
+    // character set, so a message quoting only the charset tells an operator their id is legal
+    // and rejected in the same breath — and sends them looking for an illegal character that
+    // is not there.
+    const why =
+      projectId === '.' || projectId === '..'
+        ? `${JSON.stringify(projectId)} is a relative path segment, so it cannot name a directory`
+        : `expected 1-64 chars of [A-Za-z0-9._-]`;
     throw new Error(
-      `project id ${JSON.stringify(projectId)} cannot address a project graph directory: ` +
-        `expected 1-64 chars of [A-Za-z0-9._-]`,
+      `project id ${JSON.stringify(projectId)} cannot address a project graph directory: ${why}`,
     );
   }
 }
