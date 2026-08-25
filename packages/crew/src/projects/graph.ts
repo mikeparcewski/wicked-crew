@@ -62,6 +62,20 @@ export const CO_LOCATION_NOTE =
   'Co-located, not linked: each repo is indexed under its own label and edges do not resolve ' +
   'across repos. Results are per-repo hits gathered into one answer, never a cross-repo trace.';
 
+/**
+ * The second sentence `/graph/search` carries, and only it.
+ *
+ * `matches: []` from an exact-name resolver against a healthy graph is the empty-result-that-reads-
+ * as-an-answer this whole surface is built to refuse: a caller who typed half a name is told
+ * "nothing in this project", which is false. estate's `resolve` has no substring mode (the header
+ * on {@link projectSymbolSearch} argues why a `nodes --json` dump is not the answer), so the
+ * matching RULE goes on the wire instead of a matching mode that does not exist.
+ */
+export const EXACT_NAME_NOTE =
+  'Exact-name matching only: this resolves a whole symbol name, so a partial or fuzzy name ' +
+  'returns no matches even when the symbol exists. An empty `matches` means "no symbol by that ' +
+  'exact name", never "not in this project".';
+
 /** `wicked-estate`, overridable exactly as `WICKED_CORE_EXE` overrides `wicked-core` in routes.ts. */
 function estateExe(env: NodeJS.ProcessEnv = process.env): string {
   return env['WICKED_ESTATE_EXE'] ?? 'wicked-estate';
@@ -219,6 +233,22 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * The evidence check failed: the binary took `--repo` and dropped it.
+ *
+ * A distinct type because it is NOT a per-repo failure and must not be collected as one. It is the
+ * same fact the capability probe establishes — this binary cannot co-locate — discovered one step
+ * later, and the only safe response is the probe's: stop, before the next repo's index overwrites
+ * the rows just written. Recording it in `failed` and continuing runs a full index per member, each
+ * clobbering the last, while the message on every entry claims the opposite.
+ */
+export class EstateDroppedRepoLabelError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EstateDroppedRepoLabelError';
+  }
+}
+
 // ── Git freshness ─────────────────────────────────────────────────────────────
 
 /**
@@ -269,6 +299,28 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
           reason: dbExists
             ? 'attached since the last refresh — not in the graph yet'
             : 'the project graph has never been built',
+        };
+      }
+      // The rows under this label were written from a DIFFERENT root than the registry now names.
+      // `indexed: true` here would be a claim about a checkout that was never indexed, and it is
+      // the shape a refused refresh leaves behind: estate binds a label to the root it first saw,
+      // so re-indexing a repo that moved is refused as a collision (`repo_scope.rs::guard` #4) and
+      // the prior manifest row survives untouched. Reporting that as a healthy graph made a project
+      // read `ready` with `missingRepos: []` for ever while queries served the old tree's symbols.
+      // The repo is NOT in the graph as currently registered, so it is missing, its rows are
+      // excluded from answers (`queryable` builds its label map from `indexed`), and the reason
+      // names both roots plus the remedy the guard's own message asks for.
+      if (row.rootPath !== m.repo.root_path) {
+        return {
+          repoId: m.repoId,
+          label: m.label,
+          rootPath: m.repo.root_path,
+          indexed: false,
+          reason:
+            `the graph holds '${m.label}' as indexed from ${row.rootPath}, but the registry now ` +
+            `points at ${m.repo.root_path} — those rows describe a different checkout and are ` +
+            `excluded. A refresh re-indexes it; if wicked-estate refuses the label as already ` +
+            `bound to the old root, delete ${dbPath} and rebuild the project graph.`,
         };
       }
       return {
@@ -493,7 +545,21 @@ async function doRefresh(
   // Prior rows survive a refresh only if the database they describe does. When it does not, every
   // repo is re-indexed and the manifest is rebuilt from this run alone.
   const rows: ManifestRepo[] = dbExisted ? [...(prior?.repos ?? [])] : [];
-  let verifiedLabelling = dbExisted && priorByLabel.size > 0;
+  // FALSE at the start of EVERY refresh, deliberately — not seeded from the prior manifest.
+  //
+  // Seeding it from "a previous run wrote labels" makes the evidence check a one-time initiation
+  // rite, and the thing it guards against is not a property of the graph, it is a property of the
+  // BINARY THIS RUN WILL USE. A `wicked-estate` that advertises `--repo` and drops it (0.14.4's
+  // behaviour under a newer usage banner — a vendored build, a downgrade, a WICKED_ESTATE_EXE
+  // pointed somewhere else) sails past the help-text probe, and with the check already "verified"
+  // nothing looks at the database again: the refresh answers 200 / `indexed: [...]` / `failed: []`
+  // and the status reads `ready` with `missingRepos: []` while every repo's rows have been
+  // overwritten by unlabelled ones and every query returns `[]`. Reproduced end-to-end against the
+  // real 0.14.4 before this line changed.
+  //
+  // The price is one extra `stats` per refresh that indexes anything at all, and none when every
+  // repo skips.
+  let verifiedLabelling = false;
 
   for (const m of members.repos) {
     const head = await cleanHead(m.repo.root_path);
@@ -520,7 +586,7 @@ async function doRefresh(
       );
       if (!verifiedLabelling) {
         if (!(await graphHoldsLabel(dbPath, m.label, env))) {
-          throw new Error(
+          throw new EstateDroppedRepoLabelError(
             `wicked-estate indexed ${m.repoId} but the graph records no repo labelled ` +
               `'${m.label}' — the binary accepted --repo and ignored it, so the next repo would ` +
               `overwrite this one. Refusing to continue; delete ${dbPath} and upgrade wicked-estate.`,
@@ -540,6 +606,22 @@ async function doRefresh(
       else rows.push(row);
       indexed.push(m.label);
     } catch (err) {
+      // A binary that drops `--repo` is a property of the RUN, not of this repo: every remaining
+      // member would index over the rows just written, so this refresh stops here.
+      //
+      // And the PRIOR manifest goes with it. By the time the evidence check can fire, the offending
+      // index has already run: whatever labelled rows the database held have been overwritten by
+      // unlabelled ones. Leaving the manifest describing them makes the refusal loud on the write
+      // path and silent on the read path — `GET /graph` keeps answering `ready` / `missingRepos:
+      // []` while every query returns `[]` at 200, which is the exact shape this surface exists to
+      // refuse. Emptying it re-derives the truth: nothing in that database can be attributed to a
+      // repo, so the project is `not-indexed` and the query routes refuse WITH A CAUSE. The
+      // database itself is left on disk, because the error names deleting it as the operator's
+      // step and destroying data on the way out of an error path is not this function's call.
+      if (err instanceof EstateDroppedRepoLabelError) {
+        await writeManifest(projectId, { version: 1, projectId, repos: [] }, env);
+        throw err;
+      }
       failed.push({
         repoId: m.repoId,
         label: m.label,
@@ -704,6 +786,6 @@ export async function projectSymbolSearch(
     reposSearched: [...q.labels.keys()].sort(),
     missingRepos: q.status.missingRepos,
     linkage: 'co-located',
-    note: CO_LOCATION_NOTE,
+    note: `${CO_LOCATION_NOTE} ${EXACT_NAME_NOTE}`,
   };
 }

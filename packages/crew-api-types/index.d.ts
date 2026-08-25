@@ -1468,7 +1468,12 @@ export interface ProjectGraphRepo {
   head?: string;
   /** Unix millis of the index that put these rows in. */
   indexedAt?: number;
-  /** Present when `indexed` is false: registry miss, index failure, or never refreshed. */
+  /**
+   * Present when `indexed` is false: registry miss, index failure, never refreshed, or the rows
+   * under this label were indexed from a DIFFERENT root than the registry now names (a repo that
+   * moved — wicked-estate binds a label to the root it first saw and refuses to rebind it, so the
+   * graph keeps the old checkout's symbols until the project graph is rebuilt).
+   */
   reason?: string;
 }
 
@@ -1554,5 +1559,10 @@ export interface ProjectGraphSearch {
   reposSearched: string[];
   missingRepos: string[];
   linkage: ProjectGraphLinkage;
+  /**
+   * Carries the co-location limit AND the matching rule: this is EXACT-NAME resolution, so an
+   * empty `matches` means "no symbol by that exact name" and never "not in this project". A
+   * partial or fuzzy name returns nothing even when the symbol exists.
+   */
   note: string;
 }
