@@ -72,7 +72,12 @@ check_version() {
   local repo="$1" pj="$2"
   local dir="$ROOT/$repo"
   [ -d "$dir/.git" ] || { skip "$repo — not checked out"; return; }
-  git -C "$dir" fetch -q origin 2>/dev/null
+  # A FAILED FETCH MEANS THE REF MAY BE STALE. Comparing a days-old local `origin/main` against
+  # live npm can manufacture either verdict — a false DRIFT for a version already synced, or a
+  # false PASS for one that is not. Same rule as everywhere else here: infrastructure skips.
+  if ! git -C "$dir" fetch -q origin 2>/dev/null; then
+    skip "$repo — could not fetch origin (offline? local ref may be stale, not a verdict)"; return
+  fi
   local name main npmv
   name=$(node -p "require('$dir/$pj').name" 2>/dev/null) || { skip "$repo — unreadable manifest"; return; }
   # An unreadable `origin/main:$pj` means offline, no origin, or a moved path — NOT a version
@@ -100,7 +105,7 @@ check_version wicked-core        crates/wicked-core-ts/package.json
 # String-matching the bundle does NOT catch this: the marker strings existed in both versions.
 head_ "2 · crew bundles the studio version it depends on"
 verify_bundle() {
-  local tmp; tmp=$(mktemp -d)
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local crewv range studiov
   crewv=$(npm view wicked-crew version 2>/dev/null)
   range=$(npm view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null)
@@ -152,7 +157,7 @@ verify_bundle
 # reason for existing was a `status` command that lied about what was installed.
 head_ "3 · published artifacts behave"
 verify_installer() {
-  local tmp; tmp=$(mktemp -d)
+  local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
   if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz ) >/dev/null 2>&1 \
      || ! safe_untar "$tmp/i.tgz" "$tmp" \
@@ -174,7 +179,9 @@ verify_installer() {
     rm -rf "$tmp"; return
   fi
   # The regression this replaced: everything the switch did not name reported "not installed".
-  if grep -q "not installed  wicked-crew" <<<"$out" && command -v wicked-crew >/dev/null 2>&1; then
+  # One-or-more spaces: the padding is `status`'s presentation detail, and pinning the exact
+  # column count would make this guard miss the regression after any cosmetic change to it.
+  if grep -qE "not installed +wicked-crew" <<<"$out" && command -v wicked-crew >/dev/null 2>&1; then
     bad "installer status says wicked-crew missing while it is on PATH (detection regressed)"
   elif grep -qE "installed +wicked-(crew|estate)" <<<"$out"; then
     ok "installer status detects binaries that are actually present"
@@ -215,6 +222,11 @@ site_has() {
   body=$(curl -fsSL -m 20 "$url" 2>/dev/null); rc=$?
   if [ "$rc" -ne 0 ]; then bad "$label — $url answered $code but the body could not be read (curl $rc)"
   elif [ -z "$body" ]; then bad "$label — $url answered $code with an empty body"
+  # A QUOTED variable inside a `[[ ]]` pattern is ALREADY a literal — bash suppresses globbing for
+  # the quoted portion, so `w?rld` does not match `world` here (verified). A review round called
+  # this a glob and I swapped it for `grep -qF`, which broke the wi.wickedagile.com check outright
+  # while the needle was demonstrably present in the body. Reverted: the original was correct, and
+  # the replacement was both unnecessary and wrong.
   elif [[ "$body" == *"$needle"* ]]; then ok "$label"
   else bad "$label — $url served but missing: $needle"; fi
 }
