@@ -683,6 +683,20 @@ export interface ProjectGraphBindingDecision {
  * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
  * exist and sends whoever is debugging it looking for one.
  */
+/**
+ * How many repo labels a binding reason names before it starts counting instead. Eight fits a
+ * readable log line and covers every project anyone has built so far; past that the count carries
+ * the information and the labels are just volume.
+ */
+const MAX_NAMED_LABELS = 8;
+
+/** `a, b, c` — or `a, b, … and 12 more` once the list stops being readable. */
+function labelList(labels: string[]): string {
+  if (labels.length <= MAX_NAMED_LABELS) return labels.join(', ');
+  const shown = labels.slice(0, MAX_NAMED_LABELS).join(', ');
+  return `${shown}, and ${labels.length - MAX_NAMED_LABELS} more`;
+}
+
 function degradedTo(repoRef: string | undefined): string {
   return repoRef === undefined
     ? 'This repo-less run gets no code graph.'
@@ -750,11 +764,15 @@ export async function resolveProjectGraphBinding(
         reason: `${status.detail} ${degradedTo(repoRef)}`,
       };
     }
+    // The COUNT is exact; the label list is capped. This string is a log line on every repo-less
+    // launch, and a project with a hundred members would put a hundred labels on one line of every
+    // operator's structured logs — the labels are there to make the answer recognisable at a
+    // glance, which a wall of them defeats. Naming a few and counting the rest keeps both.
     return {
       binding: { dbPath: status.dbPath },
       reason:
         `this repo-less run is bound to the project graph (${indexed.length} repo(s): ` +
-        `${indexed.map((r) => r.label).join(', ')}).`,
+        `${labelList(indexed.map((r) => r.label))}).`,
     };
   }
 

@@ -258,6 +258,25 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     expect(reason).toMatch(/members/);
   });
 
+  /**
+   * The bind reason is a LOG LINE on every repo-less launch (Copilot on #327). The labels make the
+   * answer recognisable at a glance; a hundred of them on one line defeats exactly that, so the
+   * count stays exact and the list stops at eight.
+   */
+  it('caps the label list but never the count', async () => {
+    const labels = Array.from({ length: 12 }, (_, i) => `repo-${String(i).padStart(2, '0')}`);
+    buildGraph(labels);
+    const adapter = adapterFor(labels.map(repoMember), labels.map(repo));
+
+    const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined);
+
+    expect(binding).not.toBeNull();
+    expect(reason).toMatch(/12 repo\(s\)/);
+    expect(reason).toMatch(/and 4 more/);
+    expect(reason).toContain('repo-07');
+    expect(reason).not.toContain('repo-08');
+  });
+
   /** No own-repo to be wrong about ⇒ any non-empty graph is a gain over the nothing it gets today. */
   it('binds a repo-less run with no label', async () => {
     buildGraph(['engine-repo', 'daemon-repo']);
