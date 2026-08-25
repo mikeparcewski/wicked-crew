@@ -60,7 +60,7 @@ describe('PUT/GET /settings worker_config_root', () => {
     // Guarded: a pre-assignment failure must surface itself, not this cleanup (Copilot).
     await app?.close();
     app = undefined;
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     restoreWorkerHome();
   });
 
@@ -152,7 +152,7 @@ describe('adapter getSettings read-validation', () => {
   afterEach(() => {
     if (savedHome === undefined) delete process.env['HOME'];
     else process.env['HOME'] = savedHome;
-    rmSync(fakeHome, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function writeSettings(content: unknown): void {
@@ -190,7 +190,7 @@ describe('daemon boot applies the persisted root (createServer)', () => {
 
   afterEach(() => {
     adapter.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     restoreWorkerHome();
   });
 

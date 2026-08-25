@@ -21,7 +21,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { InteractiveBridgePool, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
+import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js';
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
@@ -228,7 +228,7 @@ describe('interactive proxy — acceptance (slice 1)', () => {
     expect(res.statusCode).toBe(503);
     const body = res.json() as { code: string; hint: string };
     expect(body.code).toBe('bridge_unavailable');
-    expect(body.hint).toContain(`npx wicked-interactive serve --root ${deadRoot}`);
+    expect(body.hint).toContain(`npx ${INTERACTIVE_SPEC} serve --root ${deadRoot}`);
   }, 30_000);
 
   it('404s an unknown project instead of starting a bridge for it', async () => {
