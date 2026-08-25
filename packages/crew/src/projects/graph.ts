@@ -651,12 +651,6 @@ async function doRefresh(
 // ── Binding a run to the project graph ────────────────────────────────────────
 
 /**
- * What a launch decided about the project graph, and why. The `reason` is carried on BOTH outcomes
- * because "you got the project graph" and "you got the repo graph instead, because X" are equally
- * worth saying, and the operator asking "why can't this run see the sibling repo" needs the second
- * one to have been recorded somewhere.
- */
-/**
  * Passed to the engine as `LaunchOptions.projectGraph`. `repoLabel` names this run's repo inside
  * the co-located graph so the engine can confirm the graph actually holds it; a repo-less run
  * carries no label because it has no own repo to confirm.
@@ -666,6 +660,12 @@ export interface ProjectGraphBinding {
   repoLabel?: string;
 }
 
+/**
+ * What a launch decided about the project graph, and why. The `reason` is carried on BOTH outcomes
+ * because "you got the project graph" and "you got the repo graph instead, because X" are equally
+ * worth saying, and the operator asking "why can't this run see the sibling repo" needs the second
+ * one to have been recorded somewhere.
+ */
 export interface ProjectGraphBindingDecision {
   /** The binding to hand the engine; `null` ⇒ the run keeps whatever graph it would have had. */
   binding: ProjectGraphBinding | null;
