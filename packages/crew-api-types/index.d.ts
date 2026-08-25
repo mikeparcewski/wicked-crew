@@ -1177,6 +1177,18 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
+  /**
+   * SKIN-OWNED preference blobs (crew#323). The settings store is shared: alongside the
+   * engine's keys it carries the studio's own state — `studio.appearance` (accent/logo/theme),
+   * `studio.notifications` (desktop-notification opt-in) — which the daemon persists and
+   * returns VERBATIM without ever interpreting them.
+   *
+   * `PUT /settings` accepts a key matching `^studio\.[a-z][a-z0-9-]*$` whose value is
+   * JSON-serializable and at most 512KB of JSON; it answers 400 naming the key otherwise.
+   * Any other unrecognized key is still dropped from the patch (request bodies are
+   * forward-additive, §5.1), so a skin's own state MUST ride this namespace to persist.
+   */
+  [key: `studio.${string}`]: unknown;
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──

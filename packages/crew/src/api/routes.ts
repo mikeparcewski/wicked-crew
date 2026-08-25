@@ -208,6 +208,28 @@ export const OpenPathSchema = z.object({
   runId: z.string().min(1).optional(),
 }).strict();
 
+/**
+ * A SKIN-OWNED settings key (crew#323): one lowercase segment under the `studio.` namespace,
+ * e.g. `studio.appearance`, `studio.notifications`. The daemon never interprets these values —
+ * the settings store is shared with the skin, and the namespace is what makes that legible.
+ */
+const STUDIO_SETTINGS_KEY = /^studio\.[a-z][a-z0-9-]*$/;
+
+/**
+ * Per-key ceiling on a `studio.*` value, as the UTF-8 byte length of its JSON form.
+ *
+ * 512KB, not "a few KB": `studio.appearance` carries the operator's logo as a data URI, and
+ * base64 costs ~33%, so this admits a ~380KB image — a real logo, not a favicon — while a
+ * preferences blob like `studio.notifications` spends a few dozen bytes of it. One generous
+ * cap covers both because the daemon cannot tell them apart; what it stops is settings.json
+ * quietly becoming an asset store. It sits at half of Fastify's 1MiB default body limit, so a
+ * realistic multi-key patch (one blob near the cap plus small preference blobs) is still parsed
+ * before it is judged — but note the two limits COMPOSE: a body whose keys total more than 1MiB
+ * is refused by Fastify with a 413 that this route never sees, so the per-key 400 below is the
+ * ceiling on ONE key, not on the patch.
+ */
+const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
+
 /** The actor/audit deps (task #88) — threaded from `createServer`. */
 export interface SecurityDeps {
   audit: AuditLog;
@@ -1872,6 +1894,9 @@ export function registerRoutes(
   });
 
   // ── System settings ──────────────────────────────────────────────────────────
+  // The store is SHARED with the skin (crew#323): beside the engine's own keys it round-trips
+  // the studio's `studio.*` preference blobs verbatim — see `CrewSystemSettings`'s index
+  // signature in core/types.ts, which states that rather than leaving it to a client comment.
   app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings() }));
 
   app.put(`${V}/settings`, async (req, reply) => {
@@ -1879,13 +1904,13 @@ export function registerRoutes(
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       return reply.code(400).send({ error: 'body must be a JSON object' });
     }
-    if ('graphNodeLimit' in patch) {
+    if (Object.hasOwn(patch, 'graphNodeLimit')) {
       const limit = patch.graphNodeLimit;
       if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 20 || limit > 500) {
         return reply.code(400).send({ error: 'graphNodeLimit must be an integer between 20 and 500' });
       }
     }
-    if ('worker_config_root' in patch) {
+    if (Object.hasOwn(patch, 'worker_config_root')) {
       const root = patch.worker_config_root;
       if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
         return reply.code(400).send({
@@ -1895,7 +1920,7 @@ export function registerRoutes(
     }
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
-    if ('workerStallMinutes' in patch) {
+    if (Object.hasOwn(patch, 'workerStallMinutes')) {
       const mins = patch.workerStallMinutes;
       if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 1 || mins > 1440) {
         return reply
@@ -1903,7 +1928,37 @@ export function registerRoutes(
           .send({ error: 'workerStallMinutes must be an integer between 1 and 1440' });
       }
     }
-    // Only allow known keys through.
+    // Skin-owned keys (crew#323): allowed through, but VALIDATED rather than trusted. The
+    // daemon does not read these values, so the only two things it can check are the two that
+    // can hurt it — a value it cannot persist, and a value big enough to bloat settings.json.
+    // Both answer 400 naming the key: silence is exactly what made #323 invisible for a whole
+    // campaign of appearance work.
+    const studioKeys = Object.keys(patch).filter((k) => STUDIO_SETTINGS_KEY.test(k));
+    for (const key of studioKeys) {
+      const value = (patch as Record<string, unknown>)[key];
+      // `undefined` from a throwing/circular value AND from a value JSON.stringify simply
+      // drops (a function, a symbol) — both are unpersistable, both are refused.
+      let encoded: string | undefined;
+      try {
+        encoded = JSON.stringify(value);
+      } catch {
+        encoded = undefined;
+      }
+      if (encoded === undefined) {
+        return reply.code(400).send({ error: `${key} must be a JSON-serializable value` });
+      }
+      const bytes = Buffer.byteLength(encoded, 'utf8');
+      if (bytes > STUDIO_SETTINGS_MAX_BYTES) {
+        return reply.code(400).send({
+          error: `${key} is ${bytes} bytes of JSON, over the ${STUDIO_SETTINGS_MAX_BYTES}-byte per-key cap on studio.* settings`,
+        });
+      }
+    }
+    // Only known engine keys and validated `studio.*` keys are persisted. A key that is
+    // NEITHER is dropped, not refused: request bodies are forward-additive too (DES-STUDIO-001
+    // §5.1), so an older daemon meeting a newer client's engine key must not fail the whole
+    // patch and take the caller's other keys down with it. The cost is that a typo goes
+    // unnoticed on the wire — so the dropped keys are NAMED in the audit entry below.
     const allowed: (keyof import('../core/types.js').CrewSystemSettings)[] = [
       'graphNodeLimit',
       'worker_config_root',
@@ -1911,14 +1966,32 @@ export function registerRoutes(
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
-      if (key in patch) (safe as Record<string, unknown>)[key] = patch[key];
+      // `Object.hasOwn`, NOT `key in patch` (Copilot on #324): `in` walks the prototype chain, so
+      // a body whose prototype carries an engine key would be persisted from a value the caller
+      // never sent. Not reachable through the default JSON parser — `JSON.parse` yields a plain
+      // object and Fastify refuses `__proto__` — but this route already accepts custom
+      // content-type parsers, which can produce non-plain objects. Own properties only, and the
+      // same spelling the `ignored` filter below uses, so the two can never disagree about what
+      // "present" means.
+      if (Object.hasOwn(patch, key)) (safe as Record<string, unknown>)[key] = patch[key];
     }
+    for (const key of studioKeys) {
+      (safe as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
+    }
+    // `Object.hasOwn`, NOT `k in safe`: `in` walks the prototype chain, so a dropped key named
+    // `toString` / `valueOf` / `constructor` would test as "kept" and vanish from `ignored` —
+    // the exact silent drop this route exists to end.
+    const ignored = Object.keys(patch).filter((k) => !Object.hasOwn(safe, k));
     const settings = await adapter.updateSettings(safe);
     // Re-apply the worker-config root to this process's env (seat sign-in). The engine reads
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
-    audit.record('settings.updated', actorOf(req), { detail: { changed: Object.keys(safe) } });
+    // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
+    // when there is one) is where a dropped unknown key stops being invisible.
+    audit.record('settings.updated', actorOf(req), {
+      detail: { changed: Object.keys(safe), ...(ignored.length > 0 ? { ignored } : {}) },
+    });
     return { settings };
   });
 

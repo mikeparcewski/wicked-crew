@@ -101,6 +101,17 @@ export interface CrewSystemSettings extends SystemSettings {
    * a synthetic `workerStalled` frame is broadcast on /ws (detection only; default 15).
    */
   workerStallMinutes?: number;
+  /**
+   * Skin-owned preference blobs, round-tripped verbatim (crew#323). RESTATED here rather than
+   * merely inherited from `SystemSettings` so the daemon's own type SAYS the settings store is
+   * shared with the experience plane — the fact that used to live only in a comment in the
+   * studio's client, which is how `studio.appearance` / `studio.notifications` could be
+   * silently dropped by `PUT /settings` without either side's types objecting.
+   *
+   * The daemon never interprets a value here; it enforces only "JSON-serializable, under the
+   * per-key byte cap" at the PUT boundary (`api/routes.ts` `STUDIO_SETTINGS_MAX_BYTES`).
+   */
+  [key: `studio.${string}`]: unknown;
 }
 
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
