@@ -61,10 +61,17 @@ npm_view() { run_bounded 60 npm view "$@" 2>/dev/null; }
 # commit that wrote the rule down.
 CURL_BOUNDED=(--fail --silent --show-error --location --connect-timeout 15 --max-time 120)
 
+# EXIT 125 = "could not run this bounded", distinct from any status the command itself returns.
+# Callers translate it to a skip. A HELPER GATES ITS OWN DEPENDENCIES: the alternative is every
+# caller listing `cat rm sleep mktemp` because the watchdog happens to use them, which couples each
+# check to this function's internals and re-creates the scattered-guard problem one level down.
 run_bounded() {
   local secs="$1"; shift
   if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
   if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  # The shell-watchdog path needs these; without them we cannot bound the run, and running it
+  # UNBOUNDED is not an option (I4). Say so with 125 rather than guessing a verdict.
+  need mktemp cat rm sleep || return 125
   local out rc pid waited=0 had_monitor=""
   out=$(mktemp "${TMPDIR:-/tmp}/wv-bounded.XXXXXX") || return 125
   # Job control puts the child in its OWN PROCESS GROUP, so the deadline can kill the whole tree.
@@ -165,6 +172,7 @@ check_version() {
   main=$(git -C "$dir" show "origin/main:$pj" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s).version;if(typeof v==="string"&&v)console.log(v)}catch{}})')
   if [ -z "$main" ]; then skip "$name — cannot read origin/main:$pj (offline? not a verdict)"; return; fi
   npmv=$(npm_view "$name" version 2>/dev/null)
+  [ $? -eq 125 ] && { skip "$name — cannot bound a run: $MISSING_REASON"; return; }
   if [ -z "$npmv" ]; then skip "$name — not on npm (or npm unreachable)"
   elif [ "$main" = "$npmv" ]; then ok "$name $npmv"
   else bad "$name — main=$main npm=$npmv (release-sync PR unmerged?)"; fi
@@ -188,6 +196,7 @@ verify_bundle() {
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local crewv range studiov
   crewv=$(npm_view wicked-crew version 2>/dev/null)
+  [ $? -eq 125 ] && { skip "crew/studio bundle — cannot bound a run: $MISSING_REASON"; return; }
   range=$(npm_view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null)
   # RESOLVE the range; do not strip characters off it. `^0.4.0` does not mean 0.4.0 — npm installs
   # the highest 0.4.x, so `tr -d '^~'` would compare crew's bundle against the wrong tarball and
@@ -258,6 +267,9 @@ verify_installer() {
   # I4: one bounded-run helper, so no call site can accidentally run unbounded.
   local out rc
   out=$(cd "$tmp/package" && run_bounded 120 node dist/index.js status 2>/dev/null); rc=$?
+  if [ "$rc" -eq 125 ]; then
+    skip "installer status — cannot bound the run: $MISSING_REASON"; rm -rf "$tmp"; return
+  fi
   # A crash, a timeout, or empty output is a FAILURE of the published artifact — not a machine
   # with nothing installed. Conflating the two is how a broken `status` would pass this check.
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then

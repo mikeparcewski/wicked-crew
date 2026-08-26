@@ -58,6 +58,12 @@ each is answered.
    (`-`, `d`) and rejecting absolute paths and `..` segments per segment.
 4. **Every bounded run goes through one function** (`run_bounded`), which uses `timeout`/`gtimeout`
    when present and a shell watchdog when not — never unbounded.
+5. **A helper gates its own dependencies.** `run_bounded`'s watchdog needs `mktemp`/`cat`/`rm`/
+   `sleep`; `safe_untar` needs `tar`/`awk`. Those are checked inside the helper, which returns a
+   distinguishable code (125 for "cannot bound") that callers translate to a skip. The alternative
+   — every check listing a helper's internal tools in its own `need` — couples callers to
+   implementation details and re-creates the scattered-guard problem one level down. That is
+   exactly how the transitive gaps got there.
 
 ## Testing contract
 

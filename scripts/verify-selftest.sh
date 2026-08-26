@@ -23,7 +23,9 @@ bad() { printf "  \033[31m✗\033[0m %s\n" "$1"; FAIL=$((FAIL+1)); }
 # be reported as a verdict about the verifier. Without python3 the mutation silently does not
 # happen, the verifier correctly stays green, and this would have called that a FAILURE of the
 # guard — a wrong verdict produced by the thing whose entire job is catching wrong verdicts.
-for _t in python3 mktemp cp awk sed; do
+# Everything this suite actually shells out to, including the quiet ones — a mid-run
+# failure would surface as a verifier failure rather than a clean skip.
+for _t in python3 mktemp cp awk sed grep tail ln rm mkdir dirname basename; do
   command -v "$_t" >/dev/null 2>&1 || {
     printf "  \033[33m~\033[0m self-test cannot run: requires %s\n" "$_t" >&2
     exit 0
