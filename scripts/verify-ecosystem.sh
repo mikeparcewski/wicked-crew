@@ -146,6 +146,13 @@ verify_bundle() {
   if ! safe_untar "$tmp/c.tgz" "$tmp/c" || ! safe_untar "$tmp/s.tgz" "$tmp/s"; then
     skip "crew/studio bundle — tarball refused or unextractable (unsafe members?)"; rm -rf "$tmp"; return
   fi
+  # `diff` missing exits 127, and mapping any non-zero to "DIFFERS" turns a tooling gap into an
+  # ecosystem regression — the same infrastructure-as-verdict bug already fixed in the npm, tarball
+  # and site checks. Third time in this file: the rule is "only evidence produces a verdict", and
+  # it has to be applied to every external command, not just the ones that felt like network.
+  if ! command -v diff >/dev/null 2>&1; then
+    skip "crew/studio bundle — \`diff\` not available (not a verdict)"; rm -rf "$tmp"; return
+  fi
   if [ ! -d "$tmp/c/package/dist/studio" ]; then
     bad "crew $crewv ships no dist/studio"
   elif diff -r "$tmp/s/package/dist" "$tmp/c/package/dist/studio" >/dev/null 2>&1; then
