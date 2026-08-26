@@ -45,7 +45,7 @@ import '../styles/crew.css';
 
 const title = 'wicked-crew — the control plane: intent in, verified work out';
 const description =
-  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. One public API, two skins: the studio console ships inside crew as the coder skin, a pure client of /api/v1; governed generation already answers the creator skin over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -309,28 +309,30 @@ const GATE_CARDS = [
     </div>
   </section>
 
-  <!-- ── One public API, two skins ─────────────────────────────────────────
-       The control plane has ONE contract: /api/v1. The studio is crew's coder
-       SKIN — a pure client, nothing privileged. The creator skin (interactive)
-       is already answered over the bus by a governed run: the trace below is
-       the real event vocabulary from interactive/draft-events.ts. -->
+  <!-- ── One public API, no privileged clients ──────────────────────────────
+       The control plane has ONE contract: /api/v1. wicked-studio is a pure
+       client of it, nothing privileged, and ships inside crew. The second
+       consumer is NOT a second UI: wicked-interactive's builder moved into
+       studio, so what remains is the DOCUMENT ENGINE crew spawns and proxies —
+       a governed run answers its bus events and the engine renders the result.
+       The trace below is the real vocabulary from interactive/draft-events.ts. -->
   <section class="skins" data-skins aria-labelledby="skins-h">
     <div class="wrap">
       <div class="sec-head sec-head--wide">
-        <div class="kicker kicker--plane">One public API · two skins</div>
-        <h2 id="skins-h">The studio is a skin. The API is the product.</h2>
+        <div class="kicker kicker--plane">One public API · no privileged clients</div>
+        <h2 id="skins-h">The console is a client. The API is the product.</h2>
         <p class="sec-sub">
           Everything the console can do rides <b>one public contract</b> — <code>/api/v1</code>.
-          The studio ships inside crew as the <b>coder skin</b> and holds no privileged access:
-          if the skin can show it, the API serves it. The <b>creator skin</b> is already real —
-          not a diagram: a crew-governed run answers <a href="https://wi.wickedagile.com">wicked-interactive</a>’s
-          bus and delivers the first draft.
+          <a href="https://ws.wickedagile.com">wicked-studio</a> ships inside crew and holds no
+          privileged access: if it can show it, the API serves it. The second consumer is not a
+          second UI — it is the <b>document engine</b> crew spawns and proxies: a crew-governed run
+          answers its bus events and delivers the first draft, and the engine renders it.
         </p>
       </div>
 
       <div class="skins-grid">
-        <div class="skin-card" role="group" aria-label="The coder skin — studio">
-          <span class="skin-k">coder skin · ships inside crew</span>
+        <div class="skin-card" role="group" aria-label="The console — wicked-studio">
+          <span class="skin-k">the console · ships inside crew</span>
           <span class="skin-name">studio</span>
           <p class="skin-t">
             The run board: submit intent, watch phases stream, answer gates, export evidence.
@@ -339,8 +341,8 @@ const GATE_CARDS = [
           </p>
         </div>
 
-        <div class="skin-card" role="group" aria-label="The creator skin — wicked-interactive">
-          <span class="skin-k">creator skin · governed generation, proven</span>
+        <div class="skin-card" role="group" aria-label="The document engine — wicked-interactive">
+          <span class="skin-k">document engine · governed generation, proven</span>
           <span class="skin-name">wicked-interactive</span>
           <p class="skin-t">
             When interactive creates a doc, <b>a governed crew run answers the bus with a real
@@ -355,7 +357,7 @@ const GATE_CARDS = [
             <span class="skin-trace-tag">opt-in seam · real vocabulary</span>
           </div>
           <ol class="skin-trace-rows">
-            <li><code>wicked.interactive.doc.created</code><span class="str-note">← the creator skin asks for a first draft</span></li>
+            <li><code>wicked.interactive.doc.created</code><span class="str-note">← the document engine asks for a first draft</span></li>
             <li><code>crew · governed run launched</code><span class="str-note">worker session in an isolated worktree</span></li>
             <li><code>wicked.interactive.status.posted</code><span class="str-note">narrated heartbeats — the canvas never freezes</span></li>
             <li class="str-final"><code>wicked.interactive.draft.completed</code><span class="str-note">a real draft, idempotency-keyed — replays can’t double-deliver</span></li>

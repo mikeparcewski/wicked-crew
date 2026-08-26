@@ -2,12 +2,13 @@ import { test, expect } from '@playwright/test';
 import { bringIntoView } from './utils';
 
 /**
- * The four-plane story: the "one public API, two skins" section [data-skins]
- * (studio = coder skin, wicked-interactive = creator skin, governed-generation
+ * The four-plane story: the "one public API, no privileged clients" section [data-skins]
+ * (studio = the console; wicked-interactive = the DOCUMENT ENGINE, not a second UI — its builder
+ * moved into studio, so crew spawns and proxies what remains; governed-generation
  * bus trace, Project-model landing strip) and the shared-chrome SameGarden map
  * (.same-garden) with crew's card as the "you are here" marker.
  */
-test.describe('one public API, two skins [data-skins]', () => {
+test.describe('one public API, no privileged clients [data-skins]', () => {
   test('both skins render, the bus trace carries the real vocabulary, the landing strip is honest', async ({ page }) => {
     await page.goto('/');
     const skins = page.locator('[data-skins]');
