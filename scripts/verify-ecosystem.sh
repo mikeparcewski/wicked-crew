@@ -186,6 +186,35 @@ check_version wicked-bus         package.json
 check_version wicked-installer   package.json
 check_version wicked-core        crates/wicked-core-ts/package.json
 
+# ── 1b. Rust crates: the tag says one thing, crates.io serves another ────────
+# This check exists because the ecosystem shipped exactly that failure and NOTHING here caught it.
+# wicked-estate v0.14.6 was tagged, the tag was pushed, the manifest and main both said 0.14.6 —
+# and the publish workflow never ran, so crates.io kept serving 0.14.5. The version checks above
+# cover eight npm packages and zero crates, so the whole Rust half of the foundation was unverified
+# while this script reported 16/0.
+#
+# It matters beyond bookkeeping: 0.14.6 is the release that added `--repo` co-location, which
+# wicked-crew 0.7.0's project graph requires. A 0.14.5 binary accepts `--repo`, ignores it, and
+# exits 0 — so the gap is silent at every layer that does not check the registry.
+head_ "1b · Rust crates published match their tags"
+check_crate() {
+  local crate="$1" repo="$2" dir tag published
+  need curl node git || { skip "$crate — $MISSING_REASON"; return; }
+  dir="$ROOT/$repo"
+  [ -d "$dir/.git" ] || { skip "$crate — $repo not checked out"; return; }
+  tag=$(git -C "$dir" tag --sort=-v:refname 2>/dev/null | grep -E '^v[0-9]' | head -1)
+  tag=${tag#v}
+  [ -z "$tag" ] && { skip "$crate — no version tag in $repo"; return; }
+  published=$(curl "${CURL_BOUNDED[@]}" -H "User-Agent: wicked-verify-ecosystem" \
+      "https://crates.io/api/v1/crates/$crate" 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=JSON.parse(s).crate;const v=c.max_stable_version||c.max_version;if(typeof v==="string"&&v)console.log(v)}catch{}})')
+  if [ -z "$published" ]; then skip "$crate — crates.io unreachable (not a verdict)"
+  elif [ "$tag" = "$published" ]; then ok "$crate $published matches tag v$tag"
+  else bad "$crate — tag v$tag but crates.io serves $published (publish never ran?)"; fi
+}
+check_crate wicked-estate     wicked-estate
+check_crate wicked-estate-mcp wicked-estate
+
 # ── 2. crew's bundled skin is the studio it claims ───────────────────────────
 # `build:with-studio` copies whatever is INSTALLED. A caret on a 0.x pin locks the MINOR, so
 # `^0.2.0` could never resolve 0.3.0 and crew shipped a stale UI while every check stayed green.

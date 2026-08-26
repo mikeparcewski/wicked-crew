@@ -65,6 +65,21 @@ each is answered.
    implementation details and re-creates the scattered-guard problem one level down. That is
    exactly how the transitive gaps got there.
 
+## What it missed, and why that shape recurs
+
+The first version checked **eight npm packages and zero crates**. wicked-estate v0.14.6 was tagged,
+its manifest and `main` both said 0.14.6, and the publish workflow never ran — so crates.io kept
+serving 0.14.5 while this script reported a clean 16/0. The whole Rust half of the foundation was
+unverified, and the gap was invisible precisely because every check that existed passed.
+
+It was not a small miss: 0.14.6 is the release that added `--repo` co-location, which
+wicked-crew 0.7.0's project graph requires, and a 0.14.5 binary accepts `--repo`, ignores it, and
+exits 0. Documentation, a site page and this verifier all agreed on a version no user could install.
+
+The recurring shape: **a check that covers one registry reads as covering "releases".** When adding
+a check, ask what class it belongs to and whether the class is covered — npm and crates.io are the
+same question asked of two registries, and only one was being asked.
+
 ## Testing contract
 
 A verifier that cannot fail is decoration. Each check ships with proof in **both** directions:
