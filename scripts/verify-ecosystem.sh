@@ -22,6 +22,49 @@ bad()  { printf "  \033[31m✗\033[0m %s\n" "$1"; FAIL=$((FAIL+1)); }
 skip() { printf "  \033[33m~\033[0m %s\n" "$1"; SKIP=$((SKIP+1)); }
 head_() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 
+# ── The contract (scripts/VERIFY-DESIGN.md) ──────────────────────────────────
+# I1 verdicts come from evidence · I2 the local environment is never a verdict · I3 registry input
+# is hostile · I4 bounded · I5 read-only · I6 absence of evidence is not evidence of absence.
+#
+# I2 is the one this file kept violating. Nine review rounds each flagged ONE unguarded command;
+# an audit then showed 2 of 10 were guarded and 5 of 6 checks could report a missing local tool as
+# an ecosystem regression. Per-call-site guards are why: eight were simply never visited. So the
+# probe happens ONCE, here, and `need` is the single gate every check passes through — a new check
+# that forgets it is visible at a glance rather than after a reviewer trips over it.
+MISSING_REASON=""
+
+# `command -v` is a shell BUILTIN, so probing on demand costs nothing and needs no cache. The first
+# cut memoized into an associative array — which is bash 4+, and macOS ships bash 3.2, so the whole
+# script died on `declare -A` on the most common developer machine. Portability is part of the
+# contract here: a verifier that will not start is the same as one that reports nothing.
+need() {
+  local miss="" c
+  for c in "$@"; do command -v "$c" >/dev/null 2>&1 || miss="$miss $c"; done
+  if [ -n "$miss" ]; then
+    MISSING_REASON="requires${miss} (not installed — not a verdict)"
+    return 1
+  fi
+  return 0
+}
+
+# run_bounded <seconds> <cmd>... — I4. Uses timeout/gtimeout when present; otherwise a shell
+# watchdog, because running unbounded trades a false verdict for NO verdict, and a verifier that
+# never returns is the only failure nothing reports. Echoes stdout; returns the command's status,
+# or 124 on deadline, exactly as timeout does.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  local out rc pid waited=0
+  out=$(mktemp "${TMPDIR:-/tmp}/wv-bounded.XXXXXX") || return 125
+  ( "$@" >"$out" 2>/dev/null ) & pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$secs" ]; do sleep 1; waited=$((waited+1)); done
+  if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rc=124
+  else wait "$pid" 2>/dev/null; rc=$?; fi
+  cat "$out" 2>/dev/null; rm -f "$out"
+  return "$rc"
+}
+
 # The workspace holding the sibling wicked-* checkouts. Defaults to this repo's parent, which is
 # the layout every checkout already has; override for anything else. Checks that need a sibling
 # repo SKIP rather than fail when it is absent — a missing checkout is not a broken ecosystem.
@@ -37,6 +80,7 @@ ROOT="${WICKED_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # Returns non-zero on refusal so callers SKIP — a tarball we would not extract is not evidence of
 # an ecosystem regression.
 safe_untar() { # safe_untar <tarball> <dest-dir>
+  need tar awk || return 1
   local tb="$1" dest="$2" listing
   listing=$(tar tzf "$tb" 2>/dev/null) || return 1
   [ -z "$listing" ] && return 1
@@ -77,6 +121,7 @@ head_ "1 · published version matches main"
 check_version() {
   local repo="$1" pj="$2"
   local dir="$ROOT/$repo"
+  need git node npm || { skip "$repo — $MISSING_REASON"; return; }
   [ -d "$dir/.git" ] || { skip "$repo — not checked out"; return; }
   # A FAILED FETCH MEANS THE REF MAY BE STALE. Comparing a days-old local `origin/main` against
   # live npm can manufacture either verdict — a false DRIFT for a version already synced, or a
@@ -116,6 +161,7 @@ check_version wicked-core        crates/wicked-core-ts/package.json
 # String-matching the bundle does NOT catch this: the marker strings existed in both versions.
 head_ "2 · crew bundles the studio version it depends on"
 verify_bundle() {
+  need npm curl tar diff mktemp || { skip "crew/studio bundle — $MISSING_REASON"; return; }
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local crewv range studiov
   crewv=$(npm view wicked-crew version 2>/dev/null)
@@ -156,9 +202,6 @@ verify_bundle() {
   # ecosystem regression — the same infrastructure-as-verdict bug already fixed in the npm, tarball
   # and site checks. Third time in this file: the rule is "only evidence produces a verdict", and
   # it has to be applied to every external command, not just the ones that felt like network.
-  if ! command -v diff >/dev/null 2>&1; then
-    skip "crew/studio bundle — \`diff\` not available (not a verdict)"; rm -rf "$tmp"; return
-  fi
   if [ ! -d "$tmp/c/package/dist/studio" ]; then
     bad "crew $crewv ships no dist/studio"
   elif diff -r "$tmp/s/package/dist" "$tmp/c/package/dist/studio" >/dev/null 2>&1; then
@@ -175,6 +218,7 @@ verify_bundle
 # reason for existing was a `status` command that lied about what was installed.
 head_ "3 · published artifacts behave"
 verify_installer() {
+  need npm curl tar node grep mktemp || { skip "installer status — $MISSING_REASON"; return; }
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
   if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz ) >/dev/null 2>&1 \
@@ -183,25 +227,9 @@ verify_installer() {
     skip "installer status — could not fetch/verify/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi
-  # `timeout` is not guaranteed, and a missing tool's 127 must not read as "the artifact does not
-  # run". The first fix ran the command BARE when timeout was absent — which trades a false verdict
-  # for an unbounded one: a hanging `status` would hang this script and the loop harness forever,
-  # and a verifier that never returns is worse than one that returns wrong, because nothing even
-  # reports it. Neither is acceptable, so when no timeout implementation exists we bound it in
-  # shell: run in the background, kill it past the deadline, and report 124 the way timeout does.
-  local out rc runner=()
-  if command -v timeout >/dev/null 2>&1; then runner=(timeout 120)
-  elif command -v gtimeout >/dev/null 2>&1; then runner=(gtimeout 120); fi
-  if [ ${#runner[@]} -gt 0 ]; then
-    out=$(cd "$tmp/package" && "${runner[@]}" node dist/index.js status 2>/dev/null); rc=$?
-  else
-    local outfile="$tmp/status.out" pid waited=0
-    ( cd "$tmp/package" && node dist/index.js status >"$outfile" 2>/dev/null ) & pid=$!
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 120 ]; do sleep 1; waited=$((waited+1)); done
-    if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rc=124
-    else wait "$pid" 2>/dev/null; rc=$?; fi
-    out=$(cat "$outfile" 2>/dev/null)
-  fi
+  # I4: one bounded-run helper, so no call site can accidentally run unbounded.
+  local out rc
+  out=$(cd "$tmp/package" && run_bounded 120 node dist/index.js status 2>/dev/null); rc=$?
   # A crash, a timeout, or empty output is a FAILURE of the published artifact — not a machine
   # with nothing installed. Conflating the two is how a broken `status` would pass this check.
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
@@ -226,6 +254,7 @@ verify_installer
 # A deploy can succeed and serve the previous build; Pages fronts a CDN. Assert CONTENT.
 head_ "4 · live sites serve the features they document"
 site_has() {
+  need curl || { skip "$3 — $MISSING_REASON"; return; }
   local url="$1" needle="$2" label="$3" body rc
   # -f so a 4xx/5xx fails instead of handing back an error page, which would otherwise count as
   # "reachable" and — with a generic enough needle — could even match it.
@@ -274,7 +303,8 @@ if [ -d "$WI" ]; then
   # carries the reference" (a real regression). grep on a missing file returns the same 1 as grep
   # that found nothing, so the file check has to come first or the two are indistinguishable.
   wired() { # wired <file> <needle> <ok-msg> <bad-msg>
-    if [ ! -f "$1" ]; then skip "$(basename "$1") not present in this checkout (not a verdict)"
+    if ! need grep; then skip "$(basename "$1") — $MISSING_REASON"
+    elif [ ! -f "$1" ]; then skip "$(basename "$1") not present in this checkout (not a verdict)"
     # -F: the needles are literal PATHS, and in regex mode `create.js` also matches `createXjs`
     # and `create-js` (verified). A check whose entire purpose is "this exact reference is still
     # here" must not accept a near-miss — that is a false PASS, the silent kind.
