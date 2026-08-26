@@ -51,6 +51,16 @@ need() {
 # watchdog, because running unbounded trades a false verdict for NO verdict, and a verifier that
 # never returns is the only failure nothing reports. Echoes stdout; returns the command's status,
 # or 124 on deadline, exactly as timeout does.
+# I4 for the registry: `npm` has no timeout flag of its own and will sit on a stalled connection
+# indefinitely. Every `npm view` in this file goes through here, so a hung registry costs 60s and a
+# skip instead of hanging the verifier and the loop harness forever.
+npm_view() { run_bounded 60 npm view "$@" 2>/dev/null; }
+
+# I4 for downloads: --max-time bounds the whole transfer, --connect-timeout the handshake. Without
+# them a stalled CDN hangs the run, which the design forbids and I shipped anyway in the same
+# commit that wrote the rule down.
+CURL_BOUNDED=(--fail --silent --show-error --location --connect-timeout 15 --max-time 120)
+
 run_bounded() {
   local secs="$1"; shift
   if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
@@ -141,7 +151,7 @@ check_version() {
   # mistake the bundle and installer checks make below, and it must skip for the same reason.
   main=$(git -C "$dir" show "origin/main:$pj" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s).version;if(typeof v==="string"&&v)console.log(v)}catch{}})')
   if [ -z "$main" ]; then skip "$name — cannot read origin/main:$pj (offline? not a verdict)"; return; fi
-  npmv=$(npm view "$name" version 2>/dev/null)
+  npmv=$(npm_view "$name" version 2>/dev/null)
   if [ -z "$npmv" ]; then skip "$name — not on npm (or npm unreachable)"
   elif [ "$main" = "$npmv" ]; then ok "$name $npmv"
   else bad "$name — main=$main npm=$npmv (release-sync PR unmerged?)"; fi
@@ -164,8 +174,8 @@ verify_bundle() {
   need npm curl tar diff mktemp || { skip "crew/studio bundle — $MISSING_REASON"; return; }
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local crewv range studiov
-  crewv=$(npm view wicked-crew version 2>/dev/null)
-  range=$(npm view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null)
+  crewv=$(npm_view wicked-crew version 2>/dev/null)
+  range=$(npm_view wicked-crew@"$crewv" devDependencies.wicked-studio 2>/dev/null)
   # RESOLVE the range; do not strip characters off it. `^0.4.0` does not mean 0.4.0 — npm installs
   # the highest 0.4.x, so `tr -d '^~'` would compare crew's bundle against the wrong tarball and
   # report DIFFERS for a correctly-bundled crew. Getting caret semantics wrong inside the check
@@ -176,23 +186,23 @@ verify_bundle() {
     # "wicked-garden@12.31.012.31.0" — garbage that would then fail to resolve. The JSON is a
     # string for one match and an array for many; take the LAST, which is the highest npm would
     # install for the range.
-    studiov=$(npm view "wicked-studio@${range}" version --json 2>/dev/null | node -e '
+    studiov=$(npm_view "wicked-studio@${range}" version --json 2>/dev/null | node -e '
       let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
         try{const v=JSON.parse(s);const out=Array.isArray(v)?v[v.length-1]:v;
             if(typeof out==="string"&&out)console.log(out);}catch{}
       })')
   fi
-  [ -z "$studiov" ] && studiov=$(npm view wicked-studio version 2>/dev/null)
+  [ -z "$studiov" ] && studiov=$(npm_view wicked-studio version 2>/dev/null)
   # INFRASTRUCTURE FAILURE IS NOT A VERDICT. If npm is unreachable or a tarball will not extract,
   # this must SKIP — reporting "bundle DIFFERS" because curl timed out is a false regression, and
   # a verifier that cries wolf on a network hiccup is one people learn to ignore.
   local crew_tb studio_tb
-  crew_tb=$(npm view wicked-crew@"$crewv" dist.tarball 2>/dev/null)
-  studio_tb=$(npm view wicked-studio@"$studiov" dist.tarball 2>/dev/null)
+  crew_tb=$(npm_view wicked-crew@"$crewv" dist.tarball 2>/dev/null)
+  studio_tb=$(npm_view wicked-studio@"$studiov" dist.tarball 2>/dev/null)
   if [ -z "$crewv" ] || [ -z "$studiov" ] || [ -z "$crew_tb" ] || [ -z "$studio_tb" ]; then
     skip "crew/studio bundle — npm unreachable (not a verdict)"; rm -rf "$tmp"; return
   fi
-  if ! ( cd "$tmp" && curl -fsSL "$crew_tb" -o c.tgz && curl -fsSL "$studio_tb" -o s.tgz ) >/dev/null 2>&1; then
+  if ! ( cd "$tmp" && curl "${CURL_BOUNDED[@]}" "$crew_tb" -o c.tgz && curl "${CURL_BOUNDED[@]}" "$studio_tb" -o s.tgz ) >/dev/null 2>&1; then
     skip "crew/studio bundle — tarball fetch failed (not a verdict)"; rm -rf "$tmp"; return
   fi
   if ! safe_untar "$tmp/c.tgz" "$tmp/c" || ! safe_untar "$tmp/s.tgz" "$tmp/s"; then
@@ -220,10 +230,10 @@ head_ "3 · published artifacts behave"
 verify_installer() {
   need npm curl tar node grep mktemp || { skip "installer status — $MISSING_REASON"; return; }
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
-  local tb; tb=$(npm view wicked-installer dist.tarball 2>/dev/null)
-  if [ -z "$tb" ] || ! ( cd "$tmp" && curl -fsSL "$tb" -o i.tgz ) >/dev/null 2>&1 \
+  local tb; tb=$(npm_view wicked-installer dist.tarball 2>/dev/null)
+  if [ -z "$tb" ] || ! ( cd "$tmp" && curl "${CURL_BOUNDED[@]}" "$tb" -o i.tgz ) >/dev/null 2>&1 \
      || ! safe_untar "$tmp/i.tgz" "$tmp" \
-     || ! ( cd "$tmp/package" && npm install --omit=dev --ignore-scripts --silent ) >/dev/null 2>&1; then
+     || ! ( cd "$tmp/package" && run_bounded 180 npm install --omit=dev --ignore-scripts --silent ) >/dev/null 2>&1; then
     skip "installer status — could not fetch/verify/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi

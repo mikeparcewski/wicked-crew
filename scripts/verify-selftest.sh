@@ -19,6 +19,17 @@ PASS=0; FAIL=0
 ok()  { printf "  \033[32m✓\033[0m %s\n" "$1"; PASS=$((PASS+1)); }
 bad() { printf "  \033[31m✗\033[0m %s\n" "$1"; FAIL=$((FAIL+1)); }
 
+# The self-test is held to the SAME contract it enforces (I2): a tool it needs but lacks must not
+# be reported as a verdict about the verifier. Without python3 the mutation silently does not
+# happen, the verifier correctly stays green, and this would have called that a FAILURE of the
+# guard — a wrong verdict produced by the thing whose entire job is catching wrong verdicts.
+for _t in python3 mktemp cp awk sed; do
+  command -v "$_t" >/dev/null 2>&1 || {
+    printf "  \033[33m~\033[0m self-test cannot run: requires %s\n" "$_t" >&2
+    exit 0
+  }
+done
+
 RESTORE=()
 cleanup() { local r; for r in "${RESTORE[@]:-}"; do [ -n "$r" ] && eval "$r"; done; }
 trap cleanup EXIT INT TERM
@@ -48,6 +59,12 @@ s=open(p,encoding='utf-8').read()
 # which made the test look like it had found a hole in the check when the hole was in the test.
 open(p,'w',encoding='utf-8').write(s.replace(a,b))
 PY
+  # Confirm the mutation LANDED before judging the verdict. If the edit silently no-ops, the
+  # verifier stays green for the right reason and this would blame the guard for it.
+  if ! grep -qF -- "$to" "$file" 2>/dev/null; then
+    cp "$backup" "$file"; rm -f "$backup"; RESTORE=("${RESTORE[@]:0:${#RESTORE[@]}-1}")
+    printf "  \033[33m~\033[0m %s — mutation did not apply, nothing proven\n" "$label"; return
+  fi
   local out; out=$("$VERIFY" 2>&1)
   local c; c=$(counts "$out"); local f; f=$(echo "$c" | awk '{print $2}')
   # Restore inline AND drop the trap entry — leaving it queued made the exit trap re-run a `cp`
