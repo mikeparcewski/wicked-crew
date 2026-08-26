@@ -51,13 +51,19 @@ safe_untar() { # safe_untar <tarball> <dest-dir>
     '; then :; else
     return 2
   fi
-  # Links are the subtler escape: a symlink member pointing outside, then a later member written
-  # THROUGH it. `tar -tvzf` marks them with a leading l/h. If the VERBOSE listing fails while the
-  # plain one succeeded, refuse — proceeding would skip the link check silently, which is the
-  # worst outcome: an unchecked archive extracted under the appearance of having been checked.
+  # ALLOWLIST the member types instead of blacklisting the dangerous ones. Links were the obvious
+  # escape (a symlink pointing outside, then a later member written THROUGH it) and rejecting only
+  # `l`/`h` left FIFOs, character and block devices accepted from an untrusted registry tarball —
+  # abusable on their own, and considerably worse if this ever runs as root. A published npm
+  # package needs regular files and directories and nothing else, so anything whose `tar -tvzf`
+  # type column is not `-` or `d` refuses the archive. Verified against tarballs carrying p/c/b
+  # members built with exact headers.
+  #
+  # If the VERBOSE listing fails while the plain one succeeded, refuse too — proceeding would skip
+  # the type check silently, extracting an unchecked archive under the appearance of a checked one.
   local verbose
   verbose=$(tar -tvzf "$tb" 2>/dev/null) || return 3
-  printf '%s\n' "$verbose" | grep -qE '^[lh]' && return 3
+  printf '%s\n' "$verbose" | awk '{ t = substr($1, 1, 1); if (t != "-" && t != "d") exit 1 }' || return 3
   # NOTE the check/use boundary: members are inspected from one read and extracted in another.
   # Safe here only because $tb is a temp file this script just wrote and nothing else touches.
   # Do not point safe_untar at a path another process can swap between the two reads.
@@ -177,13 +183,25 @@ verify_installer() {
     skip "installer status — could not fetch/verify/install the published tarball (not a verdict)"
     rm -rf "$tmp"; return
   fi
-  # `timeout` is not guaranteed — this script already avoids `seq` for that reason, and treating a
-  # missing tool's 127 as "the published artifact does not run" would be a false regression from
-  # local tooling. Use it when present, run bare when not.
+  # `timeout` is not guaranteed, and a missing tool's 127 must not read as "the artifact does not
+  # run". The first fix ran the command BARE when timeout was absent — which trades a false verdict
+  # for an unbounded one: a hanging `status` would hang this script and the loop harness forever,
+  # and a verifier that never returns is worse than one that returns wrong, because nothing even
+  # reports it. Neither is acceptable, so when no timeout implementation exists we bound it in
+  # shell: run in the background, kill it past the deadline, and report 124 the way timeout does.
   local out rc runner=()
   if command -v timeout >/dev/null 2>&1; then runner=(timeout 120)
   elif command -v gtimeout >/dev/null 2>&1; then runner=(gtimeout 120); fi
-  out=$(cd "$tmp/package" && "${runner[@]}" node dist/index.js status 2>/dev/null); rc=$?
+  if [ ${#runner[@]} -gt 0 ]; then
+    out=$(cd "$tmp/package" && "${runner[@]}" node dist/index.js status 2>/dev/null); rc=$?
+  else
+    local outfile="$tmp/status.out" pid waited=0
+    ( cd "$tmp/package" && node dist/index.js status >"$outfile" 2>/dev/null ) & pid=$!
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 120 ]; do sleep 1; waited=$((waited+1)); done
+    if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rc=124
+    else wait "$pid" 2>/dev/null; rc=$?; fi
+    out=$(cat "$outfile" 2>/dev/null)
+  fi
   # A crash, a timeout, or empty output is a FAILURE of the published artifact — not a machine
   # with nothing installed. Conflating the two is how a broken `status` would pass this check.
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
