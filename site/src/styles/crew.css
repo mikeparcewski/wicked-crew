@@ -14,8 +14,9 @@
    The shared wicked-web chrome (Base/Topbar/Footer + tokens.css) owns theming
    via [data-theme]; the family palette is inherited. Only crew-specific rules
    live here. Each major section is viewport-sized and the document scroll
-   LOCKS section-to-section (scroll-snap, mandatory — every section fits the
-   viewport, so the hard lock never traps; mobile falls back to natural scroll). */
+   SETTLES section-to-section (scroll-snap: y proximity, the chrome default —
+   soft, so a section taller than the viewport is still reachable; mobile falls
+   back to natural scroll). */
 
 body { padding-top: var(--topbar-h); }
 
@@ -33,15 +34,36 @@ body { padding-top: var(--topbar-h); }
 .wrap { width: 100%; max-width: 1240px; margin-inline: auto; padding-inline: 28px; }
 @media (max-width: 560px) { .wrap { padding-inline: 18px; } }
 
-/* ── Scroll-lock to section + per-section viewport sizing ──────────────────
-   Each major section fills the viewport and the document hard-locks section-to-
-   section. `mandatory` so a partial wheel snaps fully to a section boundary;
-   every crew section fits the viewport, so this never traps. Mobile falls back
-   to natural scroll (scroll-snap-type: none). scroll-padding offsets the topbar. */
-html { scroll-snap-type: y mandatory; scroll-padding-top: var(--topbar-h); }
+/* ── Scroll-snap to section + per-section viewport sizing ──────────────────
+   `proximity`, NOT `mandatory` — this is the chrome's default (tokens.css) and
+   crew has no reason to override it.
+
+   Why mandatory was wrong here: it forbids the viewport coming to rest anywhere
+   that is not a snap point. The old comment claimed "every crew section fits the
+   viewport, so this never traps" — that claim was false. Measured at 1440x700,
+   .byo is 878px (+178 past the fold), .console-sec 808px (+108) and .get 751px
+   (+51), so their lower halves sat between snap points and were unreachable.
+   Worse, at 1440x760 the page did not scroll AT ALL: from the top, one 320px
+   wheel notch lands nearer the hero's snap point than the next section's, so
+   mandatory dragged the viewport straight back to y=0 — three notches, scrollY
+   never left 0. Same defect, and same fix, as wicked-studio#132.
+
+   `proximity` snaps only when the rest position is already near a point, so a
+   partial wheel still settles section-to-section, but nothing is ever
+   unreachable. Mobile falls back to natural scroll. scroll-padding offsets the
+   topbar. */
+html { scroll-snap-type: y proximity; scroll-padding-top: var(--topbar-h); }
+
+/* Snap points are assigned STRUCTURALLY, to every section, and deliberately not
+   via the class list below: that list is maintained by hand, and a section added
+   later without its class being added here would silently have no snap point at
+   all — the browser would scroll straight past it. Sizing can be per-class;
+   reachability must not be. */
+section {
+  scroll-snap-align: start;
+}
 .hero, .idd, .probs, .skins, .byo, .console-sec, .wf, .rail-sec, .council, .studio, .get {
   min-height: calc(100svh - var(--topbar-h));
-  scroll-snap-align: start;
   display: flex;
   flex-direction: column;
   justify-content: safe center;
@@ -981,7 +1003,14 @@ code {
 .install__copy { font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.06em; color: var(--muted); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 6px; padding: 4px 12px; cursor: pointer; transition: border-color .2s var(--ease), color .2s var(--ease); }
 .install__copy:hover { border-color: var(--accent); color: var(--accent); }
 .install__code { min-width: 0; margin: 0; padding: 16px; overflow-x: auto; }
-.install__code code { display: block; background: none; border: none; padding: 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.8; color: var(--ink); white-space: pre; }
+/* `pre-wrap`, not `pre`: under `pre` the family-installer line measured 630px of
+   content inside a 541px box, so the trailing comment was cut mid-phrase — the
+   line read "... picks products · ships the" and the rest was only reachable by
+   horizontally scrolling a code block, which nobody does on a landing page.
+   `pre-wrap` keeps the newlines that separate the two commands but lets a long
+   trailing comment fall to the next line. The Copy buttons write a JS string
+   literal, not this DOM text, so wrapping cannot corrupt what gets copied. */
+.install__code code { display: block; background: none; border: none; padding: 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.8; color: var(--ink); white-space: pre-wrap; overflow-wrap: break-word; }
 .install__code .c { color: var(--faint); }
 
 .install-stack { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -1233,6 +1262,10 @@ code {
   border-left: 3px solid color-mix(in oklab, var(--deny) 50%, var(--hairline-strong));
   padding-left: 12px;
 }
+/* Keep the trailing call-to-action whole. It is short (~124px) and the column is
+   ~50ch, so it always has a line to itself if it needs one — whereas letting it
+   break mid-phrase stranded "→" alone on the last line. */
+.get-tos a { white-space: nowrap; }
 
 /* ── Article page prose ────────────────────────────────────────────────── */
 .article-wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
@@ -1295,4 +1328,29 @@ code {
   .hero .hero-head h1 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
   .hero-console-wrap .studio-feed { height: clamp(96px, 15svh, 130px); }
   .hero .hero-tags { display: none; }
+
+  /* ── Bring the three over-tall sections back inside a laptop viewport ────
+     A section is only "one screen" if it fits `100svh - topbar` = 636px at
+     1440x700. Measured there before this block: .byo 878 (+242 over the
+     636 usable band), .get 751 (+115), .console-sec 808 (+172).
+
+     These are the cheap levers only — section padding, the decorative tag row
+     (same trade the hero already makes above), and over-generous heading
+     margins. Nothing here reflows body copy or shrinks an interactive
+     component, because a squashed control is a worse bug than a tall section:
+     under `proximity` a tall section is still fully readable, it just takes an
+     extra wheel notch. */
+  .byo, .get { padding-block: clamp(22px, 3.4svh, 44px); }
+  .byo .sec-head { margin-bottom: 14px; }
+  .byo-card { padding-block: 11px; }
+  .byo-tag { display: none; }
+  .byo-stage { margin-top: 12px; }
+  .byo-stage-row { padding-top: 12px; }
+  .byo-stage-note { margin-block: 8px 12px; }
+
+  .get-intro h2 { font-size: clamp(1.6rem, 2.9vw, 2.2rem); }
+  .get-intro p { margin-top: 12px; }
+  .get-tos { margin-top: 10px; }
+
+  .console-sec .sec-head { margin-bottom: 8px; }
 }
