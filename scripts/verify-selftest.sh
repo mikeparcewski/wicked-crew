@@ -49,7 +49,10 @@ break_case() { # break_case <label> <file> <from> <to>
   fi
   local backup; backup=$(mktemp "${TMPDIR:-/tmp}/selftest.XXXXXX")
   cp "$file" "$backup"
-  RESTORE+=("cp '$backup' '$file'; rm -f '$backup'")
+  # printf %q, not hand-rolled single quotes: a checkout under a directory containing an
+  # apostrophe ("we ird's") makes the quoted form syntactically wrong, the eval fails, and the
+  # repo is left MUTATED — breaking the one guarantee this suite makes about itself.
+  RESTORE+=("$(printf 'cp %q %q; rm -f %q' "$backup" "$file" "$backup")")
   python3 - "$file" "$from" "$to" <<'PY'
 import sys
 p,a,b=sys.argv[1],sys.argv[2],sys.argv[3]

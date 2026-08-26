@@ -184,7 +184,7 @@ check_version wicked-core        crates/wicked-core-ts/package.json
 # String-matching the bundle does NOT catch this: the marker strings existed in both versions.
 head_ "2 · crew bundles the studio version it depends on"
 verify_bundle() {
-  need npm curl tar diff mktemp || { skip "crew/studio bundle — $MISSING_REASON"; return; }
+  need npm curl tar diff mktemp node || { skip "crew/studio bundle — $MISSING_REASON"; return; }
   local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/wicked-verify.XXXXXX")
   local crewv range studiov
   crewv=$(npm_view wicked-crew version 2>/dev/null)
@@ -205,7 +205,12 @@ verify_bundle() {
             if(typeof out==="string"&&out)console.log(out);}catch{}
       })')
   fi
-  [ -z "$studiov" ] && studiov=$(npm_view wicked-studio version 2>/dev/null)
+  # NO silent fallback to `latest`. If the declared range could not be resolved, the comparison
+  # would be against a version crew never claimed to bundle — a false DIFFERS dressed as evidence.
+  # Not knowing which version to compare is a reason to SKIP, not to guess one.
+  if [ -z "$studiov" ]; then
+    skip "crew/studio bundle — could not resolve '${range:-<no range>}' (not a verdict)"; rm -rf "$tmp"; return
+  fi
   # INFRASTRUCTURE FAILURE IS NOT A VERDICT. If npm is unreachable or a tarball will not extract,
   # this must SKIP — reporting "bundle DIFFERS" because curl timed out is a false regression, and
   # a verifier that cries wolf on a network hiccup is one people learn to ignore.

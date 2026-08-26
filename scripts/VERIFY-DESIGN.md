@@ -47,9 +47,11 @@ each is answered.
 
 ## Structure that enforces them
 
-1. **One preflight, not ten scattered guards.** Every external command is declared up front and
-   probed once. A check whose tools are missing skips with a named reason, and the skip is decided
-   in one place rather than at each call site — which is how eight of them got missed.
+1. **One gate, not ten scattered guards.** Every check declares its tools in a single `need ...`
+   call, which probes them with the `command -v` builtin and skips with a named reason when any is
+   absent. The decision lives in one place per check rather than at each call site — which is how
+   eight of them got missed. (An earlier draft memoized the probe into an associative array; that
+   is bash 4, and macOS ships 3.2, so it is deliberately an on-demand builtin probe instead.)
 2. **`bad` is reachable only after evidence is in hand.** Fetch/parse/tooling failures return early
    via `skip`, so the verdict path cannot be entered without data.
 3. **Untrusted extraction goes through one function** (`safe_untar`), allowlisting member types
