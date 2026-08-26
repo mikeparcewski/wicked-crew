@@ -199,7 +199,10 @@ check_version wicked-core        crates/wicked-core-ts/package.json
 head_ "1b · Rust crates published match their tags"
 check_crate() {
   local crate="$1" repo="$2" dir tag published
-  need curl node git || { skip "$crate — $MISSING_REASON"; return; }
+  # grep and head are in the tag pipeline: without them $tag comes back empty and the check
+  # would skip citing "no version tag" — a wrong REASON, which sends whoever reads it looking in
+  # the repo for a tag that is there. Same class as the transitive gaps in run_bounded.
+  need curl node git grep head || { skip "$crate — $MISSING_REASON"; return; }
   dir="$ROOT/$repo"
   [ -d "$dir/.git" ] || { skip "$crate — $repo not checked out"; return; }
   tag=$(git -C "$dir" tag --sort=-v:refname 2>/dev/null | grep -E '^v[0-9]' | head -1)
