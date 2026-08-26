@@ -65,12 +65,25 @@ run_bounded() {
   local secs="$1"; shift
   if command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?; fi
   if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
-  local out rc pid waited=0
+  local out rc pid waited=0 had_monitor=""
   out=$(mktemp "${TMPDIR:-/tmp}/wv-bounded.XXXXXX") || return 125
+  # Job control puts the child in its OWN PROCESS GROUP, so the deadline can kill the whole tree.
+  # Killing just the top pid leaves children running — `npm` spawns node and curl, and a timed-out
+  # run would return 124 while its grandchildren carried on doing network work in the background.
+  # Reproduced: 2 survivors from a one-child parent.
+  case "$-" in *m*) had_monitor=1 ;; *) set -m ;; esac
   ( "$@" >"$out" 2>/dev/null ) & pid=$!
+  [ -z "$had_monitor" ] && set +m
   while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$secs" ]; do sleep 1; waited=$((waited+1)); done
-  if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rc=124
-  else wait "$pid" 2>/dev/null; rc=$?; fi
+  if kill -0 "$pid" 2>/dev/null; then
+    # Negative pid = the process GROUP. TERM first so a child can flush, then KILL what remains.
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    sleep 1
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null; rc=124
+  else
+    wait "$pid" 2>/dev/null; rc=$?
+  fi
   cat "$out" 2>/dev/null; rm -f "$out"
   return "$rc"
 }
