@@ -9,7 +9,7 @@ import { bringIntoView } from './utils';
  * (.same-garden) with crew's card as the "you are here" marker.
  */
 test.describe('one public API, no privileged clients [data-skins]', () => {
-  test('both skins render, the bus trace carries the real vocabulary, the landing strip is honest', async ({ page }) => {
+  test('both consumers render, the bus trace carries the real vocabulary, the landing strip is honest', async ({ page }) => {
     await page.goto('/');
     const skins = page.locator('[data-skins]');
     await bringIntoView(skins);
