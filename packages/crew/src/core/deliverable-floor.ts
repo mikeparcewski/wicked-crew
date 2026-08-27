@@ -34,7 +34,9 @@
  * PER-RUN copy of the workflow def (the exact mechanism `core/deliver.ts` proved for
  * `deliver: "pr"` — the shared def is never mutated, nothing lands in the overlay dir, the
  * catalog never grows a per-run entry), which asserts that the artifacts the launcher declared
- * EXIST and are non-empty. A Tool phase's failure surface is its exit code: wicked-core's
+ * EXIST, are non-empty, and were written by THIS run (crew#320 — existence alone re-derives
+ * nothing at a path a prior run already populated). A Tool phase's failure surface is its exit
+ * code: wicked-core's
  * `run_tool_cmd` maps a non-zero exit to `StepStatus::Failed`, which fails the unit and the run
  * through the unchanged completion path. No LLM, no worktree, no judgement about the content —
  * only "the phase promised this file; is it there".
@@ -63,49 +65,108 @@ export const DELIVERABLE_FLOOR_FAILURE_MARKER =
   '[wicked-crew] DELIVERABLE FLOOR FAILED';
 
 /**
- * The floor program, run as `node -e <script> <path...>`.
+ * Slack allowed on the freshness comparison, in milliseconds (crew#320).
+ *
+ * The launch timestamp comes from the daemon's `Date.now()` (millisecond resolution); the
+ * artifact timestamp comes from the FILESYSTEM, and not every filesystem keeps milliseconds —
+ * HFS+ and ext3 truncate mtime to whole seconds, and some SMB/NFS mounts are coarser still. A
+ * file genuinely written 400 ms after a launch at `…:07.600Z` can therefore report an mtime of
+ * `…:07.000Z` and read as older than the launch that produced it.
+ *
+ * One second absorbs that truncation without weakening the check this exists to make: the stale
+ * artifact crew#320 describes is the PREVIOUS run's output, which predates this run's launch by
+ * that run's whole remaining lifetime plus the turnaround before the next one — orders of
+ * magnitude more than a timestamp-granularity rounding error.
+ */
+export const DELIVERABLE_FLOOR_MTIME_SLACK_MS = 1_000;
+
+/**
+ * The floor program, run as `node -e <script> <launchedAtMs> <path...>`.
  *
  * Node rather than a shell: this must work identically on macOS, Linux, and Windows, and the
  * daemon already IS node, so `process.execPath` is a guaranteed-present absolute interpreter
- * (see {@link deliverableFloorPhase}). `-e` runs CommonJS, so `require` is available; the
- * declared paths arrive as `process.argv.slice(1)`, passed as argv rather than interpolated
- * into a shell string so a path containing a space, a quote, or a `$` cannot be re-parsed.
+ * (see {@link deliverableFloorPhase}). `-e` runs CommonJS, so `require` is available; the launch
+ * timestamp and the declared paths arrive as `process.argv.slice(1)`, passed as argv rather than
+ * interpolated into a shell string so a path containing a space, a quote, or a `$` cannot be
+ * re-parsed.
  *
- * A path counts as PRODUCED when it exists AND carries bytes: a non-empty file, or a directory
- * with at least one entry (a phase may declare a directory of outputs). A zero-byte file is
- * NOT evidence — it is the same "nothing was produced" this exists to catch, and the draft/chat
- * seams already treated an empty deliverable as a failure at their own post-hoc check.
+ * A path counts as PRODUCED when it exists, carries bytes, and was written by THIS RUN:
+ *
+ *  - a non-empty file whose `mtimeMs` is at or after the launch timestamp;
+ *  - a directory holding at least one direct entry whose `mtimeMs` is at or after it (a phase may
+ *    declare a directory of outputs; the directory's own mtime is not enough, because a directory
+ *    left over from a prior run keeps its entries and its mtime).
+ *
+ * A zero-byte file is NOT evidence — it is the same "nothing was produced" this exists to catch,
+ * and the draft/chat seams already treated an empty deliverable as a failure at their own
+ * post-hoc check.
+ *
+ * ## Why the timestamp (crew#320)
+ *
+ * Existence alone re-derives nothing when the path can be pre-populated. The interactive seams
+ * copy their deliverable to `outPath` and never remove it, and demo/draft/edit run directories
+ * are keyed by DOCUMENT ID (edit by `doc:version`) — so a second run over the same key starts
+ * with the previous run's file already sitting at the declared path. The floor would find it,
+ * find bytes, and pass: the artifact exists, but this run did not produce it. "Done" would be
+ * asserted by a leftover rather than derived from this run's work — the exact failure shape one
+ * level in from the one crew#311 closed.
+ *
+ * The comparison is the stronger of the two available fixes. Clearing `outPath` at launch would
+ * also work, but only for as long as every seam remembers to clear it; the mtime check survives
+ * a seam that forgets, and it survives a seam that has not been written yet.
+ *
+ * A launch timestamp that does not parse FAILS CLOSED. An armed floor that cannot judge freshness
+ * is not a floor, and passing on the grounds that the check itself is broken is precisely the
+ * "assert done" move this module exists to refuse.
  */
 export function deliverableFloorScript(): string {
   return [
     'const fs=require("node:fs");',
-    'const want=process.argv.slice(1);',
+    'const pathmod=require("node:path");',
+    'const launch=Number(process.argv[1]);',
+    'const want=process.argv.slice(2);',
+    'const iso=(t)=>{try{return new Date(t).toISOString()}catch(e){return String(t)}};',
+    'if(!Number.isFinite(launch)){',
+    `console.log(${JSON.stringify(DELIVERABLE_FLOOR_FAILURE_MARKER)}+" — the floor was armed without a parseable launch timestamp ("+JSON.stringify(process.argv[1])+"), so it cannot tell this run's artifacts from a prior run's leftovers. Failing closed (crew#320).");`,
+    'process.exit(1)}',
+    `const floorAt=launch-${DELIVERABLE_FLOOR_MTIME_SLACK_MS};`,
+    'const fresh=(t)=>t>=floorAt;',
     'const found=[],missing=[];',
     'for(const p of want){',
     'let s=null;',
     'try{s=fs.statSync(p)}catch(e){s=null}',
     'if(s===null){missing.push(p+" (does not exist)");continue}',
     'if(s.isDirectory()){',
-    'let n=0;try{n=fs.readdirSync(p).length}catch(e){n=0}',
-    'if(n===0){missing.push(p+" (directory is empty)")}else{found.push(p+" (directory, "+n+" entries)")}',
+    'let names=[];try{names=fs.readdirSync(p)}catch(e){names=[]}',
+    'if(names.length===0){missing.push(p+" (directory is empty)");continue}',
+    'let n=0;',
+    'for(const e of names){let es=null;try{es=fs.statSync(pathmod.join(p,e))}catch(err){es=null}if(es!==null&&fresh(es.mtimeMs)){n++}}',
+    'if(n===0){missing.push(p+" (directory, "+names.length+" entries, but NONE written by this run — every entry predates the launch at "+iso(launch)+", so they are a PRIOR run\'s output)")}',
+    'else{found.push(p+" (directory, "+names.length+" entries, "+n+" written by this run)")}',
     'continue}',
     'if(s.size===0){missing.push(p+" (file is empty, 0 bytes)");continue}',
+    'if(!fresh(s.mtimeMs)){missing.push(p+" (STALE: last modified "+iso(s.mtimeMs)+", before this run launched at "+iso(launch)+" — it is a PRIOR run\'s artifact, not this run\'s)");continue}',
     'found.push(p+" ("+s.size+" bytes)");',
     '}',
-    'console.log("[wicked-crew] deliverable floor: this phase declared "+want.length+" artifact(s).");',
+    'console.log("[wicked-crew] deliverable floor: this phase declared "+want.length+" artifact(s); this run launched at "+iso(launch)+".");',
     'console.log("[wicked-crew] EXPECTED: "+(want.length?want.join(", "):"(none)"));',
     'console.log("[wicked-crew] FOUND:    "+(found.length?found.join(", "):"(nothing)"));',
     'if(missing.length===0){',
-    'console.log("[wicked-crew] every declared deliverable exists and carries bytes — done is re-derived from the artifact, not asserted.");',
+    'console.log("[wicked-crew] every declared deliverable exists, carries bytes, and was written by THIS run — done is re-derived from the artifact, not asserted.");',
     'process.exit(0)}',
     'console.log("[wicked-crew] MISSING:  "+missing.join(", "));',
-    `console.log(${JSON.stringify(DELIVERABLE_FLOOR_FAILURE_MARKER)}+" — the run reported done without producing the artifact(s) it was launched to produce. A prose reply is not a deliverable (crew#311).");`,
+    `console.log(${JSON.stringify(DELIVERABLE_FLOOR_FAILURE_MARKER)}+" — the run reported done without producing the artifact(s) it was launched to produce. A prose reply is not a deliverable (crew#311), and a prior run's leftover file is not this run's evidence (crew#320).");`,
     'process.exit(1);',
   ].join('');
 }
 
 /**
- * The floor PhaseDef for `paths`.
+ * The floor PhaseDef for `paths`, judged against `launchedAtMs`.
+ *
+ * `launchedAtMs` is positional and required rather than defaulted (crew#320): a default would let
+ * a new caller arm a floor that checks existence only, and the resulting run would report done on
+ * a leftover with nothing in its output saying the freshness half was never applied. The compiler
+ * asking the question is the point.
  *
  * `cmd[0]` is `process.execPath` — the ABSOLUTE path of the node binary already running the
  * daemon — not the bare name `node`. wicked-core preflights every Tool phase at launch
@@ -121,6 +182,7 @@ export function deliverableFloorScript(): string {
  */
 export function deliverableFloorPhase(
   paths: readonly string[],
+  launchedAtMs: number,
   dependsOn: string[] = [],
 ): PhaseDef {
   return {
@@ -128,7 +190,9 @@ export function deliverableFloorPhase(
     kind: 'test',
     executor: {
       type: 'tool',
-      cmd: [process.execPath, '-e', deliverableFloorScript(), ...paths],
+      // The timestamp rides ahead of the paths as its own argv slot: a path is arbitrary user
+      // text and could itself look like a number, so position — not parsing — separates them.
+      cmd: [process.execPath, '-e', deliverableFloorScript(), String(launchedAtMs), ...paths],
     },
     gate_type: 'execution',
     gate: 'auto',
@@ -160,11 +224,17 @@ export function deliverableFloorPhase(
  * Throws on an empty `paths` list — a floor over nothing would pass vacuously, which is the
  * defect, not the fix. Throws on a def that already carries the floor phase, for the same
  * ambiguity reason `composeDeliverWorkflow` does.
+ *
+ * `launchedAtMs` defaults to composition time, which is the correct instant on every path that
+ * exists: composition is the last thing that happens before `core.launchRun`, so nothing this run
+ * produces can predate it, and a nonsense value is rejected here rather than being discovered by
+ * the tool phase minutes later (crew#320).
  */
 export function composeDeliverableFloor(
   base: WorkflowDef,
   runId: string,
   paths: readonly string[],
+  launchedAtMs: number = Date.now(),
 ): WorkflowDef {
   if (paths.length === 0) {
     throw new Error(
@@ -176,6 +246,13 @@ export function composeDeliverableFloor(
       throw new Error('requireDeliverables: a declared deliverable path must not be blank');
     }
   }
+  if (!Number.isFinite(launchedAtMs) || launchedAtMs <= 0) {
+    throw new Error(
+      `requireDeliverables: launchedAtMs must be a positive epoch-millisecond timestamp, got ` +
+        `${String(launchedAtMs)} — the floor compares it against each artifact's mtime to prove ` +
+        `THIS run produced them`,
+    );
+  }
   if (base.phases.some((p) => p.id === DELIVERABLE_FLOOR_PHASE_ID)) {
     throw new Error(
       `workflow '${base.id}' already has a '${DELIVERABLE_FLOOR_PHASE_ID}' phase — launch it without requireDeliverables`,
@@ -186,6 +263,9 @@ export function composeDeliverableFloor(
   const composedId = `${base.id}-verified-${safeRunId}`.slice(0, 128);
   return {
     id: composedId,
-    phases: [...base.phases, deliverableFloorPhase(paths, last !== undefined ? [last.id] : [])],
+    phases: [
+      ...base.phases,
+      deliverableFloorPhase(paths, launchedAtMs, last !== undefined ? [last.id] : []),
+    ],
   };
 }

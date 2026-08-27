@@ -7,7 +7,7 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,12 +20,27 @@ import {
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
 
-/** Run the floor exactly as wicked-core's `run_tool_cmd` will: argv[0] then the declared paths. */
-function runFloor(paths: string[]): { code: number; out: string } {
-  const phase = deliverableFloorPhase(paths);
+/**
+ * Run the floor exactly as wicked-core's `run_tool_cmd` will: argv[0] then the phase's argv.
+ *
+ * `launchedAtMs` defaults to an hour in the PAST so every pre-existing assertion below keeps
+ * testing what it was written to test (existence + bytes) rather than accidentally testing
+ * freshness — the fixtures are written moments before the call, so they are trivially newer.
+ */
+function runFloor(
+  paths: string[],
+  launchedAtMs: number = Date.now() - 3_600_000,
+): { code: number; out: string } {
+  const phase = deliverableFloorPhase(paths, launchedAtMs);
   const cmd = (phase.executor as { type: 'tool'; cmd: string[] }).cmd;
   const r = spawnSync(cmd[0]!, cmd.slice(1), { encoding: 'utf8' });
   return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+}
+
+/** Backdate a path so it looks like a PRIOR run's leftover. */
+function backdate(p: string, msAgo: number): void {
+  const t = (Date.now() - msAgo) / 1000;
+  utimesSync(p, t, t);
 }
 
 describe('the floor script (executed, not grepped)', () => {
@@ -80,6 +95,66 @@ describe('the floor script (executed, not grepped)', () => {
     expect(out).toContain('directory is empty');
   });
 
+  // THE crew#320 REPRODUCER: the interactive seams copy the deliverable to `outPath` and never
+  // remove it, and demo/draft/edit run dirs are keyed by DOCUMENT ID — so a second run over the
+  // same key finds the PREVIOUS run's file sitting there. Existence alone therefore proves
+  // nothing about THIS run: the artifact is there, but this run did not produce it. That is the
+  // "done asserted rather than derived" shape the floor exists to eliminate, one level in.
+  it('FAILS a STALE artifact — a PRIOR run\'s file is not this run\'s evidence (crew#320)', () => {
+    const stale = join(dir, 'stale-from-a-previous-run.html');
+    writeFileSync(stale, '<html>produced by the run before this one</html>');
+    backdate(stale, 3_600_000); // one hour before this run launched
+    const launchedAt = Date.now();
+
+    const { code, out } = runFloor([stale], launchedAt);
+    expect(code).toBe(1);
+    expect(out).toContain(DELIVERABLE_FLOOR_FAILURE_MARKER);
+    expect(out).toContain(stale);
+    expect(out).toContain('STALE');
+    // The report must name BOTH clocks, or an operator cannot tell a stale artifact from a
+    // mis-set launch timestamp.
+    expect(out).toContain(new Date(launchedAt).toISOString());
+    expect(out).toContain('FOUND:    (nothing)');
+  });
+
+  it('PASSES the same path once THIS run rewrites it — freshness, not a blanket ban', () => {
+    const p = join(dir, 'rewritten.html');
+    writeFileSync(p, 'v1');
+    backdate(p, 3_600_000);
+    const launchedAt = Date.now();
+    expect(runFloor([p], launchedAt).code).toBe(1);
+    // The run does its job: same path, new bytes, mtime now after the launch.
+    writeFileSync(p, '<html>v2, produced by this run</html>');
+    expect(runFloor([p], launchedAt).code).toBe(0);
+  });
+
+  it('FAILS a directory whose only entries predate the launch, and PASSES once one is fresh', () => {
+    const d = join(dir, 'stale-fragments');
+    mkdirSync(d, { recursive: true });
+    const old = join(d, 'fragment-from-last-run.html');
+    writeFileSync(old, '<p>old</p>');
+    backdate(old, 3_600_000);
+    backdate(d, 3_600_000);
+    const launchedAt = Date.now();
+
+    const stale = runFloor([d], launchedAt);
+    expect(stale.code).toBe(1);
+    expect(stale.out).toContain('NONE written by this run');
+
+    writeFileSync(join(d, 'fragment-from-this-run.html'), '<p>new</p>');
+    expect(runFloor([d], launchedAt).code).toBe(0);
+  });
+
+  it('FAILS CLOSED when armed without a launch timestamp — unknowable freshness is not freshness', () => {
+    const p = join(dir, 'fresh-but-unjudgeable.html');
+    writeFileSync(p, 'content');
+    const r = spawnSync(process.execPath, ['-e', deliverableFloorScript(), 'not-a-timestamp', p], {
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(1);
+    expect(`${r.stdout}${r.stderr}`).toContain(DELIVERABLE_FLOOR_FAILURE_MARKER);
+  });
+
   it('FAILS on a PARTIAL delivery and names both halves — three declared, one written', () => {
     const wrote = join(dir, 'wrote.html');
     writeFileSync(wrote, 'x'.repeat(40));
@@ -102,11 +177,13 @@ describe('the floor script (executed, not grepped)', () => {
     const script = deliverableFloorScript();
     expect(script).not.toContain('stdin');
     const missing = join(dir, 'still-not-there.html');
-    const r = spawnSync(process.execPath, ['-e', script, missing], {
+    const r = spawnSync(process.execPath, ['-e', script, String(Date.now() - 3_600_000), missing], {
       encoding: 'utf8',
       input: narration,
     });
     expect(r.status).toBe(1);
+    // Not the fail-closed branch: the timestamp above is valid, so this is the file verdict.
+    expect(`${r.stdout}${r.stderr}`).toContain('does not exist');
   });
 
   it('handles paths carrying spaces, quotes and shell metacharacters (argv, never a shell string)', () => {
@@ -120,7 +197,8 @@ describe('the floor script (executed, not grepped)', () => {
 });
 
 describe('the floor PhaseDef', () => {
-  const phase = deliverableFloorPhase(['/tmp/x.html'], ['draft']);
+  const LAUNCHED_AT = 1_756_000_000_000;
+  const phase = deliverableFloorPhase(['/tmp/x.html'], LAUNCHED_AT, ['draft']);
 
   it('is an EXECUTION-gated phase that runs a deterministic tool, not an agent', () => {
     expect(phase.id).toBe(DELIVERABLE_FLOOR_PHASE_ID);
@@ -128,9 +206,23 @@ describe('the floor PhaseDef', () => {
     expect(phase.gate).toBe('auto');
     expect(phase.executor).toEqual({
       type: 'tool',
-      cmd: [process.execPath, '-e', deliverableFloorScript(), '/tmp/x.html'],
+      cmd: [
+        process.execPath,
+        '-e',
+        deliverableFloorScript(),
+        String(LAUNCHED_AT),
+        '/tmp/x.html',
+      ],
     });
     expect(phase.depends_on).toEqual(['draft']);
+  });
+
+  // crew#320: position, not parsing, separates the timestamp from the paths — a declared path is
+  // arbitrary text and may itself be all digits.
+  it('carries the launch timestamp as its OWN argv slot, ahead of the paths', () => {
+    const numericPath = deliverableFloorPhase(['/inbox/12345'], LAUNCHED_AT);
+    const cmd = (numericPath.executor as { cmd: string[] }).cmd;
+    expect(cmd.slice(3)).toEqual([String(LAUNCHED_AT), '/inbox/12345']);
   });
 
   it('names an ABSOLUTE, existing interpreter — wicked-core preflights tool binaries at launch', () => {
@@ -178,6 +270,37 @@ describe('composeDeliverableFloor (per-run, never mutating the shared def)', () 
     const once = composeDeliverableFloor(base, 'run-abc', ['/tmp/out.html']);
     expect(() => composeDeliverableFloor(once, 'run-abc', ['/tmp/out.html'])).toThrow(
       /already has a 'verify-deliverables' phase/,
+    );
+  });
+
+  // crew#320: the floor phase is only as good as the instant it compares against, so the
+  // timestamp has to reach the argv, and a nonsense one has to be caught at compose time rather
+  // than discovered by the tool phase minutes into the run.
+  it('threads the launch timestamp through to the floor phase argv', () => {
+    const composed = composeDeliverableFloor(base, 'run-abc', ['/tmp/out.html'], 1_756_000_000_000);
+    const floor = composed.phases[composed.phases.length - 1]!;
+    expect((floor.executor as { cmd: string[] }).cmd.slice(3)).toEqual([
+      '1756000000000',
+      '/tmp/out.html',
+    ]);
+  });
+
+  it('defaults the launch timestamp to composition time — the last instant before launch', () => {
+    const before = Date.now();
+    const composed = composeDeliverableFloor(base, 'run-abc', ['/tmp/out.html']);
+    const after = Date.now();
+    const floor = composed.phases[composed.phases.length - 1]!;
+    const stamp = Number((floor.executor as { cmd: string[] }).cmd[3]);
+    expect(stamp).toBeGreaterThanOrEqual(before);
+    expect(stamp).toBeLessThanOrEqual(after);
+  });
+
+  it('REFUSES a non-timestamp — an unjudgeable freshness check is not a freshness check', () => {
+    expect(() =>
+      composeDeliverableFloor(base, 'run-abc', ['/tmp/out.html'], Number.NaN),
+    ).toThrow(/positive epoch-millisecond timestamp/);
+    expect(() => composeDeliverableFloor(base, 'run-abc', ['/tmp/out.html'], 0)).toThrow(
+      /positive epoch-millisecond timestamp/,
     );
   });
 
