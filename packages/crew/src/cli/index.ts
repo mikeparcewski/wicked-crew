@@ -78,10 +78,19 @@ function stateHome(): string {
  *
  * Runs for `serve`, `start` and `resume` alike (all three go through `bootstrap`), so every entry
  * point that can accept `--db` gets the same isolation.
+ *
+ * An override that IS set is normalized in place (Copilot on #339). Every in-repo reader goes
+ * through `projectGraphRoot`, which trims — but this variable is inherited by every process the
+ * daemon spawns, and out there crew cannot promise the reader trims anything. Writing back the
+ * resolved value makes the exported environment say what the daemon actually resolved, once, at
+ * the boundary where the operator's string arrives.
  */
 function bindProjectGraphRoot(dbPath: string): void {
-  const override = process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-  if (override !== undefined && override.trim() !== '') return;
+  const override = process.env['WICKED_CREW_PROJECT_GRAPH_ROOT']?.trim();
+  if (override !== undefined && override !== '') {
+    process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = override;
+    return;
+  }
   const root = projectGraphRootForDb(dbPath);
   if (root !== null) process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = root;
 }

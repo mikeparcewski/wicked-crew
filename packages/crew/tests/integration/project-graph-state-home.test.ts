@@ -41,20 +41,28 @@ import { fileURLToPath } from 'node:url';
 
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), '../../dist/cli/index.js');
 
-let proc: ChildProcess | undefined;
 let root: string;
 let fakeHome: string;
 let stateHome: string;
-let baseUrl: string;
 
-/** The daemon's stdout up to now — the READY line, and the whole log if a boot goes wrong. */
-let out = '';
-/** The parsed WICKED_CREW_READY payload — the machine-readable line an evidence harness reads. */
-let readyFields: Record<string, unknown> = {};
+/** Every daemon this file started, so `afterAll` can end them all even if a test threw. */
+const daemons: ChildProcess[] = [];
 
-async function bootDaemon(): Promise<void> {
-  // A CLEAN env: the vitest setup file exports WICKED_CREW_* overrides into this process, and
-  // inheriting them would pre-answer the very question this test asks.
+interface Daemon {
+  /** `<base>/api/v1`. */
+  baseUrl: string;
+  /** The parsed WICKED_CREW_READY payload — the machine-readable line an evidence harness reads. */
+  ready: Record<string, unknown>;
+}
+
+/**
+ * Boot the built CLI against the scratch state home and wait for its readiness line.
+ *
+ * The child env is built from scratch rather than inherited: the vitest setup file exports
+ * `WICKED_CREW_*` overrides into this process, and passing them down would pre-answer the very
+ * question these tests ask.
+ */
+async function bootDaemon(extraEnv: NodeJS.ProcessEnv = {}): Promise<Daemon> {
   const env: NodeJS.ProcessEnv = {
     ...(process.env['PATH'] !== undefined ? { PATH: process.env['PATH'] } : {}),
     ...(process.env['SystemRoot'] !== undefined ? { SystemRoot: process.env['SystemRoot'] } : {}),
@@ -63,14 +71,18 @@ async function bootDaemon(): Promise<void> {
     HOME: fakeHome,
     USERPROFILE: fakeHome, // homedir() reads this one on Windows
     WICKED_MEMORY_EMBEDDER: 'hash',
+    ...extraEnv,
   };
-  proc = spawn(
+  // A store per daemon: two engines on one core.db is a writer race, not a test.
+  const storeDir = join(stateHome, `d${String(daemons.length)}`);
+  mkdirSync(storeDir, { recursive: true });
+  const proc = spawn(
     process.execPath,
     [
       DIST,
       'serve',
-      '--db', join(stateHome, 'core.db'),
-      '--bus-db', join(stateHome, 'bus.db'),
+      '--db', join(storeDir, 'core.db'),
+      '--bus-db', join(storeDir, 'bus.db'),
       '--port', '0',
       '--stub',
       // The cross-product event seams are irrelevant here and would only add a bus to boot.
@@ -81,6 +93,10 @@ async function bootDaemon(): Promise<void> {
     ],
     { env, stdio: ['ignore', 'pipe', 'pipe'] },
   );
+  daemons.push(proc);
+
+  /** This daemon's output so far — the READY line, and the whole log if the boot goes wrong. */
+  let out = '';
   proc.stdout?.on('data', (c: Buffer) => {
     out += c.toString();
   });
@@ -89,7 +105,10 @@ async function bootDaemon(): Promise<void> {
   });
 
   const ready = await new Promise<Record<string, unknown>>((res, rej) => {
-    const timer = setTimeout(() => rej(new Error(`daemon never printed WICKED_CREW_READY:\n${out}`)), 90_000);
+    const timer = setTimeout(
+      () => rej(new Error(`daemon never printed WICKED_CREW_READY:\n${out}`)),
+      90_000,
+    );
     const poll = setInterval(() => {
       const line = out.split('\n').find((l) => l.startsWith('WICKED_CREW_READY '));
       if (line === undefined) return;
@@ -97,15 +116,21 @@ async function bootDaemon(): Promise<void> {
       clearTimeout(timer);
       res(JSON.parse(line.slice('WICKED_CREW_READY '.length)) as Record<string, unknown>);
     }, 100);
-    proc?.on('exit', (code) => {
+    proc.on('exit', (code) => {
       clearInterval(poll);
       clearTimeout(timer);
       rej(new Error(`daemon exited with ${String(code)} before READY:\n${out}`));
     });
   });
-  baseUrl = `http://127.0.0.1:${String(ready['port'])}/api/v1`;
-  readyFields = ready;
+  return { baseUrl: `http://127.0.0.1:${String(ready['port'])}/api/v1`, ready };
 }
+
+/** The store a daemon was given — its `--db` parent, which is where its graphs must land. */
+function storeDirOf(d: Daemon): string {
+  return dirname(String(d.ready['db']));
+}
+
+let isolated: Daemon;
 
 beforeAll(async () => {
   if (!existsSync(DIST)) {
@@ -118,19 +143,19 @@ beforeAll(async () => {
   stateHome = join(root, 'state');
   mkdirSync(fakeHome, { recursive: true });
   mkdirSync(stateHome, { recursive: true });
-  await bootDaemon();
+  isolated = await bootDaemon();
 }, 120_000);
 
 afterAll(async () => {
-  proc?.kill('SIGTERM');
+  for (const p of daemons) p.kill('SIGTERM');
   await new Promise((r) => setTimeout(r, 1000));
-  proc?.kill('SIGKILL');
+  for (const p of daemons) p.kill('SIGKILL');
   if (root !== undefined) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe('a daemon given --db keeps its project graph under that state home (crew#330)', () => {
   it('resolves the project graph next to the store it was given, NOT under $HOME', async () => {
-    const created = await fetch(`${baseUrl}/projects`, {
+    const created = await fetch(`${isolated.baseUrl}/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'crew330-isolation' }),
@@ -140,13 +165,13 @@ describe('a daemon given --db keeps its project graph under that state home (cre
 
     // Both candidates seeded: the answer names the root the daemon CHOSE, not the only one present.
     const underHome = join(fakeHome, '.wicked-crew', 'project-graphs', projectId, 'code-graph.db');
-    const underState = join(stateHome, 'project-graphs', projectId, 'code-graph.db');
+    const underState = join(storeDirOf(isolated), 'project-graphs', projectId, 'code-graph.db');
     for (const db of [underHome, underState]) {
       mkdirSync(dirname(db), { recursive: true });
       writeFileSync(db, 'stub-graph');
     }
 
-    const res = await fetch(`${baseUrl}/projects/${projectId}/graph`);
+    const res = await fetch(`${isolated.baseUrl}/projects/${projectId}/graph`);
     expect(res.status).toBe(200);
     const { status } = (await res.json()) as { status: { dbPath: string | null } };
 
@@ -160,6 +185,20 @@ describe('a daemon given --db keeps its project graph under that state home (cre
     // The half of this defect that made it survive: nothing announced the root, so a harness that
     // read every field of WICKED_CREW_READY still could not tell an isolated daemon from one
     // quietly filling the developer's home. `db` moved with the flag and this did not, unsaid.
-    expect(readyFields['projectGraphs']).toBe(join(stateHome, 'project-graphs'));
+    expect(isolated.ready['projectGraphs']).toBe(join(storeDirOf(isolated), 'project-graphs'));
   });
+
+  it('lets an explicit WICKED_CREW_PROJECT_GRAPH_ROOT beat --db, and reports it TRIMMED', async () => {
+    // Precedence: the documented override answers this question, so the --db derivation must not
+    // overrule a caller who already answered it. And the value is normalized ONCE at the boundary
+    // (Copilot on #339) — a stray space, the ordinary cost of copying a path out of a log line,
+    // must not become a directory name nobody can type again, nor be exported to every child
+    // process the daemon spawns.
+    const explicit = join(root, 'elsewhere', 'graphs');
+    const withOverride = await bootDaemon({ WICKED_CREW_PROJECT_GRAPH_ROOT: `  ${explicit}  ` });
+    expect(withOverride.ready['projectGraphs']).toBe(explicit);
+    expect(withOverride.ready['projectGraphs']).not.toBe(
+      join(storeDirOf(withOverride), 'project-graphs'),
+    );
+  }, 120_000);
 });
