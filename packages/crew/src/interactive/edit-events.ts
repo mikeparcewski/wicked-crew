@@ -280,8 +280,9 @@ export interface InteractiveEditOptions {
   heartbeatMs?: number;
   /** Ledger file (default `~/.wicked-crew/interactive-edit-ledger.json`). */
   ledgerPath?: string;
-  /** Where handoff files land and workers write edited fragments
-   *  (default `~/.wicked-crew/interactive-edits`). */
+  /** Root under which each handoff gets its OWN subdirectory (`<editDir>/<safeKey>/`) holding
+   *  that handoff's JSON + edited fragments (default `~/.wicked-crew/interactive-edits`). Only
+   *  the per-handoff subdirectory is ever declared as a run's write root — see crew#314. */
   editDir?: string;
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
@@ -683,10 +684,16 @@ export async function startInteractiveEditSubscriber(
       if (f.key === key) return;
     }
 
-    const outDir = join(editDir, key.replace(':', '-'));
-    mkdirSync(outDir, { recursive: true });
-    const items = handoffFileItems(handoff, outDir);
-    const handoffPath = join(editDir, `${key.replace(':', '-')}-handoff.json`);
+    // PER-HANDOFF ISOLATION (crew#314, same class as crew#313's draft/chat fix): every file this
+    // run reads or writes lives under ONE per-handoff directory, so the write root declared below
+    // can be that directory instead of the whole shared `editDir`. The handoff JSON used to sit
+    // directly under `editDir`, which forced the wholesale declaration and handed each worker
+    // read+write access to every SIBLING handoff's fragments and instructions.
+    const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const runDir = join(editDir, safeKey);
+    mkdirSync(runDir, { recursive: true });
+    const items = handoffFileItems(handoff, runDir);
+    const handoffPath = join(runDir, 'handoff.json');
     writeFileSync(
       handoffPath,
       JSON.stringify({ document_id: handoff.documentId, version: handoff.version, items }, null, 2),
@@ -710,11 +717,13 @@ export async function startInteractiveEditSubscriber(
         // The 7b surface: a project-bound doc's governed edits are FILED — the run lands in
         // the project's activity feed instead of floating unattributed.
         ...(handoff.projectId !== undefined ? { projectId: handoff.projectId } : {}),
-        // The task names the handoff JSON + per-block output files under `editDir`, which sits
+        // The task names the handoff JSON + per-block output files under `runDir`, which sits
         // OUTSIDE the unit's sandbox — the wrapped-CLI boundary would deny both the reads and
         // the deliverable writes (crew#263, same shape as the draft path). One declared root
-        // covers both: write roots are readable (wicked-core#259).
-        extraWriteRoots: [editDir],
+        // covers both: write roots are readable (wicked-core#259). It is the PER-HANDOFF dir,
+        // never the shared `editDir` (crew#314): a wholesale declaration would let this worker
+        // read and overwrite every other in-flight handoff's fragments.
+        extraWriteRoots: [runDir],
         // THE DELIVERABLE FLOOR (crew#311): EVERY handed-off fragment file is a deliverable, so
         // a run that rewrote three blocks and wrote one file fails too — the floor is per-path,
         // not "did anything land". Without it the engine's substance floor passes a worker
