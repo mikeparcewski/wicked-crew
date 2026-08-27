@@ -49,6 +49,8 @@ let baseUrl: string;
 
 /** The daemon's stdout up to now — the READY line, and the whole log if a boot goes wrong. */
 let out = '';
+/** The parsed WICKED_CREW_READY payload — the machine-readable line an evidence harness reads. */
+let readyFields: Record<string, unknown> = {};
 
 async function bootDaemon(): Promise<void> {
   // A CLEAN env: the vitest setup file exports WICKED_CREW_* overrides into this process, and
@@ -102,6 +104,7 @@ async function bootDaemon(): Promise<void> {
     });
   });
   baseUrl = `http://127.0.0.1:${String(ready['port'])}/api/v1`;
+  readyFields = ready;
 }
 
 beforeAll(async () => {
@@ -151,5 +154,12 @@ describe('a daemon given --db keeps its project graph under that state home (cre
     // the developer's real ~/.wicked-crew, keyed by a project id only the scratch store knows.
     expect(status.dbPath).toBe(underState);
     expect(status.dbPath).not.toBe(underHome);
+  });
+
+  it('SAYS where the graphs land on the readiness line', () => {
+    // The half of this defect that made it survive: nothing announced the root, so a harness that
+    // read every field of WICKED_CREW_READY still could not tell an isolated daemon from one
+    // quietly filling the developer's home. `db` moved with the flag and this did not, unsaid.
+    expect(readyFields['projectGraphs']).toBe(join(stateHome, 'project-graphs'));
   });
 });
