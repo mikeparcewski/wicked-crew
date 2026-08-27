@@ -76,8 +76,8 @@ function stateHome(): string {
  * `WICKED_CREW_PROJECT_GRAPH_ROOT` still wins — it is the documented override, and a caller who set
  * it has already answered this question.
  *
- * Runs for `serve`, `start` and `resume` alike (all three go through `parseBootstrap`), so every
- * entry point that can accept `--db` gets the same isolation.
+ * Runs for `serve`, `start` and `resume` alike (all three go through `bootstrap`), so every entry
+ * point that can accept `--db` gets the same isolation.
  */
 function bindProjectGraphRoot(dbPath: string): void {
   const override = process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
@@ -88,7 +88,6 @@ function bindProjectGraphRoot(dbPath: string): void {
 
 function parseBootstrap(args: string[]): BootstrapOpts {
   const dbPath = flag(args, '--db') ?? join(stateHome(), 'core.db');
-  bindProjectGraphRoot(dbPath);
   const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
   const port = portStr !== undefined ? Number(portStr) : 7701;
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
@@ -163,6 +162,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // environment. Makes a plain `npm install` deployment fully self-contained (no
   // global installs, no hand-made symlinks).
   ensureBridgesOnPath();
+  // Before ANY surface can ask where a project graph lives (crew#330).
+  bindProjectGraphRoot(opts.dbPath);
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
