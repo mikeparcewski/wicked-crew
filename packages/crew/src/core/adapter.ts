@@ -76,6 +76,16 @@ export function settingsFilePath(): string {
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 
+/**
+ * Per-key ceiling on a `studio.*` settings value, as the UTF-8 byte length of its JSON form.
+ *
+ * The same 512KiB limit `PUT /settings` enforces (`STUDIO_SETTINGS_MAX_BYTES`, api/routes.ts) —
+ * restated rather than imported because routes.ts imports THIS module, so a shared constant here
+ * would close an import cycle. The two spellings must stay in step; the read-path test restates
+ * the number a third time so a change to either side breaks a test rather than a deployment.
+ */
+const STUDIO_SETTINGS_MAX_BYTES = 512 * 1024;
+
 /** Read user-registered workflow overlays from `dir` (the same dir `registerWorkflow` writes to).
  *
  * Skips: files whose id matches a built-in (those are `_writeBuiltinOverlay` artifacts written FOR
@@ -1715,6 +1725,30 @@ export class CoreAdapter {
       if ('worker_config_root' in parsed) {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
+      }
+      // Skin-owned `studio.*` blobs (crew#325): the same per-key cap the PUT /settings route
+      // enforces. The write cap alone cannot hold it — `updateSettings` reads through here, so a
+      // value hand-edited past the cap is served in full AND carried forward by a later patch that
+      // never names it, which makes the ceiling un-lowerable. Dropped LOUDLY: the daemon cannot
+      // interpret these values, so an operator whose theme "reset itself" has nothing to go on
+      // unless the drop names the key and the limit (silence is what made #323 invisible).
+      // Namespace prefix, not the route's stricter key regex — the cap is about bytes in
+      // settings.json, and a hand-edited `studio.Foo` the route would never have admitted costs
+      // exactly as much to store and to propagate.
+      const bag = parsed as Record<string, unknown>;
+      for (const key of Object.keys(bag)) {
+        if (!key.startsWith('studio.')) continue;
+        const bytes = Buffer.byteLength(JSON.stringify(bag[key]), 'utf8');
+        if (bytes > STUDIO_SETTINGS_MAX_BYTES) {
+          delete bag[key];
+          console.warn(
+            `[settings] dropped ${key} from ${settingsFilePath()}: ${bytes} bytes of JSON, over ` +
+              `the ${STUDIO_SETTINGS_MAX_BYTES}-byte per-key cap on studio.* settings. PUT ` +
+              `/settings refuses a write this size, so this value was hand-edited in or predates ` +
+              `the cap; it is dropped on read rather than served and rewritten forward. Shrink it ` +
+              `in the file to get it back — nothing else in settings.json is affected (crew#325).`,
+          );
+        }
       }
       return { ...DEFAULT_SETTINGS, ...parsed };
     } catch {
