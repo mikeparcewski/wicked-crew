@@ -62,7 +62,11 @@ interface Daemon {
  * `WICKED_CREW_*` overrides into this process, and passing them down would pre-answer the very
  * question these tests ask.
  */
-async function bootDaemon(extraEnv: NodeJS.ProcessEnv = {}): Promise<Daemon> {
+async function bootDaemon(
+  extraEnv: NodeJS.ProcessEnv = {},
+  /** `false` boots with NO `--db`/`--bus-db`, the shape an ordinary local daemon has. */
+  isolateStore = true,
+): Promise<Daemon> {
   const env: NodeJS.ProcessEnv = {
     ...(process.env['PATH'] !== undefined ? { PATH: process.env['PATH'] } : {}),
     ...(process.env['SystemRoot'] !== undefined ? { SystemRoot: process.env['SystemRoot'] } : {}),
@@ -81,8 +85,8 @@ async function bootDaemon(extraEnv: NodeJS.ProcessEnv = {}): Promise<Daemon> {
     [
       DIST,
       'serve',
-      '--db', join(storeDir, 'core.db'),
-      '--bus-db', join(storeDir, 'bus.db'),
+      ...(isolateStore ? ['--db', join(storeDir, 'core.db'), '--bus-db', join(storeDir, 'bus.db')] : []),
+      // ALWAYS an ephemeral port, `--db` or not: 7701 is where a developer's real daemon listens.
       '--port', '0',
       '--stub',
       // The cross-product event seams are irrelevant here and would only add a bus to boot.
@@ -200,5 +204,15 @@ describe('a daemon given --db keeps its project graph under that state home (cre
     expect(withOverride.ready['projectGraphs']).not.toBe(
       join(storeDirOf(withOverride), 'project-graphs'),
     );
+  }, 120_000);
+
+  it('leaves a daemon with NO --db exactly where it was — nothing existing relocates', async () => {
+    // The compatibility half of the fix. Deriving the root from the store must not MOVE the graphs
+    // of every ordinary local daemon, whose store is `<state home>/core.db` already: the derivation
+    // has to land on the same `~/.wicked-crew/project-graphs` those daemons have been using, or
+    // this change silently orphans real graphs to fix scratch ones.
+    const plain = await bootDaemon({}, false);
+    expect(plain.ready['projectGraphs']).toBe(join(fakeHome, '.wicked-crew', 'project-graphs'));
+    expect(plain.ready['db']).toBe(join(fakeHome, '.wicked-crew', 'core.db'));
   }, 120_000);
 });
