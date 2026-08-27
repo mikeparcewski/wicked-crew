@@ -163,9 +163,13 @@ describe('the project-graph root implied by a --db (crew#330)', () => {
     // The observed failure: `serve --db <scratch>/core.db --bus-db <scratch>/bus.db` moved the
     // engine store and the bus, and left a 41.7 MB graph in the developer's real ~/.wicked-crew,
     // keyed by project ids that existed only in the scratch store — so nothing could reap them.
-    expect(projectGraphRootForDb(join(sep, 'scratch', 'core.db'))).toBe(
-      join(sep, 'scratch', 'project-graphs'),
-    );
+    //
+    // The expectation is `resolve`d, not spelled with a bare `sep` (Copilot on #339): a root-
+    // relative path is only half-absolute on win32, where `resolve` supplies the current drive.
+    // `\scratch\project-graphs` would then fail against a correct `C:\scratch\project-graphs` —
+    // a green POSIX suite hiding a test that cannot pass on Windows at all.
+    const storeDir = resolve(join(sep, 'scratch'));
+    expect(projectGraphRootForDb(join(storeDir, 'core.db'))).toBe(join(storeDir, 'project-graphs'));
   });
 
   it('resolves a relative --db against the cwd, exactly as the store itself is resolved', () => {
