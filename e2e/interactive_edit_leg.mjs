@@ -343,7 +343,9 @@ try {
   check('governed edit run completed', finalRun.session.status === 'completed', `status=${finalRun.session.status}, units=${finalRun.units.length}`);
 
   // The handoff FILE carried ONLY the structural item (the deterministic one never climbed).
-  const handoffPath = join(EDITS, `${DOC}-v2-handoff.json`);
+  // crew#314: per-handoff isolation — the JSON lives inside `<editDir>/<doc>-v<n>/`, the only
+  // directory that handoff's run may write to (a sibling handoff's state stays out of reach).
+  const handoffPath = join(EDITS, `${DOC}-v2`, 'handoff.json');
   const handoff = existsSync(handoffPath) ? JSON.parse(readFileSync(handoffPath, 'utf8')) : null;
   check(
     'handoff file carries ONLY the structural item',

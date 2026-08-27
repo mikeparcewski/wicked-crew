@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 import {
   FEEDBACK_PROCESSED,
   EDIT_COMPLETED,
@@ -473,12 +473,13 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     expect(launch.clisJson).toBe(SEATS);
     expect(launch.projectId).toBeUndefined(); // unbound doc → unfiled run
     expect(launch.problem).toContain('"spike-doc"');
-    const handoffPath = join(dir, 'edits', 'spike-doc-v2-handoff.json');
+    const handoffPath = join(dir, 'edits', 'spike-doc-v2', 'handoff.json');
     expect(launch.problem).toContain(handoffPath);
     // crew#263: the edit inbox rides the launch as a declared write root — the task names the
-    // handoff JSON + output files under editDir, all outside the unit sandbox; without the
-    // declaration the wrapped-CLI boundary denies both the reads and the deliverable writes.
-    expect(launch.extraWriteRoots).toEqual([join(dir, 'edits')]);
+    // handoff JSON + output files, all outside the unit sandbox; without the declaration the
+    // wrapped-CLI boundary denies both the reads and the deliverable writes. crew#314: that
+    // root is the PER-HANDOFF directory, never the shared editDir.
+    expect(launch.extraWriteRoots).toEqual([join(dir, 'edits', 'spike-doc-v2')]);
 
     // The handoff FILE carries the fragments + index-named output paths.
     const handoffFile = JSON.parse(readFileSync(handoffPath, 'utf8')) as {
@@ -527,6 +528,56 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
       ),
     );
     expect(sub.ledger.get('spike-doc:v2')?.emittedAt).toBeTruthy();
+  });
+
+  it('crew#314: each handoff declares ONLY its own subdirectory — a run cannot reach a sibling handoff’s state', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    await arm(engine);
+
+    // Two handoffs, live at the same time: a different doc, and a different version of the
+    // first doc (the two ways sibling runs coexist in one editDir).
+    await emitFeedbackProcessed(bus);
+    await waitFor(() => engine.launches.length === 1);
+    await emitFeedbackProcessed(bus, { document_id: 'other-doc' });
+    await waitFor(() => engine.launches.length === 2);
+    await emitFeedbackProcessed(bus, { version: 7 });
+    await waitFor(() => engine.launches.length === 3);
+
+    const editDir = join(dir, 'edits');
+    const covers = (root: string, p: string): boolean => {
+      const rel = relative(root, p);
+      return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    };
+
+    // Every declared root is a PROPER subdirectory of editDir — never editDir itself. A
+    // wholesale `editDir` declaration is exactly the cross-run exposure crew#314 reports.
+    const roots = engine.launches.map((l) => {
+      expect(l.extraWriteRoots).toHaveLength(1);
+      const root = l.extraWriteRoots![0]!;
+      expect(root, 'the shared inbox must never be the declared root').not.toBe(editDir);
+      expect(covers(editDir, root)).toBe(true);
+      return root;
+    });
+    expect(new Set(roots).size, 'each handoff owns a distinct directory').toBe(3);
+
+    // …and every file a run is told to touch lives inside ITS root and outside every sibling's.
+    for (const [i, launch] of engine.launches.entries()) {
+      const owned = [...launch.requireDeliverables!];
+      // The handoff JSON moved under the run dir too — while it sat directly in editDir it
+      // FORCED the wholesale declaration.
+      const handoffPath = join(roots[i]!, 'handoff.json');
+      expect(existsSync(handoffPath), 'the handoff JSON lives inside the run dir').toBe(true);
+      expect(launch.problem).toContain(handoffPath);
+      owned.push(handoffPath);
+      for (const p of owned) {
+        expect(covers(roots[i]!, p)).toBe(true);
+        for (const [j, other] of roots.entries()) {
+          if (i === j) continue;
+          expect(covers(other, p), `run ${j} must not reach run ${i}'s ${p}`).toBe(false);
+        }
+      }
+    }
   });
 
   it('files the run into the doc’s project when the handoff carries project_id (7b)', async () => {
