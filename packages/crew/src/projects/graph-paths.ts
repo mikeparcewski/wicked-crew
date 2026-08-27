@@ -16,23 +16,39 @@
  * and writing it into the first member's tree would make repo A's working directory grow with repo
  * B's symbols. It goes in the daemon's own state directory.
  *
- * # Why `~/.wicked-crew/project-graphs/<projectId>/`
+ * # Why `<state home>/project-graphs/<projectId>/`
  *
- * `~/.wicked-crew/` is already where this package keeps crew-side per-project state that the engine
- * does not own — `project-settings.json` (DES-MERGE-001 §7.1) sits there today. The project graph is
- * exactly that kind of thing: crew-owned, per-project, derived, and rebuildable. A directory per
- * project (rather than `<projectId>.db` files in one flat folder) keeps the db and the refresh
- * manifest that describes it together, so removing a project's graph is one `rm -rf` that cannot
- * leave a manifest describing a database that is gone.
+ * The daemon's state home — `~/.wicked-crew/` by default — is already where this package keeps
+ * crew-side per-project state that the engine does not own: `project-settings.json`
+ * (DES-MERGE-001 §7.1) sits there today. The project graph is exactly that kind of thing:
+ * crew-owned, per-project, derived, and rebuildable. A directory per project (rather than
+ * `<projectId>.db` files in one flat folder) keeps the db and the refresh manifest that describes
+ * it together, so removing a project's graph is one `rm -rf` that cannot leave a manifest
+ * describing a database that is gone.
  *
- * Overridable with `WICKED_CREW_PROJECT_GRAPH_ROOT` — the same escape hatch
+ * # Why the root FOLLOWS `--db` (crew#330)
+ *
+ * `serve --db <scratch>/core.db --bus-db <scratch>/bus.db` reads as a fully isolated daemon — the
+ * engine store moves, the bus moves — and the graph did not: this module resolved `homedir()`
+ * unconditionally, so a scratch daemon wrote a 41.7 MB graph into the developer's REAL
+ * `~/.wicked-crew/project-graphs/`, keyed by project ids that exist only in the scratch store. So
+ * nothing reaps them: the store that knew those ids was the throwaway one. Isolation was implied
+ * and not delivered, and nobody was told.
+ *
+ * `projectGraphRootForDb` is the derivation that closes it — the graph is a sibling of the store
+ * whose projects it describes — and `cli/index.ts` applies it at bootstrap. Deliberately scoped to
+ * the GRAPH and not to `project-settings.json`: the graph is derived and rebuildable, so relocating
+ * it costs a refresh, while settings are authored state that an existing `--db` daemon would appear
+ * to lose if its file moved out from under it.
+ *
+ * `WICKED_CREW_PROJECT_GRAPH_ROOT` still wins over both — the same escape hatch
  * `WICKED_CREW_PROJECT_SETTINGS` gives the settings store, and what lets the tests and the proof
  * scripts run without touching a developer's real home.
  */
 
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * The estate label charset, copied from the rule that enforces it
@@ -113,9 +129,36 @@ export function assertProjectIdIsPathSafe(projectId: string): void {
   }
 }
 
-/** The root every project graph directory hangs off. */
+/**
+ * The project-graph root implied by the core store a daemon was actually given — its sibling
+ * `project-graphs/` directory (crew#330).
+ *
+ * `null` for a store that is not a file on disk (`:memory:`, `file::memory:?cache=shared`): there is
+ * no directory to be a sibling of, and `dirname(resolve(':memory:'))` would silently plant the graph
+ * in whatever the process's cwd happened to be — a worse landing site than the state home, because
+ * it moves with the shell.
+ *
+ * Pure and side-effect-free on purpose: the CALLER decides whether to apply it (see
+ * `cli/index.ts`, which does so only when `WICKED_CREW_PROJECT_GRAPH_ROOT` has not already spoken).
+ */
+export function projectGraphRootForDb(coreDbPath: string): string | null {
+  const trimmed = coreDbPath.trim();
+  if (trimmed === '' || trimmed === ':memory:' || trimmed.startsWith('file::memory:')) return null;
+  return join(dirname(resolve(trimmed)), 'project-graphs');
+}
+
+/**
+ * The root every project graph directory hangs off.
+ *
+ * An empty `WICKED_CREW_PROJECT_GRAPH_ROOT` counts as UNSET rather than as the empty path: `VAR=`
+ * is the ordinary shell idiom for clearing a variable, and honouring it literally would return the
+ * bare relative `project-graphs` and scatter graphs through whatever directory the daemon was
+ * started from.
+ */
 export function projectGraphRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_PROJECT_GRAPH_ROOT'] ?? join(homedir(), '.wicked-crew', 'project-graphs');
+  const override = env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+  if (override !== undefined && override.trim() !== '') return override;
+  return join(homedir(), '.wicked-crew', 'project-graphs');
 }
 
 /** One project's graph directory — holds the database and the manifest that describes it. */

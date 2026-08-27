@@ -10,6 +10,7 @@ import { bridgeReaper, reapOrphansAtBoot } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { runMcpServer } from './mcp.js';
+import { projectGraphRoot, projectGraphRootForDb } from '../projects/graph-paths.js';
 import type { LaunchRunInput } from '../core/types.js';
 
 const [, , command, ...argv] = process.argv;
@@ -60,8 +61,34 @@ function stateHome(): string {
   return dir;
 }
 
+/**
+ * Make the PROJECT GRAPH follow the store this daemon was actually given (crew#330).
+ *
+ * `--db` moved the engine store and `--bus-db` moved the bus, so `serve --db <scratch>/core.db`
+ * read as an isolated daemon — but `projects/graph-paths.ts` resolved `homedir()`, so the graph a
+ * scratch daemon built landed in the developer's REAL `~/.wicked-crew/project-graphs/` (41.7 MB for
+ * three repos, observed), keyed by project ids that only the scratch store knew. Nothing reaps
+ * those, because the store that could name them is gone.
+ *
+ * Applied here rather than inside `graph-paths.ts` because THIS is the only layer that knows which
+ * store the operator chose; the paths module is a pure function of its env by design, and the bug
+ * was that nothing ever put the answer into that env. An explicit
+ * `WICKED_CREW_PROJECT_GRAPH_ROOT` still wins — it is the documented override, and a caller who set
+ * it has already answered this question.
+ *
+ * Runs for `serve`, `start` and `resume` alike (all three go through `parseBootstrap`), so every
+ * entry point that can accept `--db` gets the same isolation.
+ */
+function bindProjectGraphRoot(dbPath: string): void {
+  const override = process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+  if (override !== undefined && override.trim() !== '') return;
+  const root = projectGraphRootForDb(dbPath);
+  if (root !== null) process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = root;
+}
+
 function parseBootstrap(args: string[]): BootstrapOpts {
   const dbPath = flag(args, '--db') ?? join(stateHome(), 'core.db');
+  bindProjectGraphRoot(dbPath);
   const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
   const port = portStr !== undefined ? Number(portStr) : 7701;
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
@@ -269,6 +296,10 @@ async function main(): Promise<void> {
       mode: 'serve',
       port,
       db: opts.dbPath,
+      // Where the project code graphs land (crew#330). Reported because the failure this closes was
+      // SILENT: a daemon that isolated its store and its bus wrote graphs into the real home, and
+      // the readiness line — the one thing an evidence harness reads — never said so.
+      projectGraphs: projectGraphRoot(),
       stub: opts.stub,
       // The identity seam's resolved mode (task #88): `required` under
       // WICKED_RUNTIME=team / WICKED_CREW_AUTH=required, else `off` (local).

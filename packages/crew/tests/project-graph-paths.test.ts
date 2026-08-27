@@ -14,7 +14,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { homedir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 import {
   assertProjectIdIsPathSafe,
@@ -23,6 +23,7 @@ import {
   projectGraphDir,
   projectGraphManifest,
   projectGraphRoot,
+  projectGraphRootForDb,
   repoLabel,
 } from '../src/projects/graph-paths.js';
 
@@ -115,6 +116,12 @@ describe('project graph paths', () => {
     expect(projectGraphRoot(env)).toBe(join(sep, 'tmp', 'pg'));
   });
 
+  it('treats an EMPTY WICKED_CREW_PROJECT_GRAPH_ROOT as unset, not as the empty path', () => {
+    // `VAR=` is the ordinary shell idiom for clearing a variable. Taken literally it produced the
+    // bare relative `project-graphs`, which scatters a graph per directory the daemon started from.
+    const root = projectGraphRoot({ WICKED_CREW_PROJECT_GRAPH_ROOT: '' } as NodeJS.ProcessEnv);
+    expect(root).toBe(join(homedir(), '.wicked-crew', 'project-graphs'));
+  });
   it('puts the database and its manifest in ONE per-project directory', () => {
     const dir = projectGraphDir('proj_178751942378800000', env);
     expect(dir).toBe(join(sep, 'tmp', 'pg', 'proj_178751942378800000'));
@@ -136,6 +143,29 @@ describe('project graph paths', () => {
       );
       expect(() => projectGraphDb(bad, env)).toThrow();
     }
+  });
+});
+
+describe('the project-graph root implied by a --db (crew#330)', () => {
+  it('is the store’s sibling, so one --db moves the graph with it', () => {
+    // The observed failure: `serve --db <scratch>/core.db --bus-db <scratch>/bus.db` moved the
+    // engine store and the bus, and left a 41.7 MB graph in the developer's real ~/.wicked-crew,
+    // keyed by project ids that existed only in the scratch store — so nothing could reap them.
+    expect(projectGraphRootForDb(join(sep, 'scratch', 'core.db'))).toBe(
+      join(sep, 'scratch', 'project-graphs'),
+    );
+  });
+
+  it('resolves a relative --db against the cwd, exactly as the store itself is resolved', () => {
+    expect(projectGraphRootForDb(join('rel', 'core.db'))).toBe(join(resolve('rel'), 'project-graphs'));
+  });
+
+  it('declines a store that is not a file — an in-memory db has no sibling directory', () => {
+    // `dirname(resolve(':memory:'))` is the cwd, which would plant the graph wherever the daemon
+    // happened to be started from — a WORSE landing site than the state home, because it moves.
+    expect(projectGraphRootForDb(':memory:')).toBeNull();
+    expect(projectGraphRootForDb('file::memory:?cache=shared')).toBeNull();
+    expect(projectGraphRootForDb('   ')).toBeNull();
   });
 });
 
