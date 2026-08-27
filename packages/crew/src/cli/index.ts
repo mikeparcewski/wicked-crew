@@ -276,10 +276,13 @@ async function main(): Promise<void> {
       engineExec: adapter.engineExec,
       busDb: adapter.engineExec ? adapter.busDbPath : undefined,
       qeGateEvents: opts.qeGateEvents || undefined,
-      interactiveDraftEvents: opts.interactiveDraftEvents || undefined,
-      interactiveEditEvents: opts.interactiveEditEvents || undefined,
-      interactiveChatEvents: opts.interactiveChatEvents || undefined,
-      interactiveDemoEvents: opts.interactiveDemoEvents || undefined,
+      // What ARMED, not what was asked for (crew#309): a stub-engine daemon refuses the four
+      // interactive answering seams (see `api/server.ts`), and an evidence harness that reads
+      // this line must not be told a seam is live when nothing is holding its cursor.
+      interactiveDraftEvents: (opts.interactiveDraftEvents && !adapter.stub) || undefined,
+      interactiveEditEvents: (opts.interactiveEditEvents && !adapter.stub) || undefined,
+      interactiveChatEvents: (opts.interactiveChatEvents && !adapter.stub) || undefined,
+      interactiveDemoEvents: (opts.interactiveDemoEvents && !adapter.stub) || undefined,
       startupMs: Math.round(performance.now() - t0),
     });
   } else if (command === 'start') {

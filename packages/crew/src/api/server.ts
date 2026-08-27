@@ -371,12 +371,54 @@ export async function createServer(
     }
   }
 
+  // ── A STUB ENGINE NEVER ANSWERS ANOTHER PRODUCT'S TRAFFIC (crew#309) ────────────────────────
+  //
+  // The four seams below are ANSWERERS: each opens a durable wicked-bus subscription and replies
+  // to wicked-interactive's events by LAUNCHING A GOVERNED RUN. Under `serve --stub` the engine is
+  // `Core.spawnStub` — a `StubDispatcher` (every seat votes for the first roster option, no
+  // subprocess) plus a `StubStepRunner` (fixed text, no CLI) — so such a run resolves every phase
+  // Ok in under a millisecond and narrates the entire governed lifecycle onto interactive's
+  // vocabulary: "Convening a 6-seat council…", "Council picked claude for outline…", "Gate
+  // approved outline — moving on…", "Gate approved the draft…". Nothing ran. Nothing was written.
+  // Two gate approvals were announced anyway.
+  //
+  // Worse than fabricating locally: the durable cursor is keyed by PLUGIN NAME
+  // (`wicked-crew-interactive-draft`), so on the shared bus a stub daemon and the production
+  // daemon are ONE consumer group — a frame claimed by the stub is a frame the real daemon never
+  // sees. That is what wicked-crew#309 recorded: bus rows 242632–242643 carry a complete draft
+  // narration ending in a gate approval, 52ms wide, whose run id
+  // (3c106511-6340-4465-b029-30cb5b004416) appears in NO store, NO event log and NO audit trail on
+  // the daemon the operator was watching — `GET /runs/:id` 404s on a run the bus says was
+  // gate-approved. Both units were assigned the same first-roster seat (`claude`) within 1ms of
+  // convening, which is the StubDispatcher's signature; the real runs 5 minutes later took ~95s to
+  // vote and split their seats (`pi` for outline, `claude` for draft).
+  //
+  // So: refuse to arm, loudly. The deny is scoped to the ANSWERERS on purpose — the QE seam above
+  // only fills a freshness cache and the project seam only relays, neither launches work nor
+  // narrates governance, so neither can fabricate a verdict. Offline/deterministic runs are NOT
+  // lost by this: every harness in `e2e/` already does the correct thing, keeping the REAL engine
+  // (`stub: false`) and registering a scripted stub SEAT in the roster — which exercises planning,
+  // dispatch, gates and the durable event log for real and simply pins what the worker returns.
+  const stubEngine = adapter.stub === true;
+  const refuseStubSeam = (seam: string): boolean => {
+    if (!stubEngine) return false;
+    app.log.warn(
+      `${seam} subscription REFUSED: this daemon runs the deterministic stub engine (--stub), ` +
+        `whose runs complete every phase instantly with no CLI and no artifact. Answering ` +
+        `wicked-interactive on the bus would narrate a full governed lifecycle — gate approvals ` +
+        `included — for work that never happened, and would take the frame away from the ` +
+        `production daemon sharing this bus (crew#309). Run without --stub to answer, or keep the ` +
+        `real engine and register a scripted stub SEAT for a deterministic run.`,
+    );
+    return true;
+  };
+
   // Arm the opt-in interactive-draft answering seam (task #86 spike). Same posture as the QE
   // seam: failure to arm is LOUD but non-fatal — interactive's assist loop is the fallback
   // answerer, and this daemon must boot on a machine whose bus is broken. The handle is kept:
   // the chat seam below consults its in-flight docs (CREW-UX-5 per-doc serialization).
   let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
-  if (options?.interactiveDraftEvents?.enabled === true) {
+  if (options?.interactiveDraftEvents?.enabled === true && !refuseStubSeam('interactive-draft')) {
     const o = options.interactiveDraftEvents;
     draftSub = await startInteractiveDraftSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
@@ -407,7 +449,7 @@ export async function createServer(
   // posture as the draft seam: failure to arm is LOUD but non-fatal — interactive's assist
   // loop is the fallback answerer, and this daemon must boot on a machine whose bus is broken.
   let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
-  if (options?.interactiveEditEvents?.enabled === true) {
+  if (options?.interactiveEditEvents?.enabled === true && !refuseStubSeam('interactive-edit')) {
     const o = options.interactiveEditEvents;
     editSub = await startInteractiveEditSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
@@ -438,7 +480,7 @@ export async function createServer(
   // doc then keeps its placeholder, and this daemon must boot on a machine whose bus is
   // broken. Armed beside the edit seam because the two split `feedback.processed` by the doc
   // manifest's kind (demo → re-author the spec here; everything else → structural edit there).
-  if (options?.interactiveDemoEvents?.enabled === true) {
+  if (options?.interactiveDemoEvents?.enabled === true && !refuseStubSeam('interactive-demo')) {
     const o = options.interactiveDemoEvents;
     demoSub = await startInteractiveDemoSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
@@ -467,7 +509,7 @@ export async function createServer(
   // per-doc serialization contract (no draft/edit/chat run races another on one doc) can
   // consult their in-flight sets; docs roots resolve through the SAME per-project settings
   // store the project routes and the interactive proxy share.
-  if (options?.interactiveChatEvents?.enabled === true) {
+  if (options?.interactiveChatEvents?.enabled === true && !refuseStubSeam('interactive-chat')) {
     const o = options.interactiveChatEvents;
     const sub = await startInteractiveChatSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),

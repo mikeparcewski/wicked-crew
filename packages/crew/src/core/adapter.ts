@@ -659,6 +659,18 @@ export class CoreAdapter {
   readonly engineExec: boolean;
   /** The bus db the exec seam runs over when armed (else `undefined`). */
   readonly busDbPath: string | undefined;
+  /**
+   * `true` when this adapter drives the DETERMINISTIC OFFLINE engine (`Core.spawnStub`) rather
+   * than the production one — i.e. the `StubDispatcher` (every seat votes for the first roster
+   * option, no subprocess) plus the `StubStepRunner` (fixed text, no CLI).
+   *
+   * Exposed, not private, because a stub engine is not a quieter production engine — it is a
+   * FABRICATOR. Every phase resolves Ok in under a millisecond, so a run narrates its whole
+   * governed lifecycle, gate approvals included, with no work behind any of it. Anything that
+   * lets this daemon answer OTHER products' traffic has to be able to ask (see
+   * `api/server.ts`, crew#309).
+   */
+  readonly stub: boolean;
 
   constructor(opts: CoreAdapterOptions) {
     // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
@@ -691,7 +703,8 @@ export class CoreAdapter {
       if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
     }
 
-    this.core = opts.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
+    this.stub = opts.stub === true;
+    this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
     // isolated so one bad consumer can never stall the pump or the others.
