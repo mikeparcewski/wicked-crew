@@ -154,10 +154,15 @@ export function projectGraphRootForDb(coreDbPath: string): string | null {
  * is the ordinary shell idiom for clearing a variable, and honouring it literally would return the
  * bare relative `project-graphs` and scatter graphs through whatever directory the daemon was
  * started from.
+ *
+ * The override is returned TRIMMED, not merely tested trimmed (Copilot on #339). Deciding a value
+ * is present by its trimmed form and then using the untrimmed one is the inconsistency that turns
+ * a stray space — the ordinary cost of copying a path out of a log line — into a graph directory
+ * whose name nobody can type, silently distinct from the one the operator meant.
  */
 export function projectGraphRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-  if (override !== undefined && override.trim() !== '') return override;
+  const override = env['WICKED_CREW_PROJECT_GRAPH_ROOT']?.trim();
+  if (override !== undefined && override !== '') return override;
   return join(homedir(), '.wicked-crew', 'project-graphs');
 }
 

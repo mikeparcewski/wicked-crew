@@ -122,6 +122,18 @@ describe('project graph paths', () => {
     const root = projectGraphRoot({ WICKED_CREW_PROJECT_GRAPH_ROOT: '' } as NodeJS.ProcessEnv);
     expect(root).toBe(join(homedir(), '.wicked-crew', 'project-graphs'));
   });
+
+  it('returns the override TRIMMED, not merely tested trimmed (Copilot on #339)', () => {
+    // Judging presence by the trimmed value and then USING the untrimmed one is what turns a stray
+    // space — the ordinary cost of copying a path out of a log line — into a graph directory whose
+    // name nobody can type again, silently distinct from the one the operator meant.
+    const padded = {
+      WICKED_CREW_PROJECT_GRAPH_ROOT: `  ${join(sep, 'tmp', 'pg')}  `,
+    } as NodeJS.ProcessEnv;
+    expect(projectGraphRoot(padded)).toBe(join(sep, 'tmp', 'pg'));
+    expect(projectGraphDb('proj_1', padded)).toBe(join(sep, 'tmp', 'pg', 'proj_1', 'code-graph.db'));
+  });
+
   it('puts the database and its manifest in ONE per-project directory', () => {
     const dir = projectGraphDir('proj_178751942378800000', env);
     expect(dir).toBe(join(sep, 'tmp', 'pg', 'proj_178751942378800000'));
