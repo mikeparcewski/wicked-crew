@@ -35,13 +35,17 @@ function stubCore(a: CoreAdapter, name: string, impl: unknown) {
   (a as unknown as { core: Record<string, unknown> }).core[name] = impl;
 }
 
-/** The floor phase of a registered composed def, plus the paths it will actually check. */
-function floorOf(json: string): { phase: PhaseDef; checked: string[] } {
+/**
+ * The floor phase of a registered composed def, the launch instant it judges freshness against,
+ * and the paths it will actually check.
+ *
+ * argv after `node -e <script>` is `<launchedAtMs> <path...>` (crew#320).
+ */
+function floorOf(json: string): { phase: PhaseDef; launchedAtMs: number; checked: string[] } {
   const def = JSON.parse(json) as WorkflowDef;
   const phase = def.phases.find((p) => p.id === DELIVERABLE_FLOOR_PHASE_ID)!;
   const cmd = (phase.executor as { type: 'tool'; cmd: string[] }).cmd;
-  // argv after `node -e <script>` is the declared path list.
-  return { phase, checked: cmd.slice(3) };
+  return { phase, launchedAtMs: Number(cmd[3]), checked: cmd.slice(4) };
 }
 
 beforeEach(() => {
@@ -125,6 +129,26 @@ describe('launchRun with requireDeliverables (crew#311)', () => {
     // phase that pushes a branch and opens a pull request.
     expect(ids.indexOf(DELIVERABLE_FLOOR_PHASE_ID)).toBeLessThan(ids.indexOf(DELIVER_PHASE_ID));
     expect(launched[0]!.workflow).toBe((JSON.parse(registered[0]!) as WorkflowDef).id);
+  });
+
+  // crew#320: the floor's freshness half is only real if the LAUNCH threads a live timestamp.
+  // A placeholder, a zero, or a value copied from a previous composition would let the artifact
+  // of a prior run over the same document-id-keyed path satisfy this run's floor.
+  it('arms the floor with THIS launch\'s instant, so a prior run\'s artifact cannot satisfy it', async () => {
+    const before = Date.now();
+    await adapter.launchRun({
+      problem: 'p',
+      sessionId: 'run-fresh',
+      clisJson: '[]',
+      workflow: 'feature',
+      requireDeliverables: ['/inbox/doc-42/draft.html'],
+    });
+    const after = Date.now();
+
+    const { launchedAtMs } = floorOf(registered[0]!);
+    expect(Number.isFinite(launchedAtMs)).toBe(true);
+    expect(launchedAtMs).toBeGreaterThanOrEqual(before);
+    expect(launchedAtMs).toBeLessThanOrEqual(after);
   });
 
   it('two floored launches compose two independent defs — no cross-run sharing', async () => {

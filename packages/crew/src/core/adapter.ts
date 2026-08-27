@@ -840,11 +840,24 @@ export class CoreAdapter {
       if (composed !== null && requireDeliverables.length > 0) {
         // THE DELIVERABLE FLOOR (crew#311): "done" is re-derived from the artifact. The
         // launcher declared what this run must produce, so a deterministic Tool phase appended
-        // here re-verifies that those files EXIST and carry bytes, and fails the run naming
-        // what was expected and what was found when they do not. Composed BEFORE the deliver
-        // phase below so the floor sits ahead of it: a run that produced nothing must fail
-        // rather than open a pull request over an empty branch.
-        composed = composeDeliverableFloor(composed, input.sessionId, requireDeliverables);
+        // here re-verifies that those files EXIST, carry bytes, and were written by THIS RUN,
+        // and fails the run naming what was expected and what was found when they do not.
+        // Composed BEFORE the deliver phase below so the floor sits ahead of it: a run that
+        // produced nothing must fail rather than open a pull request over an empty branch.
+        //
+        // The timestamp is taken HERE, at composition — the last moment before `core.launchRun`
+        // below — and passed explicitly rather than left to the default, because the whole
+        // freshness claim rests on it: nothing this run produces can predate this line, so an
+        // artifact whose mtime does is a PRIOR run's leftover (crew#320). The interactive seams
+        // copy their deliverable to `outPath` and never remove it, and their run dirs are keyed
+        // by document id, so a re-run over the same key finds the previous file already there;
+        // without this the floor would pass on it and "done" would be asserted by a leftover.
+        composed = composeDeliverableFloor(
+          composed,
+          input.sessionId,
+          requireDeliverables,
+          Date.now(),
+        );
       }
       if (composed !== null && input.deliver === 'pr') {
         // First-class delivery (crew#293): compose a PER-RUN def — the selected workflow's
