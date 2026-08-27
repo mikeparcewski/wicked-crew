@@ -17,17 +17,17 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { dirname, join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import type { CrewSystemSettings } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -363,5 +363,105 @@ describe('PUT /settings engine keys validate as before (crew#323 regression guar
     await app.ready();
 
     expect((await put(app, ['studio.appearance'])).statusCode).toBe(400);
+  });
+});
+
+// The READ half of the cap (crew#325). PUT refuses an over-cap `studio.*` write, but the cap bound
+// only the write path: `getSettings()` served a hand-edited 600KB blob in full, and because
+// `updateSettings()` reads through it, an unrelated patch rewrote all of it back to disk — so the
+// route could refuse to CREATE that state but not to PROPAGATE it, and the cap could never be
+// lowered. Driven against the real CoreAdapter with $HOME redirected, matching the harness in
+// settings-worker-root.test.ts: neither getSettings nor updateSettings touches engine state, so
+// calling them off the prototype avoids spawning a Core.
+describe('adapter getSettings enforces the studio.* cap on READ (crew#325)', () => {
+  const savedHome = process.env['HOME'];
+  let fakeHome: string;
+  // Typed off the helper rather than off `vi.spyOn` directly — the MockInstance type parameters
+  // have changed shape across vitest majors, the inferred one never does.
+  const silenceWarn = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  let warn: ReturnType<typeof silenceWarn>;
+
+  beforeEach(() => {
+    fakeHome = mkdtempSync(join(tmpdir(), 'studio-cap-home-'));
+    process.env['HOME'] = fakeHome; // os.homedir() honours $HOME on POSIX
+    warn = silenceWarn();
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+    if (savedHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = savedHome;
+    rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  function writeSettings(content: unknown): void {
+    // settingsFilePath() reads $HOME at call time, which beforeEach points at the fixture.
+    const file = settingsFilePath();
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(content));
+  }
+
+  const readSettings = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(settingsFilePath(), 'utf8')) as Record<string, unknown>;
+
+  const read = (): Promise<CrewSystemSettings> =>
+    CoreAdapter.prototype.getSettings.call({} as CoreAdapter);
+
+  // `updateSettings` calls `this.getSettings()`, so the fake `this` carries that one method.
+  const update = (patch: Partial<CrewSystemSettings>): Promise<CrewSystemSettings> =>
+    CoreAdapter.prototype.updateSettings.call(
+      { getSettings: CoreAdapter.prototype.getSettings } as unknown as CoreAdapter,
+      patch,
+    );
+
+  it('drops a hand-edited over-cap studio.* key, naming the key and the limit', async () => {
+    writeSettings({ graphNodeLimit: 150, 'studio.appearance': 'x'.repeat(CAP_BYTES) });
+
+    const settings = await read();
+    expect(settings).not.toHaveProperty('studio.appearance');
+    // Everything else survives — this drops ONE key, it is not a settings.json reset.
+    expect(settings.graphNodeLimit).toBe(150);
+
+    // Loud, not silent (#323): the operator whose theme "reset itself" is told which key went,
+    // how big it was, and what the ceiling is.
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0]?.[0]);
+    expect(line).toContain('studio.appearance');
+    expect(line).toContain(String(CAP_BYTES + 2)); // n-char ASCII string → n + 2 bytes of JSON
+    expect(line).toContain(String(CAP_BYTES));
+  });
+
+  it('keeps a value exactly AT the cap, and the first byte over it is the one that goes', async () => {
+    writeSettings({ graphNodeLimit: 150, 'studio.appearance': 'x'.repeat(CAP_BYTES - 2) });
+    expect((await read())['studio.appearance']).toBe('x'.repeat(CAP_BYTES - 2));
+    expect(warn).not.toHaveBeenCalled();
+
+    writeSettings({ graphNodeLimit: 150, 'studio.appearance': 'x'.repeat(CAP_BYTES - 1) });
+    expect(await read()).not.toHaveProperty('studio.appearance');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves under-cap siblings alone when it drops one key', async () => {
+    writeSettings({
+      'studio.appearance': 'x'.repeat(CAP_BYTES),
+      'studio.notifications': { desktop: true },
+    });
+
+    const settings = await read();
+    expect(settings).not.toHaveProperty('studio.appearance');
+    expect(settings['studio.notifications']).toEqual({ desktop: true });
+  });
+
+  it('does NOT carry an over-cap value forward through a patch that never names it', async () => {
+    writeSettings({ graphNodeLimit: 150, 'studio.appearance': 'x'.repeat(CAP_BYTES) });
+
+    const next = await update({ graphNodeLimit: 100 });
+    expect(next.graphNodeLimit).toBe(100);
+    expect(next).not.toHaveProperty('studio.appearance');
+    // And the rewritten file no longer stores it — otherwise the cap is un-lowerable, because
+    // anything already past the limit reappears on the next unrelated write.
+    const onDisk = readSettings();
+    expect(onDisk).not.toHaveProperty('studio.appearance');
+    expect(onDisk['graphNodeLimit']).toBe(100);
   });
 });
