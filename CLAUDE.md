@@ -22,7 +22,7 @@ protocol, where things live) are in the parent `../CLAUDE.md`.
 ## Where the real docs live
 
 - `README.md` — product overview, install, quickstart.
-- `packages/crew/.product/` — requirements + design artifacts (DES-*, ADRs, build plans).
+- `.product/` (repo root) — requirements + design artifacts (REQ-*, DES-*, ADRs, build plans).
 - `docs/` — operator docs and articles; `site/` — the product website (Astro).
 - `e2e/` — end-to-end probe scripts; root `tests/` — workspace-level scenario scripts.
 
