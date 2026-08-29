@@ -33,6 +33,34 @@ the coding inside a phase.
 > remote/distributed execution is **not shipped**: crew runs on a single host. No cluster, no
 > horizontal scale.
 
+## Install & quickstart
+
+Requires Node.js ≥ 22 and at least one coding-agent CLI on your machine (e.g. Claude Code, Codex —
+crew drives them through packaged ACP bridges, self-contained, no global installs).
+
+```bash
+npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
+wicked-crew serve
+```
+
+`serve` starts the daemon on `http://127.0.0.1:7701` (`--port` / `CREW_PORT` override) and serves
+the bundled **wicked-studio** console same-origin — open the URL to launch and steer runs, answer
+human gates, and browse projects and evidence. Durable state lives in `~/.wicked-crew/` (`--db`
+overrides). Headless works too:
+
+```bash
+# launch a governed run over the API…
+curl -X POST http://127.0.0.1:7701/api/v1/runs \
+     -H 'content-type: application/json' \
+     -d '{"problem": "Add input validation to the signup form", "workflow": "feature"}'
+
+# …or without the console entirely
+wicked-crew start --problem "Fix the flaky retry test" --workflow bug
+```
+
+The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp` — `mcp` runs a stdio MCP
+server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the terminal.
+
 ## The idea
 
 Spec-driven development promised rigor and delivered ceremony. wicked-crew goes for the **outcome
@@ -70,9 +98,11 @@ phase runs are all **data** on the workflow definition.
 > distinct content-hash pin), and the gate re-verifies that pinned script against the worktree
 > (deny-dominates, no LLM at gate time) alongside an independent agent judge that can reject but never
 > lone-approve. The security controls (approval gate, fail-closed parse, denylist) survived a 14-finding
-> adversarial review. **Caveat:** the shipped feature/bug/migration workflows ship *ungated*
-> (`validator_pin: null`) — a phase engages the gate only once an operator authors, approves, and pins a
-> validator into the def.
+> adversarial review. **Caveat:** the shipped feature/bug/migration workflows pin only the built-in
+> **evidence floor** (`e2e7af1db9e48454` — "the run left a change in its worktree; done is re-derived
+> from the diff, never asserted") on their verification phases (feature `adversarial-review` + `test`,
+> bug `verify`, migration `verify`); every other phase ships `validator_pin: null` and engages the full
+> gate only once an operator authors, approves, and pins a task-specific validator into the def.
 
 The deterministic gate check is not a generic precanned assertion. A **test-strategy agent authors a
 grounded validation script** for that specific phase/task — stored as the phase's **evidence
@@ -94,6 +124,35 @@ never the sole approver** — a model may fail a gate, never solely approve one.
 **Trust model, named honestly:** diverse-seat agent consensus, on a deterministic structural floor, with
 human escalation above a threshold. A green run means "diverse seats + the escalation policy agreed,"
 not "proven."
+
+## Acceptance: the QE gate *(crew 0.6.0, Phase 6a)*
+
+Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** answers a
+different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
+the machine gate absorbed from the retired wicked-testing product, and it lives on the daemon:
+
+```
+GET /api/v1/runs/:id/acceptance        (?qeRun=<id> pins the read to one QE run's newest verdict)
+```
+
+A workflow declares its acceptance requirement through its phases: any phase carrying
+`verified_evidence: true` requires "done" to be re-derived from evidence. Crew resolves that
+requirement from the repo's **QE evidence ledger** — a [wicked-ledger](https://www.npmjs.com/package/wicked-ledger)
+store at `<repo>/.wicked-qe/` written by wicked-garden's QE skills (legacy `<repo>/.wicked-testing/`
+ledgers are still read; `WICKED_QE_LEDGER_DIR` overrides) — **deny-dominates** throughout:
+
+- `PASS` → satisfied. **Nothing else is.**
+- `FAIL`, `CONDITIONAL`, `PARTIAL`, `INCONCLUSIVE`, a missing ledger, a missing verdict, an
+  unreadable ledger → each **denies with its own named reason**. No evidence is never a pass, and a
+  conditional approval's conditions are unmet work — the hold stands until a clean `PASS` is
+  recorded or a human approves at the crew gate with the conditions in view.
+
+The route always answers 200 for a known run: "no ledger", "no verdict", and "FAIL" are real answers
+about the gate, not errors in the request. It sits beside `GET /runs/:id/evidence` deliberately —
+evidence is what the *run* recorded about itself; acceptance is what the *QE pipeline* recorded
+about the repo the run worked on. Two systems of record, two routes. (`serve --qe-gate-events` also
+subscribes the daemon to the QE pipeline's `wicked.qe.gate.*` bus events for freshness; without it
+the route lazy-reads the ledger on demand — no bus required.)
 
 ## Event-driven, with sidecars *(built substrate — DES-EXEC-001 §2/§4.2)*
 
@@ -220,6 +279,10 @@ typecheck if the daemon's responses ever stop satisfying it.
 Active build. **Built + verified in `wicked-core`** (each layer adversarially reviewed): workflows-as-data
 → data-driven planning → per-phase gate + role/artifact-passing → skills-driven invocation → the
 dual-validator gate (author→approve→pin→re-verify) → the validator vault → the Rust↔wicked-bus bridge →
-a napi bridge (`../wicked-core-ts`). Remaining: wiring the napi addon into the studio UI, an OS sandbox
-around validator execution, and (honestly) the shipped workflows gate only once an operator pins a
-validator. See `wicked-core/README.md` for the per-layer status.
+the napi bridge ([`wicked-core-ts`](https://github.com/mikeparcewski/wicked-core/tree/main/crates/wicked-core-ts),
+a crate inside the wicked-core repo, published to npm — this daemon depends on `^0.7.1` and embeds the
+engine through it). Remaining: an OS sandbox around validator execution (today's containment is a
+denylist-screened parse + minimal env — defense-in-depth, not a hermetic sandbox), and (honestly) the
+shipped workflows pin only the built-in evidence floor on their verification phases — the full
+authored-validator gate engages per phase only once an operator pins one. See `wicked-core/README.md`
+for the per-layer status.
