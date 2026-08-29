@@ -27,9 +27,20 @@
  *    answered wicked-interactive's `wicked.interactive.doc.created` bus event
  *    with a real first draft (`wicked.interactive.draft.completed`), zero
  *    interactive-service changes (interactive/draft-events.ts).
- *  - The Project model is LANDING (ADR in flight) — say "landing", never
- *    "shipped": projects grouping runs + docs across both skins, durable
- *    gate prompts surviving restarts.
+ *  - The Project model SHIPPED in 0.7.0 (registerProjectRoutes, api/routes.ts):
+ *    projects group runs + docs across both skins — members, merged activity
+ *    feed, open-prompt rollups, and a project-scoped code graph (blast radius
+ *    across member repos). Present tense now; keep claims to those routes.
+ *  - Blast radius is shipped repo- AND project-scoped (GET …/graph/blast-radius),
+ *    both answered by the same `wicked-estate blast-radius` CLI. The studio UI
+ *    renders only the REPO-scoped answer (RepoGraphModal) — keep any
+ *    "UI == API == CLI" claim repo-scoped until a skin surfaces the project rollup.
+ *  - Governed PTY is shipped (DES-TERMINAL-001): POST /api/v1/terminals defaults
+ *    governed:true (tool-calls route through the gate-hook); an ungoverned shell
+ *    is an explicit opt-in. Never imply the terminal bypasses governance.
+ *  - Workflow authoring is shipped: POST /api/v1/workflows validates, persists
+ *    to the overlay dir, and hot-registers in the running engine (core-ts
+ *    registerWorkflow NAPI) — the studio ships a builder for it (crew#44).
  *  - BYO-CLI: crew runs whatever CLI you've authed, under your plan. It has no
  *    billing and manages no subscriptions. Programmatic use of some CLIs may
  *    conflict with their ToS (noted on-page).
@@ -119,11 +130,11 @@ const COUNCIL_ROUNDS = [
 
 // Gate-console explainer cards. Each card drives the console animation (below).
 const GATE_CARDS = [
-  { k: 'series',  title: 'Every check is a switch',   line: 'Policies sit in series across a phase gate. Close them all and current reaches the next phase.' },
-  { k: 'deny',    title: 'Deny dominates',            line: 'Open one switch and the whole track goes dark. One failing check is the whole answer — not a score you out-vote.' },
-  { k: 'agent',   title: 'The judge can veto only',   line: 'An LLM seat sits on the track. It can break it (fail the gate) — it can never be the thing that closes it. No model approves.' },
-  { k: 'ledger',  title: 'Evidence feeds the gate',   line: 'The verdict.json switch is read from the QE evidence ledger — GET /api/v1/runs/:id/acceptance. A CONDITIONAL verdict is unmet work: the hold stands until a clean PASS lands.' },
-  { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated. Turn the gate off and the transition passes without evaluation — gating is a choice you make per phase.' },
+  { k: 'series',  title: 'Every check is a switch',   line: 'Policies sit in series; close every switch and current reaches the next phase.' },
+  { k: 'deny',    title: 'Deny dominates',            line: 'Open one switch and the track goes dark. One failing check is the whole answer — not a score you out-vote.' },
+  { k: 'agent',   title: 'The judge can veto only',   line: 'An LLM seat can break the track (fail the gate) — never close it. No model approves.' },
+  { k: 'ledger',  title: 'Evidence feeds the gate',   line: 'verdict.json is read from the QE evidence ledger. CONDITIONAL is unmet work: the hold stands until a clean PASS lands.' },
+  { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated: turn the gate off and the transition passes without evaluation — a per-phase choice.' },
 ];
 ---
 
@@ -298,6 +309,10 @@ const GATE_CARDS = [
           <span class="op-k">Evidence</span>
           <span class="op-t">One call returns the run: units, transcripts, decision trail, assumptions. Derived from durable state — <b>nothing reconstructed after the fact</b>.</span>
         </div>
+        <div class="op-card" role="listitem">
+          <span class="op-k">Governed terminal</span>
+          <span class="op-t">A real PTY into the worktree — <b>governed by default</b>: tool-calls route through the gate-hook. An ungoverned shell is a loud, explicit opt-in.</span>
+        </div>
       </div>
 
       <p class="honest-note">
@@ -323,10 +338,9 @@ const GATE_CARDS = [
         <h2 id="skins-h">The console is a client. The API is the product.</h2>
         <p class="sec-sub">
           Everything the console can do rides <b>one public contract</b> — <code>/api/v1</code>.
-          <a href="https://ws.wickedagile.com">wicked-studio</a> ships inside crew and holds no
-          privileged access: if it can show it, the API serves it. The second consumer is not a
-          second UI — it is the <b>document engine</b> crew spawns and proxies: a crew-governed run
-          answers its bus events and delivers the first draft, and the engine renders it.
+          <a href="https://ws.wickedagile.com">wicked-studio</a> ships inside crew with no privileged
+          access: if it can show it, the API serves it. The second consumer is not a UI at all — the
+          <b>document engine</b>: a crew-governed run answers its bus events with the first draft.
         </p>
       </div>
 
@@ -366,10 +380,10 @@ const GATE_CARDS = [
       </div>
 
       <p class="skins-landing">
-        <span class="skins-landing-chip">landing</span>
-        <b>The Project model</b> — projects that group runs and docs across both skins, with
-        durable gate prompts that survive restarts. The ADR is in flight; it’s the experience-plane
-        keystone, not yet a shipped claim.
+        <span class="skins-landing-chip">shipped</span>
+        <b>The Project model</b> — projects group runs and docs across both skins: members, a merged
+        activity feed, open-gate rollups, and a project-scoped code graph — <b>blast radius across
+        member repos</b> via the API, computed by the same estate CLI behind the studio’s repo graph.
       </p>
     </div>
   </section>
@@ -384,11 +398,9 @@ const GATE_CARDS = [
         <p class="sec-sub">
           Not a new model, not a subscription. Your <b>installed</b> CLIs run
           as <b>persistent <a href="https://agentclientprotocol.com">Agent Client Protocol</a> sessions</b> in
-          isolated git worktrees, under <b>your own auth and plan</b> — streamed token-level output,
-          structured usage, cross-agent context injected between units. The adapters come from the
-          ecosystem where they exist (official <code>claude-agent-acp</code> + <code>codex-acp</code>,
-          community <code>pi-acp</code>, native <code>copilot --acp</code> / <code>opencode acp</code>);
-          crew owns only the Antigravity bridge. The roster is data you own.
+          isolated git worktrees, under <b>your own auth and plan</b> — streamed tokens, structured
+          usage, cross-agent context between units. The adapters come from the ecosystem where they
+          exist; crew owns only the Antigravity bridge. The roster is data you own.
         </p>
       </div>
 
@@ -436,12 +448,11 @@ const GATE_CARDS = [
         <div class="kicker">Why you can trust the gate · watch it, then drive it</div>
         <h2 id="gc-h">“Done” is re-derived — and no model can approve it.</h2>
         <p class="sec-sub">
-          A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>: an
-          approved deterministic check re-verified against the worktree, plus an LLM judge that
-          can <b>fail</b> a gate but can <b>never approve</b> one. The <code>verdict.json</code> switch isn’t
-          asserted by any agent — crew <b>reads it from the QE evidence ledger</b>
-          (<code>GET /api/v1/runs/:id/acceptance</code>), written by <a href="https://wg.wickedagile.com">wicked-garden’s
-          QE specialist fleet</a>. It plays itself. Click a switch to take over.
+          A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>:
+          deterministic checks re-verified against the worktree, plus an LLM judge that can <b>fail</b> a
+          gate but <b>never approve</b> one. The <code>verdict.json</code> switch is <b>read from the QE
+          evidence ledger</b>, written by <a href="https://wg.wickedagile.com">wicked-garden’s QE
+          fleet</a> — never asserted. It plays itself; click a switch to take over.
         </p>
       </div>
 
@@ -569,11 +580,12 @@ const GATE_CARDS = [
         <div class="kicker">Workflows are data, not code</div>
         <h2 id="wf-h">Drop a <code>*.json</code>. It’s a workflow.</h2>
         <p class="sec-sub">
-          <b>10 built-ins ship</b> — feature, bug, migration, onboarding, <b>collab</b> (a real
-          propose → critique → revise → verdict discussion between two CLIs) and more — each
-          as <b>validated JSON</b> you pick in the studio’s workflow selector. Add your own by dropping a
-          file in <code>~/.config/wicked-core/workflows/</code>; the plan is <b>acyclic-validated</b> with
-          loud, per-file errors. It auto-cycles the defs below — click one to pin it.
+          <b>10 built-ins ship</b> — feature, bug, migration, <b>collab</b> (a real propose →
+          critique → revise → verdict discussion between two CLIs) and more, each as
+          <b>acyclic-validated JSON</b>. Author your own two ways: drop a file in
+          <code>~/.config/wicked-core/workflows/</code>, or <code>POST /api/v1/workflows</code> —
+          validated, persisted, <b>hot-registered in the running engine</b>, and the studio ships a
+          builder for it. It auto-cycles the defs below — click one to pin it.
         </p>
       </div>
 
@@ -671,10 +683,10 @@ const GATE_CARDS = [
         <p class="sec-sub">
           When a run is planned, each unit goes to auction: seats vote on <b>numbered capability
           profiles</b> — names hidden, so no agent can vote for itself — each through a distinct lens
-          (capability, risk, efficiency). The council needs <b>75% agreement</b>; below-bar ballots trigger
-          runoffs where every seat sees the tally <b>and the dissenters’ arguments</b>. Honest caveats:
-          hiding names makes self-selection harder, not impossible, and on a two-CLI roster 75% means
-          unanimity — when nothing differentiates, plurality stands and the recorded dissent is the value.
+          (capability, risk, efficiency). The council needs <b>75% agreement</b>; below-bar ballots
+          trigger runoffs where every seat sees the tally <b>and the dissenters’ arguments</b>. Honest
+          caveat: hiding names makes self-selection harder, not impossible — when nothing
+          differentiates, plurality stands and the recorded dissent is the value.
         </p>
       </div>
 
@@ -720,16 +732,15 @@ const GATE_CARDS = [
           <div class="kicker">Get it</div>
           <h2>Start with the family installer. The studio comes with it.</h2>
           <p>
-            The simplest way in is <b><code>npx wicked-installer</code></b> — the interactive, cross-CLI
-            installer for the whole wicked-* family. Already know you want just this one?
-            Install <b>wicked-crew</b> directly (needs Node ≥ 22) — either way the <b>studio console ships
-            inside it</b>, served on your machine. Install whichever agent CLIs you want on the roster;
-            crew degrades gracefully to whatever it finds.
+            The simplest way in is <b><code>npx wicked-installer</code></b> — the interactive installer
+            for the whole wicked-* family. Or install <b>wicked-crew</b> directly (Node ≥ 22) — either
+            way the <b>studio console ships inside it</b>, served on your machine. Add whichever agent
+            CLIs you want on the roster; crew degrades gracefully to what it finds.
           </p>
           <p class="get-tos">
-            <b>Terms-of-service note:</b> crew drives CLIs you install under your own accounts — confirm
-            programmatic use is permitted by each CLI’s terms. Community reports suggest driving
-            Antigravity this way may conflict with its ToS. · <a href="/article">Why this exists&nbsp;→</a>
+            <b>Terms-of-service note:</b> crew drives CLIs you install under your own accounts —
+            confirm programmatic use is permitted by each CLI’s terms; community reports suggest
+            Antigravity’s may not permit it. · <a href="/article">Why this exists&nbsp;→</a>
           </p>
         </div>
         <div class="install-stack">

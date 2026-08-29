@@ -127,13 +127,13 @@ test.describe('scroll-snap reachability', () => {
         .filter((s) => s.h > window.innerHeight),
     );
 
-    // .console-sec is a known, accepted exception: its 360px gate console plus
-    // the 5-step card row cannot be compressed further without squashing an
-    // interactive component. Under `proximity` it stays fully reachable.
-    const unexpected = tall.filter((s) => s.name !== 'console-sec');
+    // No exceptions — crew#337 recovered even .console-sec (was 804px) from
+    // type, spacing and copy without squashing the gate console. The stronger
+    // content-vs-usable-height guard lives in sections-fit.spec.ts; this one
+    // keeps the coarse box-vs-viewport regression net.
     expect(
-      unexpected,
-      `sections taller than the 700px viewport: ${unexpected.map((s) => `${s.name}=${s.h}`).join(', ')}`,
+      tall,
+      `sections taller than the 700px viewport: ${tall.map((s) => `${s.name}=${s.h}`).join(', ')}`,
     ).toEqual([]);
   });
 

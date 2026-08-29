@@ -194,7 +194,10 @@ code {
 .sec-sub b { color: var(--ink); }
 
 /* ── Hero ─────────────────────────────────────────────────────────────── */
-.hero { position: relative; overflow: hidden; padding: clamp(48px, 9svh, 104px) 0 clamp(40px, 7svh, 80px); }
+/* Padding is a MINIMUM here (the section is min-height flex-centered, so tall
+   viewports still breathe): sized so the hero's content fits 636px of usable
+   height at 1440x700 with slack for CI's taller Linux rendering (crew#337). */
+.hero { position: relative; overflow: hidden; padding: clamp(28px, 5svh, 88px) 0 clamp(22px, 4svh, 64px); }
 .grid-floor {
   position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background: radial-gradient(ellipse 60% 60% at 82% 8%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 60%);
@@ -1158,7 +1161,7 @@ code {
 
 /* ── Operator-rail cards (what the rail answers) ───────────────────────── */
 .op-cards {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 22px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 22px;
 }
 @media (max-width: 940px) { .op-cards { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { .op-cards { grid-template-columns: 1fr; } }
@@ -1226,9 +1229,9 @@ code {
 .skin-trace-rows li.str-final code { color: var(--accent); font-weight: 700; }
 .skin-trace-rows li.str-final::before { color: var(--accent); }
 
-/* the Project-model strip — landing, said honestly. Block flow (not flex):
-   the strip is a sentence with an inline chip, and flex would break the text
-   nodes into their own wrapped items. */
+/* the Project-model strip — shipped in 0.7.0 (registerProjectRoutes). Block
+   flow (not flex): the strip is a sentence with an inline chip, and flex would
+   break the text nodes into their own wrapped items. */
 .skins-landing {
   display: block; margin: 16px 0 0; font-size: 0.85rem; line-height: 1.6;
   color: color-mix(in oklab, var(--ink) 74%, transparent);
@@ -1326,31 +1329,88 @@ code {
   /* Short laptop viewports (snap-active widths only — phones scroll naturally
      and keep their tags): give the console the space, shrink the frame. */
   .hero .hero-head h1 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
-  .hero-console-wrap .studio-feed { height: clamp(96px, 15svh, 130px); }
   .hero .hero-tags { display: none; }
 
-  /* ── Bring the three over-tall sections back inside a laptop viewport ────
-     A section is only "one screen" if it fits `100svh - topbar` = 636px at
-     1440x700. Measured there before this block: .byo 878 (+242 over the
-     636 usable band), .get 751 (+115), .console-sec 808 (+172).
+  /* Feed and gate share ONE height: the gate panel is the taller column when
+     it raises, and an uncapped gate stretched the grid row — the hero grew
+     from 636 to 678 mid-animation (crew#337). Match the columns and compact
+     the gate's chrome instead so approve/steer/reject stay fully visible. */
+  .hero-console-wrap .studio-feed,
+  .hero-console-wrap .studio-gate { height: clamp(96px, 17svh, 130px); }
+  .hero-console-wrap .studio-gate { padding: 10px 12px; gap: 5px; }
+  .hero-console-wrap .sg-stamp { font-size: 0.78rem; padding: 4px 10px; }
+  .hero-console-wrap .sg-btn { padding: 5px 11px; }
+  .hero .hero-cta .btn { padding: 8px 17px; }
 
-     These are the cheap levers only — section padding, the decorative tag row
-     (same trade the hero already makes above), and over-generous heading
-     margins. Nothing here reflows body copy or shrinks an interactive
-     component, because a squashed control is a worse bug than a tall section:
-     under `proximity` a tall section is still fully readable, it just takes an
-     extra wheel notch. */
-  .byo, .get { padding-block: clamp(22px, 3.4svh, 44px); }
-  .byo .sec-head { margin-bottom: 14px; }
-  .byo-card { padding-block: 11px; }
+  /* ── Fit EVERY section inside a laptop viewport (crew#337) ───────────────
+     A section is only "one screen" if its CONTENT fits `100svh - topbar` =
+     636px of usable height at 1440x700 — measuring the min-height-clamped box
+     is what let #335 report "fits, 0px spare" right up until it didn't.
+     Measured before this pass: .console-sec 804 (+168 over the usable band),
+     .byo 698 (+62), .skins 680 (+44), .hero 666 (+30), .get 647 (+11) — and
+     .council/.wf sat within 12px of the line, close enough for CI's ~24px
+     taller Linux rendering to tip them over.
+
+     The levers, per the studio #133/#134 playbook: section padding, heading
+     margins, measured type/spacing trims, and copy tightened in the page
+     itself — never deleting an interactive payload. Every section now aims
+     for ≥20px of slack so it still fits on CI. Guarded by
+     tests/e2e/sections-fit.spec.ts, which measures content vs usable height. */
+  .byo, .get { padding-block: clamp(18px, 3svh, 40px); }
+  .byo .sec-head { margin-bottom: 10px; }
+  .byo-grid { gap: 10px; }
   .byo-tag { display: none; }
-  .byo-stage { margin-top: 12px; }
-  .byo-stage-row { padding-top: 12px; }
-  .byo-stage-note { margin-block: 8px 12px; }
+  .byo-stage { margin-top: 10px; }
+  .byo-stage-head { padding-block: 9px; }
+  .byo-stage-row { padding-top: 10px; }
+  .byo-stage-note { margin-block: 6px 10px; }
 
   .get-intro h2 { font-size: clamp(1.6rem, 2.9vw, 2.2rem); }
   .get-intro p { margin-top: 12px; }
   .get-tos { margin-top: 10px; }
 
+  /* the hero: minimum paddings are set at the base rule; shave the internal
+     rhythm so the console keeps its size and the section keeps CI slack */
+  .hero .lede { margin-top: 8px; }
+  .hero-console-wrap { margin-top: 12px; }
+  .hero .hero-foot { margin-top: 10px; }
+
+  /* the skins section: tighter head + trace so the API story fits one screen */
+  .skins .sec-head { margin-bottom: 12px; }
+  .skins .sec-head h2 { margin-top: 10px; }
+  .skins-grid { gap: 12px; }
+  .skin-card { padding: 12px 16px; }
+  .skin-trace-bar { padding: 8px 16px; }
+  .skin-trace-rows { padding: 4px 0; }
+  .skin-trace-rows li { padding: 4px 16px; }
+  .skins-landing { margin-top: 12px; }
+
+  /* the bring-your-own grid: heading down to one line at laptop widths (the
+     same type trade the hero makes above), tighter head, cards + stage */
+  .byo .sec-head h2 { margin-top: 10px; font-size: clamp(1.7rem, 2.6vw, 2.4rem); }
+  .byo .sec-sub { margin-top: 12px; }
+  .byo-card { padding-block: 9px; }
+  .byo-stage-note { margin-bottom: 8px; }
+
+  /* the gate console: the deepest offender (+168). Recovered from chrome —
+     bar/rail/panel padding, card type — never from the circuit itself. */
+  .console-sec { padding-block: 6px; }
   .console-sec .sec-head { margin-bottom: 8px; }
+  .console-sec .sec-head h2 { margin-top: 8px; }
+  .console-sec .sec-sub { margin-top: 10px; }
+  .gc-topbar { padding: 5px 16px; }
+  .gc-rail { padding: 10px clamp(14px, 2.4vw, 34px) 8px; gap: 0; }
+  .gc-sw { gap: 5px; }
+  .gc-panel { padding: 9px clamp(16px, 2.6vw, 32px) 10px; gap: 6px; }
+  .gc-v-stamp { font-size: 1.1rem; padding: 4px 12px; }
+  .gc-btn { padding: 6px 13px; }
+  .gc-ledger { padding: 5px 12px; }
+  .gc-cards { margin-top: 10px; gap: 10px; }
+  .gc-card { padding: 10px 12px 11px; gap: 5px; }
+  .gc-card-n { width: 22px; height: 22px; font-size: 0.7rem; border-radius: 6px; }
+  .gc-card-t { font-size: 0.88rem; }
+  .gc-card-l { font-size: 0.62rem; line-height: 1.45; }
+
+  /* sections that fit locally but without CI slack: cheaper heading margins */
+  .council .sec-head, .wf .sec-head, .rail-sec .sec-head { margin-bottom: 18px; }
 }

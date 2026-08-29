@@ -5,11 +5,11 @@ import { bringIntoView } from './utils';
  * The four-plane story: the "one public API, no privileged clients" section [data-skins]
  * (studio = the console; wicked-interactive = the DOCUMENT ENGINE, not a second UI — its builder
  * moved into studio, so crew spawns and proxies what remains; governed-generation
- * bus trace, Project-model landing strip) and the shared-chrome SameGarden map
+ * bus trace, Project-model shipped strip) and the shared-chrome SameGarden map
  * (.same-garden) with crew's card as the "you are here" marker.
  */
 test.describe('one public API, no privileged clients [data-skins]', () => {
-  test('both consumers render, the bus trace carries the real vocabulary, the landing strip is honest', async ({ page }) => {
+  test('both consumers render, the bus trace carries the real vocabulary, the project strip is honest', async ({ page }) => {
     await page.goto('/');
     const skins = page.locator('[data-skins]');
     await bringIntoView(skins);
@@ -29,10 +29,14 @@ test.describe('one public API, no privileged clients [data-skins]', () => {
     await expect(rows.first()).toContainText('wicked.interactive.doc.created');
     await expect(rows.last()).toContainText('wicked.interactive.draft.completed');
 
-    // The Project model is LANDING — a labeled strip, never a shipped claim.
+    // The Project model SHIPPED in crew 0.7.0 (registerProjectRoutes,
+    // packages/crew/src/api/routes.ts) — the strip says so, present tense,
+    // and stakes only route-backed claims (members, activity, gate rollups,
+    // project-scoped blast radius).
     const landing = skins.locator('.skins-landing');
-    await expect(landing.locator('.skins-landing-chip')).toHaveText('landing');
+    await expect(landing.locator('.skins-landing-chip')).toHaveText('shipped');
     await expect(landing).toContainText('Project model');
+    await expect(landing).toContainText('blast radius');
   });
 });
 
