@@ -19,8 +19,18 @@
  * Why an OVERRIDES sidecar: the artifact is DERIVED (regenerated from the estate
  * store), so operator edits written into it would be clobbered on the next
  * `domain-graph` run. Edits live in `requirements_overrides.json` beside the artifact,
- * keyed `domain::reqId`, and are merged at read time — the overlay survives
- * regeneration and keeps provenance honest (`riskSource: operator` vs `data`).
+ * keyed `domain::reqId` (store-built indexes key by the estate SymbolId), and are
+ * merged at read time — the overlay survives regeneration and keeps provenance honest
+ * (`riskSource: operator` vs `data`).
+ *
+ * ORPHANED OVERRIDES: an override key matches by exact string, so a key the corpus no
+ * longer mints simply stops matching — silently. That happens on an estate id-scheme
+ * migration (a full re-extract re-keys method/field SymbolIds; module-level ids
+ * survive) and on artifact regeneration that renames a domain or reqId. The index
+ * therefore COUNTS the keys that matched no row and surfaces the count as
+ * `orphanedOverrides` on every page, so the edits' existence is never invisible. It
+ * does NOT re-key them: the old→new mapping is estate's to define, and guessing it
+ * here would attach an operator's risk note to the wrong symbol.
  */
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -107,6 +117,18 @@ interface RepoIndex {
   overridesMtimeMs: number;
   builtAtMs: number;
   total: number;
+  /** Override keys that matched NO row — stale after a re-index/migration (module header). */
+  orphanedOverrides: number;
+}
+
+/** Keys in the overrides sidecar that no corpus row claimed — counted, never dropped silently. */
+function countOrphanedOverrides(
+  overrides: Record<string, RequirementOverride>,
+  byKey: Map<string, IndexEntry>,
+): number {
+  let orphaned = 0;
+  for (const key of Object.keys(overrides)) if (!byKey.has(key)) orphaned += 1;
+  return orphaned;
 }
 
 const RISK_RE = /risk/i;
@@ -255,6 +277,7 @@ async function buildStoreIndex(
     overridesMtimeMs: ovMtime,
     builtAtMs: Date.now(),
     total: entries.length,
+    orphanedOverrides: countOrphanedOverrides(overrides, byKey),
   };
 }
 
@@ -345,6 +368,7 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
     overridesMtimeMs: ovMtime,
     builtAtMs: Date.now(),
     total: entries.length,
+    orphanedOverrides: countOrphanedOverrides(overrides, byKey),
   };
   cache.set(repo.root_path, index);
   return index;
@@ -373,6 +397,13 @@ export interface RequirementsPage {
    * this the caller cannot tell which one it is looking at. (FINDING-065)
    */
   source: 'store' | 'artifact';
+  /**
+   * Override keys that matched no requirement in this corpus — operator edits stranded by an
+   * estate id-scheme migration (method/field SymbolIds re-mint on a full re-extract) or by an
+   * artifact regeneration that renamed their domain/reqId. Counted so the edits' existence is
+   * never silent; deliberately NOT re-keyed (module header says why).
+   */
+  orphanedOverrides: number;
 }
 
 /** Tokenized AND-match: every whitespace-separated term must appear in the haystack. */
@@ -403,6 +434,7 @@ export async function listRequirements(
     limit: query.limit,
     items: matched.slice(query.offset, query.offset + query.limit),
     source: index.fromStore ? 'store' : 'artifact',
+    orphanedOverrides: index.orphanedOverrides,
   };
 }
 

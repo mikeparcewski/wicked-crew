@@ -491,29 +491,72 @@ export async function projectGraphStatus(
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
 
+/** What a refresh was asked to do, and where it may say things. Both optional, both additive. */
+export interface RefreshOptions {
+  /**
+   * Bypass the clean-HEAD skip for every member repo AND pass `--force` to `wicked-estate index`.
+   * The migration path: after a wicked-estate upgrade, an UNCHANGED repo never re-indexes under
+   * the plain rules, so its rows keep the old binary's id scheme and unresolved accounting until
+   * its HEAD happens to move. Costs a full rebuild — the same bound as the project's first build.
+   */
+  force?: boolean;
+  /** Receives one line per index run that wrote to stderr (estate's migration notice, warnings). */
+  log?: (msg: string) => void;
+}
+
 /**
  * One refresh at a time per project. Two `wicked-estate index` runs against one SQLite file is a
  * writer race, and the second caller wanting the same work done is served by the first — so
  * concurrent callers COALESCE onto the in-flight refresh rather than getting a 409 for asking.
+ *
+ * Force-aware: a plain caller is served by ANY in-flight refresh (a forced one does strictly more
+ * work), and a forced caller is served by an in-flight FORCED one — but never by a plain one,
+ * which would silently not-force. A forced request arriving while a plain refresh runs QUEUES
+ * behind it (same single-writer rule) and then runs its own build.
  */
-const inFlight = new Map<string, Promise<ProjectGraphRefreshResult>>();
+interface InFlightRefresh {
+  promise: Promise<ProjectGraphRefreshResult>;
+  force: boolean;
+}
+const inFlight = new Map<string, InFlightRefresh>();
 
 export async function refreshProjectGraph(
   adapter: CoreAdapter,
   projectId: string,
   env: NodeJS.ProcessEnv = process.env,
+  opts: RefreshOptions = {},
 ): Promise<ProjectGraphRefreshResult> {
+  const force = opts.force === true;
   const running = inFlight.get(projectId);
-  if (running !== undefined) return running;
-  const started = doRefresh(adapter, projectId, env).finally(() => inFlight.delete(projectId));
-  inFlight.set(projectId, started);
-  return started;
+  if (running !== undefined && (running.force || !force)) return running.promise;
+  const after = running?.promise ?? Promise.resolve(undefined);
+  const promise = after
+    // The prior refresh's failure belongs to its own caller; this one still runs.
+    .catch(() => undefined)
+    .then(() => doRefresh(adapter, projectId, env, force, opts.log))
+    // The delete is guarded: a queued forced entry replaces a plain one in the map, and the plain
+    // one settling must not evict its successor.
+    .finally(() => {
+      if (inFlight.get(projectId) === entry) inFlight.delete(projectId);
+    });
+  const entry: InFlightRefresh = { force, promise };
+  inFlight.set(projectId, entry);
+  return promise;
+}
+
+/** Last `max` bytes of a stderr stream, trimmed — enough to carry estate's migration notice. */
+const STDERR_TAIL_BYTES = 2048;
+function stderrTail(stderr: string, max = STDERR_TAIL_BYTES): string {
+  const trimmed = stderr.trim();
+  return trimmed.length <= max ? trimmed : `…${trimmed.slice(trimmed.length - max)}`;
 }
 
 async function doRefresh(
   adapter: CoreAdapter,
   projectId: string,
   env: NodeJS.ProcessEnv,
+  force: boolean,
+  log?: (msg: string) => void,
 ): Promise<ProjectGraphRefreshResult> {
   const members = await resolveMembers(adapter, projectId);
   assertEngineFresh(members.repos);
@@ -522,6 +565,7 @@ async function doRefresh(
   const indexed: string[] = [];
   const skipped: string[] = [];
   const failed: ProjectGraphRefreshResult['failed'] = [];
+  const repoRows: NonNullable<ProjectGraphRefreshResult['repos']> = [];
 
   if (members.repos.length === 0) {
     return {
@@ -529,6 +573,7 @@ async function doRefresh(
       indexed,
       skipped,
       failed,
+      repos: repoRows,
     };
   }
 
@@ -574,9 +619,16 @@ async function doRefresh(
     const before = priorByLabel.get(m.label);
     // Skip only on POSITIVE evidence: a clean checkout, at the same commit the graph already holds,
     // in the same place it was indexed from. Anything less re-indexes — estate's own incremental
-    // digest skip then makes an unchanged re-index cheap, so the cost of being wrong here is a
-    // second, not a stale answer.
+    // digest skip usually makes an unchanged re-index cheap (the exception is estate's id_scheme
+    // migration gate, which turns the first index under a new scheme into a full re-extract — once,
+    // and the stderr tail on the repo's row says so), so the cost of being wrong here is bounded,
+    // never a stale answer.
+    //
+    // `force` bypasses this ON PURPOSE: the skip fires on git evidence alone, so it also skips a
+    // repo whose rows were written by an OLDER estate binary — the one situation where "unchanged
+    // checkout" does not mean "current graph". Force is the migration path for exactly that.
     if (
+      !force &&
       dbExisted &&
       before !== undefined &&
       head !== null &&
@@ -584,14 +636,30 @@ async function doRefresh(
       before.rootPath === m.repo.root_path
     ) {
       skipped.push(m.label);
+      repoRows.push({ repoId: m.repoId, label: m.label, action: 'skipped-head-unchanged' });
       continue;
     }
     try {
-      await execCapped(
+      const { stderr } = await execCapped(
         estateExe(env),
-        ['index', m.repo.root_path, '--db', dbPath, '--repo', m.label],
+        [
+          'index',
+          m.repo.root_path,
+          '--db',
+          dbPath,
+          '--repo',
+          m.label,
+          // estate's own digest skip would otherwise no-op an unchanged repo, leaving the very rows
+          // a forced refresh exists to rewrite.
+          ...(force ? ['--force'] : []),
+        ],
         { timeout: INDEX_TIMEOUT_MS, cwd: m.repo.root_path },
       );
+      // The index child's stderr used to be discarded here, which swallowed estate's id_scheme
+      // migration notice — the ONE signal explaining why a one-second incremental refresh suddenly
+      // ran for minutes. Bounded tail on the repo's row, full-line through the logger.
+      const tail = stderrTail(stderr);
+      if (tail !== '') log?.(`wicked-estate index ${m.label} (project ${projectId}) stderr: ${tail}`);
       if (!verifiedLabelling) {
         if (!(await graphHoldsLabel(dbPath, m.label, env))) {
           throw new EstateDroppedRepoLabelError(
@@ -613,6 +681,12 @@ async function doRefresh(
       if (at >= 0) rows[at] = row;
       else rows.push(row);
       indexed.push(m.label);
+      repoRows.push({
+        repoId: m.repoId,
+        label: m.label,
+        action: 'indexed',
+        ...(tail === '' ? {} : { stderrTail: tail }),
+      });
     } catch (err) {
       // A binary that drops `--repo` is a property of the RUN, not of this repo: every remaining
       // member would index over the rows just written, so this refresh stops here.
@@ -630,10 +704,18 @@ async function doRefresh(
         await writeManifest(projectId, { version: 1, projectId, repos: [] }, env);
         throw err;
       }
-      failed.push({
+      const error = err instanceof ExecOutputTooLarge ? err.message : message(err);
+      failed.push({ repoId: m.repoId, label: m.label, error });
+      // execFile errors carry the child's stderr; the failure tail is worth as much as a success's.
+      const errStderr = (err as { stderr?: unknown }).stderr;
+      const tail = typeof errStderr === 'string' ? stderrTail(errStderr) : '';
+      if (tail !== '') log?.(`wicked-estate index ${m.label} (project ${projectId}) stderr: ${tail}`);
+      repoRows.push({
         repoId: m.repoId,
         label: m.label,
-        error: err instanceof ExecOutputTooLarge ? err.message : message(err),
+        action: 'failed',
+        error,
+        ...(tail === '' ? {} : { stderrTail: tail }),
       });
     }
   }
@@ -645,6 +727,7 @@ async function doRefresh(
     indexed,
     skipped,
     failed,
+    repos: repoRows,
   };
 }
 

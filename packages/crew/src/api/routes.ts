@@ -1660,6 +1660,15 @@ export function registerRoutes(
     if (page === null) {
       return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
     }
+    // Overrides keyed by ids the corpus no longer mints (an estate id-scheme migration re-keys
+    // method/field SymbolIds) would otherwise vanish without a trace — the count is on the page
+    // AND in the log, because the operator who edited them is not the one reading the response.
+    if ((page.orphanedOverrides ?? 0) > 0) {
+      req.log.warn(
+        { repo: id, orphanedOverrides: page.orphanedOverrides },
+        'requirements_overrides.json holds keys matching no requirement — stale after a re-index/migration; re-run the annotation workflow, then re-apply or delete them',
+      );
+    }
     return page;
   });
 
@@ -1762,8 +1771,10 @@ export function registerRoutes(
   // ── Git history (last 20 commits via git log) ─────────────────────────────
 
   // ── Blast radius for a symbol (via wicked-estate blast-radius --json).
-  //    Carries the honesty contract through: dependents PLUS the unresolved-call
-  //    count — an empty dependents list must never read as "safe to change".
+  //    Carries the honesty contract through: dependents PLUS the count of references
+  //    no resolver bound (ENGINE-CONTRACT §2.1 — repeat sites of an already-bound
+  //    relationship are not counted, so 0 is legitimate for a fully-resolved symbol).
+  //    When non-zero, an empty dependents list must never read as "safe to change".
   app.get(`${V}/repos/:id/graph/blast-radius`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { name?: string };

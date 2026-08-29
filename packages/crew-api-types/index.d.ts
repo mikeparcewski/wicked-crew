@@ -1226,6 +1226,14 @@ export interface RequirementsPage {
   /** Which source served the corpus: the live estate store, or the evidence-gated
    *  `requirements_graph.json` snapshot, which can lag it by hours (FINDING-065). */
   source: 'store' | 'artifact';
+  /**
+   * Keys in `requirements_overrides.json` that matched NO requirement in the corpus. Operator
+   * edits are keyed by SymbolId (store) or `domain::reqId` (artifact); an estate id-scheme
+   * migration re-mints method/field SymbolIds, so overrides keyed by the old ids stop matching and
+   * would otherwise vanish silently. Non-zero means edits exist that no row is showing — re-run
+   * the annotation workflow, then re-apply or delete the stale keys.
+   */
+  orphanedOverrides?: number;
 }
 
 export interface RequirementPatch {
@@ -1239,7 +1247,11 @@ export interface RequirementPatch {
 export interface BlastRadius {
   target: string;
   dependents: Array<{ id: string; name: string; kind: string; file: string; line: number }>;
-  /** Unresolved call-sites referencing the target — absence of dependents never means "safe". */
+  /**
+   * References to the target that no resolver bound (ENGINE-CONTRACT §2.1). Repeat call-sites of
+   * an already-bound relationship are NOT counted, so 0 is a legitimate value for a fully-resolved
+   * hot symbol. When non-zero, an empty `dependents` still never means "safe".
+   */
   unresolved: number;
 }
 
@@ -1506,6 +1518,44 @@ export interface ProjectGraphStatus {
   updatedAt: number | null;
 }
 
+/**
+ * `POST /projects/:id/graph/refresh` body. Optional — an empty body is the plain incremental
+ * refresh.
+ *
+ * `force: true` exists for MIGRATION, not for routine use: the plain refresh skips any member repo
+ * whose clean checkout is still at the HEAD the manifest recorded, so after a wicked-estate upgrade
+ * an UNCHANGED repo never re-indexes and its rows keep the old binary's id scheme and unresolved
+ * accounting (ENGINE-CONTRACT §2.1) indefinitely. Force bypasses that skip for every member repo
+ * AND passes `--force` to `wicked-estate index`, so estate performs a full re-extract even when its
+ * own incremental digest would skip. Expect it to take as long as the project's first build.
+ */
+export interface RefreshProjectGraphBody {
+  /** Re-index every member repo, bypassing the clean-HEAD skip and estate's digest skip. */
+  force?: boolean;
+}
+
+/**
+ * One member repo's outcome in a refresh — why it did or did not index. `skipped-head-unchanged`
+ * is the row an operator reads when asking why a repo did not migrate after an estate upgrade:
+ * the plain refresh trusts a clean checkout at the manifest's HEAD, so only `force` (or a new
+ * commit) makes that repo re-index.
+ */
+export interface ProjectGraphRefreshRepo {
+  repoId: string;
+  /** The estate label its rows carry. */
+  label: string;
+  /** What this refresh did with the repo. */
+  action: 'indexed' | 'skipped-head-unchanged' | 'failed';
+  /**
+   * Bounded tail (last 2 KiB) of `wicked-estate index` stderr, present when the binary said
+   * anything — notably estate's id_scheme migration notice explaining why a refresh that used to
+   * skip in a second ran a full re-extract for minutes.
+   */
+  stderrTail?: string;
+  /** Present when `action` is `failed` — the same message the `failed` array carries. */
+  error?: string;
+}
+
 /** `POST /projects/:id/graph/refresh` — an incremental (re)build, repo by repo. */
 export interface ProjectGraphRefreshResult {
   status: ProjectGraphStatus;
@@ -1515,6 +1565,8 @@ export interface ProjectGraphRefreshResult {
   skipped: string[];
   /** Repos that failed to index, with the reason; the graph keeps whatever it already had. */
   failed: Array<{ repoId: string; label: string; error: string }>;
+  /** Per-repo outcomes with the WHY (and any index stderr) attached — one row per member repo. */
+  repos?: ProjectGraphRefreshRepo[];
 }
 
 /** One hit, always attributed: a cross-repo answer that does not say WHERE is not an answer. */
@@ -1550,7 +1602,11 @@ export interface ProjectBlastRadius {
   target: string;
   dependents: ProjectGraphHit[];
   byRepo: ProjectGraphRepoCount[];
-  /** Unresolved call-sites referencing the target — an empty `dependents` never means "safe". */
+  /**
+   * References to the target that no resolver bound (ENGINE-CONTRACT §2.1). Repeat call-sites of
+   * an already-bound relationship are NOT counted, so 0 is a legitimate value for a fully-resolved
+   * hot symbol. When non-zero, an empty `dependents` still never means "safe".
+   */
   unresolved: number;
   /** Labels actually covered by this answer. */
   reposSearched: string[];

@@ -34,6 +34,7 @@ import type { AuditLog } from '../src/api/audit.js';
 import type {
   AttachMemberSchema,
   CreateProjectSchema,
+  RefreshProjectGraphSchema,
   UpdateProjectSchema,
 } from '../src/projects/routes.js';
 import type { DEFAULT_SETTINGS } from '../src/core/types.js';
@@ -174,6 +175,8 @@ accepts<z.input<typeof OpenPathSchema>, Wire.OpenPathBody>();
 accepts<z.input<typeof CreateProjectSchema>, Wire.CreateProjectBody>();
 accepts<z.input<typeof UpdateProjectSchema>, Wire.UpdateProjectBody>();
 accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
+// POST /projects/:id/graph/refresh — the additive `force` body (estate-migration path).
+accepts<z.input<typeof RefreshProjectGraphSchema>, Wire.RefreshProjectGraphBody>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {
