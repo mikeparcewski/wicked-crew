@@ -72,6 +72,24 @@ describe('qeLedgerDirName / qeLedgerRoot', () => {
     expect(qeLedgerRoot(ws)).toBe(join(ws, '.custom-ledger'));
   });
 
+  // Regression (recon TH-2 / campaign S11): an ABSOLUTE override is the root
+  // itself — it must never be joined onto repoRoot. Before the fix,
+  // `/elsewhere/ledger` resolved to `<repo>/elsewhere/ledger`, breaking every
+  // isolated-profile run that pins the ledger outside the repo.
+  it('honours an absolute WICKED_QE_LEDGER_DIR as-is (never joined onto repoRoot)', () => {
+    const pinned = join(dir, 'pinned-ledger-root');
+    process.env['WICKED_QE_LEDGER_DIR'] = pinned;
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    expect(qeLedgerRoot(ws)).toBe(pinned);
+    expect(qeLedgerRoot(ws)).not.toBe(join(ws, pinned));
+  });
+
+  it('still joins a relative WICKED_QE_LEDGER_DIR under repoRoot', () => {
+    process.env['WICKED_QE_LEDGER_DIR'] = 'nested/qe-ledger';
+    const ws = workspaceWithLedger(LEGACY_QE_LEDGER_DIRNAME);
+    expect(qeLedgerRoot(ws)).toBe(join(ws, 'nested', 'qe-ledger'));
+  });
+
   it('treats a blank override as unset', () => {
     process.env['WICKED_QE_LEDGER_DIR'] = '  ';
     expect(qeLedgerDirName()).toBe(DEFAULT_QE_LEDGER_DIRNAME);
