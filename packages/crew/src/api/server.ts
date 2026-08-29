@@ -27,6 +27,7 @@ import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-health.js';
+import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { DEFAULT_WORKER_STALL_MINUTES } from '../core/types.js';
@@ -241,6 +242,11 @@ export async function createServer(
   options?: CreateServerOptions,
 ): Promise<ReturnType<typeof Fastify>> {
   const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
+  // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
+  // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook
+  // exists. Read via `app.endpointManifest` (scripts/generate-endpoint-manifest.ts + the drift
+  // test); costs one array push per route at boot, nothing per request.
+  app.decorate('endpointManifest', installEndpointManifestHook(app));
   const gateCache = new GateCache();
   const elicitationCache = new ElicitationCache();
   const terminals = new TerminalHub();

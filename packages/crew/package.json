@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "skills"
+    "skills",
+    "endpoint-manifest.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,6 +22,8 @@
     "lint": "eslint src tests",
     "test": "vitest run",
     "test:integration": "vitest run tests/integration",
+    "manifest:endpoints": "tsx scripts/generate-endpoint-manifest.ts",
+    "generate:api-tests": "tsx scripts/generate-api-tests.ts",
     "dev": "tsx watch src/cli/index.ts serve",
     "start": "node dist/cli/index.js serve"
   },
