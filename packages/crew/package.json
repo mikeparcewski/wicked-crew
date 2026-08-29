@@ -1,7 +1,7 @@
 {
   "name": "wicked-crew",
   "version": "0.7.1",
-  "description": "wicked-crew daemon — thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
+  "description": "wicked-crew daemon \u2014 thin REST+WS bridge to the wicked-core engine via wicked-core-ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mikeparcewski/wicked-crew.git"
@@ -37,7 +37,7 @@
     "fastify": "^5.0.0",
     "pi-acp": "^0.0.32",
     "wicked-bus": "^2.3.1",
-    "wicked-core-ts": "^0.7.1",
+    "wicked-core-ts": "^0.7.2",
     "wicked-ledger": "^0.4.0",
     "zod": "^3.23.0"
   },
