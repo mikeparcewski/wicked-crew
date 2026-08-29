@@ -1,0 +1,624 @@
+{
+  "version": 1,
+  "apiTypesVersion": "0.10.0",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/audit",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/chats",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/chats/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/chats/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/messages",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/config",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/domain-graph",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/claims",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/coverage",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/graph",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/policies",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/governance/policies",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/governance/policies/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/rules",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/governance/rules",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/governance/rules/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/rules/preview",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/open",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/projects/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/activity",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/graph",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/graph/blast-radius",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/graph/refresh",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/graph/search",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/members",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:id/members",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/projects/:id/members/:mid",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:id/prompts",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:projectId/interactive-events",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "OPTIONS",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "TRACE",
+      "path": "/api/v1/projects/:projectId/interactive/*",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/repos",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/contributors",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/domain-graph",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/git-history",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/graph",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/graph/blast-radius",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/onboard",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/repos/:id/onboard",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/requirements",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/repos/:id/requirements/:key",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/repos/:id/requirements/:key",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/roster",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs",
+      "requestType": null,
+      "responseType": "{ runs: SessionView[] }",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs",
+      "requestType": "LaunchRunBody",
+      "responseType": "{ runId: string }",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id",
+      "requestType": null,
+      "responseType": "{ run: SessionView }",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/acceptance",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/archive",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/cancel",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/diff",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/elicitation",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/elicitation",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/events",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/evidence",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/files",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/gate",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/gate",
+      "requestType": "GateDecision",
+      "responseType": "{ status: SessionStatus }",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/runs/:id/guidance",
+      "requestType": "SetGuidanceBody",
+      "responseType": "SetGuidanceResult",
+      "statusCodes": [
+        200,
+        400,
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/inject",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/resume",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/units/:unitKey/output",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/archive",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/scripts",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/settings",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/settings",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/terminals",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/terminals/:id/close",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/terminals/:id/resize",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/whoami",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workflows",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workflows",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workflows/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/ws",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [],
+      "websocket": true
+    },
+    {
+      "method": "GET",
+      "path": "/ws/terminals/:id",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [],
+      "websocket": true
+    }
+  ]
+}

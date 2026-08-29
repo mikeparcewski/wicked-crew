@@ -25,14 +25,26 @@
  * manifest that describes it together, so removing a project's graph is one `rm -rf` that cannot
  * leave a manifest describing a database that is gone.
  *
+ * # Why the root FOLLOWS `--db` (crew#330)
+ *
+ * `~/.wicked-crew` is the daemon's DEFAULT state home, not its definition. A daemon started with
+ * `--db $SCRATCH/core.db --bus-db $SCRATCH/bus.db` reads as fully isolated — and then built its
+ * project graph in the developer's real home, 41.7 MB keyed by project ids that only the scratch
+ * store ever knew, with nothing to reap them. One `--db` must move everything durable, so the
+ * bootstrap threads the RESOLVED state home (the `--db` parent) into this module via
+ * {@link setProjectGraphStateHome}, and the resolver here prefers it over the homedir fallback.
+ * With no `--db`, the resolved state home IS `~/.wicked-crew`, so the default daemon's paths are
+ * byte-identical to what they were before the fix.
+ *
  * Overridable with `WICKED_CREW_PROJECT_GRAPH_ROOT` — the same escape hatch
  * `WICKED_CREW_PROJECT_SETTINGS` gives the settings store, and what lets the tests and the proof
- * scripts run without touching a developer's real home.
+ * scripts run without touching a developer's real home. The env override outranks the configured
+ * state home: it is the more specific instruction ("graphs go THERE") and the one CI already uses.
  */
 
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /**
  * The estate label charset, copied from the rule that enforces it
@@ -113,9 +125,43 @@ export function assertProjectIdIsPathSafe(projectId: string): void {
   }
 }
 
-/** The root every project graph directory hangs off. */
+/**
+ * The daemon's RESOLVED state home — set once at bootstrap from the `--db` parent (crew#330),
+ * `undefined` for library consumers and unit tests that never boot a daemon (they fall through to
+ * the homedir default, exactly the pre-fix behaviour).
+ */
+let configuredStateHome: string | undefined;
+
+/**
+ * The state home the daemon was ACTUALLY given, derived from its resolved core-db path — the seam
+ * that makes `--db` move the project graphs along with everything else durable (crew#330).
+ *
+ * Called from the CLI bootstrap (the one place that knows the resolved `--db`), before any route
+ * can resolve a graph path. `undefined` clears it (tests). Idempotent; the last call wins, which
+ * is harmless because a process boots one daemon.
+ */
+export function setProjectGraphStateHome(stateHome: string | undefined): void {
+  configuredStateHome = stateHome;
+}
+
+/**
+ * A core-db path → the state home it implies. Pure and exported so the bootstrap and the
+ * regression test spell the derivation once: `dirname` of the ABSOLUTE db path, so a relative
+ * `--db ./scratch/core.db` still lands its graphs next to the db it named rather than resolving
+ * differently on every later `join`.
+ */
+export function stateHomeOfDb(dbPath: string): string {
+  return dirname(resolve(dbPath));
+}
+
+/** The root every project graph directory hangs off. Precedence: explicit env override, then the
+ *  daemon's configured state home (the `--db` parent — crew#330), then the `~/.wicked-crew`
+ *  default (which is also what the configured state home resolves to when `--db` was not given). */
 export function projectGraphRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_PROJECT_GRAPH_ROOT'] ?? join(homedir(), '.wicked-crew', 'project-graphs');
+  const override = env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+  if (override !== undefined) return override;
+  if (configuredStateHome !== undefined) return join(configuredStateHome, 'project-graphs');
+  return join(homedir(), '.wicked-crew', 'project-graphs');
 }
 
 /** One project's graph directory — holds the database and the manifest that describes it. */

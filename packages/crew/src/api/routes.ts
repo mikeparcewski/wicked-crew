@@ -314,7 +314,12 @@ export function registerRoutes(
   // still gets the ONE actor shape via this accessor.
   const actorOf = (req: { actor?: import('../core/types.js').Actor }) => req.actor ?? LOCAL_ACTOR;
   // Liveness — also proves the actor + event pump are up.
-  app.get(`${V}/health`, async () => {
+  // `config.manifest` on the routes below (TH-11): the declaration channel the endpoint manifest
+  // reads — type names bind to `wicked-crew-api-types` exports where one exists, structural
+  // spellings where the contract has no name, statusCodes list every code the route answers on
+  // purpose. Declared on the highest-traffic run-lifecycle routes first; the manifest records
+  // null / [] for the rest ("where declared", never invented). See src/api/endpoint-manifest.ts.
+  app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await adapter.ping();
     return { status: 'ok', version: PKG_VERSION, ping };
   });
@@ -625,7 +630,20 @@ export function registerRoutes(
 
   // Launch a run (replaces POST /sessions). `clisJson` defaults to the roster;
   // `sessionId` is minted if the client omits it.
-  app.post(`${V}/runs`, async (req, reply) => {
+  app.post(
+    `${V}/runs`,
+    {
+      config: {
+        manifest: {
+          requestType: 'LaunchRunBody',
+          responseType: '{ runId: string }',
+          // 404/409: unknown project / archived-or-synthesized project + busy engine (see the
+          // catch below); 400: zod reject or a retryOf naming no existing run.
+          statusCodes: [201, 400, 404, 409],
+        },
+      },
+    },
+    async (req, reply) => {
     const parsed = LaunchSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
@@ -718,7 +736,10 @@ export function registerRoutes(
 
   // Run list (replaces GET /sessions). Actionable-first; reconciles the gate and elicitation caches
   // so that terminal-run entries are pruned even when their terminal CoreEvent was missed.
-  app.get(`${V}/runs`, async (req) => {
+  app.get(
+    `${V}/runs`,
+    { config: { manifest: { responseType: '{ runs: SessionView[] }', statusCodes: [200] } } },
+    async (req) => {
     const views = await adapter.sessionsDetail();
     gateCache.reconcile(views);
     elicitationCache.reconcile(views);
@@ -785,7 +806,10 @@ export function registerRoutes(
   });
 
   // One run's detail.
-  app.get(`${V}/runs/:id`, async (req, reply) => {
+  app.get(
+    `${V}/runs/:id`,
+    { config: { manifest: { responseType: '{ run: SessionView }', statusCodes: [200, 404] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
@@ -804,7 +828,18 @@ export function registerRoutes(
   // operator-visible context only; the amend text at gate decision (`POST /runs/:id/gate`)
   // stays the ONE injection point. The studio pre-populates its steer textarea from this note,
   // and injection still happens only through the governed amend.
-  app.put(`${V}/runs/:id/guidance`, async (req, reply) => {
+  app.put(
+    `${V}/runs/:id/guidance`,
+    {
+      config: {
+        manifest: {
+          requestType: 'SetGuidanceBody',
+          responseType: 'SetGuidanceResult',
+          statusCodes: [200, 400, 404],
+        },
+      },
+    },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = GuidanceSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1049,7 +1084,19 @@ export function registerRoutes(
   });
 
   // The steering gate (§11.1). approve+amend = approve-with-steer; approve:false = reject (cancels).
-  app.post(`${V}/runs/:id/gate`, async (req, reply) => {
+  app.post(
+    `${V}/runs/:id/gate`,
+    {
+      config: {
+        manifest: {
+          requestType: 'GateDecision',
+          responseType: '{ status: SessionStatus }',
+          // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
+          statusCodes: [200, 400, 404, 409],
+        },
+      },
+    },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = GateSchema.safeParse(req.body);
     if (!parsed.success) {
