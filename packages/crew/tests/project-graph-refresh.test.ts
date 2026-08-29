@@ -219,6 +219,20 @@ function indexCalls(): string[][] {
     .map((l) => JSON.parse(l) as string[]);
 }
 
+/**
+ * Poll until the stub has recorded `n` index invocations. The stub appends the argv line BEFORE
+ * its STUB_INDEX_DELAY_MS sleep, so this resolves while the observed build is still in-flight
+ * inside its child — which is what makes the force-aware coalescing tests deterministic about
+ * WHICH refresh was running when the second request arrived, instead of racing two injects.
+ */
+async function waitForIndexCalls(n: number, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (indexCalls().length < n) {
+    if (Date.now() - start > timeoutMs) throw new Error(`stub never reached ${n} index calls`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 interface Hit {
   repoId: string;
   repo: string;
@@ -633,6 +647,131 @@ describe.skipIf(!POSIX)('two refreshes at once', () => {
     const ok = await refresh();
     expect(ok.code).toBe(200);
     expect(ok.body['indexed']).toEqual(['alpha']);
+  });
+});
+
+/**
+ * FORCE-AWARE COALESCING — what "one refresh at a time" means when the callers disagree.
+ *
+ * Plain-plain coalescing is pinned above; these pin the force-aware half of the in-flight map.
+ * The requests are not interchangeable: a forced caller served a plain refresh's result has been
+ * SILENTLY un-forced — the migration it asked for never ran, and its 200 body says nothing about
+ * it. So a forced request queues behind an in-flight plain build and runs its own, while a plain
+ * request is served by ANY in-flight refresh (a forced build does strictly more work), and a
+ * forced request is served by an in-flight FORCED one.
+ *
+ * Ordering is pinned by `waitForIndexCalls`, not by Promise.all luck: the first build is proven
+ * in-flight (its child is sleeping inside STUB_INDEX_DELAY_MS) before the second request fires.
+ */
+describe.skipIf(!POSIX)('two refreshes at once, one of them forced', () => {
+  it('a FORCED request during a plain build queues behind it and runs its own forced build', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+
+    const plain = refresh();
+    await waitForIndexCalls(1); // the plain build is in-flight — its first index child is asleep
+    const forced = refresh({ force: true });
+
+    const [p, f] = await Promise.all([plain, forced]);
+    expect(p.code).toBe(200);
+    expect(f.code).toBe(200);
+    // Two waves of two. Coalescing the forced caller onto the plain build would leave this at 2
+    // with no `--force` anywhere — the silent un-force the force-aware map exists to prevent.
+    const calls = indexCalls();
+    expect(calls).toHaveLength(4);
+    for (const call of calls.slice(0, 2)) expect(call).not.toContain('--force');
+    for (const call of calls.slice(2)) expect(call).toContain('--force');
+    // And the forced wave really rebuilt: nothing changed on disk between the waves, so only the
+    // clean-HEAD-skip bypass explains repos landing in `indexed` rather than `skipped`.
+    expect([...f.body['indexed']].sort()).toEqual(['alpha', 'beta']);
+    expect(f.body['skipped']).toEqual([]);
+  });
+
+  it('a PLAIN request during a forced build coalesces onto it — forced does strictly more', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const forced = refresh({ force: true });
+    await waitForIndexCalls(1);
+    const plain = refresh();
+
+    const [f, p] = await Promise.all([forced, plain]);
+    expect(f.code).toBe(200);
+    expect(p.code).toBe(200);
+    // ONE build, and it was the forced one.
+    const calls = indexCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('--force');
+    // The plain caller is served the forced build's answer rather than a fabricated one.
+    expect(p.body).toEqual(f.body);
+  });
+
+  it('a FORCED request during a forced build coalesces — the in-flight one already forces', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const first = refresh({ force: true });
+    await waitForIndexCalls(1);
+    const second = refresh({ force: true });
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.code).toBe(200);
+    expect(b.code).toBe(200);
+    expect(indexCalls()).toHaveLength(1);
+    expect(b.body).toEqual(a.body);
+  });
+
+  it("the plain build settling must NOT evict its queued forced successor from the map", async () => {
+    // The finally-delete is identity-guarded: the queued forced entry REPLACED the plain one in
+    // the map, so the plain one settling deletes nothing. Unguarded, it would evict the successor
+    // and a third caller would start a THIRD build concurrent with the forced one still running —
+    // two estate writers on one database, the exact race the map exists to prevent.
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const plain = refresh();
+    await waitForIndexCalls(1);
+    const forced = refresh({ force: true });
+    await plain; // the plain build settles; its finally runs while the forced entry owns the slot
+    await waitForIndexCalls(2); // the forced build is now in-flight, asleep inside its index child
+    const third = refresh();
+
+    const [f, t] = await Promise.all([forced, third]);
+    expect(f.code).toBe(200);
+    expect(t.code).toBe(200);
+    // The third caller coalesced onto the still-in-flight forced build — no third writer.
+    expect(indexCalls()).toHaveLength(2);
+    expect(t.body).toEqual(f.body);
+  });
+
+  it('the queued forced build still runs when the plain one FAILS', async () => {
+    // The plain build fails AFTER its index ran: STUB_DROPS_REPO reproduces 0.14.4, whose damage
+    // only the post-index evidence check catches — a REJECTION from deep inside the refresh,
+    // which is exactly the settled shape the queue's catch has to absorb without letting the
+    // prior caller's failure poison the forced build queued behind it.
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    process.env['STUB_DROPS_REPO'] = '1';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const plain = refresh();
+    await waitForIndexCalls(1); // the broken index is in-flight; its child inherited DROPS_REPO
+    delete process.env['STUB_DROPS_REPO']; // children the queued forced build spawns are healthy
+    const forced = refresh({ force: true });
+
+    const [p, f] = await Promise.all([plain, forced]);
+    expect(p.code).toBe(400);
+    expect(p.body['error']).toMatch(/records no repo labelled/);
+    // The prior refresh's failure belongs to its own caller; the queued forced one still ran.
+    expect(f.code).toBe(200);
+    expect(f.body['indexed']).toEqual(['alpha']);
+    const calls = indexCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain('--force');
   });
 });
 
