@@ -10,12 +10,33 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.7.1] — 2026-08-29
+
+**The release train release.** Bundles the wicked-studio 0.4.1 truth-pass skin, moves the QE
+acceptance gate onto the wicked-ledger 2.1 evidence-manifest floor, and — because the npm page
+was blank through 0.7.0 — is the first version whose npm page carries a README.
+
+### Changed
+- Bundles **wicked-studio 0.4.1** as the default local skin — the devDep bumped explicitly from
+  `^0.4.0` (the committed lockfile means the caret never auto-floats; an unbumped pin silently
+  ships a stale UI).
+- **wicked-ledger floor raised to `^0.4.0`** — the release that carries evidence-manifest 2.1
+  (optional `scenario_evidence` block + first-class `claim_level` enum, ledger#7). All ledger
+  consumers move in the same wave so no v2.0/v2.1 validator split exists; 2.0 bundles stay valid
+  (the manifest bump is additive-minor).
+
 ### Added
+- Committed **endpoint manifest** (`packages/crew/endpoint-manifest.json`) with a drift test and
+  an API-test generator (`manifest:endpoints` / `generate:api-tests`) (#351).
 - Estate-migration operability on the project graph: force refresh, per-repo outcomes, stderr
   visibility (#347).
 - Root `CLAUDE.md` pointer stub for coding agents (#348).
 
 ### Fixed
+- Project graphs follow `--db`: an isolated daemon no longer writes project graphs into the real
+  `~/.wicked-crew` state root (crew#330, #351).
 - QE acceptance ledger honors an absolute `WICKED_QE_LEDGER_DIR` (#348).
 - The deliverable floor no longer passes on a PRIOR run's artifact (#346).
 - Interactive edit-events scope their declared write root to the handoff that owns it (#345).
@@ -24,8 +45,12 @@ mentioned only where a daemon release depends on them.
 - Pinned the wicked-interactive crew starts; fixed two load-sensitive tests (#331).
 
 ### Docs
+- `packages/crew/README.md` — the npm package page, blank at every version ≤ 0.7.0, now says what
+  the daemon is, how to install it, and where the acceptance gate lives; repo README gained
+  Install/Quickstart and the acceptance-gate section (#349).
 - Documented the project code graph, which shipped in 0.7.0 undocumented (#332).
-- Site: chrome re-pin, scroll-snap and topbar-threshold fixes (#334–#336).
+- Site: shipped 0.4–0.7 features marketed truthfully + viewport fixes (#350); chrome re-pin,
+  scroll-snap and topbar-threshold fixes (#334–#336).
 
 ## [0.7.0] — 2026-08-25
 
@@ -191,7 +216,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mikeparcewski/wicked-crew/compare/v0.4.0...v0.5.0
