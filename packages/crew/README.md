@@ -23,6 +23,9 @@ Or without installing:
 npx wicked-crew serve
 ```
 
+Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
+installs/updates the whole wicked-\* family, crew included.
+
 `serve` starts the daemon on `http://127.0.0.1:7701` (override with `--port` or `CREW_PORT`) and
 serves the bundled **wicked-studio** browser console same-origin — open the URL and you have the
 control room: launch and steer runs, answer human gates, browse projects and evidence, watch live
@@ -67,7 +70,7 @@ layer over it.
 ## The acceptance gate
 
 `GET /api/v1/runs/:id/acceptance` answers "does the QE evidence ledger accept this run's work?" —
-crew's machine gate, absorbed from the retired wicked-testing product. It reads the repo's
+crew's machine gate, absorbed from the retired wicked-testing product. <!-- historical --> It reads the repo's
 evidence ledger (a wicked-ledger store at `<repo>/.wicked-qe/`, written by wicked-garden's QE
 skills; legacy `.wicked-testing/` ledgers are still read) and resolves the workflow's acceptance
 requirement **deny-dominates**: only a `PASS` verdict satisfies it. `FAIL`, `CONDITIONAL`,

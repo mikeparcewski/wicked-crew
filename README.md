@@ -43,6 +43,9 @@ npm install -g wicked-crew     # or run it directly: npx wicked-crew serve
 wicked-crew serve
 ```
 
+Or use the family installer — [`npx wicked-installer`](https://www.npmjs.com/package/wicked-installer)
+installs/updates the whole wicked-\* family, crew included.
+
 `serve` starts the daemon on `http://127.0.0.1:7701` (`--port` / `CREW_PORT` override) and serves
 the bundled **wicked-studio** console same-origin — open the URL to launch and steer runs, answer
 human gates, and browse projects and evidence. Durable state lives in `~/.wicked-crew/` (`--db`
@@ -129,7 +132,7 @@ not "proven."
 
 Distinct from the per-phase gates above — which govern the RUN — the **acceptance gate** answers a
 different question: *does the QE evidence ledger accept the work this run did to its repo?* This is
-the machine gate absorbed from the retired wicked-testing product, and it lives on the daemon:
+the machine gate absorbed from the retired wicked-testing product, and it lives on the daemon: <!-- historical -->
 
 ```
 GET /api/v1/runs/:id/acceptance        (?qeRun=<id> pins the read to one QE run's newest verdict)
