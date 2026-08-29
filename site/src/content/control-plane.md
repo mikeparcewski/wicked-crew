@@ -250,8 +250,17 @@ product of it.
 ## Trying it
 
 ```sh
+npm install -g wicked-crew
+wicked-crew serve
+# open http://127.0.0.1:7701 — the studio console ships inside
+```
+
+Building from source instead? The plain `npm run build` is **headless** — it compiles the
+daemon without the studio UI. Use the bundling build so the console actually ships:
+
+```sh
 git clone https://github.com/mikeparcewski/wicked-crew
-cd wicked-crew && npm install && npm run build
+cd wicked-crew && npm install && npm run build:with-studio
 node packages/crew/dist/cli/index.js serve
 # open http://127.0.0.1:7701
 ```

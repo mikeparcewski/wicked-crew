@@ -37,3 +37,26 @@ test.describe('install copy buttons', () => {
     await expect(btn).toHaveText('Copy');
   });
 });
+
+/**
+ * Rendered-text fusion guard. Astro's default `compressHTML` deletes the
+ * newline between a text node and a following inline tag (<b>/<code>/<a>),
+ * fusing rendered words: this page shipped "thedocument engine",
+ * "asacyclic-validated" and "/api/v1.wicked-studio" that way. The config now
+ * sets `compressHTML: false`; this test fails loudly if that regresses.
+ * Phrases are checked in rendered innerText — a measurement can't see this,
+ * only the text can.
+ */
+test.describe('inline-tag boundaries render with their spaces', () => {
+  test('known fusion-prone phrases are intact', async ({ page }) => {
+    await page.goto('/');
+    const text = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
+    for (const phrase of [
+      'the document engine',       // .skins sec-sub: "the" + <b>document engine</b>
+      'as acyclic-validated JSON', // .wf sec-sub: "as" + <b>acyclic-validated JSON</b>
+      'visible during the run',    // .op-card: <i>during</i> + " the run"
+    ]) {
+      expect(text, `fused inline-tag boundary — expected "${phrase}"`).toContain(phrase);
+    }
+  });
+});

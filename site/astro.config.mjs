@@ -15,5 +15,10 @@ export default defineConfig({
   // assets resolve from '/', so the CNAME root serves CSS/JS correctly.
   site: 'https://wc.wickedagile.com',
   output: 'static',
+  // compressHTML collapses the newline between a text node and a following
+  // inline tag (<b>/<code>/<a>), fusing rendered words ("the" + "<b>document
+  // engine</b>" → "thedocument engine"). Same defect class as the apex site's
+  // "returns8 hits". The bytes saved are not worth silently broken copy.
+  compressHTML: false,
   vite: { resolve: { alias } },
 });
