@@ -52,6 +52,17 @@ const POSIX = process.platform !== 'win32';
 const PROJECT_ID = 'proj_refresh';
 
 /**
+ * The real-binary closure lane (see the CLOSURE test at the bottom of the refresh suite).
+ * `CLOSURE_ESTATE_BIN` = an integrated wicked-estate (scheme-2 ids); `CLOSURE_ESTATE_BIN_OLD` = a
+ * pre-scheme-2 release, needed because only an old binary can seed an old-scheme database. Read at
+ * module load like every other gate in this suite; unset (the normal case, CI included) the
+ * closure test skips.
+ */
+const CLOSURE_BIN = process.env['CLOSURE_ESTATE_BIN'] ?? '';
+const CLOSURE_BIN_OLD = process.env['CLOSURE_ESTATE_BIN_OLD'] ?? '';
+const CLOSURE_READY = CLOSURE_BIN !== '' && CLOSURE_BIN_OLD !== '';
+
+/**
  * A wicked-estate stand-in.
  *
  * Records every `index` invocation verbatim so a test can assert the exact argv crew built, and
@@ -62,6 +73,9 @@ const PROJECT_ID = 'proj_refresh';
  *   STUB_NO_REPO_FLAG=1  — a pre-#117 usage banner (no `--repo`), what the probe must catch.
  *   STUB_DROPS_REPO=1    — 0.14.4 exactly: takes `--repo`, ignores it, exits 0. Nothing but the
  *                          post-index read of `stats` can tell this one from a working build.
+ * And one reproduces a binary that has something to SAY:
+ *   STUB_INDEX_STDERR=…  — written to stderr by every `index` (exit 0), the shape of estate's
+ *                          id_scheme migration notice. crew used to discard it entirely.
  */
 const STUB = `#!/usr/bin/env node
 'use strict';
@@ -86,6 +100,8 @@ if (cmd === 'index') {
   const root = argv[1];
   const label = process.env.STUB_DROPS_REPO === '1' ? undefined : opt('--repo');
   fs.appendFileSync(db + '.calls', JSON.stringify(argv) + '\\n');
+  // The loud-notice seam: estate's id_scheme migration gate speaks on stderr and exits 0.
+  if (process.env.STUB_INDEX_STDERR) process.stderr.write(process.env.STUB_INDEX_STDERR + '\\n');
   // A real index takes seconds; a stub returns in a millisecond. STUB_INDEX_DELAY_MS widens the
   // window a second caller has to arrive in, so the coalescing test is testing coalescing rather
   // than the luck of an event-loop ordering.
@@ -153,6 +169,8 @@ interface Fixture {
   dbPath: string;
   repos: Map<string, RepoEntry>;
   members: string[];
+  /** Everything the route deps' `log` received — where index stderr must land. */
+  logs: string[];
 }
 let fx: Fixture;
 
@@ -212,6 +230,20 @@ function indexCalls(): string[][] {
     .map((l) => JSON.parse(l) as string[]);
 }
 
+/**
+ * Poll until the stub has recorded `n` index invocations. The stub appends the argv line BEFORE
+ * its STUB_INDEX_DELAY_MS sleep, so this resolves while the observed build is still in-flight
+ * inside its child — which is what makes the force-aware coalescing tests deterministic about
+ * WHICH refresh was running when the second request arrived, instead of racing two injects.
+ */
+async function waitForIndexCalls(n: number, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (indexCalls().length < n) {
+    if (Date.now() - start > timeoutMs) throw new Error(`stub never reached ${n} index calls`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 interface Hit {
   repoId: string;
   repo: string;
@@ -229,11 +261,19 @@ interface StatusBody {
   linkage: string;
   note: string;
 }
+interface RefreshRepoRow {
+  repoId: string;
+  label: string;
+  action: 'indexed' | 'skipped-head-unchanged' | 'failed';
+  stderrTail?: string;
+  error?: string;
+}
 interface RefreshBody {
   status: StatusBody;
   indexed: string[];
   skipped: string[];
   failed: Array<{ repoId: string; label: string; error: string }>;
+  repos?: RefreshRepoRow[];
   error?: string;
 }
 interface QueryBase {
@@ -251,10 +291,13 @@ interface BlastBody extends QueryBase {
   unresolved: number;
 }
 
-async function refresh(): Promise<{ code: number; body: RefreshBody }> {
+async function refresh(body?: { force?: boolean }): Promise<{ code: number; body: RefreshBody }> {
   const res = await fx.app.inject({
     method: 'POST',
     url: `/api/v1/projects/${PROJECT_ID}/graph/refresh`,
+    // No payload at all when the caller sent none — the route must keep accepting the
+    // body-less POST every pre-force client sends.
+    ...(body === undefined ? {} : { payload: body }),
   });
   return { code: res.statusCode, body: res.json() as RefreshBody };
 }
@@ -278,6 +321,7 @@ beforeEach(() => {
   delete process.env['STUB_NO_REPO_FLAG'];
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
+  delete process.env['STUB_INDEX_STDERR'];
 
   fx = {
     app: undefined as unknown as FastifyInstance,
@@ -286,6 +330,7 @@ beforeEach(() => {
     dbPath: join(graphRoot, PROJECT_ID, 'code-graph.db'),
     repos: new Map(),
     members: [],
+    logs: [],
   };
 
   const adapter = {
@@ -301,7 +346,7 @@ beforeEach(() => {
   registerProjectRoutes(fx.app, adapter, {
     bus: null,
     index: new MembershipIndex(),
-    log: () => undefined,
+    log: (msg) => fx.logs.push(msg),
     settings: new ProjectSettingsStore(join(work, 'settings.json')),
   });
 });
@@ -313,6 +358,7 @@ afterEach(async () => {
   delete process.env['STUB_NO_REPO_FLAG'];
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
+  delete process.env['STUB_INDEX_STDERR'];
   rmSync(fx.work, { recursive: true, force: true });
 });
 
@@ -612,6 +658,382 @@ describe.skipIf(!POSIX)('two refreshes at once', () => {
     const ok = await refresh();
     expect(ok.code).toBe(200);
     expect(ok.body['indexed']).toEqual(['alpha']);
+  });
+});
+
+/**
+ * FORCE-AWARE COALESCING — what "one refresh at a time" means when the callers disagree.
+ *
+ * Plain-plain coalescing is pinned above; these pin the force-aware half of the in-flight map.
+ * The requests are not interchangeable: a forced caller served a plain refresh's result has been
+ * SILENTLY un-forced — the migration it asked for never ran, and its 200 body says nothing about
+ * it. So a forced request queues behind an in-flight plain build and runs its own, while a plain
+ * request is served by ANY in-flight refresh (a forced build does strictly more work), and a
+ * forced request is served by an in-flight FORCED one.
+ *
+ * Ordering is pinned by `waitForIndexCalls`, not by Promise.all luck: the first build is proven
+ * in-flight (its child is sleeping inside STUB_INDEX_DELAY_MS) before the second request fires.
+ */
+describe.skipIf(!POSIX)('two refreshes at once, one of them forced', () => {
+  it('a FORCED request during a plain build queues behind it and runs its own forced build', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+
+    const plain = refresh();
+    await waitForIndexCalls(1); // the plain build is in-flight — its first index child is asleep
+    const forced = refresh({ force: true });
+
+    const [p, f] = await Promise.all([plain, forced]);
+    expect(p.code).toBe(200);
+    expect(f.code).toBe(200);
+    // Two waves of two. Coalescing the forced caller onto the plain build would leave this at 2
+    // with no `--force` anywhere — the silent un-force the force-aware map exists to prevent.
+    const calls = indexCalls();
+    expect(calls).toHaveLength(4);
+    for (const call of calls.slice(0, 2)) expect(call).not.toContain('--force');
+    for (const call of calls.slice(2)) expect(call).toContain('--force');
+    // And the forced wave really rebuilt: nothing changed on disk between the waves, so only the
+    // clean-HEAD-skip bypass explains repos landing in `indexed` rather than `skipped`.
+    expect([...f.body['indexed']].sort()).toEqual(['alpha', 'beta']);
+    expect(f.body['skipped']).toEqual([]);
+  });
+
+  it('a PLAIN request during a forced build coalesces onto it — forced does strictly more', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const forced = refresh({ force: true });
+    await waitForIndexCalls(1);
+    const plain = refresh();
+
+    const [f, p] = await Promise.all([forced, plain]);
+    expect(f.code).toBe(200);
+    expect(p.code).toBe(200);
+    // ONE build, and it was the forced one.
+    const calls = indexCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('--force');
+    // The plain caller is served the forced build's answer rather than a fabricated one.
+    expect(p.body).toEqual(f.body);
+  });
+
+  it('a FORCED request during a forced build coalesces — the in-flight one already forces', async () => {
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const first = refresh({ force: true });
+    await waitForIndexCalls(1);
+    const second = refresh({ force: true });
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.code).toBe(200);
+    expect(b.code).toBe(200);
+    expect(indexCalls()).toHaveLength(1);
+    expect(b.body).toEqual(a.body);
+  });
+
+  it("the plain build settling must NOT evict its queued forced successor from the map", async () => {
+    // The finally-delete is identity-guarded: the queued forced entry REPLACED the plain one in
+    // the map, so the plain one settling deletes nothing. Unguarded, it would evict the successor
+    // and a third caller would start a THIRD build concurrent with the forced one still running —
+    // two estate writers on one database, the exact race the map exists to prevent.
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const plain = refresh();
+    await waitForIndexCalls(1);
+    const forced = refresh({ force: true });
+    await plain; // the plain build settles; its finally runs while the forced entry owns the slot
+    await waitForIndexCalls(2); // the forced build is now in-flight, asleep inside its index child
+    const third = refresh();
+
+    const [f, t] = await Promise.all([forced, third]);
+    expect(f.code).toBe(200);
+    expect(t.code).toBe(200);
+    // The third caller coalesced onto the still-in-flight forced build — no third writer.
+    expect(indexCalls()).toHaveLength(2);
+    expect(t.body).toEqual(f.body);
+  });
+
+  it('the queued forced build still runs when the plain one FAILS', async () => {
+    // The plain build fails AFTER its index ran: STUB_DROPS_REPO reproduces 0.14.4, whose damage
+    // only the post-index evidence check catches — a REJECTION from deep inside the refresh,
+    // which is exactly the settled shape the queue's catch has to absorb without letting the
+    // prior caller's failure poison the forced build queued behind it.
+    process.env['STUB_INDEX_DELAY_MS'] = '250';
+    process.env['STUB_DROPS_REPO'] = '1';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const plain = refresh();
+    await waitForIndexCalls(1); // the broken index is in-flight; its child inherited DROPS_REPO
+    delete process.env['STUB_DROPS_REPO']; // children the queued forced build spawns are healthy
+    const forced = refresh({ force: true });
+
+    const [p, f] = await Promise.all([plain, forced]);
+    expect(p.code).toBe(400);
+    expect(p.body['error']).toMatch(/records no repo labelled/);
+    // The prior refresh's failure belongs to its own caller; the queued forced one still ran.
+    expect(f.code).toBe(200);
+    expect(f.body['indexed']).toEqual(['alpha']);
+    const calls = indexCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain('--force');
+  });
+});
+
+/**
+ * FORCE — the estate-migration path.
+ *
+ * The plain skip rule fires on git evidence alone (clean checkout, same HEAD, same root), so it
+ * also skips a repo whose rows were written by an OLDER estate binary — after an estate upgrade an
+ * UNCHANGED repo never re-indexes and keeps serving old-scheme ids and old unresolved accounting
+ * indefinitely. `{ force: true }` exists for exactly that: bypass the skip AND pass `--force` so
+ * estate's own digest skip cannot no-op the rebuild either.
+ */
+describe.skipIf(!POSIX)('POST /graph/refresh with { force: true }', () => {
+  it('bypasses the clean-HEAD skip and passes --force to every index', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+    await refresh();
+    expect(indexCalls()).toHaveLength(2);
+    // The situation force exists for: nothing changed, so a plain refresh would skip both.
+    expect((await refresh()).body['skipped'].sort()).toEqual(['alpha', 'beta']);
+    expect(indexCalls()).toHaveLength(2);
+
+    const forced = await refresh({ force: true });
+    expect(forced.code).toBe(200);
+    expect([...forced.body['indexed']].sort()).toEqual(['alpha', 'beta']);
+    expect(forced.body['skipped']).toEqual([]);
+    const calls = indexCalls();
+    expect(calls).toHaveLength(4);
+    for (const call of calls.slice(2)) expect(call).toContain('--force');
+    // And the plain calls before it did NOT carry the flag — force is opt-in, never ambient.
+    for (const call of calls.slice(0, 2)) expect(call).not.toContain('--force');
+  });
+
+  it('a plain refresh sends no --force', async () => {
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    await refresh();
+    expect(indexCalls()[0]).not.toContain('--force');
+  });
+
+  it('rejects a body the contract does not describe', async () => {
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    const res = await fx.app.inject({
+      method: 'POST',
+      url: `/api/v1/projects/${PROJECT_ID}/graph/refresh`,
+      payload: { force: 'yes' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  // CLOSURE SUITE — needs the real wicked-estate binaries: a forced refresh against a database
+  // written by the OLD id scheme must trigger estate's id_scheme full re-extract, emit the
+  // migration notice on stderr, and leave nested-scheme ids in the graph. The stub can only prove
+  // crew's side of the call (argv + stderr plumbing), which the tests above do.
+  //
+  // Env-gated per the repo's `it.skipIf` convention (see tests/support/core-checkout.ts for the
+  // policy discussion): set BOTH
+  //   CLOSURE_ESTATE_BIN     — an integrated wicked-estate that mints scheme-2 (nested) ids
+  //   CLOSURE_ESTATE_BIN_OLD — a pre-scheme-2 release (≤ the flat-id scheme) to SEED the
+  //                            old-scheme database with; nothing else can mint scheme-1 rows
+  // and the test runs against the real binaries; unset, it skips rather than reporting a green it
+  // did not earn. Paths that are set but wrong fail loudly at the first spawn — a typo should
+  // never demote a closure proof to a skip.
+  it.skipIf(!CLOSURE_READY)(
+    'CLOSURE (real wicked-estate): force migrates an old-scheme project graph end-to-end',
+    async () => {
+      // A method INSIDE a class is the one shape whose id differs between schemes: scheme 1 minted
+      // module-flat `<module>/save().`; scheme 2 nests it as `<module>/Repo#save().` (ADR-002
+      // amendment). Module-level functions get the same id under both, so they prove nothing.
+      const root = makeRepo('alpha');
+      writeFileSync(
+        join(root, 'src', 'repo.ts'),
+        'export class Repo {\n  save(): number {\n    return 1;\n  }\n}\n',
+      );
+      git(['add', '-A'], root);
+      git(['commit', '-qm', 'add nested shape'], root);
+      register('alpha', root);
+      attach('alpha');
+
+      // Full stored SymbolId strings (`<language> <pkg> <ver> <ns> <descriptors…>` — the three
+      // `.` are the empty package/version/namespace slots), so a contains/not-contains pair reads
+      // against exactly the row the store holds.
+      const FLAT_ID = 'ts-typescript . . . alpha/src/repo/save().';
+      const NESTED_ID = 'ts-typescript . . . alpha/src/repo/Repo#save().';
+      // node:sqlite ships from Node 22.5; crew's floor is 22.0. Imported lazily so the module
+      // keeps loading (and this test keeps SKIPPING cleanly) on a floor-version node.
+      const { DatabaseSync } = await import('node:sqlite');
+      /** The syms with a LIVE node row. The `symbols` table alone proves nothing — it is an
+       *  append-only identity registry, so retired flat ids stay in it forever by design. */
+      const liveSyms = (): string[] => {
+        const db = new DatabaseSync(fx.dbPath, { readOnly: true });
+        try {
+          return (
+            db.prepare('SELECT s.sym FROM nodes n JOIN symbols s ON s.sid = n.symbol').all() as Array<{
+              sym: string;
+            }>
+          ).map((r) => r.sym);
+        } finally {
+          db.close();
+        }
+      };
+      const idScheme = (): string | undefined => {
+        const db = new DatabaseSync(fx.dbPath, { readOnly: true });
+        try {
+          const row = db.prepare("SELECT v FROM meta WHERE k = 'repo:alpha:id_scheme'").get() as
+            | { v: string }
+            | undefined;
+          return row?.v;
+        } finally {
+          db.close();
+        }
+      };
+
+      // ── Seed: the OLD binary builds the project graph, exactly as a pre-upgrade crew did ────
+      process.env['WICKED_ESTATE_EXE'] = CLOSURE_BIN_OLD;
+      const seeded = await refresh();
+      expect(seeded.code).toBe(200);
+      expect(seeded.body['indexed']).toEqual(['alpha']);
+      expect(seeded.body['repos']?.find((r) => r.repoId === 'alpha')?.action).toBe('indexed');
+      let syms = liveSyms();
+      expect(syms).toContain(FLAT_ID);
+      expect(syms).not.toContain(NESTED_ID);
+      expect(idScheme()).toBeUndefined(); // pre-scheme binaries never stamp the key
+
+      // ── Upgrade the binary. From here on, every call crew makes runs the integrated estate ──
+      process.env['WICKED_ESTATE_EXE'] = CLOSURE_BIN;
+
+      // ── CONTROL — the impact finding: a plain refresh CANNOT migrate an unchanged repo ──────
+      // The clean-HEAD skip fires on git evidence alone, so crew never spawns the binary and
+      // estate's scheme gate never gets to run: the graph silently stays old-scheme forever.
+      const plain = await refresh();
+      expect(plain.code).toBe(200);
+      expect(plain.body['skipped']).toEqual(['alpha']);
+      expect(plain.body['repos']?.find((r) => r.repoId === 'alpha')?.action).toBe(
+        'skipped-head-unchanged',
+      );
+      syms = liveSyms();
+      expect(syms).toContain(FLAT_ID);
+      expect(syms).not.toContain(NESTED_ID);
+      expect(idScheme()).toBeUndefined();
+
+      // ── THE FIX — force: crew indexes with --force, estate migrates, and SAYS SO ────────────
+      const forced = await refresh({ force: true });
+      expect(forced.code).toBe(200);
+      expect(forced.body['indexed']).toEqual(['alpha']);
+      expect(forced.body['failed']).toEqual([]);
+      const row = forced.body['repos']?.find((r) => r.repoId === 'alpha');
+      expect(row?.action).toBe('indexed');
+      // estate's migration notice, verbatim, surfaced on the row AND through the logger — the one
+      // signal explaining why a one-second refresh suddenly ran a full re-extract.
+      expect(row?.stderrTail).toContain('SYMBOL-ID SCHEME changed (v1 → v2): forcing full re-extraction');
+      expect(fx.logs.some((l) => l.includes('SYMBOL-ID SCHEME changed') && l.includes('alpha'))).toBe(
+        true,
+      );
+      // And the database is actually migrated: the nested id is live, the flat one is retired.
+      syms = liveSyms();
+      expect(syms).toContain(NESTED_ID);
+      expect(syms).not.toContain(FLAT_ID);
+      expect(idScheme()).toBe('2');
+    },
+    120_000,
+  );
+});
+
+/**
+ * PER-REPO OUTCOME ROWS — why a repo did or did not migrate, and what the binary said.
+ *
+ * `indexed`/`skipped`/`failed` name the sets; the `repos` rows carry the WHY per repo plus the
+ * bounded stderr tail. The tail is the whole point: estate's id_scheme migration gate explains a
+ * suddenly-minutes-long refresh on stderr, and crew used to discard that stream unread.
+ */
+describe.skipIf(!POSIX)('per-repo refresh outcomes and index stderr', () => {
+  it('says per repo whether the index ran or was skipped, and why', async () => {
+    for (const n of ['alpha', 'beta']) register(n, makeRepo(n));
+    attach('alpha', 'beta');
+
+    const first = await refresh();
+    expect(first.body['repos']?.map((r) => [r.repoId, r.action]).sort()).toEqual([
+      ['alpha', 'indexed'],
+      ['beta', 'indexed'],
+    ]);
+
+    const second = await refresh();
+    expect(second.body['repos']?.map((r) => [r.repoId, r.action]).sort()).toEqual([
+      ['alpha', 'skipped-head-unchanged'],
+      ['beta', 'skipped-head-unchanged'],
+    ]);
+
+    // One repo changes: the rows disagree, which is exactly what an operator diagnosing a
+    // half-migrated project needs to see.
+    writeFileSync(join(fx.repos.get('beta')!.root_path, 'src', 'grew.ts'), 'export const g = 1;\n');
+    git(['add', '-A'], fx.repos.get('beta')!.root_path);
+    git(['commit', '-qm', 'grow'], fx.repos.get('beta')!.root_path);
+    const third = await refresh();
+    expect(third.body['repos']?.map((r) => [r.repoId, r.action]).sort()).toEqual([
+      ['alpha', 'skipped-head-unchanged'],
+      ['beta', 'indexed'],
+    ]);
+  });
+
+  it("attaches the index child's stderr tail to the repo row and hands it to the logger", async () => {
+    const NOTICE = 'id_scheme=v1 detected: forcing a full re-extract (this runs once, minutes not seconds)';
+    process.env['STUB_INDEX_STDERR'] = NOTICE;
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+
+    const res = await refresh();
+    expect(res.code).toBe(200);
+    const row = res.body['repos']?.find((r) => r.repoId === 'alpha');
+    expect(row?.action).toBe('indexed');
+    expect(row?.stderrTail).toContain(NOTICE);
+    // And through the standard logger, where an operator tailing the daemon will actually see it.
+    expect(fx.logs.some((l) => l.includes(NOTICE) && l.includes('alpha'))).toBe(true);
+  });
+
+  it('emits NO stderr tail when the binary said nothing — absence means silence, not truncation', async () => {
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    const res = await refresh();
+    const row = res.body['repos']?.find((r) => r.repoId === 'alpha');
+    expect(row?.stderrTail).toBeUndefined();
+    expect(fx.logs).toEqual([]);
+  });
+
+  it('bounds the tail — a chatty binary cannot flood the response', async () => {
+    process.env['STUB_INDEX_STDERR'] = 'x'.repeat(10_000) + ' THE-END';
+    register('alpha', makeRepo('alpha'));
+    attach('alpha');
+    const res = await refresh();
+    const tail = res.body['repos']?.find((r) => r.repoId === 'alpha')?.stderrTail ?? '';
+    expect(tail.length).toBeLessThanOrEqual(2049); // 2 KiB + the elision mark
+    // A tail keeps the END of the stream — the notice's conclusion, not its preamble.
+    expect(tail.endsWith('THE-END')).toBe(true);
+  });
+
+  it('a failed index still carries what the binary said on the way down', async () => {
+    for (const n of ['alpha', 'gamma']) register(n, makeRepo(n));
+    attach('alpha', 'gamma');
+    await refresh();
+    // Move gamma: the stub refuses with REPO COLLISION on stderr (exit 1).
+    const from = fx.repos.get('gamma')!.root_path;
+    const to = join(fx.work, 'repos', 'gamma-moved');
+    renameSync(from, to);
+    register('gamma', to);
+
+    const res = await refresh();
+    const row = res.body['repos']?.find((r) => r.repoId === 'gamma');
+    expect(row?.action).toBe('failed');
+    expect(row?.error).toMatch(/REPO COLLISION/);
+    expect(row?.stderrTail).toMatch(/REPO COLLISION/);
   });
 });
 

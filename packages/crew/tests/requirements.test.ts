@@ -233,6 +233,24 @@ describe('requirements service', () => {
   it('patching an unknown requirement 404s as null', async () => {
     expect(await patchRequirement(repoAt(root), 'nope::REQ-9', { risk: true })).toBeNull();
   });
+
+  // The artifact-path twin of the store orphan test: a regeneration that renames a domain or
+  // reqId strands the override keyed by the old spelling. Counted, never silently dropped.
+  it('counts override keys stranded by artifact regeneration', async () => {
+    await patchRequirement(repoAt(root), 'auth/session::REQ-001', { risk: true });
+    const ovPath = join(root, '.wicked-estate', 'requirements', 'requirements_overrides.json');
+    const ov = JSON.parse(await readFile(ovPath, 'utf8')) as Record<string, unknown>;
+    ov['renamed-domain::REQ-404'] = { notes: 'keyed by a domain the regen dropped' };
+    await writeFile(ovPath, JSON.stringify(ov), 'utf8');
+    const future = new Date(Date.now() + 5000);
+    await utimes(ovPath, future, future);
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
+    expect(page!.source).toBe('artifact');
+    expect(page!.orphanedOverrides).toBe(1);
+    // The still-matching override keeps applying.
+    const detail = await getRequirement(repoAt(root), 'auth/session::REQ-001');
+    expect(detail!.risk).toBe(true);
+  });
 });
 
 const hasSqlite = await (async () => {
@@ -338,5 +356,44 @@ describe.skipIf(!hasSqlite)('requirements service — live estate store (primary
     expect(patched!.riskSource).toBe('operator');
     const raw = JSON.parse(await readFile(join(dir, 'requirements_overrides.json'), 'utf8'));
     expect(raw[key].notes).toBe('reviewed');
+  });
+
+  /**
+   * ORPHANED OVERRIDES — the migration hole. Store-built indexes key overrides by the estate
+   * SymbolId string; an id-scheme migration (full re-extract) re-mints method/field ids, so an
+   * override keyed by the OLD id matches nothing and the lookup just misses — the operator's edit
+   * vanishes with no trace. The service counts those keys instead of dropping them silently.
+   */
+  it('counts override keys that match no store row instead of dropping them silently', async () => {
+    const root = await storeRepo();
+    const dir = join(root, '.wicked-estate', 'requirements');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'requirements_overrides.json'),
+      JSON.stringify({
+        // A key the store still mints — matched, not orphaned.
+        'src::chargeTax()': { notes: 'still attached' },
+        // Two old-scheme method ids the re-extract no longer produces.
+        'src::Repo.save()': { risk: true, notes: 'edited before the migration' },
+        'src::Repo.load()': { title: 'stale too' },
+      }),
+      'utf8',
+    );
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
+    expect(page!.source).toBe('store');
+    expect(page!.orphanedOverrides).toBe(2);
+    // The matched override still applies — orphan counting must not disturb the merge.
+    const detail = await getRequirement(repoAt(root), 'src::chargeTax()');
+    expect(detail!.notes).toBe('still attached');
+  });
+
+  it('reports zero orphans when every override key matches', async () => {
+    const root = await storeRepo();
+    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
+    expect(page!.orphanedOverrides).toBe(0);
+    const key = page!.items[0]!.key;
+    await patchRequirement(repoAt(root), key, { notes: 'attached' });
+    const after = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
+    expect(after!.orphanedOverrides).toBe(0);
   });
 });

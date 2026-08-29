@@ -90,6 +90,15 @@ export const UpdateProjectSchema = z
   })
   .strict();
 
+/** `POST /projects/:id/graph/refresh` body — optional; `{}` (or no body) is the plain refresh.
+ *  `force: true` is the post-estate-upgrade migration path: it bypasses the clean-HEAD skip and
+ *  passes `--force` to `wicked-estate index` (see `RefreshProjectGraphBody` in the wire types). */
+export const RefreshProjectGraphSchema = z
+  .object({
+    force: z.boolean().optional(),
+  })
+  .strict();
+
 /** `<product>.<noun>` — the engine re-validates; this is the 400-with-names layer. */
 export const AttachMemberSchema = z
   .object({
@@ -519,13 +528,22 @@ export function registerProjectRoutes(
     if (id === DEFAULT_PROJECT_ID) {
       return reply.code(409).send({ error: defaultProjectGraph().detail });
     }
+    // A refresh has always been body-less; the body stays OPTIONAL so every existing caller keeps
+    // working, and `force` arrives as the one additive field (the estate-migration path).
+    const parsed = RefreshProjectGraphSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
     try {
       const project = await adapter.projectGet(id);
       if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
       // Synchronous: indexing runs to completion before this answers, so the response describes a
       // graph that IS built rather than one that was asked for. Bounded per repo by graph.ts's
       // index timeout; concurrent callers coalesce onto the one in-flight refresh.
-      return await refreshProjectGraph(adapter, id);
+      return await refreshProjectGraph(adapter, id, process.env, {
+        ...(parsed.data.force === undefined ? {} : { force: parsed.data.force }),
+        log,
+      });
     } catch (err) {
       return reply.code(graphErrorStatus(err)).send({ error: message(err) });
     }
