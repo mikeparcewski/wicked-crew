@@ -52,6 +52,17 @@ const POSIX = process.platform !== 'win32';
 const PROJECT_ID = 'proj_refresh';
 
 /**
+ * The real-binary closure lane (see the CLOSURE test at the bottom of the refresh suite).
+ * `CLOSURE_ESTATE_BIN` = an integrated wicked-estate (scheme-2 ids); `CLOSURE_ESTATE_BIN_OLD` = a
+ * pre-scheme-2 release, needed because only an old binary can seed an old-scheme database. Read at
+ * module load like every other gate in this suite; unset (the normal case, CI included) the
+ * closure test skips.
+ */
+const CLOSURE_BIN = process.env['CLOSURE_ESTATE_BIN'] ?? '';
+const CLOSURE_BIN_OLD = process.env['CLOSURE_ESTATE_BIN_OLD'] ?? '';
+const CLOSURE_READY = CLOSURE_BIN !== '' && CLOSURE_BIN_OLD !== '';
+
+/**
  * A wicked-estate stand-in.
  *
  * Records every `index` invocation verbatim so a test can assert the exact argv crew built, and
@@ -823,13 +834,118 @@ describe.skipIf(!POSIX)('POST /graph/refresh with { force: true }', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  // CLOSURE SUITE — needs the real wicked-estate binary (not built yet): a forced refresh against
-  // a database written by the OLD id scheme must trigger estate's id_scheme full re-extract, emit
-  // the migration notice on stderr, and leave nested-scheme ids in the graph. The stub can only
-  // prove crew's side of the call (argv + stderr plumbing), which the tests above do.
-  it.skip('CLOSURE (real wicked-estate): force migrates an old-scheme project graph end-to-end', () => {
-    /* runs in the estate-review closure suite once the integrated binary ships */
-  });
+  // CLOSURE SUITE — needs the real wicked-estate binaries: a forced refresh against a database
+  // written by the OLD id scheme must trigger estate's id_scheme full re-extract, emit the
+  // migration notice on stderr, and leave nested-scheme ids in the graph. The stub can only prove
+  // crew's side of the call (argv + stderr plumbing), which the tests above do.
+  //
+  // Env-gated per the repo's `it.skipIf` convention (see tests/support/core-checkout.ts for the
+  // policy discussion): set BOTH
+  //   CLOSURE_ESTATE_BIN     — an integrated wicked-estate that mints scheme-2 (nested) ids
+  //   CLOSURE_ESTATE_BIN_OLD — a pre-scheme-2 release (≤ the flat-id scheme) to SEED the
+  //                            old-scheme database with; nothing else can mint scheme-1 rows
+  // and the test runs against the real binaries; unset, it skips rather than reporting a green it
+  // did not earn. Paths that are set but wrong fail loudly at the first spawn — a typo should
+  // never demote a closure proof to a skip.
+  it.skipIf(!CLOSURE_READY)(
+    'CLOSURE (real wicked-estate): force migrates an old-scheme project graph end-to-end',
+    async () => {
+      // A method INSIDE a class is the one shape whose id differs between schemes: scheme 1 minted
+      // module-flat `<module>/save().`; scheme 2 nests it as `<module>/Repo#save().` (ADR-002
+      // amendment). Module-level functions get the same id under both, so they prove nothing.
+      const root = makeRepo('alpha');
+      writeFileSync(
+        join(root, 'src', 'repo.ts'),
+        'export class Repo {\n  save(): number {\n    return 1;\n  }\n}\n',
+      );
+      git(['add', '-A'], root);
+      git(['commit', '-qm', 'add nested shape'], root);
+      register('alpha', root);
+      attach('alpha');
+
+      // Full stored SymbolId strings (`<language> <pkg> <ver> <ns> <descriptors…>` — the three
+      // `.` are the empty package/version/namespace slots), so a contains/not-contains pair reads
+      // against exactly the row the store holds.
+      const FLAT_ID = 'ts-typescript . . . alpha/src/repo/save().';
+      const NESTED_ID = 'ts-typescript . . . alpha/src/repo/Repo#save().';
+      // node:sqlite ships from Node 22.5; crew's floor is 22.0. Imported lazily so the module
+      // keeps loading (and this test keeps SKIPPING cleanly) on a floor-version node.
+      const { DatabaseSync } = await import('node:sqlite');
+      /** The syms with a LIVE node row. The `symbols` table alone proves nothing — it is an
+       *  append-only identity registry, so retired flat ids stay in it forever by design. */
+      const liveSyms = (): string[] => {
+        const db = new DatabaseSync(fx.dbPath, { readOnly: true });
+        try {
+          return (
+            db.prepare('SELECT s.sym FROM nodes n JOIN symbols s ON s.sid = n.symbol').all() as Array<{
+              sym: string;
+            }>
+          ).map((r) => r.sym);
+        } finally {
+          db.close();
+        }
+      };
+      const idScheme = (): string | undefined => {
+        const db = new DatabaseSync(fx.dbPath, { readOnly: true });
+        try {
+          const row = db.prepare("SELECT v FROM meta WHERE k = 'repo:alpha:id_scheme'").get() as
+            | { v: string }
+            | undefined;
+          return row?.v;
+        } finally {
+          db.close();
+        }
+      };
+
+      // ── Seed: the OLD binary builds the project graph, exactly as a pre-upgrade crew did ────
+      process.env['WICKED_ESTATE_EXE'] = CLOSURE_BIN_OLD;
+      const seeded = await refresh();
+      expect(seeded.code).toBe(200);
+      expect(seeded.body['indexed']).toEqual(['alpha']);
+      expect(seeded.body['repos']?.find((r) => r.repoId === 'alpha')?.action).toBe('indexed');
+      let syms = liveSyms();
+      expect(syms).toContain(FLAT_ID);
+      expect(syms).not.toContain(NESTED_ID);
+      expect(idScheme()).toBeUndefined(); // pre-scheme binaries never stamp the key
+
+      // ── Upgrade the binary. From here on, every call crew makes runs the integrated estate ──
+      process.env['WICKED_ESTATE_EXE'] = CLOSURE_BIN;
+
+      // ── CONTROL — the impact finding: a plain refresh CANNOT migrate an unchanged repo ──────
+      // The clean-HEAD skip fires on git evidence alone, so crew never spawns the binary and
+      // estate's scheme gate never gets to run: the graph silently stays old-scheme forever.
+      const plain = await refresh();
+      expect(plain.code).toBe(200);
+      expect(plain.body['skipped']).toEqual(['alpha']);
+      expect(plain.body['repos']?.find((r) => r.repoId === 'alpha')?.action).toBe(
+        'skipped-head-unchanged',
+      );
+      syms = liveSyms();
+      expect(syms).toContain(FLAT_ID);
+      expect(syms).not.toContain(NESTED_ID);
+      expect(idScheme()).toBeUndefined();
+
+      // ── THE FIX — force: crew indexes with --force, estate migrates, and SAYS SO ────────────
+      const forced = await refresh({ force: true });
+      expect(forced.code).toBe(200);
+      expect(forced.body['indexed']).toEqual(['alpha']);
+      expect(forced.body['failed']).toEqual([]);
+      const row = forced.body['repos']?.find((r) => r.repoId === 'alpha');
+      expect(row?.action).toBe('indexed');
+      // estate's migration notice, verbatim, surfaced on the row AND through the logger — the one
+      // signal explaining why a one-second refresh suddenly ran a full re-extract.
+      expect(row?.stderrTail).toContain('SYMBOL-ID SCHEME changed (v1 → v2): forcing full re-extraction');
+      expect(fx.logs.some((l) => l.includes('SYMBOL-ID SCHEME changed') && l.includes('alpha'))).toBe(
+        true,
+      );
+      // And the database is actually migrated: the nested id is live, the flat one is retired.
+      syms = liveSyms();
+      expect(syms).toContain(NESTED_ID);
+      expect(syms).not.toContain(FLAT_ID);
+      expect(idScheme()).toBe('2');
+    },
+    120_000,
+  );
 });
 
 /**
