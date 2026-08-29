@@ -19,7 +19,7 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { createDomainStore } from 'wicked-ledger';
 import type { EvidenceManifest, RunRecord, VerdictRecord } from 'wicked-ledger';
 
@@ -44,14 +44,15 @@ export function qeLedgerDirName(): string {
 /**
  * Absolute ledger root for a repo (dual-read, Phase 6c).
  *
- * An explicit `WICKED_QE_LEDGER_DIR` pins the dirname exactly — the operator
- * is driving, no fallback probing. Otherwise: `<repo>/.wicked-qe` when it
+ * An explicit `WICKED_QE_LEDGER_DIR` pins the root exactly — the operator is
+ * driving, no fallback probing. An absolute value IS the root; a relative
+ * value is a dirname under `repoRoot`. Otherwise: `<repo>/.wicked-qe` when it
  * exists; else an existing legacy `<repo>/.wicked-testing` (that ledger keeps
  * its root — a store must never split across two dirs); else `.wicked-qe`.
  */
 export function qeLedgerRoot(repoRoot: string): string {
   const env = process.env['WICKED_QE_LEDGER_DIR']?.trim();
-  if (env !== undefined && env !== '') return join(repoRoot, env);
+  if (env !== undefined && env !== '') return isAbsolute(env) ? env : join(repoRoot, env);
   const current = join(repoRoot, DEFAULT_QE_LEDGER_DIRNAME);
   if (existsSync(current)) return current;
   const legacy = join(repoRoot, LEGACY_QE_LEDGER_DIRNAME);
