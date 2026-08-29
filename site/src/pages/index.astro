@@ -32,8 +32,9 @@
  *    feed, open-prompt rollups, and a project-scoped code graph (blast radius
  *    across member repos). Present tense now; keep claims to those routes.
  *  - Blast radius is shipped repo- AND project-scoped (GET …/graph/blast-radius),
- *    answered by the same `wicked-estate blast-radius` CLI the studio UI renders —
- *    one answer through UI, API, and CLI, by construction.
+ *    both answered by the same `wicked-estate blast-radius` CLI. The studio UI
+ *    renders only the REPO-scoped answer (RepoGraphModal) — keep any
+ *    "UI == API == CLI" claim repo-scoped until a skin surfaces the project rollup.
  *  - Governed PTY is shipped (DES-TERMINAL-001): POST /api/v1/terminals defaults
  *    governed:true (tool-calls route through the gate-hook); an ungoverned shell
  *    is an explicit opt-in. Never imply the terminal bypasses governance.
@@ -382,7 +383,7 @@ const GATE_CARDS = [
         <span class="skins-landing-chip">shipped</span>
         <b>The Project model</b> — projects group runs and docs across both skins: members, a merged
         activity feed, open-gate rollups, and a project-scoped code graph — <b>blast radius across
-        member repos</b>, the same answer through the studio UI, the API, and the estate CLI.
+        member repos</b> via the API, computed by the same estate CLI behind the studio’s repo graph.
       </p>
     </div>
   </section>
