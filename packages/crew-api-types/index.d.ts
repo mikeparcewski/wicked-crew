@@ -525,6 +525,14 @@ export interface CoreEvent {
   decision?: string;
   /** failureTriaged: the judge's bounded reasoning. */
   analysis?: string;
+  // campaign* frames (DES-CAMPAIGN-001 / TH-9) — camelCase per event_to_json; the exact
+  // per-variant shapes are the CampaignEvent union below.
+  /** campaign* frames: the campaign id. */
+  campaign?: string;
+  /** campaignNode* frames: the node id within the campaign. */
+  node?: string;
+  /** campaignNodeStarted / campaignNodeAwaitingHuman: the node's attempt-keyed Run id. */
+  runId?: string;
   // assumptionRecorded (external-transform convention) — camelCase per event_to_json
   kind?: string;
   library?: string;
@@ -1650,3 +1658,171 @@ export interface ProjectGraphSearch {
    */
   note: string;
 }
+
+// ── Campaigns (DES-CAMPAIGN-001 / crew#342 slice 1 + TH-9) ───────────────────
+// The engine's Campaign scheduler — a durable, crash-resumable, dependency-aware parallel DAG of
+// governed Runs — exposed over `/api/v1/campaigns`. The GET routes return the ENGINE's persisted
+// shapes verbatim (wicked-core `src/campaign.rs` serde: snake_case fields, snake_case enum
+// tokens), same doctrine as `SessionView`: one producer of the wire shape, zero re-spelling in
+// the daemon. The POST body (`LaunchCampaignBody`) is the daemon's own camelCase request contract
+// — crew maps it onto the engine def, composing one Tool-executor workflow per deterministic
+// scenario (spec FILE PATHS on the argv, never scenario bodies — the 1022-byte PTY prompt trap).
+
+/** Per-node lifecycle status. Terminal = `completed` | `failed` | `blocked` | `cancelled`. */
+export type CampaignNodeStatus =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'awaiting_human'
+  | 'ready_to_resume'
+  | 'completed'
+  | 'failed'
+  | 'blocked'
+  | 'cancelled';
+
+/** Campaign lifecycle status — also the token `POST /campaigns/:id/resume` / `/cancel` resolve to. */
+export type CampaignStatus =
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'partially_completed'
+  | 'failed'
+  | 'cancelled';
+
+/** When a dependency edge is satisfied: dep `completed` only, or any terminal outcome. */
+export type CampaignEdgeCondition = 'on_success' | 'on_terminal';
+
+/** How a node failure propagates (DES-CAMPAIGN-001 §5.2). */
+export type CampaignFailurePolicy = 'fail_fast' | 'continue_independent' | 'human_gate_on_failure';
+
+/**
+ * What one campaign node runs — the engine's reusable Run specification (mirrors a launch minus
+ * the session id, which the scheduler derives as `{campaign}:{node}:a{attempt}`). A node inherits
+ * governance, worktree isolation, HITL gates, live output, and per-Run resume from the Run it is.
+ */
+export interface CampaignRunSpec {
+  /** The free-text problem this node's Run decomposes — for a scenario node, a short human label
+   *  (the scenario body lives in its spec FILE; it is never inlined here). */
+  problem: string;
+  /** The council roster (`AgenticCli` seats) convened for this node's Run. */
+  clis: unknown[];
+  entity_mode: EntityMode;
+  /** The node's internal human-confirm gate policy (engine serde shape); absent = none. */
+  human_confirm?: unknown;
+  /** The registered repo the node's Run targets, if any (creates an isolated worktree). */
+  repo_ref?: string | null;
+  /** The registered `WorkflowDef` id this node's Run follows — for a deterministic scenario node,
+   *  the per-node composed Tool workflow (`campaign-<campaign>-<node>`). */
+  workflow_id?: string | null;
+}
+
+/** A schedulable unit of the DAG — one node = one governed core Run. */
+export interface CampaignNode {
+  /** Stable node id, unique within the campaign (never contains `:` — it keys the run id). */
+  node_id: string;
+  run_spec: CampaignRunSpec;
+}
+
+/** A dependency edge `from -> to`: `to` becomes eligible once `from` satisfies `condition`. */
+export interface CampaignEdge {
+  from: string;
+  to: string;
+  condition: CampaignEdgeCondition;
+}
+
+/** The static campaign definition — validated at launch (cycle / empty / duplicate-edge /
+ *  unknown-endpoint rejects) and persisted verbatim inside the live {@link Campaign}. */
+export interface CampaignDef {
+  id: string;
+  name: string;
+  nodes: CampaignNode[];
+  edges: CampaignEdge[];
+  policy: CampaignFailurePolicy;
+  /** Global concurrency cap (>= 1) — a resource guard on parallel worktrees + CLI subprocesses. */
+  max_concurrency: number;
+}
+
+/**
+ * The live campaign instance (`GET /campaigns`, `GET /campaigns/:id`) — durable and
+ * crash-resumable; the scheduler re-derives the ready set from these persisted statuses on
+ * resume, never re-running a completed node.
+ */
+export interface Campaign {
+  id: string;
+  def_id: string;
+  status: CampaignStatus;
+  /** The full definition, embedded so a resume needs no second store. */
+  def: CampaignDef;
+  node_status: Record<string, CampaignNodeStatus>;
+  /** node_id -> live Run id, always `{campaign}:{node}:a{attempt}` (attempt-keyed, idempotent). */
+  node_run_id: Record<string, string>;
+  /** node_id -> 0-based attempt counter (a `human_gate_on_failure` Retry bumps it). */
+  node_attempt: Record<string, number>;
+  /** Persisted amend text of an approved-but-unslotted per-node gate decision (crash-safe). */
+  pending_decision_amend: Record<string, string | null>;
+  /** `human_gate_on_failure` queue — failed nodes awaiting a Retry/Skip/Abort decision. */
+  pending_failure_gates: string[];
+  /** Whether a fail-fast (or Abort) tripped — finalization lands on `failed`. */
+  fail_fast_tripped: boolean;
+}
+
+/**
+ * One scenario of `POST /campaigns` — the daemon maps each onto a {@link CampaignNode}.
+ *
+ * Exactly one of `tool` / `agent` per scenario:
+ *  - `tool` (deterministic): the daemon composes a single-phase Tool-executor workflow running
+ *    `cmd` verbatim (no council, no LLM). Every argv token must be a single line of ≤ 1022
+ *    bytes — pass the scenario/spec as a FILE PATH argument, never inline its body. A body
+ *    smuggled into the argv is rejected with a 400 naming the offending token.
+ *  - `agent` (exploratory/authoring): a governed agent run over `problem` — same byte
+ *    discipline, because the problem text reaches PTY workers as prompt material.
+ */
+export interface CampaignScenario {
+  /** Node id, unique within the campaign (letters/digits/dots/hyphens/underscores; no `:`). */
+  id: string;
+  /** Short human label for the scoreboard; defaults to the id. NOT the scenario body. */
+  title?: string;
+  /** Ids of scenarios that must reach `depsCondition` before this one dispatches. */
+  deps?: string[];
+  /** Edge condition applied to every dep edge of this scenario (default `on_success`). */
+  depsCondition?: CampaignEdgeCondition;
+  /** Deterministic execution: argv run by the engine's Tool executor, file paths not bodies. */
+  tool?: { cmd: string[] };
+  /** Governed agent execution: the problem statement (short — reaches workers as a prompt). */
+  agent?: { problem: string; workflow?: string };
+  /** Registered repo this node runs within (isolated worktree). Omit for a repo-less node. */
+  repoRef?: string;
+}
+
+/** `POST /campaigns` request body → 201 `{ campaignId }`. */
+export interface LaunchCampaignBody {
+  /** Campaign id (also the def id). Defaults to a generated `campaign-<uuid>`. */
+  id?: string;
+  name?: string;
+  scenarios: CampaignScenario[];
+  /** Failure propagation policy (default `continue_independent`). */
+  policy?: CampaignFailurePolicy;
+  /** Global concurrency cap, >= 1 (default 2). */
+  maxConcurrency?: number;
+  /** JSON array of `AgenticCli` seats for agent scenarios; defaults to the daemon roster. */
+  clisJson?: string;
+}
+
+/**
+ * The 11 campaign frames of the `/ws` stream (wicked-core `event_to_json`, camelCase tags), as a
+ * discriminated union for consumers that narrow on `type` — the TH-14 scoreboard renders node
+ * status from exactly these. They also flow through the permissive {@link CoreEvent}; the daemon
+ * relay is allowlist-free, so every frame below reaches `/ws` clients byte-for-byte.
+ */
+export type CampaignEvent =
+  | { type: 'campaignLaunched'; campaign: string }
+  | { type: 'campaignNodeReady'; campaign: string; node: string }
+  | { type: 'campaignNodeStarted'; campaign: string; node: string; runId: string }
+  | { type: 'campaignNodeAwaitingHuman'; campaign: string; node: string; runId: string; prompt: string }
+  | { type: 'campaignNodeCompleted'; campaign: string; node: string }
+  | { type: 'campaignNodeFailed'; campaign: string; node: string }
+  | { type: 'campaignNodeBlocked'; campaign: string; node: string }
+  | { type: 'campaignPaused'; campaign: string }
+  | { type: 'campaignCompleted'; campaign: string }
+  | { type: 'campaignFailed'; campaign: string }
+  | { type: 'campaignCancelled'; campaign: string };

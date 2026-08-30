@@ -11,6 +11,63 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/campaigns",
+      "requestType": null,
+      "responseType": "{ campaigns: Campaign[] }",
+      "statusCodes": [
+        200,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/campaigns",
+      "requestType": "LaunchCampaignBody",
+      "responseType": "{ campaignId: string }",
+      "statusCodes": [
+        201,
+        400,
+        409,
+        501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/campaigns/:id",
+      "requestType": null,
+      "responseType": "{ campaign: Campaign }",
+      "statusCodes": [
+        200,
+        404,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/campaigns/:id/cancel",
+      "requestType": null,
+      "responseType": "{ campaignId: string; status: CampaignStatus }",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/campaigns/:id/resume",
+      "requestType": null,
+      "responseType": "{ campaignId: string; status: CampaignStatus }",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        501
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/chats",
       "requestType": null,
       "responseType": null,

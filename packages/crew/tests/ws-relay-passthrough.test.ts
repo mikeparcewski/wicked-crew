@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { createServer } from '../src/api/server.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { CoreEvent, SystemSettings, UnitOutputDeltaEvent } from '../src/core/types.js';
+import type { CampaignEvent, CoreEvent, SystemSettings, UnitOutputDeltaEvent } from '../src/core/types.js';
 
 type Listener = (event: CoreEvent) => void;
 
@@ -134,6 +134,34 @@ describe('/ws relay pass-through (no allowlist)', () => {
       attempt: 0,
       text: 'chunk 1 of streamed worker output\nwith a newline and unicode ✓',
     });
+  });
+
+  it('relays the campaign* frames verbatim — the TH-9 WS passthrough the scoreboard reads', async () => {
+    // Two representative shapes of the 11-frame family (wicked-core event_to_json, camelCase):
+    // the campaign-scoped tag and the node-scoped tag carrying the attempt-keyed run id. The
+    // relay is allowlist-free, so passing these two byte-for-byte with the exact contract field
+    // sets pins the family's path; the per-variant field sets are the api-types CampaignEvent
+    // union, and core's own serialization test pins the Rust side of the same shapes.
+    const started = {
+      type: 'campaignNodeStarted',
+      campaign: 'camp-ws-1',
+      node: 'a',
+      runId: 'camp-ws-1:a:a0',
+    } satisfies CampaignEvent;
+    emit(started);
+    const receivedStarted = await waitForRaw(
+      (s) => s.includes('"campaignNodeStarted"'),
+      'campaignNodeStarted frame',
+    );
+    expect(receivedStarted).toBe(JSON.stringify(started));
+
+    const completed = { type: 'campaignCompleted', campaign: 'camp-ws-1' } satisfies CampaignEvent;
+    emit(completed);
+    const receivedCompleted = await waitForRaw(
+      (s) => s.includes('"campaignCompleted"'),
+      'campaignCompleted frame',
+    );
+    expect(receivedCompleted).toBe(JSON.stringify(completed));
   });
 
   it('relays an arbitrary unknown event type verbatim (the general no-allowlist property)', async () => {
