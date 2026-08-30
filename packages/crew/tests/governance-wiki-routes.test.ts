@@ -171,7 +171,7 @@ describe('GET /api/v1/governance/wiki/meta', () => {
         doc: WIKI_AUTHORING_DOC,
       },
     });
-    expect(body['meta']['doc']).toMatch(/seed\/README\.md$/);
+    expect((body['meta'] as Record<string, unknown>)['doc']).toMatch(/seed\/README\.md$/);
   });
 
   it('reports a seeded store with counted rulesets and scoreboard availability', async () => {
@@ -194,9 +194,9 @@ describe('GET /api/v1/governance/wiki/meta', () => {
     rulesetCount = 2;
     listedRules = [];
     const { body } = await get('/api/v1/governance/wiki/meta');
-    expect(body['meta']['seeded']).toBe(true);
-    expect(body['meta']['rule_count']).toBe(0);
-    expect(body['meta']['ruleset_count']).toBe(2);
+    expect((body['meta'] as Record<string, unknown>)['seeded']).toBe(true);
+    expect((body['meta'] as Record<string, unknown>)['rule_count']).toBe(0);
+    expect((body['meta'] as Record<string, unknown>)['ruleset_count']).toBe(2);
   });
 });
 
