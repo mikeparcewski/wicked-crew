@@ -29,6 +29,7 @@ import {
 import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
+import { registerGovernanceWikiRoutes } from './governance-wiki.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -100,6 +101,13 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
       : what;
   return { error, details: err.issues };
 }
+
+// Closed facet vocabularies for the `GET /governance/rules` browse filters (wiki-mgmt) — the
+// wire contract's `RuleBrowseQuery`. Sets, not zod: the query is otherwise free-form and only
+// these three facets have a vocabulary to enforce.
+const RULE_SEVERITIES: ReadonlySet<string> = new Set(['info', 'warn', 'error', 'critical']);
+const RULE_TYPES: ReadonlySet<string> = new Set(['pattern', 'policy']);
+const RULE_STATUSES: ReadonlySet<string> = new Set(['active', 'retired', 'all']);
 
 // Repo names become directory components under ~/.wicked/repos/ — reject anything
 // that would allow path traversal (slashes, dots-only segments, control chars).
@@ -1455,10 +1463,63 @@ export function registerRoutes(
     return { policies };
   });
 
-  app.get(`${V}/governance/rules`, async () => {
-    const rules = await adapter.listConformanceRules();
-    return { rules };
-  });
+  // The wiki BROWSE surface (wiki-mgmt): facet filters over the listed rows. EXACT matches by
+  // design — unlike `/governance/rules/preview`, whose recall semantics treat an absent rule
+  // facet as a wildcard (enforcement's question: "which rules apply HERE"), browse answers
+  // "show me the rules TAGGED `layer=api`", and a wildcard rule flooding every layer filter
+  // would bury the tagged ones. `?status=` keeps the AW-24 kill switch visible: every row keeps
+  // its `retired` flag, and `retired`/`active` narrow to one side. Default is `all` — the
+  // route's historical behavior, though pre-0.7.4 addons funnel the listing through recall and
+  // return active rows only (the engine's fact to fix, not this filter's to mask).
+  app.get(
+    `${V}/governance/rules`,
+    {
+      config: {
+        manifest: {
+          responseType: '{ rules: ConformanceRule[] }',
+          statusCodes: [200, 400],
+        },
+      },
+    },
+    async (req, reply) => {
+      const q = req.query as Record<string, string | string[] | undefined>;
+      // Same normalization as `repoParam` below: first value of a repeated param, trimmed, and
+      // an empty/whitespace value means "facet not given" rather than a filter matching nothing.
+      const facet = (k: string): string | undefined => {
+        const raw = q[k];
+        const first = Array.isArray(raw) ? raw[0] : raw;
+        const trimmed = first?.trim();
+        return trimmed ? trimmed : undefined;
+      };
+      // Closed vocabularies reject loudly (400 names the valid set): `?severity=hihg` silently
+      // matching nothing would read as "no critical rules" — an empty answer to a question the
+      // caller didn't ask.
+      const invalid = (name: string, got: string, valid: string) =>
+        reply.code(400).send({ error: `${name} must be one of ${valid} (got \`${got}\`)` });
+      const severity = facet('severity');
+      if (severity !== undefined && !RULE_SEVERITIES.has(severity)) {
+        return invalid('severity', severity, 'info|warn|error|critical');
+      }
+      const ruleType = facet('rule_type');
+      if (ruleType !== undefined && !RULE_TYPES.has(ruleType)) {
+        return invalid('rule_type', ruleType, 'pattern|policy');
+      }
+      const status = facet('status') ?? 'all';
+      if (!RULE_STATUSES.has(status)) {
+        return invalid('status', status, 'active|retired|all');
+      }
+      const layer = facet('layer');
+      const rules = (await adapter.listConformanceRules()).filter(
+        (r) =>
+          (severity === undefined || r.severity === severity) &&
+          (ruleType === undefined || r.rule_type === ruleType) &&
+          (layer === undefined || r.targets.layer === layer) &&
+          // `retired` is absent on rows written before the field existed, which read as active.
+          (status === 'all' || (status === 'retired') === (r.retired === true)),
+      );
+      return { rules };
+    },
+  );
 
   app.get(`${V}/governance/claims`, async () => {
     const claims = await adapter.listConformanceClaims();
@@ -2097,6 +2158,11 @@ export function registerRoutes(
     actorOf,
     roster: () => CoreAdapter.roster(),
   });
+
+  // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────
+  // Browse (`GET /governance/rules` + facets) and retire (`DELETE /governance/rules/:id`) stay
+  // ABOVE with the other governance routes; this registers only the wiki-specific reads.
+  registerGovernanceWikiRoutes(app, adapter);
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one
