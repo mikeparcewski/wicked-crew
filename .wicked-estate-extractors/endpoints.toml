@@ -1,0 +1,74 @@
+# endpoints.toml — wicked-crew's fastify route registrations → HTTP endpoint
+# nodes, as wicked-estate ExtraEdgeExtractor rules (TH-15 / recon test-R18;
+# format per wicked-estate docs/extractor-sdk.md Part 2).
+#
+# `wicked-estate index <repo>` auto-discovers this file and injects, per
+# route registration, a synthetic endpoint node plus a `serves` edge from the
+# registering source file. BlastRadius over a diff then answers "which API
+# capabilities changed": a change to a route file surfaces every endpoint it
+# serves, and blast-radius on an endpoint node surfaces its registering file.
+# Consumers: wicked-garden's qe campaign Lens 1 (route/handler inventory,
+# refs/campaign.md) and qe-test-impact-analyzer (change-scoped scenario
+# selection).
+#
+# Registration shapes covered (verified against packages/crew/src at crew
+# 0.7.1 — 5 route files: api/routes.ts, api/server.ts, projects/routes.ts,
+# interactive/ws-relay.ts, events/terminals.ts):
+#
+#   1. endpoint-v1 — template-literal paths on the versioned API surface:
+#        app.get(`${V}/health`, ...)          (single-line)
+#        app.post(
+#          `${V}/runs`, ...)                  (multi-line; \s* crosses the newline)
+#        scope.all(`${API_PREFIX}/projects/:projectId/interactive/*`, ...)
+#                                             (interactive/proxy-routes.ts:112)
+#      Every route file binds `const V = API_PREFIX` ('/api/v1', the single
+#      definition in api/api-prefix.ts), so the node id bakes in the literal
+#      /api/v1 prefix — ids line up with the committed endpoint manifest
+#      (packages/crew/endpoint-manifest.json, e.g. "GET /api/v1/health"),
+#      modulo lowercase method (regex captures the source spelling) and the
+#      catch-all proxy: one registration = one `all` node here, where the
+#      manifest expands it into its seven per-method rows.
+#
+#   2. endpoint-plain — plain-quoted paths outside the versioned prefix (the
+#      websocket surface): app.get('/ws', { websocket: true }, ...) in
+#      api/server.ts and app.get('/ws/terminals/:id', ...) in
+#      events/terminals.ts.
+#
+# Both rules share node_scheme = "http-endpoint" so GET /api/v1/runs
+# registered anywhere converges on one node (methods stay distinct: the
+# method is part of the id, matching the manifest's method+path row grain).
+# The glob stays under packages/crew/src/ — tests/ fixtures never mint
+# endpoint nodes. Known limitation (regex-over-text, documented in the SDK):
+# a commented-out registration would still match; none exist today.
+
+[[rule]]
+name      = "endpoint-v1"
+file_glob = "packages/crew/src/**/*.ts"
+pattern   = '(?:app|scope)\.(?P<method>get|post|put|patch|delete|all)\(\s*`\$\{(?:V|API_PREFIX)\}(?P<path>/[^`]*)`'
+
+[rule.emit_node]
+id_template   = "endpoint:{method}:/api/v1{path}"
+label_capture = "path"
+kind          = "other:endpoint"
+node_scheme   = "http-endpoint"
+
+[rule.emit_edge]
+kind               = "other:serves"
+target_id_template = "endpoint:{method}:/api/v1{path}"
+target_node_scheme = "http-endpoint"
+
+[[rule]]
+name      = "endpoint-plain"
+file_glob = "packages/crew/src/**/*.ts"
+pattern   = '''(?:app|scope)\.(?P<method>get|post|put|patch|delete|all)\(\s*['"](?P<path>/[^'"]*)['"]'''
+
+[rule.emit_node]
+id_template   = "endpoint:{method}:{path}"
+label_capture = "path"
+kind          = "other:endpoint"
+node_scheme   = "http-endpoint"
+
+[rule.emit_edge]
+kind               = "other:serves"
+target_id_template = "endpoint:{method}:{path}"
+target_node_scheme = "http-endpoint"
