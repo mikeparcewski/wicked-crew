@@ -938,6 +938,115 @@ export interface RulePreviewQuery {
   rule_type?: string;
 }
 
+/**
+ * Facet query for `GET /governance/rules` (the wiki BROWSE surface). Unlike
+ * {@link RulePreviewQuery} — whose recall semantics treat an absent rule facet as a wildcard
+ * match, enforcement's question — browse filters are EXACT matches over the listed rows
+ * ("show me the rules tagged `layer=api`"), and `status` keeps retired rules reachable so the
+ * kill switch stays visible (`all` is the default).
+ */
+export interface RuleBrowseQuery {
+  severity?: 'info' | 'warn' | 'error' | 'critical';
+  layer?: string;
+  rule_type?: 'pattern' | 'policy';
+  status?: 'active' | 'retired' | 'all';
+}
+
+// ── Governance wiki management (scoreboard + meta) ─────────────────────────────
+
+/**
+ * Typing-coverage half of the wiki scoreboard — % of doctrine statements typed into
+ * enforcement classes. Doc-side by construction (the class lives in doc frontmatter, never on
+ * the rule node), so it is measurable only when the daemon was pointed at the same docs root
+ * `rules ingest --dir` used; otherwise `available` is `false` and `reason` says why.
+ */
+export interface WikiTypingCoverage {
+  available: boolean;
+  /** Why typing could not be measured (present only when `available` is `false`). */
+  reason?: string;
+  docs_scanned: number;
+  statements_total: number;
+  statements_typed: number;
+  /** `statements_typed / statements_total` in [0,100]; absent when the corpus mints no statements. */
+  percent?: number;
+  /** Typed statements per class (`policy` / `validator` / `guidance`). */
+  by_class: Record<string, number>;
+  /** Docs that mint statements but declare no class — the actionable backlog. */
+  docs_untyped: string[];
+}
+
+/** Connection-coverage half — do the active rules' `symbol_ref`s resolve, and are the links live? */
+export interface WikiConnectionCoverage {
+  rules_with_ref: number;
+  refs_resolving: number;
+  refs_unresolvable: number;
+  /** `refs_resolving / rules_with_ref` in [0,100]; absent when no rule carries a ref. */
+  percent?: number;
+  /** Active rules with at least one live `Governs` edge. */
+  rules_linked: number;
+}
+
+/** One rule's enforcement evidence (only rules with any evidence appear). */
+export interface WikiRuleEvidenceRow {
+  rule_id: string;
+  /** Distinct deny claims citing this rule (`evidenced_by` edges in). */
+  denial_claims: number;
+  /** Accumulated `evidence_count` across the rule's `Governs` edges. */
+  governs_evidence: number;
+}
+
+/** Enforcement evidence — gate denials citing wiki rules (retired rules included: a past denial
+ *  stays explicable after its rule retires, so its evidence stays countable). */
+export interface WikiEnforcementEvidence {
+  denial_claims: number;
+  rules_evidenced: number;
+  evidenced_by_edges: number;
+  governs_evidence_total: number;
+  /** Per-rule breakdown, most-evidenced first — the "which rules actually fire" list. */
+  per_rule: WikiRuleEvidenceRow[];
+}
+
+/** Recall volume — documented UNAVAILABLE in-band (an honest "cannot measure" beats a
+ *  fabricated zero); `reason` says why. */
+export interface WikiRecallVolume {
+  available: boolean;
+  reason: string;
+}
+
+/**
+ * The wiki population/connection scoreboard (`wicked-governance::Scoreboard`, AW-23/arch-R23) —
+ * the report that tells a populated wiki from an ingested-once-and-decaying one.
+ * Served by `GET /governance/wiki/scoreboard`; 501 when the installed engine addon predates the
+ * `governanceScoreboard` binding (wicked-core-ts ≥ 0.7.4).
+ */
+export interface GovernanceScoreboard {
+  rules_total: number;
+  rules_active: number;
+  rules_retired: number;
+  typing: WikiTypingCoverage;
+  connection: WikiConnectionCoverage;
+  evidence: WikiEnforcementEvidence;
+  recall_volume: WikiRecallVolume;
+}
+
+/**
+ * `GET /governance/wiki/meta` — the wiki's honest empty-state signal, cheap enough for the UI
+ * to call on mount. `ruleset_count` is `null` (not 0) when the installed engine build cannot
+ * count `RuleSet` rows: "no rulesets" is a real answer about a seeded store, and "cannot count"
+ * must never impersonate it.
+ */
+export interface GovernanceWikiMeta {
+  /** Any doctrine on the store at all (rules listable, or RuleSet rows counted). */
+  seeded: boolean;
+  ruleset_count: number | null;
+  /** Rules the engine lists (pre-0.7.4 addons list active rules only — the recall funnel). */
+  rule_count: number;
+  /** Whether `GET /governance/wiki/scoreboard` will answer 200 on this deployment. */
+  scoreboard_available: boolean;
+  /** The authoring guide / seed runbook the empty state points at. */
+  doc: string;
+}
+
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
 
 /**

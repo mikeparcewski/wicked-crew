@@ -11,6 +11,20 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Added
+- **Governance wiki management wire** (wiki-mgmt): `GET /governance/wiki/scoreboard` — the AW-23
+  population/connection scoreboard (typed %, resolving `symbol_ref`s, enforcement evidence, and
+  in-band "cannot measure" markers), presence-gated on the core-ts `governanceScoreboard`
+  binding (wicked-core-ts ≥ 0.7.4; older addons answer an honest 501 "upgrade the engine", the
+  campaigns doctrine) with optional `?docsRoot=` for the doc-side typing half. `GET
+  /governance/wiki/meta` — the wiki's honest empty-state signal (`seeded`, `rule_count`,
+  `ruleset_count` — `null`, never a fabricated 0, when the engine build cannot count `RuleSet`
+  rows — `scoreboard_available`, and `doc` pointing at the seed runbook), served on every addon.
+  `GET /governance/rules` grew the browse facets `severity`/`layer`/`rule_type`/`status`
+  (exact-match, closed vocabularies 400 loudly; `status` keeps the AW-24 kill switch visible —
+  retired rows stay listed with their `retired` flag, `retired`/`active` narrow to one side).
+  Retire stays the existing `DELETE /governance/rules/:id` — no second door. Wire shapes
+  (`GovernanceScoreboard`, `GovernanceWikiMeta`, `RuleBrowseQuery`) ship in
+  `wicked-crew-api-types` **0.12.0**.
 - **Campaign budget/runtime governance** (TH-20 / recon test-R22): `CampaignSupervisor`
   (`packages/crew/src/campaign/supervision.ts`) — campaign wall-clock budget, per-node timeout
   (running time only; `awaiting_human` never counts), kill/abandon policy for in-flight nodes,

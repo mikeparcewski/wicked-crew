@@ -124,6 +124,14 @@ respondsWith<Wire.GovernanceClaim[], Awaited<ReturnType<CoreAdapter['listConform
 respondsWith<Wire.CoverageReport | null, Awaited<ReturnType<CoreAdapter['getCoverageReport']>>>();
 respondsWith<Wire.GraphKind[], Awaited<ReturnType<CoreAdapter['getGraphKindsForRepo']>>>();
 
+// Governance wiki management (wiki-mgmt): GET /governance/wiki/scoreboard + /governance/wiki/meta.
+respondsWith<
+  Wire.GovernanceScoreboard,
+  Awaited<ReturnType<CoreAdapter['governanceScoreboard']>>
+>();
+respondsWith<Wire.GovernanceWikiMeta['ruleset_count'], Awaited<ReturnType<CoreAdapter['countRuleSets']>>>();
+respondsWith<Wire.GovernanceWikiMeta['scoreboard_available'], ReturnType<CoreAdapter['wikiScoreboardSupported']>>();
+
 // GET/PATCH /repos/:id/requirements — server-side search + overrides.
 respondsWith<Wire.RequirementsPage, RequirementsPage>();
 respondsWith<Wire.RequirementDetail, RequirementDetail>();

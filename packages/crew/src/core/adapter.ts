@@ -15,6 +15,7 @@ import type {
   RecordedEvent,
   GovernancePolicy,
   ConformanceRule,
+  GovernanceScoreboard,
   GovernanceClaim,
   CoverageReport,
   GraphKind,
@@ -185,6 +186,18 @@ type GovernanceMethods = {
   // runtime could guarantee. Optional keeps the guard type-meaningful.
   retirePolicy?(id: string): Promise<string>;
   retireConformanceRule?(id: string): Promise<string>;
+  // The AW-23 wiki population/connection scoreboard (wiki-mgmt). Resolves to a JSON
+  // `Scoreboard` object; `docsRoot` (nullable) is the same docs root `rules ingest --dir` used,
+  // without which the typing half reports `available: false` in-band. Optional for the same
+  // reason as `retirePolicy` above: the binding ships in wicked-core-ts ≥ 0.7.4, so an installed
+  // addon at ≤ 0.7.3 does not have it at runtime — a required declaration would type away the
+  // presence gate `wikiScoreboardSupported` exists to keep meaningful.
+  governanceScoreboard?(docsRoot?: string | null): Promise<string>;
+  // RuleSet rows (the `NodeKind::RuleSet` doctrine parents, AW-13) as a JSON array — the wiki
+  // meta's "is anything seeded" half. Optional and not hypothetically: NO released addon carries
+  // it yet, so `countRuleSets` answers `null` ("cannot count") rather than a fabricated 0 until
+  // one does.
+  listRuleSets?(): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -575,6 +588,23 @@ export class CampaignsUnsupportedError extends Error {
         'no campaign bindings — upgrade it to a release carrying launchCampaign)',
     );
     this.name = 'CampaignsUnsupportedError';
+  }
+}
+
+/**
+ * The wiki scoreboard (AW-23 / wiki-mgmt) is not available in this deployment — the installed
+ * wicked-core-ts predates the `governanceScoreboard` binding (ships in ≥ 0.7.4). Typed for the
+ * same reason as `ChatUnsupportedError`: the route answers 501 ("upgrade the engine") on this,
+ * never 400 ("fix your request"). Gated on METHOD PRESENCE, the campaigns doctrine — true on
+ * whatever release actually carries the binding.
+ */
+export class GovernanceScoreboardUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts has ` +
+        'no governanceScoreboard binding — upgrade it to a release carrying it, >= 0.7.4)',
+    );
+    this.name = 'GovernanceScoreboardUnsupportedError';
   }
 }
 
@@ -1622,6 +1652,51 @@ export class CoreAdapter {
     }
     const json = await this.core.recallRulesPreview(JSON.stringify(cleanQuery));
     return JSON.parse(json) as ConformanceRule[];
+  }
+
+  // ── Governance wiki management (wiki-mgmt) ─────────────────────────────────
+
+  /** Whether the installed engine addon carries the AW-23 scoreboard binding (core-ts ≥ 0.7.4). */
+  wikiScoreboardSupported(): boolean {
+    return typeof this.core.governanceScoreboard === 'function';
+  }
+
+  /**
+   * The wiki population/connection scoreboard (AW-23 / arch-R23) — typed %, resolving %,
+   * enforcement evidence, and an in-band honesty marker for what cannot be measured. Read-only
+   * on the engine side (`open_store_ro`), so it never blocks the single-writer actor.
+   *
+   * `docsRoot` is the same docs root `rules ingest --dir` used; omitted, the typing half reports
+   * `available: false` with the reason — an honest in-band answer, not an error.
+   *
+   * Presence-gated (the campaigns doctrine): throws {@link GovernanceScoreboardUnsupportedError}
+   * on an addon that predates the binding, which the route maps to 501 ("upgrade the engine").
+   */
+  async governanceScoreboard(docsRoot?: string): Promise<GovernanceScoreboard> {
+    const fn = this.core.governanceScoreboard;
+    if (typeof fn !== 'function') {
+      throw new GovernanceScoreboardUnsupportedError('Reading the governance wiki scoreboard');
+    }
+    return parseEngineJson<GovernanceScoreboard>(
+      await fn.call(this.core, docsRoot ?? null),
+      'governanceScoreboard',
+    );
+  }
+
+  /**
+   * How many `RuleSet` rows (doctrine domain parents, AW-13) the store holds — or `null` when
+   * this engine build cannot count them (no `listRuleSets` binding yet).
+   *
+   * `null` rather than `0` on purpose (the `runEvents` doctrine): "no rulesets" is a real answer
+   * about an unseeded store, and "I cannot count" must never impersonate it — the wiki meta's
+   * empty state would otherwise report a seeded store as empty and point the operator at a
+   * runbook they already ran.
+   */
+  async countRuleSets(): Promise<number | null> {
+    const fn = this.core.listRuleSets;
+    if (typeof fn !== 'function') return null;
+    const rows = parseEngineJson<unknown>(await fn.call(this.core), 'listRuleSets');
+    return Array.isArray(rows) ? rows.length : null;
   }
 
   // ── Workflow viewer + builder (crew#44) ────────────────────────────────────

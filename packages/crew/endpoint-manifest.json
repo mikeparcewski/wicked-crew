@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.11.0",
+  "apiTypesVersion": "0.12.0",
   "endpoints": [
     {
       "method": "GET",
@@ -161,8 +161,11 @@
       "method": "GET",
       "path": "/api/v1/governance/rules",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "{ rules: ConformanceRule[] }",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "POST",
@@ -184,6 +187,26 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/wiki/meta",
+      "requestType": null,
+      "responseType": "{ meta: GovernanceWikiMeta }",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/governance/wiki/scoreboard",
+      "requestType": null,
+      "responseType": "{ scoreboard: GovernanceScoreboard }",
+      "statusCodes": [
+        200,
+        500,
+        501
+      ]
     },
     {
       "method": "GET",
