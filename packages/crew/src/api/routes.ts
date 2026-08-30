@@ -28,6 +28,7 @@ import {
 } from './run-files.js';
 import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
+import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -2087,6 +2088,15 @@ export function registerRoutes(
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);
+
+  // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
+  // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these
+  // routes are launch/resume/cancel + the reads a scoreboard builds from.
+  registerCampaignRoutes(app, adapter, {
+    audit,
+    actorOf,
+    roster: () => CoreAdapter.roster(),
+  });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one

@@ -23,10 +23,13 @@ import type {
   Project,
   ProjectMember,
   InteractionRequest,
+  Campaign,
+  CampaignDef,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
+import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor } from './deliverable-floor.js';
 
 
@@ -109,6 +112,10 @@ export function readOverlayWorkflows(
     if (!file.endsWith('.json')) continue;
     const id = file.slice(0, -'.json'.length);
     if (builtinIds.has(id)) continue; // a built-in overlay, not a user workflow
+    // A composed campaign-node workflow (TH-9): persisted here so the Rust actor reloads it at
+    // startup (a fresh-process resumeCampaign re-dispatches pending nodes by workflow id), but
+    // it is one node's private plumbing, not a user workflow — keep it out of the catalog.
+    if (id.startsWith(CAMPAIGN_WORKFLOW_PREFIX)) continue;
     try {
       const def = JSON.parse(readFileSync(join(dir, file), 'utf8')) as WorkflowDef;
       if (def && typeof def.id === 'string' && Array.isArray(def.phases)) out.push(def);
@@ -242,7 +249,31 @@ type ProjectMethods = {
   recallKnowledge?(query: string, k: number): Promise<string>;
 };
 
-type CoreHandleFull = CoreHandle & GovernanceMethods & ChatMethods & EventLogMethods & ProjectMethods;
+/**
+ * The campaign scheduler bindings (DES-CAMPAIGN-001 / TH-9). ALL optional, same doctrine as
+ * `ProjectMethods`: they land after wicked-core-ts 0.7.2, so the installed addon may not carry
+ * them at runtime, and required declarations would type away the `typeof … !== 'function'`
+ * guards below (the FINDING-042 shape). Every method resolves a JSON string or a status token.
+ */
+type CampaignMethods = {
+  /** `defJson` = engine-wire `CampaignDef` JSON (snake_case). Resolves to the campaign id. */
+  launchCampaign?(defJson: string): Promise<string>;
+  /** Resolves to the campaign status token (`running` | … | `cancelled`); rejects when unknown. */
+  resumeCampaign?(id: string): Promise<string>;
+  /** Resolves to the campaign status token; rejects when unknown. */
+  cancelCampaign?(id: string): Promise<string>;
+  /** Resolves to a `Campaign` JSON object, or the JSON literal `null` when unknown. */
+  campaignDetail?(id: string): Promise<string>;
+  /** Resolves to a JSON array of `Campaign` objects (read-only store connection). */
+  campaignList?(): Promise<string>;
+};
+
+type CoreHandleFull = CoreHandle &
+  GovernanceMethods &
+  ChatMethods &
+  EventLogMethods &
+  ProjectMethods &
+  CampaignMethods;
 
 /** The napi constructor surface — the static factories live on the class object. */
 interface CoreConstructor {
@@ -526,6 +557,24 @@ export class ElicitationUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ElicitationUnsupportedError';
+  }
+}
+
+/**
+ * The campaign surface (DES-CAMPAIGN-001 / TH-9) is not available in this deployment — the
+ * installed wicked-core-ts predates the campaign bindings. Typed for the same reason as
+ * `ChatUnsupportedError`: the routes answer 501 ("upgrade the engine") on this, never 400
+ * ("fix your request"). Gated on METHOD PRESENCE rather than a version floor because the
+ * bindings ship in the next core-ts release whose number is the release train's to pick —
+ * a presence check is true on whatever version actually carries them.
+ */
+export class CampaignsUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts has ` +
+        'no campaign bindings — upgrade it to a release carrying launchCampaign)',
+    );
+    this.name = 'CampaignsUnsupportedError';
   }
 }
 
@@ -937,6 +986,88 @@ export class CoreAdapter {
   /** Cancel a run → the status token. */
   cancelRun(runId: string): Promise<string> {
     return this.core.cancelRun(runId);
+  }
+
+  // ── Campaigns (DES-CAMPAIGN-001 / crew#342 + TH-9) ─────────────────────────
+  // The engine is the campaign store — durable, single-writer, crash-resumable (its Campaign
+  // rows persist beside AgentSessions on the same estate substrate). Crew keeps NO shadow copy:
+  // every read below asks the engine, so a daemon restart or a second daemon over the same db
+  // sees the same campaigns. `launchCampaign` is gated on METHOD PRESENCE (not a version floor)
+  // because the bindings ship in whatever core-ts release the train cuts next.
+
+  /** Whether the installed engine addon carries the campaign bindings. */
+  campaignsSupported(): boolean {
+    return typeof this.core.launchCampaign === 'function';
+  }
+
+  /** Guard: the campaign binding surface, or a typed 501-shaped refusal naming the action. */
+  private _campaigns(what: string): Required<CampaignMethods> {
+    if (
+      typeof this.core.launchCampaign !== 'function' ||
+      typeof this.core.resumeCampaign !== 'function' ||
+      typeof this.core.cancelCampaign !== 'function' ||
+      typeof this.core.campaignDetail !== 'function' ||
+      typeof this.core.campaignList !== 'function'
+    ) {
+      throw new CampaignsUnsupportedError(what);
+    }
+    return this.core as Required<CampaignMethods>;
+  }
+
+  /** Validate + launch a campaign DAG → the campaign id. `def` is the ENGINE wire shape
+   *  (snake_case) — `campaigns/plan.ts` is the one producer of it in this daemon.
+   *
+   *  `workflows` are the composed per-node Tool workflows the def's run_specs reference; they
+   *  are armed FIRST (hot-register + overlay persist) so the engine can resolve them both now
+   *  and after a restart — a campaign is durable, so its node workflows must be too. Unlike a
+   *  deliver-composed def they are NOT purely ephemeral (`_armPerRunWorkflow`), and unlike a
+   *  user workflow they never enter `userWorkflows` or the catalog (the hydration filter in
+   *  `readOverlayWorkflows` skips the `campaign-` prefix). */
+  async launchCampaign(def: CampaignDef, workflows: WorkflowDef[] = []): Promise<string> {
+    const surface = this._campaigns('Launching a campaign');
+    for (const wf of workflows) {
+      await this._armCampaignWorkflow(wf);
+    }
+    return surface.launchCampaign(JSON.stringify(def));
+  }
+
+  /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —
+   *  core's parser is the authority and runs BEFORE the overlay write), overlay file for
+   *  restart durability, no `userWorkflows` entry. */
+  private async _armCampaignWorkflow(def: WorkflowDef): Promise<void> {
+    const core = this.core as unknown as Record<string, unknown>;
+    const register = core['registerWorkflow'];
+    if (typeof register !== 'function') {
+      // Unreachable on any addon that carries launchCampaign (registerWorkflow predates it by
+      // several releases), but the guard keeps the failure loud if that ever un-holds.
+      throw new CampaignsUnsupportedError('Arming a campaign node workflow');
+    }
+    await (register as (j: string) => Promise<string>).call(this.core, JSON.stringify(def));
+    const dir = workflowOverlayDir();
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${def.id}.json`), JSON.stringify(def, null, 2), 'utf8');
+  }
+
+  /** Resume a campaign from its persisted state → the campaign status token. */
+  resumeCampaign(id: string): Promise<string> {
+    return this._campaigns('Resuming a campaign').resumeCampaign(id);
+  }
+
+  /** Cancel a campaign (in-flight node Runs cancelled, the rest marked) → the status token. */
+  cancelCampaign(id: string): Promise<string> {
+    return this._campaigns('Cancelling a campaign').cancelCampaign(id);
+  }
+
+  /** A campaign's full persisted state (DAG + node statuses + run ids), or `null` when unknown. */
+  async campaignDetail(id: string): Promise<Campaign | null> {
+    const raw = await this._campaigns('Reading a campaign').campaignDetail(id);
+    return parseEngineJson<Campaign | null>(raw, 'campaignDetail');
+  }
+
+  /** Every campaign on the store. */
+  async campaignList(): Promise<Campaign[]> {
+    const raw = await this._campaigns('Listing campaigns').campaignList();
+    return parseEngineJson<Campaign[]>(raw, 'campaignList');
   }
 
   /**
