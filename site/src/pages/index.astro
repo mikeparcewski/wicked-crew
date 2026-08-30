@@ -136,6 +136,10 @@ const GATE_CARDS = [
   { k: 'ledger',  title: 'Evidence feeds the gate',   line: 'verdict.json is read from the QE evidence ledger. CONDITIONAL is unmet work: the hold stands until a clean PASS lands.' },
   { k: 'opt-in',  title: 'Gating is opt-in per phase', line: 'A phase can run ungated: turn the gate off and the transition passes without evaluation — a per-phase choice.' },
 ];
+
+// Injected at build time from packages/crew/package.json via astro.config.mjs
+// (vite define). Never hardcode a version in this file — it re-stales. (DT-7)
+const crewVersion = __WICKED_CREW_VERSION__;
 ---
 
 <Base title={title} description={description}>
@@ -751,7 +755,7 @@ const GATE_CARDS = [
                 onclick="navigator.clipboard&&navigator.clipboard.writeText('npx wicked-installer').then(()=>{this.textContent='Copied';setTimeout(()=>{this.textContent='Copy';},1400);})">Copy</button>
             </div>
             <pre class="install__code"><code>npx wicked-installer   <span class="c"># interactive · picks products · ships the `wicked` CLI</span></code></pre>
-            <p class="install__note">Cross-CLI, cross-product. Choose wicked-crew (and anything else in the family) from one prompt. <span class="install__ver">wicked-crew npm v0.3.0</span></p>
+            <p class="install__note">Cross-CLI, cross-product. Choose wicked-crew (and anything else in the family) from one prompt. <span class="install__ver">wicked-crew npm v{crewVersion}</span></p>
           </div>
 
           <div class="install-or" aria-hidden="true"><span>or install just this directly</span></div>

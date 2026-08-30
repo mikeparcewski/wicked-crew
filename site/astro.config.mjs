@@ -1,6 +1,16 @@
 import { defineConfig } from 'astro/config';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+
+// The install CTA's version stamp is injected at build time from the published
+// package's own manifest (packages/crew/package.json — the `wicked-crew` npm
+// package), so the stamp can never re-stale the way a hardcoded string does
+// (it sat at v0.3.0 while npm was at 0.7.x). Deliberately NOT an npm-registry
+// fetch: that would make the build non-hermetic. The release train keeps this
+// manifest in sync with npm, so stamp == npm at every deploy from main. (DT-7)
+const crewPkg = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../packages/crew/package.json', import.meta.url)), 'utf8'),
+);
 
 // Shared chrome lives in the `wicked-web` package. Develop against the local
 // source when it sits beside this repo (../../wicked-web from this site dir),
@@ -20,5 +30,8 @@ export default defineConfig({
   // engine</b>" → "thedocument engine"). Same defect class as the apex site's
   // "returns8 hits". The bytes saved are not worth silently broken copy.
   compressHTML: false,
-  vite: { resolve: { alias } },
+  vite: {
+    resolve: { alias },
+    define: { __WICKED_CREW_VERSION__: JSON.stringify(crewPkg.version) },
+  },
 });
