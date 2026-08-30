@@ -195,8 +195,8 @@ describe('GET /api/v1/governance/wiki/meta', () => {
     listedRules = [];
     const { body } = await get('/api/v1/governance/wiki/meta');
     expect(body['meta']['seeded']).toBe(true);
-    expect(body['rule_count']).toBe(0);
-    expect(body['ruleset_count']).toBe(2);
+    expect(body['meta']['rule_count']).toBe(0);
+    expect(body['meta']['ruleset_count']).toBe(2);
   });
 });
 
