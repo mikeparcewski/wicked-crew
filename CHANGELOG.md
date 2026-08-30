@@ -40,6 +40,22 @@ mentioned only where a daemon release depends on them.
   routes when TH-9's scheduler exposure lands; until then campaigns run as ordinary governed
   workflows under the documented interim pins.
 
+## [0.7.2] — 2026-08-30
+
+### Added
+- **Campaigns live** (TH-9): `POST/GET /api/v1/campaigns` on core-ts >= 0.7.3 bindings,
+  WS Campaign* passthrough, durable DAG execution; budget/timeout/kill supervision (TH-20).
+- **Architecture-wiki management wire**: `GET /governance/wiki/scoreboard` (core-ts >= 0.7.4),
+  `GET /governance/wiki/meta` (honest unseeded state), faceted rules browse incl. retired.
+- **AcceptanceView conformance section** (AW-14): run-scoped claims, deny-dominates beside the
+  QE verdict, `GovernanceUnenforced` surfaced.
+- **session.delivery on the list wire** (closes #321); fastify-route extractor pack (TH-15);
+  campaign scenario corpus from e2e/ (TH-23).
+
+### Changed
+- Bundles wicked-studio 0.4.2 (Wiki page + campaign scoreboard); engine floor core-ts ^0.7.4.
+- Site version stamp injected at build (DT-7).
+
 ## [0.7.1] — 2026-08-29
 
 **The release train release.** Bundles the wicked-studio 0.4.1 truth-pass skin, moves the QE
