@@ -37,11 +37,19 @@
 
 import type { Verdict } from 'wicked-ledger';
 import { VERDICT_VALUES } from 'wicked-ledger';
-import type { RepoEntry, SessionView, WorkflowDef } from '../core/types.js';
+import type {
+  GovernanceClaim,
+  RecordedEvent,
+  RepoEntry,
+  SessionView,
+  WorkflowDef,
+} from '../core/types.js';
 import { basename } from 'node:path';
 import type { QeAcceptanceState, QeManifestSummary } from './ledger.js';
 import { readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
+import type { RunConformance } from './conformance.js';
+import { resolveConformance } from './conformance.js';
 
 /**
  * Verdict → run-status, 1:1 with garden's qe `accept` action (VERDICT_TO_STATUS)
@@ -248,6 +256,12 @@ export interface AcceptanceView {
     error?: string;
   } | null;
   gate: AcceptanceGateResolution;
+  /**
+   * The governance half, BESIDE the QE gate (AW-14 / arch-R13a + R16): this run's conformance
+   * claims (wiki rule ids cited), its enforcement status, and the deny-dominates `guardrailed`
+   * headline. Never claims guardrailed for an unenforced, ungoverned, or unverifiable run.
+   */
+  conformance: RunConformance;
   /** The latest matching `wicked.qe.*` bus event, when the bus seam is armed and one was seen. */
   busEvent: QeGateEventEntry | null;
 }
@@ -263,6 +277,18 @@ export async function buildAcceptanceView(opts: {
   workflow: WorkflowDef | null;
   gateEvents: QeGateCache;
   qeRunId?: string;
+  /**
+   * Loader for the conformance store's claims (the adapter's `listConformanceClaims`). Optional so
+   * older callers keep compiling — but ABSENT reads as "claims unreadable", never as "no claims":
+   * the conformance section reports `claimsAvailable: false` rather than a clean empty list.
+   */
+  claims?: () => Promise<GovernanceClaim[]>;
+  /**
+   * Loader for the run's durable event log (the adapter's `runEvents`; `null` = no binding).
+   * Optional with the same contract: absent or failing reads as `unverifiable` enforcement — an
+   * unknown enforcement state is never reported guardrailed (arch-R16).
+   */
+  events?: (runId: string) => Promise<RecordedEvent[] | null>;
 }): Promise<AcceptanceView> {
   const phases = acceptancePhaseIds(opts.workflow);
   const required = phases.length > 0;
@@ -275,6 +301,34 @@ export async function buildAcceptanceView(opts: {
         )
       : null;
   const gate = resolveAcceptanceGate(required, state);
+
+  // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
+  // section's own resolution turns "unreadable" into "not claimed clean" (deny-dominates).
+  let claimRows: GovernanceClaim[] | null = null;
+  let claimsError: string | undefined;
+  if (opts.claims !== undefined) {
+    try {
+      claimRows = await opts.claims();
+    } catch (err) {
+      claimsError = err instanceof Error ? err.message : String(err);
+    }
+  } else {
+    claimsError = 'claims loader not wired';
+  }
+  let eventRows: RecordedEvent[] | null = null;
+  if (opts.events !== undefined) {
+    try {
+      eventRows = await opts.events(opts.runId);
+    } catch {
+      eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
+    }
+  }
+  const conformance = resolveConformance({
+    runId: opts.runId,
+    claims: claimRows,
+    ...(claimsError !== undefined ? { claimsError } : {}),
+    events: eventRows,
+  });
 
   // Freshness signal only — the ledger stays the system of record for the
   // gate. Keyed by the QE run id when the ledger named one, else by context
@@ -328,6 +382,7 @@ export async function buildAcceptanceView(opts: {
           }
         : null,
     gate,
+    conformance,
     busEvent,
   };
 }

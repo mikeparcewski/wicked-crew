@@ -157,6 +157,29 @@ about the repo the run worked on. Two systems of record, two routes. (`serve --q
 subscribes the daemon to the QE pipeline's `wicked.qe.gate.*` bus events for freshness; without it
 the route lazy-reads the ledger on demand — no bus required.)
 
+### Conformance, beside the QE verdict *(crew 0.8, AW-14)*
+
+The same acceptance body carries a **`conformance` section** — the governance half of "is it done?",
+so a wiki-rule violation appears on the page humans actually look at instead of only on the
+standalone `/governance/claims` wire:
+
+- **Run-scoped claims, cited.** The run's own governance decisions (scope
+  `wicked-agent/<runId>/…`), each `conform:` obligation parsed back to the conformance rule it
+  cites (severity, rule id, statement — the ruleset the output had to meet). Denials name their
+  rules; advisory boundary-*read* denies are counted separately and never deny the run.
+- **`enforcement`** — what the run's durable event log says about whether governance was actually
+  in force: `enforced` | `unenforced` | `ungoverned` | `unverifiable`.
+- **`guardrailed`** — the one deny-dominates headline. True ONLY when the claims wire was readable,
+  no non-advisory denial stands, AND enforcement was positively verified. An unenforced,
+  ungoverned, or unverifiable run is **never** reported guardrailed.
+
+**Coverage boundary, stated plainly:** deterministic per-tool-call input governance (gate-hook
+injection) exists for **claude only**. A governed unit routed to any other CLI (Antigravity, Codex,
+local, …) runs with unchecked tool calls and is reported `unenforced` — it still gets
+**phase-boundary coverage only**: the in-process output gate and the deliverable floor evaluate the
+unit's *output* after the fact, advisory relative to mid-flight tool-call blocking. "Guardrailed"
+is a verified claim about claude-seated governed units, not a blanket property of every run.
+
 ## Event-driven, with sidecars *(built substrate — DES-EXEC-001 §2/§4.2)*
 
 Components publish and subscribe; they don't call each other. Standard event types (`wicked.*`) mean you
