@@ -163,13 +163,15 @@ describe('GET /api/v1/governance/wiki/meta', () => {
     const { status, body } = await get('/api/v1/governance/wiki/meta');
     expect(status).toBe(200);
     expect(body).toEqual({
-      seeded: false,
-      ruleset_count: null,
-      rule_count: 0,
-      scoreboard_available: false,
-      doc: WIKI_AUTHORING_DOC,
+      meta: {
+        seeded: false,
+        ruleset_count: null,
+        rule_count: 0,
+        scoreboard_available: false,
+        doc: WIKI_AUTHORING_DOC,
+      },
     });
-    expect(body['doc']).toMatch(/seed\/README\.md$/);
+    expect(body['meta']['doc']).toMatch(/seed\/README\.md$/);
   });
 
   it('reports a seeded store with counted rulesets and scoreboard availability', async () => {
@@ -178,11 +180,13 @@ describe('GET /api/v1/governance/wiki/meta', () => {
     listedRules = RULES;
     const { body } = await get('/api/v1/governance/wiki/meta');
     expect(body).toEqual({
-      seeded: true,
-      ruleset_count: 3,
-      rule_count: RULES.length,
-      scoreboard_available: true,
-      doc: WIKI_AUTHORING_DOC,
+      meta: {
+        seeded: true,
+        ruleset_count: 3,
+        rule_count: RULES.length,
+        scoreboard_available: true,
+        doc: WIKI_AUTHORING_DOC,
+      },
     });
   });
 
@@ -190,7 +194,7 @@ describe('GET /api/v1/governance/wiki/meta', () => {
     rulesetCount = 2;
     listedRules = [];
     const { body } = await get('/api/v1/governance/wiki/meta');
-    expect(body['seeded']).toBe(true);
+    expect(body['meta']['seeded']).toBe(true);
     expect(body['rule_count']).toBe(0);
     expect(body['ruleset_count']).toBe(2);
   });

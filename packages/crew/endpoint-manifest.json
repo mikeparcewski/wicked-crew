@@ -192,7 +192,7 @@
       "method": "GET",
       "path": "/api/v1/governance/wiki/meta",
       "requestType": null,
-      "responseType": "GovernanceWikiMeta",
+      "responseType": "{ meta: GovernanceWikiMeta }",
       "statusCodes": [
         200
       ]

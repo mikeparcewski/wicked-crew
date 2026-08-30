@@ -85,23 +85,27 @@ export function registerGovernanceWikiRoutes(app: FastifyInstance, adapter: Core
     {
       config: {
         manifest: {
-          responseType: 'GovernanceWikiMeta',
+          responseType: '{ meta: GovernanceWikiMeta }',
           statusCodes: [200],
         },
       },
     },
-    async (): Promise<GovernanceWikiMeta> => {
+    // Wrapped per crew house style — campaigns/rules/scoreboard all wrap, and studio's
+    // Wiki page reads `body.meta` (a bare seeded:false would read as "cannot tell").
+    async (): Promise<{ meta: GovernanceWikiMeta }> => {
       // NOTE: pre-0.7.4 addons funnel listConformanceRules through recall, which skips retired
       // rows — so `rule_count` counts the LISTABLE rules. That is the right number for "is
       // anything here": a store holding only retired rules has nothing recallable to show.
       const rules = await adapter.listConformanceRules();
       const rulesetCount = await adapter.countRuleSets();
       return {
-        seeded: rules.length > 0 || (rulesetCount ?? 0) > 0,
-        ruleset_count: rulesetCount,
-        rule_count: rules.length,
-        scoreboard_available: adapter.wikiScoreboardSupported(),
-        doc: WIKI_AUTHORING_DOC,
+        meta: {
+          seeded: rules.length > 0 || (rulesetCount ?? 0) > 0,
+          ruleset_count: rulesetCount,
+          rule_count: rules.length,
+          scoreboard_available: adapter.wikiScoreboardSupported(),
+          doc: WIKI_AUTHORING_DOC,
+        },
       };
     },
   );
