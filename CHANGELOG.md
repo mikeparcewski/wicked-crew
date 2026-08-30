@@ -10,7 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Campaign budget/runtime governance** (TH-20 / recon test-R22): `CampaignSupervisor`
+  (`packages/crew/src/campaign/supervision.ts`) — campaign wall-clock budget, per-node timeout
+  (running time only; `awaiting_human` never counts), kill/abandon policy for in-flight nodes,
+  and a fail-closed nightly node cap. Budget exhaustion aborts remaining nodes with
+  **excluded-with-reason** status — visible in supervision state, as synthetic
+  `campaignBudgetExceeded`/`campaignNodeExcluded` `/ws` frames, and in the warn log; never
+  silent. Per-node cost (wall-clock always; tokens/USD when the worker CLI reports them) lands
+  in the `campaign-supervision.json` evidence artifact so cost regressions diff like verdict
+  regressions. TH-8-style env pins: node environments must carry the exact
+  `WICKED_UNIT_TIMEOUT_SECS` pin (`assertNodeEnvPinned`, fail-closed — unpinned means the
+  engine's 2-hour default). Knob placement records the **P-9 interim decision: crew-side
+  supervision**, not `CampaignDef` fields (`docs/campaign-budgets.md`). Wired into the campaign
+  routes when TH-9's scheduler exposure lands; until then campaigns run as ordinary governed
+  workflows under the documented interim pins.
 
 ## [0.7.1] — 2026-08-29
 
