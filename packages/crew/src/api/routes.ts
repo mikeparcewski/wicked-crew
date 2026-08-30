@@ -1080,6 +1080,12 @@ export function registerRoutes(
       workflow,
       gateEvents: qeGateEvents,
       ...(qeRunId !== undefined && qeRunId !== '' ? { qeRunId } : {}),
+      // AW-14 (arch-R13a + R16): the conformance section reads the same wires the standalone
+      // `/governance/claims` and `/runs/:id/events` routes serve, but run-scoped and resolved
+      // deny-dominates BESIDE the QE gate — so a wiki-rule violation and an unenforced governed
+      // unit both appear on the page humans actually look at.
+      claims: () => adapter.listConformanceClaims(),
+      events: (rid) => adapter.runEvents(rid),
     });
   });
 
