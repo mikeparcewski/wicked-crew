@@ -1,0 +1,183 @@
+{
+  "spec": 2,
+  "name": "crew-e2e",
+  "generated_at": "2026-08-30T00:00:00Z",
+  "target": {
+    "repo": "mikeparcewski/wicked-crew",
+    "surface_url": "http://127.0.0.1:79xx (isolated per run)"
+  },
+  "sources": {
+    "estate": "unindexed",
+    "docs_recall": false,
+    "live_probe": false
+  },
+  "capabilities": [
+    {
+      "id": "api-projects",
+      "surface": "the /api/v1 substrate every e2e journey boots through (health, projects CRUD)",
+      "apis": "GET /api/v1/health · POST/GET /api/v1/projects",
+      "test_shape": "deterministic curl steps with content-bearing JSON assertions (status ok + version; 201 + read-back)",
+      "needs": "an ISOLATED daemon (79xx port, scratch --db/--bus-db); CREW_API set explicitly — no default target",
+      "citations": [
+        "packages/crew/src/api/routes.ts:332",
+        "packages/crew/src/projects/routes.ts:231"
+      ],
+      "source": "human",
+      "status": "verified"
+    },
+    {
+      "id": "acp-bridge",
+      "surface": "the ACP bridge protocol leg: initialize → session/new → session/prompt against an adapter binary",
+      "apis": "ACP JSON-RPC over stdio (adapter binary named by ACP_BINARY)",
+      "test_shape": "e2e/acp-probe.mjs exits 0 only when the prompt round-trips with a real sessionId",
+      "needs": "a real, authenticated adapter binary; spends one prompt — nightly tier",
+      "citations": [
+        "e2e/acp-probe.mjs:1"
+      ],
+      "source": "human",
+      "status": "verified"
+    },
+    {
+      "id": "project-model-journey",
+      "surface": "DES-PROJECT-001 §8: one project created in studio's API, continued in interactive, both reflecting the same state — all ten numbered steps incl. RESTART SURVIVAL",
+      "apis": "/api/v1 (+ /ws) + wicked-interactive serve on a scratch stack",
+      "test_shape": "e2e/project_model_e2e.mjs — ten PASS lines, deterministic stub seat, fresh core.db/bus per run",
+      "needs": "wicked-interactive sibling checkout (or WICKED_INTERACTIVE_REPO); fixed interactive port 4491 → EXCLUSIVE",
+      "citations": [
+        "e2e/project_model_e2e.mjs:1"
+      ],
+      "source": "human",
+      "status": "verified"
+    },
+    {
+      "id": "studio-insight-rail",
+      "surface": "studio insight rail on a LIVE run: all eight accordions + Term modal populate from live WS events (no replay for late joiners)",
+      "apis": "studio SPA over /api/v1 + /ws (Playwright)",
+      "test_shape": "e2e/insight_rail_test.py — launch run via API, hold page open, open every accordion, screenshot + JSON report",
+      "needs": "isolated daemon + served studio (CREW_API + STUDIO_URL); a real governed run — real tokens, nightly-governed tier",
+      "citations": [
+        "e2e/insight_rail_test.py:1"
+      ],
+      "source": "human",
+      "status": "verified"
+    },
+    {
+      "id": "studio-burn-cov",
+      "surface": "studio Burn panel populated from cliUsage (tokens/cost/per-CLI) + Cov modal open/close via its X",
+      "apis": "studio SPA over /api/v1 + /ws (Playwright)",
+      "test_shape": "e2e/burn_cov_test.py — live run, content-bearing Burn figures (a stub seat reports no usage), JSON report",
+      "needs": "isolated daemon + served studio; a real governed run — real tokens, nightly-governed tier",
+      "citations": [
+        "e2e/burn_cov_test.py:1"
+      ],
+      "source": "human",
+      "status": "verified"
+    }
+  ],
+  "environment_manifest": {
+    "ref": "environment-manifest.json"
+  },
+  "scenarios": [
+    {
+      "id": "api-smoke",
+      "title": "API smoke: health + namespaced project create/read-back (PR-deterministic tripwire)",
+      "category": "api",
+      "capability_ids": [
+        "api-projects"
+      ],
+      "deps": [],
+      "pass_criteria": {
+        "terminal_state": "isolated daemon answering: /health status ok with a version; the created project readable",
+        "artifact": "step captures: health JSON, the 201 create response with project id, the list read containing qe-smoke-<ns>",
+        "consumer_state": "no restart loops; the namespaced fixture exists exactly once (stateless contract held)"
+      },
+      "claim_ceiling": "machinery-verified",
+      "isolation": "stateless",
+      "scenario_path": "scenarios/crew-e2e-api-smoke.md",
+      "status": "confirmed",
+      "notes": "zero tokens/seats — the only rung that belongs in the PR lane (refs/campaign-ci.md)"
+    },
+    {
+      "id": "acp-handshake",
+      "title": "ACP handshake round-trips through a real adapter (folds acp-probe.mjs)",
+      "category": "api",
+      "capability_ids": [
+        "acp-bridge"
+      ],
+      "deps": [],
+      "pass_criteria": {
+        "terminal_state": "probe exit 0: initialize ok, a real sessionId, prompt result received (no 120s stall)",
+        "artifact": "probe stdout timeline: initialize/session/prompt lines with timestamps",
+        "consumer_state": "adapter process exited cleanly after kill — no orphaned adapter"
+      },
+      "claim_ceiling": "machinery-verified",
+      "isolation": "stateless",
+      "scenario_path": "scenarios/crew-e2e-acp-handshake.md",
+      "status": "confirmed",
+      "notes": "spends one prompt against a real adapter — nightly tier, never PR"
+    },
+    {
+      "id": "project-model",
+      "title": "Project model ten-step journey incl. restart survival (folds project_model_e2e.mjs)",
+      "category": "api",
+      "capability_ids": [
+        "project-model-journey"
+      ],
+      "deps": [
+        "api-smoke"
+      ],
+      "pass_criteria": {
+        "terminal_state": "all ten ADR §8 assertions PASS; the restarted daemon serves the same project state",
+        "artifact": "the script's per-step PASS lines + final JSON report",
+        "consumer_state": "scratch stack only — no real docs root, bus, or engine store touched; interactive port 4491 released"
+      },
+      "claim_ceiling": "machinery-verified",
+      "isolation": "exclusive",
+      "scenario_path": "scenarios/crew-e2e-project-model.md",
+      "status": "confirmed",
+      "notes": "API-substituted two-skin proof — machinery-verified by doctrine (certify the user journey, not the proxy); EXCLUSIVE: fixed port 4491 + mid-run daemon restart"
+    },
+    {
+      "id": "insight-rail",
+      "title": "Insight rail: every accordion + Term modal on a live governed run (folds insight_rail_test.py)",
+      "category": "ui",
+      "capability_ids": [
+        "studio-insight-rail"
+      ],
+      "deps": [
+        "api-smoke"
+      ],
+      "pass_criteria": {
+        "terminal_state": "run reached a terminal state while the page was held open; every accordion opened",
+        "artifact": "per-surface screenshots in e2e/shots/ + the JSON report with no failed section",
+        "consumer_state": "studio still serving; WS connection lived through the run (rail populated, not empty)"
+      },
+      "claim_ceiling": "certified",
+      "isolation": "shares-state",
+      "scenario_path": "scenarios/crew-e2e-insight-rail.md",
+      "status": "confirmed",
+      "notes": "real browser journey on a real governed run — nightly-governed tier"
+    },
+    {
+      "id": "burn-cov",
+      "title": "Burn populates from cliUsage; Cov modal opens + closes (folds burn_cov_test.py)",
+      "category": "ui",
+      "capability_ids": [
+        "studio-burn-cov"
+      ],
+      "deps": [
+        "api-smoke"
+      ],
+      "pass_criteria": {
+        "terminal_state": "run terminal; Burn shows non-empty token/cost/per-CLI figures",
+        "artifact": "Burn + Cov screenshots in e2e/shots/ + the JSON report with no failed check",
+        "consumer_state": "Cov modal closed via its X — the page is interactive after the journey"
+      },
+      "claim_ceiling": "certified",
+      "isolation": "shares-state",
+      "scenario_path": "scenarios/crew-e2e-burn-cov.md",
+      "status": "confirmed",
+      "notes": "needs a REAL seat: a stub seat reports no usage, which would fail the Burn assertion honestly — nightly-governed tier"
+    }
+  ]
+}
