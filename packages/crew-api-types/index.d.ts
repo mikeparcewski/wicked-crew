@@ -190,6 +190,24 @@ export interface AgentSession {
    * pre-populate the steer textarea when a gate arrives.
    */
   guidance?: string;
+  /**
+   * The run's delivered artifact (CREW-UX-8, crew#321; api-types 0.11.0) — populated at DTO
+   * assembly on BOTH `GET /runs` and `GET /runs/:id`. ABSENT — never `null` — when the run
+   * delivered nothing: absence is the one spelling, so `'delivery' in session` and
+   * `!== undefined` agree. FAILURE is not spelled here; it is `units[].status === 'rejected'`
+   * plus `denial_reason` (crew#318's message), both already on the list wire — only the
+   * SUCCESS half needed a field.
+   *
+   * `kind` is a discriminator so a future artifact type is additive. Deliberately NOT an
+   * artifact model: documents and demos already have their own identity, tiles and routes in
+   * the skin; runs are the only producer with no product, and their product is exactly one
+   * thing.
+   *
+   * KNOWN LIMIT: runs that delivered before a 0.11.0 daemon first saw their terminal frame
+   * have no durable `run.delivered` audit entry and carry no field — historical runs still
+   * resolve their URL through `GET /runs/:id/units/:unitKey/output` (the pre-#321 fallback).
+   */
+  delivery?: { kind: 'pull_request'; url: string };
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
