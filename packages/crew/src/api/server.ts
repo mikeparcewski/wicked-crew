@@ -11,6 +11,8 @@ import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
 import { GuidanceIndex } from './guidance-index.js';
+import { DeliveryIndex, deliverUnitOf, prUrlFrom } from './delivery-index.js';
+import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
 import { QeGateCache, startQeGateSubscriber } from '../qe/gate-events.js';
@@ -295,6 +297,50 @@ export async function createServer(
   // trail's `guidance.set` entries so notes survive a daemon restart.
   const guidanceIndex = new GuidanceIndex();
   await guidanceIndex.hydrate(audit, (m) => app.log.warn(m));
+  // Delivered-PR record (CREW-UX-8, crew#321): same durable pattern — hydrated from the
+  // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
+  const deliveryIndex = new DeliveryIndex();
+  await deliveryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // The one post-terminal `workOutput` read that resolves a run's delivered PR URL into the
+  // durable record (audit entry) + the index the run DTOs echo. Best-effort by construction:
+  // a failure here must never fail the run. Triggered on `sessionCompleted` OR
+  // `sessionFailed` — a def-carried deliver phase need not be the last phase, so a successful
+  // deliver can precede a later failure; the failed-deliver case is a cheap no-op (a rejected
+  // unit has no stored work_output — deny-dominates writes none past a deny — and the status
+  // guard below skips the read entirely).
+  const resolveRunDelivery = async (runId: string): Promise<void> => {
+    try {
+      // Resume/retry re-terminals: already resolved once, and a terminal run's PR URL never
+      // changes — never re-read, never double-write the trail.
+      if (deliveryIndex.deliveryFor(runId) !== undefined) return;
+      const views = await adapter.sessionsDetail();
+      const view = views.find((v) => v.session.id === runId);
+      if (view === undefined) return;
+      const unit = deliverUnitOf(view);
+      // Only an APPROVED deliver unit carries a delivery claim: a rejected one's output (were
+      // any stored) can contain a PR URL from a step that gh completed before a later
+      // re-derivation refused to report the delivery (core/deliver.ts step f).
+      if (unit === null || unit.status !== 'done') return;
+      const output = await adapter.workOutput(coreUnitId(runId, unit));
+      if (output === null) return;
+      const url = prUrlFrom(output);
+      if (url === null) return;
+      // The durable record first, then the read-side index — the same write order as
+      // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
+      // hold a record the trail does not.
+      audit.record('run.delivered', { id: 'daemon', kind: 'system', trust: 'admin' }, {
+        runId,
+        detail: { url },
+      });
+      deliveryIndex.set(runId, url);
+    } catch (err) {
+      app.log.warn(
+        `[runs] delivery resolution for ${runId} failed (field absent until restart replays the trail): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
   const projectBus =
     options?.projectEvents?.disabled === true
       ? null
@@ -585,6 +631,15 @@ export async function createServer(
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
     broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
+    // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
+    // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
+    // terminal frames trigger it and why a failed deliver is a no-op.
+    if (
+      (event.type === 'sessionCompleted' || event.type === 'sessionFailed') &&
+      session !== undefined
+    ) {
+      void resolveRunDelivery(session);
+    }
     // The foundation record's evidence pointer (§3.2 row 3): a project-bound run that completes
     // gets its run-scope pointer written, best-effort, off the hot path.
     if (event.type === 'sessionCompleted' && session !== undefined && projectId !== undefined) {
@@ -720,7 +775,7 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex, guidanceIndex },
+    { seatHealth, retryIndex, guidanceIndex, deliveryIndex },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay

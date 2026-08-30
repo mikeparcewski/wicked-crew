@@ -36,6 +36,7 @@ import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.j
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
 import { GuidanceIndex } from './guidance-index.js';
+import { DeliveryIndex } from './delivery-index.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
@@ -250,6 +251,10 @@ export interface RuntimeDeps {
   /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
    *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
   guidanceIndex?: GuidanceIndex;
+  /** Run→delivered-PR index (CREW-UX-8, crew#321) — `createServer` hydrates one from the audit
+   *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
+   *  fresh one. */
+  deliveryIndex?: DeliveryIndex;
   openWithOs?: (target: string) => Promise<void>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
@@ -291,10 +296,12 @@ export function registerRoutes(
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
+  const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
-  // `retry_of` from the lineage index, and `guidance` from the guidance index, each set only
-  // when known (absent, never null, spells "not a retry" / "no note").
+  // `retry_of` from the lineage index, `guidance` from the guidance index, and `delivery`
+  // from the delivery index (CREW-UX-8, crew#321), each set only when known (absent, never
+  // null, spells "not a retry" / "no note" / "delivered nothing").
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
   const decorateRun = (view: SessionView): SessionView => {
@@ -303,6 +310,8 @@ export function registerRoutes(
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
+    const delivery = deliveryIndex.deliveryFor(view.session.id);
+    if (delivery !== undefined) view.session.delivery = delivery;
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
