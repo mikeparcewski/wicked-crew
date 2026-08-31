@@ -17,6 +17,8 @@ import type {
   ConformanceRule,
   GovernanceScoreboard,
   GovernanceClaim,
+  SteeringImportEntry,
+  SteeringImportResult,
   CoverageReport,
   GraphKind,
   WorkflowDef,
@@ -198,6 +200,20 @@ type GovernanceMethods = {
   // it yet, so `countRuleSets` answers `null` ("cannot count") rather than a fabricated 0 until
   // one does.
   listRuleSets?(): Promise<string>;
+  // STEERING batch import (the unified steering-rule model, wicked-core-ts ≥ 0.7.5). Takes a
+  // JSON `{ default_type: string | null, entries: SteeringImportEntry[] }` batch, runs EVERY
+  // entry — frontmattered markdown doc or ready rule JSON — through the engine's ingest
+  // normalize/validate path on the single-writer actor (fail-closed PER ENTRY), and resolves to
+  // a JSON array of per-entry `SteeringImportResult`s.
+  //
+  // Optional for the same reason as `retirePolicy` above, and it is also THE presence sentinel
+  // for the whole steering seam (`steeringSupported()`): the 0.7.5 addon ships the unified model
+  // (steering_type / applies_to / excludes / weight / effect on ConformanceRule, policy-row
+  // migration) and this binding together, so its presence is what tells crew the engine will
+  // round-trip the steering fields instead of silently dropping them (ConformanceRule has no
+  // `deny_unknown_fields` — an old engine ACCEPTS a steering-field write and persists a rule
+  // that enforces differently than the caller wrote).
+  steeringImport?(batchJson: string): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -482,6 +498,26 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     ],
   },
   {
+    // "Add with chat" for the Steering surface (STEERING program) — the dedicated entry point
+    // behind POST /governance/steering/author. TH-12 propose-as-gate: the run analyzes the
+    // operator's intent + the named files/dirs, then the TERMINAL `propose` phase emits the
+    // PROPOSED steering rules and its unconditional human gate pauses the run `awaiting_human`
+    // (core evaluates a terminal phase's own gate before finalize — seam finding #4), so the
+    // operator approves/amends/rejects via the standard POST /runs/:id/gate. Approved rules land
+    // through the governed rules CRUD with `provenance.source: "chat"` — the run itself must
+    // never write the store, which is why both phases say so out loud.
+    //
+    // Crew-authored drop-in (like `chat`): NOT in CORE_SEEDED_WORKFLOWS, so launchRun's
+    // `_writeBuiltinOverlay` write is the only way core resolves the id — the same delivery
+    // mechanism every crew drop-in uses.
+    id: 'steering-author',
+    is_system: true,
+    phases: [
+      { id: 'analyze', kind: 'recon', instructions: 'Read the operator intent and every file or directory listed in the problem statement. Identify candidate steering rules: durable, prescriptive statements a coding agent must follow, each classified into one steering type (architecture, development, security, testing, operations, compliance, design-ux). For each candidate note the statement, steering type, severity, and the evidence in the source material. Analysis only — do not write any rule to any store, and do not emit final rule JSON yet.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (0..1), targets, steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to, excludes, weight, effect, trigger, obligations, criteria. This output is a PROPOSAL for the human gate: rules land in the store only after approval, via the governance rules API — do not write them yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
     id: 'collab',
     is_system: true,
     phases: [
@@ -598,6 +634,24 @@ export class CampaignsUnsupportedError extends Error {
  * never 400 ("fix your request"). Gated on METHOD PRESENCE, the campaigns doctrine — true on
  * whatever release actually carries the binding.
  */
+/**
+ * The unified steering-rule model (STEERING program) is not available in this deployment —
+ * wicked-core-ts predates the `steeringImport` binding (ships in ≥ 0.7.5, alongside the model
+ * merge). Typed for the same reason as `ChatUnsupportedError`: the routes answer 501 ("upgrade
+ * the engine") on this, never 400 ("fix your request") — and never the WORSE failure of passing
+ * a steering-field write through to an engine that would silently drop the fields.
+ */
+export class SteeringUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts addon ` +
+        'has no steeringImport binding — upgrade it to a release carrying the unified steering ' +
+        'model, >= 0.7.5)',
+    );
+    this.name = 'SteeringUnsupportedError';
+  }
+}
+
 export class GovernanceScoreboardUnsupportedError extends Error {
   constructor(what: string) {
     super(
@@ -1697,6 +1751,55 @@ export class CoreAdapter {
     if (typeof fn !== 'function') return null;
     const rows = parseEngineJson<unknown>(await fn.call(this.core), 'listRuleSets');
     return Array.isArray(rows) ? rows.length : null;
+  }
+
+  // ── Steering (STEERING program — the unified steering-rule model) ───────────
+
+  /**
+   * Whether the installed engine addon carries the unified steering-rule model (core-ts ≥ 0.7.5).
+   *
+   * The sentinel is the `steeringImport` binding, which ships WITH the model merge — see the
+   * `GovernanceMethods` comment. Consulted by the routes before: filtering rules by
+   * `?type=` (rows on an old engine carry no `steering_type`, so an empty answer would
+   * impersonate "no rules of that type"); accepting a rule write that carries steering fields
+   * (an old engine would silently drop them — the extraWriteRoots doctrine); and folding the
+   * legacy policy write surface (410 only once the unified store exists to point at).
+   */
+  steeringSupported(): boolean {
+    return typeof this.core.steeringImport === 'function';
+  }
+
+  /**
+   * Batch-import steering rules (frontmattered markdown docs and/or ready rule JSON) through the
+   * engine's ingest normalize/validate path — the SAME path `rules ingest --dir` runs, on the
+   * single-writer actor (the daemon must never open the store for writes itself). Fail-closed
+   * PER ENTRY: one bad entry rejects alone with its reason in that entry's result row, the rest
+   * still land. `defaultType` is the page's inferred steering type, applied to entries that
+   * omit one.
+   *
+   * Presence-gated (the campaigns doctrine): throws {@link SteeringUnsupportedError} on an addon
+   * that predates the binding, which the route maps to 501 ("upgrade the engine").
+   */
+  async importSteeringRules(
+    entries: SteeringImportEntry[],
+    defaultType?: string,
+  ): Promise<SteeringImportResult[]> {
+    const fn = this.core.steeringImport;
+    if (typeof fn !== 'function') {
+      throw new SteeringUnsupportedError('Importing steering rules');
+    }
+    const rows = parseEngineJson<SteeringImportResult[]>(
+      await fn.call(this.core, JSON.stringify({ default_type: defaultType ?? null, entries })),
+      'steeringImport',
+    );
+    // Rust spells an absent `Option` as `null` unless the engine adds `skip_serializing_if`;
+    // crew's published wire type (`SteeringImportResult.name/ids/error?`) spells absence as an
+    // ABSENT KEY. Pin the shape on OUR side of the seam — strip null-valued keys — so the HTTP
+    // response honors the contract whichever spelling the installed addon ships.
+    return rows.map(
+      (r) =>
+        Object.fromEntries(Object.entries(r).filter(([, v]) => v !== null)) as SteeringImportResult,
+    );
   }
 
   // ── Workflow viewer + builder (crew#44) ────────────────────────────────────

@@ -28,6 +28,7 @@ import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -124,6 +125,15 @@ respondsWith<Wire.GovernanceClaim[], Awaited<ReturnType<CoreAdapter['listConform
 respondsWith<Wire.CoverageReport | null, Awaited<ReturnType<CoreAdapter['getCoverageReport']>>>();
 respondsWith<Wire.GraphKind[], Awaited<ReturnType<CoreAdapter['getGraphKindsForRepo']>>>();
 
+// Steering (STEERING program): the unified steering-rule fields ride the ConformanceRule pin
+// above; these pin the import surface's produced results and the boolean presence gate.
+respondsWith<Wire.SteeringImportResult[], Awaited<ReturnType<CoreAdapter['importSteeringRules']>>>();
+respondsWith<
+  Wire.SteeringImportResponse,
+  { results: Wire.SteeringImportResult[]; imported: number; rejected: number }
+>();
+respondsWith<boolean, ReturnType<CoreAdapter['steeringSupported']>>();
+
 // Governance wiki management (wiki-mgmt): GET /governance/wiki/scoreboard + /governance/wiki/meta.
 respondsWith<
   Wire.GovernanceScoreboard,
@@ -183,6 +193,9 @@ accepts<z.input<typeof OpenPathSchema>, Wire.OpenPathBody>();
 accepts<z.input<typeof CreateProjectSchema>, Wire.CreateProjectBody>();
 accepts<z.input<typeof UpdateProjectSchema>, Wire.UpdateProjectBody>();
 accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
+// Steering (STEERING program) — the import batch and the "add with chat" authoring launch.
+accepts<z.input<typeof SteeringImportSchema>, Wire.SteeringImportBody>();
+accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();
 // POST /projects/:id/graph/refresh — the additive `force` body (estate-migration path).
 accepts<z.input<typeof RefreshProjectGraphSchema>, Wire.RefreshProjectGraphBody>();
 

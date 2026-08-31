@@ -912,8 +912,29 @@ export interface GovernancePolicy {
 }
 
 /**
+ * The steering-type vocabulary (STEERING program) — one sub-page per type in the studio's
+ * Steering surface. Enum-as-string on the wire; the engine's serde default is `architecture`,
+ * so a rule row written before the field existed reads back as an architecture rule.
+ */
+export type SteeringType =
+  | 'architecture'
+  | 'development'
+  | 'security'
+  | 'testing'
+  | 'operations'
+  | 'compliance'
+  | 'design-ux';
+
+/**
  * A prescriptive conformance rule (`wicked-governance::ConformanceRule`).
  * `rule_type`: `pattern` | `policy`. `severity`: `info` | `warn` | `error` | `critical`.
+ *
+ * STEERING (unified model): the wiki/rules model and the old policy model merged into ONE
+ * steering-rule model. The steering fields below are all optional on the wire — additive for
+ * older consumers, and ABSENT on rows served by a pre-steering engine (wicked-core-ts < 0.7.5),
+ * where absence reads as the serde defaults (`steering_type` architecture, `weight` 1.0, no
+ * enforcement half). A rule WITHOUT `effect` is recall-only, exactly as before the merge; a rule
+ * WITH one participates in decide()/select() the way a `GovernancePolicy` used to.
  */
 export interface ConformanceRule {
   id: string;
@@ -924,9 +945,25 @@ export interface ConformanceRule {
   targets: { language?: string; layer?: string; framework?: string };
   symbol_ref?: string;
   compliance?: { framework: string; control_id: string };
+  /** Where the rule came from. Doc-ingested rules keep `path@sha#id` in `ref`; UI/chat-authored
+   *  rules carry `source: "ui"` / `source: "chat"` — first-class provenance, not second-class. */
   provenance: { source: string; ref?: string; source_kinds: string[] };
   /** Withdrawn from recall. Same contract as {@link GovernancePolicy.retired}. */
   retired?: boolean;
+  /** Which Steering sub-page this rule belongs to. Engine default: `architecture`. */
+  steering_type?: SteeringType;
+  /** Phases / tools this rule is selected for (inclusion — {@link GovernancePolicy.applies_to} semantics). */
+  applies_to?: string[];
+  /** Exclusion twin of `applies_to`: phases / tools this rule is NEVER selected for. */
+  excludes?: string[];
+  /** Ordering within a severity band + gate priority. Engine default: 1.0. */
+  weight?: number;
+  /** Enforcement half (from the retired policy model). Absent ⇒ the rule is recall-only. */
+  effect?: 'deny' | 'allow_with_conditions' | 'allow';
+  trigger?: { contains?: string };
+  obligations?: string[];
+  /** The frozen acceptance-criteria text (becomes a claim's `criteria` when the rule decides a gate). */
+  criteria?: string;
 }
 
 /** Facet query for `GET /governance/rules/preview`. All fields are optional. */
@@ -950,6 +987,80 @@ export interface RuleBrowseQuery {
   layer?: string;
   rule_type?: 'pattern' | 'policy';
   status?: 'active' | 'retired' | 'all';
+  /**
+   * Steering-type facet (the Steering sub-page's filter). Answers 501 on a pre-steering engine
+   * (wicked-core-ts < 0.7.5): rows there carry no `steering_type`, so an empty answer would
+   * impersonate "no rules of that type".
+   */
+  type?: SteeringType;
+  /**
+   * Boolean spelling of the retire filter: `true` ⇒ `status=all`, `false` ⇒ `status=active`.
+   * Mutually exclusive with `status` — sending both is a 400 (two spellings of one filter can
+   * contradict, and picking a winner silently would answer a question the caller didn't ask).
+   */
+  include_retired?: 'true' | 'false';
+}
+
+// ── Steering management (STEERING program) ──────────────────────────────────────
+
+/**
+ * One entry of a `POST /governance/steering/import` batch: either a frontmattered markdown
+ * document (`kind: 'doc'` — the same format `rules ingest --dir` consumes) or a ready rule
+ * object (`kind: 'rule'`). Every entry runs through the engine's ingest normalize/validate
+ * path, fail-closed PER ENTRY: one bad entry rejects alone, the rest still land.
+ */
+export type SteeringImportEntry =
+  | { kind: 'doc'; name?: string; content: string }
+  | { kind: 'rule'; rule: ConformanceRule };
+
+/** The `POST /governance/steering/import` request body (JSON — this daemon speaks no multipart). */
+export interface SteeringImportBody {
+  /** The page's inferred steering type, applied as the DEFAULT `steering_type` for entries that omit one. */
+  type?: SteeringType;
+  entries: SteeringImportEntry[];
+}
+
+/** Per-entry outcome of a steering import (same order as the submitted batch). */
+export interface SteeringImportResult {
+  /** Index into the submitted `entries` array. */
+  index: number;
+  /** The doc entry's `name`, when one was given. */
+  name?: string;
+  status: 'imported' | 'rejected';
+  /** Rule ids the entry minted (a doc can mint several; a rejected entry mints none). */
+  ids?: string[];
+  /** Why the entry was rejected (present only on `rejected`). */
+  error?: string;
+}
+
+/** The `POST /governance/steering/import` 200 body — 200 even with rejections: per-entry results ARE the answer. */
+export interface SteeringImportResponse {
+  results: SteeringImportResult[];
+  imported: number;
+  rejected: number;
+}
+
+/**
+ * The `POST /governance/steering/author` request body — "add with chat". Launches a governed
+ * authoring run (the `steering-author` workflow) that analyzes the named files/directories plus
+ * the operator's intent and emits PROPOSED steering rules at a human gate (the TH-12
+ * propose-as-gate pattern): the run PAUSES `awaiting_human` after the propose phase, and the
+ * operator approves/amends/rejects through the standard `POST /runs/:id/gate`. Approved rules
+ * land via the rules CRUD with `provenance.source: "chat"` — the run itself writes nothing.
+ */
+export interface SteeringAuthorBody {
+  /** The operator's conversational intent — what steering to author, and why. */
+  instructions: string;
+  /** Default `steering_type` for the proposed rules (the page's inferred type). */
+  type?: SteeringType;
+  /** ABSOLUTE paths on the daemon host (files or directories) the run should analyze. */
+  paths?: string[];
+  /** Inline documents — written into the run's steering inbox on the daemon host and analyzed like `paths`. */
+  documents?: { name: string; content: string }[];
+  /** Registered repo to run within (the run analyzes that worktree's context too). */
+  repoRef?: string;
+  /** Stable run id; minted when omitted. */
+  sessionId?: string;
 }
 
 // ── Governance wiki management (scoreboard + meta) ─────────────────────────────
