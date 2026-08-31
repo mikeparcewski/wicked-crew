@@ -168,7 +168,9 @@ const require = createRequire(import.meta.url);
 // below satisfies the TypeScript compiler until node_modules is updated.
 type GovernanceMethods = {
   listPolicies(): Promise<string>;
-  listConformanceRules(): Promise<string>;
+  // Positional steering facets (0.7.5): (steeringType?, includeRetired?). Older bindings declare
+  // zero params and IGNORE extra args — calling with them is safe on every generation.
+  listConformanceRules(steeringType?: string | null, includeRetired?: boolean | null): Promise<string>;
   listConformanceClaims(): Promise<string>;
   getCoverageReport(): Promise<string>;
   // FINDING-009: coverage for ONE registered repo, computed over that repo's OWN code graph (not the
@@ -1663,7 +1665,11 @@ export class CoreAdapter {
 
   /** All conformance rules on the store. */
   async listConformanceRules(): Promise<ConformanceRule[]> {
-    return JSON.parse(await this.core.listConformanceRules()) as ConformanceRule[];
+    // includeRetired=true: the BROWSE surface defaults to status=all and filters in the route, so
+    // the fetch must not silently withdraw retired rows (a steering engine's default excludes
+    // them — with the bare call, `?status=retired` / `include_retired=true` answered [] for every
+    // engine-retired rule, a vacuous facet). Pre-0.7.5 bindings ignore the extra args.
+    return JSON.parse(await this.core.listConformanceRules(null, true)) as ConformanceRule[];
   }
 
   /** All recorded conformance claims (governance decisions). */

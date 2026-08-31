@@ -69,6 +69,7 @@ beforeAll(async () => {
   adapter.sessions = async () => [PARKED];
   adapter.confirmGate = async () => 'resumed';
   adapter.upsertPolicy = async () => undefined;
+  adapter.upsertConformanceRule = async () => undefined;
   adapter.getSettings = async () => ({ graphNodeLimit: 150 });
   adapter.updateSettings = async (patch: Partial<SystemSettings>) =>
     ({ graphNodeLimit: 150, ...patch }) as SystemSettings;
@@ -255,7 +256,7 @@ describe('operator — does the work, cannot govern', () => {
   });
 
   it('403s on governance writes, settings writes, and project archive', async () => {
-    expect((await call('POST', '/api/v1/governance/policies', TOKENS.operator, { id: 'p1' })).status).toBe(403);
+    expect((await call('POST', '/api/v1/governance/rules', TOKENS.operator, { id: 'p1' })).status).toBe(403);
     expect((await call('DELETE', '/api/v1/governance/rules/r-1', TOKENS.operator)).status).toBe(403);
     expect((await call('PUT', '/api/v1/settings', TOKENS.operator, { graphNodeLimit: 100 })).status).toBe(403);
     expect(
@@ -270,8 +271,8 @@ describe('operator — does the work, cannot govern', () => {
 });
 
 describe('admin — governs', () => {
-  it('writes a governance policy, updates settings, archives a project', async () => {
-    expect((await call('POST', '/api/v1/governance/policies', TOKENS.admin, { id: 'p1' })).status).toBe(200);
+  it('writes a governance rule, updates settings, archives a project', async () => {
+    expect((await call('POST', '/api/v1/governance/rules', TOKENS.admin, { id: 'p1' })).status).toBe(200);
     expect((await call('PUT', '/api/v1/settings', TOKENS.admin, { graphNodeLimit: 100 })).status).toBe(200);
     expect((await call('PATCH', '/api/v1/projects/p1', TOKENS.admin, { status: 'archived' })).status).toBe(200);
   });
@@ -310,7 +311,7 @@ describe('local mode — the zero-config control', () => {
     // Governance writes included — full trust is the local contract.
     expect(
       (
-        await fetch(`${localBase}/api/v1/governance/policies`, {
+        await fetch(`${localBase}/api/v1/governance/rules`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: 'p1' }),
