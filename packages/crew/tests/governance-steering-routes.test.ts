@@ -126,7 +126,9 @@ afterAll(async () => {
   else process.env['WICKED_STEERING_INBOX_DIR'] = priorInboxDir;
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  // close() returns before the actor thread finishes flushing SQLite's WAL sidecars, and
+  // `force` does not cover the ENOTEMPTY that races with it — retries do (the repo pattern).
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 async function get(path: string) {

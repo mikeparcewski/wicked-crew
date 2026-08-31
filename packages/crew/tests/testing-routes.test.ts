@@ -157,7 +157,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  // close() returns before the actor thread finishes flushing SQLite's WAL sidecars, and
+  // `force` does not cover the ENOTEMPTY that races with it — retries do (the repo pattern).
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 beforeEach(() => {
@@ -218,7 +220,8 @@ describe('the real presence gate (installed wicked-core-ts, no evals bindings)',
     } finally {
       await app2.close();
       bare.close();
-      rmSync(dir2, { recursive: true, force: true });
+      // Same WAL-flush race as the afterAll above — `force` does not cover ENOTEMPTY; retries do.
+      rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });
