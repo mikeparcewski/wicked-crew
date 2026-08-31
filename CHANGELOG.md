@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-08-31
+
+### Fixed
+
+- **Failed runs keep their evidence** (wicked-core-ts 0.7.6): rejected units persist their
+  partial transcripts, pre-output denies persist an explicit failure record, and `gateEvaluated`
+  carries a machine-readable denial ({source, claim_id, rule_ids}) beside the prose — the
+  usability review's one blocker, closed at the engine.
+
+### Changed
+
+- `wicked-core-ts` pinned `^0.7.6`; bundled `wicked-studio` `^0.4.4` (the run narrator, the
+  dead-end fixes, plain-language failure copy).
+
 ## [0.7.3] — 2026-08-31
 
 ### Added
