@@ -22,6 +22,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -170,6 +171,21 @@ beforeEach(() => {
   importThrows = null;
 });
 
+// Engine-generation probe (the SC-005 pattern): the evals bindings ship with wicked-core-ts
+// 0.7.5. Against an older installed addon the routes MUST 501; against 0.7.5+ (what crew's CI
+// links from wicked-core main, and what the ^0.7.5 pin installs) the same un-stubbed
+// composition must serve the real seam — both postures are pinned below, gated on this probe.
+const _require = createRequire(import.meta.url);
+const EVALS_CAPABLE = (() => {
+  try {
+    const { Core } = _require('wicked-core-ts') as { Core: { spawnStub(p: string): Record<string, unknown> } };
+    const probe = Core.spawnStub(join(tmpdir(), 'evals-probe.db'));
+    return typeof probe['governanceEvals'] === 'function';
+  } catch {
+    return false;
+  }
+})();
+
 async function post(path: string, body?: unknown) {
   const res = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
@@ -181,10 +197,8 @@ async function post(path: string, body?: unknown) {
   return { status: res.status, text, body: JSON.parse(text) as Record<string, unknown> };
 }
 
-describe('the real presence gate (installed wicked-core-ts, no evals bindings)', () => {
+describe.runIf(!EVALS_CAPABLE)('the real presence gate (installed wicked-core-ts predates the evals bindings)', () => {
   it('the un-stubbed adapter reports unsupported and refuses both seams', async () => {
-    // The installed addon is 0.7.4 — no governanceEvals binding. If this ever flips to true,
-    // the 501 posture below is obsolete and this file should start exercising the real seam.
     expect(realEvalsSupported()).toBe(false);
     await expect(realRunEvals({})).rejects.toThrow(GovernanceEvalsUnsupportedError);
     await expect(realImportCorpus('dev-behaviors', SAMPLES)).rejects.toThrow(
@@ -224,6 +238,51 @@ describe('the real presence gate (installed wicked-core-ts, no evals bindings)',
       rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
+});
+
+describe.runIf(EVALS_CAPABLE)('the real seam (installed wicked-core-ts carries the evals bindings)', () => {
+  it('END TO END: the un-stubbed composition serves both routes for real', async () => {
+    // The positive twin of the 501 pin: a fresh adapter over the INSTALLED addon, a fresh
+    // server over that adapter, a temp store (the engine derives its knowledge sidecar from
+    // dbPath, so nothing here touches a real store). An empty rules store means the default
+    // corpus evaluates to gaps — an HONEST report, which is the product working.
+    expect(realEvalsSupported()).toBe(true);
+    const dir2 = mkdtempSync(join(tmpdir(), 'testing-real-'));
+    const bare = new CoreAdapter({ dbPath: join(dir2, 'core.db'), stub: true });
+    const app2 = await createServer(bare, { auditPath: join(dir2, 'audit.log') });
+    try {
+      await app2.listen({ port: 0, host: '127.0.0.1' });
+      const addr = app2.server.address();
+      const base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+      const imp = await fetch(`${base}/api/v1/testing/corpora/import`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'dev-behaviors', samples: SAMPLES }),
+      });
+      expect(imp.status).toBe(200);
+      const receipt = (await imp.json()) as { imported?: number; scope?: string; embedded?: boolean };
+      expect(receipt.imported).toBe(SAMPLES.length);
+      expect(receipt.scope).toBe('evals:dev-behaviors');
+      expect(typeof receipt.embedded).toBe('boolean');
+      const run = await fetch(`${base}/api/v1/testing/evals/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(run.status).toBe(200);
+      const report = (await run.json()) as Record<string, unknown>;
+      expect(Array.isArray(report['results'])).toBe(true);
+      const summary = report['summary'] as Record<string, unknown>;
+      for (const k of ['total', 'caught', 'gaps', 'false_positives']) {
+        expect(typeof summary[k], `summary.${k}`).toBe('number');
+      }
+      expect('degraded' in report, 'degraded is always in-band').toBe(true);
+    } finally {
+      await app2.close();
+      bare.close();
+      rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60000);
 });
 
 describe('POST /api/v1/testing/evals/run', () => {
