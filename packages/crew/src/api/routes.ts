@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
+import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -30,6 +30,12 @@ import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
+import {
+  DEFAULT_STEERING_TYPE,
+  STEERING_TYPE_VALUES,
+  STEERING_TYPES,
+  registerGovernanceSteeringRoutes,
+} from './governance-steering.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -1458,10 +1464,18 @@ export function registerRoutes(
 
   // ── Governance reads (crew#40) ──────────────────────────────────────────────
 
-  app.get(`${V}/governance/policies`, async () => {
-    const policies = await adapter.listPolicies();
-    return { policies };
-  });
+  // STEERING fold: the READ half of the old policy surface stays — retired-not-deleted means a
+  // past gate decision citing a policy id must stay resolvable, and the engine keeps serving the
+  // listing (as a thin shim over the unified store once the model merges). The WRITE half
+  // (POST/DELETE below) answers 410 on a steering engine — see the fold comment there.
+  app.get(
+    `${V}/governance/policies`,
+    { config: { manifest: { responseType: '{ policies: GovernancePolicy[] }', statusCodes: [200] } } },
+    async () => {
+      const policies = await adapter.listPolicies();
+      return { policies };
+    },
+  );
 
   // The wiki BROWSE surface (wiki-mgmt): facet filters over the listed rows. EXACT matches by
   // design — unlike `/governance/rules/preview`, whose recall semantics treat an absent rule
@@ -1477,7 +1491,8 @@ export function registerRoutes(
       config: {
         manifest: {
           responseType: '{ rules: ConformanceRule[] }',
-          statusCodes: [200, 400],
+          // 501: `?type=` on a pre-steering engine (wicked-core-ts < 0.7.5) — see the facet below.
+          statusCodes: [200, 400, 501],
         },
       },
     },
@@ -1504,7 +1519,36 @@ export function registerRoutes(
       if (ruleType !== undefined && !RULE_TYPES.has(ruleType)) {
         return invalid('rule_type', ruleType, 'pattern|policy');
       }
-      const status = facet('status') ?? 'all';
+      // `?type=` — the STEERING facet (one Steering sub-page per type). Closed vocabulary, and
+      // presence-gated on the steering engine: rows served by a pre-0.7.5 addon carry no
+      // `steering_type`, so filtering them would answer "no <type> rules" to a question this
+      // engine cannot answer — 501 ("upgrade the engine"), never an empty non-answer.
+      const steeringType = facet('type');
+      if (steeringType !== undefined && !STEERING_TYPES.has(steeringType)) {
+        return invalid('type', steeringType, STEERING_TYPE_VALUES.join('|'));
+      }
+      if (steeringType !== undefined && !adapter.steeringSupported()) {
+        return reply
+          .code(501)
+          .send({ error: new SteeringUnsupportedError('Filtering rules by steering type').message });
+      }
+      // `?include_retired=` — the boolean spelling of the retire filter (`true` ⇒ `all`,
+      // `false` ⇒ `active`). Mutually exclusive with `?status=`: the two are one filter in two
+      // spellings, and silently picking a winner when they contradict would answer a question
+      // the caller didn't ask.
+      const includeRetired = facet('include_retired');
+      if (includeRetired !== undefined && includeRetired !== 'true' && includeRetired !== 'false') {
+        return invalid('include_retired', includeRetired, 'true|false');
+      }
+      const statusGiven = facet('status');
+      if (includeRetired !== undefined && statusGiven !== undefined) {
+        return reply.code(400).send({
+          error:
+            'send `status` or `include_retired`, not both — they are two spellings of the same retire filter and can contradict',
+        });
+      }
+      const status =
+        statusGiven ?? (includeRetired === undefined ? 'all' : includeRetired === 'true' ? 'all' : 'active');
       if (!RULE_STATUSES.has(status)) {
         return invalid('status', status, 'active|retired|all');
       }
@@ -1514,6 +1558,9 @@ export function registerRoutes(
           (severity === undefined || r.severity === severity) &&
           (ruleType === undefined || r.rule_type === ruleType) &&
           (layer === undefined || r.targets.layer === layer) &&
+          // Absent `steering_type` reads as the engine's serde default (architecture) — a
+          // steering engine always stamps it, but filter defensively over mixed-era rows.
+          (steeringType === undefined || (r.steering_type ?? DEFAULT_STEERING_TYPE) === steeringType) &&
           // `retired` is absent on rows written before the field existed, which read as active.
           (status === 'all' || (status === 'retired') === (r.retired === true)),
       );
@@ -1575,43 +1622,121 @@ export function registerRoutes(
     }
   });
 
-  // ── Governance writes (crew#42) ────────────────────────────────────────────
+  // ── Governance writes (crew#42; STEERING fold) ─────────────────────────────
 
-  app.post(`${V}/governance/policies`, async (req, reply) => {
-    try {
-      const policy = req.body as import('../core/types.js').GovernancePolicy;
-      await adapter.upsertPolicy(policy);
-      audit.record('governance.policy.upserted', actorOf(req), { detail: { id: policy?.id } });
-      return { status: 'ok' };
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
-  });
+  // The OLD policy WRITE surface, folded into the unified rules routes (STEERING program): on a
+  // steering engine (wicked-core-ts ≥ 0.7.5, where policy rows have MIGRATED into steering
+  // rules) these answer 410 Gone with a pointer at the rules CRUD — the wire contract's honest
+  // spelling of "this resource model no longer exists" (a silent alias would accept a write into
+  // a store decide()/select() no longer read). On a PRE-steering engine the legacy behavior
+  // stands untouched: folding before the model merges would strand policy writes with no unified
+  // store to land in.
+  //
+  // The READ (`GET /governance/policies` above) deliberately stays: retired-not-deleted means
+  // past decisions citing a policy id must stay resolvable, the engine keeps a read shim for
+  // exactly that, and the released studio 0.4.2 still renders the listing.
+  const policyWriteGone = (reply: FastifyReply, pointer: string) =>
+    reply.code(410).send({
+      error:
+        'the policy model merged into steering rules (STEERING program): policies are now ' +
+        `steering rules with effect/trigger/obligations/criteria as first-class fields — use ${pointer}`,
+      see: pointer,
+    });
 
-  app.post(`${V}/governance/rules`, async (req, reply) => {
-    try {
-      const rule = req.body as import('../core/types.js').ConformanceRule;
-      await adapter.upsertConformanceRule(rule);
-      audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
-      return { status: 'ok' };
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
-  });
+  app.post(
+    `${V}/governance/policies`,
+    { config: { manifest: { statusCodes: [200, 400, 410] } } },
+    async (req, reply) => {
+      if (adapter.steeringSupported()) {
+        return policyWriteGone(reply, `POST ${V}/governance/rules`);
+      }
+      try {
+        const policy = req.body as import('../core/types.js').GovernancePolicy;
+        await adapter.upsertPolicy(policy);
+        audit.record('governance.policy.upserted', actorOf(req), { detail: { id: policy?.id } });
+        return { status: 'ok' };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
+
+  // The steering fields a rule write may carry — the merged model's additions (STEERING). On an
+  // engine that predates the model, `upsertConformanceRule` would ACCEPT the write and silently
+  // drop every one of them (ConformanceRule has no `deny_unknown_fields`), persisting a rule
+  // that recalls and enforces differently than the caller wrote — so their presence is gated
+  // loudly (the extraWriteRoots doctrine): 501, upgrade the engine. A write WITHOUT them is the
+  // legacy request and passes through on any engine.
+  const STEERING_RULE_FIELDS = [
+    'steering_type',
+    'applies_to',
+    'excludes',
+    'weight',
+    'effect',
+    'trigger',
+    'obligations',
+    'criteria',
+  ] as const;
+
+  app.post(
+    `${V}/governance/rules`,
+    {
+      config: {
+        manifest: {
+          requestType: 'ConformanceRule',
+          // 501: the body carries steering fields but the installed engine predates the
+          // steering model (wicked-core-ts < 0.7.5) and would silently drop them.
+          statusCodes: [200, 400, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      try {
+        const rule = req.body as import('../core/types.js').ConformanceRule;
+        if (!adapter.steeringSupported() && rule !== null && typeof rule === 'object') {
+          const carried = STEERING_RULE_FIELDS.filter(
+            (f) => (rule as unknown as Record<string, unknown>)[f] !== undefined,
+          );
+          if (carried.length > 0) {
+            return reply.code(501).send({
+              error:
+                `${new SteeringUnsupportedError('Writing steering rule fields').message} — ` +
+                `the installed engine would silently drop ${carried.map((f) => `\`${f}\``).join(', ')} ` +
+                'and persist a rule that enforces differently than you wrote',
+            });
+          }
+        }
+        await adapter.upsertConformanceRule(rule);
+        audit.record('governance.rule.upserted', actorOf(req), { detail: { id: rule?.id } });
+        return { status: 'ok' };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
 
   // Retire, not delete. The record survives so past decisions citing it stay explicable; it just
   // stops being enforced (FINDING-038 — a mis-authored policy otherwise denied forever).
-  app.delete(`${V}/governance/policies/:id`, async (req, reply) => {
-    const { id } = req.params as { id: string };
-    try {
-      const existed = await adapter.retirePolicy(id);
-      if (!existed) return reply.code(404).send({ error: `policy '${id}' not found` });
-      audit.record('governance.policy.retired', actorOf(req), { detail: { id } });
-      return { status: 'retired', id };
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
-  });
+  app.delete(
+    `${V}/governance/policies/:id`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 410] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      // Folded like the POST above: on a steering engine the migrated row retires through the
+      // rules kill switch (same id — migration keeps ids stable so decision audits resolve).
+      if (adapter.steeringSupported()) {
+        return policyWriteGone(reply, `DELETE ${V}/governance/rules/${id}`);
+      }
+      try {
+        const existed = await adapter.retirePolicy(id);
+        if (!existed) return reply.code(404).send({ error: `policy '${id}' not found` });
+        audit.record('governance.policy.retired', actorOf(req), { detail: { id } });
+        return { status: 'retired', id };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
 
   app.delete(`${V}/governance/rules/:id`, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -2162,7 +2287,17 @@ export function registerRoutes(
   // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────
   // Browse (`GET /governance/rules` + facets) and retire (`DELETE /governance/rules/:id`) stay
   // ABOVE with the other governance routes; this registers only the wiki-specific reads.
+  // Both wiki reads feed the Steering page header too — they stay, unchanged (STEERING).
   registerGovernanceWikiRoutes(app, adapter);
+
+  // ── Steering management (STEERING program) — batch import + "add with chat" authoring ──────
+  // Per-rule CRUD stays ABOVE with the other governance routes (a steering rule IS a
+  // conformance rule); this registers only the import batch and the governed authoring launch.
+  registerGovernanceSteeringRoutes(app, adapter, {
+    audit,
+    actorOf,
+    roster: () => CoreAdapter.roster(),
+  });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one
