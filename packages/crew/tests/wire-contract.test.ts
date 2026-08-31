@@ -29,6 +29,7 @@ import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
+import type { ImportEvalCorpusSchema, RunGovernanceEvalsSchema } from '../src/api/testing.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -134,6 +135,17 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['steeringSupported']>>();
 
+// Testing (crew-testing): POST /testing/evals/run + /testing/corpora/import — the report and
+// the import receipt are the ENGINE's serde output passed through verbatim (snake_case), so
+// what the adapter parses out of the addon must satisfy the published shapes; the boolean is
+// the presence gate the 501 posture hangs off (core-ts ≥ 0.7.5).
+respondsWith<Wire.GovernanceEvalReport, Awaited<ReturnType<CoreAdapter['runGovernanceEvals']>>>();
+respondsWith<
+  Wire.ImportEvalCorpusResponse,
+  Awaited<ReturnType<CoreAdapter['importGovernanceCorpus']>>
+>();
+respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
+
 // Governance wiki management (wiki-mgmt): GET /governance/wiki/scoreboard + /governance/wiki/meta.
 respondsWith<
   Wire.GovernanceScoreboard,
@@ -196,6 +208,9 @@ accepts<z.input<typeof AttachMemberSchema>, Wire.AttachMemberBody>();
 // Steering (STEERING program) — the import batch and the "add with chat" authoring launch.
 accepts<z.input<typeof SteeringImportSchema>, Wire.SteeringImportBody>();
 accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();
+// Testing (crew-testing) — the evals-run selector and the corpus-import batch.
+accepts<z.input<typeof RunGovernanceEvalsSchema>, Wire.RunGovernanceEvalsBody>();
+accepts<z.input<typeof ImportEvalCorpusSchema>, Wire.ImportEvalCorpusBody>();
 // POST /projects/:id/graph/refresh — the additive `force` body (estate-migration path).
 accepts<z.input<typeof RefreshProjectGraphSchema>, Wire.RefreshProjectGraphBody>();
 

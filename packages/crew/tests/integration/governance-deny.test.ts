@@ -41,10 +41,11 @@ const SEATS = JSON.stringify([
 
 /** Sentinel keyword embedded in the deny trigger. */
 const DENY_KEYWORD = 'GOVDENYTEST';
+const DENY_POLICY_ID = 'sc005-deny-sentinel';
 
 /** Deny policy: blocks any unit whose description contains DENY_KEYWORD. */
 const DENY_POLICY: GovernancePolicy = {
-  id: 'sc005-deny-sentinel',
+  id: DENY_POLICY_ID,
   kind: 'guard',
   applies_to: ['unit-1'],
   effect: 'deny',
@@ -82,6 +83,34 @@ function probeRetireCapable(): boolean {
 }
 const RETIRE_CAPABLE = probeRetireCapable();
 
+// STEERING generation probe: on an engine carrying the unified steering model (wicked-core-ts
+// >= 0.7.5 — crew CI links wicked-core main, so this flips the day the model lands), the policy
+// WRITE surface answers 410 Gone and the deny doctrine is authored through the rules CRUD
+// instead. Same decide() semantics either way — that equivalence is the migration's golden test.
+function probeSteeringCapable(): boolean {
+  try {
+    const { Core } = _require('wicked-core-ts') as { Core: { spawnStub(p: string): Record<string, unknown> } };
+    const probe = Core.spawnStub(join(tmpdir(), 'gov-probe.db'));
+    return typeof probe['steeringImport'] === 'function';
+  } catch {
+    return false;
+  }
+}
+const STEERING = probeSteeringCapable();
+
+/** DENY_POLICY projected onto the unified steering-rule model (steering_rule_from_policy). */
+const DENY_RULE = {
+  id: DENY_POLICY_ID,
+  rule_type: 'policy',
+  statement: `blocks any unit whose description contains ${DENY_KEYWORD} (SC-005 sentinel)`,
+  severity: 'critical', // Policy 'high' ⇔ ConfSeverity Critical (steering.rs severity map)
+  confidence: 1,
+  provenance: { source: 'policy', source_kinds: [] },
+  applies_to: ['unit-1'],
+  effect: 'deny',
+  trigger: { contains: DENY_KEYWORD },
+};
+
 describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run at the crew HTTP surface', () => {
   let app: Awaited<ReturnType<typeof createServer>>;
   let adapter: CoreAdapter;
@@ -97,15 +126,18 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
     const port = typeof addr === 'object' && addr ? addr.port : 0;
     baseUrl = `http://127.0.0.1:${port}`;
 
-    // Register the deny policy via the crew HTTP API (validates the full crew → adapter → engine path).
-    const res = await fetch(`${baseUrl}/api/v1/governance/policies`, {
+    // Register the deny doctrine via the crew HTTP API (validates the full crew → adapter →
+    // engine path). Steering engines retire the policy write (410 → rules CRUD), so the surface
+    // is picked by the same probe the engine answers.
+    const writePath = STEERING ? 'governance/rules' : 'governance/policies';
+    const res = await fetch(`${baseUrl}/api/v1/${writePath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(DENY_POLICY),
+      body: JSON.stringify(STEERING ? DENY_RULE : DENY_POLICY),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`POST /governance/policies failed ${res.status}: ${text}`);
+      throw new Error(`POST /${writePath} failed ${res.status}: ${text}`);
     }
   }, 30000);
 
@@ -170,22 +202,34 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
   // every matching unit forever, and no HTTP surface could withdraw it — the store had to be wiped.
   // Runs LAST: it retires the policy the two tests above depend on.
   it.runIf(RETIRE_CAPABLE)('a retired policy stops denying, stays listed, and 404s when unknown', async () => {
-    const unknown = await fetch(`${baseUrl}/api/v1/governance/policies/no-such-policy`, { method: 'DELETE' });
+    const retireBase = STEERING ? 'governance/rules' : 'governance/policies';
+    const unknown = await fetch(`${baseUrl}/api/v1/${retireBase}/no-such-policy`, { method: 'DELETE' });
     expect(unknown.status, 'retiring an id that was never registered must 404, not report a hollow success').toBe(404);
 
-    const res = await fetch(`${baseUrl}/api/v1/governance/policies/${DENY_POLICY.id}`, { method: 'DELETE' });
+    const res = await fetch(`${baseUrl}/api/v1/${retireBase}/${DENY_POLICY.id}`, { method: 'DELETE' });
     // Read the body ONCE — a fetch body cannot be consumed twice, so it cannot double as the
     // failure message for a status assertion.
     const body = await res.json().catch(() => null) as unknown;
     expect(res.status, `DELETE returned ${res.status}: ${JSON.stringify(body)}`).toBe(200);
     expect(body).toEqual({ status: 'retired', id: DENY_POLICY.id });
 
-    // Retire, not delete: past decisions cite this id, so it must still resolve.
-    const listed = await fetch(`${baseUrl}/api/v1/governance/policies`);
-    const { policies } = await listed.json() as { policies: GovernancePolicy[] };
-    const found = policies.find((p) => p.id === DENY_POLICY.id);
-    expect(found, 'the retired policy is still listed').toBeDefined();
-    expect(found?.retired, 'and is flagged so the UI can show it is no longer enforced').toBe(true);
+    // Retire, not delete: past decisions cite this id, so it must still resolve. The listing
+    // probe follows the write surface: rules-authored doctrine resolves through the rules browse
+    // (`include_retired=true` — the engine's default listing withdraws retired rows), while the
+    // legacy policies listing keeps answering for policy-authored doctrine.
+    if (STEERING) {
+      const listed = await fetch(`${baseUrl}/api/v1/governance/rules?include_retired=true`);
+      const { rules } = await listed.json() as { rules: { id: string; retired?: boolean }[] };
+      const found = rules.find((r) => r.id === DENY_POLICY.id);
+      expect(found, 'the retired rule is still listed (include_retired)').toBeDefined();
+      expect(found?.retired, 'and is flagged so the UI can show it is no longer enforced').toBe(true);
+    } else {
+      const listed = await fetch(`${baseUrl}/api/v1/governance/policies`);
+      const { policies } = await listed.json() as { policies: GovernancePolicy[] };
+      const found = policies.find((p) => p.id === DENY_POLICY.id);
+      expect(found, 'the retired policy is still listed').toBeDefined();
+      expect(found?.retired, 'and is flagged so the UI can show it is no longer enforced').toBe(true);
+    }
 
     // The identical run that failed in the first test now completes — same trigger, same problem.
     const sessionId = 'sc005-retired';

@@ -1158,6 +1158,101 @@ export interface GovernanceWikiMeta {
   doc: string;
 }
 
+// ── Testing surface (crew-testing) — governance evals + eval corpora ───────────
+
+/**
+ * The behavior signals of one eval sample — the facts the governance decide path is asked to
+ * judge (mirrors the engine's decision inputs: run phase, tool invoked, files touched, content).
+ * All optional: a sample carries only the signals its behavior is about.
+ */
+export interface GovernanceEvalSignals {
+  phase?: string;
+  tool?: string;
+  files?: string[];
+  content?: string;
+}
+
+/**
+ * One eval sample: a described behavior (`kind: 'bad'` ⇒ the steering corpus SHOULD deny it,
+ * `'good'` ⇒ it should pass) tagged with the steering type it exercises. Field names are the
+ * engine's serde spelling (snake_case) — the report echoes them back verbatim.
+ */
+export interface GovernanceEvalSample {
+  id: string;
+  description: string;
+  kind: 'good' | 'bad';
+  steering_type: string;
+  signals: GovernanceEvalSignals;
+}
+
+/**
+ * The `POST /testing/evals/run` request body. `type` narrows the run to one steering type;
+ * `corpus` names an estate scope (`evals:<name>`, as minted by `POST /testing/corpora/import`);
+ * omitted, the engine runs its built-in default corpus.
+ */
+export interface RunGovernanceEvalsBody {
+  type?: SteeringType;
+  corpus?: string;
+}
+
+/** A near-miss rule on a `gap` verdict — the rule that ALMOST fired, with its similarity score. */
+export interface GovernanceEvalNearestRule {
+  rule_id: string;
+  similarity: number;
+}
+
+/**
+ * One sample's outcome. `expected` is derived from the sample's `kind` (`bad` ⇒ `deny`);
+ * `fired` lists the rule ids that actually fired; `verdict` is the comparison: `caught` (a bad
+ * behavior denied), `gap` (a bad behavior that sailed through), `false_positive` (a good
+ * behavior denied). `nearest_rules` is present on gaps (an empty array is allowed) — the
+ * remediation pointer for "which rule needs sharpening".
+ */
+export interface GovernanceEvalResult {
+  sample: Pick<GovernanceEvalSample, 'id' | 'description' | 'kind' | 'steering_type'>;
+  expected: 'deny' | 'allow';
+  fired: string[];
+  verdict: 'caught' | 'gap' | 'false_positive';
+  nearest_rules?: GovernanceEvalNearestRule[];
+}
+
+/** The report's roll-up counts (snake_case — the engine's serde output, passed through verbatim). */
+export interface GovernanceEvalSummary {
+  total: number;
+  caught: number;
+  gaps: number;
+  false_positives: number;
+}
+
+/**
+ * The `POST /testing/evals/run` 200 body — the engine's serde report passed through VERBATIM
+ * (snake_case field names, `degraded` spelled `null` when the run was full-fidelity;
+ * `'facet-only'` when the embedding side was unavailable and only facet matching ran).
+ */
+export interface GovernanceEvalReport {
+  results: GovernanceEvalResult[];
+  summary: GovernanceEvalSummary;
+  degraded: 'facet-only' | null;
+}
+
+/** The `POST /testing/corpora/import` request body — a named eval corpus for later runs. */
+export interface ImportEvalCorpusBody {
+  name: string;
+  samples: GovernanceEvalSample[];
+}
+
+/**
+ * The `POST /testing/corpora/import` 200 body. `scope` is the estate scope the samples landed
+ * under (`evals:<name>` — the string `RunGovernanceEvalsBody.corpus` names); `embedded` reports
+ * whether the samples were embedded for similarity matching (false ⇒ later runs degrade to
+ * facet-only).
+ */
+export interface ImportEvalCorpusResponse {
+  imported: number;
+  scope: string;
+  embedded: boolean;
+}
+
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
 
 /**
