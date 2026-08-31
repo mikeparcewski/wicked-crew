@@ -36,6 +36,7 @@ import {
   STEERING_TYPES,
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
+import { registerTestingRoutes } from './testing.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -2298,6 +2299,11 @@ export function registerRoutes(
     actorOf,
     roster: () => CoreAdapter.roster(),
   });
+
+  // ── Testing (crew-testing) — governance evals + eval corpora ────────────────
+  // Run the evals (does the steering corpus catch what it claims to?) and import a named eval
+  // corpus. Both presence-gated on the engine's evals bindings (501 on wicked-core-ts < 0.7.5).
+  registerTestingRoutes(app, adapter, { audit, actorOf });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one

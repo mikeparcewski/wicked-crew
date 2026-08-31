@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.13.0",
+  "apiTypesVersion": "0.14.0",
   "endpoints": [
     {
       "method": "GET",
@@ -696,6 +696,30 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/corpora/import",
+      "requestType": "ImportEvalCorpusBody",
+      "responseType": "ImportEvalCorpusResponse",
+      "statusCodes": [
+        200,
+        400,
+        500,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/evals/run",
+      "requestType": "RunGovernanceEvalsBody",
+      "responseType": "GovernanceEvalReport",
+      "statusCodes": [
+        200,
+        400,
+        500,
+        501
+      ]
     },
     {
       "method": "GET",

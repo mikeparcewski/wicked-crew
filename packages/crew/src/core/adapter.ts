@@ -19,6 +19,9 @@ import type {
   GovernanceClaim,
   SteeringImportEntry,
   SteeringImportResult,
+  GovernanceEvalReport,
+  GovernanceEvalSample,
+  ImportEvalCorpusResponse,
   CoverageReport,
   GraphKind,
   WorkflowDef,
@@ -214,6 +217,19 @@ type GovernanceMethods = {
   // `deny_unknown_fields` — an old engine ACCEPTS a steering-field write and persists a rule
   // that enforces differently than the caller wrote).
   steeringImport?(batchJson: string): Promise<string>;
+  // TESTING surface (crew-testing): governance EVALS over the steering-rule store. Takes a JSON
+  // `{ type?, corpus?, knowledgeDb?, dbPath }` args object and resolves to the serde
+  // `GovernanceEvalReport` JSON (snake_case — passed through to the wire verbatim).
+  //
+  // Optional for the same reason as `retirePolicy` above, and not hypothetically: the binding
+  // ships with wicked-core-ts 0.7.5 which is UNRELEASED — the installed 0.7.4 addon does not
+  // carry it, and this presence is THE sentinel for the whole evals seam
+  // (`governanceEvalsSupported()`), corpus import included.
+  governanceEvals?(argsJson: string): Promise<string>;
+  // Companion write half: import a named eval corpus (`{ name, samples, knowledgeDb }` args
+  // JSON) into the knowledge store under the `evals:<name>` scope. Resolves to a JSON
+  // `{ imported, scope, embedded }` object. Ships with `governanceEvals` (0.7.5).
+  governanceCorpusImport?(argsJson: string): Promise<string>;
 };
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
@@ -652,6 +668,24 @@ export class SteeringUnsupportedError extends Error {
   }
 }
 
+/**
+ * The installed engine addon predates the governance-evals surface (crew-testing; the
+ * `governanceEvals` + `governanceCorpusImport` bindings ship with wicked-core-ts 0.7.5, which is
+ * unreleased at the time this seam lands). Typed for the same reason as `SteeringUnsupportedError`:
+ * the testing routes answer 501 ("upgrade the engine") on this, never 400 ("fix your request") —
+ * and they must not crash a daemon running against the released 0.7.4 addon.
+ */
+export class GovernanceEvalsUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts addon ` +
+        'has no governanceEvals binding — upgrade it to a release carrying the governance ' +
+        'evals surface, >= 0.7.5)',
+    );
+    this.name = 'GovernanceEvalsUnsupportedError';
+  }
+}
+
 export class GovernanceScoreboardUnsupportedError extends Error {
   constructor(what: string) {
     super(
@@ -798,6 +832,14 @@ export class CoreAdapter {
   /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
   private readonly _builtinOverlayWritten = new Set<string>();
 
+  /**
+   * The estate db the Core actor was spawned over (`CoreAdapterOptions.dbPath` — the `--db`
+   * flag / `~/.wicked-crew/core.db` default). Kept because some engine bindings take the db
+   * path as an ARG rather than reading the actor's own handle (`governanceEvals` runs its evals
+   * over a read-only connection to this same store); crew resolves it here, the one place the
+   * path is already known, so no route grows a second spelling of where the store lives.
+   */
+  readonly dbPath: string;
   /** `true` when this adapter armed the event-driven exec seam (for readiness/reporting). */
   readonly engineExec: boolean;
   /** The bus db the exec seam runs over when armed (else `undefined`). */
@@ -847,6 +889,7 @@ export class CoreAdapter {
     }
 
     this.stub = opts.stub === true;
+    this.dbPath = opts.dbPath;
     this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
     // The ONE subscribe() for the process. Error-first callback (index.d.ts:56):
     // one JSON string per CoreEvent, in emission order. A throw in a listener is
@@ -1799,6 +1842,73 @@ export class CoreAdapter {
     return rows.map(
       (r) =>
         Object.fromEntries(Object.entries(r).filter(([, v]) => v !== null)) as SteeringImportResult,
+    );
+  }
+
+  // ── Testing (crew-testing) — governance evals over the steering-rule store ──
+
+  /**
+   * Whether the installed engine addon carries the governance-evals surface (core-ts ≥ 0.7.5,
+   * unreleased at the time this seam lands). The sentinel is the `governanceEvals` binding —
+   * for the WHOLE evals seam, corpus import included: the two bindings ship together, and a
+   * daemon running against the released 0.7.4 addon must answer 501 on both routes, never crash.
+   */
+  governanceEvalsSupported(): boolean {
+    return typeof this.core.governanceEvals === 'function';
+  }
+
+  /**
+   * Run the governance evals: every sample of the corpus (`corpus` = an `evals:<name>` estate
+   * scope minted by {@link importGovernanceCorpus}; omitted = the engine's built-in default
+   * corpus) is pushed through the decide path and compared to what its `kind` says SHOULD have
+   * happened. Resolves the engine's serde report — snake_case field names, passed to the wire
+   * verbatim (the pinned crew/studio contract).
+   *
+   * `dbPath` rides the args because the eval run opens its own read-only connection to the
+   * steering store — the SAME store this adapter's actor writes (`this.dbPath`, the one spelling
+   * of where it lives). `knowledgeDb` is deliberately omitted: crew configures no separate
+   * knowledge db (the knowledge store is the engine's single-writer sidecar, derived from its
+   * own config exactly as the steering ingest path derives it).
+   *
+   * Presence-gated (the campaigns doctrine): throws {@link GovernanceEvalsUnsupportedError} on
+   * an addon that predates the binding, which the route maps to 501 ("upgrade the engine").
+   */
+  async runGovernanceEvals(args: { type?: string; corpus?: string }): Promise<GovernanceEvalReport> {
+    const fn = this.core.governanceEvals;
+    if (typeof fn !== 'function') {
+      throw new GovernanceEvalsUnsupportedError('Running governance evals');
+    }
+    const payload = {
+      ...(args.type !== undefined ? { type: args.type } : {}),
+      ...(args.corpus !== undefined ? { corpus: args.corpus } : {}),
+      dbPath: this.dbPath,
+    };
+    return parseEngineJson<GovernanceEvalReport>(
+      await fn.call(this.core, JSON.stringify(payload)),
+      'governanceEvals',
+    );
+  }
+
+  /**
+   * Import a named eval corpus into the knowledge store under the `evals:<name>` scope (the
+   * string a later {@link runGovernanceEvals} names as `corpus`). `knowledgeDb` is omitted for
+   * the same reason as in {@link runGovernanceEvals} — the engine derives its own sidecar.
+   *
+   * Gated on the `governanceEvals` sentinel as well as the binding itself: the two ship
+   * together, and importing a corpus no engine on this host can ever run would be a trap, not
+   * a feature (the steering author-route doctrine).
+   */
+  async importGovernanceCorpus(
+    name: string,
+    samples: GovernanceEvalSample[],
+  ): Promise<ImportEvalCorpusResponse> {
+    const importFn = this.core.governanceCorpusImport;
+    if (typeof this.core.governanceEvals !== 'function' || typeof importFn !== 'function') {
+      throw new GovernanceEvalsUnsupportedError('Importing an eval corpus');
+    }
+    return parseEngineJson<ImportEvalCorpusResponse>(
+      await importFn.call(this.core, JSON.stringify({ name, samples })),
+      'governanceCorpusImport',
     );
   }
 
