@@ -10,6 +10,32 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-08-31
+
+### Added
+
+- **Testing wire** — `POST /api/v1/testing/evals/run` `{type?, corpus?}` runs the steering-rule
+  evals through the engine's real decide()/select() path and passes the serde report through
+  verbatim (caught / gap / false_positive verdicts, `nearest_rules` semantic hints on gaps,
+  `degraded: "facet-only"|null`), and `POST /api/v1/testing/corpora/import` `{name, samples}`
+  ingests an eval corpus into the estate knowledge store under `evals:<name>` with embeddings.
+  Both presence-gated on the wicked-core-ts ≥ 0.7.5 `governanceEvals` binding — an older engine
+  answers an honest 501 with the upgrade pointer. `wicked-crew-api-types` 0.14.0 (#370).
+
+### Fixed
+
+- The rules browse's retire filter was vacuous for engine-retired rows: `include_retired=true` /
+  `status=retired` filtered a listing the engine had already withdrawn retired rules from —
+  the adapter now fetches with `includeRetired` and lets the route filter (#370).
+- Integration tests survive both engine generations: the auth matrix and the SC-005 deny probe
+  ported off the policy write surface that a steering engine 410-folds (#370); WAL-race
+  teardowns retry instead of flaking ENOTEMPTY (#373).
+
+### Changed
+
+- `wicked-core-ts` pinned `^0.7.5` (steering + evals engine), bundled `wicked-studio` `^0.4.3`
+  (Steering redesign, Testing surface, Settings cleanup).
+
 ### Added
 - **Governance wiki management wire** (wiki-mgmt): `GET /governance/wiki/scoreboard` — the AW-23
   population/connection scoreboard (typed %, resolving `symbol_ref`s, enforcement evidence, and
