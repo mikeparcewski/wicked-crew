@@ -189,6 +189,38 @@ describe('the real presence gate (installed wicked-core-ts, no evals bindings)',
       GovernanceEvalsUnsupportedError,
     );
   });
+
+  it('END TO END: both routes answer 501 over an adapter nothing stubbed (verifier pin)', async () => {
+    // No instance-level stubs anywhere in this chain: a fresh adapter over the INSTALLED
+    // addon, a fresh server over that adapter — the exact composition a `wicked-crew serve`
+    // daemon ships against the released 0.7.4 engine. Proves the two halves the other tests
+    // pin separately (adapter throws ⇒ route maps to 501) actually meet on the wire.
+    const dir2 = mkdtempSync(join(tmpdir(), 'testing-gate-'));
+    const bare = new CoreAdapter({ dbPath: join(dir2, 'core.db'), stub: true });
+    const app2 = await createServer(bare, { auditPath: join(dir2, 'audit.log') });
+    try {
+      await app2.listen({ port: 0, host: '127.0.0.1' });
+      const addr = app2.server.address();
+      const base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+      for (const [path, body] of [
+        ['/api/v1/testing/evals/run', {}],
+        ['/api/v1/testing/corpora/import', { name: 'dev-behaviors', samples: SAMPLES }],
+      ] as const) {
+        const res = await fetch(`${base}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(501);
+        const answer = (await res.json()) as { error?: string };
+        expect(answer.error).toMatch(/governanceEvals binding/);
+      }
+    } finally {
+      await app2.close();
+      bare.close();
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('POST /api/v1/testing/evals/run', () => {
