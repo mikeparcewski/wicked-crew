@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-08-31
+
+### Changed
+
+- Bundled `wicked-studio` `^0.4.5` — the narrator on the chat surface (GroupChat narrates by
+  default; the approval dock survives run-refresh reconciles on chat sessions).
+
 ## [0.7.4] — 2026-08-31
 
 ### Fixed
