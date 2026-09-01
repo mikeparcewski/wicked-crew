@@ -540,6 +540,27 @@ export interface CoreEvent {
   latencyMs?: number;
   /** workerStalled: silent seconds before the stall event fired. */
   stalledSecs?: number;
+  /**
+   * `workerStalled` / `workerStallEscalated` (DAEMON-SYNTHETIC, crew#287/crew#341): how long the
+   * run had been silent on the daemon's CoreEvent relay when the frame fired, ms. Distinguishes
+   * the daemon's synthetic `workerStalled` frame (this field) from the engine's PTY-path
+   * `workerStalled` event (`stalledSecs` above) — same `type` tag, different producers.
+   */
+  quietForMs?: number;
+  /** `workerStallEscalated` (crew#341): what the watchdog did — `'reassign'` | `'notify'`. */
+  action?: string;
+  /** `workerStallEscalated`: how the action ended — `'ok'` | `'failed'` | `'exhausted'`. */
+  outcome?: string;
+  /**
+   * `workerStallEscalated`: `true` when a human should look — the action failed, the automatic
+   * recovery budget is exhausted, or the configured action is `'notify'` (surface, don't touch).
+   * `false` means the platform recovered on its own; the narrator shows it, nobody is paged.
+   */
+  needsYou?: boolean;
+  /** `workerStallEscalated` (action `'reassign'`): automatic reassigns consumed for this run, this one included. */
+  escalations?: number;
+  /** `workerStallEscalated` (outcome `'failed'`): bounded excerpt of what the recovery call threw. */
+  error?: string;
   /** failureTriaged: the triage judge's decision. */
   decision?: string;
   /** failureTriaged: the judge's bounded reasoning. */
@@ -571,6 +592,63 @@ export interface CoreEvent {
  * named live, and a bundle assembled after a run cannot describe it in different
  * words than the operator watched it happen in. (FINDING-014)
  */
+/**
+ * The stall watchdog's DETECTION frame (crew#287; api-types 0.18.0 — previously daemon-local).
+ * DAEMON-SYNTHETIC: broadcast straight to `/ws` when a run in `executing` has been silent on the
+ * daemon's CoreEvent relay past `SystemSettings.workerStallMinutes` — never re-relayed through
+ * the engine, one frame per quiet period, re-armed by any new event for the run. Detection only:
+ * the run is not touched. (The engine's PTY-path event shares the `workerStalled` tag but
+ * carries `stalledSecs`; this frame carries `quietForMs`.)
+ *
+ * `type` aliases on purpose, not `interface`s: only anonymous object types satisfy `CoreEvent`'s
+ * index signature, which is what lets these frames flow through CoreEvent-typed broadcast seams.
+ */
+export type WorkerStalledFrame = {
+  type: 'workerStalled';
+  /** The stalled run's id. */
+  session: string;
+  /** The current unit ord, when any observed event or the run header named one. */
+  ord?: number;
+  /** How long the run has been silent when the frame fired, ms. */
+  quietForMs: number;
+};
+
+/**
+ * The stall watchdog's ESCALATION frame (crew#341; api-types 0.18.0). DAEMON-SYNTHETIC, emitted
+ * only when escalation is armed (`SystemSettings.workerStallEscalateMinutes` > 0 — OFF by
+ * default) and a detected stall stays silent past that threshold. Reports what the watchdog DID
+ * and how it ended, one escalation per quiet period:
+ *
+ * - `action: 'reassign'` — the wedged cursor unit was recycled in place (engine `reassignUnit`:
+ *   the stale turn is superseded, the session closed, the unit re-dispatched; queued operator
+ *   injects survive into the fresh turn). `outcome: 'ok' | 'failed' | 'exhausted'`.
+ * - `action: 'notify'` — surface loudly without touching the run (the fail-loud rung).
+ *
+ * `needsYou: true` marks the frames a human should act on (failed / exhausted / notify).
+ */
+export type WorkerStallEscalatedFrame = {
+  type: 'workerStallEscalated';
+  /** The stalled run's id. */
+  session: string;
+  /** The cursor unit's ord, when known. */
+  ord?: number;
+  /** How long the run had been silent when the watchdog escalated, ms. */
+  quietForMs: number;
+  /** What the watchdog did. */
+  action: 'reassign' | 'notify';
+  /** How it ended: `ok` (acted / surfaced), `failed` (the recovery call threw), `exhausted`
+   *  (the per-run automatic budget was already spent — nothing was attempted). */
+  outcome: 'ok' | 'failed' | 'exhausted';
+  /** True when a human should look; false = the platform recovered on its own. */
+  needsYou: boolean;
+  /** action `reassign`: the seat the unit was re-dispatched to, when known. */
+  cli?: string;
+  /** action `reassign`: automatic reassigns consumed for this run, this one included. */
+  escalations?: number;
+  /** outcome `failed`: bounded excerpt of what the recovery call threw. */
+  error?: string;
+};
+
 export interface RecordedEvent extends CoreEvent {
   /** Capture time, epoch millis — when core emitted the frame, not when it was read. */
   ts: number;
@@ -1660,6 +1738,37 @@ export interface SystemSettings {
    * launches (those are always `'none'`).
    */
   deliverDefault?: 'pr' | 'none';
+  /**
+   * The stall watchdog's DETECTION threshold (crew#287; api-types 0.18.0 — previously a
+   * daemon-local extension): minutes a run in `executing` may go without ANY engine event on the
+   * daemon's relay before one synthetic `workerStalled` frame per quiet period is broadcast on
+   * `/ws`. Integer 1..1440; absent = the daemon default (15). Detection never touches the run.
+   */
+  workerStallMinutes?: number;
+  /**
+   * The stall watchdog's ESCALATION threshold (crew#341; api-types 0.18.0): quiet minutes before
+   * the watchdog ACTS on a detected stall (see {@link WorkerStallEscalatedFrame}). Integer
+   * 0..1440; **absent or 0 = escalation OFF — the shipped default** (the issue's design: automatic
+   * recovery on a run that is merely slow would be worse than the wedge). Values below
+   * `workerStallMinutes` escalate at the detection threshold — the ladder never acts before it
+   * has notified.
+   */
+  workerStallEscalateMinutes?: number;
+  /**
+   * What an armed escalation DOES (crew#341): `'reassign'` (default) recycles the wedged cursor
+   * unit in place — the engine supersedes the stale turn, closes the worker session, bumps the
+   * attempt, and re-dispatches (queued operator injects survive into the fresh turn);
+   * `'notify'` is the fail-loud rung — a `needsYou` `workerStallEscalated` frame + an audit
+   * entry, the run untouched.
+   */
+  workerStallEscalateAction?: 'reassign' | 'notify';
+  /**
+   * Per-run budget of AUTOMATIC reassigns (crew#341): integer 1..10, default 2. Once spent, a
+   * still-silent run gets `outcome: 'exhausted'` `needsYou` frames instead of further recovery —
+   * a worker that wedges deterministically must reach a human, not loop through seats forever.
+   * Ignored when `workerStallEscalateAction` is `'notify'`.
+   */
+  workerStallMaxEscalations?: number;
   /**
    * SKIN-OWNED preference blobs (crew#323). The settings store is shared: alongside the
    * engine's keys it carries the studio's own state — `studio.appearance` (accent/logo/theme),

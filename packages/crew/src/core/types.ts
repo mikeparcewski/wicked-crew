@@ -119,19 +119,27 @@ export interface LaunchRunInput {
 export const DEFAULT_WORKER_STALL_MINUTES = 15;
 
 /**
- * LOCAL extension of the published `SystemSettings` (wicked-crew-api-types 0.6.0): the crew#287
- * stall-watchdog knob is daemon-owned until the contract picks it up. NOTE for the next
- * api-types release: fold `workerStallMinutes` into `SystemSettings` (and the synthetic
- * `workerStalled` /ws frame — see `api/stall-watchdog.ts` `WorkerStalledFrame` — into the
- * event documentation). Extra fields are forward-additive on the wire (DES-STUDIO-001 §5.1),
- * so shipping it daemon-side first breaks no consumer.
+ * Default `workerStallEscalateAction` (crew#341) when escalation is armed: recycle the wedged
+ * cursor unit in place (engine `reassignUnit`).
+ */
+export const DEFAULT_WORKER_STALL_ESCALATE_ACTION = 'reassign' as const;
+
+/**
+ * Default `workerStallMaxEscalations` (crew#341): automatic reassigns per run before the
+ * watchdog stops acting and hands the run to a human (`outcome: 'exhausted'`, `needsYou`).
+ */
+export const DEFAULT_WORKER_STALL_MAX_ESCALATIONS = 2;
+
+/**
+ * LOCAL extension of the published `SystemSettings`. The stall-watchdog knobs
+ * (`workerStallMinutes`, crew#287; `workerStallEscalateMinutes` /
+ * `workerStallEscalateAction` / `workerStallMaxEscalations`, crew#341) live in the published
+ * contract as of api-types 0.18.0 and are INHERITED here — what remains local is the
+ * `studio.*` restatement below. Note the escalation DEFAULT is OFF
+ * (`workerStallEscalateMinutes` absent/0): automatic recovery on a run that is merely slow
+ * would be worse than the wedge (crew#341's design).
  */
 export interface CrewSystemSettings extends SystemSettings {
-  /**
-   * Minutes a run in `executing` may go without ANY engine event on the daemon's relay before
-   * a synthetic `workerStalled` frame is broadcast on /ws (detection only; default 15).
-   */
-  workerStallMinutes?: number;
   /**
    * Skin-owned preference blobs, round-tripped verbatim (crew#323). RESTATED here rather than
    * merely inherited from `SystemSettings` so the daemon's own type SAYS the settings store is

@@ -2464,6 +2464,34 @@ export function registerRoutes(
           .send({ error: 'workerStallMinutes must be an integer between 1 and 1440' });
       }
     }
+    // The escalation ladder's knobs (crew#341). This trio lets the PLATFORM touch runs, so a
+    // typo must be a 400, never a silently-dropped key that leaves the operator believing they
+    // armed (or disarmed) automatic recovery. `workerStallEscalateMinutes: 0` is the explicit
+    // OFF spelling — and the shipped default is off (absent).
+    if (Object.hasOwn(patch, 'workerStallEscalateMinutes')) {
+      const mins = patch.workerStallEscalateMinutes;
+      if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 0 || mins > 1440) {
+        return reply.code(400).send({
+          error: 'workerStallEscalateMinutes must be an integer between 0 (escalation off) and 1440',
+        });
+      }
+    }
+    if (Object.hasOwn(patch, 'workerStallEscalateAction')) {
+      const a = patch.workerStallEscalateAction;
+      if (a !== 'reassign' && a !== 'notify') {
+        return reply
+          .code(400)
+          .send({ error: "workerStallEscalateAction must be 'reassign' or 'notify'" });
+      }
+    }
+    if (Object.hasOwn(patch, 'workerStallMaxEscalations')) {
+      const n = patch.workerStallMaxEscalations;
+      if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 10) {
+        return reply
+          .code(400)
+          .send({ error: 'workerStallMaxEscalations must be an integer between 1 and 10' });
+      }
+    }
     // deliverDefault (crew#393): the repo-scoped launch delivery default. Two values only —
     // this knob decides whether completed code runs open PRs, so a typo must be a 400, never
     // a silently-dropped key that leaves the operator believing they flipped it.
@@ -2510,6 +2538,9 @@ export function registerRoutes(
       'graphNodeLimit',
       'worker_config_root',
       'workerStallMinutes',
+      'workerStallEscalateMinutes',
+      'workerStallEscalateAction',
+      'workerStallMaxEscalations',
       'deliverDefault',
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
