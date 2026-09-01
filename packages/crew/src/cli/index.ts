@@ -9,7 +9,7 @@ import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
-import { setProjectGraphStateHome, stateHomeOfDb } from '../projects/graph-paths.js';
+import { setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -137,11 +137,13 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // environment. Makes a plain `npm install` deployment fully self-contained (no
   // global installs, no hand-made symlinks).
   ensureBridgesOnPath();
-  // Project graphs follow the SAME state home as the core db (crew#330): a daemon isolated with
-  // `--db $SCRATCH/core.db` must not write 40+ MB graphs into the developer's real
-  // ~/.wicked-crew. Without --db the resolved parent IS ~/.wicked-crew, so the default daemon
-  // is byte-identical; an explicit WICKED_CREW_PROJECT_GRAPH_ROOT still outranks this.
-  setProjectGraphStateHome(stateHomeOfDb(opts.dbPath));
+  // Every crew-side durable store follows the SAME state home as the core db (crew#330 for the
+  // project graphs, crew#353 for the project settings): a daemon isolated with
+  // `--db $SCRATCH/core.db` must not write 40+ MB graphs — or the operator's project settings —
+  // into the developer's real ~/.wicked-crew. Without --db the resolved parent IS ~/.wicked-crew,
+  // so the default daemon is byte-identical; the explicit per-store env overrides
+  // (WICKED_CREW_PROJECT_GRAPH_ROOT, WICKED_CREW_PROJECT_SETTINGS) still outrank this.
+  setCrewStateHome(stateHomeOfDb(opts.dbPath));
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,

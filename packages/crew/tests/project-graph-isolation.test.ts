@@ -12,7 +12,7 @@
  * # The fix under test
  *
  * The CLI bootstrap threads the RESOLVED state home — `stateHomeOfDb(dbPath)`, the `--db` parent —
- * into graph-paths via `setProjectGraphStateHome`, and `projectGraphRoot` prefers it over the
+ * into the shared state-home seam via `setCrewStateHome` (state-home.ts — generalized from this module's private seam when crew#353 found the settings store making the same escape), and `projectGraphRoot` prefers it over the
  * homedir fallback. Precedence, most-specific first:
  *
  *   1. `WICKED_CREW_PROJECT_GRAPH_ROOT` (explicit env override — the pre-existing escape hatch)
@@ -39,13 +39,8 @@ import type { FastifyInstance } from 'fastify';
 import { registerProjectRoutes } from '../src/projects/routes.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { ProjectSettingsStore } from '../src/projects/settings.js';
-import {
-  projectGraphDb,
-  projectGraphManifest,
-  projectGraphRoot,
-  setProjectGraphStateHome,
-  stateHomeOfDb,
-} from '../src/projects/graph-paths.js';
+import { projectGraphDb, projectGraphManifest, projectGraphRoot } from '../src/projects/graph-paths.js';
+import { setCrewStateHome, stateHomeOfDb } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
 
@@ -60,12 +55,12 @@ const NO_ENV = {} as NodeJS.ProcessEnv;
 afterEach(() => {
   // Module state must never leak into another test (or another file's expectations of the
   // homedir default).
-  setProjectGraphStateHome(undefined);
+  setCrewStateHome(undefined);
 });
 
 describe('projectGraphRoot precedence (crew#330)', () => {
   it('a configured state home moves the root — the --db parent owns the graphs', () => {
-    setProjectGraphStateHome(join(sep, 'scratch', 'daemon-a'));
+    setCrewStateHome(join(sep, 'scratch', 'daemon-a'));
     expect(projectGraphRoot(NO_ENV)).toBe(join(sep, 'scratch', 'daemon-a', 'project-graphs'));
     // And the db/manifest hang off it — the paths the refresh path actually writes.
     expect(projectGraphDb(PROJECT_ID, NO_ENV)).toBe(
@@ -77,19 +72,19 @@ describe('projectGraphRoot precedence (crew#330)', () => {
   });
 
   it('WICKED_CREW_PROJECT_GRAPH_ROOT still outranks the configured state home', () => {
-    setProjectGraphStateHome(join(sep, 'scratch', 'daemon-a'));
+    setCrewStateHome(join(sep, 'scratch', 'daemon-a'));
     const env = { WICKED_CREW_PROJECT_GRAPH_ROOT: join(sep, 'ci', 'pg') } as NodeJS.ProcessEnv;
     expect(projectGraphRoot(env)).toBe(join(sep, 'ci', 'pg'));
   });
 
   it('no configured state home ⇒ the historical homedir default (library/unit consumers)', () => {
-    setProjectGraphStateHome(undefined);
+    setCrewStateHome(undefined);
     expect(projectGraphRoot(NO_ENV)).toBe(join(homedir(), '.wicked-crew', 'project-graphs'));
   });
 
   it('the default daemon (no --db) resolves byte-identically to the pre-fix path', () => {
     // What cli/index.ts does when --db is absent: dbPath = ~/.wicked-crew/core.db.
-    setProjectGraphStateHome(stateHomeOfDb(join(homedir(), '.wicked-crew', 'core.db')));
+    setCrewStateHome(stateHomeOfDb(join(homedir(), '.wicked-crew', 'core.db')));
     expect(projectGraphRoot(NO_ENV)).toBe(join(homedir(), '.wicked-crew', 'project-graphs'));
   });
 
@@ -175,7 +170,7 @@ describe.skipIf(!POSIX)('POST /graph/refresh under an isolated state home (crew#
     // The point of the test: NO env override. The configured state home must carry alone.
     savedEnvRoot = process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
     delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-    setProjectGraphStateHome(stateHomeOfDb(join(stateHome, 'core.db')));
+    setCrewStateHome(stateHomeOfDb(join(stateHome, 'core.db')));
 
     repos.clear();
     members = [];
@@ -214,7 +209,7 @@ describe.skipIf(!POSIX)('POST /graph/refresh under an isolated state home (crew#
     delete process.env['WICKED_ESTATE_EXE'];
     if (savedEnvRoot === undefined) delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
     else process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = savedEnvRoot;
-    setProjectGraphStateHome(undefined);
+    setCrewStateHome(undefined);
     rmSync(work, { recursive: true, force: true });
   });
 
