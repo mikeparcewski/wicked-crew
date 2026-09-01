@@ -10,6 +10,13 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.8] — 2026-09-01
+
+### Changed
+
+- Bundled `wicked-studio` `^0.4.8` — the home command center (one needs-you queue with
+  act-in-place, honest portfolio KPIs, the essence strip, Ask on the board).
+
 ## [0.7.7] — 2026-09-01
 
 ### Added
