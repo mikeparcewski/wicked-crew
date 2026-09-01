@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.16.0",
+  "apiTypesVersion": "0.17.0",
   "endpoints": [
     {
       "method": "GET",
@@ -618,7 +618,7 @@
       "method": "POST",
       "path": "/api/v1/runs/:id/gate",
       "requestType": "GateDecision",
-      "responseType": "{ status: SessionStatus }",
+      "responseType": "{ status: SessionStatus; landing?: SteeringLandingResult }",
       "statusCodes": [
         200,
         400,

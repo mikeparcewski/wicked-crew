@@ -36,6 +36,7 @@ import {
   STEERING_TYPES,
   registerGovernanceSteeringRoutes,
 } from './governance-steering.js';
+import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -1177,7 +1178,7 @@ export function registerRoutes(
       config: {
         manifest: {
           requestType: 'GateDecision',
-          responseType: '{ status: SessionStatus }',
+          responseType: '{ status: SessionStatus; landing?: SteeringLandingResult }',
           // 409 twice over: a run not awaiting a human gate, and an engine refusal at confirm.
           statusCodes: [200, 400, 404, 409],
         },
@@ -1197,6 +1198,16 @@ export function registerRoutes(
         .code(409)
         .send({ error: `Run is not awaiting a human gate (status: ${run.session.status})` });
     }
+    // The steering-author landing (crew#388): decided — and the gate prompt captured — BEFORE
+    // the confirm, because a terminal-phase approve prunes the gate cache and moves the run out
+    // of `awaiting_human`. The landing itself runs AFTER a successful approve only.
+    // (`listWorkflows` is presence-guarded for partial-stub adapters — a registry-less adapter
+    // cannot be hosting a steering-author run, and the legacy gate path must not 500 over it.)
+    const steeringPropose =
+      parsed.data.approve &&
+      typeof adapter.listWorkflows === 'function' &&
+      isSteeringAuthorRun(run, adapter.listWorkflows());
+    const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
     try {
       const status = await adapter.confirmGate(id, parsed.data.approve, parsed.data.amend);
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
@@ -1210,7 +1221,18 @@ export function registerRoutes(
           status,
         },
       });
-      return reply.send({ status });
+      // APPROVE of the steering-author propose gate = the doctrine's landing moment: the
+      // approved proposal is written to the governance store with `provenance.source: "chat"`,
+      // audited per rule, idempotent on replay, and LOUD on failure — the response carries the
+      // outcome either way, so the studio can show "landed PAT-101" or the explicit error
+      // instead of the silent no-op crew#388 recorded. An approve WITH an amend note still
+      // lands the proposal UNCHANGED: the amend steers the RUN's continuation, not the rule
+      // text (an operator who wants different rules rejects and re-authors). A reject lands
+      // nothing — the run cancels and the proposal stays an artifact.
+      const landing = steeringPropose
+        ? await landSteeringProposal({ adapter, audit, actor: actorOf(req) }, run, gatePrompt)
+        : undefined;
+      return reply.send({ status, ...(landing !== undefined ? { landing } : {}) });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
@@ -1240,6 +1262,14 @@ export function registerRoutes(
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     try {
       const gated = run.session.status === 'awaiting_human';
+      // A gated resume IS a gate approval, so it lands a steering-author proposal exactly like
+      // POST /runs/:id/gate would — the "no side door" rule (task #88) holds for the landing
+      // write too (crew#388). Prompt captured pre-confirm; see the gate route.
+      const steeringPropose =
+        gated &&
+        typeof adapter.listWorkflows === 'function' &&
+        isSteeringAuthorRun(run, adapter.listWorkflows());
+      const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
       const status = gated ? await adapter.confirmGate(id, true) : await adapter.resumeRun(id);
       // A resume of a gated run IS a gate approval — audit it as one, so the
       // "who approved" trail has no side door (task #88).
@@ -1247,7 +1277,10 @@ export function registerRoutes(
         runId: id,
         detail: gated ? { approve: true, via: 'resume', status } : { status },
       });
-      return reply.send({ status });
+      const landing = steeringPropose
+        ? await landSteeringProposal({ adapter, audit, actor: actorOf(req) }, run, gatePrompt)
+        : undefined;
+      return reply.send({ status, ...(landing !== undefined ? { landing } : {}) });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
