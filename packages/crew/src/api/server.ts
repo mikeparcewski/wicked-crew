@@ -26,6 +26,7 @@ import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
+import { crewStateHome } from '../projects/state-home.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
@@ -393,9 +394,10 @@ export async function createServer(
    *  rows from all four handoff ledgers — the draft leg keys by DOCUMENT ID ("one first draft
    *  per document lifetime"), so a row that outlives its doc claims the name forever and a
    *  same-named successor never gets its first draft. Armed seams are swept through their live
-   *  instances; un-armed seams through their ledger FILES (options override, else the default
-   *  `~/.wicked-crew` spelling each seam uses). Never throws — the report says what happened. */
-  const crewStateDir = join(homedir(), '.wicked-crew');
+   *  instances; un-armed seams through their ledger FILES (options override, else the same
+   *  crewStateHome() default each seam resolves — under `--db` the sweep must follow the
+   *  override, crew#353/#398). Never throws — the report says what happened. */
+  const crewStateDir = crewStateHome();
   const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
     sweepDocLedgers(documentId, [
       {
