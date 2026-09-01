@@ -39,9 +39,14 @@ import type { FastifyInstance } from 'fastify';
 
 const RUN_ID = '83052f0b-96a8-4a99-ad2a-c84b75111ff0';
 
-/** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
+/** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. The explicit
+ * env spread keeps the setup's hermetic arming (harness-hygiene scan; identical to inheriting). */
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+  return execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env },
+  });
 }
 
 interface Fixture {
