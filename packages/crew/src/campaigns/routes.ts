@@ -16,11 +16,16 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import { CampaignsUnsupportedError, type CoreAdapter } from '../core/adapter.js';
+import {
+  CampaignsUnsupportedError,
+  ProjectsUnsupportedError,
+  type CoreAdapter,
+} from '../core/adapter.js';
 import type { Actor, LaunchCampaignBody } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';
-import { buildCampaign } from './plan.js';
+import { resolveScopeRepos } from '../api/multiscope.js';
+import { buildCampaign, fanScenarios } from './plan.js';
 
 const V = API_PREFIX;
 
@@ -58,7 +63,8 @@ const ScenarioSchema = z
   })
   .strict();
 
-const LaunchCampaignSchema = z
+// Exported for tests/wire-contract.test.ts — the request-direction drift pin (task #84).
+export const LaunchCampaignSchema = z
   .object({
     id: z.string().optional(),
     name: z.string().max(200).optional(),
@@ -66,6 +72,13 @@ const LaunchCampaignSchema = z
     policy: z.enum(['fail_fast', 'continue_independent', 'human_gate_on_failure']).optional(),
     maxConcurrency: z.number().int().min(1).max(64).optional(),
     clisJson: z.string().optional(),
+    // The pinned multiscope wire (see api/multiscope.ts): explicit codebase attachments and/or
+    // a project whose crew.repo members crew resolves server-side. Neither ⇒ today's behavior.
+    projectId: z.string().min(1).optional(),
+    repoRefs: z
+      .array(z.string().min(1))
+      .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
+      .optional(),
   })
   .strict();
 
@@ -87,11 +100,12 @@ export function registerCampaignRoutes(
       config: {
         manifest: {
           requestType: 'LaunchCampaignBody',
-          responseType: '{ campaignId: string }',
-          // 400: zod reject / mapping reject (inline-byte rule, unknown dep, …) / engine def
-          // reject (cycle, empty); 409: campaign id already exists; 501: engine addon lacks
-          // the campaign bindings.
-          statusCodes: [201, 400, 409, 501],
+          responseType: 'LaunchCampaignResponse',
+          // 400: zod reject / mapping reject (inline-byte rule, unknown dep, bad repoRef,
+          // repo-less project, …) / engine def reject (cycle, empty); 404: unknown projectId;
+          // 409: campaign id already exists / archived project; 501: engine addon lacks the
+          // campaign bindings (or the project bindings, when projectId is used).
+          statusCodes: [201, 400, 404, 409, 501],
         },
       },
     },
@@ -109,8 +123,24 @@ export function registerCampaignRoutes(
             .code(400)
             .send({ error: 'clisJson must be a JSON array of AgenticCli seats' });
         }
-        const built = buildCampaign(body, clis);
+        // The pinned multiscope wire: resolve projectId/repoRefs to registered repos (fail-closed,
+        // errors name the bad token), then fan unpinned scenarios — one node per repo, SAME
+        // campaign (one engine run is one repo: run_spec.repo_ref is a single ref).
+        const scope = await resolveScopeRepos(adapter, {
+          projectId: body.projectId,
+          repoRefs: body.repoRefs,
+        });
+        if (!scope.ok) {
+          return reply.code(scope.status).send({ error: scope.error });
+        }
+        const multiscope = body.projectId !== undefined || body.repoRefs !== undefined;
+        const fanned = fanScenarios(body.scenarios, scope.repos);
+        const built = buildCampaign({ ...body, scenarios: fanned.scenarios }, clis);
         const campaignId = await adapter.launchCampaign(built.def, built.workflows);
+        // The fanned nodes' attempt-0 run ids — the engine keys node run ids
+        // `{campaign}:{node}:a{attempt}` and attempts are 0-based, so these are the ids the
+        // scheduler will dispatch (a human Retry mints a1 and the campaign detail carries it).
+        const runIds = fanned.runOrder.map((nodeId) => `${campaignId}:${nodeId}:a0`);
         deps.audit.record('campaign.launched', deps.actorOf(req), {
           detail: {
             campaignId,
@@ -118,11 +148,18 @@ export function registerCampaignRoutes(
             edges: built.def.edges.length,
             policy: built.def.policy,
             maxConcurrency: built.def.max_concurrency,
+            ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
+            ...(scope.repos.length > 0 ? { repoRefs: scope.repos.map((r) => r.id) } : {}),
           },
         });
-        return reply.code(201).send({ campaignId });
+        // `runIds` is ADDITIVE: present exactly when the caller used the multiscope fields
+        // (a legacy body keeps the legacy `{ campaignId }` answer byte-for-byte).
+        return reply.code(201).send(multiscope ? { campaignId, runIds } : { campaignId });
       } catch (err) {
         if (err instanceof CampaignsUnsupportedError) {
+          return reply.code(501).send({ error: err.message });
+        }
+        if (err instanceof ProjectsUnsupportedError) {
           return reply.code(501).send({ error: err.message });
         }
         const msg = message(err);

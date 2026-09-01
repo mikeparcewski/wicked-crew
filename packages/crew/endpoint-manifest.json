@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.14.0",
+  "apiTypesVersion": "0.15.0",
   "endpoints": [
     {
       "method": "GET",
@@ -23,10 +23,11 @@
       "method": "POST",
       "path": "/api/v1/campaigns",
       "requestType": "LaunchCampaignBody",
-      "responseType": "{ campaignId: string }",
+      "responseType": "LaunchCampaignResponse",
       "statusCodes": [
         201,
         400,
+        404,
         409,
         501
       ]
@@ -717,6 +718,20 @@
       "statusCodes": [
         200,
         400,
+        500,
+        501
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/recon",
+      "requestType": "TestingReconBody",
+      "responseType": "TestingReconResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
         500,
         501
       ]

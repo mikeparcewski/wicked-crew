@@ -70,6 +70,130 @@ export interface BuiltCampaign {
   workflows: WorkflowDef[];
 }
 
+// ── Multi-repo fan-out (the pinned multiscope wire) ─────────────────────────────────────────
+//
+// One campaign node = one engine Run = ONE repo (`run_spec.repo_ref` is a single ref — checked
+// against `LaunchOptions.repoRef` in core/adapter.ts, wicked-core#179). A launch scoped to
+// several codebases therefore FANS: every scenario that does not pin its own `repoRef` becomes
+// one node per resolved repo, all inside the SAME campaign (the campaign IS the shared label),
+// and the route answers with the fanned nodes' attempt-0 run ids (`{campaign}:{node}:a0` — the
+// engine's documented run-id scheme) in repo-major input order.
+
+/** A resolved repo the fan targets — `id` rides `run_spec.repo_ref`, `name` labels titles. */
+export interface FanRepo {
+  id: string;
+  name: string;
+}
+
+/** The fanned scenario list plus the node-id order the route's `runIds` answer follows. */
+export interface FannedScenarios {
+  scenarios: CampaignScenario[];
+  /**
+   * Node ids in the PINNED `runIds` order: repo-major over the fanned scenarios (repos in the
+   * caller's resolved order, scenarios in input order within each repo), then the scenarios
+   * that pinned their own `repoRef` (never fanned — an explicit per-scenario pin wins over the
+   * launch-level scope) in input order. Empty exactly when `repos` was empty (legacy launch).
+   */
+  runOrder: string[];
+}
+
+/** The lane suffix a fanned copy carries: `<scenario>--r<1-based repo index>`. */
+function laneId(scenarioId: string, repoIndex: number): string {
+  return `${scenarioId}--r${repoIndex + 1}`;
+}
+
+/**
+ * Fan a scenario batch across the launch's resolved repos (multiscope `projectId`/`repoRefs`).
+ *
+ *  - `repos` empty ⇒ the batch is returned untouched (`runOrder: []`) — the legacy launch.
+ *  - one repo ⇒ no copies: scenarios without their own `repoRef` are assigned it, ids
+ *    unchanged (a single-codebase launch must look exactly like today's per-scenario spelling).
+ *  - several repos ⇒ each unpinned scenario becomes one copy per repo (`<id>--r<n>`, titled
+ *    `<label> [<repo name>]`), with dep edges rewritten to stay INSIDE a repo lane: a dep on a
+ *    fanned sibling follows the lane, a dep on a pinned scenario points at its single node,
+ *    and a pinned scenario depending on a fanned one waits for EVERY lane's copy.
+ *
+ * Throws a plain `Error` (the route answers 400 with the message) when a fanned id would break
+ * the {@link MAX_SCENARIO_ID} cap or collide with an id the caller already used.
+ */
+export function fanScenarios(scenarios: CampaignScenario[], repos: FanRepo[]): FannedScenarios {
+  if (repos.length === 0) {
+    return { scenarios, runOrder: [] };
+  }
+
+  const fanned = scenarios.filter((s) => s.repoRef === undefined);
+  const pinnedIds = new Set(scenarios.filter((s) => s.repoRef !== undefined).map((s) => s.id));
+
+  if (repos.length === 1) {
+    const repo = repos[0]!;
+    return {
+      scenarios: scenarios.map((s) =>
+        s.repoRef === undefined ? { ...s, repoRef: repo.id } : s,
+      ),
+      runOrder: scenarios.map((s) => s.id),
+    };
+  }
+
+  const fannedIds = new Set(fanned.map((s) => s.id));
+  const inputIds = new Set(scenarios.map((s) => s.id));
+  for (const s of fanned) {
+    const widest = laneId(s.id, repos.length - 1);
+    if (widest.length > MAX_SCENARIO_ID) {
+      throw new Error(
+        `scenario id '${s.id}' is too long to fan across ${repos.length} repos — the fanned ` +
+          `id '${widest}' exceeds ${MAX_SCENARIO_ID} chars; shorten the scenario id to at ` +
+          `most ${MAX_SCENARIO_ID - (widest.length - s.id.length)} chars`,
+      );
+    }
+    for (let i = 0; i < repos.length; i++) {
+      if (inputIds.has(laneId(s.id, i))) {
+        throw new Error(
+          `scenario id '${laneId(s.id, i)}' collides with the fanned copies of '${s.id}' — ` +
+            `rename one of them`,
+        );
+      }
+    }
+  }
+
+  /** Rewrite one dep for the lane a copy lives in (pinned deps keep their single node). */
+  const laneDep = (dep: string, repoIndex: number): string =>
+    fannedIds.has(dep) ? laneId(dep, repoIndex) : dep;
+
+  const out: CampaignScenario[] = [];
+  for (const s of scenarios) {
+    if (s.repoRef !== undefined) {
+      // Pinned: one node, but a dep on a fanned sibling must wait for EVERY lane's copy —
+      // dropping lanes silently would let this node run over half-checked ground.
+      const deps = (s.deps ?? []).flatMap((d) =>
+        fannedIds.has(d) ? repos.map((_r, i) => laneId(d, i)) : [d],
+      );
+      out.push({ ...s, ...(s.deps !== undefined ? { deps } : {}) });
+      continue;
+    }
+    for (let i = 0; i < repos.length; i++) {
+      const repo = repos[i]!;
+      const copy: CampaignScenario = {
+        ...s,
+        id: laneId(s.id, i),
+        title: `${s.title ?? s.id} [${repo.name}]`,
+        repoRef: repo.id,
+      };
+      if (s.deps !== undefined) copy.deps = s.deps.map((d) => laneDep(d, i));
+      out.push(copy);
+    }
+  }
+
+  // The pinned runIds order: repo-major over the fanned scenarios, then the pinned ones.
+  const runOrder: string[] = [];
+  for (let i = 0; i < repos.length; i++) {
+    for (const s of fanned) runOrder.push(laneId(s.id, i));
+  }
+  for (const s of scenarios) {
+    if (pinnedIds.has(s.id)) runOrder.push(s.id);
+  }
+  return { scenarios: out, runOrder };
+}
+
 /** Throw with the scenario + token named when an inline string breaks the single-line /
  *  byte-ceiling rule. One spelling of the rule for both scenario shapes. */
 function assertInline(scenarioId: string, what: string, value: string): void {
