@@ -108,6 +108,16 @@ export class ElicitationCache {
    * Fold one live CoreEvent into the cache.
    *
    * `elicitationCreated` → store the new prompt (replaces any prior one).
+   * `elicitationResolved` → the engine says that elicitation is DEAD (answered, declined,
+   *   timed out, torn down, superseded by the next session prompt — the `reason` field), so
+   *   drop the entry and bump the generation. Without this, an engine-side timeout/teardown
+   *   left the prompt advertised on GET forever and a late POST forwarded into a guaranteed
+   *   "no matching elicitation" 500 whose error-path restore re-advertised the dead prompt —
+   *   the silent-wedge shape crew#357/#358 forbid. Guarded by id: a resolved frame for an
+   *   elicitation OTHER than the cached one (a late frame racing a newer prompt) must not
+   *   delete the newer prompt. When no entry is present the generation still bumps — the F8
+   *   posture: a POST may have `take`n the entry just before this frame arrived, and its
+   *   error-path `restoreIfUnchanged` must then be a no-op.
    * Terminal events → delete the entry and bump the generation.
    * All other events → no-op.
    */
@@ -122,6 +132,13 @@ export class ElicitationCache {
         message: String(event.message ?? ''),
         options: Array.isArray(event.options) ? event.options : null,
       });
+    } else if (event.type === 'elicitationResolved') {
+      const entry = this.entries.get(runId);
+      if (entry !== undefined && entry.elicitationId !== String(event.elicitationId ?? '')) {
+        return; // stale frame about an already-replaced elicitation — keep the newer prompt
+      }
+      this.entries.delete(runId);
+      this.bumpGen(runId);
     } else if (TERMINAL_EVENTS.has(event.type)) {
       this.entries.delete(runId);
       this.bumpGen(runId);

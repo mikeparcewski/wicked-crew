@@ -750,6 +750,12 @@ export async function createServer(
     try {
       done(null, JSON.parse(body as string));
     } catch (err) {
+      // A syntactically invalid body is the CLIENT's error: without an explicit statusCode
+      // Fastify reports a parser error as a 500, which misfiles "you sent `{not json`" as a
+      // server fault — on the elicitation answer path that told an operator the daemon broke
+      // when their request did. 400 matches Fastify's own default JSON parser
+      // (FST_ERR_CTP_INVALID_JSON) and every schema-level 400 these routes already return.
+      (err as Error & { statusCode?: number }).statusCode = 400;
       done(err as Error);
     }
   });

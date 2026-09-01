@@ -1392,11 +1392,13 @@ export function registerRoutes(
     const ids = await adapter.sessions();
     if (!ids.includes(id)) return reply.code(404).send({ error: 'Run not found' });
     // Durable probe (DES-PROJECT-001 §5.3): `interaction_requests` reserves kind `elicitation`.
-    // The engine writes no elicitation rows yet (its elicitation surface is future work — the
-    // resolve path still answers 501), so this read is empty today; it exists so the cache is
-    // STRUCTURALLY a latency layer, and the day the engine writes the rows, restart survival
-    // holds here exactly as it does for gates, with no route change. Guarded like `runEvents`:
-    // a partial-stub adapter (tests) or a pre-0.6.0 addon simply has no durable half.
+    // The engine writes no elicitation rows yet — the LIVE elicitation wire is complete
+    // (create → cache → resolve, crew#357/#358), but the durable half of the PROMPT is still
+    // engine-side future work (wicked-core interaction.rs: "gate today; elicitation reserved") —
+    // so this read is empty today; it exists so the cache is STRUCTURALLY a latency layer, and
+    // the day the engine writes the rows, restart survival holds here exactly as it does for
+    // gates, with no route change. Guarded like `runEvents`: a partial-stub adapter (tests) or
+    // a pre-0.6.0 addon simply has no durable half.
     const durable =
       typeof adapter.interactionRequests === 'function'
         ? await adapter.interactionRequests(id, 'open')
