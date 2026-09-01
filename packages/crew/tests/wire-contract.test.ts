@@ -36,6 +36,7 @@ import type {
 } from '../src/api/testing.js';
 import type { LaunchCampaignSchema } from '../src/campaigns/routes.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
+import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -78,6 +79,14 @@ respondsWith<string | undefined, Wire.LaunchRunBody['retryOf']>();
 // never `null` (absence spells "no note", covering never-set, cleared, and pre-0.9.0 servers).
 respondsWith<Wire.AgentSession['guidance'], string | undefined>();
 respondsWith<string | undefined, Wire.AgentSession['guidance']>();
+
+// crew#393 + crew#311 (api-types 0.18.0) — the delivery derivation the routes stamp on every
+// served run must produce exactly the contract's union (both directions, so adding or dropping
+// a state on either side breaks this file), and the terminal-resume 409 body must satisfy the
+// published `ResumeRefusal`.
+respondsWith<Wire.AgentSession['delivery'], DeliveryState['delivery']>();
+respondsWith<DeliveryState['delivery'] | undefined, Wire.AgentSession['delivery']>();
+respondsWith<Wire.ResumeRefusal, { error: string; recovery: 'retry' | 'deliver' }>();
 // PUT /runs/:id/guidance — the route echoes what it stored.
 respondsWith<Wire.SetGuidanceResult, { runId: string; guidance: string }>();
 

@@ -21,7 +21,8 @@
 //     keys on the `:deliver` id suffix with the `tool_cmd` fallback, never on `workflow_id`.
 
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,6 +35,9 @@ import {
   DeliveryIndex,
   deliverUnitOf,
   deliveryStateOf,
+  deliveryStateWithVacuity,
+  gitRunBranchIsEmpty,
+  gitWorktreeIsClean,
   prUrlFrom,
 } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
@@ -106,6 +110,7 @@ function buildApp(
   mockAdapter: MockAdapter,
   deliveryIndex: DeliveryIndex,
   worktreeExists?: (p: string) => boolean,
+  worktreeIsClean?: (p: string) => Promise<boolean>,
 ): FastifyInstance {
   const app = Fastify({ logger: false });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -124,7 +129,11 @@ function buildApp(
     new QeGateCache(),
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
-    { deliveryIndex, ...(worktreeExists !== undefined ? { worktreeExists } : {}) },
+    {
+      deliveryIndex,
+      ...(worktreeExists !== undefined ? { worktreeExists } : {}),
+      ...(worktreeIsClean !== undefined ? { worktreeIsClean } : {}),
+    },
   );
   return app;
 }
@@ -261,6 +270,236 @@ describe('deliveryStateOf — the derivation itself', () => {
     expect(
       deliveryStateOf({ status: 'completed', repo_ref: 'r', workdir: '' }, undefined, exists),
     ).toEqual({ delivery: 'none' });
+  });
+});
+
+describe("crew#311 — the 'vacuous' split of 'stranded' and of the reaped 'none'", () => {
+  const S = { id: 'run-1', status: 'completed', repo_ref: 'r', workdir: '/wt' } as const;
+  const probes = (over: {
+    exists?: boolean;
+    clean?: boolean;
+    branchEmpty?: boolean;
+  }) => ({
+    worktreeExists: () => over.exists ?? true,
+    worktreeIsClean: vi.fn(async () => over.clean ?? false),
+    runBranchIsEmpty: vi.fn(async () => over.branchEmpty ?? false),
+  });
+
+  it('a would-be-stranded run whose worktree is POSITIVELY clean reads vacuous', async () => {
+    await expect(
+      deliveryStateWithVacuity(S, undefined, probes({ clean: true })),
+    ).resolves.toEqual({ delivery: 'vacuous' });
+  });
+
+  it('a worktree carrying work keeps the stranded label', async () => {
+    await expect(
+      deliveryStateWithVacuity(S, undefined, probes({ clean: false })),
+    ).resolves.toEqual({ delivery: 'stranded' });
+  });
+
+  it('a REAPED worktree with an empty (or gone) run branch reads vacuous — the FINDING-003 shape', async () => {
+    // The engine reaps exactly the clean trees at terminal, so this is where a vacuous
+    // completion normally lands: worktree gone, wicked/<run> branch carrying nothing.
+    await expect(
+      deliveryStateWithVacuity(S, undefined, probes({ exists: false, branchEmpty: true })),
+    ).resolves.toEqual({ delivery: 'vacuous' });
+  });
+
+  it("a reaped worktree whose run branch carries commits stays 'none' (landed work, nothing to lift)", async () => {
+    await expect(
+      deliveryStateWithVacuity(S, undefined, probes({ exists: false, branchEmpty: false })),
+    ).resolves.toEqual({ delivery: 'none' });
+  });
+
+  it('delivered, non-completed, and repo-less runs never consult any probe', async () => {
+    const p1 = probes({ clean: true, branchEmpty: true });
+    await expect(
+      deliveryStateWithVacuity(S, 'https://github.com/o/r/pull/7', p1),
+    ).resolves.toEqual({ delivery: 'delivered', deliverUrl: 'https://github.com/o/r/pull/7' });
+    await expect(
+      deliveryStateWithVacuity({ ...S, status: 'failed' } as never, undefined, p1),
+    ).resolves.toEqual({ delivery: 'none' });
+    await expect(
+      deliveryStateWithVacuity(
+        { id: 'run-2', status: 'completed', repo_ref: null, workdir: null },
+        undefined,
+        p1,
+      ),
+    ).resolves.toEqual({ delivery: 'none' });
+    expect(p1.worktreeIsClean).not.toHaveBeenCalled();
+    expect(p1.runBranchIsEmpty).not.toHaveBeenCalled();
+  });
+
+  it("route-level: a vacuous completed run is LOUD on both GET /runs and GET /runs/:id", async () => {
+    const mockAdapter: MockAdapter = {
+      sessionsDetail: vi
+        .fn()
+        .mockResolvedValue([view('run-empty', { repo_ref: 'repo-1', workdir: '/wt' })]),
+      sessions: vi.fn().mockResolvedValue(['run-empty']),
+    };
+    const app = buildApp(mockAdapter, new DeliveryIndex(), () => true, async () => true);
+    try {
+      await app.ready();
+      const list = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
+        runs: { session: Record<string, unknown> }[];
+      };
+      expect(list.runs[0]!.session['delivery']).toBe('vacuous');
+      const detail = (
+        await app.inject({ method: 'GET', url: '/api/v1/runs/run-empty' })
+      ).json() as { run: { session: Record<string, unknown> } };
+      expect(detail.run.session['delivery']).toBe('vacuous');
+      expect('deliverUrl' in detail.run.session).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('gitWorktreeIsClean — the production probe over a real run-worktree layout', () => {
+  let base: string;
+
+  const git = (cwd: string, args: string[]) => {
+    execFileSync('git', args, { cwd, stdio: 'pipe' });
+  };
+
+  /** repo + linked worktree on `wicked/run1` — the layout crew's run worktrees actually have. */
+  function makeWorktree(): string {
+    const repo = join(base, 'repo');
+    const wt = join(base, 'wt');
+    mkdirSync(repo, { recursive: true });
+    git(repo, ['init', '-q', '.']);
+    git(repo, ['config', 'user.email', 't@example.invalid']);
+    git(repo, ['config', 'user.name', 't']);
+    writeFileSync(join(repo, 'base.txt'), 'base\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'base']);
+    git(repo, ['worktree', 'add', '-q', wt, '-b', 'wicked/run1']);
+    return wt;
+  }
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'crew-vacuity-'));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('a pristine worktree is clean; an uncommitted file is not; a run-branch commit is not', async () => {
+    const wt = makeWorktree();
+    // Fresh probe per phase — the memo would otherwise serve the pristine answer.
+    await expect(gitWorktreeIsClean()(wt)).resolves.toBe(true);
+
+    writeFileSync(join(wt, 'feature.ts'), 'export const x = 1;\n');
+    await expect(gitWorktreeIsClean()(wt)).resolves.toBe(false);
+
+    // Committed on the run branch: porcelain goes clean, instrument 2 still sees the work.
+    git(wt, ['add', '-A']);
+    git(wt, ['commit', '-qm', 'feat: the change']);
+    await expect(gitWorktreeIsClean()(wt)).resolves.toBe(false);
+  });
+
+  it('fails toward NOT clean: a non-git directory never reads vacuous', async () => {
+    await expect(gitWorktreeIsClean()(base)).resolves.toBe(false);
+  });
+
+  it('memoizes per path for the TTL, then re-probes', async () => {
+    const wt = makeWorktree();
+    let t = 0;
+    const probe = gitWorktreeIsClean(30_000, () => t);
+    await expect(probe(wt)).resolves.toBe(true);
+
+    // Dirty the tree; within the TTL the memoized answer stands (one git pair per window)…
+    writeFileSync(join(wt, 'feature.ts'), 'export const x = 1;\n');
+    t = 29_999;
+    await expect(probe(wt)).resolves.toBe(true);
+
+    // …and past it the truth is re-read.
+    t = 30_000;
+    await expect(probe(wt)).resolves.toBe(false);
+  });
+});
+
+describe('gitRunBranchIsEmpty — the reaped-worktree probe over the parent repo', () => {
+  let base: string;
+
+  const git = (cwd: string, args: string[]) => {
+    execFileSync('git', args, { cwd, stdio: 'pipe' });
+  };
+
+  /** A repo whose `wicked/run1` branch exists at main (the post-reap layout: worktree gone,
+   *  branch untouched). Returns the repo root. */
+  function makeRepo(): string {
+    const repo = join(base, 'repo');
+    mkdirSync(repo, { recursive: true });
+    git(repo, ['init', '-q', '-b', 'main', '.']);
+    git(repo, ['config', 'user.email', 't@example.invalid']);
+    git(repo, ['config', 'user.name', 't']);
+    writeFileSync(join(repo, 'base.txt'), 'base\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'base']);
+    git(repo, ['branch', 'wicked/run1']);
+    return repo;
+  }
+
+  const rootOf =
+    (repo: string | undefined) =>
+    async (): Promise<string | undefined> =>
+      repo;
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'crew-branch-probe-'));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('an empty run branch is POSITIVELY empty; one carrying a commit is not; a deleted one is empty', async () => {
+    const repo = makeRepo();
+    await expect(gitRunBranchIsEmpty(rootOf(repo))('r', 'run1')).resolves.toBe(true);
+
+    // Land a commit on the run branch only (the reap-after-commit layout).
+    git(repo, ['checkout', '-q', 'wicked/run1']);
+    writeFileSync(join(repo, 'feature.ts'), 'export const x = 1;\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'feat: landed']);
+    git(repo, ['checkout', '-q', 'main']);
+    await expect(gitRunBranchIsEmpty(rootOf(repo))('r', 'run1')).resolves.toBe(false);
+
+    // A hand-deleted branch (with its unique commit gone from every ref) reads empty: the run's
+    // work is unreachable, which is what the run now amounts to.
+    git(repo, ['branch', '-D', 'wicked/run1']);
+    await expect(gitRunBranchIsEmpty(rootOf(repo))('r', 'run1')).resolves.toBe(true);
+  });
+
+  it('fails toward NOT empty: unresolvable repo, throwing registry, non-git root', async () => {
+    await expect(gitRunBranchIsEmpty(rootOf(undefined))('r', 'run1')).resolves.toBe(false);
+    await expect(
+      gitRunBranchIsEmpty(async () => {
+        throw new Error('registry down');
+      })('r', 'run1'),
+    ).resolves.toBe(false);
+    // A registered root that is not a git repo: rev-parse exits 128, never a clean miss.
+    await expect(gitRunBranchIsEmpty(rootOf(base))('r', 'run1')).resolves.toBe(false);
+  });
+
+  it('memoizes per (repo, run) for the TTL, then re-probes', async () => {
+    const repo = makeRepo();
+    let t = 0;
+    const probe = gitRunBranchIsEmpty(rootOf(repo), 30_000, () => t);
+    await expect(probe('r', 'run1')).resolves.toBe(true);
+
+    git(repo, ['checkout', '-q', 'wicked/run1']);
+    writeFileSync(join(repo, 'feature.ts'), 'export const x = 1;\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'feat: landed']);
+    git(repo, ['checkout', '-q', 'main']);
+
+    t = 29_999;
+    await expect(probe('r', 'run1')).resolves.toBe(true);
+    t = 30_000;
+    await expect(probe('r', 'run1')).resolves.toBe(false);
   });
 });
 
