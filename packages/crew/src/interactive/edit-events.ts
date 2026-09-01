@@ -34,7 +34,6 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import {
@@ -45,6 +44,7 @@ import {
   oneLine,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { crewStateHome } from '../projects/state-home.js';
 import { readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -339,8 +339,11 @@ interface InFlight {
   failureDetail?: string | undefined;
 }
 
+/** The seam's durable state (handoff ledger + working dirs) follows the daemon's state home —
+ *  the `--db` parent when configured, `~/.wicked-crew` otherwise (crew#353): an isolated
+ *  daemon's interactive handoffs must not land in the operator's real home. */
 function defaultStateDir(): string {
-  return join(homedir(), '.wicked-crew');
+  return crewStateHome();
 }
 
 /** The production council roster, resolved lazily through the adapter's own class so this module

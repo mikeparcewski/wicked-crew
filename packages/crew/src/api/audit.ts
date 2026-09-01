@@ -14,13 +14,21 @@
  */
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { crewStateHome } from '../projects/state-home.js';
 import type { Actor, AuditEntry } from '../core/types.js';
 
-/** Where the audit trail lives unless overridden. */
+/**
+ * Where the audit trail lives unless overridden: the explicit `WICKED_CREW_AUDIT_LOG` env
+ * override, then the daemon's state home — the `--db` parent when the bootstrap configured one,
+ * the historical `~/.wicked-crew` default otherwise (crew#353's principle, same seam as the
+ * project graphs and the project settings store). A `--db`-isolated daemon must neither APPEND
+ * its trail to the operator's real `~/.wicked-crew/audit.log` (every `run.launched` /
+ * `settings.updated` / `project.created` did exactly that) nor HYDRATE its retry/guidance/
+ * delivery indexes from the operator's real trail at boot.
+ */
 export function defaultAuditPath(env: NodeJS.ProcessEnv = process.env): string {
-  return env['WICKED_CREW_AUDIT_LOG'] ?? join(homedir(), '.wicked-crew', 'audit.log');
+  return env['WICKED_CREW_AUDIT_LOG'] ?? join(crewStateHome(), 'audit.log');
 }
 
 export interface AuditReadFilter {

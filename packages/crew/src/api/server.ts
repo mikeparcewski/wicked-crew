@@ -298,8 +298,10 @@ export async function createServer(
   // Per-project crew-side settings (DES-MERGE-001 §7.1's `interactiveRoot`). ONE instance,
   // created here so the chat seam's docs-root resolution below and the routes (project PATCH +
   // interactive proxy) all read/write the same store — two instances over one file would let a
-  // PATCH land in one while the other keeps serving the stale root.
-  const projectSettings = new ProjectSettingsStore();
+  // PATCH land in one while the other keeps serving the stale root. The default path follows the
+  // bootstrap-configured state home (crew#353); the warn hook is the loud half of the migration
+  // posture — an override root shadowing a default-root file must be SAID at boot, never silent.
+  const projectSettings = new ProjectSettingsStore(undefined, (m) => app.log.warn(m));
   // Retry lineage (CREW-UX-3): hydrated from the audit trail — the durable record the launch
   // route writes — so a restarted daemon still echoes `retry_of` on prior runs' DTOs.
   const retryIndex = new RetryIndex();
