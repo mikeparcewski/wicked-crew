@@ -1845,6 +1845,57 @@ export interface AttachMemberBody {
 }
 
 /**
+ * The crew half of a governed doc delete (crew#338) — what
+ * `DELETE /projects/:projectId/interactive/docs/:doc` did to crew's four handoff ledgers
+ * (`interactive-{draft,edit,chat,demo}-ledger.json`). Present on every answer of that route so
+ * a partial result can never hide.
+ */
+export interface InteractiveDocDeleteLedgerReport {
+  /** True iff every ledger was swept without error. On the 502 refusal paths this is false with
+   *  `skipped: true` — the sweep deliberately did not run because interactive's half did not
+   *  happen (nothing diverged). */
+  ok: boolean;
+  /** Every replay-dedup row key actually dropped (`<doc>`, `<doc>:v<n>`, `<doc>:m:<id>`, …).
+   *  Empty ⇒ nothing was there — deleting a never-drafted doc is a clean no-op on this side. */
+  removed_keys: string[];
+  /** The ledgers that could NOT be swept, by seam name (`draft`|`edit`|`chat`|`demo`) and cause.
+   *  Present only when `ok` is false and the sweep actually ran. */
+  errors?: { ledger: string; error: string }[];
+  /** True ⇒ the sweep was deliberately skipped (interactive refused/failed the retire, so
+   *  crew's rows are still doing their job and nothing diverged). */
+  skipped?: boolean;
+}
+
+/**
+ * `DELETE /projects/:projectId/interactive/docs/:doc` (crew#338) — 200: the bridge's own retire
+ * answer (interactive#189's wire, relayed verbatim) plus crew's ledger report. The route's
+ * non-200 answers carry `error` plus the same `ledger` report (404 unknown doc — the ledger is
+ * STILL swept, cleaning ghosts of hand-deleted workspaces, but ONLY on the retire wire's own
+ * 404 body `{"error":"unknown doc"}`; 500 partial — interactive retired but the sweep failed,
+ * the body names both halves; 502 — interactive did not retire (5xx, unreachable, or a 404
+ * without the wire's body from a bridge predating the retire route), nothing swept; 409 — the
+ * bridge's build-in-flight refusal relayed verbatim, no `ledger` field).
+ */
+export interface InteractiveDocDeleteResponse {
+  /** The doc name (slug). */
+  name: string;
+  kind: 'doc' | 'html' | 'source' | 'demo';
+  retired: true;
+  /** True on a repeat delete — idempotent, with the ORIGINAL `retired_at` and no `event_id`. */
+  already_retired: boolean;
+  /** ISO-8601 retirement timestamp. */
+  retired_at: string;
+  /** Head version at retirement. */
+  head: number;
+  /** Lineage size at retirement. */
+  versions: number;
+  /** The `wicked.interactive.doc.retired` bus event id — first retire only (no re-emit). */
+  event_id?: number;
+  /** What crew dropped from its handoff ledgers. */
+  ledger: InteractiveDocDeleteLedgerReport;
+}
+
+/**
  * One normalized entry of the merged project activity feed
  * (`GET /projects/:id/activity`, ADR §5.2): core events of member runs/chats
  * ∪ bus `wicked.interactive.*` events carrying this `project_id`.

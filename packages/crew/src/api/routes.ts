@@ -41,6 +41,8 @@ import { registerTestingRoutes } from './testing.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
+import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
+import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { AuditLog } from './audit.js';
@@ -302,6 +304,10 @@ export interface RuntimeDeps {
    *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
    *  spawning a real `npx wicked-interactive serve`. */
   interactiveBridges?: InteractiveBridgePool;
+  /** The governed doc-delete's handoff-ledger sweep (crew#338) — `createServer` wires the real
+   *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
+   *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
+  dropDocLedgerRows?: (documentId: string) => DocLedgerSweep;
   /** The daemon's in-process error-level log ring (diagnostics) — `createServer` tees the pino
    *  stream into one; a directly-driven route set (tests) gets an honestly-empty tail. */
   errorRing?: ErrorRing;
@@ -2579,19 +2585,39 @@ export function registerRoutes(
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one
   // origin, one auth hook, and one CORS posture — the whole point of slice 1.
+  // ONE pool, shared with the governed doc-delete route below: two pools over one root would
+  // race each other into starting duplicate bridges.
+  const interactiveBridges =
+    runtime.interactiveBridges ??
+    new InteractiveBridgePool({
+      log: (m) => app.log.warn(m),
+      debug: (m) => app.log.debug(m),
+      // #298: the daemon's own origin, read LAZILY off the bound server — the pool is built
+      // before `listen`, but only consulted while serving a request, i.e. once bound. The
+      // pool POSTs it to the bridge's /api/studio-origin on start/adopt so the bridge's
+      // `GET /` redirects into studio.
+      studioOrigin: () => boundOrigin(app.server.address()),
+    });
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
-    pool:
-      runtime.interactiveBridges ??
-      new InteractiveBridgePool({
-        log: (m) => app.log.warn(m),
-        debug: (m) => app.log.debug(m),
-        // #298: the daemon's own origin, read LAZILY off the bound server — the pool is built
-        // before `listen`, but only consulted while serving a request, i.e. once bound. The
-        // pool POSTs it to the bridge's /api/studio-origin on start/adopt so the bridge's
-        // `GET /` redirects into studio.
-        studioOrigin: () => boundOrigin(app.server.address()),
-      }),
+    pool: interactiveBridges,
+    log: (m) => app.log.warn(m),
+  });
+
+  // ── Governed doc delete (crew#338) — the one door that changes BOTH stores ──
+  // `DELETE /projects/:id/interactive/docs/:doc` retires the doc on the bridge AND drops crew's
+  // handoff-ledger rows for it (the draft leg keys by document id, so a stale row claims the
+  // name forever — studio#119's ghost). One static segment more specific than the proxy's
+  // wildcard, so the proxy stays pure transport for everything else.
+  registerInteractiveDocDelete(app, adapter, {
+    settings: projectSettings,
+    pool: interactiveBridges,
+    audit,
+    actorOf,
+    // The inert default mirrors AuditLog.noop(): a directly-driven route set must never sweep
+    // the operator's real ~/.wicked-crew ledgers. The real sweep always arrives from
+    // `createServer`.
+    dropDocLedgerRows: runtime.dropDocLedgerRows ?? (() => ({ ok: true, removed_keys: [] })),
     log: (m) => app.log.warn(m),
   });
 }

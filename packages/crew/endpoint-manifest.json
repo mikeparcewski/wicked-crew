@@ -423,6 +423,20 @@
       "statusCodes": []
     },
     {
+      "method": "DELETE",
+      "path": "/api/v1/projects/:projectId/interactive/docs/:doc",
+      "requestType": null,
+      "responseType": "InteractiveDocDeleteResponse",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        500,
+        502,
+        503
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/repos",
       "requestType": null,

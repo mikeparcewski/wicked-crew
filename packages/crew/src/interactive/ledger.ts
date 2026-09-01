@@ -110,6 +110,38 @@ export class InteractiveHandoffLedger {
     return Object.keys(this.entries).length;
   }
 
+  /**
+   * Drop every row belonging to one document (crew#338 — a deleted/retired doc must not leave
+   * ghost rows that shadow its name forever). BOTH key grammars are swept, which is why this is
+   * a prefix sweep and not a single `delete entries[docId]`:
+   *
+   *  - the exact key `<doc>` (draft leg + the demo leg's doc-created row);
+   *  - every `<doc>:<suffix>` key (edit/demo `<doc>:v<version>`, chat `<doc>:m:<msgId>` /
+   *    `<doc>:e:<eventId>`).
+   *
+   * The `:` separator cannot appear inside a doc name (interactive's DOC_NAME grammar is
+   * `^[a-z0-9][a-z0-9-]{0,63}$`), so the prefix can never match a sibling document's rows.
+   *
+   * Idempotent by construction — removing rows that are not there removes nothing — which is
+   * what makes it safe under at-least-once redelivery of the retire fact. Persisted atomically
+   * (tmp + rename, like every other write) and ONLY when something was actually removed, so a
+   * sweep of a doc this ledger never answered does not create or rewrite the file.
+   *
+   * @returns the removed keys (empty = nothing to remove).
+   */
+  removeDoc(documentId: string): string[] {
+    const prefix = `${documentId}:`;
+    const removed: string[] = [];
+    for (const key of Object.keys(this.entries)) {
+      if (key === documentId || key.startsWith(prefix)) {
+        delete this.entries[key];
+        removed.push(key);
+      }
+    }
+    if (removed.length > 0) this.persist();
+    return removed;
+  }
+
   private persist(): void {
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp-${process.pid}`;

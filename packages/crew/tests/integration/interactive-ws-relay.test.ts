@@ -15,12 +15,13 @@
 // one `/ws` the studio already holds, on the server's own listening port.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { createServer } from '../../src/api/server.js';
 import { EMITTABLE_TYPES } from '../../src/interactive/ws-relay.js';
+import { InteractiveHandoffLedger } from '../../src/interactive/ledger.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { SystemSettings } from '../../src/core/types.js';
 
@@ -101,6 +102,13 @@ beforeAll(async () => {
   app = await createServer(mockAdapter, {
     projectEvents: { disabled: true },
     interactiveWsRelay: { dbPath: busDb, pollIntervalMs: 25 },
+    // crew#338 — the doc.retired ledger sweep under test below. The seams stay UN-armed
+    // (enabled:false); the ledgerPath overrides point the sweep's file fallback at temp files
+    // so it can never touch the operator's real ~/.wicked-crew ledgers.
+    interactiveDraftEvents: { enabled: false, ledgerPath: join(dir, 'draft-ledger.json') },
+    interactiveEditEvents: { enabled: false, ledgerPath: join(dir, 'edit-ledger.json') },
+    interactiveChatEvents: { enabled: false, ledgerPath: join(dir, 'chat-ledger.json') },
+    interactiveDemoEvents: { enabled: false, ledgerPath: join(dir, 'demo-ledger.json') },
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -310,5 +318,48 @@ describe('seam disabled', () => {
     } finally {
       await app2.close();
     }
+  });
+});
+
+describe('doc.retired → handoff-ledger sweep (crew#338)', () => {
+  it('drops the retired doc rows from the seam ledgers, whoever retired it', async () => {
+    // A retirement that BYPASSED crew's governed DELETE route: the bridge (or anything else)
+    // emitted the fact straight onto the bus. Crew's replay-dedup rows must still fall — the
+    // draft leg keys by doc id, so a surviving row would claim the name forever.
+    const draftLedgerPath = join(dir, 'draft-ledger.json');
+    const editLedgerPath = join(dir, 'edit-ledger.json');
+    const draft = new InteractiveHandoffLedger(draftLedgerPath);
+    draft.recordLaunch('doc-swept', 'run-1');
+    draft.recordLaunch('doc-kept', 'run-2');
+    const edit = new InteractiveHandoffLedger(editLedgerPath);
+    edit.recordLaunch('doc-swept:v2', 'run-3');
+
+    publish('wicked.interactive.doc.retired', 'wicked-interactive', 'docs', {
+      document_id: 'doc-swept',
+      ts: new Date().toISOString(),
+      retired_at: new Date().toISOString(),
+      kind: 'doc',
+      versions: 3,
+    });
+
+    // The frame still relays (the sweep rides AFTER the broadcast, never instead of it)…
+    await waitForFrame(
+      (f) =>
+        f['type'] === 'interactiveEvent' &&
+        (f['event'] as { event_type?: string }).event_type === 'wicked.interactive.doc.retired',
+      'the relayed doc.retired frame',
+    );
+
+    // …and the rows are gone from BOTH grammars' ledgers, durably, sibling rows untouched.
+    const keysOf = (path: string): string[] =>
+      Object.keys((JSON.parse(readFileSync(path, 'utf8')) as { docs: Record<string, unknown> }).docs);
+    const start = Date.now();
+    for (;;) {
+      if (!keysOf(draftLedgerPath).includes('doc-swept') && !keysOf(editLedgerPath).includes('doc-swept:v2')) break;
+      if (Date.now() - start > 8000) throw new Error('timed out waiting for the ledger sweep');
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(keysOf(draftLedgerPath)).toEqual(['doc-kept']);
+    expect(keysOf(editLedgerPath)).toEqual([]);
   });
 });

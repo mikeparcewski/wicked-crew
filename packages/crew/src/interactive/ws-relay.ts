@@ -87,6 +87,16 @@ export interface InteractiveRelayOptions {
   /** Poll cadence for the relay subscriber, ms (tests shorten it). */
   pollIntervalMs?: number;
   log?: (msg: string) => void;
+  /**
+   * Called once per observed `wicked.interactive.doc.retired` with the retired document id
+   * (crew#338). This is how a retirement that BYPASSED crew's governed delete route — a direct
+   * bridge call, another tool — still drops the doc's handoff-ledger rows: `createServer` wires
+   * the same idempotent four-ledger sweep the route runs, so at-least-once redelivery and the
+   * route/relay overlap both collapse to "remove rows that may not exist". Best-effort by the
+   * relay's nature (cursor starts at `latest`, no retries) — the governed route stays the
+   * guaranteed path. A throw is caught and logged; it never takes the relay down.
+   */
+  onDocRetired?: (documentId: string) => void;
 }
 
 /**
@@ -144,6 +154,23 @@ export async function startInteractiveWsRelay(
       handler: (event) => {
         if (!event.event_type.startsWith(RELAY_TYPE_PREFIX)) return;
         broadcast({ type: INTERACTIVE_EVENT_FRAME, event });
+        // The retire fact's crew-side consumer (crew#338): drop the doc's handoff-ledger rows
+        // no matter WHO retired it. After the broadcast on purpose — the UI learning the doc is
+        // gone must not wait on (or be lost to) a failing sweep.
+        if (event.event_type === 'wicked.interactive.doc.retired' && opts.onDocRetired) {
+          const payload = event.payload as { document_id?: unknown } | null | undefined;
+          const documentId = payload?.document_id;
+          if (typeof documentId === 'string' && documentId.length > 0) {
+            try {
+              opts.onDocRetired(documentId);
+            } catch (err) {
+              log(
+                `[interactive-relay] doc.retired ledger sweep for ${documentId} failed (the governed ` +
+                  `DELETE route retries it): ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        }
       },
       onError: (err, event) => {
         log(
