@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyWorkerConfigRoot, signedInHeuristic } from '../src/api/seat-signin.js';
+import { applyWorkerConfigRoot, BOOT_WORKER_HOME, signedInHeuristic } from '../src/api/seat-signin.js';
 
 let home: string;
 /** Empty env: no ambient GH_TOKEN/GITHUB_TOKEN from the machine running the suite leaks in. */
@@ -192,15 +192,26 @@ describe('applyWorkerConfigRoot — the WICKED_WORKER_HOME env seam', () => {
     expect(process.env['WICKED_WORKER_HOME']).toBe('/srv/worker-homes');
   });
 
-  it('deletes the env when unset (engine default ~/.wicked-worker)', () => {
+  it('unset restores the env this process booted with, never a stale override (crew#396)', () => {
+    // Under the suite the boot value IS the hermetic arming (tests/setup/hermetic-home.ts), so
+    // this is also the proof that a settings-driven unset cannot reopen the real ~/.wicked-worker.
+    expect(BOOT_WORKER_HOME).toBeDefined();
     process.env['WICKED_WORKER_HOME'] = '/stale';
     applyWorkerConfigRoot(undefined);
-    expect(process.env['WICKED_WORKER_HOME']).toBeUndefined();
+    expect(process.env['WICKED_WORKER_HOME']).toBe(BOOT_WORKER_HOME);
   });
 
   it('treats "" as unset', () => {
     process.env['WICKED_WORKER_HOME'] = '/stale';
     applyWorkerConfigRoot('');
+    expect(process.env['WICKED_WORKER_HOME']).toBe(BOOT_WORKER_HOME);
+  });
+
+  it('deletes the env when the process booted without one (engine default ~/.wicked-worker)', () => {
+    process.env['WICKED_WORKER_HOME'] = '/stale';
+    // '' is the no-boot-value fallback: an EXPLICIT `undefined` would re-select the default
+    // parameter (BOOT_WORKER_HOME) — JS default-parameter semantics, not an override.
+    applyWorkerConfigRoot(undefined, '');
     expect(process.env['WICKED_WORKER_HOME']).toBeUndefined();
   });
 });

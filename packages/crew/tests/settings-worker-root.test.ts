@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registerRoutes } from '../src/api/routes.js';
+import { BOOT_WORKER_HOME } from '../src/api/seat-signin.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { createServer } from '../src/api/server.js';
@@ -82,7 +83,7 @@ describe('PUT/GET /settings worker_config_root', () => {
     expect((get.json() as { settings: SystemSettings }).settings.worker_config_root).toBe(dir);
   });
 
-  it('clearing with "" persists the empty default and DELETES the env', async () => {
+  it('clearing with "" persists the empty default and restores the boot-time env (crew#396)', async () => {
     app = buildApp(memoryAdapter({ worker_config_root: dir }));
     await app.ready();
     process.env['WICKED_WORKER_HOME'] = dir;
@@ -94,7 +95,10 @@ describe('PUT/GET /settings worker_config_root', () => {
     });
     expect(put.statusCode).toBe(200);
     expect((put.json() as { settings: SystemSettings }).settings.worker_config_root).toBe('');
-    expect(process.env['WICKED_WORKER_HOME']).toBeUndefined();
+    // NOT deleted: an unconditional delete re-aimed every later worker spawn at the operator's
+    // REAL ~/.wicked-worker (crew#396). Unset restores what the process booted with — the
+    // harness's hermetic arming here, an operator's exported value in production.
+    expect(process.env['WICKED_WORKER_HOME']).toBe(BOOT_WORKER_HOME);
   });
 
   it('400s a relative path and leaves the env untouched', async () => {
@@ -141,22 +145,24 @@ describe('PUT/GET /settings worker_config_root', () => {
 });
 
 describe('adapter getSettings read-validation', () => {
-  const savedHome = process.env['HOME'];
+  // The harness arms WICKED_CREW_SYSTEM_SETTINGS per PROCESS (tests/setup/hermetic-home.ts);
+  // re-aim it per TEST so each case gets a fresh fixture file, and restore the armed value.
+  const savedSettings = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   let fakeHome: string;
 
   beforeEach(() => {
     fakeHome = mkdtempSync(join(tmpdir(), 'worker-root-home-'));
-    process.env['HOME'] = fakeHome; // os.homedir() honours $HOME on POSIX
+    process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(fakeHome, 'settings.json');
   });
 
   afterEach(() => {
-    if (savedHome === undefined) delete process.env['HOME'];
-    else process.env['HOME'] = savedHome;
+    if (savedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = savedSettings;
     rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function writeSettings(content: unknown): void {
-    // settingsFilePath() reads $HOME at call time, which beforeEach points at the fixture.
+    // settingsFilePath() reads the env at call time, which beforeEach points at the fixture.
     const file = settingsFilePath();
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(content));
@@ -212,13 +218,16 @@ describe('daemon boot applies the persisted root (createServer)', () => {
     }
   });
 
-  it('deletes a stale WICKED_WORKER_HOME when no root is persisted (settings.json is the source of truth)', async () => {
+  it('restores the boot-time env over a stale WICKED_WORKER_HOME when no root is persisted (crew#396)', async () => {
     adapter.getSettings = async () => ({ graphNodeLimit: 150 });
     process.env['WICKED_WORKER_HOME'] = '/stale';
 
     const app = await createServer(adapter, options());
     try {
-      expect(process.env['WICKED_WORKER_HOME']).toBeUndefined();
+      // The stale override goes, but the env is NOT deleted: boot over an empty settings store
+      // used to delete it, which re-aimed every test-spawned worker at the operator's REAL
+      // ~/.wicked-worker. The boot-time value (the harness's hermetic arming) comes back instead.
+      expect(process.env['WICKED_WORKER_HOME']).toBe(BOOT_WORKER_HOME);
     } finally {
       await app.close();
     }

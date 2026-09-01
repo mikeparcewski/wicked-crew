@@ -23,7 +23,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, GovernanceEvalsUnsupportedError } from '../src/core/adapter.js';
@@ -243,9 +243,14 @@ describe.runIf(!EVALS_CAPABLE)('the real presence gate (installed wicked-core-ts
 describe.runIf(EVALS_CAPABLE)('the real seam (installed wicked-core-ts carries the evals bindings)', () => {
   it('END TO END: the un-stubbed composition serves both routes for real', async () => {
     // The positive twin of the 501 pin: a fresh adapter over the INSTALLED addon, a fresh
-    // server over that adapter, a temp store (the engine derives its knowledge sidecar from
-    // dbPath, so nothing here touches a real store). An empty rules store means the default
-    // corpus evaluates to gaps — an HONEST report, which is the product working.
+    // server over that adapter, a temp store. The knowledge db is NOT dbPath-derived — the
+    // engine defaults it to the operator's real `~/.wicked-estate/knowledge.db` (evals.rs
+    // `default_knowledge_db()`), so this import is hermetic ONLY because
+    // tests/setup/hermetic-home.ts arms WICKED_CREW_KNOWLEDGE_DB (crew#396) — asserted below.
+    // An empty rules store means the default corpus evaluates to gaps — an HONEST report,
+    // which is the product working.
+    const armedKnowledgeDb = process.env['WICKED_CREW_KNOWLEDGE_DB'];
+    expect(armedKnowledgeDb, 'hermetic-home.ts must arm WICKED_CREW_KNOWLEDGE_DB').toBeTruthy();
     expect(realEvalsSupported()).toBe(true);
     const dir2 = mkdtempSync(join(tmpdir(), 'testing-real-'));
     const bare = new CoreAdapter({ dbPath: join(dir2, 'core.db'), stub: true });
@@ -277,6 +282,14 @@ describe.runIf(EVALS_CAPABLE)('the real seam (installed wicked-core-ts carries t
         expect(typeof summary[k], `summary.${k}`).toBe('number');
       }
       expect('degraded' in report, 'degraded is always in-band').toBe(true);
+      // The import LANDED in the armed store, not the operator's real ~/.wicked-estate —
+      // the write half of the hermetic guarantee, provable because the path is ours.
+      expect(
+        existsSync(armedKnowledgeDb as string),
+        `the corpus import did not write the armed knowledge db (${armedKnowledgeDb}) — ` +
+          `if the adapter stopped honoring WICKED_CREW_KNOWLEDGE_DB it is writing the ` +
+          `operator's real ~/.wicked-estate/knowledge.db (crew#396)`,
+      ).toBe(true);
     } finally {
       await app2.close();
       bare.close();

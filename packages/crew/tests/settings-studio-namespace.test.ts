@@ -370,11 +370,14 @@ describe('PUT /settings engine keys validate as before (crew#323 regression guar
 // only the write path: `getSettings()` served a hand-edited 600KB blob in full, and because
 // `updateSettings()` reads through it, an unrelated patch rewrote all of it back to disk — so the
 // route could refuse to CREATE that state but not to PROPAGATE it, and the cap could never be
-// lowered. Driven against the real CoreAdapter with $HOME redirected, matching the harness in
-// settings-worker-root.test.ts: neither getSettings nor updateSettings touches engine state, so
-// calling them off the prototype avoids spawning a Core.
+// lowered. Driven against the real CoreAdapter with the settings file re-aimed per test
+// (WICKED_CREW_SYSTEM_SETTINGS), matching the harness in settings-worker-root.test.ts: neither
+// getSettings nor updateSettings touches engine state, so calling them off the prototype avoids
+// spawning a Core.
 describe('adapter getSettings enforces the studio.* cap on READ (crew#325)', () => {
-  const savedHome = process.env['HOME'];
+  // The harness arms WICKED_CREW_SYSTEM_SETTINGS per PROCESS (tests/setup/hermetic-home.ts);
+  // re-aim it per TEST so each case gets a fresh fixture file, and restore the armed value.
+  const savedSettings = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
   let fakeHome: string;
   // Typed off the helper rather than off `vi.spyOn` directly — the MockInstance type parameters
   // have changed shape across vitest majors, the inferred one never does.
@@ -383,19 +386,19 @@ describe('adapter getSettings enforces the studio.* cap on READ (crew#325)', () 
 
   beforeEach(() => {
     fakeHome = mkdtempSync(join(tmpdir(), 'studio-cap-home-'));
-    process.env['HOME'] = fakeHome; // os.homedir() honours $HOME on POSIX
+    process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(fakeHome, 'settings.json');
     warn = silenceWarn();
   });
 
   afterEach(() => {
     warn.mockRestore();
-    if (savedHome === undefined) delete process.env['HOME'];
-    else process.env['HOME'] = savedHome;
+    if (savedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+    else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = savedSettings;
     rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function writeSettings(content: unknown): void {
-    // settingsFilePath() reads $HOME at call time, which beforeEach points at the fixture.
+    // settingsFilePath() reads the env at call time, which beforeEach points at the fixture.
     const file = settingsFilePath();
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(content));

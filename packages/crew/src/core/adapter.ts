@@ -81,8 +81,18 @@ function workflowOverlayDir(): string {
 }
 
 /** Where the daemon persists system settings. Exported so tests write fixtures to the ONE
- *  spelling of this path (the tests/ tree is audited against spelling core paths itself). */
+ *  spelling of this path (the tests/ tree is audited against spelling core paths itself).
+ *
+ *  `WICKED_CREW_SYSTEM_SETTINGS` overrides the file — the same escape hatch
+ *  `WICKED_CREW_PROJECT_SETTINGS` gives the project-settings store (projects/settings.ts). The
+ *  test harness arms it (tests/setup/hermetic-home.ts) so the suite never reads the operator's
+ *  real `~/.config/wicked-core/settings.json` at `createServer` boot — where a real
+ *  `worker_config_root` would be exported as `WICKED_WORKER_HOME` into the hermetic env — and a
+ *  `PUT /settings` test never rewrites it (crew#396). Read at call time, not import time, so a
+ *  test may re-aim it per fixture. */
 export function settingsFilePath(): string {
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  if (override !== undefined && override !== '') return override;
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 
@@ -1890,6 +1900,22 @@ export class CoreAdapter {
   }
 
   /**
+   * `WICKED_CREW_KNOWLEDGE_DB` overrides the estate knowledge db the evals seams hand the
+   * engine — the same escape hatch `WICKED_CREW_SYSTEM_SETTINGS` gives {@link settingsFilePath}.
+   * Unset/empty (production) omits `knowledgeDb` from the args so the engine resolves its own
+   * default — which is `~/.wicked-estate/knowledge.db` (evals.rs `default_knowledge_db()`, HOME-
+   * derived), NOT a dbPath-derived sidecar. That home default is exactly why the test harness
+   * arms this seam (tests/setup/hermetic-home.ts): an un-armed corpus-import test writes
+   * `evals:` junk into the OPERATOR's real estate knowledge store — the store the mem/search
+   * domains answer from (crew#396). Read at call time, not construction time, so a test may
+   * re-aim it per fixture.
+   */
+  private static knowledgeDbOverride(): string | undefined {
+    const override = process.env['WICKED_CREW_KNOWLEDGE_DB'];
+    return override !== undefined && override !== '' ? override : undefined;
+  }
+
+  /**
    * Run the governance evals: every sample of the corpus (`corpus` = an `evals:<name>` estate
    * scope minted by {@link importGovernanceCorpus}; omitted = the engine's built-in default
    * corpus) is pushed through the decide path and compared to what its `kind` says SHOULD have
@@ -1898,9 +1924,8 @@ export class CoreAdapter {
    *
    * `dbPath` rides the args because the eval run opens its own read-only connection to the
    * steering store — the SAME store this adapter's actor writes (`this.dbPath`, the one spelling
-   * of where it lives). `knowledgeDb` is deliberately omitted: crew configures no separate
-   * knowledge db (the knowledge store is the engine's single-writer sidecar, derived from its
-   * own config exactly as the steering ingest path derives it).
+   * of where it lives). `knowledgeDb` is normally omitted so the engine resolves its own default
+   * (`~/.wicked-estate/knowledge.db`) — {@link knowledgeDbOverride} is the env escape hatch.
    *
    * Presence-gated (the campaigns doctrine): throws {@link GovernanceEvalsUnsupportedError} on
    * an addon that predates the binding, which the route maps to 501 ("upgrade the engine").
@@ -1910,9 +1935,11 @@ export class CoreAdapter {
     if (typeof fn !== 'function') {
       throw new GovernanceEvalsUnsupportedError('Running governance evals');
     }
+    const knowledgeDb = CoreAdapter.knowledgeDbOverride();
     const payload = {
       ...(args.type !== undefined ? { type: args.type } : {}),
       ...(args.corpus !== undefined ? { corpus: args.corpus } : {}),
+      ...(knowledgeDb !== undefined ? { knowledgeDb } : {}),
       dbPath: this.dbPath,
     };
     return parseEngineJson<GovernanceEvalReport>(
@@ -1923,8 +1950,9 @@ export class CoreAdapter {
 
   /**
    * Import a named eval corpus into the knowledge store under the `evals:<name>` scope (the
-   * string a later {@link runGovernanceEvals} names as `corpus`). `knowledgeDb` is omitted for
-   * the same reason as in {@link runGovernanceEvals} — the engine derives its own sidecar.
+   * string a later {@link runGovernanceEvals} names as `corpus`). `knowledgeDb` resolves the
+   * same way as in {@link runGovernanceEvals} — normally omitted (engine default:
+   * `~/.wicked-estate/knowledge.db`), {@link knowledgeDbOverride} wins when set.
    *
    * Gated on the `governanceEvals` sentinel as well as the binding itself: the two ship
    * together, and importing a corpus no engine on this host can ever run would be a trap, not
@@ -1938,8 +1966,12 @@ export class CoreAdapter {
     if (typeof this.core.governanceEvals !== 'function' || typeof importFn !== 'function') {
       throw new GovernanceEvalsUnsupportedError('Importing an eval corpus');
     }
+    const knowledgeDb = CoreAdapter.knowledgeDbOverride();
     return parseEngineJson<ImportEvalCorpusResponse>(
-      await importFn.call(this.core, JSON.stringify({ name, samples })),
+      await importFn.call(
+        this.core,
+        JSON.stringify({ name, samples, ...(knowledgeDb !== undefined ? { knowledgeDb } : {}) }),
+      ),
       'governanceCorpusImport',
     );
   }
