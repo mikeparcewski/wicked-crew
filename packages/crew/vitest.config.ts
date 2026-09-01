@@ -4,9 +4,13 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: false,
-    // Runs before every test file: redirects the workflow overlay dir away from the real
-    // ~/.config. See the file — the suite was writing into it.
-    setupFiles: ['./tests/setup/isolate-workflow-overlay.ts'],
+    // Run before every test file, before anything it imports:
+    //   hermetic-home           arms the engine/daemon env seams (emit outbox, worker home,
+    //                           system settings, audit log, project graphs) away from the
+    //                           operator's real home — crew#396. Guarded by
+    //                           tests/harness-hygiene.test.ts; do not remove.
+    //   isolate-workflow-overlay redirects the workflow overlay dir away from the real ~/.config.
+    setupFiles: ['./tests/setup/hermetic-home.ts', './tests/setup/isolate-workflow-overlay.ts'],
     testTimeout: 30000,
     hookTimeout: 15000,
     reporters: ['verbose'],

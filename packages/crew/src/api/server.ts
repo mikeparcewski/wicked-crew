@@ -284,8 +284,10 @@ export async function createServer(
   // Seat sign-in: export the persisted worker-config root as WICKED_WORKER_HOME at boot (the
   // PUT /settings route re-applies it on every change). The engine reads the env PER SPAWN
   // (acp_runner.rs claude_worker_home), so boot + on-change application is sufficient — no
-  // engine restart is ever needed. settings.json is the source of truth: unset/empty deletes
-  // the env, restoring the engine default ~/.wicked-worker.
+  // engine restart is ever needed. settings.json is the source of truth when it names a root;
+  // unset/empty restores the env this process booted with (an operator-exported
+  // WICKED_WORKER_HOME — or the test harness's hermetic arming, crew#396 — survives), falling
+  // back to the engine default ~/.wicked-worker when the process booted without one.
   applyWorkerConfigRoot((await adapter.getSettings()).worker_config_root);
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the

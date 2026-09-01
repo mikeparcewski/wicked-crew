@@ -81,8 +81,18 @@ function workflowOverlayDir(): string {
 }
 
 /** Where the daemon persists system settings. Exported so tests write fixtures to the ONE
- *  spelling of this path (the tests/ tree is audited against spelling core paths itself). */
+ *  spelling of this path (the tests/ tree is audited against spelling core paths itself).
+ *
+ *  `WICKED_CREW_SYSTEM_SETTINGS` overrides the file — the same escape hatch
+ *  `WICKED_CREW_PROJECT_SETTINGS` gives the project-settings store (projects/settings.ts). The
+ *  test harness arms it (tests/setup/hermetic-home.ts) so the suite never reads the operator's
+ *  real `~/.config/wicked-core/settings.json` at `createServer` boot — where a real
+ *  `worker_config_root` would be exported as `WICKED_WORKER_HOME` into the hermetic env — and a
+ *  `PUT /settings` test never rewrites it (crew#396). Read at call time, not import time, so a
+ *  test may re-aim it per fixture. */
 export function settingsFilePath(): string {
+  const override = process.env['WICKED_CREW_SYSTEM_SETTINGS'];
+  if (override !== undefined && override !== '') return override;
   return join(homedir(), '.config', 'wicked-core', 'settings.json');
 }
 

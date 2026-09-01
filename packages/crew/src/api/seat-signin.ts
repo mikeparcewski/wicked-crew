@@ -148,15 +148,37 @@ export function signedInHeuristic(
 }
 
 /**
+ * The `WICKED_WORKER_HOME` this process BOOTED with — captured at module load, before any
+ * settings application can rewrite it. This is what an unset/empty `worker_config_root` restores:
+ * an operator who exported the variable before starting the daemon keeps their choice (the engine
+ * would have honoured it had crew never touched the env), and the test harness's hermetic arming
+ * (tests/setup/hermetic-home.ts, crew#396) survives every `createServer` boot over an empty
+ * settings store — the unconditional delete this replaces re-aimed every subsequent worker spawn
+ * at the operator's REAL `~/.wicked-worker`.
+ */
+export const BOOT_WORKER_HOME: string | undefined = process.env['WICKED_WORKER_HOME'];
+
+/**
  * Apply the persisted `worker_config_root` setting to THIS process's environment. The engine
  * reads `WICKED_WORKER_HOME` per worker spawn (acp_runner.rs — never cached at engine start),
  * so calling this at daemon boot and again on every settings change is sufficient: the next
  * spawn sees the new root with no daemon or engine restart. `settings.json` is the source of
- * truth — unset/empty DELETES the env, restoring the engine default `~/.wicked-worker`.
+ * truth when it names a root; unset/empty restores the env this process booted with
+ * (`BOOT_WORKER_HOME`), falling back to deleting the variable (engine default
+ * `~/.wicked-worker`) when the process booted without one.
+ *
+ * `fallback` exists so a unit test can exercise the booted-without-one branch in a process whose
+ * baseline is armed; production callers never pass it. Pass `''` for "booted without one" — an
+ * explicit `undefined` re-selects the default parameter (JS semantics), it does not override it.
  */
-export function applyWorkerConfigRoot(root: string | undefined): void {
+export function applyWorkerConfigRoot(
+  root: string | undefined,
+  fallback: string | undefined = BOOT_WORKER_HOME,
+): void {
   if (typeof root === 'string' && root !== '') {
     process.env['WICKED_WORKER_HOME'] = root;
+  } else if (typeof fallback === 'string' && fallback !== '') {
+    process.env['WICKED_WORKER_HOME'] = fallback;
   } else {
     delete process.env['WICKED_WORKER_HOME'];
   }
