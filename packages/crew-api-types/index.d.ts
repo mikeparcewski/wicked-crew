@@ -2208,3 +2208,95 @@ export type CampaignEvent =
   | { type: 'campaignCompleted'; campaign: string }
   | { type: 'campaignFailed'; campaign: string }
   | { type: 'campaignCancelled'; campaign: string };
+
+// ── Diagnostics (api-types 0.16.0) ──────────────────────────────────────────────
+
+/**
+ * Component versions of the running deployment (`GET /diagnostics`). The honesty rule of the
+ * whole diagnostics surface: a version the daemon cannot determine is `null` — never guessed.
+ */
+export interface DiagnosticsComponents {
+  /** The wicked-crew daemon's own package version (always known). */
+  crew: string;
+  /** The bundled studio SPA's version, read from the manifest the bundle ships
+   *  (`testid-inventory.json` → `studioVersion`); `null` on a headless daemon or a bundle
+   *  that predates the manifest. */
+  studioBundle: string | null;
+  /** The installed `wicked-core-ts` engine binding's version; `null` when unresolvable. */
+  coreTs: string | null;
+  /** Engine binary versions via `--version`, keyed by binary name (`wicked-core`,
+   *  `wicked-estate`) — probed ONLY through paths crew already resolves (`WICKED_CORE_EXE`,
+   *  bare PATH name); `null` per binary when unresolved or the probe fails. */
+  engineBinaries: Record<string, string | null>;
+}
+
+/** Daemon process runtime facts (`GET /diagnostics`). */
+export interface DiagnosticsDaemon {
+  /** Milliseconds since this daemon process started. */
+  uptimeMs: number;
+  /** Epoch ms the process started (now − uptime). */
+  startedAt: number;
+  /** The actually-bound HTTP port (honours --port / CREW_PORT / port 0). */
+  port: number;
+}
+
+/** One store file (or dir, sized as a content total) under the daemon's state home. Paths and
+ *  sizes only — file contents never ride this wire. */
+export interface DiagnosticsStoreFile {
+  /** Filename relative to the state home (`core.db`, `core.db-wal`, `core.db.events`, …). */
+  name: string;
+  /** Absolute path. */
+  path: string;
+  /** File size, or the total of a directory's contents (the events dir). */
+  bytes: number;
+}
+
+/** One captured error-level line from the daemon's own log ring (`GET /diagnostics`). */
+export interface DiagnosticsRecentError {
+  /** Epoch ms the line was logged. */
+  ts: number;
+  /** Which record produced it (`daemon` = the in-process pino error ring). */
+  source: string;
+  /** The logged message, length-bounded. */
+  line: string;
+}
+
+/**
+ * Per-CLI ACP health, folded from the durable run event logs
+ * (`<state-home>/core.db.events/*.ndjson`, `acpSessionStarted` / `acpFallback` frames).
+ * A CLI that never appears in the logs has no key — absence spells "no ACP traffic recorded",
+ * and zero counts are never invented for it.
+ */
+export interface AcpCliDiagnostics {
+  /** Count of `acpSessionStarted` events for this cliKey. */
+  sessionsStarted: number;
+  /** Count of `acpFallback` events (ACP unavailable/failed; run continued single-shot). */
+  fallbacks: number;
+  /** Fallback counts by `fallbackKind` (`session_died`, `auth_required`, `binary_unavailable`, …). */
+  fallbackKinds: Record<string, number>;
+  /** Epoch ms of the newest `acpSessionStarted`, or `null` when none recorded. */
+  lastStartedTs: number | null;
+  /** Epoch ms of the newest `acpFallback`, or `null` when none recorded. */
+  lastFallbackTs: number | null;
+}
+
+/** The ACP fold of `GET /diagnostics` — keyed by `cliKey` (`claude`, `pi`, `codex`, …). */
+export interface AcpDiagnostics {
+  byCli: Record<string, AcpCliDiagnostics>;
+}
+
+/**
+ * `GET /diagnostics` (api-types 0.16.0) — the daemon's read-only self-knowledge surface:
+ * what is deployed, what it stores, what has gone wrong recently, and whether ACP is really
+ * working across the CLIs. Every field is derived from records the daemon already owns;
+ * anything it cannot answer is `null` / empty, never fabricated.
+ */
+export interface DiagnosticsResponse {
+  components: DiagnosticsComponents;
+  daemon: DiagnosticsDaemon;
+  /** `core.db` + sidecars + the events dir (as a total), sorted by name. */
+  stores: DiagnosticsStoreFile[];
+  /** Bounded tail of the daemon's own error-level log lines, newest first. */
+  recentErrors: DiagnosticsRecentError[];
+  acp: AcpDiagnostics;
+}
