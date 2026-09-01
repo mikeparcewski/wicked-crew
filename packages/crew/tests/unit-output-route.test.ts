@@ -148,6 +148,32 @@ describe('GET /runs/:id/units/:unitKey/output', () => {
     expect(reason).toContain('not retained');
   });
 
+  it('places the evidence pointer before the denial reason so it survives newline-based truncation', async () => {
+    // In production, denial_reason for a step failure carries core's bounded head+tail excerpt —
+    // a multiline string with an embedded '\n...\n' separator. Confirm the evidence URL lands
+    // before the first newline so a log reader or line-truncating UI never cuts it (crew#322).
+    const view = workflowRun();
+    view.units[2] = unit({
+      ord: 3,
+      id: `${RUN}:domain`,
+      status: 'rejected',
+      denial_reason: 'Worker FAILED on unit 3 (triage: nonzero exit): head excerpt\n...\ntail excerpt',
+    });
+    mockAdapter.sessionsDetail.mockResolvedValue([view]);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/units/domain/output` });
+    const reason = res.json<{ outputUnavailable: string }>().outputUnavailable;
+    const evidenceIdx = reason.indexOf('/evidence');
+    const firstNewline = reason.indexOf('\n');
+    expect(evidenceIdx).toBeGreaterThan(-1);
+    // The evidence pointer must appear before the first newline in the message.
+    if (firstNewline !== -1) {
+      expect(evidenceIdx, 'evidence URL was cut by a newline in denial_reason').toBeLessThan(firstNewline);
+    }
+    // Both head and tail excerpts must still appear in full.
+    expect(reason).toContain('head excerpt');
+    expect(reason).toContain('tail excerpt');
+  });
+
   it('distinguishes "has not run yet" from "was denied"', async () => {
     const view = workflowRun();
     view.units[2] = unit({ ord: 3, id: `${RUN}:domain`, status: 'pending' });

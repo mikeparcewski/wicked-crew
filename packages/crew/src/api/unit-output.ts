@@ -92,12 +92,18 @@ export function outputUnavailableReason(unit: WorkUnit): string {
     // deny AND a worker step failure — and only `denial_reason` distinguishes them (core prefixes
     // it "Governance DENIED unit N …" or "Worker FAILED on unit N (triage: …)"). Naming one cause
     // for both would be this endpoint committing the FINDING-050 error while fixing FINDING-006.
+    //
+    // `${where}` is placed BEFORE `${why}` (crew#322): a step-failure denial_reason carries
+    // core's bounded head+tail excerpt, which contains embedded newlines. Any line-based
+    // consumer (log forwarder, UI card, shell head -1) that stops at the first newline would
+    // silently drop everything after it — including the evidence pointer. Putting the pointer
+    // first guarantees it survives regardless of how long or how multi-line denial_reason is.
     return (
       `Unit ${unit.ord} was REJECTED, so wicked-core stored no transcript for it: a work_output ` +
       `record is written only for a unit whose phase resolved approved, and this one's did not. ` +
       `That is the deny-dominates rule holding, not a lost or unreadable record — and the text ` +
       `the unit streamed is not retained anywhere else, so this is the whole of what survives. ` +
-      `Why it was rejected: ${why}. ${where}`
+      `${where} Why it was rejected: ${why}`
     );
   }
 
