@@ -377,7 +377,10 @@ export interface GateInfo {
   receivedAt: string;
 }
 
-/** Approve / reject payload for the steering gate (`POST /runs/:id/gate`). */
+/** Approve / reject payload for the steering gate (`POST /runs/:id/gate`). On a
+ *  `steering-author` propose gate, an approve — amend note or not — also LANDS the proposal
+ *  into the rules store and the 200 body carries a {@link SteeringLandingResult}; the amend
+ *  steers the RUN's continuation, never the landed rule text (crew#388). */
 export interface GateDecision {
   approve: boolean;
   amend?: string;
@@ -1045,8 +1048,9 @@ export interface SteeringImportResponse {
  * authoring run (the `steering-author` workflow) that analyzes the named files/directories plus
  * the operator's intent and emits PROPOSED steering rules at a human gate (the TH-12
  * propose-as-gate pattern): the run PAUSES `awaiting_human` after the propose phase, and the
- * operator approves/amends/rejects through the standard `POST /runs/:id/gate`. Approved rules
- * land via the rules CRUD with `provenance.source: "chat"` — the run itself writes nothing.
+ * operator approves/amends/rejects through the standard `POST /runs/:id/gate`. On APPROVE the
+ * daemon lands the proposal into the rules store with `provenance.source: "chat"` and the gate
+ * response carries a {@link SteeringLandingResult} — the run itself writes nothing to any store.
  */
 export interface SteeringAuthorBody {
   /** The operator's conversational intent — what steering to author, and why. */
@@ -1061,6 +1065,33 @@ export interface SteeringAuthorBody {
   repoRef?: string;
   /** Stable run id; minted when omitted. */
   sessionId?: string;
+}
+
+/** Where a landed steering proposal was read from, most-preferred first: the propose phase's
+ *  machine-readable artifact file, the propose unit's stored transcript, the cached gate prompt. */
+export type SteeringProposalSource = 'deliverable' | 'transcript' | 'gate-prompt';
+
+/**
+ * The `landing` field on the `POST /runs/:id/gate` (and gated `POST /runs/:id/resume`) 200 body
+ * — present ONLY when the approved gate was a `steering-author` propose gate (crew#388). It is
+ * how the skin learns the approved chat proposal actually reached the rules store — or, loudly,
+ * that it did not: on `failed` the run still advanced (the approve stands) but `error` carries
+ * the operator-readable reason, mirrored on the audit trail as
+ * `governance.steering.landing_failed`. Landed rules are audited per rule as
+ * `governance.rule.upserted` with the chat provenance. Idempotent: a replayed approve reports
+ * `alreadyLanded: true` and re-lands nothing. An approve WITH an amend note lands the proposal
+ * UNCHANGED — the amend steers the RUN, not the rule text. A reject lands nothing.
+ */
+export interface SteeringLandingResult {
+  outcome: 'landed' | 'failed';
+  /** Rule ids actually upserted (all of them on `landed`; the partial set on a partial `failed`). */
+  ruleIds: string[];
+  /** Where the proposal was read from. Absent when no source yielded one. */
+  source?: SteeringProposalSource;
+  /** `true` when a replayed approve found the durable landing marker — nothing was re-landed. */
+  alreadyLanded?: boolean;
+  /** Present iff `outcome: "failed"` — the loud, operator-readable reason. */
+  error?: string;
 }
 
 // ── Governance wiki management (scoreboard + meta) ─────────────────────────────

@@ -139,6 +139,15 @@ export function steeringInboxDir(runId: string): string {
   return join(home, '.wicked', 'steering-inbox', runId);
 }
 
+/**
+ * The propose phase's machine-readable artifact (crew#388): the file — inside
+ * {@link steeringInboxDir} — the workflow tells the worker to write the proposed-rules JSON
+ * array to, and the FIRST place the post-approval landing (`api/steering-landing.ts`) reads.
+ * One spelling, exported: the author route composes it into the problem statement, the landing
+ * derives the same path from the run id.
+ */
+export const STEERING_PROPOSAL_FILENAME = 'proposed-rules.json';
+
 export interface SteeringRoutesDeps {
   audit: AuditLog;
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
@@ -222,7 +231,9 @@ export function registerGovernanceSteeringRoutes(
   // propose phase: TH-12 propose-as-gate), inline documents land in the per-run steering inbox
   // (the run reads the daemon host's filesystem — the existing run file mechanism), and the
   // operator answers the proposal through the standard POST /runs/:id/gate. Approved rules land
-  // via POST /governance/rules with `provenance.source: "chat"` — the run itself writes nothing.
+  // CREW-SIDE on that approve — the gate handler performs the store write with
+  // `provenance.source: "chat"` (see `api/steering-landing.ts`, crew#388); the run itself
+  // writes nothing to any store, only its proposal artifact in the inbox.
   //
   // Gated on the steering engine too, on purpose: the run only PROPOSES, but proposing rules
   // whose steering fields the CRUD would then refuse (501) is a trap, not a feature.
@@ -291,23 +302,31 @@ export function registerGovernanceSteeringRoutes(
         }
       }
       const runId = b.sessionId ?? randomUUID();
+      // The inbox exists for EVERY authoring run (not only ones with inline documents): it is
+      // also where the propose phase writes its machine-readable proposal (crew#388 — the file
+      // the post-approval landing reads), and it rides the launch as the run's extra write root.
+      const dir = steeringInboxDir(runId);
+      await fsp.mkdir(dir, { recursive: true });
       // Inline documents → per-run inbox files; only their PATHS ride the problem statement
       // (content in the prompt would fatten it past what prompt transports tolerate).
       const docPaths: string[] = [];
-      if (b.documents !== undefined && b.documents.length > 0) {
-        const dir = steeringInboxDir(runId);
-        await fsp.mkdir(dir, { recursive: true });
-        for (const [i, doc] of b.documents.entries()) {
-          // basename + charset scrub: the caller's `name` is display text, never a path. The
-          // index prefix keeps scrubbed names collision-free and the filename non-empty.
-          const safe = `${i}-${basename(doc.name).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-          const target = join(dir, safe);
-          await fsp.writeFile(target, doc.content, 'utf8');
-          docPaths.push(target);
-        }
+      for (const [i, doc] of (b.documents ?? []).entries()) {
+        // basename + charset scrub: the caller's `name` is display text, never a path. The
+        // index prefix keeps scrubbed names collision-free and the filename non-empty.
+        const safe = `${i}-${basename(doc.name).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const target = join(dir, safe);
+        await fsp.writeFile(target, doc.content, 'utf8');
+        docPaths.push(target);
       }
       const type = b.type ?? DEFAULT_STEERING_TYPE;
       const sources = [...(b.paths ?? []), ...docPaths];
+      // The per-run proposal artifact (crew#388): the propose phase writes the proposed-rules
+      // JSON here (its instructions name "the absolute proposal file path in the problem
+      // statement"), and the gate handler's landing reads THIS file first — machine-readable by
+      // design, with transcript parsing only as the fallback. The path is per-run and inside
+      // the inbox the launch declares as an extra write root, so the write is governed and the
+      // run still writes NOTHING to any store (evaluator≠creator).
+      const proposalPath = join(dir, STEERING_PROPOSAL_FILENAME);
       const problem = [
         `Author steering rules for the '${type}' steering type (use it as the default steering_type for every proposed rule without a better fit).`,
         '',
@@ -316,6 +335,8 @@ export function registerGovernanceSteeringRoutes(
         ...(sources.length > 0
           ? ['', 'Analyze these files/directories on this machine:', ...sources.map((s) => `- ${s}`)]
           : []),
+        '',
+        `Proposal file (for the propose phase): write the proposed rules JSON array to exactly this absolute path: ${proposalPath}`,
       ].join('\n');
       try {
         await adapter.launchRun({
@@ -323,6 +344,10 @@ export function registerGovernanceSteeringRoutes(
           sessionId: runId,
           clisJson: JSON.stringify(deps.roster()),
           workflow: 'steering-author',
+          // The proposal artifact lands in the per-run inbox, which sits OUTSIDE any unit
+          // sandbox/worktree — without this declaration the engine's boundary denies the one
+          // file the landing is designed to read (the crew#263 shape).
+          extraWriteRoots: [dir],
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
         });
         // The same trail entry POST /runs writes — this IS a run launch, findable by the same

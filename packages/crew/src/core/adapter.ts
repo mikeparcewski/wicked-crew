@@ -522,8 +522,13 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // PROPOSED steering rules and its unconditional human gate pauses the run `awaiting_human`
     // (core evaluates a terminal phase's own gate before finalize — seam finding #4), so the
     // operator approves/amends/rejects via the standard POST /runs/:id/gate. Approved rules land
-    // through the governed rules CRUD with `provenance.source: "chat"` — the run itself must
-    // never write the store, which is why both phases say so out loud.
+    // CREW-SIDE on that approve: the gate handler writes them through the governed rules seam
+    // with `provenance.source: "chat"` (api/steering-landing.ts, crew#388) — the run itself must
+    // never write the store, which is why both phases say so out loud. What the propose phase
+    // DOES write is its machine-readable proposal ARTIFACT — the proposed-rules JSON at the
+    // absolute path the problem statement names, inside the run's own steering inbox (declared
+    // as the launch's extra write root) — because parsing the proposal out of prose transcript
+    // is a fallback, not a design (the landing reads the file first).
     //
     // Crew-authored drop-in (like `chat`): NOT in CORE_SEEDED_WORKFLOWS, so launchRun's
     // `_writeBuiltinOverlay` write is the only way core resolves the id — the same delivery
@@ -532,7 +537,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     is_system: true,
     phases: [
       { id: 'analyze', kind: 'recon', instructions: 'Read the operator intent and every file or directory listed in the problem statement. Identify candidate steering rules: durable, prescriptive statements a coding agent must follow, each classified into one steering type (architecture, development, security, testing, operations, compliance, design-ux). For each candidate note the statement, steering type, severity, and the evidence in the source material. Analysis only — do not write any rule to any store, and do not emit final rule JSON yet.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (0..1), targets, steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to, excludes, weight, effect, trigger, obligations, criteria. This output is a PROPOSAL for the human gate: rules land in the store only after approval, via the governance rules API — do not write them yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'propose', kind: 'recon', instructions: 'From the prior analysis, emit the PROPOSED steering rules as one JSON array. Each entry is a conformance-rule object: id (PAT-<digits> for rule_type "pattern", POL-<digits> for "policy"), rule_type, statement, severity (info|warn|error|critical), confidence (0..1), targets, steering_type (default to the type named in the problem statement), provenance {"source":"chat"}, and — only where the source material supports them — the enforcement fields applies_to, excludes, weight, effect, trigger, obligations, criteria. SAVE that JSON array (bare array, no prose, no code fences) to the absolute proposal file path named in the problem statement (create parent directories if needed, overwrite if present), AND include the same array in your reply for the human reviewer. This output is a PROPOSAL for the human gate: the proposal file is an artifact for review, and rules land in the governance store only after approval, written crew-side — do not write any rule to any store yourself.', gate_type: 'value', gate: { human_confirm: { unconditional: true } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
   {

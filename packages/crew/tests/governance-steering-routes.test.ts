@@ -421,6 +421,13 @@ describe('POST /api/v1/governance/steering/author — "add with chat" as a gover
     expect(launch.problem).toContain("'operations' steering type");
     expect(launch.problem).toContain('Codify the deploy-freeze rules');
     expect(launch.problem).toContain(`- ${dir}`);
+    // The landing contract (crew#388): the problem names the per-run machine-readable proposal
+    // file, and the launch declares the inbox as the run's extra write root so the propose phase
+    // may actually write it — the file the gate handler's landing reads FIRST.
+    const inbox = steeringInboxDir('steer-run-1');
+    expect(launch.problem).toContain(join(inbox, 'proposed-rules.json'));
+    expect(launch.extraWriteRoots).toEqual([inbox]);
+    expect(existsSync(inbox)).toBe(true); // created for every authoring run, documents or not
   });
 
   it('writes inline documents into the per-run steering inbox and names their PATHS in the problem', async () => {
