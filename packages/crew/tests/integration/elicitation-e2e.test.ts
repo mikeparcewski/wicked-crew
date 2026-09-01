@@ -285,6 +285,18 @@ describe('ACP elicitation end-to-end (real engine + scripted agent)', () => {
     expect(after.status).toBe(200);
   });
 
+  it('a syntactically invalid JSON body is the CLIENT error (400, never 500) and the prompt stands', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/elicitation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{not json',
+    });
+    expect(res.status).toBe(400);
+
+    const after = await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/elicitation`);
+    expect(after.status).toBe(200);
+  });
+
   it('the human answer routes back to the agent and the run completes', async () => {
     const current = (await (await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/elicitation`)).json()) as {
       elicitationId: string;
