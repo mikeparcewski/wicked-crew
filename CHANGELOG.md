@@ -10,6 +10,21 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recon siblings pause at their intake gates** (#391): every `POST /testing/recon` launch —
+  fan, single, unscoped — now carries `human_confirm: before:1` (the launch banner's promise)
+  instead of silently launching unattended; `ungated: true` is the explicit, audited opt-out
+  (api-types 0.17.0).
+- **Recon fan-outs are real engine campaigns** (#390): a launch over ≥ 2 resolved repos
+  registers a `CampaignDef` (one governed node per repo, `continue_independent`, fan-width
+  concurrency) and files its runs under it, so `GET /campaigns` and the studio dashboard serve
+  the fan with real per-node stats; `runIds` become the nodes' attempt-0 run ids and the
+  response says `campaignRegistered`. `projectId` filing rides the daemon (one `crew.run`
+  membership per sibling). Includes a daemon-side workaround (`campaigns/worktrees.ts`) for the
+  engine defect where repo-scoped campaign nodes fail at dispatch because `wicked/{run_id}` is
+  not a legal git branch name for a `{campaign}:{node}:a{attempt}` run id.
+
 ## [0.7.8] — 2026-09-01
 
 ### Changed

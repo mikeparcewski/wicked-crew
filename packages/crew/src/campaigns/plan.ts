@@ -197,6 +197,120 @@ export function fanScenarios(scenarios: CampaignScenario[], repos: FanRepo[]): F
   return { scenarios: out, runOrder };
 }
 
+// ── The recon fan-out's campaign (crew#390/#391) ─────────────────────────────────────────────
+//
+// `POST /testing/recon` over ≥ 2 resolved repos used to launch N independent runs under a
+// LABEL-ONLY campaign — invisible to `GET /campaigns` (crew#390) and, worse, launched with
+// `human_confirm: none` while the launch banner promised a per-sibling intake gate (crew#391).
+// This builder converges the fan with the campaign-launch path: ONE engine `CampaignDef` whose
+// nodes are the siblings, so the engine schedules, persists, and reports the fan like any other
+// campaign, and every sibling carries the gate the banner advertises.
+
+/** The intake gate every recon sibling pauses at (engine serde shape of `HumanConfirm::Before(1)`):
+ *  pause before unit 1 — the plan is on the table, nothing has run. The same posture as the
+ *  studio composer's shipped default (`before:1` on the launch wire). */
+export const RECON_INTAKE_GATE = { before: 1 } as const;
+
+/** The `LaunchRunInput.humanConfirm` wire token for the same gate — the per-run fan path
+ *  (single repo / unscoped / no campaign bindings) must pause at the identical seam. */
+export const RECON_INTAKE_GATE_TOKEN = 'before:1';
+
+export interface ReconCampaignInput {
+  /** Campaign id = the shared recon label (`recon-<ts36>-<hex8>` — {@link SAFE_ID}-safe by
+   *  construction, and what `TestingReconResponse.campaign` already carries). */
+  id: string;
+  /** The operator's brief, VERBATIM — each sibling node's Run decomposes exactly this, the same
+   *  text the per-run fan passed to `launchRun`. Deliberately NOT held to the 1022-byte inline
+   *  rule: that rule stops scenario BODIES being smuggled into argv/label slots, whereas this IS
+   *  the run's problem statement — the same field a plain `POST /runs` launch carries uncapped. */
+  problem: string;
+  /** The resolved fan targets, in the caller's resolved order (≥ 2 — a smaller scope stays on
+   *  the per-run path so the single-repo/unscoped recon keeps today's shape). */
+  repos: FanRepo[];
+  /** The parsed council roster every sibling convenes. */
+  clis: unknown[];
+  /** `true` = the caller EXPLICITLY asked for an unattended fan (`ungated: true` on the wire —
+   *  never a silent default): nodes carry no gate. `false` = the intake gate per sibling. */
+  ungated: boolean;
+}
+
+/** A built recon fan: the engine def plus the attempt-0 node run ids in repo order — the
+ *  `runIds` the route answers with (`{campaign}:{node}:a0`, the engine's documented scheme). */
+export interface ReconCampaign {
+  def: CampaignDef;
+  runIds: string[];
+}
+
+/** One repo's node id: the repo NAME squeezed into the {@link SAFE_ID} alphabet (readable in
+ *  run ids and on the campaign detail), deduped by repo position when two names collide. */
+function reconNodeId(name: string, index: number, taken: Set<string>): string {
+  const base =
+    name
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^[^a-zA-Z0-9]+/, '')
+      .slice(0, 40) || `r${index + 1}`;
+  const id = taken.has(base) ? `${base}-r${index + 1}` : base;
+  taken.add(id);
+  return id;
+}
+
+/**
+ * Build the recon fan-out's `CampaignDef`: one AGENT node per resolved repo — no edges (siblings
+ * are independent, exactly as the per-run fan launched them), `continue_independent` (one honest
+ * failure never cancels the others), and `max_concurrency` = the fan width capped at 64 (the
+ * per-run fan launched everything at once; the campaign must not silently serialize it, but an
+ * unbounded fan must not exhaust the host either). Each node's
+ * run_spec carries the caller's brief, the shared roster, its repo, and — unless the caller
+ * explicitly said `ungated` — the {@link RECON_INTAKE_GATE}.
+ *
+ * Throws a plain `Error` (the route's 500 — the inputs are daemon-resolved, not caller text)
+ * when called with fewer than 2 repos or a label that breaks the campaign-id rule.
+ */
+export function buildReconCampaign(input: ReconCampaignInput): ReconCampaign {
+  if (input.repos.length < 2) {
+    throw new Error(
+      `buildReconCampaign needs at least 2 resolved repos (got ${input.repos.length}) — ` +
+        'a single-repo or unscoped recon stays on the per-run launch path',
+    );
+  }
+  if (!SAFE_ID.test(input.id) || input.id.length > MAX_CAMPAIGN_ID) {
+    throw new Error(`recon campaign label '${input.id}' breaks the campaign-id rule`);
+  }
+  const taken = new Set<string>();
+  const nodes: CampaignNode[] = [];
+  const runIds: string[] = [];
+  for (const [i, repo] of input.repos.entries()) {
+    const nodeId = reconNodeId(repo.name, i, taken);
+    nodes.push({
+      node_id: nodeId,
+      run_spec: {
+        problem: input.problem,
+        clis: input.clis,
+        entity_mode: 'shared',
+        // Absent = the engine's `HumanConfirm::None` — the EXPLICITLY requested unattended fan.
+        ...(input.ungated ? {} : { human_confirm: RECON_INTAKE_GATE }),
+        repo_ref: repo.id,
+      },
+    });
+    runIds.push(`${input.id}:${nodeId}:a0`);
+  }
+  // The campaign NAME is the brief's first line (what the dashboard card shows), the label as
+  // the fallback for an all-whitespace first line.
+  const firstLine = input.problem.split('\n', 1)[0]!.trim();
+  const name = firstLine === '' ? input.id : firstLine.slice(0, 140);
+  return {
+    def: {
+      id: input.id,
+      name,
+      nodes,
+      edges: [],
+      policy: 'continue_independent',
+      max_concurrency: Math.min(input.repos.length, 64),
+    },
+    runIds,
+  };
+}
+
 /** Throw with the scenario + token named when an inline string breaks the single-line /
  *  byte-ceiling rule. One spelling of the rule for both scenario shapes. */
 function assertInline(scenarioId: string, what: string, value: string): void {

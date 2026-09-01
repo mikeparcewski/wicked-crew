@@ -156,9 +156,23 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
 
-// Multiscope responses (api-types 0.15.0) — the recon trigger's fan receipt and the campaign
-// launch's additive `runIds`: what the routes construct must satisfy the published shapes.
-respondsWith<Wire.TestingReconResponse, { runId: string; runIds: string[]; campaign: string }>();
+// Multiscope responses (api-types 0.15.0; 0.17.0 grew `campaignRegistered` + the optional
+// `projectAttachError`) — the recon trigger's fan receipt and the campaign launch's additive
+// `runIds`: what the routes construct must satisfy the published shapes.
+respondsWith<
+  Wire.TestingReconResponse,
+  { runId: string; runIds: string[]; campaign: string; campaignRegistered: boolean }
+>();
+respondsWith<
+  Wire.TestingReconResponse,
+  {
+    runId: string;
+    runIds: string[];
+    campaign: string;
+    campaignRegistered: boolean;
+    projectAttachError: string;
+  }
+>();
 respondsWith<Wire.LaunchCampaignResponse, { campaignId: string; runIds: string[] }>();
 respondsWith<Wire.LaunchCampaignResponse, { campaignId: string }>();
 

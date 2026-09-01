@@ -1302,24 +1302,42 @@ export interface ImportEvalCorpusResponse {
  * Testing page sent before this wire existed, unchanged.
  *
  * One engine run carries ONE repo, so a multi-repo recon FANS: one governed run per resolved
- * repo, all under one shared campaign label (`TestingReconResponse.campaign`).
+ * repo, all under one shared campaign label (`TestingReconResponse.campaign`) — and a real fan
+ * (>= 2 repos) registers an ENGINE campaign under that same id, so `GET /campaigns` serves it
+ * (api-types 0.17.0, crew#390).
+ *
+ * Every launched sibling pauses at its INTAKE GATE (`human_confirm: before:1` — the launch
+ * banner's promise) by default; `ungated: true` is the EXPLICIT opt-out for an unattended fan
+ * (api-types 0.17.0, crew#391). It is never the silent default, and it is audited.
  */
 export interface TestingReconBody {
   problem: string;
   projectId?: string;
   repoRefs?: string[];
+  /** EXPLICITLY launch the siblings unattended (no intake gate). Default `false`: each sibling
+   *  pauses at its intake gate before any unit runs. */
+  ungated?: boolean;
 }
 
 /**
  * The `POST /testing/recon` 201 body. `runIds` is the source of truth (`length >= 1` always —
  * one run per resolved repo in the caller's order; exactly one for an unscoped recon); `runId`
  * is its first entry, kept as the single-run spelling existing launch readers expect;
- * `campaign` is the shared label every fanned run's `run.launched` audit entry carries.
+ * `campaign` is the shared label every fanned run's `run.launched` audit entry carries — and,
+ * when `campaignRegistered` is `true`, the id of the ENGINE campaign the fan was filed under
+ * (`GET /campaigns/:id` serves it; the `runIds` are its nodes' attempt-0 run ids,
+ * `{campaign}:{node}:a0`). `campaignRegistered: false` = a single/unscoped recon, or an engine
+ * addon without the campaign bindings — the launch will NOT appear on `GET /campaigns`.
  */
 export interface TestingReconResponse {
   runId: string;
   runIds: string[];
   campaign: string;
+  /** Whether an engine campaign was registered for this launch (api-types 0.17.0). */
+  campaignRegistered: boolean;
+  /** Present only when the fan was campaign-registered with a `projectId` and filing a sibling
+   *  into the project failed — the runs are LIVE; re-attach via POST /projects/:id/members. */
+  projectAttachError?: string;
 }
 
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
