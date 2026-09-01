@@ -1255,6 +1255,24 @@ export class CoreAdapter {
   }
 
   /**
+   * Recycle the CURSOR unit of an Executing run (crew#341; wicked-core-ts ≥ 0.7.6): the engine
+   * supersedes the stale turn (cancels its epoch — never folded as a step failure), closes the
+   * worker session, bumps the attempt, and re-dispatches. Queued operator injects survive into
+   * the fresh turn. `newCli` set = re-dispatch to that seat (pass the unit's CURRENT seat to
+   * recycle in place); absent/null = the engine re-runs the council and lets it pick.
+   *
+   * REJECTS (engine-validated) when the run is unknown, not Executing, or `ord` is not the
+   * cursor unit — the caller must treat that as "the run moved on", not retry blindly.
+   * Fail-closed on an old addon: method-presence guard, same doctrine as `injectWorkerMessage`.
+   */
+  async reassignUnit(runId: string, ord: number, newCli?: string | null): Promise<void> {
+    if (typeof this.core.reassignUnit !== 'function') {
+      throw new Error('Unit reassignment needs wicked-core-ts >= 0.7.6; this build does not support it');
+    }
+    await this.core.reassignUnit(runId, ord, newCli ?? null);
+  }
+
+  /**
    * A run's recorded event history, oldest first — or `null` when this wicked-core build has no
    * event-log read binding.
    *
@@ -2225,6 +2243,32 @@ export class CoreAdapter {
         const v = parsed.workerStallMinutes;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 1440) {
           delete parsed.workerStallMinutes;
+        }
+      }
+      // workerStallEscalateMinutes (crew#341): 0 = escalation OFF (the default), else the same
+      // integer-minutes bounds the PUT /settings route enforces. A hand-edited invalid value
+      // must fall back to OFF — this knob lets the platform TOUCH runs, so garbage reads as
+      // "disarmed", never as "escalate on every sweep".
+      if ('workerStallEscalateMinutes' in parsed) {
+        const v = parsed.workerStallEscalateMinutes;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 1440) {
+          delete parsed.workerStallEscalateMinutes;
+        }
+      }
+      // workerStallEscalateAction (crew#341): 'reassign' | 'notify' only — same values the PUT
+      // route admits. Anything else falls back to the default ('reassign', applied where the
+      // watchdog resolves its config) rather than becoming an unparseable third action.
+      if ('workerStallEscalateAction' in parsed) {
+        const a = parsed.workerStallEscalateAction;
+        if (a !== 'reassign' && a !== 'notify') delete parsed.workerStallEscalateAction;
+      }
+      // workerStallMaxEscalations (crew#341): integer 1..10 — same bounds as the PUT route. A
+      // hand-edited zero would silently disarm recovery while claiming it armed; a huge value
+      // would let the watchdog churn a deterministically-wedging worker for hours.
+      if ('workerStallMaxEscalations' in parsed) {
+        const v = parsed.workerStallMaxEscalations;
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 10) {
+          delete parsed.workerStallMaxEscalations;
         }
       }
       // worker_config_root (seat sign-in): absolute path or "" (= engine default). A hand-edited

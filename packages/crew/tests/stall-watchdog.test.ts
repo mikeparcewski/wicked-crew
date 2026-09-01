@@ -13,6 +13,7 @@ import {
   DEFAULT_SWEEP_INTERVAL_MS,
   WorkerStallWatchdog,
   type ExecutingRun,
+  type WorkerStallEscalatedFrame,
   type WorkerStalledFrame,
 } from '../src/api/stall-watchdog.js';
 import { DEFAULT_WORKER_STALL_MINUTES } from '../src/core/types.js';
@@ -31,12 +32,14 @@ function build(opts?: {
   listExecuting?: () => Promise<ExecutingRun[]>;
 }): {
   wd: WorkerStallWatchdog;
-  frames: WorkerStalledFrame[];
+  // The union is the broadcast seam's type; with NO escalation dep wired (this file's whole
+  // point — the crew#287 behaviour must be bit-for-bit unchanged) only detection frames arrive.
+  frames: (WorkerStalledFrame | WorkerStallEscalatedFrame)[];
   logs: string[];
   tick: (ms: number) => void;
 } {
   let nowMs = Date.parse('2026-08-19T10:00:00Z');
-  const frames: WorkerStalledFrame[] = [];
+  const frames: (WorkerStalledFrame | WorkerStallEscalatedFrame)[] = [];
   const logs: string[] = [];
   const runs = opts?.runs ?? [{ id: 'r-stall', ord: 3 }];
   const wd = new WorkerStallWatchdog({

@@ -12,6 +12,18 @@ mentioned only where a daemon release depends on them.
 
 ### Added
 
+- **Stall-watchdog escalation ladder** (crew#341, api-types 0.18.0): detection now drives
+  recovery — notify (always) → act (opt-in) → fail loud. OFF by default: setting
+  `workerStallEscalateMinutes` (`PUT /settings`, integer minutes, `0`/absent = off) arms the
+  second stage, and a run still silent past it gets ONE action per quiet period —
+  `workerStallEscalateAction: 'reassign'` (default: recycle the wedged cursor unit in place via
+  the engine's `reassignUnit`; the stale turn is superseded, never folded as a failure, and the
+  unit re-dispatched to its own seat) or `'notify'` (surface loudly, touch nothing).
+  `workerStallMaxEscalations` (default 2) budgets automatic reassigns per run; a spent budget
+  answers `outcome: 'exhausted'` instead of more recovery. Every escalation rides a new
+  `workerStallEscalated` /ws frame (`needsYou: true` exactly when a human should look) and is
+  audited as `run.stall.escalated` under the system `stall-watchdog` actor. The crew#287
+  detection knob (`workerStallMinutes`) and `WorkerStalledFrame` join the published contract.
 - **The delivery contract** (#393, api-types 0.18.0): a completed code run ends with a
   reviewable deliverable or an explicit, visible decision not to.
   - `POST /runs` `deliver` accepts `'pr' | 'none'`; OMITTED now DEFAULTS to `'pr'` for a

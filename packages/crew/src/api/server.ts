@@ -226,13 +226,22 @@ export interface CreateServerOptions {
     timeoutMs?: number;
   };
   /**
-   * The worker stall watchdog (crew#287): DETECTION ONLY. For every run whose engine status is
-   * `executing`, the daemon tracks the last CoreEvent observed on its own relay (any frame for
-   * that run, `unitOutputDelta` included); silence past `workerStallMinutes` (setting, default
-   * 15) broadcasts ONE synthetic `{ type: "workerStalled", session, ord?, quietForMs }` frame
-   * on /ws per quiet period and logs at warn. Any new event re-arms. The run is never killed
-   * or mutated — the operator decides. `enabled` defaults to ON in the daemon and OFF under a
-   * test runner (VITEST / NODE_ENV=test), the seat-health-probe posture.
+   * The worker stall watchdog (crew#287 detection + crew#341 escalation). For every run whose
+   * engine status is `executing`, the daemon tracks the last CoreEvent observed on its own
+   * relay (any frame for that run, `unitOutputDelta` included); silence past
+   * `workerStallMinutes` (setting, default 15) broadcasts ONE synthetic
+   * `{ type: "workerStalled", session, ord?, quietForMs }` frame on /ws per quiet period and
+   * logs at warn. Any new event re-arms. Detection never touches the run.
+   *
+   * ESCALATION (crew#341) is OPT-IN and OFF by default: when `workerStallEscalateMinutes`
+   * (setting, or the `escalateMinutes` override) is > 0, a run still silent past that
+   * threshold gets one action per quiet period — `reassign` (default: recycle the wedged
+   * cursor unit in place via the engine's `reassignUnit`, budgeted per run by
+   * `workerStallMaxEscalations`) or `notify` (fail-loud `needsYou` frame, run untouched) —
+   * each reported on a `workerStallEscalated` /ws frame and audited as `run.stall.escalated`.
+   *
+   * `enabled` defaults to ON in the daemon and OFF under a test runner (VITEST /
+   * NODE_ENV=test), the seat-health-probe posture.
    */
   stallWatchdog?: {
     enabled?: boolean;
@@ -240,6 +249,12 @@ export interface CreateServerOptions {
     sweepIntervalMs?: number;
     /** Threshold override, minutes — bypasses the settings read (tests). */
     stallMinutes?: number;
+    /** Escalation-threshold override, minutes — bypasses the settings read (tests). */
+    escalateMinutes?: number;
+    /** Escalation-action override — bypasses the settings read (tests). */
+    escalateAction?: 'reassign' | 'notify';
+    /** Per-run automatic-reassign budget override — bypasses the settings read (tests). */
+    maxEscalations?: number;
   };
 }
 
@@ -675,20 +690,63 @@ export async function createServer(
     }
   }
 
-  // The worker stall watchdog (crew#287). Built BEFORE the single CoreEvent subscription below
-  // so every relayed frame stamps its run's liveness clock; armed (sweep interval) further down
-  // beside the seat-health probe, under the same test-runner gate. Detection only: its sole
-  // outputs are one synthetic `workerStalled` /ws frame per quiet period and a warn log.
+  // The worker stall watchdog (crew#287 detection + crew#341 escalation). Built BEFORE the
+  // single CoreEvent subscription below so every relayed frame stamps its run's liveness clock;
+  // armed (sweep interval) further down beside the seat-health probe, under the same
+  // test-runner gate. Detection's sole outputs are one synthetic `workerStalled` /ws frame per
+  // quiet period and a warn log; the escalation stage (OFF unless `workerStallEscalateMinutes`
+  // > 0) additionally recycles the wedged cursor unit in place (`adapter.reassignUnit`) or
+  // fail-louds, reports on a `workerStallEscalated` frame, and audits `run.stall.escalated`.
   const stallWatchdog = new WorkerStallWatchdog({
     listExecuting: async () =>
       (await adapter.sessionsDetail())
         .filter((v) => v.session.status === 'executing')
-        .map((v) => ({ id: v.session.id, ord: v.session.unit_ix })),
+        .map((v) => {
+          // The CURSOR unit, resolved exactly the way the engine resolves it (`session_units`
+          // sorts by ord, then indexes `unit_ix`): its `ord` is what `reassignUnit` validates
+          // against, and its seat is what reassign-in-place re-dispatches to. Views with no
+          // units (older engines, stub adapters) keep the historical `unit_ix` fallback.
+          const cursor = [...v.units].sort((a, b) => a.ord - b.ord)[v.session.unit_ix];
+          return {
+            id: v.session.id,
+            ord: cursor?.ord ?? v.session.unit_ix,
+            ...(cursor?.assigned_cli != null ? { cli: cursor.assigned_cli } : {}),
+          };
+        }),
     broadcast: (frame) => broadcast(frame),
     stallMinutes: async () =>
       options?.stallWatchdog?.stallMinutes ??
       (await adapter.getSettings()).workerStallMinutes ??
       DEFAULT_WORKER_STALL_MINUTES,
+    escalation: {
+      // Resolved per sweep so a PUT /settings change arms/disarms/retunes live. Test overrides
+      // bypass the settings read field-by-field, same convention as `stallMinutes` above.
+      config: async () => {
+        const o = options?.stallWatchdog;
+        const settings = await adapter.getSettings();
+        return {
+          minutes: o?.escalateMinutes ?? settings.workerStallEscalateMinutes,
+          action: o?.escalateAction ?? settings.workerStallEscalateAction,
+          maxPerRun: o?.maxEscalations ?? settings.workerStallMaxEscalations,
+        };
+      },
+      // Reassign IN PLACE: the watchdog passes the cursor unit's current seat, so the engine
+      // re-dispatches to the same CLI rather than re-running the council mid-wedge.
+      reassign: async (runId, ord, cli) => {
+        await adapter.reassignUnit(runId, ord, cli ?? null);
+      },
+      // An automated actor touching a run is a privileged action exactly like an operator
+      // doing it — one audit line per escalation, needs-you or not (task #88 posture).
+      audit: (frame) => {
+        const { type, session, ...detail } = frame;
+        void type; // the audit `action` names the event; the tag would only duplicate it
+        audit.record(
+          'run.stall.escalated',
+          { id: 'stall-watchdog', kind: 'system', trust: 'admin' },
+          { runId: session, detail },
+        );
+      },
+    },
     log: (m) => app.log.warn(m),
   });
 
