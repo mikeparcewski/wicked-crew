@@ -10,6 +10,23 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-09-01
+
+### Added
+
+- **Testing launches take a project and multiple codebases** (#382): `POST /testing/recon` and
+  the campaign launch accept `{projectId, repoRefs}` — explicit refs validated by name, project
+  membership resolved server-side, unions deduped; multi-repo launches fan one run per repo
+  under one campaign label with additive `runIds`. Legacy single-repo bodies unchanged.
+- **`GET /api/v1/diagnostics`** (#383): the daemon's self-knowledge — component versions,
+  uptime, store sizes, a bounded error tail, and per-CLI ACP health folded from the durable run
+  event logs (sessions started / fallbacks by kind / last seen). api-types 0.16.0.
+
+### Changed
+
+- Bundled `wicked-studio` `^0.4.7` — command surfaces on every section, the assist dock, Ask,
+  and the steering usage band.
+
 ## [0.7.6] — 2026-09-01
 
 ### Changed
