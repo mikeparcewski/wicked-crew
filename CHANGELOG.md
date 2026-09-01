@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-09-01
+
+### Changed
+
+- Bundled `wicked-studio` `^0.4.6` — the section command surfaces (Projects / project home /
+  Make as full-width dashboards with honest KPI deltas, filters, and a needs-you-first action
+  layer) and the condensed run header (Timeline/Units behind Inspect; +79px of feed).
+
 ## [0.7.5] — 2026-08-31
 
 ### Changed
