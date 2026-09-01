@@ -80,6 +80,15 @@ describe('hermetic env arming (tests/setup/hermetic-home.ts)', () => {
     expectArmed('WICKED_CREW_PROJECT_GRAPH_ROOT', join(homedir(), '.wicked-crew'));
   });
 
+  it('the evals knowledge db is armed away from the real ~/.wicked-estate', () => {
+    // The engine's evals seams default `knowledgeDb` to `~/.wicked-estate/knowledge.db`
+    // (evals.rs `default_knowledge_db()` — HOME-derived, NOT a dbPath sidecar), and crew's
+    // adapter omits the arg in production. Un-armed, testing-routes' real-seam corpus import
+    // writes `evals:` junk into the OPERATOR's real estate knowledge store — the store the
+    // mem/search domains answer from (crew#396).
+    expectArmed('WICKED_CREW_KNOWLEDGE_DB', join(homedir(), '.wicked-estate'));
+  });
+
   it('the setup file is registered in vitest.config.ts (the arming has no other entry point)', () => {
     const config = readFileSync(join(PKG_ROOT, 'vitest.config.ts'), 'utf8');
     expect(
@@ -141,8 +150,27 @@ describe('the daemon boot unset window (applyWorkerConfigRoot, crew#396)', () =>
 /** How much source to inspect after a spawn-ish call before deciding what it passes. */
 const WINDOW = 500;
 
-/** Fewest spawn sites the scan must find before its verdict means anything (currently ~9). */
-const MIN_SPAWN_SITES = 5;
+/** Fewest spawn sites the scan must find before its verdict means anything (currently ~30). */
+const MIN_SPAWN_SITES = 15;
+
+/**
+ * The child-process call tokens the scan inspects — the async AND sync spellings, because this
+ * suite idiomatically uses both (`spawnSync` in deliverable-floor, `execFileSync` in a dozen
+ * files); a new test written by imitation picks whichever it saw last. `allowMember` admits
+ * `cp.spawnSync(`-style member calls (a namespace import of node:child_process drops the arming
+ * exactly as hard as a named import); it stays OFF for `exec(` so `db.exec(` / `regex.exec(` —
+ * other APIs entirely — don't false-positive. (`cp.exec(` is the one residual blind spot that
+ * buys; every other spelling of a child-process call is covered.)
+ */
+const SPAWN_CALLS: ReadonlyArray<{ token: string; allowMember: boolean }> = [
+  { token: 'spawn(', allowMember: true },
+  { token: 'fork(', allowMember: true },
+  { token: 'execFile(', allowMember: true },
+  { token: 'spawnSync(', allowMember: true },
+  { token: 'execFileSync(', allowMember: true },
+  { token: 'execSync(', allowMember: true },
+  { token: 'exec(', allowMember: false },
+];
 
 function testSourcesUnder(dir: string): string[] {
   const out: string[] = [];
@@ -171,20 +199,29 @@ describe('test-spawned children keep the hermetic env (source scan)', () => {
     for (const path of sources) {
       const src = readFileSync(path, 'utf8');
       const file = relative(PKG_ROOT, path);
-      // Bare-identifier child_process calls only (`spawn(`, `fork(`, `execFile(`) — the way this
-      // suite invokes them. Member calls like `regex.exec(` or `pool.spawn(` are other APIs, and
-      // identifier tails like `respawn(` are not calls to these; both are excluded by requiring a
-      // non-word, non-dot character before the match.
-      for (const call of ['spawn(', 'fork(', 'execFile(']) {
+      // Identifier tails like `respawn(` are not calls to these — excluded by requiring a
+      // non-word character before the match. Member calls are per-token (SPAWN_CALLS above).
+      for (const { token: call, allowMember } of SPAWN_CALLS) {
         for (let idx = src.indexOf(call); idx !== -1; idx = src.indexOf(call, idx + 1)) {
           const before = idx === 0 ? ' ' : src[idx - 1]!;
-          if (/[\w.$]/.test(before)) continue;
+          if (/[\w$]/.test(before)) continue;
+          if (before === '.' && !allowMember) continue;
           spawnSites += 1;
           const window = src.slice(idx, idx + WINDOW);
-          if (!window.includes('env:')) continue; // inherits the parent env — armed by setup
+          // `env:` passes a custom env inline; shorthand `{ env }` / `, env,` passes one built
+          // elsewhere in the file (the engine-link-verification idiom). Neither present → the
+          // child inherits the parent env, which setup armed.
+          const inlineEnv = window.includes('env:');
+          const shorthandEnv = !inlineEnv && /[{,]\s*env\s*[,}]/.test(window);
+          if (!inlineEnv && !shorthandEnv) continue;
+          // Inline: the object literal is in the window — judge the window. Shorthand: the
+          // variable's construction is usually ABOVE the call, outside the forward window — judge
+          // the whole file. (A file mixing one armed and one stripped custom env can slip the
+          // file-level check; the runtime home-hygiene gate still catches what it writes.)
+          const scope = inlineEnv ? window : src;
           const keepsArming =
-            window.includes('...process.env') ||
-            (window.includes('WICKED_APPS_EMIT_DEADLETTER') && window.includes('WICKED_WORKER_HOME'));
+            scope.includes('...process.env') ||
+            (scope.includes('WICKED_APPS_EMIT_DEADLETTER') && scope.includes('WICKED_WORKER_HOME'));
           if (!keepsArming) {
             const line = src.slice(0, idx).split('\n').length;
             stripped.push(`${file}:${line}`);

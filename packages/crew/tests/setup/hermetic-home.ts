@@ -35,6 +35,14 @@
 //   WICKED_CREW_PROJECT_GRAPH_ROOT projects/graph-paths.ts `projectGraphRoot()` (createServer-based
 //                                 tests never call `setProjectGraphStateHome`, so they'd fall
 //                                 through to `~/.wicked-crew/project-graphs`)
+//   WICKED_CREW_KNOWLEDGE_DB      core/adapter.ts `knowledgeDbOverride()` — the estate knowledge
+//                                 db the evals seams hand the engine. Un-armed, the engine
+//                                 resolves `~/.wicked-estate/knowledge.db` (evals.rs
+//                                 `default_knowledge_db()` is HOME-derived, NOT a dbPath
+//                                 sidecar), so testing-routes' real-seam corpus import wrote
+//                                 `evals:` junk into the OPERATOR's real estate knowledge store
+//                                 — the store the mem/search domains answer from (observed:
+//                                 knowledge.db + -shm + -wal created in a fake-$HOME probe).
 //
 // `applyWorkerConfigRoot` (api/seat-signin.ts) restores the value armed here — the process's
 // boot-time env — whenever the settings store has no `worker_config_root`, so a daemon booted over
@@ -79,3 +87,4 @@ process.env['WICKED_BUS_DATA_DIR'] = join(base, 'wicked-bus');
 process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(base, 'wicked-core-settings.json');
 process.env['WICKED_CREW_AUDIT_LOG'] = join(base, 'audit.log');
 process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(base, 'project-graphs');
+process.env['WICKED_CREW_KNOWLEDGE_DB'] = join(base, 'knowledge.db');
