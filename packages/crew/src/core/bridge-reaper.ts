@@ -32,6 +32,13 @@
  *    until the CLI finishes. See `bridge.mjs`. That half covers our own bridges even
  *    when the daemon dies too hard (SIGKILL) for this module to run at all.
  *
+ * A third concern joined in crew#340: `kill -9` on a BRIDGE reparents its in-flight
+ * worker CLI (`claude`, `codex`, …) to init — invisible to both halves above — and the
+ * orphan keeps the engine-minted shared worker config home busy, wedging subsequent
+ * `session/new` handshakes until the daemon restarts. The orphan sweeps below (one at
+ * boot, one periodic while the daemon lives) reap those under a conservative triple
+ * gate: ppid == 1, a token-boundary command match, and a cwd inside a run worktree.
+ *
  * # Why a process-table sweep rather than tracked pids alone
  *
  * The spawn happens inside the engine (the native actor thread), which reports no pid
@@ -58,6 +65,19 @@ export const BRIDGE_BINS: readonly string[] = [
   'pi-acp',
 ];
 
+/**
+ * The worker CLIs those bridges spawn as their OWN children — grandchildren of the daemon.
+ *
+ * `kill -9` on a bridge (crew#340) orphans its in-flight CLI child to init, where the
+ * ppid-filtered direct-child sweep can never see it. The orphan keeps running under the
+ * engine-minted shared worker config home (`~/.wicked-worker/<cli>`), which subsequent
+ * `session/new` handshakes contend on — the evidenced "ACP wedged until daemon restart"
+ * failure. These tokens identify exactly those orphans under the SAME conservative triple
+ * gate as orphaned bridges: ppid == 1, a token-boundary command match, AND a cwd inside an
+ * engine run worktree — an operator's own `claude`/`codex` never runs from one of those.
+ */
+export const WORKER_CLI_BINS: readonly string[] = ['agy', 'claude', 'codex', 'pi'];
+
 /** How long a SIGTERM'd bridge gets to exit before the SIGKILL escalation. */
 export const BRIDGE_KILL_GRACE_MS = 2000;
 
@@ -82,6 +102,13 @@ function bridgeTokenRe(bin: string): RegExp {
 
 /** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */
 const BRIDGE_TOKEN_RES: readonly RegExp[] = BRIDGE_BINS.map((bin) => bridgeTokenRe(bin));
+
+/** Bridges ∪ worker CLIs — the full set of engine-descended run processes the ORPHAN sweeps
+ *  match. The direct-child shutdown sweep stays bridges-only: worker CLIs are grandchildren
+ *  by construction, and a `claude` that IS our direct child is the operator's own business. */
+const ORPHAN_TOKEN_RES: readonly RegExp[] = [...BRIDGE_BINS, ...WORKER_CLI_BINS].map((bin) =>
+  bridgeTokenRe(bin),
+);
 
 export function parseBridgeChildren(listing: string, parentPid: number): number[] {
   const pids: number[] = [];
@@ -138,13 +165,16 @@ export function discoverBridgeChildren(parentPid: number = process.pid): number[
 }
 
 /**
- * Pids of bridge processes ORPHANED by a previous daemon generation: reparented to
- * init (ppid 1). Deliberately conservative — a bridge owned by another LIVE daemon
- * still has that daemon as its parent and is never matched, so a boot sweep cannot
- * shoot a neighbour's workers (#285, Copilot review: shutdown-only reaping leaves
- * pre-existing orphans alive forever).
+ * Pids of engine-descended run processes ORPHANED to init (ppid 1): bridges left behind
+ * by a previous daemon generation (#285), AND worker CLIs left behind by a bridge that
+ * died too hard to reap its own child — `kill -9` on the bridge reparents its in-flight
+ * `claude`/`codex`/… to init, where it clings to the shared worker config home until
+ * something reaps it (crew#340). Deliberately conservative — a process owned by another
+ * LIVE daemon (or bridge) still has that parent and is never matched, so neither the boot
+ * sweep nor the periodic sweep can shoot a neighbour's workers (#285, Copilot review:
+ * shutdown-only reaping leaves pre-existing orphans alive forever).
  */
-export function parseOrphanedBridges(listing: string): number[] {
+export function parseOrphanedRunProcesses(listing: string): number[] {
   const pids: number[] = [];
   for (const line of listing.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
@@ -153,7 +183,7 @@ export function parseOrphanedBridges(listing: string): number[] {
     const ppid = Number(m[2]);
     const command = m[3] as string;
     if (ppid !== 1 || pid === process.pid) continue;
-    if (BRIDGE_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
+    if (ORPHAN_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
   }
   return pids;
 }
@@ -181,13 +211,14 @@ function pidRunsInRunWorktree(pid: number): boolean {
 }
 
 /**
- * Boot-time sweep: SIGTERM orphaned bridges from a prior daemon generation — ppid 1
- * AND cwd inside a run worktree, so user-started bridges are never matched.
+ * Boot-time sweep: SIGTERM orphaned bridges from a prior daemon generation AND orphaned
+ * worker CLIs from any bridge that died too hard to reap them — ppid 1 AND cwd inside a
+ * run worktree, so user-started processes are never matched.
  */
 export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
-  const listing = listProcesses();
+  const listing = (io.list ?? listProcesses)();
   if (listing === null) return [];
-  const orphans = parseOrphanedBridges(listing).filter(
+  const orphans = parseOrphanedRunProcesses(listing).filter(
     (pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid),
   );
   const reaped: number[] = [];
@@ -202,14 +233,101 @@ export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
   return reaped;
 }
 
+// ── Periodic orphan sweep (crew#340) ─────────────────────────────────────────────
+//
+// The boot sweep only helps the NEXT daemon generation. The crew#340 wedge happens while
+// this daemon lives: `kill -9` on a bridge mid-run orphans its worker CLI immediately, and
+// that orphan keeps the engine-minted shared worker config home busy — the next
+// `session/new` contends on it until something reaps the orphan or the daemon restarts.
+// So the daemon keeps sweeping, on an unref'd timer, with the SAME conservative triple
+// gate as the boot sweep (ppid 1 + token match + cwd inside a run worktree).
+
+/** How often the live daemon re-scans for orphaned run processes. */
+export const ORPHAN_SWEEP_DEFAULT_MS = 30_000;
+
+/** The sweep interval: `WICKED_CREW_ORPHAN_SWEEP_SECS` (0 disables), else 30s. */
+export function orphanSweepMs(raw: string | undefined = process.env['WICKED_CREW_ORPHAN_SWEEP_SECS']): number {
+  if (raw === undefined || raw === '') return ORPHAN_SWEEP_DEFAULT_MS;
+  const secs = Number(raw);
+  if (!Number.isFinite(secs) || secs < 0) return ORPHAN_SWEEP_DEFAULT_MS;
+  return secs * 1000;
+}
+
+/**
+ * One sweep tick. `pendingKill` carries the pids SIGTERMed on a previous tick: one that is
+ * STILL in the table now ignored its SIGTERM for a whole interval and gets SIGKILL — the
+ * same escalation `shutdown()` runs, at sweep-interval granularity. Exported for tests.
+ */
+export function sweepOrphanedRunProcesses(
+  pendingKill: Set<number>,
+  io: BridgeReaperIo = {},
+): { terminated: number[]; killed: number[] } {
+  const listing = (io.list ?? listProcesses)();
+  if (listing === null) return { terminated: [], killed: [] };
+  const alive = new Set(
+    parseOrphanedRunProcesses(listing).filter(
+      (pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid),
+    ),
+  );
+  const kill = io.kill ?? process.kill;
+  const terminated: number[] = [];
+  const killed: number[] = [];
+  for (const pid of [...pendingKill]) {
+    pendingKill.delete(pid); // one escalation per pid — never a SIGKILL loop
+    if (!alive.has(pid)) continue; // exited during the grace interval
+    alive.delete(pid); // never SIGTERM what was just SIGKILLed
+    try {
+      kill(pid, 'SIGKILL');
+      killed.push(pid);
+    } catch {
+      // ESRCH / EPERM: fail open.
+    }
+  }
+  for (const pid of alive) {
+    try {
+      kill(pid, 'SIGTERM');
+      terminated.push(pid);
+      pendingKill.add(pid);
+    } catch {
+      // ESRCH / EPERM: fail open.
+    }
+  }
+  return { terminated, killed };
+}
+
+/**
+ * Start the periodic orphan sweep. Returns a stop function. The timer is unref'd — it
+ * must never hold an exiting daemon open — and each reap is logged LOUDLY with the pids
+ * and the issue that motivated it, so an operator can connect a recovered wedge to what
+ * was reaped.
+ */
+export function startOrphanSweep(intervalMs: number = orphanSweepMs(), io: BridgeReaperIo = {}): () => void {
+  if (intervalMs <= 0) return () => {};
+  const pendingKill = new Set<number>();
+  const timer = setInterval(() => {
+    const { terminated, killed } = sweepOrphanedRunProcesses(pendingKill, io);
+    if (terminated.length > 0 || killed.length > 0) {
+      const killNote = killed.length > 0 ? `; SIGKILLed unresponsive: ${killed.join(', ')}` : '';
+      console.warn(
+        `[bridge-reaper] reaped orphaned worker/bridge process(es) (crew#340): ` +
+          `SIGTERMed ${terminated.join(', ') || '(none)'}${killNote}`,
+      );
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 /** Injectable seams so the reaper is testable without signalling real bridges. */
 export interface BridgeReaperIo {
   /** Signal sender; must throw like `process.kill` (ESRCH when the pid is gone). */
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   /** Bridge-child discovery; defaults to the process-table sweep above. */
   discover?: (parentPid: number) => number[];
-  /** Boot-sweep worktree-cwd discriminator; injectable so tests avoid real lsof. */
+  /** Orphan-sweep worktree-cwd discriminator; injectable so tests avoid real lsof. */
   cwdInWorktree?: (pid: number) => boolean;
+  /** Orphan-sweep process listing (`pid ppid command` lines); defaults to the real table. */
+  list?: () => string | null;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
 }
