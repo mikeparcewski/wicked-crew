@@ -343,4 +343,35 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     expect((res.json() as { error: string }).error).toContain('worktree is gone');
     expect(execCalls()).toBe(0);
   });
+
+  it('500 when the script never reached its own verdict (spawn failure / timeout kill) — an infra fault, not a 409 refusal', async () => {
+    const fx = fixture();
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })]),
+      sessions: vi.fn(async () => [RUN_ID]),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    registerRoutes(
+      app,
+      mockAdapter,
+      new GateCache(),
+      new ElicitationCache(),
+      new QeGateCache(),
+      { bus: null, index: new MembershipIndex(), log: () => undefined },
+      { audit: AuditLog.noop(), authMode: 'off' },
+      {
+        deliveryIndex: new DeliveryIndex(),
+        // What runDeliverScript resolves for a timeout kill or ENOENT: non-zero, marked.
+        deliverExec: async () => ({ status: 1, output: 'spawn bash ENOENT', spawnFailure: true }),
+      },
+    );
+    apps.push(app);
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    expect(res.statusCode).toBe(500);
+    const err = (res.json() as { error: string }).error;
+    expect(err).toContain('could not run to completion');
+    expect(err).toContain('ENOENT');
+  });
 });

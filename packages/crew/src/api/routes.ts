@@ -1029,6 +1029,13 @@ export function registerRoutes(
       } finally {
         deliverInFlight.delete(id);
       }
+      if (result.spawnFailure === true) {
+        // The script never reached its own verdict (spawn failure, timeout kill) — an infra
+        // fault, not a refusal: 500 so the caller knows a retry is reasonable.
+        return reply.code(500).send({
+          error: `deliver script could not run to completion: ${deliverErrorTail(result.output)}`,
+        });
+      }
       if (result.status !== 0) {
         // The script's own words (crew#317's rule: never silent, never masked) — it names
         // exactly what it refused (rebase conflict, nothing to deliver, gh's error) and

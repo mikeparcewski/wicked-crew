@@ -26,6 +26,9 @@ export interface DeliverScriptResult {
   status: number;
   /** stdout + stderr, chronological (the script folds stderr into stdout itself: `exec 2>&1`). */
   output: string;
+  /** True when the SCRIPT never ran to its own verdict — a spawn failure (ENOENT) or the
+   *  timeout kill. The route answers 500 (infra fault, retryable), never the refusal 409. */
+  spawnFailure?: boolean;
 }
 
 /** The exec seam the deliver route runs the script through — injectable so route tests can
@@ -67,12 +70,14 @@ export function runDeliverScript(
           resolve({ status: 0, output });
           return;
         }
-        const code = (err as { code?: unknown }).code;
-        // A non-numeric code is a spawn-level failure (ENOENT, a timeout kill): surface the
-        // error's own message in the output so the caller's 4xx/5xx is never blank.
+        const { code, killed } = err as { code?: unknown; killed?: boolean };
+        // A non-numeric code (ENOENT) or a kill (the timeout) means the script never reached
+        // its own verdict — mark it so the route answers 500, not the script-refusal 409.
+        // Surface the error's own message in the output so the response is never blank.
         resolve({
           status: typeof code === 'number' ? code : 1,
           output: output !== '' ? output : (err as Error).message,
+          spawnFailure: typeof code !== 'number' || killed === true,
         });
       },
     );
