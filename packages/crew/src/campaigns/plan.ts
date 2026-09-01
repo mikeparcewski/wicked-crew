@@ -130,7 +130,10 @@ export function fanScenarios(scenarios: CampaignScenario[], repos: FanRepo[]): F
       scenarios: scenarios.map((s) =>
         s.repoRef === undefined ? { ...s, repoRef: repo.id } : s,
       ),
-      runOrder: scenarios.map((s) => s.id),
+      // The SAME documented order the multi-repo fan answers with — fanned scenarios first
+      // (one repo ⇒ repo-major degenerates to input order), then the pinned ones — so a
+      // consumer mapping `runIds` to lanes never needs a repo-count special case.
+      runOrder: [...fanned.map((s) => s.id), ...scenarios.filter((s) => pinnedIds.has(s.id)).map((s) => s.id)],
     };
   }
 

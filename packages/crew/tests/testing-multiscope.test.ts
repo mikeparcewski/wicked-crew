@@ -210,7 +210,7 @@ describe('POST /testing/recon', () => {
     expect((res.body['runIds'] as string[])).toHaveLength(2);
   });
 
-  it('BOTH ⇒ the union, deduped, explicit repoRefs order first', async () => {
+  it('BOTH ⇒ the union, deduped, explicit repoRefs order first — THREE engine launches, ONE label', async () => {
     const res = await post('/api/v1/testing/recon', {
       problem: 'union scope',
       repoRefs: ['repo-gamma', 'repo-beta'],
@@ -219,6 +219,16 @@ describe('POST /testing/recon', () => {
     expect(res.status).toBe(201);
     // gamma + beta (explicit, in order), then alpha from the project; beta NOT repeated.
     expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-gamma', 'repo-beta', 'repo-alpha']);
+    expect(res.body['runIds']).toEqual(runLaunches.map((l) => l.sessionId));
+    // All THREE fanned runs share the ONE campaign label on their trail entries.
+    const campaign = res.body['campaign'] as string;
+    const entries = await reconAuditEntries(campaign, 3);
+    expect(entries).toHaveLength(3);
+    expect(entries.map((e) => (e.detail as Record<string, unknown>)['repoRef'])).toEqual([
+      'repo-gamma',
+      'repo-beta',
+      'repo-alpha',
+    ]);
   });
 
   it('404s an unknown project, naming it', async () => {
@@ -347,6 +357,24 @@ describe('POST /campaigns multiscope', () => {
     expect(res.body['runIds']).toEqual(['camp-one:a:a0', 'camp-one:b:a0']);
   });
 
+  it('ONE repo + a pinned scenario keeps the documented runIds order: fanned first, then pinned', async () => {
+    const res = await post('/api/v1/campaigns', {
+      id: 'camp-one-pin',
+      scenarios: [
+        { id: 'report', repoRef: 'repo-gamma', tool: { cmd: ['node', '/specs/r.mjs'] } },
+        { id: 'scan', tool: { cmd: ['node', '/specs/scan.mjs'] } },
+      ],
+      repoRefs: ['repo-alpha'],
+    });
+    expect(res.status).toBe(201);
+    const def = campaignLaunch!.def;
+    // Node ids unchanged, the unpinned scenario assigned the launch repo, the pin kept.
+    const repoOf = Object.fromEntries(def.nodes.map((n) => [n.node_id, n.run_spec.repo_ref]));
+    expect(repoOf).toEqual({ report: 'repo-gamma', scan: 'repo-alpha' });
+    // Same order rule as the multi-repo fan (no repo-count special case for consumers).
+    expect(res.body['runIds']).toEqual(['camp-one-pin:scan:a0', 'camp-one-pin:report:a0']);
+  });
+
   it('a scenario’s own repoRef PINS it: never fanned, and fanned deps wait for every lane', async () => {
     const res = await post('/api/v1/campaigns', {
       id: 'camp-pin',
@@ -377,12 +405,23 @@ describe('POST /campaigns multiscope', () => {
       id: 'camp-proj',
       scenarios: [{ id: 'a', tool: { cmd: ['node', '/specs/a.mjs'] } }],
       projectId: 'proj-two',
-      repoRefs: ['repo-beta'],
+      repoRefs: ['repo-gamma', 'repo-beta'],
     });
     expect(res.status).toBe(201);
     const def = campaignLaunch!.def;
-    // beta (explicit) first, then alpha from the project — beta not repeated.
-    expect(def.nodes.map((n) => n.run_spec.repo_ref)).toEqual(['repo-beta', 'repo-alpha']);
+    // THREE repos ⇒ THREE nodes inside ONE campaign def (the campaign IS the shared label):
+    // gamma + beta (explicit, in order), then alpha from the project — beta not repeated.
+    expect(def.id).toBe('camp-proj');
+    expect(def.nodes.map((n) => n.run_spec.repo_ref)).toEqual([
+      'repo-gamma',
+      'repo-beta',
+      'repo-alpha',
+    ]);
+    expect(res.body['runIds']).toEqual([
+      'camp-proj:a--r1:a0',
+      'camp-proj:a--r2:a0',
+      'camp-proj:a--r3:a0',
+    ]);
   });
 
   it('404s an unknown project / 400s an empty one, nothing launched', async () => {
