@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.17.0",
+  "apiTypesVersion": "0.18.0",
   "endpoints": [
     {
       "method": "GET",
@@ -564,6 +564,18 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/:id/deliver",
+      "requestType": null,
+      "responseType": "DeliverRunResult",
+      "statusCodes": [
+        200,
+        404,
+        409,
+        500
+      ]
     },
     {
       "method": "GET",

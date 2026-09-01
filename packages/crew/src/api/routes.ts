@@ -55,7 +55,8 @@ import {
 } from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
 import { GuidanceIndex } from './guidance-index.js';
-import { DeliveryIndex } from './delivery-index.js';
+import { DeliveryIndex, deliveryStateOf, prUrlFrom } from './delivery-index.js';
+import { runDeliverScript, type DeliverExec } from './post-hoc-deliver.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
@@ -183,14 +184,18 @@ export const LaunchSchema = z.object({
    *  the launch record. Unknown/archived ⇒ the launch fails (never a silent unfiled run). */
   projectId: z.string().min(1).optional(),
   /** crew#293 — `"pr"` appends the hardened deliver Tool phase (push run branch + `gh pr create`)
-   *  to a PER-RUN copy of the selected workflow. Requires `workflow` (enforced by the refine
-   *  below, so the 400 happens at parse time, not after the adapter is consulted). */
-  deliver: z.literal('pr').optional(),
+   *  to a PER-RUN copy of the selected workflow; requires `workflow` (enforced by the refine
+   *  below, so the 400 happens at parse time, not after the adapter is consulted). crew#393 —
+   *  `"none"` explicitly declines delivery (legal with or without a workflow); OMITTED means the
+   *  daemon decides: repo-scoped + a CODE-WORK workflow (a def with an `executes_code` phase)
+   *  defaults to `"pr"` (flippable via the `deliverDefault` setting), everything else to
+   *  `"none"` — see the resolution below. */
+  deliver: z.enum(['pr', 'none']).optional(),
   /** DES-UX-001 §8.3 (CREW-UX-3) — the run this launch retries. Must name an EXISTING run id
    *  (the route checks the store and 400s with a named error otherwise); persisted via the
    *  `run.launched` audit entry + retry index and echoed as `AgentSession.retry_of`. */
   retryOf: z.string().min(1).optional(),
-}).strict().refine((b) => b.deliver === undefined || b.workflow !== undefined, {
+}).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
 });
@@ -281,6 +286,14 @@ export interface RuntimeDeps {
    *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
    *  fresh one. */
   deliveryIndex?: DeliveryIndex;
+  /** The worktree-presence probe behind the `'stranded'` derivation (crew#393) — one stat per
+   *  served repo-scoped completed run. Injectable so route tests pin the derivation without
+   *  staging directories; defaults to `fs.existsSync`. */
+  worktreeExists?: (path: string) => boolean;
+  /** The post-hoc deliver exec (crew#393, `POST /runs/:id/deliver`) — spawns the hardened
+   *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
+   *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
+  deliverExec?: DeliverExec;
   openWithOs?: (target: string) => Promise<void>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
@@ -329,11 +342,16 @@ export function registerRoutes(
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
+  const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
+  const deliverExec = runtime.deliverExec ?? runDeliverScript;
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
-  // `retry_of` from the lineage index, `guidance` from the guidance index, and `delivery`
-  // from the delivery index (CREW-UX-8, crew#321), each set only when known (absent, never
-  // null, spells "not a retry" / "no note" / "delivered nothing").
+  // `retry_of` from the lineage index and `guidance` from the guidance index, each set only
+  // when known (absent, never null, spells "not a retry" / "no note"). `delivery` (crew#393,
+  // api-types 0.18.0) is DERIVED on every served run — delivered from the index (CREW-UX-8's
+  // durable record), stranded from the run record + a worktree stat, none otherwise — so a
+  // completed code run whose work is sitting unlifted in its worktree is VISIBLE on the wire,
+  // legacy records included.
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
   const decorateRun = (view: SessionView): SessionView => {
@@ -342,8 +360,13 @@ export function registerRoutes(
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
-    const delivery = deliveryIndex.deliveryFor(view.session.id);
-    if (delivery !== undefined) view.session.delivery = delivery;
+    const state = deliveryStateOf(
+      view.session,
+      deliveryIndex.urlFor(view.session.id),
+      worktreeExists,
+    );
+    view.session.delivery = state.delivery;
+    if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
@@ -757,7 +780,41 @@ export function registerRoutes(
         `run ${input.sessionId}: ${decision.reason}`,
       );
     }
-    if (b.deliver !== undefined) input.deliver = b.deliver;
+    // The delivery contract (crew#393): a completed code run must end with a reviewable
+    // deliverable, or an explicit, recorded decision not to. So the deliver option is resolved
+    // HERE, at the boundary, for every launch:
+    //   - explicit 'pr' / 'none' wins (the operator decided);
+    //   - omitted + repo-scoped + a CODE-WORK workflow (the def carries at least one
+    //     `executes_code` phase — feature/bug/migration, not chat/onboarding/recon) ⇒ the
+    //     daemon's `deliverDefault` setting ('pr' unless the operator flipped it) — the default
+    //     that keeps run 83052f0b's work from stranding invisibly again. The code-work guard is
+    //     the issue's own scope ("default deliver:'pr' for CODE-WORK launches"): a read-only
+    //     workflow leaves a clean worktree, and the deliver script FAILS a clean worktree loudly
+    //     ("nothing to deliver", crew#317) — defaulting it on would flip every repo-scoped chat
+    //     from completed to failed;
+    //   - omitted otherwise ⇒ 'none': a repo-less run has no worktree to lift, and a free-text
+    //     run has no def to append the deliver phase to (the adapter REFUSES deliver:'pr'
+    //     without a workflow rather than silently dropping it, so defaulting it on would turn
+    //     a legal launch into a 400).
+    // The adapter input spells 'none' as an omitted field; the audit entry below records the
+    // RESOLVED value either way, plus whether it was defaulted.
+    let deliver: 'pr' | 'none';
+    let deliverDefaulted = false;
+    if (b.deliver !== undefined) {
+      deliver = b.deliver;
+    } else if (b.repoRef !== undefined && b.workflow !== undefined) {
+      // Unknown def ⇒ no default (the launch fails at workflow resolution with its own error —
+      // defaulting 'pr' onto it would swap that for a misleading deliver-flavored one).
+      const def = adapter.getWorkflow(b.workflow);
+      const codeWork = def !== null && def.phases.some((p) => p.executes_code === true);
+      deliver =
+        codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
+      deliverDefaulted = true;
+    } else {
+      deliver = 'none';
+      deliverDefaulted = true;
+    }
+    if (deliver === 'pr') input.deliver = 'pr';
     // Retry lineage (DES-UX-001 §8.3): `retryOf` must name an EXISTING run — recording lineage
     // to a run that never existed would be provenance pointing at nothing, so the launch fails
     // loudly (400, before anything is committed) rather than filing a dangling edge.
@@ -780,7 +837,10 @@ export function registerRoutes(
           ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-          ...(b.deliver !== undefined ? { deliver: b.deliver } : {}),
+          // crew#393: the RESOLVED delivery decision, not just the caller's field — so the
+          // trail says what the run will actually do, and whether the daemon decided it.
+          deliver,
+          ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
           // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
           // restarted daemon's hydrate) reads it back from exactly this entry.
           ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
@@ -898,6 +958,107 @@ export function registerRoutes(
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     return { run: decorateRun(run) };
   });
+
+  // ── Post-hoc delivery (crew#393) — lift a stranded run's worktree into a PR ──
+  // The recovery path for the run 83052f0b class: a COMPLETED repo-scoped run whose reviewable
+  // work was never lifted (`delivery: 'stranded'` on the wire — including runs recorded long
+  // before this route existed). Runs the SAME hardened script as the deliver phase (#293/#317:
+  // commit, refuse the default branch, rebase — a conflict aborts LOUDLY with nothing pushed —
+  // never force, push, `gh pr create`, success re-derived from a real PR URL) against the run's
+  // existing worktree. Idempotent: a delivered run answers its recorded URL, never a second PR.
+  // Failure is a loud 4xx/5xx carrying the script's own words — never a silent 200.
+  const deliverInFlight = new Set<string>();
+  /** The last words of a failed deliver script — enough to name the refusal, bounded so a full
+   *  git transcript never becomes an error body. */
+  const deliverErrorTail = (output: string): string => {
+    const trimmed = output.trim();
+    return trimmed.length <= 2000 ? trimmed : `…${trimmed.slice(-2000)}`;
+  };
+  app.post(
+    `${V}/runs/:id/deliver`,
+    {
+      config: {
+        manifest: {
+          responseType: 'DeliverRunResult',
+          // 404: unknown run. 409: not completed / repo-less / worktree gone / already in
+          // flight / the script's own loud refusal (conflict, nothing to deliver, gh failure).
+          // 500: exit 0 with no verifiable PR URL, or the spawn itself failed.
+          statusCodes: [200, 404, 409, 500],
+        },
+      },
+    },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      // Idempotency first: a recorded delivery answers the SAME URL — `gh pr create` is never
+      // re-run on a delivered run, so a double-click (or a retry after a slow response) cannot
+      // double-open. The index only ever holds real runs, so this needs no store round-trip.
+      const existing = deliveryIndex.urlFor(id);
+      if (existing !== undefined) return { prUrl: existing };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      const s = run.session;
+      if (s.status !== 'completed') {
+        return reply.code(409).send({
+          error: `run ${id} is ${s.status} — only a completed run can be delivered post-hoc`,
+        });
+      }
+      if (s.repo_ref == null || typeof s.workdir !== 'string' || s.workdir === '') {
+        return reply.code(409).send({
+          error: `run ${id} is not repo-scoped — there is no worktree to lift into a PR`,
+        });
+      }
+      if (!worktreeExists(s.workdir)) {
+        return reply.code(409).send({
+          error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
+        });
+      }
+      // One delivery per run at a time: the script pushes and opens a PR, so two concurrent
+      // spawns could race gh into two PRs — the exact double-open idempotency forbids.
+      if (deliverInFlight.has(id)) {
+        return reply.code(409).send({
+          error: `a delivery for run ${id} is already in progress — wait for it to finish`,
+        });
+      }
+      deliverInFlight.add(id);
+      let result;
+      try {
+        result = await deliverExec(s.workdir, s.problem);
+      } catch (err) {
+        return reply.code(500).send({ error: `deliver script could not run: ${message(err)}` });
+      } finally {
+        deliverInFlight.delete(id);
+      }
+      if (result.spawnFailure === true) {
+        // The script never reached its own verdict (spawn failure, timeout kill) — an infra
+        // fault, not a refusal: 500 so the caller knows a retry is reasonable.
+        return reply.code(500).send({
+          error: `deliver script could not run to completion: ${deliverErrorTail(result.output)}`,
+        });
+      }
+      if (result.status !== 0) {
+        // The script's own words (crew#317's rule: never silent, never masked) — it names
+        // exactly what it refused (rebase conflict, nothing to deliver, gh's error) and
+        // guarantees nothing was pushed on the refusing paths.
+        return reply.code(409).send({
+          error: `deliver failed (exit ${result.status}): ${deliverErrorTail(result.output)}`,
+        });
+      }
+      const url = prUrlFrom(result.output);
+      if (url === null) {
+        // Exit 0 with no URL should be unreachable (the script re-derives its own success),
+        // but a delivery nothing can be pointed at is never recorded (crew#317).
+        return reply.code(500).send({
+          error: 'deliver script exited 0 but produced no PR URL — refusing to record a delivery nothing can be pointed at',
+        });
+      }
+      // The durable record first, then the read-side index — the same write order as the
+      // deliver-phase resolution in server.ts, so the index can only LAG a crash, never lead it.
+      audit.record('run.delivered', actorOf(req), { runId: id, detail: { url, via: 'post-hoc' } });
+      deliveryIndex.set(id, url);
+      return { prUrl: url };
+    },
+  );
 
   // Durable pre-gate guidance (DES-UX-002 §7.2 — spec'd there as CREW-UX-4, implemented as
   // CREW-UX-7 because crew#308 already spent that id; see guidance-index.ts). Upserts the ONE
@@ -2297,6 +2458,17 @@ export function registerRoutes(
           .send({ error: 'workerStallMinutes must be an integer between 1 and 1440' });
       }
     }
+    // deliverDefault (crew#393): the repo-scoped launch delivery default. Two values only —
+    // this knob decides whether completed code runs open PRs, so a typo must be a 400, never
+    // a silently-dropped key that leaves the operator believing they flipped it.
+    if (Object.hasOwn(patch, 'deliverDefault')) {
+      const d = patch.deliverDefault;
+      if (d !== 'pr' && d !== 'none') {
+        return reply
+          .code(400)
+          .send({ error: "deliverDefault must be 'pr' or 'none'" });
+      }
+    }
     // Skin-owned keys (crew#323): allowed through, but VALIDATED rather than trusted. The
     // daemon does not read these values, so the only two things it can check are the two that
     // can hurt it — a value it cannot persist, and a value big enough to bloat settings.json.
@@ -2332,6 +2504,7 @@ export function registerRoutes(
       'graphNodeLimit',
       'worker_config_root',
       'workerStallMinutes',
+      'deliverDefault',
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {

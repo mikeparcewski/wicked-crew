@@ -10,6 +10,31 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **The delivery contract** (#393, api-types 0.18.0): a completed code run ends with a
+  reviewable deliverable or an explicit, visible decision not to.
+  - `POST /runs` `deliver` accepts `'pr' | 'none'`; OMITTED now DEFAULTS to `'pr'` for a
+    repo-scoped launch of a code-work workflow (a def with an `executes_code` phase —
+    feature/bug/migration; chat and other read-only defs stay `'none'`, their clean worktree
+    would only fail the deliver script). The new `deliverDefault` daemon setting
+    (`PUT /settings`, `'pr' | 'none'`) flips that default; an explicit per-launch value always
+    wins. The launch audit entry records the RESOLVED decision plus `deliverDefaulted`.
+  - The run wire's `delivery` is now a tri-state string on every served run — `'delivered'`
+    (with the PR URL in the new `deliverUrl` field) | `'stranded'` (a COMPLETED repo-scoped run
+    with no recorded PR whose worktree still exists — derived honestly for runs recorded before
+    this change, the run 83052f0b class) | `'none'`. ⚠ Wire reshape: the 0.11.0 object spelling
+    `delivery: { kind: 'pull_request', url }` is gone.
+  - `POST /runs/:id/deliver` — post-hoc delivery: lifts a stranded run's worktree into a PR
+    with the SAME hardened script as the deliver phase (#293/#317 — commit, refuse the default
+    branch, rebase with a loud abort on conflict, never force, push, `gh pr create`, success
+    re-derived from a real PR URL). Idempotent (a delivered run answers its recorded URL, never
+    a second PR); failures are loud 4xx/5xx carrying the script's own words.
+  - Runs that deliver keep their identity: the acceptance gate and the workflow-name patch
+    strip the per-run appended phases (`verify-deliverables`, `deliver`) before phase-sequence
+    matching, so a delivered feature run still resolves its acceptance requirement and its
+    workflow name.
+
 ### Fixed
 
 - **Recon siblings pause at their intake gates** (#391): every `POST /testing/recon` launch —

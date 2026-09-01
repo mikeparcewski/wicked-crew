@@ -75,6 +75,14 @@ const SAMPLES: Sample[] = [
     positive: { status: 200, params: { id: RUN_DONE }, body: { text: 'generated note' } },
     validBody: { text: 'generated note' },
   },
+  {
+    method: 'POST',
+    path: '/api/v1/runs/:id/deliver',
+    // No positive: a real delivery needs a git worktree + a stub gh — covered end to end by
+    // tests/deliver-posthoc-route.test.ts and tests/integration/deliver-e2e.test.ts.
+    // The 409: RUN_DONE is completed but repo-less, so there is no worktree to lift (crew#393).
+    conflict: { params: { id: RUN_DONE } },
+  },
 ];
 
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);

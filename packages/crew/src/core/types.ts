@@ -87,7 +87,14 @@ export interface LaunchRunInput {
    * Delivery mode (crew#293). `"pr"` ⇒ the adapter appends the hardened deliver Tool phase
    * (push the run branch + `gh pr create`, see `core/deliver.ts`) to a PER-RUN copy of the
    * selected workflow def and launches that copy — the shared def is never mutated. Requires
-   * `workflow`; a free-text run has no def to append to. Omit ⇒ no delivery phase (default).
+   * `workflow`; a free-text run has no def to append to. Omit ⇒ no delivery phase.
+   *
+   * NOTE (crew#393): "omit" here is the ADAPTER's spelling of no-delivery — the HTTP boundary
+   * is where the wire's `deliver: 'pr' | 'none'` and the DEFAULT (`'pr'` for repo-scoped
+   * launches of code-work workflows — defs with an `executes_code` phase — flippable via the
+   * `deliverDefault` daemon setting) are resolved; `'none'` and the repo-less/free-text/
+   * read-only-workflow defaults all reach this input as an omitted field. See `POST /runs`
+   * in api/routes.ts.
    */
   deliver?: 'pr';
   /**
@@ -141,4 +148,8 @@ export interface CrewSystemSettings extends SystemSettings {
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
   workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
+  // crew#393 — repo-scoped CODE-WORK launches (a def with an `executes_code` phase) DELIVER by
+  // default: a completed code run ends with a PR, or with the operator's explicit
+  // `deliver: 'none'` (or this setting flipped) saying why not.
+  deliverDefault: 'pr',
 };
