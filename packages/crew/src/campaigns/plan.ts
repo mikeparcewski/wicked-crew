@@ -257,8 +257,9 @@ function reconNodeId(name: string, index: number, taken: Set<string>): string {
 /**
  * Build the recon fan-out's `CampaignDef`: one AGENT node per resolved repo — no edges (siblings
  * are independent, exactly as the per-run fan launched them), `continue_independent` (one honest
- * failure never cancels the others), and `max_concurrency` = the fan width (the per-run fan
- * launched everything at once; the campaign must not silently serialize it). Each node's
+ * failure never cancels the others), and `max_concurrency` = the fan width capped at 64 (the
+ * per-run fan launched everything at once; the campaign must not silently serialize it, but an
+ * unbounded fan must not exhaust the host either). Each node's
  * run_spec carries the caller's brief, the shared roster, its repo, and — unless the caller
  * explicitly said `ungated` — the {@link RECON_INTAKE_GATE}.
  *

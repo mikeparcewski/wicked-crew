@@ -26,7 +26,9 @@ import type { Campaign } from '../../src/core/types.js';
 
 const require = createRequire(import.meta.url);
 const { Core } = require('wicked-core-ts') as { Core: { prototype: Record<string, unknown> } };
-const supported = typeof Core.prototype['launchCampaign'] === 'function';
+// win32 keeps the per-run fan (campaign worktree PATHS carry ':', illegal on NTFS — see
+// campaigns/worktrees.ts), so the campaign path this test pins never runs there.
+const supported = typeof Core.prototype['launchCampaign'] === 'function' && process.platform !== 'win32';
 
 let scratch: string;
 let adapter: CoreAdapter;
