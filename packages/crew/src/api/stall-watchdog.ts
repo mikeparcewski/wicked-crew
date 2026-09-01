@@ -278,9 +278,11 @@ export class WorkerStallWatchdog {
     }
     const action = cfg?.action === 'notify' ? 'notify' : DEFAULT_WORKER_STALL_ESCALATE_ACTION;
     const rawMax = cfg?.maxPerRun;
+    // Same 1..10 envelope the settings route enforces — the createServer override seam must
+    // not admit a budget large enough to hammer reassignUnit on a deterministically wedging run.
     const maxPerRun =
       typeof rawMax === 'number' && Number.isFinite(rawMax) && Math.floor(rawMax) >= 1
-        ? Math.floor(rawMax)
+        ? Math.min(Math.floor(rawMax), 10)
         : DEFAULT_WORKER_STALL_MAX_ESCALATIONS;
     // The ladder notifies before it acts: an escalation threshold set below the detection
     // threshold acts AT the detection threshold, never before it.
@@ -383,8 +385,8 @@ export class WorkerStallWatchdog {
       );
     } else {
       this.log(
-        `[stall-watchdog] ESCALATION FAILED for ${where}: ${quiet} — reassign was attempted but ` +
-          `did not take (${frame.error ?? 'unknown error'}); needs-you frame broadcast`,
+        `[stall-watchdog] ESCALATION FAILED for ${where}: ${quiet} — the reassign did not ` +
+          `happen (${frame.error ?? 'unknown error'}); needs-you frame broadcast`,
       );
     }
   }
