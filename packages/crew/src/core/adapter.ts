@@ -620,8 +620,10 @@ export class ProjectsUnsupportedError extends Error {
 }
 
 /**
- * `resolveElicitation` is not available in this deployment — the NAPI binding has not
- * landed in the installed `wicked-core-ts` yet (DES-002 §4 P-1 stub).
+ * `resolveElicitation` is not available in this deployment — the installed `wicked-core-ts`
+ * predates the binding (< 0.7.2). Feature-detected by method presence, the
+ * `interactionRequests`/`runEvents` convention (crew#357/#358 wired the live path; this
+ * error is now only the older-addon detect, no longer an always-throw stub).
  *
  * Routes map this to HTTP 501 so an operator knows to upgrade rather than to fix a
  * call that was already correct.
@@ -1494,29 +1496,33 @@ export class CoreAdapter {
   }
 
   /**
-   * Forward the operator's elicitation response to the actor (DES-002 §4 P-1).
+   * Forward the operator's elicitation response to the actor (DES-002 §4 P-1; crew#357/#358).
    *
    * NAPI flat signature: `resolve_elicitation(run_id, elicitation_id, action, response)`.
-   * `response` is `null` for `decline` and `cancel` actions; a non-empty string for `accept`.
+   * `response` is `null` for `decline` and `cancel` actions; a non-empty string for `accept`
+   * (the engine takes any JSON value — crew's route validates a string, so a string is what
+   * crosses the boundary).
    *
-   * Throws `ElicitationUnsupportedError` until the NAPI binding is present in the installed
-   * `wicked-core-ts`. Routes map that to HTTP 501.
+   * Guarded on METHOD PRESENCE the way `interactionRequests`/`runEvents` are: the binding
+   * ships in wicked-core-ts ≥ 0.7.2, so an older installed addon has no method at runtime.
+   * That case throws `ElicitationUnsupportedError`, which the route maps to HTTP 501 —
+   * "upgrade the engine", never "fix your request". On a binding-bearing build the call is
+   * forwarded and the engine's own rejection ("no matching elicitation", "elicitation not
+   * supported for this runner") propagates as a plain error (route: 500, prompt restored).
    */
   async resolveElicitation(
-    _runId: string,
-    _elicitationId: string,
-    _action: string,
-    _response: string | null,
+    runId: string,
+    elicitationId: string,
+    action: string,
+    response: string | null,
   ): Promise<void> {
-    // Consume stub params to satisfy @typescript-eslint/no-unused-vars; the
-    // parameter names are part of the public interface and must not be dropped.
-    void _runId; void _elicitationId; void _action; void _response;
-    // The NAPI binding (`this.core.resolveElicitation`) will land with the actor-side
-    // work in a follow-on. Until then, every call throws so the route surfaces 501 and
-    // an operator knows to upgrade rather than to keep retrying.
-    throw new ElicitationUnsupportedError(
-      'resolveElicitation is not yet bound in this wicked-core build; upgrade wicked-core-ts to enable it',
-    );
+    const resolve = this.core.resolveElicitation;
+    if (typeof resolve !== 'function') {
+      throw new ElicitationUnsupportedError(
+        'resolveElicitation is not bound in the installed wicked-core-ts; upgrade it (>= 0.7.2) to enable elicitation',
+      );
+    }
+    await resolve.call(this.core, runId, elicitationId, action, response);
   }
 
   /** repo id → onboarding run id (in-memory; graph persists on disk across restarts). */

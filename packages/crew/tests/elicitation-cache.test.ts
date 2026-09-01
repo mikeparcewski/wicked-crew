@@ -5,6 +5,8 @@
 //   - create/get/take lifecycle
 //   - Generation-based restoreIfUnchanged (prevents zombie entries)
 //   - ingest terminal events prune entries
+//   - ingest elicitationResolved prunes the dead prompt (crew#357/#358: engine-side
+//     timeout/teardown must never leave a prompt advertised that nothing can answer)
 //   - reconcile bumps gen for absent terminal runs (F8 from DES-002)
 
 import { describe, expect, it } from 'vitest';
@@ -137,5 +139,58 @@ describe('ElicitationCache', () => {
     // restoreIfUnchanged must see the gen bump and bail.
     expect(cache.restoreIfUnchanged(RUN, taken.entry, taken.gen)).toBe(false);
     expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  // ── elicitationResolved ingest (crew#357/#358 — the deny/timeout paths must be LOUD) ──────────
+
+  it('ingest elicitationResolved with a matching id drops the entry (engine timeout/teardown)', () => {
+    // The engine resolved the elicitation itself (reason: timeout/teardown/session_prompt).
+    // The prompt is DEAD: GET must stop advertising it, or every subsequent POST forwards into
+    // a guaranteed "no matching elicitation" rejection.
+    const cache = new ElicitationCache();
+    cache.create(makeEntry({ elicitationId: 'e-timeout' }));
+    cache.ingest(event('elicitationResolved', {
+      elicitationId: 'e-timeout',
+      action: 'cancel',
+      reason: 'timeout',
+    }));
+    expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  it('ingest elicitationResolved for a DIFFERENT id keeps the newer prompt', () => {
+    // A late resolved frame about an already-replaced elicitation must not delete the
+    // replacement the operator has yet to answer.
+    const cache = new ElicitationCache();
+    cache.create(makeEntry({ elicitationId: 'e-new' }));
+    cache.ingest(event('elicitationResolved', {
+      elicitationId: 'e-old',
+      action: 'cancel',
+      reason: 'session_prompt',
+    }));
+    expect(cache.get(RUN)).toMatchObject({ elicitationId: 'e-new' });
+  });
+
+  it('ingest elicitationResolved with entry absent bumps gen so a raced restore is a no-op', () => {
+    // Scenario: POST takes the entry, the engine times the elicitation out in the same window,
+    // the adapter call fails ("no matching elicitation"), and the POST error path tries to
+    // restore. The resolved frame's gen bump must make that restore a no-op — restoring would
+    // re-advertise a prompt nothing can ever answer (the silent-wedge shape).
+    const cache = new ElicitationCache();
+    cache.create(makeEntry({ elicitationId: 'e-raced' }));
+    const taken = cache.take(RUN)!;
+    cache.ingest(event('elicitationResolved', {
+      elicitationId: 'e-raced',
+      action: 'cancel',
+      reason: 'timeout',
+    }));
+    expect(cache.restoreIfUnchanged(RUN, taken.entry, taken.gen)).toBe(false);
+    expect(cache.get(RUN)).toBeUndefined();
+  });
+
+  it('ingest elicitationResolved never touches another run', () => {
+    const cache = new ElicitationCache();
+    cache.create(makeEntry({ runId: OTHER, elicitationId: 'e-001' }));
+    cache.ingest(event('elicitationResolved', { elicitationId: 'e-001', action: 'accept', reason: 'human' }));
+    expect(cache.get(OTHER)).toBeDefined();
   });
 });
