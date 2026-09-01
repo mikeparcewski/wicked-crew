@@ -1,12 +1,15 @@
 // The pinned multiscope wire (testing UX): POST /testing/recon (the recon trigger) and
 // POST /campaigns accept optional `projectId` / `repoRefs`, resolve them fail-closed (errors
 // NAME the bad ref / project), and — because one engine run carries ONE repo — fan a multi-repo
-// launch into one run per repo under one shared campaign label, answering with `runIds` in the
-// caller's resolved order. Neither field ⇒ today's behavior, byte-for-byte (regression pins).
+// launch into one run per repo. A real recon fan (≥ 2 repos) registers an ENGINE campaign and
+// files the siblings under it (crew#390); every sibling pauses at its intake gate unless the
+// caller EXPLICITLY sent `ungated: true` (crew#391). Neither field ⇒ today's behavior,
+// byte-for-byte (regression pins).
 //
 // Route behavior over a stubbed adapter (the campaign-routes.test.ts pattern): the engine seams
-// (`launchRun`, `launchCampaign`, `listRepos`, `projectGet`, `projectMembers`) are stubbed
-// instance-level so this file pins the HTTP contract, not the scheduler.
+// (`launchRun`, `launchCampaign`, `listRepos`, `projectGet`, `projectMembers`,
+// `projectMemberAttach`, `campaignsSupported`) are stubbed instance-level so this file pins the
+// HTTP contract, not the scheduler.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -82,6 +85,15 @@ let auditPath: string;
 let runLaunches: LaunchRunInput[] = [];
 /** The last campaign launch the stub captured. */
 let campaignLaunch: { def: CampaignDef; workflows: WorkflowDef[] } | null = null;
+/** Every project-member attach the stub captured (the recon fan's daemon-side filing). */
+let memberAttaches: { projectId: string; kind: string; ref: string }[] = [];
+/** Every worktree pre-provisioning batch the stub captured (the branch-name workaround). */
+let provisioned: { runId: string; repoRoot: string }[][] = [];
+/** How many times the last provisioning batch was rolled back (launch-refused reclaim). */
+let rolledBack = 0;
+/** Per-test toggles for the engine seams the recon fan branches on. */
+let campaignsSupported = true;
+let launchCampaignError: Error | null = null;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'testing-multiscope-'));
@@ -98,9 +110,32 @@ beforeAll(async () => {
     runLaunches.push(input);
     return input.sessionId;
   };
+  adapter.campaignsSupported = () => campaignsSupported;
   adapter.launchCampaign = async (def: CampaignDef, workflows: WorkflowDef[] = []) => {
+    if (launchCampaignError !== null) throw launchCampaignError;
     campaignLaunch = { def, workflows };
     return def.id;
+  };
+  adapter.provisionCampaignWorktrees = async (targets) => {
+    provisioned.push(targets.map((t) => ({ ...t })));
+    return async () => {
+      rolledBack += 1;
+    };
+  };
+  adapter.projectMemberAttach = async (projectId: string, kind: string, ref: string) => {
+    memberAttaches.push({ projectId, kind, ref });
+    return {
+      member: {
+        id: `${projectId}:${kind}:${ref}`,
+        project_id: projectId,
+        member_kind: kind,
+        member_ref: ref,
+        meta: null,
+        attached_at: 1,
+        attached_by: 'api',
+      },
+      created: true,
+    };
   };
 
   app = await createServer(adapter, { auditPath });
@@ -118,6 +153,11 @@ afterAll(async () => {
 beforeEach(() => {
   runLaunches = [];
   campaignLaunch = null;
+  memberAttaches = [];
+  provisioned = [];
+  rolledBack = 0;
+  campaignsSupported = true;
+  launchCampaignError = null;
 });
 
 async function post(path: string, body?: unknown) {
@@ -129,9 +169,14 @@ async function post(path: string, body?: unknown) {
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
-/** run.launched audit entries whose detail carries `campaign` — polled until `expected` have
- *  flushed (appends are fire-and-forget, serialized on the log's own chain). */
-async function reconAuditEntries(campaign: string, expected: number): Promise<AuditEntry[]> {
+/** Audit entries of `action` whose detail carries the campaign label under `key` — polled until
+ *  `expected` have flushed (appends are fire-and-forget, serialized on the log's own chain). */
+async function auditEntries(
+  action: string,
+  key: 'campaign' | 'campaignId',
+  campaign: string,
+  expected: number,
+): Promise<AuditEntry[]> {
   let entries: AuditEntry[] = [];
   for (let i = 0; i < 100; i++) {
     try {
@@ -141,8 +186,8 @@ async function reconAuditEntries(campaign: string, expected: number): Promise<Au
         .map((l) => JSON.parse(l) as AuditEntry)
         .filter(
           (e) =>
-            e.action === 'run.launched' &&
-            (e.detail as Record<string, unknown> | undefined)?.['campaign'] === campaign,
+            e.action === action &&
+            (e.detail as Record<string, unknown> | undefined)?.[key] === campaign,
         );
       if (entries.length >= expected) return entries;
     } catch {
@@ -153,41 +198,136 @@ async function reconAuditEntries(campaign: string, expected: number): Promise<Au
   return entries;
 }
 
+/** run.launched audit entries whose detail carries `campaign` (the fan's per-sibling trail). */
+async function reconAuditEntries(campaign: string, expected: number): Promise<AuditEntry[]> {
+  return auditEntries('run.launched', 'campaign', campaign, expected);
+}
+
 // ── POST /testing/recon — the recon trigger ────────────────────────────────────
 
 describe('POST /testing/recon', () => {
-  it('neither field ⇒ ONE unscoped run (today’s behavior), runIds still the source of truth', async () => {
+  it('neither field ⇒ ONE unscoped run (today’s shape) — now paused at its intake gate', async () => {
     const res = await post('/api/v1/testing/recon', { problem: 'survey the estate' });
     expect(res.status).toBe(201);
     expect(runLaunches).toHaveLength(1);
     expect(runLaunches[0]!.repoRef).toBeUndefined();
     expect(runLaunches[0]!.projectId).toBeUndefined();
+    // crew#391: the intake gate is the DEFAULT — the banner's promise, not 'none'.
+    expect(runLaunches[0]!.humanConfirm).toBe('before:1');
     const runIds = res.body['runIds'] as string[];
     expect(runIds).toHaveLength(1);
     expect(res.body['runId']).toBe(runIds[0]);
     expect(res.body['campaign']).toMatch(/^recon-/);
+    // No engine campaign for a single run — and the response says so honestly.
+    expect(res.body['campaignRegistered']).toBe(false);
+    expect(campaignLaunch).toBeNull();
   });
 
-  it('repoRefs fan out: one run per repo, caller order kept, one shared campaign label', async () => {
+  it('a real fan (≥ 2 repos) registers an ENGINE campaign: one gated node per repo, caller order', async () => {
     const res = await post('/api/v1/testing/recon', {
       problem: 'survey both',
       repoRefs: ['repo-beta', 'repo-alpha'],
     });
     expect(res.status).toBe(201);
-    // N launches, in the caller's order.
-    expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-beta', 'repo-alpha']);
-    // runIds order matches input; runId is the first.
-    const runIds = res.body['runIds'] as string[];
-    expect(runIds).toEqual(runLaunches.map((l) => l.sessionId));
-    expect(res.body['runId']).toBe(runIds[0]);
-    // The SAME campaign label on every fanned run's trail entry.
+    // crew#390: no per-run launches — the fan IS a campaign the engine schedules.
+    expect(runLaunches).toHaveLength(0);
     const campaign = res.body['campaign'] as string;
+    const def = campaignLaunch!.def;
+    expect(def.id).toBe(campaign);
+    // One agent node per repo, caller order, independent (no edges), fan-width concurrency.
+    expect(def.nodes.map((n) => n.run_spec.repo_ref)).toEqual(['repo-beta', 'repo-alpha']);
+    expect(def.nodes.map((n) => n.node_id)).toEqual(['beta', 'alpha']);
+    expect(def.edges).toEqual([]);
+    expect(def.policy).toBe('continue_independent');
+    expect(def.max_concurrency).toBe(2);
+    // Every node carries the brief VERBATIM and the intake gate (crew#391).
+    expect(def.nodes.every((n) => n.run_spec.problem === 'survey both')).toBe(true);
+    expect(def.nodes.every((n) => JSON.stringify(n.run_spec.human_confirm) === '{"before":1}')).toBe(true);
+    // runIds are the nodes' attempt-0 run ids, in repo order; runId is the first.
+    const runIds = res.body['runIds'] as string[];
+    expect(runIds).toEqual([`${campaign}:beta:a0`, `${campaign}:alpha:a0`]);
+    expect(res.body['runId']).toBe(runIds[0]);
+    expect(res.body['campaignRegistered']).toBe(true);
+    // Each node's worktree was pre-provisioned (the engine branch-name workaround) BEFORE launch.
+    expect(provisioned).toEqual([[
+      { runId: runIds[0], repoRoot: '/x/beta' },
+      { runId: runIds[1], repoRoot: '/x/alpha' },
+    ]]);
+    // The SAME campaign label on every sibling's trail entry — plus the gate it carries.
     const entries = await reconAuditEntries(campaign, 2);
     expect(entries).toHaveLength(2);
     expect(entries.map((e) => (e.detail as Record<string, unknown>)['repoRef'])).toEqual([
       'repo-beta',
       'repo-alpha',
     ]);
+    expect(entries.every((e) => (e.detail as Record<string, unknown>)['gate'] === 'before:1')).toBe(true);
+    // And the campaign-level trail entry (the campaign-route idiom).
+    const launched = await auditEntries('campaign.launched', 'campaignId', campaign, 1);
+    expect(launched).toHaveLength(1);
+    expect((launched[0]!.detail as Record<string, unknown>)['recon']).toBe(true);
+  });
+
+  it('ungated: true is honored EXPLICITLY — no intake gate on the nodes, audited as ungated', async () => {
+    const res = await post('/api/v1/testing/recon', {
+      problem: 'unattended sweep',
+      repoRefs: ['repo-alpha', 'repo-beta'],
+      ungated: true,
+    });
+    expect(res.status).toBe(201);
+    const def = campaignLaunch!.def;
+    expect(def.nodes.every((n) => n.run_spec.human_confirm === undefined)).toBe(true);
+    const campaign = res.body['campaign'] as string;
+    const entries = await reconAuditEntries(campaign, 2);
+    expect(entries.every((e) => (e.detail as Record<string, unknown>)['gate'] === 'none')).toBe(true);
+    expect(entries.every((e) => (e.detail as Record<string, unknown>)['ungated'] === true)).toBe(true);
+  });
+
+  it('ungated: true on a SINGLE run launches with humanConfirm none (explicit, audited)', async () => {
+    const res = await post('/api/v1/testing/recon', {
+      problem: 'unattended single',
+      repoRefs: ['repo-alpha'],
+      ungated: true,
+    });
+    expect(res.status).toBe(201);
+    expect(runLaunches).toHaveLength(1);
+    expect(runLaunches[0]!.humanConfirm).toBe('none');
+    const campaign = res.body['campaign'] as string;
+    const entries = await reconAuditEntries(campaign, 1);
+    expect((entries[0]!.detail as Record<string, unknown>)['ungated']).toBe(true);
+  });
+
+  it('an engine without the campaign bindings falls back to the per-run fan — still GATED', async () => {
+    campaignsSupported = false;
+    const res = await post('/api/v1/testing/recon', {
+      problem: 'survey both (old engine)',
+      repoRefs: ['repo-beta', 'repo-alpha'],
+    });
+    expect(res.status).toBe(201);
+    expect(campaignLaunch).toBeNull();
+    expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-beta', 'repo-alpha']);
+    // crew#391 holds on the fallback too: the intake gate is not a campaign-path privilege.
+    expect(runLaunches.every((l) => l.humanConfirm === 'before:1')).toBe(true);
+    expect(res.body['runIds']).toEqual(runLaunches.map((l) => l.sessionId));
+    expect(res.body['campaignRegistered']).toBe(false);
+  });
+
+  it('a launchCampaign reject answers 500 (daemon-built def) / 409 on a state conflict', async () => {
+    launchCampaignError = new Error('campaign store exploded');
+    const boom = await post('/api/v1/testing/recon', {
+      problem: 'x',
+      repoRefs: ['repo-alpha', 'repo-beta'],
+    });
+    expect(boom.status).toBe(500);
+    expect(boom.body['error']).toMatch(/campaign store exploded/);
+    // The pre-provisioned worktrees were reclaimed on the refused launch.
+    expect(rolledBack).toBe(1);
+
+    launchCampaignError = new Error("campaign 'recon-x' already exists");
+    const dup = await post('/api/v1/testing/recon', {
+      problem: 'x',
+      repoRefs: ['repo-alpha', 'repo-beta'],
+    });
+    expect(dup.status).toBe(409);
   });
 
   it('a unique repo NAME resolves to its id', async () => {
@@ -199,18 +339,26 @@ describe('POST /testing/recon', () => {
     expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-beta']);
   });
 
-  it('projectId alone resolves the project’s member repos AND files each run into it', async () => {
+  it('projectId alone resolves the project’s member repos AND files each sibling into it', async () => {
     const res = await post('/api/v1/testing/recon', {
       problem: 'survey the project',
       projectId: 'proj-two',
     });
     expect(res.status).toBe(201);
-    expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-alpha', 'repo-beta']);
-    expect(runLaunches.every((l) => l.projectId === 'proj-two')).toBe(true);
-    expect((res.body['runIds'] as string[])).toHaveLength(2);
+    const campaign = res.body['campaign'] as string;
+    const def = campaignLaunch!.def;
+    expect(def.nodes.map((n) => n.run_spec.repo_ref)).toEqual(['repo-alpha', 'repo-beta']);
+    const runIds = res.body['runIds'] as string[];
+    expect(runIds).toEqual([`${campaign}:alpha:a0`, `${campaign}:beta:a0`]);
+    // The daemon-side §2.2 filing: one crew.run membership per sibling (engine campaign nodes
+    // are unfiled at the engine seam, so the route attaches them itself).
+    expect(memberAttaches).toEqual([
+      { projectId: 'proj-two', kind: 'crew.run', ref: runIds[0] },
+      { projectId: 'proj-two', kind: 'crew.run', ref: runIds[1] },
+    ]);
   });
 
-  it('BOTH ⇒ the union, deduped, explicit repoRefs order first — THREE engine launches, ONE label', async () => {
+  it('BOTH ⇒ the union, deduped, explicit repoRefs order first — THREE nodes, ONE campaign', async () => {
     const res = await post('/api/v1/testing/recon', {
       problem: 'union scope',
       repoRefs: ['repo-gamma', 'repo-beta'],
@@ -218,10 +366,19 @@ describe('POST /testing/recon', () => {
     });
     expect(res.status).toBe(201);
     // gamma + beta (explicit, in order), then alpha from the project; beta NOT repeated.
-    expect(runLaunches.map((l) => l.repoRef)).toEqual(['repo-gamma', 'repo-beta', 'repo-alpha']);
-    expect(res.body['runIds']).toEqual(runLaunches.map((l) => l.sessionId));
-    // All THREE fanned runs share the ONE campaign label on their trail entries.
+    const def = campaignLaunch!.def;
+    expect(def.nodes.map((n) => n.run_spec.repo_ref)).toEqual([
+      'repo-gamma',
+      'repo-beta',
+      'repo-alpha',
+    ]);
     const campaign = res.body['campaign'] as string;
+    expect(res.body['runIds']).toEqual([
+      `${campaign}:gamma:a0`,
+      `${campaign}:beta:a0`,
+      `${campaign}:alpha:a0`,
+    ]);
+    // All THREE siblings share the ONE campaign label on their trail entries.
     const entries = await reconAuditEntries(campaign, 3);
     expect(entries).toHaveLength(3);
     expect(entries.map((e) => (e.detail as Record<string, unknown>)['repoRef'])).toEqual([
@@ -277,7 +434,8 @@ describe('POST /testing/recon', () => {
     expect(runLaunches).toHaveLength(0);
   });
 
-  it('a mid-fan engine failure answers 500 and NAMES what already launched', async () => {
+  it('a mid-fan engine failure (per-run fallback) answers 500 and NAMES what already launched', async () => {
+    campaignsSupported = false; // the campaign path launches atomically — mid-fan is fallback-only
     const res = await post('/api/v1/testing/recon', {
       problem: 'BOOM-ON-SECOND',
       repoRefs: ['repo-alpha', 'repo-beta'],
