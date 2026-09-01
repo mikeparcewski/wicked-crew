@@ -28,7 +28,11 @@
  *
  *  - 200  both halves done — the bridge's own 200 body (retire/repeat) + `ledger` report;
  *  - 404  unknown doc in interactive; the ledger was STILL swept (`ledger` report in the body) —
- *         a hand-`rm -rf`'d workspace is precisely a 404 with ghost rows to drop;
+ *         a hand-`rm -rf`'d workspace is precisely a 404 with ghost rows to drop. ONLY the retire
+ *         wire's own 404 counts (body `{"error":"unknown doc"}`): a bridge too old to carry the
+ *         retire route answers `DELETE /api/docs/:doc` with express's default not-found page, and
+ *         sweeping on THAT 404 would drop live rows for a doc the bridge still serves — the exact
+ *         silent divergence this route exists to prevent (see the 502 skew branch below);
  *  - 409  the bridge refused (build in flight) — relayed verbatim, NOTHING swept;
  *  - 500  PARTIAL: interactive's half happened (or was a 404 no-op) but the ledger sweep failed —
  *         the body carries both halves and says the retry instruction out loud;
@@ -190,14 +194,34 @@ export function registerInteractiveDocDelete(
         return reply.code(409).send(upstream.body);
       }
 
-      // Any other non-retire answer (5xx, an unexpected shape) — interactive's half did NOT
-      // happen, so crew's half deliberately doesn't either. Loud, with the upstream answer
-      // attached so the operator sees exactly what the bridge said.
-      if (upstream.status !== 200 && upstream.status !== 404) {
+      // A 404 is only the retire wire's "unknown doc" when the BODY says so. A bridge too old to
+      // carry the retire route (any published wicked-interactive up to 0.8.1 — the route is newer
+      // than the ^0.8.1 spawn floor) answers this DELETE with express's default not-found page:
+      // same status, no JSON, doc still alive and listed. Sweeping on that 404 would drop live
+      // replay-dedup rows and report "unknown doc" for a doc `GET /api/docs` plainly lists — a
+      // silent two-store divergence. So the sweep below trusts only the wire's own body.
+      const wire404 = upstream.status === 404 && upstream.body['error'] === 'unknown doc';
+
+      // Any other non-retire answer (5xx, a routeless bridge's 404, an unexpected shape) —
+      // interactive's half did NOT happen, so crew's half deliberately doesn't either. Loud,
+      // with the upstream answer attached so the operator sees exactly what the bridge said.
+      if (upstream.status !== 200 && !wire404) {
+        const skewed = upstream.status === 404;
+        if (skewed) {
+          log(
+            `[doc-delete] the bridge 404'd '${doc}' WITHOUT the retire wire's body — likely a ` +
+              `wicked-interactive predating DELETE /api/docs/:doc; nothing swept`,
+          );
+        }
         return reply.code(502).send({
-          error:
-            `wicked-interactive did not retire '${doc}' (HTTP ${upstream.status}) — crew's ` +
-            `handoff-ledger rows were deliberately left in place (nothing diverged)`,
+          error: skewed
+            ? `wicked-interactive answered 404 without the retire wire's body — this bridge ` +
+              `likely predates DELETE /api/docs/:doc (the doc may still be alive), so crew's ` +
+              `handoff-ledger rows were deliberately left in place (nothing diverged). Upgrade ` +
+              `the bridge (restart it so \`npx wicked-interactive serve\` resolves a release ` +
+              `carrying the retire route) and re-issue this DELETE`
+            : `wicked-interactive did not retire '${doc}' (HTTP ${upstream.status}) — crew's ` +
+              `handoff-ledger rows were deliberately left in place (nothing diverged)`,
           name: doc,
           upstream_status: upstream.status,
           upstream: upstream.body,

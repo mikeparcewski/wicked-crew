@@ -1870,9 +1870,11 @@ export interface InteractiveDocDeleteLedgerReport {
  * `DELETE /projects/:projectId/interactive/docs/:doc` (crew#338) — 200: the bridge's own retire
  * answer (interactive#189's wire, relayed verbatim) plus crew's ledger report. The route's
  * non-200 answers carry `error` plus the same `ledger` report (404 unknown doc — the ledger is
- * STILL swept, cleaning ghosts of hand-deleted workspaces; 500 partial — interactive retired
- * but the sweep failed, the body names both halves; 502 — interactive did not retire, nothing
- * swept; 409 — the bridge's build-in-flight refusal relayed verbatim, no `ledger` field).
+ * STILL swept, cleaning ghosts of hand-deleted workspaces, but ONLY on the retire wire's own
+ * 404 body `{"error":"unknown doc"}`; 500 partial — interactive retired but the sweep failed,
+ * the body names both halves; 502 — interactive did not retire (5xx, unreachable, or a 404
+ * without the wire's body from a bridge predating the retire route), nothing swept; 409 — the
+ * bridge's build-in-flight refusal relayed verbatim, no `ledger` field).
  */
 export interface InteractiveDocDeleteResponse {
   /** The doc name (slug). */

@@ -14,6 +14,10 @@
 //   - repeat DELETE → 200 {already_retired:true}, no event_id, empty sweep (idempotent)
 //   - the bridge's 404 is relayed TRUTHFULLY — and ghost ledger rows are still swept
 //     (a hand-rm'd workspace is exactly a 404 with rows to drop)
+//   - ONLY the retire wire's own 404 body ({"error":"unknown doc"}) earns that sweep: a 404
+//     without it (express's default not-found page on a bridge predating the route, or any
+//     other JSON) → 502 and NOTHING swept — the doc may still be alive upstream, and dropping
+//     its rows on a routeless bridge's 404 is exactly the silent two-store divergence
 //   - the bridge's 409 (build in flight) is relayed verbatim and NOTHING is swept
 //   - a bridge 5xx → 502, ledger deliberately untouched (`skipped: true` — nothing diverged)
 //   - PARTIAL failure is LOUD: retire succeeded but the sweep failed → 500 naming both halves
@@ -54,6 +58,8 @@ const docs = new Map([
   ['doc-raw',   { kind: 'doc',  head: 0, versions: 1, retired_at: null }],
   ['doc-busy',  { kind: 'source', head: 2, versions: 3, retired_at: null }],
   ['doc-500',   { kind: 'doc',  head: 0, versions: 1, retired_at: null }],
+  ['doc-skew-html', { kind: 'doc', head: 0, versions: 1, retired_at: null }],
+  ['doc-skew-json', { kind: 'doc', head: 0, versions: 1, retired_at: null }],
 ]);
 let nextEventId = 77;
 const send = (res, code, body) => res.writeHead(code, {'content-type':'application/json'}).end(JSON.stringify(body));
@@ -74,6 +80,12 @@ const server = createServer((req, res) => {
   if (m && req.method === 'DELETE') {
     const name = m[1];
     const d = docs.get(name);
+    // Version-skew doubles: what a bridge NOT carrying the retire route answers for this DELETE
+    // (the doc itself is alive and listed) — express's default not-found page, or some other
+    // JSON 404 that is not the retire wire's body.
+    if (name === 'doc-skew-html') return res.writeHead(404, {'content-type':'text/html; charset=utf-8'})
+      .end('<!DOCTYPE html><html><body><pre>Cannot DELETE /api/docs/doc-skew-html</pre></body></html>');
+    if (name === 'doc-skew-json') return send(res, 404, { error: 'not found' });
     if (!d) return send(res, 404, { error: 'unknown doc' });
     if (name === 'doc-busy') return send(res, 409, {
       error: 'doc has a build in flight — wait for it to finish (or cancel the run in crew), then retire',
@@ -171,6 +183,8 @@ beforeAll(async () => {
   draft.recordLaunch('ghost-doc', 'run-d2'); // workspace hand-rm'd — the studio#119 mess
   draft.recordLaunch('doc-busy', 'run-d3');
   draft.recordLaunch('doc-500', 'run-d4');
+  draft.recordLaunch('doc-skew-html', 'run-d5');
+  draft.recordLaunch('doc-skew-json', 'run-d6');
   const edit = new InteractiveHandoffLedger(editLedgerPath);
   edit.recordLaunch('doc-live:v2', 'run-e1');
   edit.recordLaunch('doc-busy:v1', 'run-e2');
@@ -303,6 +317,30 @@ describe('truthful relays', () => {
     expect((json['upstream'] as { error?: string })?.error).toContain('simulated');
     expect(json['ledger']).toEqual({ ok: false, removed_keys: [], skipped: true });
     expect(ledgerKeys(draftLedgerPath)).toContain('doc-500');
+  });
+
+  it("a 404 WITHOUT the retire wire's body (bridge predating the route) → 502, nothing swept", async () => {
+    // The pool's INTERACTIVE_SPEC floor (^0.8.1) still resolves published bridges that lack
+    // DELETE /api/docs/:doc — express answers with its default HTML not-found page, same 404
+    // status, doc alive and listed. Trusting that 404 as "unknown doc" swept live rows.
+    const { status, json } = await del('/api/v1/projects/p-a/interactive/docs/doc-skew-html');
+    expect(status).toBe(502);
+    expect(json['error']).toContain('without the retire wire');
+    expect(json['error']).toContain('predates');
+    expect(json['upstream_status']).toBe(404);
+    expect(json['ledger']).toEqual({ ok: false, removed_keys: [], skipped: true });
+    // Nothing diverged: crew's row survives, and the doc is still alive upstream.
+    expect(ledgerKeys(draftLedgerPath)).toContain('doc-skew-html');
+    expect((await listDocs()).map((d) => d['name'])).toContain('doc-skew-html');
+  });
+
+  it('a JSON 404 that is not {"error":"unknown doc"} is refused the same way', async () => {
+    const { status, json } = await del('/api/v1/projects/p-a/interactive/docs/doc-skew-json');
+    expect(status).toBe(502);
+    expect(json['upstream_status']).toBe(404);
+    expect((json['upstream'] as { error?: string })?.error).toBe('not found'); // attached verbatim
+    expect(json['ledger']).toEqual({ ok: false, removed_keys: [], skipped: true });
+    expect(ledgerKeys(draftLedgerPath)).toContain('doc-skew-json');
   });
 
   it('an invalid slug 404s as "unknown doc" without a bridge call or a sweep', async () => {
