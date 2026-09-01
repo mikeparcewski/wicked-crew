@@ -2,6 +2,8 @@ import Fastify from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
@@ -22,6 +24,7 @@ import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
+import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
@@ -375,6 +378,56 @@ export async function createServer(
     });
   }
 
+  // The four interactive answering seams' handles, declared BEFORE the /ws relay below because
+  // the relay's `doc.retired` hook — and the governed delete route — sweep the seams' handoff
+  // ledgers through `dropDocLedgerRows`, which prefers each seam's LIVE ledger instance (a
+  // file-level rewrite behind a live instance's back would be undone by that instance's next
+  // whole-map persist). The sources are read AT SWEEP TIME, so a seam that arms after the relay
+  // is still preferred over its file once armed; the seams themselves arm further down.
+  let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
+  let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
+  let demoSub: Awaited<ReturnType<typeof startInteractiveDemoSubscriber>> = null;
+  let chatSub: Awaited<ReturnType<typeof startInteractiveChatSubscriber>> = null;
+
+  /** The crew-side half of deleting an interactive doc (crew#338): drop the doc's replay-dedup
+   *  rows from all four handoff ledgers — the draft leg keys by DOCUMENT ID ("one first draft
+   *  per document lifetime"), so a row that outlives its doc claims the name forever and a
+   *  same-named successor never gets its first draft. Armed seams are swept through their live
+   *  instances; un-armed seams through their ledger FILES (options override, else the default
+   *  `~/.wicked-crew` spelling each seam uses). Never throws — the report says what happened. */
+  const crewStateDir = join(homedir(), '.wicked-crew');
+  const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
+    sweepDocLedgers(documentId, [
+      {
+        name: 'draft',
+        ledger: draftSub?.ledger,
+        path:
+          options?.interactiveDraftEvents?.ledgerPath ??
+          join(crewStateDir, 'interactive-draft-ledger.json'),
+      },
+      {
+        name: 'edit',
+        ledger: editSub?.ledger,
+        path:
+          options?.interactiveEditEvents?.ledgerPath ??
+          join(crewStateDir, 'interactive-edit-ledger.json'),
+      },
+      {
+        name: 'chat',
+        ledger: chatSub?.ledger,
+        path:
+          options?.interactiveChatEvents?.ledgerPath ??
+          join(crewStateDir, 'interactive-chat-ledger.json'),
+      },
+      {
+        name: 'demo',
+        ledger: demoSub?.ledger,
+        path:
+          options?.interactiveDemoEvents?.ledgerPath ??
+          join(crewStateDir, 'interactive-demo-ledger.json'),
+      },
+    ]);
+
   // The interactive relay seam (DES-MERGE-001 §5.4/§6.1, slice 3): every wicked.interactive.**
   // bus event becomes an `interactiveEvent` frame on the SAME /ws socket the studio already
   // holds, and POST /projects/:id/interactive-events puts a whitelisted UI event back on the bus.
@@ -391,6 +444,24 @@ export async function createServer(
             ? { pollIntervalMs: options.interactiveWsRelay.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
+          // crew#338 — a retirement that bypassed the governed DELETE route (direct bridge call,
+          // another tool) still drops the doc's ledger rows. Idempotent, so overlapping with the
+          // route's own synchronous sweep is harmless.
+          onDocRetired: (documentId) => {
+            const sweep = dropDocLedgerRows(documentId);
+            if (sweep.removed_keys.length > 0) {
+              app.log.info(
+                `[interactive] doc.retired(${documentId}): dropped handoff-ledger row(s) ${sweep.removed_keys.join(', ')}`,
+              );
+            }
+            if (!sweep.ok) {
+              app.log.warn(
+                `[interactive] doc.retired(${documentId}): ledger sweep failed for ${(sweep.errors ?? [])
+                  .map((e) => `${e.ledger} (${e.error})`)
+                  .join(', ')} — stale rows may shadow the name; DELETE the doc via the API to retry`,
+              );
+            }
+          },
         });
   if (interactiveRelay !== null) {
     app.log.info('interactive /ws relay armed (filter wicked.interactive.** → interactiveEvent)');
@@ -482,9 +553,9 @@ export async function createServer(
 
   // Arm the opt-in interactive-draft answering seam (task #86 spike). Same posture as the QE
   // seam: failure to arm is LOUD but non-fatal — interactive's assist loop is the fallback
-  // answerer, and this daemon must boot on a machine whose bus is broken. The handle is kept:
-  // the chat seam below consults its in-flight docs (CREW-UX-5 per-doc serialization).
-  let draftSub: Awaited<ReturnType<typeof startInteractiveDraftSubscriber>> = null;
+  // answerer, and this daemon must boot on a machine whose bus is broken. The handle is kept
+  // (declared above, beside the ledger sweep): the chat seam below consults its in-flight docs
+  // (CREW-UX-5 per-doc serialization).
   if (options?.interactiveDraftEvents?.enabled === true && !refuseStubSeam('interactive-draft')) {
     const o = options.interactiveDraftEvents;
     draftSub = await startInteractiveDraftSubscriber(adapter, {
@@ -506,16 +577,13 @@ export async function createServer(
     }
   }
 
-  // Declared BEFORE the edit seam it is probed by: the demo seam arms after (it must, so the
-  // per-doc serialization contract can see the edit seam's in-flight set), but the edit seam's
-  // demo-kind gate needs to know at EVENT time whether the demo seam actually came up. A
-  // closure over this binding reads the settled value; a boolean captured here would not.
-  let demoSub: Awaited<ReturnType<typeof startInteractiveDemoSubscriber>> = null;
-
   // Arm the opt-in interactive STRUCTURAL-edit answering seam (task #86 final leg). Same
   // posture as the draft seam: failure to arm is LOUD but non-fatal — interactive's assist
   // loop is the fallback answerer, and this daemon must boot on a machine whose bus is broken.
-  let editSub: Awaited<ReturnType<typeof startInteractiveEditSubscriber>> = null;
+  // `demoSub` (declared above) is deliberately still null here: the demo seam arms after (it
+  // must, so the per-doc serialization contract can see the edit seam's in-flight set), but the
+  // edit seam's demo-kind gate needs to know at EVENT time whether the demo seam actually came
+  // up — a closure over the binding reads the settled value; a boolean captured here would not.
   if (options?.interactiveEditEvents?.enabled === true && !refuseStubSeam('interactive-edit')) {
     const o = options.interactiveEditEvents;
     editSub = await startInteractiveEditSubscriber(adapter, {
@@ -578,7 +646,7 @@ export async function createServer(
   // store the project routes and the interactive proxy share.
   if (options?.interactiveChatEvents?.enabled === true && !refuseStubSeam('interactive-chat')) {
     const o = options.interactiveChatEvents;
-    const sub = await startInteractiveChatSubscriber(adapter, {
+    chatSub = await startInteractiveChatSubscriber(adapter, {
       ...(o.dbPath !== undefined ? { dbPath: o.dbPath } : {}),
       ...(o.pollIntervalMs !== undefined ? { pollIntervalMs: o.pollIntervalMs } : {}),
       ...(o.heartbeatMs !== undefined ? { heartbeatMs: o.heartbeatMs } : {}),
@@ -597,7 +665,8 @@ export async function createServer(
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
     });
-    if (sub !== null) {
+    if (chatSub !== null) {
+      const sub = chatSub;
       app.log.info('interactive-chat subscription armed (filter wicked.interactive.chat.posted)');
       app.addHook('onClose', async () => {
         await sub.stop();
@@ -801,7 +870,7 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot },
+    { seatHealth, retryIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot, dropDocLedgerRows },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
