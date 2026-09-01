@@ -263,6 +263,27 @@ async function main(): Promise<void> {
   const t0 = performance.now();
 
   if (command === 'serve') {
+    if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
+      console.log(
+        'Usage: wicked-crew serve [options]\n' +
+        '\n' +
+        'Start the wicked-crew daemon.\n' +
+        '\n' +
+        'Options:\n' +
+        '  --port <n>                      Port to listen on (default: 7701, env: CREW_PORT)\n' +
+        '  --db <path>                     Core database path (default: ~/.wicked-crew/core.db)\n' +
+        '  --bus-db <path>                 Bus database path (default: ~/.wicked-crew/bus.db, env: WICKED_BUS_DB)\n' +
+        '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
+        '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
+        '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +
+        '  --no-interactive-draft-events   Disable interactive draft answering (env: WICKED_INTERACTIVE_DRAFT_EVENTS=0)\n' +
+        '  --no-interactive-edit-events    Disable interactive edit answering (env: WICKED_INTERACTIVE_EDIT_EVENTS=0)\n' +
+        '  --no-interactive-chat-events    Disable interactive chat answering (env: WICKED_INTERACTIVE_CHAT_EVENTS=0)\n' +
+        '  --no-interactive-demo-events    Disable interactive demo answering (env: WICKED_INTERACTIVE_DEMO_EVENTS=0)\n' +
+        '  -h, --help                      Print this help'
+      );
+      process.exit(0);
+    }
     const opts = parseBootstrap(argv);
     // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
     // reparented to init and would otherwise live forever — shutdown-path reaping
