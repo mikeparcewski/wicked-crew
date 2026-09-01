@@ -267,11 +267,13 @@ interface LandedMarker {
   at: string;
 }
 
+/** Read a file, mapping ONLY a missing file to null — any other error (EACCES, EIO) throws. */
 async function readIfExists(path: string): Promise<string | null> {
   try {
     return await fsp.readFile(path, 'utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
   }
 }
 
@@ -307,7 +309,13 @@ export async function landSteeringProposal(
   };
 
   // ── Idempotency: a replayed approve re-lands nothing ─────────────────────────
-  const markerText = await readIfExists(steeringLandedMarkerPath(runId));
+  let markerText: string | null = null;
+  try {
+    markerText = await readIfExists(steeringLandedMarkerPath(runId));
+  } catch {
+    /* an unreadable marker (not just missing) is treated as absent — the upsert is
+       idempotent by rule id, so the worst case is a same-content overwrite */
+  }
   if (markerText !== null) {
     try {
       const marker = JSON.parse(markerText) as LandedMarker;
@@ -328,7 +336,16 @@ export async function landSteeringProposal(
   let rawRules: RawRule[] | null = null;
   let source: SteeringProposalSource | undefined;
 
-  const fileText = await readIfExists(steeringProposalPath(runId));
+  let fileText: string | null = null;
+  try {
+    fileText = await readIfExists(steeringProposalPath(runId));
+  } catch (err) {
+    // A present-but-unreadable deliverable (EACCES, EIO) must NOT silently fall back to the
+    // transcript — that would mask an operational failure. Fail the landing loudly instead.
+    return failed(
+      `the run's proposal deliverable exists but could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (fileText !== null) {
     rawRules = extractProposedRules(fileText);
     if (rawRules !== null) source = 'deliverable';
