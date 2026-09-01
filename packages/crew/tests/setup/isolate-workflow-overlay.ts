@@ -51,3 +51,9 @@ process.env['WICKED_WORKFLOWS_DIR'] = slot[KEY];
 // `~/.wicked-crew/project-settings.json`, so a PATCH in any route test would otherwise rewrite the
 // developer's real project→interactiveRoot bindings.
 process.env['WICKED_CREW_PROJECT_SETTINGS'] = join(slot[KEY], 'project-settings.json');
+
+// And for the actor audit trail (task #88): its default is the state home's `audit.log` —
+// `~/.wicked-crew/audit.log` in a test process, since nothing here calls `setCrewStateHome` —
+// so any `createServer`-based test that creates a project, launches a run, or PUTs settings
+// would otherwise APPEND to the operator's real trail (and hydrate indexes from it at boot).
+process.env['WICKED_CREW_AUDIT_LOG'] = join(slot[KEY], 'audit.log');

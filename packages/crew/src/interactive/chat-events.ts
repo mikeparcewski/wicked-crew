@@ -51,7 +51,6 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import {
@@ -63,6 +62,7 @@ import {
   oneLine,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { crewStateHome } from '../projects/state-home.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
@@ -377,8 +377,11 @@ interface LandingGate {
   until: number;
 }
 
+/** The seam's durable state (handoff ledger + working dirs) follows the daemon's state home —
+ *  the `--db` parent when configured, `~/.wicked-crew` otherwise (crew#353): an isolated
+ *  daemon's interactive handoffs must not land in the operator's real home. */
 function defaultStateDir(): string {
-  return join(homedir(), '.wicked-crew');
+  return crewStateHome();
 }
 
 /** The production council roster, resolved lazily through the adapter's own class so this module

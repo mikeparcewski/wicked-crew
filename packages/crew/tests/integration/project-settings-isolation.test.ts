@@ -33,7 +33,11 @@ import { setCrewStateHome, stateHomeOfDb } from '../../src/projects/state-home.j
 import type { Project } from '../../src/core/types.js';
 
 const MARKER = `/srv/decks-crew353-${process.pid}-${Date.now()}`;
+// Unique per run for the same reason as MARKER — the audit trail records the project NAME, and
+// the real-home trail on a developer machine must never false-fail (or mask) the escape check.
+const PROJECT_NAME = `isolation-353-${process.pid}-${Date.now()}`;
 const REAL_DEFAULT = join(homedir(), '.wicked-crew', 'project-settings.json');
+const REAL_AUDIT = join(homedir(), '.wicked-crew', 'audit.log');
 
 let work: string;
 let stateHome: string;
@@ -41,6 +45,7 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl: string;
 let savedEnvOverride: string | undefined;
+let savedAuditOverride: string | undefined;
 
 async function boot(): Promise<void> {
   // What the CLI bootstrap does for `--db <stateHome>/core.db`, in order: seam first, server after.
@@ -74,10 +79,13 @@ beforeAll(async () => {
   work = mkdtempSync(join(tmpdir(), 'crew-353-'));
   stateHome = join(work, 'state');
   mkdirSync(stateHome, { recursive: true });
-  // The point of the test: NO env override (the suite setup pins one for every other file). The
-  // configured state home must carry alone, exactly as it does for a daemon launched with --db.
+  // The point of the test: NO env overrides (the suite setup pins them for every other file). The
+  // configured state home must carry alone, exactly as it does for a daemon launched with --db —
+  // for the settings store AND the audit trail (the lane-2 finding: audit was still escaping).
   savedEnvOverride = process.env['WICKED_CREW_PROJECT_SETTINGS'];
   delete process.env['WICKED_CREW_PROJECT_SETTINGS'];
+  savedAuditOverride = process.env['WICKED_CREW_AUDIT_LOG'];
+  delete process.env['WICKED_CREW_AUDIT_LOG'];
   await boot();
 }, 60_000);
 
@@ -85,13 +93,15 @@ afterAll(async () => {
   await shutdown();
   if (savedEnvOverride === undefined) delete process.env['WICKED_CREW_PROJECT_SETTINGS'];
   else process.env['WICKED_CREW_PROJECT_SETTINGS'] = savedEnvOverride;
+  if (savedAuditOverride === undefined) delete process.env['WICKED_CREW_AUDIT_LOG'];
+  else process.env['WICKED_CREW_AUDIT_LOG'] = savedAuditOverride;
   setCrewStateHome(undefined);
   rmSync(work, { recursive: true, force: true });
 });
 
 describe('project settings under an isolated state home (crew#353)', () => {
   it('PATCH persists under the --db parent, survives a restart, and leaves $HOME untouched', { timeout: 60_000 }, async () => {
-    const created = await req('POST', '/projects', { name: 'isolation-353' });
+    const created = await req('POST', '/projects', { name: PROJECT_NAME });
     expect(created.status).toBe(201);
     const projectId = (created.json['project'] as Project).id;
 
@@ -113,7 +123,20 @@ describe('project settings under an isolated state home (crew#353)', () => {
     }
 
     // RESTART: fresh adapter + server over the same core.db, empty caches — the durable read.
+    // `shutdown()` awaits the audit flush (the server's onClose hook), so the trail is settled
+    // for the checks below.
     await shutdown();
+
+    // The audit trail followed the state home too (the lane-2 finding): `project.created` for
+    // THIS run's uniquely-named project landed inside the isolated home…
+    const isolatedAudit = join(stateHome, 'audit.log');
+    expect(existsSync(isolatedAudit)).toBe(true);
+    expect(readFileSync(isolatedAudit, 'utf8')).toContain(PROJECT_NAME);
+    // …and the developer's real trail holds no trace of it (read-only check).
+    if (existsSync(REAL_AUDIT)) {
+      expect(readFileSync(REAL_AUDIT, 'utf8')).not.toContain(PROJECT_NAME);
+    }
+
     await boot();
 
     const readBack = await req('GET', `/projects/${projectId}`);

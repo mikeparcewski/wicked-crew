@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -9,7 +8,7 @@ import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
-import { setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -53,10 +52,13 @@ interface BootstrapOpts {
   interactiveSeats: string | undefined;
 }
 
-/** Durable state home (~/.wicked-crew) — runs/evidence must survive a reboot, which the
- * OS temp dir explicitly does not. Created on demand; --db/--bus-db still override. */
+/** Durable DEFAULT state home (~/.wicked-crew) — runs/evidence must survive a reboot, which the
+ * OS temp dir explicitly does not. Created on demand, and ONLY on the default path: `??` keeps
+ * this call out of a `--db` boot entirely (crew#353's E2E gate — an isolated daemon must not even
+ * `mkdir` the operator's real `~/.wicked-crew`). Resolves through the shared state-home seam;
+ * at parse time no `--db` has been threaded yet, so this IS the homedir default. */
 function stateHome(): string {
-  const dir = join(homedir(), '.wicked-crew');
+  const dir = crewStateHome();
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -71,10 +73,16 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   const engineExec =
     hasFlag(args, '--engine-exec') ||
     (process.env['WICKED_BUS_EXEC'] !== undefined && process.env['WICKED_BUS_EXEC'] !== '');
+  // The exec seam's bus db follows the SAME state home as the core db (crew#353): with `--db`
+  // given, the old `stateHome()` fallback both pointed the bus at the developer's real
+  // `~/.wicked-crew/bus.db` AND eagerly `mkdir`ed that directory on every boot — the isolated
+  // daemon's first write into a home it was told to stay out of. `stateHomeOfDb(dbPath)` is
+  // byte-identical without `--db` (the default dbPath's parent IS `~/.wicked-crew`, already
+  // created by `stateHome()` above).
   const busDbPath =
     flag(args, '--bus-db') ??
     process.env['WICKED_BUS_DB'] ??
-    join(stateHome(), 'bus.db');
+    join(stateHomeOfDb(dbPath), 'bus.db');
   // OPT-IN (Phase 6a, same shape as --engine-exec): consume the QE gate's bus
   // events (`wicked.qe.gate.*` + `wicked.qe.deploy.completed`) into the
   // acceptance freshness cache. Default OFF → the acceptance route lazy-reads
