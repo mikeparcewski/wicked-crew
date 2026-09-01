@@ -2300,10 +2300,17 @@ export function registerRoutes(
     roster: () => CoreAdapter.roster(),
   });
 
-  // ── Testing (crew-testing) — governance evals + eval corpora ────────────────
+  // ── Testing (crew-testing) — governance evals + eval corpora + the recon trigger ────────────
   // Run the evals (does the steering corpus catch what it claims to?) and import a named eval
-  // corpus. Both presence-gated on the engine's evals bindings (501 on wicked-core-ts < 0.7.5).
-  registerTestingRoutes(app, adapter, { audit, actorOf });
+  // corpus — both presence-gated on the engine's evals bindings (501 on wicked-core-ts < 0.7.5).
+  // POST /testing/recon launches governed recon runs (the multiscope fan-out), so it gets the
+  // roster and the SAME membership plumbing POST /runs files projectId launches through.
+  registerTestingRoutes(app, adapter, {
+    audit,
+    actorOf,
+    roster: () => CoreAdapter.roster(),
+    projects: { bus: projects.bus, index: projects.index },
+  });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
   // Mounted BESIDE the routes above and under the same `${V}` prefix, so it inherits one

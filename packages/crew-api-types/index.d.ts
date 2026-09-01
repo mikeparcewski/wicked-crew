@@ -1253,6 +1253,44 @@ export interface ImportEvalCorpusResponse {
   embedded: boolean;
 }
 
+/**
+ * The `POST /testing/recon` request body (api-types 0.15.0) — the Testing page's campaign-recon
+ * trigger. `problem` is the recon brief, passed to every launched run VERBATIM (the client owns
+ * the framing). The two optional fields are the multiscope wire, shared with
+ * {@link LaunchCampaignBody}:
+ *
+ *  - `repoRefs` — explicit codebase attachments: registered repo refs (ids; a unique repo NAME
+ *    also resolves), deduped; a ref that does not resolve fails the whole request with a 400
+ *    naming it.
+ *  - `projectId` — crew resolves the project's `crew.repo` members server-side (404 unknown
+ *    project; 400 when the project has zero repo members and no `repoRefs` cover for it) AND
+ *    files every launched run into the project (the `POST /runs` §2.2 semantics: atomic
+ *    membership + project-graph binding).
+ *
+ * BOTH ⇒ the union (`repoRefs` order first). NEITHER ⇒ one unscoped recon run — the launch the
+ * Testing page sent before this wire existed, unchanged.
+ *
+ * One engine run carries ONE repo, so a multi-repo recon FANS: one governed run per resolved
+ * repo, all under one shared campaign label (`TestingReconResponse.campaign`).
+ */
+export interface TestingReconBody {
+  problem: string;
+  projectId?: string;
+  repoRefs?: string[];
+}
+
+/**
+ * The `POST /testing/recon` 201 body. `runIds` is the source of truth (`length >= 1` always —
+ * one run per resolved repo in the caller's order; exactly one for an unscoped recon); `runId`
+ * is its first entry, kept as the single-run spelling existing launch readers expect;
+ * `campaign` is the shared label every fanned run's `run.launched` audit entry carries.
+ */
+export interface TestingReconResponse {
+  runId: string;
+  runIds: string[];
+  campaign: string;
+}
+
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
 
 /**
@@ -2109,7 +2147,7 @@ export interface CampaignScenario {
   repoRef?: string;
 }
 
-/** `POST /campaigns` request body → 201 `{ campaignId }`. */
+/** `POST /campaigns` request body → 201 {@link LaunchCampaignResponse}. */
 export interface LaunchCampaignBody {
   /** Campaign id (also the def id). Defaults to a generated `campaign-<uuid>`. */
   id?: string;
@@ -2121,6 +2159,35 @@ export interface LaunchCampaignBody {
   maxConcurrency?: number;
   /** JSON array of `AgenticCli` seats for agent scenarios; defaults to the daemon roster. */
   clisJson?: string;
+  /**
+   * The multiscope wire (api-types 0.15.0), shared with `POST /testing/recon`: scope the launch
+   * to a PROJECT — crew resolves the project's `crew.repo` members server-side. Unknown project
+   * ⇒ 404; a project with zero repo members (and no `repoRefs` to fall back on) ⇒ 400 naming
+   * the fix. Combined with `repoRefs` ⇒ the union. Because one campaign node runs against ONE
+   * repo, every scenario that does not pin its own `repoRef` is FANNED — one node per resolved
+   * repo, same campaign — and the 201 body carries the fanned nodes' run ids (`runIds`).
+   * Omit both fields ⇒ the launch behaves exactly as before (backward compatible).
+   */
+  projectId?: string;
+  /**
+   * The multiscope wire (api-types 0.15.0): explicit codebase attachments — registered repo
+   * refs (ids; a unique repo NAME also resolves), deduped, min 1 when present. A ref that does
+   * not resolve fails the WHOLE launch with a 400 naming it — never a silently narrowed scope.
+   */
+  repoRefs?: string[];
+}
+
+/**
+ * `POST /campaigns` 201 body. `runIds` is ADDITIVE (api-types 0.15.0): present exactly when
+ * the launch used the multiscope fields (`projectId`/`repoRefs`), carrying the attempt-0 run
+ * ids (`{campaign}:{node}:a0`) of the launch's nodes — repo-major over the fanned scenarios
+ * (repos in resolved input order), then the scenarios that pinned their own `repoRef`.
+ * Consumers treat `runIds.length >= 1` as the source of truth for what launched; a legacy
+ * body keeps the legacy `{ campaignId }` answer.
+ */
+export interface LaunchCampaignResponse {
+  campaignId: string;
+  runIds?: string[];
 }
 
 /**

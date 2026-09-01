@@ -29,7 +29,12 @@ import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
 import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
-import type { ImportEvalCorpusSchema, RunGovernanceEvalsSchema } from '../src/api/testing.js';
+import type {
+  ImportEvalCorpusSchema,
+  RunGovernanceEvalsSchema,
+  TestingReconSchema,
+} from '../src/api/testing.js';
+import type { LaunchCampaignSchema } from '../src/campaigns/routes.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -146,6 +151,12 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
 
+// Multiscope responses (api-types 0.15.0) — the recon trigger's fan receipt and the campaign
+// launch's additive `runIds`: what the routes construct must satisfy the published shapes.
+respondsWith<Wire.TestingReconResponse, { runId: string; runIds: string[]; campaign: string }>();
+respondsWith<Wire.LaunchCampaignResponse, { campaignId: string; runIds: string[] }>();
+respondsWith<Wire.LaunchCampaignResponse, { campaignId: string }>();
+
 // Governance wiki management (wiki-mgmt): GET /governance/wiki/scoreboard + /governance/wiki/meta.
 respondsWith<
   Wire.GovernanceScoreboard,
@@ -211,6 +222,10 @@ accepts<z.input<typeof SteeringAuthorSchema>, Wire.SteeringAuthorBody>();
 // Testing (crew-testing) — the evals-run selector and the corpus-import batch.
 accepts<z.input<typeof RunGovernanceEvalsSchema>, Wire.RunGovernanceEvalsBody>();
 accepts<z.input<typeof ImportEvalCorpusSchema>, Wire.ImportEvalCorpusBody>();
+// Multiscope (api-types 0.15.0) — the recon trigger and the campaign launch: every body the
+// contract lets a client send (projectId/repoRefs included) must parse.
+accepts<z.input<typeof TestingReconSchema>, Wire.TestingReconBody>();
+accepts<z.input<typeof LaunchCampaignSchema>, Wire.LaunchCampaignBody>();
 // POST /projects/:id/graph/refresh — the additive `force` body (estate-migration path).
 accepts<z.input<typeof RefreshProjectGraphSchema>, Wire.RefreshProjectGraphBody>();
 
