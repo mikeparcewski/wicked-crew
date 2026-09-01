@@ -43,6 +43,15 @@ import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import { AuditLog } from './audit.js';
+import {
+  AcpFoldCache,
+  EngineVersionCache,
+  eventsDirOf,
+  installedPackageVersion,
+  listStoreFiles,
+  readStudioBundleVersion,
+  type ErrorRing,
+} from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { DeliveryIndex } from './delivery-index.js';
@@ -279,6 +288,12 @@ export interface RuntimeDeps {
    *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
    *  spawning a real `npx wicked-interactive serve`. */
   interactiveBridges?: InteractiveBridgePool;
+  /** The daemon's in-process error-level log ring (diagnostics) — `createServer` tees the pino
+   *  stream into one; a directly-driven route set (tests) gets an honestly-empty tail. */
+  errorRing?: ErrorRing;
+  /** The studio asset root `createServer` resolved (bundled or overridden) — diagnostics reads
+   *  the bundle's shipped version manifest from it. Absent = headless = `studioBundle: null`. */
+  studioRoot?: string;
 }
 
 /**
@@ -348,6 +363,47 @@ export function registerRoutes(
     const ping = await adapter.ping();
     return { status: 'ok', version: PKG_VERSION, ping };
   });
+
+  // The daemon's self-knowledge surface (diagnostics): what is deployed, what it stores, what
+  // has gone wrong recently, and whether ACP is really working across the CLIs — the answer
+  // that previously lived only in raw NDJSON under the state home. READ-ONLY throughout, and
+  // honest throughout: a field the daemon cannot answer is null/empty, never fabricated.
+  // The ACP fold and the binary probes are cached (briefly / per-process) so a polling skin
+  // can never turn this GET into an event-log re-reader or a `--version` spawner per request.
+  const acpFoldCache = new AcpFoldCache();
+  const engineVersionCache = new EngineVersionCache();
+  app.get(
+    `${V}/diagnostics`,
+    { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
+    async () => {
+      // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
+      // and diagnostics over an unknown store honestly reports no stores and no ACP record.
+      const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
+      const [stores, byCli, engineBinaries] = await Promise.all([
+        dbPath !== null ? listStoreFiles(dbPath) : Promise.resolve([]),
+        dbPath !== null
+          ? acpFoldCache.get(eventsDirOf(dbPath))
+          : Promise.resolve<Awaited<ReturnType<AcpFoldCache['get']>>>({}),
+        engineVersionCache.get(),
+      ]);
+      const uptimeMs = Math.round(process.uptime() * 1000);
+      const addr = app.server.address();
+      const port = typeof addr === 'object' && addr !== null ? addr.port : 7701;
+      return {
+        components: {
+          crew: PKG_VERSION,
+          studioBundle:
+            runtime.studioRoot !== undefined ? readStudioBundleVersion(runtime.studioRoot) : null,
+          coreTs: installedPackageVersion('wicked-core-ts'),
+          engineBinaries,
+        },
+        daemon: { uptimeMs, startedAt: Date.now() - uptimeMs, port },
+        stores,
+        recentErrors: runtime.errorRing?.list() ?? [],
+        acp: { byCli },
+      };
+    },
+  );
 
   // Who am I talking to the daemon as? (task #88). In local mode this is
   // always the implicit full-trust local actor; in required mode it names the

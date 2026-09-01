@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import { registerRoutes } from './routes.js';
+import { ErrorRing, teeStreamWithErrorRing } from './diagnostics.js';
 import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
@@ -243,7 +244,17 @@ export async function createServer(
   adapter: CoreAdapter,
   options?: CreateServerOptions,
 ): Promise<ReturnType<typeof Fastify>> {
-  const app = Fastify({ logger: { level: process.env['LOG_LEVEL'] ?? 'info' } });
+  // The diagnostics error ring: a tee on the pino stream that keeps the last ~20 error-level
+  // lines in memory (crew has no log file of its own — stdout belongs to whoever launched the
+  // daemon), surfaced read-only on GET /diagnostics. Built before Fastify so the logger's
+  // destination IS the tee — no second logging channel to keep in step.
+  const errorRing = new ErrorRing();
+  const app = Fastify({
+    logger: {
+      level: process.env['LOG_LEVEL'] ?? 'info',
+      stream: teeStreamWithErrorRing(errorRing),
+    },
+  });
   // TH-11: accumulate the route table as it registers — the endpoint manifest's one source of
   // truth. Installed FIRST because fastify only fires onRoute for routes added after the hook
   // exists. Read via `app.endpointManifest` (scripts/generate-endpoint-manifest.ts + the drift
@@ -762,6 +773,11 @@ export async function createServer(
   // One dedicated WS channel per PTY: /ws/terminals/:id (DES-TERMINAL-001 §6).
   registerTerminalWs(app, adapter, terminals);
 
+  // Resolved HERE (not at the static-serving block below) because the routes need it too:
+  // diagnostics reads the bundle's shipped version manifest from the same root the static
+  // handler serves. One resolution, two consumers.
+  const studioRoot = options?.studioRoot ?? defaultStudioRoot();
+
   registerRoutes(
     app,
     adapter,
@@ -775,7 +791,7 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex, guidanceIndex, deliveryIndex },
+    { seatHealth, retryIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
@@ -786,7 +802,6 @@ export async function createServer(
   // API routes, `/ws`, and terminal WS are registered ABOVE and keep winning:
   // static uses `wildcard: false` (only serves files that physically exist),
   // and the SPA fallback below explicitly excludes `/api/` and `/ws`.
-  const studioRoot = options?.studioRoot ?? defaultStudioRoot();
   if (existsSync(studioRoot)) {
     await app.register(fastifyStatic, {
       root: studioRoot,

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.15.0",
+  "apiTypesVersion": "0.16.0",
   "endpoints": [
     {
       "method": "GET",
@@ -108,6 +108,15 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/diagnostics",
+      "requestType": null,
+      "responseType": "DiagnosticsResponse",
+      "statusCodes": [
+        200
+      ]
     },
     {
       "method": "GET",
