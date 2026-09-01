@@ -45,6 +45,8 @@ import type {
   WorkflowDef,
 } from '../core/types.js';
 import { basename } from 'node:path';
+import { DELIVER_PHASE_ID } from '../core/deliver.js';
+import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { QeAcceptanceState, QeManifestSummary } from './ledger.js';
 import { readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
@@ -85,6 +87,15 @@ export function acceptancePhaseIds(workflow: WorkflowDef | null): string[] {
  * full registry (built-ins + user workflows). Free-text runs are excluded by
  * construction: their planned units are `u1`, `u2`, … — not phase ids — and
  * they declare nothing.
+ *
+ * PER-RUN COMPOSITION (crew#293/#311, default-on since crew#393): a launch can append run-scoped
+ * phases the definition never had — the deliverable floor, then the deliver phase — so a
+ * delivered run's unit sequence is `<def's phases…, [verify-deliverables,] [deliver]>`. When the
+ * exact sequence matches nothing, the trailing appendages are stripped (in reverse composition
+ * order) and the match retried: the acceptance requirement lives on the DEFINITION, and a run
+ * must not lose its gate because it also delivered. A def that carries its own `deliver` phase
+ * (an operator overlay) still wins the EXACT match first, so stripping never mistakes a declared
+ * phase for an appendage.
  */
 export function resolveRunWorkflow(
   run: SessionView,
@@ -100,11 +111,16 @@ export function resolveRunWorkflow(
       return colonIdx >= 0 ? u.id.slice(colonIdx + 1) : '';
     });
   if (phases.length === 0 || phases.some((p) => p === '' || /^u\d+$/.test(p))) return null;
-  return (
+  const bySequence = (seq: string[]): WorkflowDef | null =>
     workflows.find(
-      (w) => w.phases.length === phases.length && w.phases.every((p, i) => p.id === phases[i]),
-    ) ?? null
-  );
+      (w) => w.phases.length === seq.length && w.phases.every((p, i) => p.id === seq[i]),
+    ) ?? null;
+  const exact = bySequence(phases);
+  if (exact !== null) return exact;
+  const stripped = [...phases];
+  if (stripped[stripped.length - 1] === DELIVER_PHASE_ID) stripped.pop();
+  if (stripped[stripped.length - 1] === DELIVERABLE_FLOOR_PHASE_ID) stripped.pop();
+  return stripped.length < phases.length ? bySequence(stripped) : null;
 }
 
 /** The gate's resolution of one run's acceptance requirement. */

@@ -201,4 +201,35 @@ describe('resolveRunWorkflow', () => {
   it('resolves nothing for an unknown id that is not an instance id', () => {
     expect(resolveRunWorkflow(view('not-registered', ['accept']), registry)).toBeNull();
   });
+
+  it('resolves a DELIVERED run — the per-run deliver phase is stripped before matching (crew#393)', () => {
+    // Default-on delivery appends a `deliver` unit the definition never had; the acceptance
+    // requirement must not vanish because the run also opened its PR.
+    const wf = resolveRunWorkflow(view('wf-abc123', ['accept', 'deliver']), registry);
+    expect(wf?.id).toBe('qe-accept');
+  });
+
+  it('strips the deliverable floor + deliver pair (composition order) and still matches', () => {
+    const wf = resolveRunWorkflow(
+      view('wf-abc123', ['accept', 'verify-deliverables', 'deliver']),
+      registry,
+    );
+    expect(wf?.id).toBe('qe-accept');
+  });
+
+  it('a def carrying its OWN deliver phase wins the exact match — stripping never fires', () => {
+    const OWN_DELIVER: WorkflowDef = {
+      id: 'own-deliver',
+      phases: [
+        { id: 'accept', kind: 'test', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: [], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
+        { id: 'deliver', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['accept'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+      ],
+    };
+    const wf = resolveRunWorkflow(view('wf-abc123', ['accept', 'deliver']), [...registry, OWN_DELIVER]);
+    expect(wf?.id).toBe('own-deliver');
+  });
+
+  it('a bare deliver-only sequence resolves nothing rather than a phantom empty def', () => {
+    expect(resolveRunWorkflow(view('wf-abc123', ['deliver']), registry)).toBeNull();
+  });
 });

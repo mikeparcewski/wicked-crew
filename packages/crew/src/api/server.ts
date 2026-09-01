@@ -327,7 +327,7 @@ export async function createServer(
     try {
       // Resume/retry re-terminals: already resolved once, and a terminal run's PR URL never
       // changes — never re-read, never double-write the trail.
-      if (deliveryIndex.deliveryFor(runId) !== undefined) return;
+      if (deliveryIndex.urlFor(runId) !== undefined) return;
       const views = await adapter.sessionsDetail();
       const view = views.find((v) => v.session.id === runId);
       if (view === undefined) return;

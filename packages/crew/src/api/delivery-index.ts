@@ -22,12 +22,47 @@
  */
 
 import type { AuditLog } from './audit.js';
-import type { SessionView, WorkUnit } from '../core/types.js';
+import type { AgentSession, SessionView, WorkUnit } from '../core/types.js';
 
-/** The wire shape `AgentSession.delivery` carries (api-types 0.11.0). */
-export interface SessionDelivery {
-  kind: 'pull_request';
-  url: string;
+/** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
+export interface DeliveryState {
+  delivery: 'delivered' | 'stranded' | 'none';
+  /** Present exactly when `delivery === 'delivered'`. */
+  deliverUrl?: string;
+}
+
+/**
+ * The tri-state delivery derivation (crew#393) — HONEST by construction, computed at DTO
+ * assembly from three facts and nothing else:
+ *
+ *   1. a recorded PR URL (the `run.delivered` trail via {@link DeliveryIndex}) ⇒ `'delivered'`;
+ *   2. otherwise a COMPLETED repo-scoped run whose worktree still exists on disk ⇒ `'stranded'`
+ *      — reviewable work nobody lifted into a PR. This is a derivation over the run record's
+ *      existing fields (`status`, `repo_ref`, `workdir`) plus one stat, so runs recorded BEFORE
+ *      this field existed (the run 83052f0b class) read `'stranded'` exactly like new ones;
+ *   3. everything else ⇒ `'none'`: repo-less runs, non-terminal runs, failed/cancelled runs
+ *      (their unit rejection already spells the failure), and completed runs whose worktree
+ *      was cleaned up (nothing left to lift).
+ *
+ * `worktreeExists` is injected (a `fs.existsSync` in production) so route tests can pin the
+ * derivation without staging real directories.
+ */
+export function deliveryStateOf(
+  session: Pick<AgentSession, 'status' | 'repo_ref' | 'workdir'>,
+  url: string | undefined,
+  worktreeExists: (path: string) => boolean,
+): DeliveryState {
+  if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+  if (
+    session.status === 'completed' &&
+    session.repo_ref != null &&
+    typeof session.workdir === 'string' &&
+    session.workdir !== '' &&
+    worktreeExists(session.workdir)
+  ) {
+    return { delivery: 'stranded' };
+  }
+  return { delivery: 'none' };
 }
 
 /**
@@ -92,9 +127,12 @@ export class DeliveryIndex {
     this.runToUrl.set(runId, url);
   }
 
-  /** The delivery for this run, or `undefined` (the DTO spells that as an ABSENT field). */
-  deliveryFor(runId: string): SessionDelivery | undefined {
-    const url = this.runToUrl.get(runId);
-    return url === undefined ? undefined : { kind: 'pull_request', url };
+  /**
+   * The recorded PR URL for this run, or `undefined` — the fact {@link deliveryStateOf} turns
+   * into the wire's `delivery: 'delivered'` + `deliverUrl` (api-types 0.18.0; the 0.11.0 object
+   * spelling `{ kind: 'pull_request', url }` is gone from the wire, crew#393).
+   */
+  urlFor(runId: string): string | undefined {
+    return this.runToUrl.get(runId);
   }
 }

@@ -37,7 +37,7 @@ import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { provisionCampaignWorktrees, type WorktreeTarget } from '../campaigns/worktrees.js';
-import { composeDeliverableFloor } from './deliverable-floor.js';
+import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 
 
 
@@ -1296,11 +1296,23 @@ export class CoreAdapter {
           const phase = phases[0] ?? '';
           if (phase === 'explore') view.session.workflow_id = 'chat';
         } else {
-          // Multi-unit: match against builtin workflow defs by phase sequence
-          const match = BUILTIN_WORKFLOWS.find(
-            (def) => def.phases.length === phases.length &&
-              def.phases.every((p, i) => p.id === phases[i]),
-          );
+          // Multi-unit: match against builtin workflow defs by phase sequence. A delivered run
+          // (crew#293, default-on for code-work launches since crew#393) carries run-scoped
+          // appendages the def never had — [verify-deliverables,] [deliver] at the tail — so
+          // when the exact sequence matches nothing they are stripped and the match retried:
+          // a feature run must not lose its name on the wire because it also delivered.
+          const bySequence = (seq: string[]): WorkflowDef | undefined =>
+            BUILTIN_WORKFLOWS.find(
+              (def) => def.phases.length === seq.length &&
+                def.phases.every((p, i) => p.id === seq[i]),
+            );
+          let match = bySequence(phases);
+          if (!match) {
+            const stripped = [...phases];
+            if (stripped[stripped.length - 1] === DELIVER_PHASE_ID) stripped.pop();
+            if (stripped[stripped.length - 1] === DELIVERABLE_FLOOR_PHASE_ID) stripped.pop();
+            if (stripped.length < phases.length) match = bySequence(stripped);
+          }
           if (match) view.session.workflow_id = match.id;
         }
       }
@@ -2221,6 +2233,13 @@ export class CoreAdapter {
       if ('worker_config_root' in parsed) {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
+      }
+      // deliverDefault (crew#393): 'pr' | 'none' only — same values PUT /settings admits. A
+      // hand-edited anything-else falls back to the shipped default ('pr') rather than turning
+      // the repo-scoped delivery default into an unparseable third state.
+      if ('deliverDefault' in parsed) {
+        const d = parsed.deliverDefault;
+        if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
       }
       // Skin-owned `studio.*` blobs (crew#325): the same per-key cap the PUT /settings route
       // enforces. The write cap alone cannot hold it — `updateSettings` reads through here, so a

@@ -191,23 +191,39 @@ export interface AgentSession {
    */
   guidance?: string;
   /**
-   * The run's delivered artifact (CREW-UX-8, crew#321; api-types 0.11.0) — populated at DTO
-   * assembly on BOTH `GET /runs` and `GET /runs/:id`. ABSENT — never `null` — when the run
-   * delivered nothing: absence is the one spelling, so `'delivery' in session` and
-   * `!== undefined` agree. FAILURE is not spelled here; it is `units[].status === 'rejected'`
-   * plus `denial_reason` (crew#318's message), both already on the list wire — only the
-   * SUCCESS half needed a field.
+   * The run's delivery state (crew#393; api-types 0.18.0) — derived at DTO assembly on BOTH
+   * `GET /runs` and `GET /runs/:id`, so a run whose reviewable work is sitting uncommitted in
+   * its worktree can no longer look identical to one that delivered or had nothing to deliver:
    *
-   * `kind` is a discriminator so a future artifact type is additive. Deliberately NOT an
-   * artifact model: documents and demos already have their own identity, tiles and routes in
-   * the skin; runs are the only producer with no product, and their product is exactly one
-   * thing.
+   *   - `'delivered'` — a PR was opened for this run (by the deliver phase, or post-hoc via
+   *     `POST /runs/:id/deliver`); `deliverUrl` carries the PR URL.
+   *   - `'stranded'`  — a COMPLETED repo-scoped run with no recorded PR whose worktree still
+   *     exists on disk: reviewable work nobody lifted. Derived honestly for OLD runs too —
+   *     records written before this field existed strand exactly the same way.
+   *   - `'none'`     — everything else: repo-less runs, non-terminal runs, failed/cancelled
+   *     runs, and completed runs whose worktree is gone.
    *
-   * KNOWN LIMIT: runs that delivered before a 0.11.0 daemon first saw their terminal frame
-   * have no durable `run.delivered` audit entry and carry no field — historical runs still
-   * resolve their URL through `GET /runs/:id/units/:unitKey/output` (the pre-#321 fallback).
+   * Always present on runs served by a 0.18.0+ daemon; absent only from an older server.
+   *
+   * ⚠ WIRE RESHAPE (0.17.0 → 0.18.0, NOT additive): 0.11.0–0.17.0 spelled this field as
+   * `delivery?: { kind: 'pull_request'; url: string }`. The object form is GONE — the state
+   * moved into this string and the URL into `deliverUrl`. A client reading `delivery?.url`
+   * must move to `deliverUrl`.
+   *
+   * FAILURE of a deliver phase is not spelled here; it is `units[].status === 'rejected'`
+   * plus `denial_reason` (crew#318's message), both already on the list wire.
    */
-  delivery?: { kind: 'pull_request'; url: string };
+  delivery?: 'delivered' | 'stranded' | 'none';
+  /**
+   * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
+   * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
+   *
+   * KNOWN LIMIT (inherited from 0.11.0): runs that delivered before a 0.11.0 daemon first saw
+   * their terminal frame have no durable `run.delivered` audit entry — they read as
+   * `'stranded'` while their worktree survives (post-hoc `POST /runs/:id/deliver` is
+   * idempotent against the existing branch) and `'none'` after it is cleaned up.
+   */
+  deliverUrl?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -1377,17 +1393,29 @@ export interface LaunchRunBody {
    */
   projectId?: string;
   /**
-   * Delivery mode (crew#293). `"pr"` ⇒ the daemon appends a hardened deliver Tool phase (push
-   * the run's branch, rebase onto origin's default branch, `gh pr create`; the PR URL is the
-   * phase output's last line) to a PER-RUN copy of the selected workflow def — the shared def
-   * is never mutated, and merge stays human. Requires `workflow`; sending `deliver` without it
-   * is a 400. Omit ⇒ no delivery phase.
+   * Delivery mode (crew#293, defaulting reworked by crew#393 / api-types 0.18.0).
    *
-   * NOTE for the next api-types release: added daemon-side first (workspace copy, 0.6.0 +
-   * crew#293) — fold into the published `LaunchRunBody` when 0.7.0 cuts. Optional, so the
-   * field is forward-additive on the wire (DES-STUDIO-001 §5.1).
+   * `"pr"` ⇒ the daemon appends a hardened deliver Tool phase (push the run's branch, rebase
+   * onto origin's default branch, `gh pr create`; the PR URL is the phase output's last line)
+   * to a PER-RUN copy of the selected workflow def — the shared def is never mutated, and
+   * merge stays human. Requires `workflow`; sending `deliver: "pr"` without one is a 400.
+   *
+   * `"none"` ⇒ explicitly no delivery phase (the run's work stays in its worktree and the run
+   * will read `delivery: 'stranded'` on the wire once completed — recoverable any time via
+   * `POST /runs/:id/deliver`).
+   *
+   * OMITTED ⇒ the daemon decides (crew#393): a repo-scoped launch (`repoRef` set) that names a
+   * CODE-WORK `workflow` — a def carrying at least one `executes_code` phase (feature, bug,
+   * migration; not chat/onboarding/recon defs, whose clean worktree the deliver script would
+   * fail loudly) — DEFAULTS to `"pr"`: a completed code run must end with a reviewable
+   * deliverable or an explicit decision not to. The daemon setting `deliverDefault: 'none'`
+   * flips that default off. Repo-less launches, free-text launches (no `workflow`, so there is
+   * no def to append the phase to), and read-only-workflow launches default to `"none"`.
+   *
+   * `"none"` is additive (0.18.0): an older daemon's launch schema rejects it with a 400 —
+   * omit the field entirely against pre-0.18 servers.
    */
-  deliver?: 'pr';
+  deliver?: 'pr' | 'none';
   /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
@@ -1414,6 +1442,23 @@ export interface SetGuidanceBody {
 export interface SetGuidanceResult {
   runId: string;
   guidance: string;
+}
+
+/**
+ * Response of `POST /runs/:id/deliver` (crew#393; api-types 0.18.0) — post-hoc delivery: lift a
+ * COMPLETED repo-scoped run's stranded worktree into a PR with the SAME hardened script the
+ * deliver phase runs (crew#293/#317: commit the run's work, refuse the default branch, rebase
+ * onto origin's default branch — a conflict fails LOUDLY with nothing pushed — push, `gh pr
+ * create`, and re-derive success from a real PR URL). Takes no body.
+ *
+ * Idempotent: a run that already delivered answers 200 with the SAME recorded `prUrl` — a second
+ * call never opens a second PR. Failure is loud, never silent: 404 (unknown run), 409 (run not
+ * completed / repo-less / worktree gone / a delivery already in flight / the script itself failed
+ * — the body's `error` carries the script's own words, e.g. the rebase-conflict message), 500
+ * (the script produced no verifiable PR URL, or could not be spawned).
+ */
+export interface DeliverRunResult {
+  prUrl: string;
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────
@@ -1605,6 +1650,16 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
+  /**
+   * The repo-scoped launch delivery DEFAULT (crew#393; api-types 0.18.0, additive). What a
+   * `POST /runs` with `repoRef` + a CODE-WORK `workflow` (a def with at least one
+   * `executes_code` phase) and NO explicit `deliver` resolves to: `'pr'` (the shipped default —
+   * completed code runs open their PR) or `'none'` (work stays in the worktree, surfaced as
+   * `delivery: 'stranded'`). Absent reads as `'pr'`. Never consulted when the launch body sets
+   * `deliver` explicitly, and never applied to repo-less, free-text, or read-only-workflow
+   * launches (those are always `'none'`).
+   */
+  deliverDefault?: 'pr' | 'none';
   /**
    * SKIN-OWNED preference blobs (crew#323). The settings store is shared: alongside the
    * engine's keys it carries the studio's own state — `studio.appearance` (accent/logo/theme),
