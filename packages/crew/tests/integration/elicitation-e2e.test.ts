@@ -234,7 +234,9 @@ describe('ACP elicitation end-to-end (real engine + scripted agent)', () => {
             key: CLI_KEY,
             display_name: 'Stub Elicit Agent',
             binary: process.execPath,
-            headless_invocation: `${process.execPath} x {PROMPT}`,
+            // Matches the clis.toml registration above — the run stays on the ACP transport,
+            // but the seat record must not contradict what the registry advertises.
+            headless_invocation: `${process.execPath} ${join(dir, 'stub-elicit-agent.mjs')} {PROMPT}`,
           },
         ]),
       }),
