@@ -36,6 +36,7 @@ import type {
 } from '../src/api/testing.js';
 import type { LaunchCampaignSchema } from '../src/campaigns/routes.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
+import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -195,6 +196,32 @@ respondsWith<
 // the diff shape verbatim, so the machinery types must satisfy the published contract.
 respondsWith<Wire.RunFileContent, { path: string } & CappedFileRead>();
 respondsWith<Wire.RunDiff, WorktreeDiff>();
+
+// GET /diagnostics (api-types 0.16.0) — the daemon's self-knowledge surface. The route
+// assembles exactly this shape from the diagnostics module's machinery types; pinning it here
+// (and each machinery type below, BOTH directions) means a null-vs-absent or camelCase drift
+// in either the module or the contract stops compiling instead of shipping.
+respondsWith<
+  Wire.DiagnosticsResponse,
+  {
+    components: {
+      crew: string;
+      studioBundle: string | null;
+      coreTs: string | null;
+      engineBinaries: Record<string, string | null>;
+    };
+    daemon: { uptimeMs: number; startedAt: number; port: number };
+    stores: StoreFileEntry[];
+    recentErrors: RecentError[];
+    acp: { byCli: Record<string, AcpCliFold> };
+  }
+>();
+respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
+respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
+respondsWith<Wire.DiagnosticsRecentError, RecentError>();
+respondsWith<RecentError, Wire.DiagnosticsRecentError>();
+respondsWith<Wire.DiagnosticsStoreFile, StoreFileEntry>();
+respondsWith<StoreFileEntry, Wire.DiagnosticsStoreFile>();
 
 // Identity/actor contract (task #88): the implicit local actor and the audit
 // trail's read shape must satisfy what the contract publishes.
