@@ -36,7 +36,6 @@ import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
-import { provisionCampaignWorktrees, type WorktreeTarget } from '../campaigns/worktrees.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 
 
@@ -1193,20 +1192,6 @@ export class CoreAdapter {
     const dir = workflowOverlayDir();
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, `${def.id}.json`), JSON.stringify(def, null, 2), 'utf8');
-  }
-
-  /**
-   * Pre-provision campaign-node worktrees (crew#390 lane) — the daemon-side workaround for the
-   * engine defect where `create_worktree` names the branch `wicked/{run_id}` verbatim while a
-   * campaign node's run id (`{campaign}:{node}:a{attempt}`) is not a legal git ref. Runs BEFORE
-   * `launchCampaign` for every repo-scoped node; the engine's dispatch then REUSES the live
-   * worktree (its documented resume contract) instead of minting the illegal branch. Returns a
-   * best-effort rollback for a launch that is then refused. Full story:
-   * `campaigns/worktrees.ts`. An instance method (not a free import at the call site) so the
-   * route suites can stub it exactly like `launchRun`/`launchCampaign`.
-   */
-  provisionCampaignWorktrees(targets: WorktreeTarget[]): Promise<() => Promise<void>> {
-    return provisionCampaignWorktrees(targets);
   }
 
   /** Resume a campaign from its persisted state → the campaign status token. */

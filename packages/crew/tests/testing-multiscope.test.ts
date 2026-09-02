@@ -87,10 +87,6 @@ let runLaunches: LaunchRunInput[] = [];
 let campaignLaunch: { def: CampaignDef; workflows: WorkflowDef[] } | null = null;
 /** Every project-member attach the stub captured (the recon fan's daemon-side filing). */
 let memberAttaches: { projectId: string; kind: string; ref: string }[] = [];
-/** Every worktree pre-provisioning batch the stub captured (the branch-name workaround). */
-let provisioned: { runId: string; repoRoot: string }[][] = [];
-/** How many times the last provisioning batch was rolled back (launch-refused reclaim). */
-let rolledBack = 0;
 /** Per-test toggles for the engine seams the recon fan branches on. */
 let campaignsSupported = true;
 let launchCampaignError: Error | null = null;
@@ -115,12 +111,6 @@ beforeAll(async () => {
     if (launchCampaignError !== null) throw launchCampaignError;
     campaignLaunch = { def, workflows };
     return def.id;
-  };
-  adapter.provisionCampaignWorktrees = async (targets) => {
-    provisioned.push(targets.map((t) => ({ ...t })));
-    return async () => {
-      rolledBack += 1;
-    };
   };
   adapter.projectMemberAttach = async (projectId: string, kind: string, ref: string) => {
     memberAttaches.push({ projectId, kind, ref });
@@ -154,8 +144,6 @@ beforeEach(() => {
   runLaunches = [];
   campaignLaunch = null;
   memberAttaches = [];
-  provisioned = [];
-  rolledBack = 0;
   campaignsSupported = true;
   launchCampaignError = null;
 });
@@ -248,11 +236,6 @@ describe('POST /testing/recon', () => {
     expect(runIds).toEqual([`${campaign}:beta:a0`, `${campaign}:alpha:a0`]);
     expect(res.body['runId']).toBe(runIds[0]);
     expect(res.body['campaignRegistered']).toBe(true);
-    // Each node's worktree was pre-provisioned (the engine branch-name workaround) BEFORE launch.
-    expect(provisioned).toEqual([[
-      { runId: runIds[0], repoRoot: '/x/beta' },
-      { runId: runIds[1], repoRoot: '/x/alpha' },
-    ]]);
     // The SAME campaign label on every sibling's trail entry — plus the gate it carries.
     const entries = await reconAuditEntries(campaign, 2);
     expect(entries).toHaveLength(2);
@@ -319,8 +302,6 @@ describe('POST /testing/recon', () => {
     });
     expect(boom.status).toBe(500);
     expect(boom.body['error']).toMatch(/campaign store exploded/);
-    // The pre-provisioned worktrees were reclaimed on the refused launch.
-    expect(rolledBack).toBe(1);
 
     launchCampaignError = new Error("campaign 'recon-x' already exists");
     const dup = await post('/api/v1/testing/recon', {
