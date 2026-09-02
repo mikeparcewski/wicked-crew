@@ -244,12 +244,14 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
 
       // Poll for the branch rather than a node status: worktree creation happens at LAUNCH, so
       // this proves provisioning independently of whether the stub node then passes or fails.
+      // Poll budget matches the test's own 120s timeout (the helper's 60s default would
+      // silently halve the allowed time on a slow runner).
       const branch = await until(async () => {
         const listed = execFileSync(
           'git', ['-C', repoRoot, 'branch', '--list', `wicked/${sanitized}`], { stdio: 'pipe' },
         ).toString().trim();
         return listed === '' ? null : listed;
-      });
+      }, 110_000);
       expect(branch, `the engine must mint wicked/${sanitized} for the repo-scoped node`).not.toBeNull();
 
       // And crew minted nothing of its own at the raw, colon-carrying spelling.

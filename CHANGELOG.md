@@ -12,8 +12,8 @@ mentioned only where a daemon release depends on them.
 
 ### Removed
 - **The campaign-worktree pre-provisioning workaround** (#415) — `packages/crew/src/campaigns/worktrees.ts`
-  and its call sites in the recon route and the core adapter, closing the removal 0.7.11 tracked
-  separately. On the ^0.7.8 engine floor `create_worktree` sanitizes a campaign-shaped run id itself
+  and its call sites in the recon route and the core adapter — the removal that 0.7.11's release
+  notes tracked separately (#415). On the ^0.7.8 engine floor `create_worktree` sanitizes a campaign-shaped run id itself
   (core#345/#347 — `:` → `-`, byte-for-byte the old `branchSafe()` spelling), ownership-marks the
   tree, adopts a pre-provisioned one, and the startup reaper spares live trees under either
   spelling, so the daemon-side workaround was dead weight. Campaigns already in flight under 0.7.11
