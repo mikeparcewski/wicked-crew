@@ -262,8 +262,10 @@ export function normalizeProposedRule(
   if (targets !== undefined && (typeof targets !== 'object' || targets === null || Array.isArray(targets))) {
     // A facet OBJECT passes through untouched; anything else cannot mean what the engine means
     // by targets — the glob scoping the worker usually intends already lives in applies_to.
-    delete out['targets'];
-    note('dropped non-facet targets (the engine Targets is a {language,layer,framework} object)');
+    // Coerced to the EMPTY facet object (not deleted): the published ConformanceRule shape has
+    // targets required, and readers like GET /governance/rules touch rule.targets.* directly.
+    out['targets'] = {};
+    note('replaced non-facet targets with {} (the engine Targets is a {language,layer,framework} object)');
   }
   const trigger = out['trigger'];
   if (trigger !== undefined && (typeof trigger !== 'object' || trigger === null || Array.isArray(trigger))) {
@@ -460,9 +462,13 @@ export async function landSteeringProposal(
           id: rule.id,
           source: 'chat',
           via: STEERING_AUTHOR_WORKFLOW,
-          // Shape coercions this landing applied (see normalizeProposedRule) — audited so a
-          // worker-authored field the engine could not store is never silently reshaped.
-          ...(coercions.length > 0 ? { coerced: coercions } : {}),
+          // Shape coercions this landing applied to THIS rule (see normalizeProposedRule) —
+          // audited so a worker-authored field the engine could not store is never silently
+          // reshaped. Coercion notes are prefixed with the rule id they belong to.
+          ...(() => {
+            const own = coercions.filter((c) => c.startsWith(`${rule.id}:`));
+            return own.length > 0 ? { coerced: own } : {};
+          })(),
         },
       });
     } catch (err) {

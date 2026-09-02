@@ -186,7 +186,7 @@ describe('normalizeProposedRule — live worker shapes (run 3234c023)', () => {
       unknown
     >;
     // The three field-shape repairs the live run needed, each named for the audit trail.
-    expect(rule['targets']).toBeUndefined();
+    expect(rule['targets']).toEqual({});
     expect(rule['trigger']).toBeUndefined();
     expect(typeof rule['criteria']).toBe('string');
     expect(rule['criteria']).toContain('All version strings');
