@@ -78,8 +78,15 @@ function waitForFrame(pred: (f: Frame) => boolean, label: string, ms = 90_000): 
   const found = frames.find(pred);
   if (found) return Promise.resolve(found);
   return new Promise<Frame>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out (${ms}ms) waiting for: ${label}`)), ms);
-    waiters.push({ pred, resolve, timer });
+    const waiter = { pred, resolve, timer: undefined as unknown as NodeJS.Timeout };
+    waiter.timer = setTimeout(() => {
+      // A timed-out waiter leaves the list — a later matching frame must not "resolve" a
+      // promise that already rejected, and stale entries must not leak across the file.
+      const i = waiters.indexOf(waiter);
+      if (i !== -1) waiters.splice(i, 1);
+      reject(new Error(`timed out (${ms}ms) waiting for: ${label}`));
+    }, ms);
+    waiters.push(waiter);
   });
 }
 
