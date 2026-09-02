@@ -227,7 +227,7 @@ export function gitRunBranchIsEmpty(
     }
   };
   return async (repoRef: string, runId: string): Promise<boolean> => {
-    const key = `${repoRef} ${runId}`;
+    const key = `${repoRef}\0${runId}`;
     const hit = memo.get(key);
     if (hit !== undefined && now() - hit.at < ttlMs) return hit.empty;
     const empty = await probe(repoRef, runId);

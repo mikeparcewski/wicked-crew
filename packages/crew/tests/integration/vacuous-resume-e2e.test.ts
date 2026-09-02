@@ -70,7 +70,6 @@ const WORK_WORKFLOW = {
   phases: [
     {
       ...NOOP_WORKFLOW.phases[0],
-      cmd: undefined,
       executor: {
         type: 'tool',
         cmd: ['bash', '-lc', 'echo real-work > crew-e2e-vacuous-work.txt'],
