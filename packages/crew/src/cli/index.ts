@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
+import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -253,8 +254,16 @@ function installShutdownHandlers(): void {
       process.exit(0);
     })();
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => {
+    daemonSignalLog.record('SIGTERM');
+    console.warn(`[daemon] received SIGTERM at ${new Date().toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
+    shutdown();
+  });
+  process.on('SIGINT', () => {
+    daemonSignalLog.record('SIGINT');
+    console.warn(`[daemon] received SIGINT at ${new Date().toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
+    shutdown();
+  });
   // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
   // await, so this is the synchronous SIGTERM sweep. After the graceful path above it is
   // a no-op re-scan; on a plain exit it is the only reaping that happens, and the

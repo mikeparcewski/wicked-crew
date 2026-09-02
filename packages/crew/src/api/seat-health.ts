@@ -28,6 +28,10 @@
 
 import type { CoreEvent, SeatHealth } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
+import {
+  DaemonSignalLog,
+  SIGNAL_CORRELATION_WINDOW_MS,
+} from '../core/daemon-signal-log.js';
 
 export type { SeatHealth };
 
@@ -81,6 +85,16 @@ export class SeatHealthTracker {
   private readonly fallbacks = new Map<string, number[]>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
+
+  constructor(private readonly opts: {
+    /**
+     * When present, `acpFallback(session_died)` events check it for a correlated
+     * daemon signal and log which case it was (crew#411). Absent: correlation skipped.
+     */
+    signalLog?: DaemonSignalLog;
+    /** Receives the correlation log lines (daemon wires `app.log.warn`). */
+    log?: (m: string) => void;
+  } = {}) {}
 
   /** Fold one CoreEvent into the map. Safe on every event type; unknown types are ignored. */
   ingest(event: CoreEvent): void {
@@ -164,6 +178,23 @@ export class SeatHealthTracker {
             since: prev?.since ?? this.startedAt,
             lastErrorAt: new Date(at).toISOString(),
           });
+        }
+        // ── crew#411: signal correlation ───────────────────────────────────────
+        // A session_died fallback is a silent bridge exit-0; whether the daemon was
+        // also signalled at the same time determines the likely cause. Both branches
+        // always log when the signal log is wired so post-mortems have the evidence.
+        if (fallbackKind === 'session_died' && this.opts.signalLog !== undefined) {
+          const match = this.opts.signalLog.findInWindow(at);
+          const who = `acpFallback(session_died) for ${cliKey} on run ${session ?? 'unknown'}`;
+          this.opts.log?.(
+            match
+              ? `[seat-health] ${who}: daemon also received ${match.signal} at ` +
+                `${new Date(match.at).toISOString()} (Δ${Math.abs(at - match.at)}ms)` +
+                ` — likely group/terminal signal (crew#411)`
+              : `[seat-health] ${who}: no daemon signal within ` +
+                `±${SIGNAL_CORRELATION_WINDOW_MS / 1000}s` +
+                ` — pid-targeted external signal or transport close (crew#411)`,
+          );
         }
         return;
       }
