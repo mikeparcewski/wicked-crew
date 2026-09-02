@@ -1,0 +1,52 @@
+Let me check the working directory for any existing structure or convention for the proposal file path.No explicit proposal file path appears in the problem statement, so I'll use the conventional `proposals/OPS-LIVE-717.json` under the working directory. Writing the rule now.Proposal written to `proposals/OPS-LIVE-717.json`. Here is the same array for the human reviewer:
+
+```json
+[
+  {
+    "id": "OPS-LIVE-717",
+    "rule_type": "policy",
+    "statement": "When making a release version change, a developer or agent MUST update every occurrence of the version string within the repo — including package manifests (package.json, pyproject.toml, and equivalents), platform version pins, plugin and skill manifests, and marketplace/CLI listing metadata — in the same commit; where a version-sync test exists it MUST guard the change and MUST pass before the commit is merged.",
+    "severity": "info",
+    "confidence": 0.95,
+    "targets": [
+      "package.json",
+      "pyproject.toml",
+      "plugin manifests",
+      "skill manifests",
+      "platform version pins",
+      "marketplace listing metadata",
+      "CLI listing metadata"
+    ],
+    "steering_type": "development",
+    "provenance": {
+      "source": "chat"
+    },
+    "applies_to": [
+      "**/package.json",
+      "**/pyproject.toml",
+      "**/manifest.*",
+      "**/*.toml"
+    ],
+    "trigger": "version field change in any release-tracked file",
+    "obligations": [
+      "Bump every version spelling — package manifests, platform pins, plugin/skill manifests, marketplace/CLI metadata — in the same commit as the triggering change.",
+      "If a version-sync test exists in the repo, run it as part of the change; it MUST pass before the commit is merged."
+    ],
+    "criteria": [
+      "All version strings across the repo resolve to the same value after the commit.",
+      "No partial update leaves any tracked file at the prior version.",
+      "Version-sync test (if present) exits zero / green."
+    ]
+  }
+]
+```
+
+**Authoring notes:**
+
+- `rule_type: "policy"` — the rule contains imperative MUST obligations, which is characteristic of policy rather than pattern; the OPS-LIVE id prefix is operator-assigned and does not conflict.
+- `confidence: 0.95` — operator intent is explicit and unambiguous; the small residual accounts for per-repo file enumeration being left to discovery rather than fixed filenames.
+- Enforcement fields (`applies_to`, `trigger`, `obligations`, `criteria`) are populated because the source material directly supports them; nothing is inferred beyond what the intent text states.
+- The `obligations` array separates the two MUST clauses (atomic commit + test guard) so a consuming agent can check each independently.
+- `criteria` gives machine-checkable pass/fail conditions aligned to the obligations.
+
+This is a **proposal only** — no rule has been written to any governance store. It lands there only after human approval, crew-side.
