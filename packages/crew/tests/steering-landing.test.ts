@@ -4,6 +4,7 @@
 // (approve lands / replay dedupes / reject lands nothing / fail-loud) lives in
 // steering-gate-landing-route.test.ts — these are the parsers it stands on.
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import {
@@ -160,5 +161,81 @@ describe('isSteeringAuthorRun', () => {
     expect(isSteeringAuthorRun(view('feature', ['clarify', 'design']), BUILTIN_WORKFLOWS)).toBe(false);
     expect(isSteeringAuthorRun(view('wf-abc123', ['gather', 'store']), BUILTIN_WORKFLOWS)).toBe(false);
     expect(isSteeringAuthorRun(view('wf-abc123', ['u1']), BUILTIN_WORKFLOWS)).toBe(false);
+  });
+});
+
+// ── Live re-verify regression (run 3234c023, 2026-09-01): a REAL worker's transcript ─────────
+// The first live steering-author run after crew#388 shipped produced field shapes the engine
+// schema refuses — targets as a string array, trigger as prose, criteria as a list — and the
+// whole landing failed with the engine's parse error ("trailing characters"). The fixture is
+// that worker's verbatim propose output; normalization must coerce it into a rule the engine
+// accepts, with every adjustment named.
+describe('normalizeProposedRule — live worker shapes (run 3234c023)', () => {
+  const fixture = readFileSync(
+    new URL('./fixtures/steering-propose-live-3234c023.txt', import.meta.url),
+    'utf8',
+  );
+
+  it('the live transcript extracts, and coercion makes it engine-shaped', () => {
+    const raw = extractProposedRules(fixture);
+    expect(raw).not.toBeNull();
+    expect(raw).toHaveLength(1);
+    const coercions: string[] = [];
+    const rule = normalizeProposedRule(raw![0]!, 'development', coercions) as unknown as Record<
+      string,
+      unknown
+    >;
+    // The three field-shape repairs the live run needed, each named for the audit trail.
+    expect(rule['targets']).toEqual({});
+    expect(rule['trigger']).toBeUndefined();
+    expect(typeof rule['criteria']).toBe('string');
+    expect(rule['criteria']).toContain('All version strings');
+    expect(coercions.some((c) => c.includes('targets'))).toBe(true);
+    expect(coercions.some((c) => c.includes('trigger'))).toBe(true);
+    expect(coercions.some((c) => c.includes('criteria'))).toBe(true);
+    // Untouched fields pass through byte-identical.
+    expect(rule['id']).toBe('OPS-LIVE-717');
+    expect(rule['severity']).toBe('info');
+    expect(rule['confidence']).toBe(0.95);
+    expect((rule['provenance'] as Record<string, unknown>)['source']).toBe('chat');
+  });
+
+  it('a facet-object targets and structured trigger pass through untouched', () => {
+    const coercions: string[] = [];
+    const rule = normalizeProposedRule(
+      {
+        id: 'PAT-901',
+        statement: 'x',
+        rule_type: 'pattern',
+        severity: 'info',
+        confidence: 0.5,
+        targets: { language: 'rust' },
+        trigger: { phase: 'build' },
+        criteria: 'already a string',
+      },
+      undefined,
+      coercions,
+    ) as unknown as Record<string, unknown>;
+    expect(rule['targets']).toEqual({ language: 'rust' });
+    expect(rule['trigger']).toEqual({ phase: 'build' });
+    expect(rule['criteria']).toBe('already a string');
+    expect(coercions).toEqual([]);
+  });
+
+  it('missing confidence is defaulted (required engine-side), out-of-range is clamped', () => {
+    const coercions: string[] = [];
+    const noConf = normalizeProposedRule(
+      { id: 'POL-902', statement: 'y', rule_type: 'policy', severity: 'warn' },
+      undefined,
+      coercions,
+    ) as unknown as Record<string, unknown>;
+    expect(noConf['confidence']).toBe(0.8);
+    const clamped = normalizeProposedRule(
+      { id: 'POL-903', statement: 'z', rule_type: 'policy', severity: 'warn', confidence: 7 },
+      undefined,
+      coercions,
+    ) as unknown as Record<string, unknown>;
+    expect(clamped['confidence']).toBe(1);
+    expect(coercions.length).toBe(2);
   });
 });

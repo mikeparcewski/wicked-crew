@@ -228,7 +228,11 @@ export function extractProposedRules(text: string): RawRule[] | null {
  * able to disguise where the rule came from. Everything else passes through untouched: the
  * ENGINE's upsert path is the one spelling of what a valid rule is.
  */
-export function normalizeProposedRule(raw: RawRule, defaultType?: string): ConformanceRule {
+export function normalizeProposedRule(
+  raw: RawRule,
+  defaultType?: string,
+  coercions?: string[],
+): ConformanceRule {
   const prior =
     typeof raw['provenance'] === 'object' && raw['provenance'] !== null && !Array.isArray(raw['provenance'])
       ? (raw['provenance'] as Record<string, unknown>)
@@ -244,6 +248,48 @@ export function normalizeProposedRule(raw: RawRule, defaultType?: string): Confo
     defaultType !== undefined
   ) {
     out['steering_type'] = defaultType;
+  }
+  // ── Shape coercion (live re-verify finding, run 3234c023): a REAL worker authors plausible
+  // shapes the engine schema refuses — `targets` as a string array (the engine's Targets is a
+  // {language, layer, framework} facet object), `trigger` as prose (a struct engine-side), and
+  // `criteria` as a list (a string engine-side). The old passthrough failed the WHOLE landing
+  // with the engine's parse error; the doctrine's loudness belongs on the parts that are wrong,
+  // not on the rule. Each coercion is recorded (the landing audits them) so nothing is silent.
+  const note = (msg: string): void => {
+    coercions?.push(`${String(out['id'] ?? '?')}: ${msg}`);
+  };
+  const targets = out['targets'];
+  if (targets !== undefined && (typeof targets !== 'object' || targets === null || Array.isArray(targets))) {
+    // A facet OBJECT passes through untouched; anything else cannot mean what the engine means
+    // by targets — the glob scoping the worker usually intends already lives in applies_to.
+    // Coerced to the EMPTY facet object (not deleted): the published ConformanceRule shape has
+    // targets required, and readers like GET /governance/rules touch rule.targets.* directly.
+    out['targets'] = {};
+    note('replaced non-facet targets with {} (the engine Targets is a {language,layer,framework} object)');
+  }
+  const trigger = out['trigger'];
+  if (trigger !== undefined && (typeof trigger !== 'object' || trigger === null || Array.isArray(trigger))) {
+    delete out['trigger'];
+    note('dropped prose trigger (the engine Trigger is a structured condition object)');
+  }
+  const criteria = out['criteria'];
+  if (Array.isArray(criteria)) {
+    out['criteria'] = criteria.filter((c) => typeof c === 'string').join('\n');
+    note('joined criteria list into the single string the engine stores');
+  } else if (criteria !== undefined && typeof criteria !== 'string') {
+    delete out['criteria'];
+    note('dropped non-string criteria');
+  }
+  const confidence = out['confidence'];
+  if (typeof confidence === 'number' && Number.isFinite(confidence)) {
+    if (confidence < 0 || confidence > 1) {
+      out['confidence'] = Math.min(1, Math.max(0, confidence));
+      note('clamped confidence into [0,1]');
+    }
+  } else {
+    // REQUIRED engine-side (f32, no serde default) — a proposal without one must still land.
+    out['confidence'] = 0.8;
+    note(confidence === undefined ? 'defaulted missing confidence to 0.8' : 'replaced non-numeric confidence with 0.8');
   }
   return out as unknown as ConformanceRule;
 }
@@ -385,7 +431,8 @@ export async function landSteeringProposal(
   }
 
   const defaultType = steeringTypeFromProblem(run.session.problem);
-  const rules = rawRules.map((r) => normalizeProposedRule(r, defaultType));
+  const coercions: string[] = [];
+  const rules = rawRules.map((r) => normalizeProposedRule(r, defaultType, coercions));
 
   // ── The same pre-steering-engine guard as POST /governance/rules ─────────────
   if (!adapter.steeringSupported()) {
@@ -411,7 +458,18 @@ export async function landSteeringProposal(
       landedIds.push(rule.id);
       audit.record('governance.rule.upserted', actor, {
         runId,
-        detail: { id: rule.id, source: 'chat', via: STEERING_AUTHOR_WORKFLOW },
+        detail: {
+          id: rule.id,
+          source: 'chat',
+          via: STEERING_AUTHOR_WORKFLOW,
+          // Shape coercions this landing applied to THIS rule (see normalizeProposedRule) —
+          // audited so a worker-authored field the engine could not store is never silently
+          // reshaped. Coercion notes are prefixed with the rule id they belong to.
+          ...(() => {
+            const own = coercions.filter((c) => c.startsWith(`${rule.id}:`));
+            return own.length > 0 ? { coerced: own } : {};
+          })(),
+        },
       });
     } catch (err) {
       failures.push(`${rule.id}: ${err instanceof Error ? err.message : String(err)}`);
