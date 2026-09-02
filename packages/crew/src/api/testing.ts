@@ -299,9 +299,13 @@ export function registerTestingRoutes(
       // persisted by the engine, so `GET /campaigns` serves it with real per-node stats instead
       // of a label only the audit trail could see. The per-run loop below stays for the
       // single/unscoped recon (today's shape, unchanged) and as the honest fallback on an
-      // engine addon without the campaign bindings — and on win32, where the engine's
-      // `wicked-worktrees/<run_id>` path (':' in the run id) cannot exist on the filesystem.
-      if (scope.repos.length >= 2 && adapter.campaignsSupported() && process.platform !== 'win32') {
+      // engine addon without the campaign bindings.
+      //
+      // Worktrees are the ENGINE's (crew#415): on the ^0.7.8 floor `create_worktree` sanitizes a
+      // campaign-shaped run id into a git- and NTFS-legal name and mints the tree at LAUNCH
+      // (core#345/#347), so this route neither pre-provisions nor excludes win32 any more. A git
+      // refusal therefore fails that NODE — it is no longer a pre-launch abort.
+      if (scope.repos.length >= 2 && adapter.campaignsSupported()) {
         const built = buildReconCampaign({
           id: campaign,
           problem: b.problem,
@@ -309,34 +313,13 @@ export function registerTestingRoutes(
           clis: deps.roster(),
           ungated: b.ungated === true,
         });
-        // Pre-provision every node's worktree BEFORE the launch (the engine names worktree
-        // branches `wicked/{run_id}` verbatim, and a node run id is not a legal git ref — see
-        // campaigns/worktrees.ts). Fail-closed: a git refusal aborts with nothing scheduled.
-        const rootOf = new Map((await adapter.listRepos()).map((r) => [r.id, r.root_path]));
-        let rollbackWorktrees: () => Promise<void>;
-        try {
-          rollbackWorktrees = await adapter.provisionCampaignWorktrees(
-            scope.repos.map((r, i) => {
-              const repoRoot = rootOf.get(r.id);
-              if (repoRoot === undefined) {
-                // Unreachable (resolveScopeRepos just admitted these ids) — but a missing root
-                // must abort, never provision a worktree in a guessed location.
-                throw new Error(`repo '${r.id}' vanished from the registry mid-launch`);
-              }
-              return { runId: built.runIds[i]!, repoRoot };
-            }),
-          );
-        } catch (err) {
-          return reply.code(500).send({ error: message(err) });
-        }
         try {
           await adapter.launchCampaign(built.def);
         } catch (err) {
-          // Nothing launched (the engine validates-then-persists the def as one unit): reclaim
-          // the pre-provisioned worktrees, then answer with the campaign-route posture — 409
-          // for a state conflict, else 500 (the def is DAEMON-built from already-validated
-          // inputs, so a reject here is ours, not "fix your request").
-          await rollbackWorktrees().catch(() => {});
+          // Nothing launched (the engine validates-then-persists the def as one unit): answer
+          // with the campaign-route posture — 409 for a state conflict, else 500 (the def is
+          // DAEMON-built from already-validated inputs, so a reject here is ours, not "fix
+          // your request").
           const msg = message(err);
           const busy = /already exists|already launched|busy|in flight/i.test(msg);
           return reply.code(busy ? 409 : 500).send({ error: msg });

@@ -10,7 +10,29 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Removed
+- **The campaign-worktree pre-provisioning workaround** (#415) — `packages/crew/src/campaigns/worktrees.ts`
+  and its call sites in the recon route and the core adapter, closing the removal 0.7.11 tracked
+  separately. On the ^0.7.8 engine floor `create_worktree` sanitizes a campaign-shaped run id itself
+  (core#345/#347 — `:` → `-`, byte-for-byte the old `branchSafe()` spelling), ownership-marks the
+  tree, adopts a pre-provisioned one, and the startup reaper spares live trees under either
+  spelling, so the daemon-side workaround was dead weight. Campaigns already in flight under 0.7.11
+  keep their existing trees: the engine's path derivation probes the raw spelling before the
+  sanitized one.
+
+### Changed
+- **The recon fan-out no longer excludes win32** (#415): `POST /testing/recon` fell back to a
+  label-only per-run fan on Windows solely because the engine's `wicked-worktrees/<run_id>` path
+  carried a `:`. Sanitized engine paths are NTFS-safe (illegal characters mapped, reserved device
+  stems prefixed, trailing `.` stripped), so Windows now registers a real engine campaign — the
+  posture `POST /campaigns` always had. Reasoned from the engine source, not executed on Windows:
+  CI is `ubuntu-latest` only.
+- **A worktree failure in a recon fan surfaces per node instead of as a pre-launch 500** (#415):
+  minting moved into the engine's dispatch, so a git refusal fails that node and leaves the campaign
+  registered, rather than aborting the request with nothing scheduled. Both campaign entry points
+  (`POST /testing/recon`, `POST /campaigns`) now behave identically — and the repo-scoped
+  `POST /campaigns` path, which never carried the workaround and until now had no real-engine
+  coverage at all, gained an integration test proving it provisions engine-natively on its own.
 
 ## [0.7.11] — 2026-09-02
 

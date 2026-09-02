@@ -17,7 +17,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
@@ -26,9 +26,9 @@ import type { Campaign } from '../../src/core/types.js';
 
 const require = createRequire(import.meta.url);
 const { Core } = require('wicked-core-ts') as { Core: { prototype: Record<string, unknown> } };
-// win32 keeps the per-run fan (campaign worktree PATHS carry ':', illegal on NTFS — see
-// campaigns/worktrees.ts), so the campaign path this test pins never runs there.
-const supported = typeof Core.prototype['launchCampaign'] === 'function' && process.platform !== 'win32';
+// The campaign path is platform-independent on the ^0.7.8 floor (crew#415): the engine sanitizes
+// its own worktree names, so the paths are NTFS-safe and win32 no longer falls back to a per-run fan.
+const supported = typeof Core.prototype['launchCampaign'] === 'function';
 
 let scratch: string;
 let adapter: CoreAdapter;
@@ -49,6 +49,14 @@ function makeRepo(root: string): void {
     '-c', 'user.name=recon-fanout-test',
     'commit', '-q', '-m', 'init',
   );
+}
+
+/** A worktree's admin dir, the way the engine derives it (wicked-core `repo.rs`
+ *  `worktree_admin_dir`) — `rev-parse` from inside the tree, never a hand-parsed `.git` file. */
+function adminDir(wt: string): string {
+  return execFileSync('git', ['-C', wt, 'rev-parse', '--absolute-git-dir'], { stdio: 'pipe' })
+    .toString()
+    .trim();
 }
 
 async function api(path: string, init?: RequestInit): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -137,6 +145,41 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
         expect(typeof gate.body['prompt']).toBe('string');
       }
 
+      // ── crew#415: the trees are the ENGINE's, minted natively — no crew pre-provisioning ──
+      // Sampled HERE, with both siblings parked at their intake gate. The engine resolves the
+      // workdir at LAUNCH (wicked-core actor.rs `resolve_workdir`, before the gate pause), so the
+      // trees already exist; after completion a clean tree may be reaped, so this is the only
+      // window that is both correct and stable.
+      for (const repo of ['alpha', 'beta'] as const) {
+        const runId = `${campaign}:${repo}:a0`;
+        const repoRoot = join(scratch, 'repos', repo);
+        // The campaign label is `[a-z0-9-]` and node ids are repo names, so ':' is the run id's
+        // ONLY illegal char — the engine's sanitizer takes its hashless colon tier and the name
+        // is exactly what crew's deleted `branchSafe()` used to spell. Pin the id SHAPE, or a
+        // future id change would silently move the engine to its hash-suffixed tier and leave
+        // these path expectations quietly wrong.
+        expect(runId).toMatch(/^[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)+$/);
+        const sanitized = runId.replaceAll(':', '-');
+
+        // The engine minted at its SANITIZED path …
+        const engineTree = join(repoRoot, 'wicked-worktrees', sanitized);
+        expect(existsSync(engineTree), `engine-native worktree for ${runId}`).toBe(true);
+        // … and the RAW path — the one crew's deleted pre-provisioning produced — is ABSENT.
+        // That absence is the actual proof this run went through the engine-native path: mere
+        // existence would also pass if crew still pre-provisioned, because the engine ADOPTS.
+        expect(
+          existsSync(join(repoRoot, 'wicked-worktrees', runId)),
+          `no crew-pre-provisioned tree for ${runId}`,
+        ).toBe(false);
+        // The ownership marker is the engine's signature: crew's workaround never wrote one.
+        expect(readFileSync(join(adminDir(engineTree), 'wicked-run-id'), 'utf8').trim()).toBe(runId);
+        // And the branch carries the engine's one spelling.
+        const listed = execFileSync(
+          'git', ['-C', repoRoot, 'branch', '--list', `wicked/${sanitized}`], { stdio: 'pipe' },
+        ).toString().trim();
+        expect(listed, `wicked/${sanitized} branch`).not.toBe('');
+      }
+
       // ── Approve both over the standard run API (a resume of a gated run IS approval) ──
       for (const runId of runIds) {
         const resumed = await api(`/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
@@ -165,6 +208,55 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
         alpha: `${campaign}:alpha:a0`,
         beta: `${campaign}:beta:a0`,
       });
+    },
+    120_000,
+  );
+
+  // crew#415's third removal check: `POST /campaigns` NEVER carried the pre-provisioning
+  // workaround, so on the ^0.7.8 floor a repo-scoped node must provision engine-natively on its
+  // own. That path had no real-engine coverage at all (campaign-dag.test.ts runs repo-LESS
+  // nodes), so the claim "both campaign entry points behave identically" was reasoned, not
+  // tested — this closes it.
+  //
+  // The assertion is the BRANCH, not the tree: this campaign is UNGATED, so there is no stable
+  // pause to sample the filesystem in, and a terminal run's clean worktree may be reaped. The
+  // branch is the durable artifact — `reap_worktree_if_clean` never touches it — and it can only
+  // exist because `git worktree add -b wicked/<sanitized>` created it.
+  it(
+    'a repo-scoped POST /campaigns node provisions engine-natively too — no crew pre-provisioning',
+    async () => {
+      const campaign = 'crew415-direct';
+      const launch = await api('/campaigns', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: campaign,
+          scenarios: [{ id: 'survey', agent: { problem: 'inventory the API surface' } }],
+          repoRefs: ['alpha'],
+        }),
+      });
+      expect(launch.status, `POST /campaigns → ${JSON.stringify(launch.body)}`).toBe(201);
+
+      // One repo ⇒ the node id keeps the scenario's own spelling, so the run id is deterministic.
+      const runId = `${campaign}:survey:a0`;
+      const sanitized = runId.replaceAll(':', '-');
+      const repoRoot = join(scratch, 'repos', 'alpha');
+
+      // Poll for the branch rather than a node status: worktree creation happens at LAUNCH, so
+      // this proves provisioning independently of whether the stub node then passes or fails.
+      const branch = await until(async () => {
+        const listed = execFileSync(
+          'git', ['-C', repoRoot, 'branch', '--list', `wicked/${sanitized}`], { stdio: 'pipe' },
+        ).toString().trim();
+        return listed === '' ? null : listed;
+      });
+      expect(branch, `the engine must mint wicked/${sanitized} for the repo-scoped node`).not.toBeNull();
+
+      // And crew minted nothing of its own at the raw, colon-carrying spelling.
+      expect(
+        existsSync(join(repoRoot, 'wicked-worktrees', runId)),
+        `no crew-pre-provisioned tree for ${runId}`,
+      ).toBe(false);
     },
     120_000,
   );
