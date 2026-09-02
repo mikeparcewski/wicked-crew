@@ -14,9 +14,23 @@
  */
 
 import type { AuditLog } from './audit.js';
+import type { AuditEntry } from '../core/types.js';
 
 export class RetryIndex {
   private readonly runToRetryOf = new Map<string, string>();
+
+  /**
+   * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
+   * and `GroupIndex` from ONE trail scan (the delivery-index consolidation note, crew#321).
+   */
+  hydrateFromLaunchEntries(entries: AuditEntry[]): void {
+    for (const entry of entries) {
+      const retryOf = entry.detail?.['retryOf'];
+      if (typeof entry.runId === 'string' && typeof retryOf === 'string') {
+        this.runToRetryOf.set(entry.runId, retryOf);
+      }
+    }
+  }
 
   /**
    * Load lineage from EVERY `run.launched` entry in the trail — exhaustively, not capped
@@ -27,12 +41,7 @@ export class RetryIndex {
    */
   async hydrate(audit: AuditLog, log?: (msg: string) => void): Promise<void> {
     try {
-      for (const entry of await audit.readAll({ action: 'run.launched' })) {
-        const retryOf = entry.detail?.['retryOf'];
-        if (typeof entry.runId === 'string' && typeof retryOf === 'string') {
-          this.runToRetryOf.set(entry.runId, retryOf);
-        }
-      }
+      this.hydrateFromLaunchEntries(await audit.readAll({ action: 'run.launched' }));
     } catch (err) {
       log?.(
         `[runs] retry-index hydrate failed (prior runs read as not-a-retry until restart): ${

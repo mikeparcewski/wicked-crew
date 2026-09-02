@@ -44,7 +44,8 @@ describe('endpoint-manifest.json (TH-11)', () => {
     const byKey = new Map(committed().endpoints.map((e) => [`${e.method} ${e.path}`, e]));
     const launch = byKey.get('POST /api/v1/runs');
     expect(launch?.requestType).toBe('LaunchRunBody');
-    expect(launch?.statusCodes).toEqual([201, 400, 404, 409]);
+    // 501: campaignId attach on an engine addon without the campaign bindings (wicked-studio#27).
+    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 501]);
     const gate = byKey.get('POST /api/v1/runs/:id/gate');
     expect(gate?.requestType).toBe('GateDecision');
     expect(gate?.statusCodes).toEqual([200, 400, 404, 409]);

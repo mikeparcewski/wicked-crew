@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.18.0",
+  "apiTypesVersion": "0.19.0",
   "endpoints": [
     {
       "method": "GET",
@@ -13,7 +13,7 @@
       "method": "GET",
       "path": "/api/v1/campaigns",
       "requestType": null,
-      "responseType": "{ campaigns: Campaign[] }",
+      "responseType": "CampaignsListResponse",
       "statusCodes": [
         200,
         501
@@ -545,7 +545,8 @@
         201,
         400,
         404,
-        409
+        409,
+        501
       ]
     },
     {

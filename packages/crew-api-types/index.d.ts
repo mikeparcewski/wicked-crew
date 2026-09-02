@@ -231,6 +231,25 @@ export interface AgentSession {
    * idempotent against the existing branch) and `'none'` after it is cleaned up.
    */
   deliverUrl?: string;
+  /**
+   * The campaign this AD-HOC run was attached to at launch (`LaunchRunBody.campaignId`;
+   * wicked-studio#27, api-types 0.19.0) — daemon-joined at DTO assembly on `GET /runs` and
+   * `GET /runs/:id` from the launch record (audit trail), so it survives a daemon restart.
+   * ABSENT — never `null` — when the run was not attached (absence is the one spelling).
+   *
+   * NOT set on a campaign's own DAG-node runs: those are correlated through
+   * {@link Campaign.node_run_id} (their run ids are `{campaign}:{node}:a{attempt}`), and a
+   * caller-chosen `sessionId` may legally contain `:`, so id-shape parsing is unsound — read
+   * membership from the campaign, not from this field or the id.
+   */
+  campaign_id?: string;
+  /**
+   * The ad-hoc group label this run was launched under (`LaunchRunBody.groupLabel`;
+   * wicked-studio#27, api-types 0.19.0) — daemon-joined like {@link AgentSession.campaign_id}.
+   * ABSENT when the run is ungrouped. Runs sharing a label form one `RunGroup` on
+   * `GET /campaigns`.
+   */
+  group_label?: string;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -1518,6 +1537,28 @@ export interface LaunchRunBody {
    * Omit when the launch is not a retry.
    */
   retryOf?: string;
+  /**
+   * Ad-hoc campaign attach (wicked-studio#27; api-types 0.19.0): file this run onto an EXISTING
+   * campaign's surface. Validated at launch, loudly: an unknown campaign id fails the launch
+   * with a 404 naming it (nothing is launched); a deployment whose engine addon lacks the
+   * campaign bindings answers 501 ("upgrade the engine", never "fix your request").
+   *
+   * The attach is daemon-side provenance ONLY (recorded in the `run.launched` audit entry,
+   * restart-durable, echoed as `AgentSession.campaign_id`): the run executes byte-identically
+   * to an unattached launch — it does NOT become a DAG node, is never scheduled, gated, or
+   * cancelled by the campaign, and the campaign's own lifecycle ignores it. It appears on the
+   * campaigns surface as a `Campaign.attached_runs` entry. Mutually exclusive with
+   * `groupLabel` (both ⇒ 400). Omit both for pre-0.19 behavior, byte for byte.
+   */
+  campaignId?: string;
+  /**
+   * Ad-hoc label grouping, created on first use (wicked-studio#27; api-types 0.19.0): runs
+   * launched with the same label form one group — no pre-registration, no scheduler, no DAG,
+   * no shared gates; pure provenance for "these sibling launches are one effort". 1–200
+   * chars. Served as a `RunGroup` row beside the campaigns on `GET /campaigns` and echoed as
+   * `AgentSession.group_label`. Mutually exclusive with `campaignId` (both ⇒ 400).
+   */
+  groupLabel?: string;
 }
 
 /**
@@ -2408,7 +2449,17 @@ export interface Campaign {
   /** The full definition, embedded so a resume needs no second store. */
   def: CampaignDef;
   node_status: Record<string, CampaignNodeStatus>;
-  /** node_id -> live Run id, always `{campaign}:{node}:a{attempt}` (attempt-keyed, idempotent). */
+  /**
+   * node_id -> live Run id, always `{campaign}:{node}:a{attempt}` (attempt-keyed, idempotent).
+   *
+   * These values ARE the engine session ids: a node's run is an ordinary governed run, so it is
+   * served by `GET /runs` / `GET /runs/:id` under exactly this id, and every session-scoped
+   * CoreEvent frame on `/ws` carries it as `session` (the `campaignNodeStarted` /
+   * `campaignNodeAwaitingHuman` frames additionally spell it as `runId`). Live narration for a
+   * campaign card is therefore a pure client-side correlation:
+   * `frame.session === campaign.node_run_id[node]` — no extra wire, no per-node fetch
+   * (wicked-studio#27).
+   */
   node_run_id: Record<string, string>;
   /** node_id -> 0-based attempt counter (a `human_gate_on_failure` Retry bumps it). */
   node_attempt: Record<string, number>;
@@ -2418,6 +2469,72 @@ export interface Campaign {
   pending_failure_gates: string[];
   /** Whether a fail-fast (or Abort) tripped — finalization lands on `failed`. */
   fail_fast_tripped: boolean;
+  /**
+   * Per-node delivery (wicked-studio#27; api-types 0.19.0) — DAEMON-JOINED at DTO assembly on
+   * `GET /campaigns` and `GET /campaigns/:id`, never engine-persisted: the exact same
+   * `delivery`/`deliverUrl` derivation every run already carries on the runs wire
+   * (`AgentSession.delivery`, crew#393/#311), keyed by node_id like {@link Campaign.node_status}.
+   * A node appears here once its current-attempt run (`node_run_id[node]`) exists on the store —
+   * a still-pending node has no entry. With `node_run_id` + `node_status`, this is everything a
+   * "N of M delivered" rollup needs from ONE campaigns fetch — no per-node run fetch, and no
+   * dependence on the runs list's archived-run filtering. ABSENT only from a pre-0.19 daemon.
+   */
+  node_delivery?: Record<string, CampaignNodeDelivery>;
+  /**
+   * Ad-hoc runs attached to this campaign at launch (`LaunchRunBody.campaignId`;
+   * wicked-studio#27, api-types 0.19.0) — DAEMON-JOINED like {@link Campaign.node_delivery},
+   * launch order. These are NOT DAG nodes: the campaign's scheduler and lifecycle ignore them;
+   * each entry is an independent governed run that an operator filed onto this campaign's
+   * surface. Absent from a pre-0.19 daemon; `[]` when none. Narration correlation is the same
+   * as for nodes: each `runId` is the engine session id on `/ws` frames (`frame.session`).
+   */
+  attached_runs?: AttachedRunView[];
+}
+
+/**
+ * One member's delivery snapshot on the campaigns surface (wicked-studio#27; api-types 0.19.0)
+ * — the same tri-state + URL contract as `AgentSession.delivery`/`deliverUrl` (crew#393/#311),
+ * derived by the same code at DTO assembly. `deliverUrl` present exactly when
+ * `delivery === 'delivered'`.
+ */
+export interface CampaignNodeDelivery {
+  delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  deliverUrl?: string;
+}
+
+/**
+ * An ad-hoc run on the campaigns surface (wicked-studio#27; api-types 0.19.0) — a member of
+ * `Campaign.attached_runs` or `RunGroup.runs`. `runId` is the engine session id: the run is
+ * served in full by `GET /runs/:id`, and live `/ws` CoreEvent frames for it carry it as
+ * `session`. `status`/`delivery`/`deliverUrl` are snapshots of the same fields the run wire
+ * serves, so a rollup needs no second fetch.
+ */
+export interface AttachedRunView {
+  runId: string;
+  status: SessionStatus;
+  delivery: 'delivered' | 'stranded' | 'vacuous' | 'none';
+  deliverUrl?: string;
+}
+
+/**
+ * An ad-hoc label group (wicked-studio#27; api-types 0.19.0): the runs launched with the same
+ * `LaunchRunBody.groupLabel`, in launch order. NOT an engine campaign — no DAG, no scheduler,
+ * no status of its own (derive a rollup from the members); it exists the moment the first run
+ * is launched under the label. Served beside the campaigns in `CampaignsListResponse.groups`.
+ */
+export interface RunGroup {
+  label: string;
+  runs: AttachedRunView[];
+}
+
+/**
+ * `GET /campaigns` 200 body (api-types 0.19.0 — `groups` is ADDITIVE: a pre-0.19 daemon sends
+ * only `campaigns`). One fetch answers the whole grouping surface: engine campaigns (each
+ * carrying its own per-node rollup fields) plus the ad-hoc label groups.
+ */
+export interface CampaignsListResponse {
+  campaigns: Campaign[];
+  groups: RunGroup[];
 }
 
 /**

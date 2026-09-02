@@ -12,6 +12,7 @@ import { ElicitationCache } from './elicitation-cache.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
+import { GroupIndex } from './group-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { DeliveryIndex, deliverUnitOf, prUrlFrom } from './delivery-index.js';
 import { coreUnitId } from './evidence.js';
@@ -322,10 +323,22 @@ export async function createServer(
   // bootstrap-configured state home (crew#353); the warn hook is the loud half of the migration
   // posture — an override root shadowing a default-root file must be SAID at boot, never silent.
   const projectSettings = new ProjectSettingsStore(undefined, (m) => app.log.warn(m));
-  // Retry lineage (CREW-UX-3): hydrated from the audit trail — the durable record the launch
-  // route writes — so a restarted daemon still echoes `retry_of` on prior runs' DTOs.
+  // Retry lineage (CREW-UX-3) + ad-hoc group attach (wicked-studio#27): both durable records
+  // live in the trail's `run.launched` entries, so ONE exhaustive scan feeds both indexes —
+  // boot stays at three full-file trail scans, not four (the crew#321 consolidation note).
   const retryIndex = new RetryIndex();
-  await retryIndex.hydrate(audit, (m) => app.log.warn(m));
+  const groupIndex = new GroupIndex();
+  try {
+    const launchEntries = await audit.readAll({ action: 'run.launched' });
+    retryIndex.hydrateFromLaunchEntries(launchEntries);
+    groupIndex.hydrateFromLaunchEntries(launchEntries);
+  } catch (err) {
+    app.log.warn(
+      `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped until restart): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
   // Operator guidance (CREW-UX-7, DES-UX-002 §7.2): same durable pattern — hydrated from the
   // trail's `guidance.set` entries so notes survive a daemon restart.
   const guidanceIndex = new GuidanceIndex();
@@ -929,7 +942,7 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot, dropDocLedgerRows },
+    { seatHealth, retryIndex, groupIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot, dropDocLedgerRows },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay
