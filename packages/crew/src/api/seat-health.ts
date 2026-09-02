@@ -186,7 +186,10 @@ export class SeatHealthTracker {
         if (fallbackKind === 'session_died' && this.opts.signalLog !== undefined) {
           const match = this.opts.signalLog.findInWindow(at);
           const who = `acpFallback(session_died) for ${cliKey} on run ${session ?? 'unknown'}`;
-          this.opts.log?.(
+          // The correlation is the whole point of crew#411 — never silently dropped when a
+          // caller wired a signalLog but no log sink; fall back to console.warn.
+          const emit = this.opts.log ?? ((m: string) => console.warn(m));
+          emit(
             match
               ? `[seat-health] ${who}: daemon also received ${match.signal} at ` +
                 `${new Date(match.at).toISOString()} (Δ${Math.abs(at - match.at)}ms)` +

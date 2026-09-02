@@ -57,9 +57,9 @@ export class DaemonSignalLog {
     return best;
   }
 
-  /** All recorded entries, oldest first. Read-only view. */
+  /** All recorded entries, oldest first — a defensive copy, so a caller cannot mutate the ring. */
   entries(): readonly SignalEntry[] {
-    return this._entries;
+    return [...this._entries];
   }
 }
 

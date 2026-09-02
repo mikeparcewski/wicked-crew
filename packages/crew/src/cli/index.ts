@@ -255,13 +255,15 @@ function installShutdownHandlers(): void {
     })();
   };
   process.on('SIGTERM', () => {
-    daemonSignalLog.record('SIGTERM');
-    console.warn(`[daemon] received SIGTERM at ${new Date().toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
+    const at = Date.now();
+    daemonSignalLog.record('SIGTERM', at);
+    console.warn(`[daemon] received SIGTERM at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
     shutdown();
   });
   process.on('SIGINT', () => {
-    daemonSignalLog.record('SIGINT');
-    console.warn(`[daemon] received SIGINT at ${new Date().toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
+    const at = Date.now();
+    daemonSignalLog.record('SIGINT', at);
+    console.warn(`[daemon] received SIGINT at ${new Date(at).toISOString()} pid=${process.pid} (sender pid unavailable in Node signal callbacks) (crew#411)`);
     shutdown();
   });
   // Normal exit (`process.exit` anywhere, main() falling off): an 'exit' handler cannot
