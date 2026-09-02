@@ -25,8 +25,9 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { GroupIndex } from '../src/api/group-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
+import { DELIVER_LIFT_CONFLICT_MARKER } from '../src/core/deliver.js';
 import { CampaignsUnsupportedError, type CoreAdapter } from '../src/core/adapter.js';
-import type { Campaign, LaunchRunInput, SessionView } from '../src/core/types.js';
+import type { Campaign, LaunchRunInput, SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
 
 const NODE_RUN_ID = 'camp-1:a:a0';
@@ -73,6 +74,32 @@ function view(id: string, status = 'executing'): SessionView {
     },
     units: [],
   } as unknown as SessionView;
+}
+
+/** A crew#418 lift-conflict strand as the engine persists it: the run is `failed` (its deliver
+ *  Tool phase exited non-zero on the collision) with the deliver unit `rejected` carrying the
+ *  LIFT-CONFLICT marker, but its work is committed on the `wicked/<id>` branch. The run wire
+ *  reinterprets this as completed+stranded; the campaigns rollup must read it identically. */
+function strandView(id: string): SessionView {
+  const v = view(id, 'failed');
+  v.session.repo_ref = 'repo-1';
+  v.session.workdir = `/tmp/${id}`;
+  (v as { units: WorkUnit[] }).units = [
+    { session_id: id, id: `${id}:build`, ord: 3, status: 'done', denial_reason: null } as unknown as WorkUnit,
+    {
+      session_id: id,
+      id: `${id}:deliver`,
+      ord: 5,
+      status: 'rejected',
+      tool_cmd: ['bash', '-lc', 'gh pr create --head "$B" --fill'],
+      denial_reason:
+        `Worker FAILED on unit 5 (triage: the deliver step exited non-zero): ` +
+        `Rebasing (1/1)\nCONFLICT (content): Merge conflict in src/thing.ts\n` +
+        `${DELIVER_LIFT_CONFLICT_MARKER} — rebase of wicked/${id} onto origin/main hit ` +
+        `conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed`,
+    } as unknown as WorkUnit,
+  ];
+  return v;
 }
 
 describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
@@ -213,6 +240,34 @@ describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
       // The engine's own persisted fields ride untouched beside the join.
       expect(campaign.node_run_id).toEqual({ a: NODE_RUN_ID });
       expect(campaign.node_status).toEqual({ a: 'completed' });
+    }
+  });
+
+  it('crew#418: a lift-conflict strand reads completed+stranded on the rollup (a recorded PR still wins)', async () => {
+    const r = await launch({ problem: 'strand me', sessionId: 'run-strand', campaignId: 'camp-1' });
+    expect(r.status).toBe(201);
+    // The engine persists the attached run as a lift-conflict strand: `failed`, the deliver unit
+    // `rejected` with the marker. Un-normalized this reads failed+none — the split-brain crew#418
+    // fixes on the run wire; the rollup must apply the SAME reinterpretation.
+    store[store.findIndex((v) => v.session.id === 'run-strand')] = strandView('run-strand');
+    // The DAG node is ALSO strand-shaped, but it carries a recorded PR (set in beforeEach) — the
+    // 'delivered' precedence must still win over the strand clause, exactly as resolveDelivery orders it.
+    store[store.findIndex((v) => v.session.id === NODE_RUN_ID)] = strandView(NODE_RUN_ID);
+
+    for (const url of ['/api/v1/campaigns', '/api/v1/campaigns/camp-1']) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode).toBe(200);
+      const raw = res.json() as Record<string, unknown>;
+      const campaign = (
+        url.endsWith('camp-1') ? raw['campaign'] : (raw['campaigns'] as unknown[])[0]
+      ) as Campaign;
+      // attached_runs: completed + stranded (both the status flip in snapshot and the delivery
+      // flip in deliveryOf), NOT the engine's failed + none.
+      expect(campaign.attached_runs).toEqual([
+        { runId: 'run-strand', status: 'completed', delivery: 'stranded' },
+      ]);
+      // node_delivery: the recorded PR beats the strand reinterpretation.
+      expect(campaign.node_delivery).toEqual({ a: { delivery: 'delivered', deliverUrl: PR_URL } });
     }
   });
 
