@@ -198,8 +198,15 @@ export interface AgentSession {
    *   - `'delivered'` — a PR was opened for this run (by the deliver phase, or post-hoc via
    *     `POST /runs/:id/deliver`); `deliverUrl` carries the PR URL.
    *   - `'stranded'`  — a COMPLETED repo-scoped run with no recorded PR whose worktree still
-   *     exists on disk: reviewable work nobody lifted. Derived honestly for OLD runs too —
-   *     records written before this field existed strand exactly the same way.
+   *     exists on disk AND carries work: reviewable work nobody lifted. Derived honestly for
+   *     OLD runs too — records written before this field existed strand exactly the same way.
+   *   - `'vacuous'`   — a COMPLETED repo-scoped run whose surviving worktree carries NO
+   *     contribution at all (crew#311: nothing uncommitted, no run-branch commit — units all
+   *     reached "done" while producing nothing). There is nothing to deliver; the recovery is a
+   *     retry launch (`POST /runs {"retryOf":"<id>"}`). Never silently green: this is the loud
+   *     spelling of the vacuous-completion class. Derived with the same two read-only git
+   *     instruments the engine's own evidence floor uses; any probe failure keeps `'stranded'`
+   *     (vacuity is only ever asserted on positive reads).
    *   - `'none'`     — everything else: repo-less runs, non-terminal runs, failed/cancelled
    *     runs, and completed runs whose worktree is gone.
    *
@@ -213,7 +220,7 @@ export interface AgentSession {
    * FAILURE of a deliver phase is not spelled here; it is `units[].status === 'rejected'`
    * plus `denial_reason` (crew#318's message), both already on the list wire.
    */
-  delivery?: 'delivered' | 'stranded' | 'none';
+  delivery?: 'delivered' | 'stranded' | 'vacuous' | 'none';
   /**
    * The delivered PR's URL (crew#393; api-types 0.18.0) — present exactly when
    * `delivery === 'delivered'`; absent otherwise (absence is the one spelling, never `null`).
@@ -252,6 +259,14 @@ export interface WorkUnit {
   gate?: GateSpec | string;
   /** True when a pinned deterministic validator is attached to this unit. */
   has_validator_pin?: boolean;
+  /**
+   * True when this unit's backing phase declared `executes_code` (crew#311 / core#297 §2) —
+   * carried from the def at plan time. The engine's code-evidence floor holds such a unit to a
+   * worktree diff: a governed Creator unit with this flag cannot fold "done" over an untouched
+   * worktree. Additive and skip-if-false on the wire: absent on non-code units, on units planned
+   * before the field existed, and on an older engine.
+   */
+  executes_code?: boolean;
 }
 
 /** A run plus its ordered units (`SessionView`) — the shape `GET /runs` returns. */
@@ -1537,6 +1552,28 @@ export interface SetGuidanceResult {
  */
 export interface DeliverRunResult {
   prUrl: string;
+}
+
+/**
+ * The 409 body of `POST /runs/:id/resume` on a TERMINAL run (crew#311; api-types 0.18.0).
+ *
+ * The engine's `resume_run` no-ops on a completed/cancelled run and answers the status token, so
+ * the route used to reply `200 {"status":"cancelled"}` — on the exact runs an operator was trying
+ * to rescue, the recovery affordance read as "resume destroyed my run". A terminal run is now
+ * refused with 409 and the ACTUAL recovery named machine-readably:
+ *
+ *   - `'retry'`   — relaunch as a new run with `POST /runs {"retryOf":"<id>"}` (cancelled runs,
+ *     and completed runs with nothing liftable — including a `delivery: 'vacuous'` run, whose
+ *     units produced no work at all);
+ *   - `'deliver'` — the run completed with unlifted work in its worktree (`delivery:
+ *     'stranded'`): lift it with `POST /runs/:id/deliver`.
+ *
+ * A FAILED run is not terminal for resume: it re-enters at the cursor as before (200 + status).
+ */
+export interface ResumeRefusal {
+  /** Human-readable refusal naming the run's terminal status and the recovery, verbatim. */
+  error: string;
+  recovery: 'retry' | 'deliver';
 }
 
 // ── Governance types (crew#40/41) ──────────────────────────────────────────────

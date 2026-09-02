@@ -57,7 +57,14 @@ import {
 } from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
 import { GuidanceIndex } from './guidance-index.js';
-import { DeliveryIndex, deliveryStateOf, prUrlFrom } from './delivery-index.js';
+import {
+  DeliveryIndex,
+  deliveryStateWithVacuity,
+  gitRunBranchIsEmpty,
+  gitWorktreeIsClean,
+  prUrlFrom,
+  type VacuityProbes,
+} from './delivery-index.js';
 import { runDeliverScript, type DeliverExec } from './post-hoc-deliver.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
@@ -292,6 +299,15 @@ export interface RuntimeDeps {
    *  served repo-scoped completed run. Injectable so route tests pin the derivation without
    *  staging directories; defaults to `fs.existsSync`. */
   worktreeExists?: (path: string) => boolean;
+  /** The worktree-cleanliness probe behind the `'vacuous'` split of `'stranded'` (crew#311) —
+   *  runs only on runs that would otherwise read stranded. Injectable so route tests pin the
+   *  derivation without staging real repos; defaults to the TTL-memoized `gitWorktreeIsClean`. */
+  worktreeIsClean?: (path: string) => Promise<boolean>;
+  /** The run-branch-emptiness probe behind the reaped-worktree half of `'vacuous'` (crew#311) —
+   *  runs only on completed repo-scoped runs that would otherwise read `'none'`. Injectable for
+   *  the same reason; defaults to the TTL-memoized `gitRunBranchIsEmpty` over the adapter's
+   *  repo registry. */
+  runBranchIsEmpty?: (repoRef: string, runId: string) => Promise<boolean>;
   /** The post-hoc deliver exec (crew#393, `POST /runs/:id/deliver`) — spawns the hardened
    *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
    *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
@@ -349,6 +365,16 @@ export function registerRoutes(
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
+  const vacuityProbes: VacuityProbes = {
+    worktreeExists,
+    worktreeIsClean: runtime.worktreeIsClean ?? gitWorktreeIsClean(),
+    runBranchIsEmpty:
+      runtime.runBranchIsEmpty ??
+      gitRunBranchIsEmpty(async (repoRef) => {
+        const repos = await adapter.listRepos();
+        return repos.find((r) => r.id === repoRef)?.root_path;
+      }),
+  };
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
@@ -357,19 +383,21 @@ export function registerRoutes(
   // api-types 0.18.0) is DERIVED on every served run — delivered from the index (CREW-UX-8's
   // durable record), stranded from the run record + a worktree stat, none otherwise — so a
   // completed code run whose work is sitting unlifted in its worktree is VISIBLE on the wire,
-  // legacy records included.
+  // legacy records included. The would-be-stranded runs are further split (crew#311): a
+  // completed run whose worktree carries NO contribution at all reads `'vacuous'` — units all
+  // "done" with nothing produced must be LOUD on the wire, never silently green.
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
-  const decorateRun = (view: SessionView): SessionView => {
+  const decorateRun = async (view: SessionView): Promise<SessionView> => {
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
-    const state = deliveryStateOf(
+    const state = await deliveryStateWithVacuity(
       view.session,
       deliveryIndex.urlFor(view.session.id),
-      worktreeExists,
+      vacuityProbes,
     );
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -902,7 +930,7 @@ export function registerRoutes(
     const visible = includeArchived
       ? views
       : views.filter((v) => v.session.archived_at == null);
-    return { runs: sortActionableFirst(visible).map(decorateRun) };
+    return { runs: await Promise.all(sortActionableFirst(visible).map(decorateRun)) };
   });
 
   // ── Run archival (crew#265) — write-off, not delete ────────────────────────
@@ -962,7 +990,7 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    return { run: decorateRun(run) };
+    return { run: await decorateRun(run) };
   });
 
   // ── Post-hoc delivery (crew#393) — lift a stranded run's worktree into a PR ──
@@ -1427,6 +1455,33 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
+    // A TERMINAL run is refused LOUDLY, with the actual recovery named (crew#311 defect 2).
+    // The engine's `resume_run` no-ops on completed/cancelled and answers the status token, so
+    // this route used to reply 200 {"status":"cancelled"} — on the exact runs an operator was
+    // trying to rescue, the recovery affordance read as "resume destroyed my run". A cancelled
+    // run has NO in-run recovery (the path is a retry launch, `POST /runs {retryOf}`); a
+    // completed run has nothing to resume — but a stranded one's work IS liftable post-hoc.
+    // The 409 body carries the machine-readable pointer (`ResumeRefusal` in api-types).
+    const terminal = run.session.status;
+    if (terminal === 'completed' || terminal === 'cancelled') {
+      const state = await deliveryStateWithVacuity(
+        run.session,
+        deliveryIndex.urlFor(id),
+        vacuityProbes,
+      );
+      const recovery = terminal === 'completed' && state.delivery === 'stranded'
+        ? ('deliver' as const)
+        : ('retry' as const);
+      const why =
+        terminal === 'cancelled'
+          ? `run ${id} is cancelled — a terminal run cannot be resumed; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`
+          : state.delivery === 'stranded'
+            ? `run ${id} is already completed — nothing to resume; its unlifted work is in the worktree: deliver it with POST /runs/${id}/deliver`
+            : state.delivery === 'vacuous'
+              ? `run ${id} is already completed, but VACUOUSLY — its units produced no work to resume or deliver; relaunch with POST /runs {"retryOf":"${id}"}`
+              : `run ${id} is already completed — nothing to resume; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`;
+      return reply.code(409).send({ error: why, recovery });
+    }
     try {
       const gated = run.session.status === 'awaiting_human';
       // A gated resume IS a gate approval, so it lands a steering-author proposal exactly like
