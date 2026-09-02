@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
 import type { GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -56,6 +56,7 @@ import {
   type ErrorRing,
 } from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
+import { GroupIndex } from './group-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
   DeliveryIndex,
@@ -204,9 +205,23 @@ export const LaunchSchema = z.object({
    *  (the route checks the store and 400s with a named error otherwise); persisted via the
    *  `run.launched` audit entry + retry index and echoed as `AgentSession.retry_of`. */
   retryOf: z.string().min(1).optional(),
+  /** wicked-studio#27 (api-types 0.19.0) — attach this AD-HOC run to an EXISTING campaign's
+   *  surface. Validated against the campaign store before anything launches (unknown ⇒ 404,
+   *  engine without campaign bindings ⇒ 501 — never a silently dropped attach); persisted via
+   *  the `run.launched` audit entry + group index, echoed as `AgentSession.campaign_id`, and
+   *  served under `Campaign.attached_runs`. Provenance only: the run is NOT a DAG node. */
+  campaignId: z.string().min(1).optional(),
+  /** wicked-studio#27 (api-types 0.19.0) — ad-hoc label group, created on first use: runs
+   *  sharing a label form one `RunGroup` on `GET /campaigns`. Persisted/echoed like
+   *  `campaignId` (as `AgentSession.group_label`). */
+  groupLabel: z.string().min(1).max(200).optional(),
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
+}).refine((b) => b.campaignId === undefined || b.groupLabel === undefined, {
+  message:
+    'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)',
+  path: ['groupLabel'],
 });
 
 export const GateSchema = z.object({
@@ -288,6 +303,10 @@ export interface RuntimeDeps {
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
   retryIndex?: RetryIndex;
+  /** Run→ad-hoc-group index (wicked-studio#27) — `createServer` hydrates one from the audit
+   *  trail (the SAME `run.launched` scan as `retryIndex`) so attaches survive a restart; a
+   *  directly-driven route set gets a fresh one. */
+  groupIndex?: GroupIndex;
   /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
    *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
   guidanceIndex?: GuidanceIndex;
@@ -362,6 +381,7 @@ export function registerRoutes(
   const openWithOs = runtime.openWithOs ?? openWithSystemDefault;
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
+  const groupIndex = runtime.groupIndex ?? new GroupIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
@@ -392,6 +412,13 @@ export function registerRoutes(
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
+    // wicked-studio#27 (api-types 0.19.0): the launch-time group attach, from the same durable
+    // trail record as lineage. ABSENT when ungrouped — never null.
+    const attach = groupIndex.attachOf(view.session.id);
+    if (attach !== undefined) {
+      if ('campaignId' in attach) view.session.campaign_id = attach.campaignId;
+      else view.session.group_label = attach.label;
+    }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
     const state = await deliveryStateWithVacuity(
@@ -776,9 +803,11 @@ export function registerRoutes(
         manifest: {
           requestType: 'LaunchRunBody',
           responseType: '{ runId: string }',
-          // 404/409: unknown project / archived-or-synthesized project + busy engine (see the
-          // catch below); 400: zod reject or a retryOf naming no existing run.
-          statusCodes: [201, 400, 404, 409],
+          // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
+          // archived-or-synthesized project + busy engine (see the catch below); 400: zod
+          // reject or a retryOf naming no existing run; 501: campaignId attach on an engine
+          // addon without the campaign bindings ("upgrade the engine").
+          statusCodes: [201, 400, 404, 409, 501],
         },
       },
     },
@@ -860,6 +889,25 @@ export function registerRoutes(
         });
       }
     }
+    // Ad-hoc campaign attach (wicked-studio#27): `campaignId` must name an EXISTING campaign,
+    // checked BEFORE anything launches — an unknown id is a 404 with nothing committed, never a
+    // run silently filed onto a surface that does not exist. An engine addon without the
+    // campaign bindings is a 501 ("upgrade the engine"), the campaigns-surface doctrine. A
+    // `groupLabel` needs no check: a label group is created by its first use.
+    if (b.campaignId !== undefined) {
+      try {
+        if ((await adapter.campaignDetail(b.campaignId)) === null) {
+          return reply.code(404).send({
+            error: `campaignId names an unknown campaign: ${b.campaignId} — an ad-hoc run can only attach to an existing campaign (launch one via POST /campaigns, or use groupLabel for a create-on-first-use group)`,
+          });
+        }
+      } catch (err) {
+        if (err instanceof CampaignsUnsupportedError) {
+          return reply.code(501).send({ error: message(err) });
+        }
+        throw err;
+      }
+    }
     try {
       const runId = await adapter.launchRun(input);
       // Who launched it — the engine's LaunchOptions carries no actor field
@@ -878,9 +926,15 @@ export function registerRoutes(
           // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
           // restarted daemon's hydrate) reads it back from exactly this entry.
           ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
+          // wicked-studio#27: the trail is likewise the durable record of the group attach —
+          // the group index (and a restarted daemon's hydrate) reads it back from here.
+          ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
+          ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
         },
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
+      if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
+      else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and
@@ -2634,11 +2688,16 @@ export function registerRoutes(
 
   // ── Campaigns (crew#342 + TH-9) — the engine's durable Run-DAG scheduler over REST ──────────
   // Progress streams as campaign* CoreEvents on the existing allowlist-free /ws relay; these
-  // routes are launch/resume/cancel + the reads a scoreboard builds from.
+  // routes are launch/resume/cancel + the reads a scoreboard builds from. The GET routes join
+  // per-member delivery (wicked-studio#27) with the SAME machinery the run DTOs use — one
+  // sessionsDetail() per request, the shared TTL-memoized vacuity probes, never a per-node fetch.
   registerCampaignRoutes(app, adapter, {
     audit,
     actorOf,
     roster: () => CoreAdapter.roster(),
+    groupIndex,
+    deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
+    vacuity: vacuityProbes,
   });
 
   // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────

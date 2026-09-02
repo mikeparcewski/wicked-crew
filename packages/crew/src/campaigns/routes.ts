@@ -3,10 +3,16 @@
  *
  * Thin by design: validation is zod (strict, unknown keys named — the FINDING-031 doctrine),
  * scenario→node mapping is `plan.ts` (pure), and the scheduler is the ENGINE's (durable,
- * single-writer, crash-resumable) — the daemon keeps no shadow campaign state, so a restarted
- * daemon and a second daemon over the same db answer these routes identically. Campaign
+ * single-writer, crash-resumable) — the daemon keeps no shadow campaign SCHEDULING state, so a
+ * restarted daemon and a second daemon over the same db answer the DAG identically. Campaign
  * progress is NOT polled from here: the 11 `campaign*` CoreEvents ride the daemon's existing
  * allowlist-free `/ws` relay the moment the engine emits them.
+ *
+ * What the GET routes ADD at DTO assembly (wicked-studio#27; api-types 0.19.0, `rollup.ts`) is
+ * provenance and derivation, never scheduling state: per-node `node_delivery` (the run wire's
+ * own delivery derivation), the ad-hoc `attached_runs` filed onto a campaign at launch, and the
+ * `groups` rows — the latter two read from the daemon's audit trail via `GroupIndex`, the same
+ * durable-record pattern as retry lineage.
  *
  * Error posture mirrors the chat/elicitation surfaces: a build whose engine addon lacks the
  * campaign bindings answers 501 (`CampaignsUnsupportedError` — "upgrade the engine"), never
@@ -26,6 +32,7 @@ import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';
 import { resolveScopeRepos } from '../api/multiscope.js';
 import { buildCampaign, fanScenarios } from './plan.js';
+import { buildGroups, enrichCampaign, sessionsById, type RollupDeps } from './rollup.js';
 
 const V = API_PREFIX;
 
@@ -82,7 +89,7 @@ export const LaunchCampaignSchema = z
   })
   .strict();
 
-export interface CampaignRoutesDeps {
+export interface CampaignRoutesDeps extends RollupDeps {
   audit: AuditLog;
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
   /** The default council roster for agent scenarios (already parsed). */
@@ -176,12 +183,25 @@ export function registerCampaignRoutes(
     `${V}/campaigns`,
     {
       config: {
-        manifest: { responseType: '{ campaigns: Campaign[] }', statusCodes: [200, 501] },
+        manifest: { responseType: 'CampaignsListResponse', statusCodes: [200, 501] },
       },
     },
     async (_req, reply) => {
       try {
-        return { campaigns: await adapter.campaignList() };
+        // ONE campaigns read + ONE sessions read serve the whole grouping surface
+        // (wicked-studio#27): each campaign gains its daemon-joined `node_delivery` +
+        // `attached_runs`, and the ad-hoc label groups ride beside as `groups` — a delivery
+        // rollup never costs a per-node fetch, and never depends on the runs list's
+        // archived-run filtering.
+        const [campaigns, views] = await Promise.all([
+          adapter.campaignList(),
+          adapter.sessionsDetail(),
+        ]);
+        const byId = sessionsById(views);
+        return {
+          campaigns: await Promise.all(campaigns.map((c) => enrichCampaign(c, byId, deps))),
+          groups: await buildGroups(byId, deps),
+        };
       } catch (err) {
         if (err instanceof CampaignsUnsupportedError) {
           return reply.code(501).send({ error: err.message });
@@ -205,7 +225,9 @@ export function registerCampaignRoutes(
         if (campaign === null) {
           return reply.code(404).send({ error: `unknown campaign: ${id}` });
         }
-        return { campaign };
+        // Same 0.19.0 join as the list — detail and list must never disagree on delivery.
+        const byId = sessionsById(await adapter.sessionsDetail());
+        return { campaign: await enrichCampaign(campaign, byId, deps) };
       } catch (err) {
         if (err instanceof CampaignsUnsupportedError) {
           return reply.code(501).send({ error: err.message });

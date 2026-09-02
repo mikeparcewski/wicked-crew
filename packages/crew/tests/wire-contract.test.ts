@@ -87,6 +87,27 @@ respondsWith<string | undefined, Wire.AgentSession['guidance']>();
 respondsWith<Wire.AgentSession['delivery'], DeliveryState['delivery']>();
 respondsWith<DeliveryState['delivery'] | undefined, Wire.AgentSession['delivery']>();
 respondsWith<Wire.ResumeRefusal, { error: string; recovery: 'retry' | 'deliver' }>();
+
+// wicked-studio#27 (api-types 0.19.0) — the ad-hoc grouping surface. Request: `campaignId` /
+// `groupLabel` are `string` or ABSENT; response: the run DTO echoes them as `campaign_id` /
+// `group_label` (`string` or ABSENT — `null` is not a legal spelling of "ungrouped"), and the
+// campaigns rollup fields reuse the run wire's own delivery union (both directions, so a state
+// added or dropped on either side breaks this file).
+respondsWith<Wire.LaunchRunBody['campaignId'], string | undefined>();
+respondsWith<string | undefined, Wire.LaunchRunBody['campaignId']>();
+respondsWith<Wire.LaunchRunBody['groupLabel'], string | undefined>();
+respondsWith<string | undefined, Wire.LaunchRunBody['groupLabel']>();
+respondsWith<Wire.AgentSession['campaign_id'], string | undefined>();
+respondsWith<string | undefined, Wire.AgentSession['campaign_id']>();
+respondsWith<Wire.AgentSession['group_label'], string | undefined>();
+respondsWith<string | undefined, Wire.AgentSession['group_label']>();
+respondsWith<Wire.CampaignNodeDelivery['delivery'], DeliveryState['delivery']>();
+respondsWith<DeliveryState['delivery'], Wire.CampaignNodeDelivery['delivery']>();
+respondsWith<
+  Wire.AttachedRunView,
+  { runId: string; status: Wire.SessionStatus; delivery: DeliveryState['delivery']; deliverUrl?: string }
+>();
+respondsWith<Wire.CampaignsListResponse, { campaigns: Wire.Campaign[]; groups: Wire.RunGroup[] }>();
 // PUT /runs/:id/guidance — the route echoes what it stored.
 respondsWith<Wire.SetGuidanceResult, { runId: string; guidance: string }>();
 

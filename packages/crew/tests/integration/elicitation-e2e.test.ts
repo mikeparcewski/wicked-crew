@@ -22,7 +22,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -131,10 +131,14 @@ beforeAll(async () => {
     process.env['WICKED_APPS_EMIT_DEADLETTER'] = join(dir, 'deadletter.ndjson');
   }
 
-  // The stub agent script + its user-registry record. `binary` is the absolute node
-  // executable (no PATH/shebang dependency, cross-platform), the script rides start_args.
+  // The stub agent script + its user-registry record. Since wicked-core#346, a seat only
+  // advertises (and serves) elicitation when its ACP binary STEM is a verified adapter — so
+  // the stub node binary is exposed through a symlink named `claude-agent-acp` (the engine
+  // resolves the stem of the configured path; the link IS node, the script rides start_args).
   const agentPath = join(dir, 'stub-elicit-agent.mjs');
   writeFileSync(agentPath, STUB_AGENT);
+  const verifiedShim = join(dir, 'claude-agent-acp');
+  symlinkSync(process.execPath, verifiedShim);
   writeFileSync(
     join(home, '.config', 'wicked-council', 'clis.toml'),
     [
@@ -145,7 +149,7 @@ beforeAll(async () => {
       `headless_invocation = ${JSON.stringify(`${process.execPath} ${agentPath} {PROMPT}`)}`,
       '',
       '[cli.acp]',
-      `binary = ${JSON.stringify(process.execPath)}`,
+      `binary = ${JSON.stringify(verifiedShim)}`,
       `start_args = [${JSON.stringify(agentPath)}]`,
       'transport = "stdio"',
       '',
