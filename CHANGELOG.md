@@ -12,6 +12,21 @@ mentioned only where a daemon release depends on them.
 
 _Nothing yet._
 
+## [0.7.11] — 2026-09-02
+
+### Added
+- **The campaign surface wire** (studio#27, #412, `wicked-crew-api-types` 0.19.0): ad-hoc run
+  grouping (`POST /runs` `campaignId` attach / create-on-first-use `groupLabel`, loudly validated),
+  per-node `node_delivery` + `attached_runs` + `groups` on `GET /campaigns` — no N+1, parallel
+  per-member rollup, linear group-index hydrate.
+
+### Changed
+- **Engine floor: `wicked-core-ts` ^0.7.8** — campaign-safe worktree names with ownership-marked
+  trees (core#345/#347; crew's `campaigns/worktrees.ts` pre-provisioning workaround remains for
+  compat and adoption, removal tracked separately) and the single elicitation-capability predicate
+  (core#346; the elicitation E2E fixture presents the verified stem accordingly). Bundles
+  wicked-studio 0.4.10 (the campaign surface).
+
 ## [0.7.10] — 2026-09-01
 
 ### Fixed
@@ -406,7 +421,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...HEAD
+[0.7.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.7...v0.7.8
