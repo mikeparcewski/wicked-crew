@@ -63,10 +63,17 @@ import {
   deliveryStateWithVacuity,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
+  isDeliverConflictStranded,
   prUrlFrom,
+  type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
-import { runDeliverScript, type DeliverExec } from './post-hoc-deliver.js';
+import {
+  gitReprovisionWorktree,
+  runDeliverScript,
+  type DeliverExec,
+  type WorktreeReprovisioner,
+} from './post-hoc-deliver.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
 // Re-exported so existing `import { API_PREFIX } from './routes.js'` callers keep working; the
 // value lives in the leaf module api-prefix.ts to keep unit-output.ts out of this file's cycle.
@@ -331,6 +338,10 @@ export interface RuntimeDeps {
    *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
    *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
   deliverExec?: DeliverExec;
+  /** Stand a lift-conflict-stranded run's worktree back up from its `wicked/<id>` branch when the
+   *  engine has reaped it (crew#418) — the post-hoc deliver path uses it before the exec above.
+   *  Injectable so route tests never shell out to git; defaults to {@link gitReprovisionWorktree}. */
+  reprovisionWorktree?: WorktreeReprovisioner;
   openWithOs?: (target: string) => Promise<void>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
@@ -396,6 +407,10 @@ export function registerRoutes(
       }),
   };
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
+  const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
+  /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
+  const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
+    (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
   // `retry_of` from the lineage index and `guidance` from the guidance index, each set only
@@ -408,7 +423,42 @@ export function registerRoutes(
   // "done" with nothing produced must be LOUD on the wire, never silently green.
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
+  // crew#418 A: a `failed` run whose ONLY failure was the deliver phase's LIFT collision (a
+  // rebase conflict the changelog union merge could not clear, or a non-fast-forward push) is
+  // reinterpreted on the wire as `completed` + `delivery: 'stranded'` — recoverable, not a hard
+  // failure. The engine's durable record stays `failed` (audit trail); this is a wire derivation,
+  // exactly like `delivery` itself, applied at the SAME three terminal-status decision points so
+  // the run reads consistently across GET /runs(/:id), resume, and POST /runs/:id/deliver. The
+  // deliver unit stays `rejected` with its marker-bearing `denial_reason`, so WHY it stranded is
+  // still on the wire.
+  //
+  // Returns whether this run IS such a strand — the caller uses it for a BRANCH-based `'stranded'`
+  // read: the engine reaps a failed-deliver run's worktree once the deliver phase has committed
+  // the work (a clean tree), so the work lives on the `wicked/<id>` branch, not the worktree — the
+  // worktree-stat derivation would read `'none'` (and flicker as the async reap lands). The
+  // lift-conflict marker is proof the branch carries the work (the deliver script verified it was
+  // ahead of the default branch before it ever attempted the rebase), so the read is a STABLE
+  // `'stranded'` regardless of whether the worktree survived. Idempotent: a second call sees the
+  // already-flipped `completed` and returns false, so the flip never re-fires.
+  const normalizeStranded = (view: SessionView): boolean => {
+    const conflictStrand = isDeliverConflictStranded(view); // true only while status === 'failed'
+    if (conflictStrand) view.session.status = 'completed';
+    return conflictStrand;
+  };
+  /** The run's delivery state, honest by construction (crew#393/#311/#418): a recorded PR wins
+   *  (`'delivered'`); else a lift-conflict strand reads `'stranded'` from the branch; else the
+   *  worktree-stat derivation (stranded / vacuous / none). */
+  const resolveDelivery = async (
+    view: SessionView,
+    conflictStrand: boolean,
+  ): Promise<DeliveryState> => {
+    const url = deliveryIndex.urlFor(view.session.id);
+    if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+    if (conflictStrand) return { delivery: 'stranded' };
+    return deliveryStateWithVacuity(view.session, undefined, vacuityProbes);
+  };
   const decorateRun = async (view: SessionView): Promise<SessionView> => {
+    const conflictStrand = normalizeStranded(view);
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
@@ -421,11 +471,7 @@ export function registerRoutes(
     }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
-    const state = await deliveryStateWithVacuity(
-      view.session,
-      deliveryIndex.urlFor(view.session.id),
-      vacuityProbes,
-    );
+    const state = await resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     return view;
@@ -1085,6 +1131,10 @@ export function registerRoutes(
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
+      // crew#418 A: a run stranded by a deliver-phase lift collision reads `failed` from the
+      // engine but IS liftable post-hoc — normalize its status to `completed` so this route
+      // accepts it, exactly as the run wire and the resume route see it.
+      const conflictStrand = normalizeStranded(run);
       const s = run.session;
       if (s.status !== 'completed') {
         return reply.code(409).send({
@@ -1096,26 +1146,42 @@ export function registerRoutes(
           error: `run ${id} is not repo-scoped — there is no worktree to lift into a PR`,
         });
       }
-      if (!worktreeExists(s.workdir)) {
-        return reply.code(409).send({
-          error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
-        });
-      }
       // One delivery per run at a time: the script pushes and opens a PR, so two concurrent
-      // spawns could race gh into two PRs — the exact double-open idempotency forbids.
+      // spawns could race gh into two PRs — the exact double-open idempotency forbids. The guard
+      // wraps the reprovision too, so a reaped run's `wicked/<id>` branch is only ever checked out
+      // by one throwaway worktree at a time.
       if (deliverInFlight.has(id)) {
         return reply.code(409).send({
           error: `a delivery for run ${id} is already in progress — wait for it to finish`,
         });
       }
       deliverInFlight.add(id);
+      // The worktree the script runs in. Usually the run's own; but the engine REAPS a
+      // failed-deliver run's worktree once its work is committed (crew#418) — the work then lives
+      // on the `wicked/<id>` branch. For such a strand, stand a throwaway worktree back up from
+      // that branch and lift THAT; the branch (the record) is untouched. `cleanupWorktree` tears
+      // the throwaway down after the lift.
+      let workdir = s.workdir;
+      let cleanupWorktree: (() => Promise<void>) | null = null;
       let result;
       try {
-        result = await deliverExec(s.workdir, s.problem);
+        if (!worktreeExists(workdir)) {
+          const root = conflictStrand ? await repoRootOf(s.repo_ref) : undefined;
+          const reprov = root !== undefined ? await reprovisionWorktree(root, id) : null;
+          if (reprov === null) {
+            return reply.code(409).send({
+              error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
+            });
+          }
+          workdir = reprov.workdir;
+          cleanupWorktree = reprov.cleanup;
+        }
+        result = await deliverExec(workdir, s.problem);
       } catch (err) {
         return reply.code(500).send({ error: `deliver script could not run: ${message(err)}` });
       } finally {
         deliverInFlight.delete(id);
+        if (cleanupWorktree !== null) await cleanupWorktree();
       }
       if (result.spawnFailure === true) {
         // The script never reached its own verdict (spawn failure, timeout kill) — an infra
@@ -1509,6 +1575,10 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
+    // crew#418 A: a run stranded by a deliver-phase lift collision reads `failed` from the engine
+    // but its work is complete and liftable — normalize to `completed` so the terminal branch
+    // below refuses resume with the DELIVER recovery (POST /runs/:id/deliver), not a re-entry.
+    const conflictStrand = normalizeStranded(run);
     // A TERMINAL run is refused LOUDLY, with the actual recovery named (crew#311 defect 2).
     // The engine's `resume_run` no-ops on completed/cancelled and answers the status token, so
     // this route used to reply 200 {"status":"cancelled"} — on the exact runs an operator was
@@ -1518,11 +1588,7 @@ export function registerRoutes(
     // The 409 body carries the machine-readable pointer (`ResumeRefusal` in api-types).
     const terminal = run.session.status;
     if (terminal === 'completed' || terminal === 'cancelled') {
-      const state = await deliveryStateWithVacuity(
-        run.session,
-        deliveryIndex.urlFor(id),
-        vacuityProbes,
-      );
+      const state = await resolveDelivery(run, conflictStrand);
       const recovery = terminal === 'completed' && state.delivery === 'stranded'
         ? ('deliver' as const)
         : ('retry' as const);
@@ -1530,7 +1596,7 @@ export function registerRoutes(
         terminal === 'cancelled'
           ? `run ${id} is cancelled — a terminal run cannot be resumed; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`
           : state.delivery === 'stranded'
-            ? `run ${id} is already completed — nothing to resume; its unlifted work is in the worktree: deliver it with POST /runs/${id}/deliver`
+            ? `run ${id} is already completed — nothing to resume; its unlifted work is on the wicked/${id} branch: deliver it with POST /runs/${id}/deliver`
             : state.delivery === 'vacuous'
               ? `run ${id} is already completed, but VACUOUSLY — its units produced no work to resume or deliver; relaunch with POST /runs {"retryOf":"${id}"}`
               : `run ${id} is already completed — nothing to resume; relaunch the work as a new run with POST /runs {"retryOf":"${id}"}`;

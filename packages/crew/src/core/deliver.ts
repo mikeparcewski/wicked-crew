@@ -12,9 +12,13 @@
  *  (b) the script REFUSES to push `main`/`master` (or an empty/detached branch name) — the
  *      deliver phase only ever pushes run branches;
  *  (c) it STAGES AND COMMITS the run's work, then rebases onto origin's default branch before
- *      pushing, and a conflicting rebase FAILS the phase visibly (aborting the rebase, pushing
- *      nothing) rather than pushing a conflicted tree;
- *  (d) `git push -u origin <branch>`;
+ *      pushing. A conflict whose conflicted paths are ALL `CHANGELOG.md` is union-merged (both
+ *      sides' additive lines kept) and the rebase continues — the crew#418 collision magnet, made
+ *      to just deliver; ANY other conflict aborts the rebase (pushing nothing) and exits carrying
+ *      {@link DELIVER_LIFT_CONFLICT_MARKER}, which crew reads as a recoverable STRAND, never a
+ *      pushed conflicted tree;
+ *  (d) `git push -u origin <branch>` — a non-fast-forward rejection carries the same lift-conflict
+ *      marker (the remote branch moved), every other push failure stays a loud plain failure;
  *  (e) `gh pr create --head <branch> --fill`, with gh's output and exit status captured
  *      SEPARATELY so a gh failure fails the phase carrying gh's own message;
  *  (f) the PR URL is the last line of the phase output.
@@ -59,6 +63,20 @@ import type { PhaseDef, WorkflowDef } from './types.js';
 
 /** The id of the appended phase — also the collision probe when a def already delivers. */
 export const DELIVER_PHASE_ID = 'deliver';
+
+/**
+ * The sentinel the deliver script prints when it refuses on a LIFT COLLISION (crew#418) — a
+ * rebase conflict it could not union-resolve, or a non-fast-forward push. The run's WORK is
+ * complete and committed on its `wicked/<id>` branch; only the lift into origin collided.
+ *
+ * crew keys the "stranded, recoverable" reinterpretation on this EXACT substring appearing in
+ * the deliver unit's `denial_reason` (which carries the head+TAIL excerpt of the script's
+ * output, and the marker is always the script's last line — see {@link isDeliverConflictStranded}
+ * in `api/delivery-index.ts`). The script's OTHER loud refusals — wrong worktree branch, nothing
+ * to deliver, `gh` failure — and a spawn/infra failure deliberately OMIT the marker, so they stay
+ * terminal run failures exactly as before (the crew#400 refusal-vs-infra posture).
+ */
+export const DELIVER_LIFT_CONFLICT_MARKER = 'deliver: LIFT-CONFLICT';
 
 /** How much of the run's intent rides in the commit subject before it is truncated. */
 const INTENT_SUBJECT_CAP = 72;
@@ -140,16 +158,58 @@ export function deliverPrScript(intent?: string): string {
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change ($B is not ahead of $D); nothing was pushed"; exit 1; }',
-    // (c3) Rebase onto origin's default branch so the PR opens mergeable. A conflict must fail
-    // the phase VISIBLY with nothing pushed — the abort leaves the worktree on the pre-rebase
-    // branch tip instead of mid-rebase.
-    'git rebase "$D" "$B" || { git rebase --abort >/dev/null 2>&1 || true; echo "deliver: rebase of $B onto $D failed (conflicts) — resolve on the branch and re-run; nothing was pushed"; exit 1; }',
+    // (c3) Rebase onto origin's default branch so the PR opens mergeable.
+    //
+    // crew#418 B — the CHANGELOG collision magnet: two runs that both append to CHANGELOG's
+    // `[Unreleased]` section conflict on the rebase BY CONSTRUCTION, though their added bullet
+    // lines never truly disagree. A conflict whose conflicted paths are ALL `CHANGELOG.md`
+    // (matched by basename) is resolved automatically with a UNION merge — `git merge-file
+    // --union` keeps BOTH sides' lines, no markers — and the rebase continues. This is scoped to
+    // the changelog and touches NOTHING else: a conflict in any other file is left exactly as
+    // loud as before (the "never weaken rebase loudness for non-changelog files" rule).
+    //
+    // crew#418 A — a conflict that is NOT changelog-only (or a changelog union that fails) is a
+    // real LIFT collision: abort the rebase (nothing pushed; the abort leaves the worktree on the
+    // pre-rebase branch tip, not mid-rebase) and exit carrying DELIVER_LIFT_CONFLICT_MARKER. The
+    // run's committed work is safe on its branch, so crew reinterprets THIS refusal as `completed`
+    // + `delivery: 'stranded'` (recoverable via POST /runs/:id/deliver) rather than a run failure.
+    '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }',
+    'if ! git rebase "$D" "$B"; then',
+    '  while _rebasing; do',
+    '    CF=$(git diff --name-only --diff-filter=U || true)',
+    '    [ -n "$CF" ] || break',
+    // Any conflicted path that is not a CHANGELOG.md → a real collision; stop resolving and strand.
+    '    if printf "%s\\n" "$CF" | grep -qvE "(^|/)CHANGELOG\\.md$"; then break; fi',
+    // Union-merge every conflicted changelog, keeping BOTH sides. A missing base stage (add/add)
+    // unions against an empty base; any git failure breaks out to the loud abort below.
+    '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
+    '          [ -n "$F" ] || continue;',
+    '          TB=$(mktemp); TO=$(mktemp); TT=$(mktemp);',
+    '          git show ":1:$F" >"$TB" 2>/dev/null || : >"$TB";',
+    '          git show ":2:$F" >"$TO" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
+    '          git show ":3:$F" >"$TT" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
+    '          git merge-file -q --union "$TO" "$TB" "$TT" || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
+    '          cat "$TO" >"$F"; git add -- "$F"; rm -f "$TB" "$TO" "$TT";',
+    '        done; then break; fi',
+    '    GIT_EDITOR=true git -c core.editor=true rebase --continue >/dev/null 2>&1 || break;',
+    '  done',
+    `  if _rebasing; then git rebase --abort >/dev/null 2>&1 || true; echo "${DELIVER_LIFT_CONFLICT_MARKER} — rebase of $B onto $D hit conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed"; exit 1; fi`,
+    'fi',
     // Re-derive after the rebase: it drops commits already upstream (patch-id equal), so a branch
     // that WAS ahead can come out of a rebase carrying nothing of its own.
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
-    // (d) Push.
-    'git push -u origin "$B"',
+    // (d) Push. A non-fast-forward rejection (the remote run branch moved under us) is the
+    // push-side twin of the rebase collision — mark it LIFT-CONFLICT so crew strands the run
+    // recoverably; ANY other push failure (auth, network, a rejecting remote hook) stays a loud
+    // terminal failure with git's own words.
+    'if PUSHOUT=$(git push -u origin "$B" 2>&1); then echo "$PUSHOUT"; else',
+    '  echo "$PUSHOUT"',
+    '  case "$PUSHOUT" in',
+    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) echo "${DELIVER_LIFT_CONFLICT_MARKER} — push of $B was rejected because the remote branch moved (non-fast-forward); rebase and re-run; nothing was pushed"; exit 1;;`,
+    '    *) echo "deliver: git push of $B failed — nothing was pushed"; exit 1;;',
+    '  esac',
+    'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
     // `| tail -1` threw away everything gh said but one line and made the phase's verdict a
     // property of a shell option; a gh failure now fails the phase carrying gh's own message.

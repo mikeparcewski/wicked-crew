@@ -238,7 +238,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toContain('oops.ts');
   }, 60_000);
 
-  it('ABORTS a conflicting rebase, fails visibly, and pushes nothing', () => {
+  it('ABORTS a NON-changelog rebase conflict as a LIFT-CONFLICT, pushes nothing, keeps the work (crew#418 A)', () => {
     const fx = fixture();
     // main moves under the run…
     writeFileSync(join(fx.clone, 'README.md'), 'base\nfrom main\n');
@@ -251,11 +251,49 @@ describe('deliver script, driven for real (crew#317)', () => {
     const r = runDeliver(fx);
 
     expect(r.status).not.toBe(0);
-    expect(r.output).toContain('failed (conflicts)');
+    // The refusal is the crew#418 LIFT-CONFLICT marker — the exact substring crew keys the
+    // "stranded, recoverable" reinterpretation on — and it guarantees nothing was pushed.
+    expect(r.output).toContain('deliver: LIFT-CONFLICT');
     expect(r.output).toContain('nothing was pushed');
+    // The marker is the LAST line of the transcript, so it survives core's head+tail denial_reason
+    // excerpt (the tail is where a step's operative line lives).
+    expect(r.output.trimEnd().split('\n').pop()).toContain('deliver: LIFT-CONFLICT');
     expect(originBranches(fx)).toEqual(['main']);
-    // The abort left the worktree on the branch tip, not mid-rebase.
+    // The abort left the worktree on the branch tip, not mid-rebase…
     expect(existsSync(join(fx.clone, '.git', 'worktrees', RUN_ID, 'rebase-merge'))).toBe(false);
+    // …and the run's WORK is intact and committed on its branch, ready for a post-hoc lift.
+    expect(git(fx.workdir, 'show', `wicked/${RUN_ID}:README.md`)).toContain('from the run');
+  }, 60_000);
+
+  it('UNION-MERGES a CHANGELOG-only rebase conflict and delivers — the collision no longer strands (crew#418 B)', () => {
+    const fx = fixture();
+    // A shared ancestor that already carries CHANGELOG [Unreleased] — the real shape (the file
+    // exists; both runs modify it) rather than an add/add.
+    const base = '## [Unreleased]\n\n### Changed\n- base line\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    // Rebase the run branch onto that shared ancestor so its base has the same CHANGELOG=base.
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+    // main then lands run ONE's bullet (its PR merged first)…
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base + '- run ONE change (#416)\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'run one');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    // …and the run adds its OWN bullet to the SAME section — a rebase conflict by construction.
+    writeFileSync(join(fx.workdir, 'CHANGELOG.md'), base + '- run TWO change (#411)\n');
+
+    const r = runDeliver(fx);
+
+    // It DELIVERS — the union merge kept both additive lines, the rebase continued, the PR opened.
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    const delivered = git(fx.origin, 'show', `wicked/${RUN_ID}:CHANGELOG.md`);
+    expect(delivered).toContain('run ONE change (#416)');
+    expect(delivered).toContain('run TWO change (#411)');
   }, 60_000);
 
   it('honours the GH_ACCOUNT guard without baking a name in', () => {

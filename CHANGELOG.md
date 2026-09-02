@@ -41,6 +41,25 @@ mentioned only where a daemon release depends on them.
   (`POST /testing/recon`, `POST /campaigns`) now behave identically — and the repo-scoped
   `POST /campaigns` path, which never carried the workaround and until now had no real-engine
   coverage at all, gained an integration test proving it provisions engine-natively on its own.
+
+### Fixed
+- **A deliver-phase LIFT collision now STRANDS the run, it no longer FAILS it** (#418): the engine
+  reports a run `failed` whenever a Tool phase exits non-zero, and the deliver phase is one — so a
+  run whose WORK was complete but whose rebase-onto-`origin/main` or push collided went to
+  `status: failed`, `delivery: none`, hiding that the committed work on its `wicked/<id>` branch was
+  fine and only the lift had collided. crew now reinterprets that exact shape on the wire as
+  `completed` + `delivery: 'stranded'` (recoverable via `POST /runs/:id/deliver`, counted by the
+  home needs-you rollup), keyed on a `deliver: LIFT-CONFLICT` marker the hardened script prints
+  ONLY on a rebase conflict or a non-fast-forward push. A spawn/infra fault, a `gh` failure, a
+  nothing-to-deliver refusal, or a genuine work-phase failure all stay terminal `failed` as before.
+  The engine's durable `failed` record is untouched — this is a wire derivation, like `delivery`.
+- **The CHANGELOG `[Unreleased]` collision magnet** (#418): two runs that both append release-note
+  lines to `[Unreleased]` conflicted on the rebase by construction, though the added lines never
+  truly disagreed. The deliver script now UNION-merges a rebase conflict whose conflicted paths are
+  all `CHANGELOG.md` (keeping both sides' additive lines) and continues — so the common collision
+  just delivers. Scoped to the changelog by basename: a conflict in any other file is left exactly
+  as loud as before and strands recoverably.
+
 ## [0.7.11] — 2026-09-02
 
 ### Added

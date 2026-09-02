@@ -17,6 +17,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { deliverPrScript } from '../core/deliver.js';
 
@@ -34,6 +37,64 @@ export interface DeliverScriptResult {
 /** The exec seam the deliver route runs the script through — injectable so route tests can
  *  point HOME/PATH at a fixture (a stub `gh`, a temp home) without touching the daemon env. */
 export type DeliverExec = (workdir: string, intent?: string) => Promise<DeliverScriptResult>;
+
+/** A worktree stood back up from a run's `wicked/<id>` branch, plus its teardown (crew#418). */
+export interface ReprovisionedWorktree {
+  /** The path to deliver in — a throwaway checkout of `wicked/<runId>`. */
+  workdir: string;
+  /** Remove the throwaway worktree; the `wicked/<runId>` branch (the record) survives. */
+  cleanup: () => Promise<void>;
+}
+
+/** The reprovision seam (crew#418) — injectable so route tests never shell out to git. Resolves
+ *  to a throwaway worktree checked out on the run's branch, or `null` when the branch is gone. */
+export type WorktreeReprovisioner = (
+  repoRoot: string,
+  runId: string,
+) => Promise<ReprovisionedWorktree | null>;
+
+/**
+ * Stand a run's committed work back up from its `wicked/<runId>` branch (crew#418).
+ *
+ * The engine REAPS a failed-deliver run's worktree once the deliver phase has committed the work
+ * (a clean tree; `git worktree remove` succeeds even with the branch ahead) — the work then lives
+ * ONLY on the `wicked/<runId>` branch, which the reap never deletes ("the checkout is scaffolding,
+ * the branch is the record"). A post-hoc lift therefore has no worktree to run in; this checks the
+ * branch out at a THROWAWAY path so the hardened deliver script can commit-nothing / rebase / push
+ * it. The path's basename is deliberately NOT the run id, so the script's branch derivation falls
+ * back to `git branch --show-current` — which the checkout puts on `wicked/<runId>` — instead of
+ * `wicked/<basename>`. Never touches the engine's recorded worktree path, so it cannot race the
+ * engine's own worktree bookkeeping.
+ *
+ * Resolves `null` when the branch does not exist (nothing to reprovision) — the caller then
+ * answers the same "nothing to deliver" refusal as a truly empty run.
+ */
+export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, runId) => {
+  const branch = `wicked/${runId}`;
+  const run = (args: string[]): Promise<void> =>
+    new Promise((resolve, reject) => {
+      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true }, (err) =>
+        err === null ? resolve() : reject(err),
+      );
+    });
+  const dir = await mkdtemp(join(tmpdir(), `wicked-deliver-${runId.replace(/[^\w.-]/g, '_')}-`));
+  try {
+    // Drop any dangling admin entry the reap left, THEN check the branch out at the empty temp dir
+    // (`git worktree add` accepts an existing empty directory). A missing branch fails here → null.
+    await run(['worktree', 'prune']);
+    await run(['worktree', 'add', dir, branch]);
+  } catch {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    return null;
+  }
+  return {
+    workdir: dir,
+    cleanup: async () => {
+      await run(['worktree', 'remove', '--force', dir]).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    },
+  };
+};
 
 /** Everything the script prints stays bounded — 8 MiB is far past any real transcript. */
 const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;

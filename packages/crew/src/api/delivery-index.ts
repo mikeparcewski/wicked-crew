@@ -24,6 +24,7 @@
 import type { AuditLog } from './audit.js';
 import type { AgentSession, SessionView, WorkUnit } from '../core/types.js';
 import { execCapped } from '../core/exec.js';
+import { DELIVER_LIFT_CONFLICT_MARKER } from '../core/deliver.js';
 
 /** What `AgentSession.delivery` + `deliverUrl` spell on the wire (api-types 0.18.0, crew#393). */
 export interface DeliveryState {
@@ -257,6 +258,37 @@ export function deliverUnitOf(view: SessionView): WorkUnit | null {
   const byId = view.units.find((u) => u.id.endsWith(':deliver'));
   if (byId !== undefined) return byId;
   return view.units.find((u) => (u.tool_cmd ?? []).join(' ').includes('gh pr create')) ?? null;
+}
+
+/**
+ * Is this a `failed` run whose ONLY failure was the deliver phase's LIFT collision (crew#418)?
+ *
+ * The deliver phase is the LAST phase, so a rejected deliver unit whose `denial_reason` carries
+ * the deliver script's {@link DELIVER_LIFT_CONFLICT_MARKER} — with EVERY non-deliver unit still
+ * `done` — means the run's WORK is complete and committed on its `wicked/<id>` branch: only the
+ * lift into origin collided (a rebase conflict the changelog union merge could not clear, or a
+ * non-fast-forward push). The engine reports the run `failed` because a Tool phase exited
+ * non-zero; crew reinterprets THIS shape on the wire as `completed` + `delivery: 'stranded'`
+ * (recoverable via `POST /runs/:id/deliver`) — the same wire-derivation posture as `delivery`
+ * itself, leaving the engine's durable `failed` record untouched. The deliver unit stays
+ * `rejected` with its marker-bearing `denial_reason`, so WHY it stranded is still on the wire.
+ *
+ * FALSE — the run stays `failed` — for every genuine failure, because each misses a condition:
+ *   - a rejected NON-deliver unit (a build/test/work phase failed) — `some(rejected)` guard;
+ *   - a deliver rejection WITHOUT the marker: a spawn/infra fault (the crew#400 posture), a
+ *     `gh` failure, nothing-to-deliver, or a wrong-worktree-branch refusal — the marker is the
+ *     deliver script's own authority on WHY it refused, so crew never guesses from git's output;
+ *   - a repo-less run (nothing to strand), or any non-`failed` status.
+ */
+export function isDeliverConflictStranded(view: SessionView): boolean {
+  if (view.session.status !== 'failed') return false;
+  if (view.session.repo_ref == null) return false;
+  const deliver = deliverUnitOf(view);
+  if (deliver === null || deliver.status !== 'rejected') return false;
+  // A rejected unit that is NOT the deliver phase = a genuine work/build/test failure, not a
+  // clean run whose only casualty was the lift.
+  if (view.units.some((u) => u.id !== deliver.id && u.status === 'rejected')) return false;
+  return (deliver.denial_reason ?? '').includes(DELIVER_LIFT_CONFLICT_MARKER);
 }
 
 export class DeliveryIndex {
