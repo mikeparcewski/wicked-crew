@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **Signal instrumentation (crew#411)**: the daemon now records every SIGTERM/SIGINT it receives
+  (timestamp + signal name) into a bounded in-process log (`DaemonSignalLog`). When an ACP bridge
+  dies silently (`acpFallback` with `fallbackKind: session_died`), the daemon correlates the event
+  against that log and emits a `warn` line stating which case it was: *"daemon also received SIGTERM
+  at T (ΔXms) — likely group/terminal signal"* or *"no daemon signal within ±5s — pid-targeted
+  external signal or transport close"*.
+
 ### Removed
 - **The campaign-worktree pre-provisioning workaround** (#415) — `packages/crew/src/campaigns/worktrees.ts`
   and its call sites in the recon route and the core adapter — the removal that 0.7.11's release
@@ -33,7 +41,6 @@ mentioned only where a daemon release depends on them.
   (`POST /testing/recon`, `POST /campaigns`) now behave identically — and the repo-scoped
   `POST /campaigns` path, which never carried the workaround and until now had no real-engine
   coverage at all, gained an integration test proving it provisions engine-natively on its own.
-
 ## [0.7.11] — 2026-09-02
 
 ### Added

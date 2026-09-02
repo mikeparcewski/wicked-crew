@@ -38,6 +38,7 @@ import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { DEFAULT_WORKER_STALL_MINUTES } from '../core/types.js';
+import { daemonSignalLog } from '../core/daemon-signal-log.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -285,7 +286,10 @@ export async function createServer(
   const qeGateCache = new QeGateCache();
   // Per-seat runtime health (crew#274): folded from the single CoreEvent subscription below,
   // surfaced on GET /roster, recovered by the low-frequency probe armed further down.
-  const seatHealth = new SeatHealthTracker();
+  const seatHealth = new SeatHealthTracker({
+    signalLog: daemonSignalLog,
+    log: (m) => app.log.warn(m),
+  });
 
   // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
   // a malformed token file or a configured-but-unimplemented OIDC block must
