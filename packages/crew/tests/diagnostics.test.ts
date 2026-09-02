@@ -252,10 +252,38 @@ describe('component version readers', () => {
       probes += 1;
       return { stdout: 'wicked-estate 1.0.0', stderr: '' };
     };
-    const cache = new EngineVersionCache();
-    await cache.get(exec);
-    await cache.get(exec);
-    expect(probes).toBe(1); // estate only — WICKED_CORE_EXE is unset in this suite by default
+    const saved = process.env['WICKED_CORE_EXE'];
+    delete process.env['WICKED_CORE_EXE'];
+    try {
+      const cache = new EngineVersionCache();
+      await cache.get(exec);
+      await cache.get(exec);
+      expect(probes).toBe(1); // estate only — WICKED_CORE_EXE is unset
+    } finally {
+      if (saved === undefined) delete process.env['WICKED_CORE_EXE'];
+      else process.env['WICKED_CORE_EXE'] = saved;
+    }
+  });
+
+  it('EngineVersionCache caches both probes when WICKED_CORE_EXE is set', async () => {
+    let probes = 0;
+    const exec = async (file: string): Promise<{ stdout: string; stderr: string }> => {
+      probes += 1;
+      if (file === '/fake/wicked-core') return { stdout: 'wicked-core 1.0.0', stderr: '' };
+      return { stdout: 'wicked-estate 1.0.0', stderr: '' };
+    };
+    const saved = process.env['WICKED_CORE_EXE'];
+    process.env['WICKED_CORE_EXE'] = '/fake/wicked-core';
+    try {
+      const cache = new EngineVersionCache();
+      await cache.get(exec);
+      expect(probes).toBe(2); // core + estate probed on first call
+      await cache.get(exec);
+      expect(probes).toBe(2); // cached — no additional probes
+    } finally {
+      if (saved === undefined) delete process.env['WICKED_CORE_EXE'];
+      else process.env['WICKED_CORE_EXE'] = saved;
+    }
   });
 });
 
