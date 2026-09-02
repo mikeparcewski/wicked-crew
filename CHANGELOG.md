@@ -12,6 +12,17 @@ mentioned only where a daemon release depends on them.
 
 _Nothing yet._
 
+## [0.7.10] — 2026-09-01
+
+### Fixed
+- **The steering landing coerces real-worker field shapes into the engine schema** (#408 — found
+  by the live re-verification of #388): a real worker proposes `targets` as a string array,
+  `trigger` as prose, `criteria` as a list — shapes the engine's `ConformanceRule` refuses, which
+  failed the WHOLE landing. `normalizeProposedRule` now repairs exactly those shapes (empty facet
+  `targets`, dropped prose `trigger`, joined `criteria`, defaulted/clamped `confidence`), names
+  every adjustment in the `governance.rule.upserted` audit (`coerced`, per rule), and the
+  propose-phase instructions spell the store schema so workers author the right shapes.
+
 ## [0.7.9] — 2026-09-01
 
 ### Added
@@ -395,7 +406,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...HEAD
+[0.7.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.6...v0.7.7
