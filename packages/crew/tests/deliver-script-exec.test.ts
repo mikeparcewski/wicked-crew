@@ -296,6 +296,42 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(delivered).toContain('run TWO change (#411)');
   }, 60_000);
 
+  it('STRANDS a CHANGELOG conflict that reaches a RELEASED section — the union is [Unreleased]-only (crew#418 review)', () => {
+    const fx = fixture();
+    // A changelog with an Unreleased section AND a released one. Both runs diverge in the
+    // RELEASED [0.5.0] section (not additive-in-Unreleased) — a genuine conflict the union must
+    // NOT silently combine.
+    const base =
+      '## [Unreleased]\n\n### Changed\n- base line\n\n## [0.5.0]\n\n### Fixed\n- shared released line\n';
+    writeFileSync(join(fx.clone, 'CHANGELOG.md'), base);
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'add changelog');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '--hard', 'origin/main');
+    // main edits the RELEASED line…
+    writeFileSync(
+      join(fx.clone, 'CHANGELOG.md'),
+      base.replace('- shared released line', '- shared released line, edited by run ONE'),
+    );
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'run one edits released');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    // …and the run edits the SAME released line differently — a real conflict outside [Unreleased].
+    writeFileSync(
+      join(fx.workdir, 'CHANGELOG.md'),
+      base.replace('- shared released line', '- shared released line, edited by run TWO'),
+    );
+
+    const r = runDeliver(fx);
+
+    // It STRANDS loudly — the union is refused because the divergence is outside [Unreleased];
+    // nothing was pushed, no branch created.
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
   it('honours the GH_ACCOUNT guard without baking a name in', () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const q = 5;\n');

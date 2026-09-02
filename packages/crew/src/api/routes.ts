@@ -72,6 +72,7 @@ import {
   gitReprovisionWorktree,
   runDeliverScript,
   type DeliverExec,
+  type DeliverScriptResult,
   type WorktreeReprovisioner,
 } from './post-hoc-deliver.js';
 import { LOCAL_ACTOR, type AuthMode } from './auth.js';
@@ -1102,6 +1103,28 @@ export function registerRoutes(
   // existing worktree. Idempotent: a delivered run answers its recorded URL, never a second PR.
   // Failure is a loud 4xx/5xx carrying the script's own words — never a silent 200.
   const deliverInFlight = new Set<string>();
+  // Per-REPO serialization for the worktree-admin-sensitive region (reprovision → deliver →
+  // cleanup). deliverInFlight is per-RUN and stops the same run double-delivering, but two
+  // DIFFERENT stranded runs in the same repo would both run `git worktree prune/add/remove`
+  // against one `.git/worktrees` admin state and race. Chaining a promise per repo ref serializes
+  // them; different repos still run in parallel. The tail entry is pruned so the map cannot grow.
+  const repoDeliverChain = new Map<string, Promise<void>>();
+  const withRepoDeliverLock = async <T>(repoRef: string, fn: () => Promise<T>): Promise<T> => {
+    const prior = repoDeliverChain.get(repoRef) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => {
+      release = r;
+    });
+    repoDeliverChain.set(repoRef, mine); // WE are now the tail
+    await prior.catch(() => undefined); // wait our turn; a prior failure never blocks ours
+    try {
+      return await fn();
+    } finally {
+      release(); // unblock whoever chained after us
+      // If nothing chained after us, drop the entry so idle repos leave no trace.
+      if (repoDeliverChain.get(repoRef) === mine) repoDeliverChain.delete(repoRef);
+    }
+  };
   /** The last words of a failed deliver script — enough to name the refusal, bounded so a full
    *  git transcript never becomes an error body. */
   const deliverErrorTail = (output: string): string => {
@@ -1146,6 +1169,11 @@ export function registerRoutes(
           error: `run ${id} is not repo-scoped — there is no worktree to lift into a PR`,
         });
       }
+      // Capture the ref + workdir while the null-check narrowing is fresh — an intervening await
+      // below invalidates property narrowing, so re-reading `s.repo_ref`/`s.workdir` later widens
+      // back to `| null`.
+      const repoRef: string = s.repo_ref;
+      const initialWorkdir: string = s.workdir;
       // One delivery per run at a time: the script pushes and opens a PR, so two concurrent
       // spawns could race gh into two PRs — the exact double-open idempotency forbids. The guard
       // wraps the reprovision too, so a reaped run's `wicked/<id>` branch is only ever checked out
@@ -1161,27 +1189,46 @@ export function registerRoutes(
       // on the `wicked/<id>` branch. For such a strand, stand a throwaway worktree back up from
       // that branch and lift THAT; the branch (the record) is untouched. `cleanupWorktree` tears
       // the throwaway down after the lift.
-      let workdir = s.workdir;
-      let cleanupWorktree: (() => Promise<void>) | null = null;
-      let result;
+      let result: DeliverScriptResult | undefined;
+      let worktreeGone = false;
       try {
-        if (!worktreeExists(workdir)) {
-          const root = conflictStrand ? await repoRootOf(s.repo_ref) : undefined;
-          const reprov = root !== undefined ? await reprovisionWorktree(root, id) : null;
-          if (reprov === null) {
-            return reply.code(409).send({
-              error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
-            });
+        // The worktree admin (reprovision), the deliver spawn, AND the throwaway teardown all run
+        // under the per-repo lock, so a second stranded run in this repo cannot touch
+        // `.git/worktrees` until this one has stood its worktree up, lifted, and torn it back
+        // down. `cw` is a LOCAL torn down in the lock body's own finally — nothing captured-mutated
+        // crosses the closure boundary.
+        await withRepoDeliverLock(repoRef, async () => {
+          let workdir = initialWorkdir;
+          let cw: (() => Promise<void>) | null = null;
+          try {
+            if (!worktreeExists(workdir)) {
+              const root = conflictStrand ? await repoRootOf(repoRef) : undefined;
+              const reprov = root !== undefined ? await reprovisionWorktree(root, id) : null;
+              if (reprov === null) {
+                worktreeGone = true;
+                return;
+              }
+              workdir = reprov.workdir;
+              cw = reprov.cleanup;
+            }
+            result = await deliverExec(workdir, s.problem ?? undefined);
+          } finally {
+            if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
           }
-          workdir = reprov.workdir;
-          cleanupWorktree = reprov.cleanup;
-        }
-        result = await deliverExec(workdir, s.problem);
+        });
       } catch (err) {
         return reply.code(500).send({ error: `deliver script could not run: ${message(err)}` });
       } finally {
         deliverInFlight.delete(id);
-        if (cleanupWorktree !== null) await cleanupWorktree();
+      }
+      if (worktreeGone) {
+        return reply.code(409).send({
+          error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
+        });
+      }
+      if (result === undefined) {
+        // Unreachable: the lock body assigns `result` on every path that is not `worktreeGone`.
+        return reply.code(500).send({ error: `deliver for run ${id} produced no result` });
       }
       if (result.spawnFailure === true) {
         // The script never reached its own verdict (spawn failure, timeout kill) — an infra

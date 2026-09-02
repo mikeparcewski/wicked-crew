@@ -180,14 +180,24 @@ export function deliverPrScript(intent?: string): string {
     '    [ -n "$CF" ] || break',
     // Any conflicted path that is not a CHANGELOG.md → a real collision; stop resolving and strand.
     '    if printf "%s\\n" "$CF" | grep -qvE "(^|/)CHANGELOG\\.md$"; then break; fi',
-    // Union-merge every conflicted changelog, keeping BOTH sides. A missing base stage (add/add)
-    // unions against an empty base; any git failure breaks out to the loud abort below.
+    // Union-merge every conflicted changelog — but ONLY when the two sides differ SOLELY within
+    // the `## [Unreleased]` section. A union keeps both sides of every conflict hunk, so a
+    // whole-file union of two edits to the SAME released-version line would silently combine
+    // them; we refuse that. Guard: strip the [Unreleased] block (from `## [Unreleased]` up to the
+    // next `## [` heading) from both stage-2 (ours) and stage-3 (theirs); if the remainder is not
+    // byte-identical, the divergence is outside [Unreleased] → a real conflict → break (strand).
+    // When they ARE identical outside it, the only conflicting hunks are within [Unreleased], so
+    // the whole-file --union affects nothing else. A missing base stage (add/add) unions against
+    // an empty base; any git failure breaks out to the loud abort below.
     '    if ! printf "%s\\n" "$CF" | while IFS= read -r F; do',
     '          [ -n "$F" ] || continue;',
     '          TB=$(mktemp); TO=$(mktemp); TT=$(mktemp);',
     '          git show ":1:$F" >"$TB" 2>/dev/null || : >"$TB";',
     '          git show ":2:$F" >"$TO" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
     '          git show ":3:$F" >"$TT" 2>/dev/null || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
+    "          _strip='/^## \\[Unreleased\\]/{s=1;next} s&&/^## \\[/{s=0} !s{print}';",
+    '          SO=$(awk "$_strip" "$TO"); ST=$(awk "$_strip" "$TT");',
+    '          if [ "$SO" != "$ST" ]; then rm -f "$TB" "$TO" "$TT"; exit 1; fi;',
     '          git merge-file -q --union "$TO" "$TB" "$TT" || { rm -f "$TB" "$TO" "$TT"; exit 1; };',
     '          cat "$TO" >"$F"; git add -- "$F"; rm -f "$TB" "$TO" "$TT";',
     '        done; then break; fi',
