@@ -175,6 +175,10 @@ export function deliverPrScript(intent?: string): string {
     // + `delivery: 'stranded'` (recoverable via POST /runs/:id/deliver) rather than a run failure.
     '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }',
     'if ! git rebase "$D" "$B"; then',
+    // A rebase that failed WITHOUT leaving in-progress state never started — a preflight error
+    // (bad ref, unexpected worktree state), not a conflict. Fail LOUD rather than fall through to
+    // the push as if the rebase had succeeded; nothing was pushed.
+    '  if ! _rebasing; then echo "deliver: git rebase of $B onto $D failed before it started (preflight error); nothing was pushed"; exit 1; fi',
     '  while _rebasing; do',
     '    CF=$(git diff --name-only --diff-filter=U || true)',
     '    [ -n "$CF" ] || break',

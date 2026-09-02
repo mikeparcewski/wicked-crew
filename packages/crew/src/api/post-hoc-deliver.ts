@@ -78,14 +78,24 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
       );
     });
   const dir = await mkdtemp(join(tmpdir(), `wicked-deliver-${runId.replace(/[^\w.-]/g, '_')}-`));
+  // Is the run's branch even there? Absent ⇒ the work is genuinely GONE → null (the route answers
+  // 409 "nothing to deliver"). This is the ONLY reason to report null: an OPERATIONAL git failure
+  // below (permissions, corruption, a busy repo) must surface as an error, not be misreported as
+  // "gone" — so it is left to throw and the route answers 500.
   try {
-    // Drop any dangling admin entry the reap left, THEN check the branch out at the empty temp dir
-    // (`git worktree add` accepts an existing empty directory). A missing branch fails here → null.
-    await run(['worktree', 'prune']);
-    await run(['worktree', 'add', dir, branch]);
+    await run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
   } catch {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     return null;
+  }
+  try {
+    // Drop any dangling admin entry the reap left, THEN check the branch out at the empty temp dir
+    // (`git worktree add` accepts an existing empty directory).
+    await run(['worktree', 'prune']);
+    await run(['worktree', 'add', dir, branch]);
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    throw err; // operational failure standing the worktree up — NOT "gone"
   }
   return {
     workdir: dir,
