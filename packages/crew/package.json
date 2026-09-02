@@ -28,7 +28,7 @@
     "start": "node dist/cli/index.js serve"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.62.0",
+    "@agentclientprotocol/claude-agent-acp": "^0.73.0",
     "@agentclientprotocol/codex-acp": "^1.1.7",
     "@fastify/static": "^10.1.2",
     "@fastify/websocket": "^11.2.0",

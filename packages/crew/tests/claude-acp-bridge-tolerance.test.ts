@@ -42,6 +42,11 @@ function bridgeEntry(): string {
 }
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-claude-cli.mjs');
+const MALFORMED_RESULT_FIXTURE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures',
+  'fake-claude-cli-malformed-result.mjs',
+);
 
 interface JsonRpcMessage {
   jsonrpc?: string;
@@ -65,12 +70,12 @@ class BridgeClient {
     { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }
   >();
 
-  constructor(cwd: string, configDir: string) {
+  constructor(cwd: string, configDir: string, fixture: string = FIXTURE) {
     const env = { ...process.env };
     // The fake CLI must win regardless of what this machine has installed or
     // configured; a real model pin would make getAvailableModels reject it.
     delete env['ANTHROPIC_MODEL'];
-    env['CLAUDE_CODE_EXECUTABLE'] = FIXTURE;
+    env['CLAUDE_CODE_EXECUTABLE'] = fixture;
     env['CLAUDE_CONFIG_DIR'] = configDir;
 
     this.child = spawn(process.execPath, [bridgeEntry()], {
@@ -199,5 +204,47 @@ describe('claude-agent-acp bridge tolerance (crew#290)', () => {
     expect(turn2['stopReason']).toBe('end_turn');
     expect(client.exit).toBeNull();
     expect(client.chunkTexts().some((t) => t.includes('turn 2: done.'))).toBe(true);
+  }, 60_000);
+
+  // The remaining crew#290 candidate trigger, pinned. Upstream 0.73.0 still calls
+  // `message.errors.join(", ")` (and a sibling `.map`) UNGUARDED in its known-subtype
+  // result handlers, so a malformed error result — `is_error: true` with no `errors`
+  // array — raises a TypeError inside the bridge's message loop. What this pins is the
+  // bridge's blast radius for that class of frame: the turn must get a terminal ANSWER
+  // (an error response is fine; silence would wedge the engine until its unit timeout)
+  // and the PROCESS must stay alive — a regression to die-on-malformed-frame is exactly
+  // the silent mid-turn exit-0 this issue hunts.
+  it('a malformed error result (no `errors` array) is answered, never a process death', async () => {
+    const cwd = makeTmpDir('acp-290-mal-cwd-');
+    const configDir = makeTmpDir('acp-290-mal-config-');
+    const client = new BridgeClient(cwd, configDir, MALFORMED_RESULT_FIXTURE);
+    cleanups.push(() => client.kill());
+
+    await client.request(
+      'initialize',
+      { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } } },
+      15_000,
+    );
+    const session = await client.request('session/new', { cwd, mcpServers: [] }, 20_000);
+    const sessionId = session['sessionId'];
+
+    // The turn must terminate with SOME answer. On current upstream that is an error
+    // response (the TypeError surfaces as -32603) — accept a result too, but never a
+    // timeout: `request` rejects on an error response and on the 20s timeout alike,
+    // so distinguish them by message.
+    const outcome = await client
+      .request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'first turn' }] }, 20_000)
+      .then(() => 'result')
+      .catch((e: Error) => (e.message.includes('timed out') ? 'timeout' : 'error-response'));
+    expect(outcome, 'the turn must get a terminal answer, not silence').not.toBe('timeout');
+
+    // The defect under hunt is PROCESS death — give a straggling exit a beat to land.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(client.exit, `bridge died: stderr tail ${client.stderrLines.slice(-3).join(' | ')}`).toBeNull();
+
+    // And the bridge still answers protocol requests afterwards.
+    const again = await client.request('initialize', { protocolVersion: 1, clientCapabilities: {} }, 15_000);
+    expect(again['protocolVersion']).toBe(1);
+    expect(client.exit).toBeNull();
   }, 60_000);
 });

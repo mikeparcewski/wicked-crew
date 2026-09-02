@@ -28,8 +28,15 @@ import {
   BRIDGE_BINS,
   BRIDGE_KILL_GRACE_MS,
   BridgeReaper,
+  ORPHAN_SWEEP_DEFAULT_MS,
+  WORKER_CLI_BINS,
   discoverBridgeChildren,
+  orphanSweepMs,
   parseBridgeChildren,
+  parseOrphanedRunProcesses,
+  reapOrphansAtBoot,
+  startOrphanSweep,
+  sweepOrphanedRunProcesses,
 } from '../src/core/bridge-reaper.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -300,6 +307,147 @@ describe('discoverBridgeChildren (real process table)', () => {
       plain.kill('SIGKILL');
       await Promise.all([bridgeyExit, plainExit]);
     }
+  });
+});
+
+describe('orphaned run-process sweep (crew#340)', () => {
+  // A worker CLI orphaned by `kill -9` on its bridge: ppid 1, cwd inside a run worktree.
+  const ORPHANED_CLAUDE = '  901     1 node /opt/homebrew/bin/claude --output-format stream-json';
+  const ORPHANED_BRIDGE = `  902     1 node /repo/node_modules/.bin/${BRIDGE_BINS[1]}`;
+  // A worker CLI whose BRIDGE is alive (ppid != 1) — some other daemon's live business.
+  const PARENTED_CLAUDE = '  903   700 node /opt/homebrew/bin/claude --output-format stream-json';
+  // An orphan that is neither a bridge nor a worker CLI.
+  const ORPHANED_VIM = '  904     1 vim README.md';
+  // The operator's own interactive claude, orphaned by a dead terminal — token matches,
+  // but its cwd (checked separately) is NOT a run worktree.
+  const OPERATOR_CLAUDE = '  905     1 claude';
+
+  it('parseOrphanedRunProcesses matches orphaned bridges AND worker CLIs, nothing parented', () => {
+    const listing = [ORPHANED_CLAUDE, ORPHANED_BRIDGE, PARENTED_CLAUDE, ORPHANED_VIM, OPERATOR_CLAUDE].join('\n');
+    expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([901, 902, 905]);
+  });
+
+  it('worker tokens never match inside bridge names (claude ≠ claude-agent-acp)', () => {
+    // claude-agent-acp CONTAINS "claude" — the token-boundary rule must still count the
+    // line exactly once (as a bridge), and a hyphen-adjacent token must not leak.
+    const listing = ['  910     1 node /x/claude-agent-acp', '  911     1 node /x/api-acp'].join('\n');
+    expect(parseOrphanedRunProcesses(listing)).toEqual([910]);
+  });
+
+  it('WORKER_CLI_BINS names the CLIs the declared bridges drive', () => {
+    // agy-acp→agy, claude-agent-acp→claude, codex-acp→codex, pi-acp→pi. A bridge added
+    // to BRIDGE_BINS whose CLI is missing here escapes the orphan sweep — keep them in step.
+    expect([...WORKER_CLI_BINS].sort()).toEqual(['agy', 'claude', 'codex', 'pi']);
+  });
+
+  it('reapOrphansAtBoot SIGTERMs only worktree-cwd orphans (worker CLIs included)', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    const reaped = reapOrphansAtBoot({
+      list: () => [ORPHANED_CLAUDE, ORPHANED_BRIDGE, OPERATOR_CLAUDE, ORPHANED_VIM].join('\n'),
+      cwdInWorktree: (pid) => pid !== 905, // the operator's own claude runs elsewhere
+      kill: (pid, sig) => signals.push([pid, sig]),
+    });
+    expect(reaped.sort(byNumber)).toEqual([901, 902]);
+    expect(signals.every(([, s]) => s === 'SIGTERM')).toBe(true);
+  });
+
+  it('sweepOrphanedRunProcesses escalates: SIGTERM on sight, SIGKILL one tick later', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    const io = {
+      list: () => [ORPHANED_CLAUDE].join('\n'),
+      cwdInWorktree: () => true,
+      kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
+    };
+    const pending = new Set<number>();
+
+    const tick1 = sweepOrphanedRunProcesses(pending, io);
+    expect(tick1).toEqual({ terminated: [901], killed: [] });
+    expect([...pending]).toEqual([901]);
+
+    // Still in the table a whole interval later — it ignored SIGTERM; escalate.
+    const tick2 = sweepOrphanedRunProcesses(pending, io);
+    expect(tick2).toEqual({ terminated: [], killed: [901] });
+    // One escalation per pid, then the slot clears: a stale table that keeps listing a
+    // SIGKILLed zombie re-enters at SIGTERM, never a SIGKILL loop.
+    expect(pending.size).toBe(0);
+    expect(signals).toEqual([
+      [901, 'SIGTERM'],
+      [901, 'SIGKILL'],
+    ]);
+  });
+
+  it('an orphan that exits during the grace interval is never SIGKILLed', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    let alive = true;
+    const io = {
+      list: () => (alive ? ORPHANED_CLAUDE : '   1     0 launchd'),
+      cwdInWorktree: () => true,
+      kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
+    };
+    const pending = new Set<number>();
+    expect(sweepOrphanedRunProcesses(pending, io).terminated).toEqual([901]);
+    alive = false; // the SIGTERM worked
+    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [] });
+    expect(pending.size).toBe(0);
+    expect(signals).toEqual([[901, 'SIGTERM']]);
+  });
+
+  it('a non-worktree cwd is the hard gate: token-matching orphans elsewhere are untouched', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    const result = sweepOrphanedRunProcesses(new Set(), {
+      list: () => [ORPHANED_CLAUDE, OPERATOR_CLAUDE].join('\n'),
+      cwdInWorktree: (pid) => pid === 901,
+      kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
+    });
+    expect(result.terminated).toEqual([901]);
+    expect(signals.map(([p]) => p)).toEqual([901]);
+  });
+
+  it('an unreadable process table is a no-op, never a throw', () => {
+    expect(sweepOrphanedRunProcesses(new Set(), { list: () => null })).toEqual({
+      terminated: [],
+      killed: [],
+    });
+  });
+
+  it('orphanSweepMs: default 30s; seconds override; 0 disables; garbage falls back', () => {
+    expect(orphanSweepMs(undefined)).toBe(ORPHAN_SWEEP_DEFAULT_MS);
+    expect(orphanSweepMs('')).toBe(ORPHAN_SWEEP_DEFAULT_MS);
+    expect(orphanSweepMs('45')).toBe(45_000);
+    expect(orphanSweepMs('0')).toBe(0);
+    expect(orphanSweepMs('never')).toBe(ORPHAN_SWEEP_DEFAULT_MS);
+    expect(orphanSweepMs('-5')).toBe(ORPHAN_SWEEP_DEFAULT_MS);
+  });
+
+  it('startOrphanSweep ticks on its interval and stop() ends it', async () => {
+    let lists = 0;
+    const stop = startOrphanSweep(10, {
+      list: () => {
+        lists++;
+        return '';
+      },
+      cwdInWorktree: () => true,
+      kill: () => {},
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    stop();
+    const after = lists;
+    expect(lists).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lists).toBe(after); // stopped means stopped
+  });
+
+  it('startOrphanSweep with a 0 interval (disabled) starts nothing', async () => {
+    let lists = 0;
+    const stop = startOrphanSweep(0, {
+      list: () => {
+        lists++;
+        return '';
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    stop();
+    expect(lists).toBe(0);
   });
 });
 

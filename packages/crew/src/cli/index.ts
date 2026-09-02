@@ -5,7 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
 import { ensureBridgesOnPath } from '../core/bridge-path.js';
-import { bridgeReaper, reapOrphansAtBoot } from '../core/bridge-reaper.js';
+import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
@@ -300,7 +300,11 @@ async function main(): Promise<void> {
     // can never see them. Conservative: only ppid==1 matches, so another live
     // daemon's bridges are untouched.
     const orphans = reapOrphansAtBoot();
-    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge(s) from a previous daemon: ${orphans.join(', ')}`);
+    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker process(es) from a previous daemon: ${orphans.join(', ')}`);
+    // Live sweep (crew#340): kill -9 on a bridge mid-run orphans its worker CLI NOW, and
+    // that orphan holds the shared worker config home hostage until reaped — the boot
+    // sweep only helps the NEXT daemon. Unref'd timer; SIGTERM, then SIGKILL a tick later.
+    startOrphanSweep();
     const { adapter, port } = await bootstrap(opts);
     printReady({
       mode: 'serve',
