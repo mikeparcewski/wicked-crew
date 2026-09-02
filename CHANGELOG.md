@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.7.9] — 2026-09-01
+
 ### Added
 
 - **Stall-watchdog escalation ladder** (crew#341, api-types 0.18.0): detection now drives
