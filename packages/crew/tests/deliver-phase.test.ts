@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
   composeDeliverWorkflow,
   deliverPrPhase,
@@ -41,13 +42,40 @@ describe('deliverPrScript (the hardened field script)', () => {
     // origin/HEAD resolution with the origin/main fallback the task names.
     expect(script).toContain('refs/remotes/origin/HEAD');
     expect(script).toContain('origin/main');
-    // A conflicting rebase must fail the phase (exit 1) and push nothing — the exit appears
-    // in the rebase failure arm, before any push runs.
-    expect(script).toMatch(/git rebase [^\n]*exit 1/);
+    // A conflict the changelog union merge cannot clear aborts the rebase and exits non-zero
+    // carrying the LIFT-CONFLICT marker + "nothing was pushed" — the loud refusal, before any
+    // push runs. (The union merge that PRECEDES this abort is asserted in the crew#418 block.)
+    expect(script).toMatch(/git rebase --abort[^\n]*LIFT-CONFLICT[^\n]*nothing was pushed[^\n]*exit 1/);
     const rebaseAt = script.indexOf('git rebase');
     const pushAt = script.indexOf('git push -u origin');
     expect(rebaseAt).toBeGreaterThan(-1);
     expect(pushAt).toBeGreaterThan(rebaseAt);
+  });
+
+  // crew#418 B — the CHANGELOG collision magnet: a rebase conflict whose conflicted paths are all
+  // CHANGELOG.md is union-merged (keep BOTH sides' additive lines) and the rebase continues; ONLY
+  // a conflict outside the changelog aborts loudly and strands. Pinned as script properties; the
+  // behaviour is driven for real against temp git repos in deliver-script-exec.test.ts.
+  it('union-merges a CHANGELOG-only rebase conflict, aborting loudly only outside the changelog', () => {
+    // The scope gate: any conflicted path that is NOT a CHANGELOG.md stops the auto-resolve.
+    expect(script).toContain('git diff --name-only --diff-filter=U');
+    expect(script).toContain('grep -qvE "(^|/)CHANGELOG\\.md$"');
+    // The union merge keeps both sides; the rebase then continues.
+    expect(script).toContain('git merge-file -q --union');
+    expect(script).toContain('git -c core.editor=true rebase --continue');
+    // The union step precedes the loud abort — a real (non-changelog) conflict still strands.
+    expect(script.indexOf('git merge-file')).toBeLessThan(script.indexOf('git rebase --abort'));
+    expect(script).toContain(`${LIFT_CONFLICT_MARKER} — rebase`);
+  });
+
+  // crew#418 A — a non-fast-forward push (the remote run branch moved) is a lift collision too:
+  // the marker rides it, and every OTHER push failure stays a loud plain failure.
+  it('marks a non-fast-forward push as a LIFT-CONFLICT, other push failures stay plain', () => {
+    expect(script).toContain('if PUSHOUT=$(git push -u origin "$B" 2>&1); then');
+    expect(script).toMatch(/\*non-fast-forward\*[^\n]*LIFT-CONFLICT[^\n]*non-fast-forward[^\n]*nothing was pushed/);
+    // The catch-all arm carries NO marker — auth/network/hook failures are terminal, not stranded.
+    const plainArm = script.split('\n').find((l) => l.includes('deliver: git push of $B failed'))!;
+    expect(plainArm).not.toContain('LIFT-CONFLICT');
   });
 
   it('pushes -u and opens the PR with gh, URL as the last line', () => {

@@ -197,9 +197,14 @@ export interface AgentSession {
    *
    *   - `'delivered'` — a PR was opened for this run (by the deliver phase, or post-hoc via
    *     `POST /runs/:id/deliver`); `deliverUrl` carries the PR URL.
-   *   - `'stranded'`  — a COMPLETED repo-scoped run with no recorded PR whose worktree still
-   *     exists on disk AND carries work: reviewable work nobody lifted. Derived honestly for
-   *     OLD runs too — records written before this field existed strand exactly the same way.
+   *   - `'stranded'`  — reviewable work nobody lifted, reached two ways: a COMPLETED repo-scoped
+   *     run with no recorded PR whose worktree still exists on disk AND carries work (derived
+   *     honestly for OLD runs too — records written before this field existed strand the same
+   *     way); OR (crew#418) a run whose deliver phase hit a LIFT collision — a rebase conflict or
+   *     non-fast-forward push — which the daemon reinterprets from the engine's `failed` to
+   *     `completed`+`stranded`: its work is committed on the `wicked/<id>` branch (the engine
+   *     reaps the now-clean worktree, but never the branch), recoverable via `POST /runs/:id/
+   *     deliver`, which stands a throwaway worktree back up from that branch to lift it.
    *   - `'vacuous'`   — a COMPLETED repo-scoped run whose surviving worktree carries NO
    *     contribution at all (crew#311: nothing uncommitted, no run-branch commit — units all
    *     reached "done" while producing nothing). There is nothing to deliver; the recovery is a

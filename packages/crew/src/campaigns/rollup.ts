@@ -22,7 +22,11 @@ import type {
   RunGroup,
   SessionView,
 } from '../core/types.js';
-import { deliveryStateWithVacuity, type VacuityProbes } from '../api/delivery-index.js';
+import {
+  deliveryStateWithVacuity,
+  isDeliverConflictStranded,
+  type VacuityProbes,
+} from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
 
 /** The delivery machinery shared with the run DTOs — injected by `registerRoutes`. */
@@ -40,11 +44,16 @@ export function sessionsById(views: SessionView[]): Map<string, SessionView> {
 }
 
 async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<CampaignNodeDelivery> {
-  const state = await deliveryStateWithVacuity(
-    view.session,
-    deps.deliveryUrlFor(view.session.id),
-    deps.vacuity,
-  );
+  // The SAME honest precedence the run DTO applies (routes.ts `resolveDelivery`): a recorded PR
+  // wins (`'delivered'`); else a crew#418 lift-conflict strand reads `'stranded'` from the branch
+  // (the engine reports the run `failed`, but its work is committed and recoverable); else the
+  // worktree-stat derivation. Without the crew#418 clause a node/attached run stranded by a lift
+  // collision would read `'none'` here while the run wire reads `'stranded'` — the exact split-
+  // brain crew#418 removes, on a surface whose charter is truthful per-node delivery.
+  const url = deps.deliveryUrlFor(view.session.id);
+  if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
+  if (isDeliverConflictStranded(view)) return { delivery: 'stranded' };
+  const state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
   return {
     delivery: state.delivery,
     ...(state.deliverUrl !== undefined ? { deliverUrl: state.deliverUrl } : {}),
@@ -55,7 +64,10 @@ async function snapshot(
   view: SessionView,
   deps: RollupDeps,
 ): Promise<Omit<AttachedRunView, 'runId'>> {
-  return { status: view.session.status, ...(await deliveryOf(view, deps)) };
+  // crew#418: the status half of the same reinterpretation — a lift-conflict strand reads
+  // `completed` (the engine's durable `failed` record is untouched; this is a wire derivation).
+  const status = isDeliverConflictStranded(view) ? 'completed' : view.session.status;
+  return { status, ...(await deliveryOf(view, deps)) };
 }
 
 /**
