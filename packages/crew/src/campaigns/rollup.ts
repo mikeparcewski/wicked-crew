@@ -69,18 +69,28 @@ export async function enrichCampaign(
   byId: Map<string, SessionView>,
   deps: RollupDeps,
 ): Promise<Campaign> {
+  // Per-member computations are independent — resolved in parallel so a wide campaign's
+  // GET /campaigns latency is the slowest member, not the sum (still one sessionsDetail read).
+  const nodeEntries = Object.entries(campaign.node_run_id).filter(
+    ([, runId]) => byId.get(runId) !== undefined, // node not dispatched yet — no run, no entry
+  );
+  const deliveries = await Promise.all(
+    nodeEntries.map(([, runId]) => deliveryOf(byId.get(runId) as SessionView, deps)),
+  );
   const node_delivery: Record<string, CampaignNodeDelivery> = {};
-  for (const [nodeId, runId] of Object.entries(campaign.node_run_id)) {
-    const view = byId.get(runId);
-    if (view === undefined) continue; // node not dispatched yet — no run, no entry
-    node_delivery[nodeId] = await deliveryOf(view, deps);
-  }
-  const attached_runs: AttachedRunView[] = [];
-  for (const runId of deps.groupIndex.attachedTo(campaign.id)) {
-    const view = byId.get(runId);
-    if (view === undefined) continue; // trail knows it, the store no longer does — don't invent
-    attached_runs.push({ runId, ...(await snapshot(view, deps)) });
-  }
+  nodeEntries.forEach(([nodeId], i) => {
+    node_delivery[nodeId] = deliveries[i] as CampaignNodeDelivery;
+  });
+  const attachedIds = deps.groupIndex
+    .attachedTo(campaign.id)
+    // trail knows it, the store no longer does — don't invent
+    .filter((runId) => byId.get(runId) !== undefined);
+  const attached_runs: AttachedRunView[] = await Promise.all(
+    attachedIds.map(async (runId) => ({
+      runId,
+      ...(await snapshot(byId.get(runId) as SessionView, deps)),
+    })),
+  );
   return { ...campaign, node_delivery, attached_runs };
 }
 
@@ -91,12 +101,13 @@ export async function buildGroups(
 ): Promise<RunGroup[]> {
   const groups: RunGroup[] = [];
   for (const { label, runIds } of deps.groupIndex.labelGroups()) {
-    const runs: AttachedRunView[] = [];
-    for (const runId of runIds) {
-      const view = byId.get(runId);
-      if (view === undefined) continue;
-      runs.push({ runId, ...(await snapshot(view, deps)) });
-    }
+    const memberIds = runIds.filter((runId) => byId.get(runId) !== undefined);
+    const runs: AttachedRunView[] = await Promise.all(
+      memberIds.map(async (runId) => ({
+        runId,
+        ...(await snapshot(byId.get(runId) as SessionView, deps)),
+      })),
+    );
     groups.push({ label, runs });
   }
   return groups;

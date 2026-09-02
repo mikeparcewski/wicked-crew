@@ -51,11 +51,13 @@ export class GroupIndex {
       const campaignId = entry.detail?.['campaignId'];
       const label = entry.detail?.['groupLabel'];
       if (typeof campaignId === 'string' && campaignId !== '') {
-        oldestFirst.unshift({ runId: entry.runId, attach: { campaignId } });
+        oldestFirst.push({ runId: entry.runId, attach: { campaignId } });
       } else if (typeof label === 'string' && label !== '') {
-        oldestFirst.unshift({ runId: entry.runId, attach: { label } });
+        oldestFirst.push({ runId: entry.runId, attach: { label } });
       }
     }
+    // The trail reads newest-first; one reverse restores launch order (unshift-in-loop is O(n²)).
+    oldestFirst.reverse();
     for (const { runId, attach } of oldestFirst) this.set(runId, attach);
   }
 
