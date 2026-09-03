@@ -162,21 +162,24 @@ export function deliverPrScript(intent?: string): string {
     // BOTH here, BEFORE the commit, so the `git add -A` below stages the regenerated
     // endpoint-manifest.json, the generated api-sample test, and the re-synced package-lock.json.
     //
-    // Scoped by the machinery being present so this stays a NO-OP for non-npm repos and byte-for-byte
-    // unchanged for npm repos that bumped nothing (an already-in-sync `npm install` rewrites neither
-    // the lockfile nor the codegen): the lockfile re-sync runs only when a root package.json +
-    // package-lock.json exist; the crew codegen only when the crew workspace AND its api-types package
-    // exist. `npm install` (never `npm ci`, which cannot re-sync a lockfile and would itself fail on a
-    // pinned-dep mismatch) is what re-syncs the lockfile; `--prefer-offline` keeps it off the registry
+    // Scoped to the CREW WORKSPACE — the whole preflight (lockfile re-sync AND codegen) runs only
+    // when the root package.json + package-lock.json AND packages/crew + packages/crew-api-types are
+    // present. `deliverPrScript` is otherwise repo-agnostic, so a bare `npm install` on any repo that
+    // merely happens to carry a root lockfile would run its install-time scripts, add latency, and —
+    // worse — strand an otherwise-deliverable run whose external deps are not cached under a
+    // restricted network (Copilot, crew#428). The #426 invariant only applies to crew's own codegen,
+    // so gate the entire block on crew's machinery; every other repo is a byte-for-byte NO-OP. For the
+    // crew workspace it is also unchanged when nothing was bumped (an already-in-sync `npm install`
+    // rewrites neither the lockfile nor the codegen). `npm install` (never `npm ci`, which cannot
+    // re-sync a lockfile and would itself fail on a pinned-dep mismatch) re-syncs the lockfile;
+    // `--prefer-offline` keeps it off the registry
     // for a workspace-internal bump (no new tarball to fetch), so a restricted network does not fail
     // delivery. A genuine failure of a step that DID apply stays LOUD (no LIFT-CONFLICT marker →
     // terminal run failure), preserving the phase's refusal posture — the preflight adds no new strand.
-    'if [ -f package.json ] && [ -f package-lock.json ]; then',
+    'if [ -f package.json ] && [ -f package-lock.json ] && [ -f packages/crew/package.json ] && [ -f packages/crew-api-types/package.json ]; then',
     '  npm install --prefer-offline --no-audit --no-fund',
-    '  if [ -f packages/crew/package.json ] && [ -f packages/crew-api-types/package.json ]; then',
-    '    npm run manifest:endpoints -w packages/crew',
-    '    npm run generate:api-tests -w packages/crew',
-    '  fi',
+    '  npm run manifest:endpoints -w packages/crew',
+    '  npm run generate:api-tests -w packages/crew',
     'fi',
     'git add -A',
     // Only commit when something is staged — a run that committed incrementally (core#280's

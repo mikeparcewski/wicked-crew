@@ -164,7 +164,7 @@ export function installEndpointManifestHook(app: FastifyInstance): EndpointEntry
  * still honoring the real resolution order (workspace link included). Retained for any layout where
  * the workspace source is not reachable from this module (e.g. a flat published install).
  */
-export function apiTypesVersion(moduleUrl: string = import.meta.url): string {
+export function apiTypesVersion(moduleUrl: string | URL = import.meta.url): string {
   // Walk up from this module to the `packages/` dir that carries `crew-api-types` (works from both
   // `packages/crew/src/api` under tsx and `packages/crew/dist/api` in the built daemon — same depth).
   // `moduleUrl` defaults to this module and is a parameter only so the test can anchor the walk at a

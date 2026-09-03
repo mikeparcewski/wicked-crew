@@ -314,4 +314,44 @@ describe('deliver preflight — internal version bump propagates to codegen + lo
     expect(git(origin, 'show', `wicked/${RUN_ID}:doc.md`)).toContain('the run wrote a doc');
     expect(existsSync(join(workdir, 'node_modules'))).toBe(false);
   }, 60_000);
+
+  it('is a NO-OP for a non-crew npm repo — a root lockfile alone must NOT trigger npm install (Copilot, crew#428)', () => {
+    // The narrowing Copilot asked for: a generic npm repo (root package.json + committed
+    // package-lock.json) that is NOT the crew workspace. The OLD guard ran `npm install` here — its
+    // install-time scripts, latency, and (worst) a strand of an otherwise-deliverable run whose deps
+    // are not cached under a restricted network. The crew-scoped guard must skip the whole preflight
+    // and deliver exactly as a plain repo does.
+    const root = mkdtempSync(join(tmpdir(), 'crew-preflight-noncrew-'));
+    roots.push(root);
+    const origin = join(root, 'origin.git');
+    const seed = join(root, 'seed');
+    const clone = join(root, 'clone');
+    execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
+    execFileSync('git', ['init', '-b', 'main', seed]);
+    git(seed, 'config', 'user.email', 'seed@test');
+    git(seed, 'config', 'user.name', 'seed');
+    // A root npm package with a real committed lockfile but no packages/crew — the case the old
+    // outer `[ -f package.json ] && [ -f package-lock.json ]` guard would have npm-installed.
+    writeJson(join(seed, 'package.json'), { name: 'some-other-repo', version: '1.0.0', private: true });
+    writeFileSync(join(seed, '.gitignore'), 'node_modules\n');
+    execFileSync('npm', ['install', '--prefer-offline', '--no-audit', '--no-fund'], { cwd: seed });
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'base: a non-crew npm repo with a lockfile');
+    git(seed, 'remote', 'add', 'origin', origin);
+    git(seed, 'push', '-q', '-u', 'origin', 'main');
+    execFileSync('git', ['clone', '-q', origin, clone]);
+    git(clone, 'config', 'user.email', 'runner@test');
+    git(clone, 'config', 'user.name', 'runner');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    const workdir = join(root, RUN_ID);
+    git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, 'main');
+    writeFileSync(join(workdir, 'doc.md'), 'the run wrote a doc\n');
+
+    const r = runDeliver({ workdir, clone, origin, root }, 'edit a doc');
+    expect(r.status, r.output).toBe(0);
+    // Delivered — and the crew-scoped guard skipped npm install: no node_modules materialized in the
+    // cold worktree (the tell-tale that the preflight did NOT run for this non-crew repo).
+    expect(git(origin, 'show', `wicked/${RUN_ID}:doc.md`)).toContain('the run wrote a doc');
+    expect(existsSync(join(workdir, 'node_modules'))).toBe(false);
+  }, 60_000);
 });
