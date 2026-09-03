@@ -145,8 +145,18 @@ function fixture(): Fixture {
   return { workdir, clone, origin, root };
 }
 
-/** Run the REAL deliver script in `workdir` as core does, with a fake `gh` + temp HOME. */
-function runDeliver(fx: Fixture, intent?: string): { status: number; output: string } {
+/**
+ * Run the REAL deliver script in `workdir` as core does, with a fake `gh` + temp HOME.
+ *
+ * `extraEnv` is merged over the base env last — the offline test uses it to blackhole the npm
+ * registry (`npm_config_registry` at an unreachable host) and prove the preflight's `npm install`
+ * touches no registry for a workspace-internal bump.
+ */
+function runDeliver(
+  fx: Fixture,
+  intent?: string,
+  extraEnv: Record<string, string> = {},
+): { status: number; output: string } {
   const home = join(fx.root, 'home');
   const bin = join(fx.root, 'bin');
   mkdirSync(bin, { recursive: true });
@@ -169,7 +179,7 @@ function runDeliver(fx: Fixture, intent?: string): { status: number; output: str
   const res = spawnSync('bash', ['-lc', deliverPrScript(intent)], {
     cwd: fx.workdir,
     encoding: 'utf8',
-    env: { ...process.env, HOME: home, GH_ACCOUNT: '' },
+    env: { ...process.env, HOME: home, GH_ACCOUNT: '', ...extraEnv },
   });
   return { status: res.status ?? -1, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
 }
@@ -224,6 +234,51 @@ describe('deliver preflight — internal version bump propagates to codegen + lo
     const ci = spawnSync('npm', ['ci', '--prefer-offline', '--no-audit', '--no-fund'], {
       cwd: delivered,
       encoding: 'utf8',
+    });
+    expect(ci.status, `${ci.stdout ?? ''}${ci.stderr ?? ''}`).toBe(0);
+  }, 120_000);
+
+  it('touches NO registry for a workspace-internal bump — delivers drift-free with the registry unreachable (offline-safe)', () => {
+    // The whole offline claim (crew#426): a per-run worktree is cold (no node_modules) and a
+    // restricted network can reach no registry, yet the preflight `npm install --prefer-offline`
+    // must still re-sync the lockfile. A workspace-INTERNAL version bump changes only a local
+    // workspace link — there is no tarball to fetch — so the install needs neither the registry
+    // NOR a warm cache. This test PROVES that by pointing npm at an unreachable registry
+    // (`http://127.0.0.1:1/`, connection refused, retries off) for the whole deliver AND the
+    // `npm ci` check. Without the fix's `--prefer-offline` (or if a future change reintroduced a
+    // registry round-trip), this reddens with ECONNREFUSED. HOME is already a temp dir, so npm's
+    // cache is cold too — the install leans on nothing external.
+    const fx = fixture();
+    writeJson(join(fx.workdir, 'packages', 'crew-api-types', 'package.json'), {
+      name: 'wicked-crew-api-types',
+      version: '0.20.0',
+    });
+
+    const offline = {
+      npm_config_registry: 'http://127.0.0.1:1/',
+      npm_config_fetch_retries: '0',
+    };
+    const r = runDeliver(fx, 'add an API wire field (bumps api-types)', offline);
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('https://github.com/o/r/pull/426');
+    // The tell-tale of a registry round-trip — must never appear for an internal bump.
+    expect(r.output).not.toContain('ECONNREFUSED');
+
+    const branch = `wicked/${RUN_ID}`;
+    const show = (p: string): string => git(fx.origin, 'show', `${branch}:${p}`);
+    const pkgVersion = JSON.parse(show('packages/crew-api-types/package.json')).version;
+    const manifestVersion = JSON.parse(show('packages/crew/endpoint-manifest.json')).apiTypesVersion;
+    const lockVersion = JSON.parse(show('package-lock.json')).packages['packages/crew-api-types']
+      .version;
+    expect(new Set([pkgVersion, manifestVersion, lockVersion]).size).toBe(1);
+    expect(pkgVersion).toBe('0.20.0');
+
+    // `npm ci` on the delivered branch ALSO succeeds with the registry unreachable.
+    const delivered = checkoutFromOrigin(fx, branch);
+    const ci = spawnSync('npm', ['ci', '--prefer-offline', '--no-audit', '--no-fund'], {
+      cwd: delivered,
+      encoding: 'utf8',
+      env: { ...process.env, ...offline },
     });
     expect(ci.status, `${ci.stdout ?? ''}${ci.stderr ?? ''}`).toBe(0);
   }, 120_000);
