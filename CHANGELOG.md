@@ -10,6 +10,10 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.7.12] — 2026-09-02
+
 ### Added
 - **Signal instrumentation (crew#411)**: the daemon now records every SIGTERM/SIGINT it receives
   (timestamp + signal name) into a bounded in-process log (`DaemonSignalLog`). When an ACP bridge
@@ -29,6 +33,9 @@ mentioned only where a daemon release depends on them.
   sanitized one.
 
 ### Changed
+- **Engine floor: `wicked-core-ts` ^0.7.9** — a seat override that omits `trust_flags`
+  inherits the built-in's trust posture (the codex-sandbox fix, core#349), and ACP bridges spawn
+  in their own process group so a terminal/group signal can't reach an idle bridge (core#350).
 - **The recon fan-out no longer excludes win32** (#415): `POST /testing/recon` fell back to a
   label-only per-run fan on Windows solely because the engine's `wicked-worktrees/<run_id>` path
   carried a `:`. Sanitized engine paths are NTFS-safe (illegal characters mapped, reserved device
@@ -469,7 +476,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...HEAD
+[0.7.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.8...v0.7.9
