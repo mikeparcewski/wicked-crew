@@ -501,7 +501,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...HEAD
+[0.7.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...v0.7.10
