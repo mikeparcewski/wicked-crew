@@ -45,7 +45,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, RouteOptions } from 'fastify';
 
 /** The explicit per-route declaration channel — `{ config: { manifest: {...} } }` on a route. */
@@ -136,17 +137,51 @@ export function installEndpointManifestHook(app: FastifyInstance): EndpointEntry
 }
 
 /**
- * The published wire contract's version, read from the actually-installed dependency.
+ * The published wire contract's version.
  *
- * NOT `require('wicked-crew-api-types/package.json')`: that package's exports map exposes only
- * `.` (types-only, no runtime condition), so both the subpath and a bare resolve are refused.
- * Walking the resolver's candidate directories and reading the file with fs sidesteps the
- * exports map while still honoring the real resolution order (workspace link included).
+ * # Prefer the WORKSPACE-LOCAL source of truth (crew#426)
+ *
+ * The workspace-local `packages/crew-api-types/package.json` — found by walking up from THIS
+ * module to the `packages/` dir that holds it — is read FIRST, and is the version this function
+ * stamps whenever it exists. That is deliberately the version of the checkout THIS module lives in:
+ * in a per-run worktree the module is `<worktree>/packages/crew/...`, so the walk finds the
+ * WORKTREE's own (possibly bumped) `crew-api-types/package.json`, not the parent checkout's.
+ *
+ * Without this, `apiTypesVersion()` resolved the version through `node_modules` (below), and a
+ * per-run worktree is provisioned with `git worktree add` ALONE — no `node_modules` of its own — so
+ * `require.resolve` walked UP to the PARENT clone's `node_modules/wicked-crew-api-types` symlink and
+ * stamped the MAIN checkout's un-bumped version. The generated manifest + api tests then disagreed
+ * with the worktree's bumped `package.json`, and (with the lockfile also stale) CI's `npm ci` broke.
+ * Reading the workspace file directly makes codegen correct-by-construction even when node_modules is
+ * absent. (The lockfile re-sync is the deliver preflight's job — see core/deliver.ts; this fix alone
+ * cannot repair the lockfile.)
+ *
+ * # Fallback: the actually-installed dependency
+ *
+ * NOT `require('wicked-crew-api-types/package.json')`: that package's exports map exposes only `.`
+ * (types-only, no runtime condition), so both the subpath and a bare resolve are refused. Walking
+ * the resolver's candidate directories and reading the file with fs sidesteps the exports map while
+ * still honoring the real resolution order (workspace link included). Retained for any layout where
+ * the workspace source is not reachable from this module (e.g. a flat published install).
  */
-export function apiTypesVersion(): string {
-  const require = createRequire(import.meta.url);
-  for (const dir of require.resolve.paths('wicked-crew-api-types') ?? []) {
-    const pkgPath = join(dir, 'wicked-crew-api-types', 'package.json');
+export function apiTypesVersion(moduleUrl: string | URL = import.meta.url): string {
+  // Walk up from this module to the `packages/` dir that carries `crew-api-types` (works from both
+  // `packages/crew/src/api` under tsx and `packages/crew/dist/api` in the built daemon — same depth).
+  // `moduleUrl` defaults to this module and is a parameter only so the test can anchor the walk at a
+  // fixture tree; production callers pass nothing.
+  let dir = dirname(fileURLToPath(moduleUrl));
+  for (;;) {
+    const workspacePkg = join(dir, 'crew-api-types', 'package.json');
+    if (existsSync(workspacePkg)) {
+      return (JSON.parse(readFileSync(workspacePkg, 'utf8')) as { version: string }).version;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const require = createRequire(moduleUrl);
+  for (const resolveDir of require.resolve.paths('wicked-crew-api-types') ?? []) {
+    const pkgPath = join(resolveDir, 'wicked-crew-api-types', 'package.json');
     if (existsSync(pkgPath)) {
       return (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string }).version;
     }

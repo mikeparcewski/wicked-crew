@@ -150,6 +150,37 @@ export function deliverPrScript(intent?: string): string {
     // pushing nothing, if that config is missing). `git add -A` respects .gitignore.
     `I='${commitSubjectIntent(intent)}'`,
     'if [ -n "$I" ]; then M="wicked-crew run $R: $I"; else M="wicked-crew run $R"; fi',
+    // (c0) DELIVER PREFLIGHT (crew#426) — a governed run that bumps an internal WORKSPACE package's
+    // version (e.g. packages/crew-api-types) leaves its version-derived codegen AND the lockfile
+    // stale. A per-run worktree is provisioned with `git worktree add` alone — no `node_modules` —
+    // so the version-stamping generators resolve the PARENT checkout's node_modules (its UN-bumped
+    // version) and nothing ever re-syncs package-lock.json to the worktree's own package.json. CI
+    // then reddens on the delivered PR: `endpoint-manifest.test.ts` fails once CI's `npm ci` relinks
+    // api-types to the worktree's bumped version and the committed manifest disagrees, and the
+    // lockfile↔package.json drift is a latent install hazard (a repo that pins the dep instead of `*`
+    // would fail `npm ci` outright). This blocks EVERY governed run that changes an API field. Re-sync
+    // BOTH here, BEFORE the commit, so the `git add -A` below stages the regenerated
+    // endpoint-manifest.json, the generated api-sample test, and the re-synced package-lock.json.
+    //
+    // Scoped to the CREW WORKSPACE — the whole preflight (lockfile re-sync AND codegen) runs only
+    // when the root package.json + package-lock.json AND packages/crew + packages/crew-api-types are
+    // present. `deliverPrScript` is otherwise repo-agnostic, so a bare `npm install` on any repo that
+    // merely happens to carry a root lockfile would run its install-time scripts, add latency, and —
+    // worse — strand an otherwise-deliverable run whose external deps are not cached under a
+    // restricted network (Copilot, crew#428). The #426 invariant only applies to crew's own codegen,
+    // so gate the entire block on crew's machinery; every other repo is a byte-for-byte NO-OP. For the
+    // crew workspace it is also unchanged when nothing was bumped (an already-in-sync `npm install`
+    // rewrites neither the lockfile nor the codegen). `npm install` (never `npm ci`, which cannot
+    // re-sync a lockfile and would itself fail on a pinned-dep mismatch) re-syncs the lockfile;
+    // `--prefer-offline` keeps it off the registry
+    // for a workspace-internal bump (no new tarball to fetch), so a restricted network does not fail
+    // delivery. A genuine failure of a step that DID apply stays LOUD (no LIFT-CONFLICT marker →
+    // terminal run failure), preserving the phase's refusal posture — the preflight adds no new strand.
+    'if [ -f package.json ] && [ -f package-lock.json ] && [ -f packages/crew/package.json ] && [ -f packages/crew-api-types/package.json ]; then',
+    '  npm install --prefer-offline --no-audit --no-fund',
+    '  npm run manifest:endpoints -w packages/crew',
+    '  npm run generate:api-tests -w packages/crew',
+    'fi',
     'git add -A',
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
