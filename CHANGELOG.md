@@ -10,7 +10,22 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Governed-run delivery propagates an internal version bump to codegen + the lockfile (crew#426)**:
+  a run that bumps `packages/crew-api-types/package.json` in its worktree used to deliver a branch
+  whose `endpoint-manifest.json`, generated api tests, and `package-lock.json` still carried the OLD
+  version — a per-run worktree is provisioned with `git worktree add` alone (no `node_modules`), so
+  the version-stamping generators resolved the parent checkout's version and nothing re-synced the
+  lockfile, reddening CI on the delivered PR. The deliver phase (`deliverPrScript`) now runs a
+  preflight before it commits: `npm install` (re-syncs `node_modules` + `package-lock.json` to the
+  worktree's own `package.json`) then `npm run manifest:endpoints` / `generate:api-tests`
+  (regenerate the version-derived artifacts), so `git add -A` stages all three at the bumped version.
+  The preflight is scoped to the machinery being present (root `package.json` + `package-lock.json`
+  for the lockfile re-sync; the crew workspace + its api-types package for the codegen) and uses
+  `--prefer-offline`, so it is a no-op for non-npm repos and never reaches the registry for a
+  workspace-internal bump. Defense-in-depth: `apiTypesVersion()` now reads the workspace-local
+  `packages/crew-api-types/package.json` before falling back to `require.resolve`, so codegen stamps
+  the correct version even when `node_modules` is absent.
 
 ## [0.7.12] — 2026-09-02
 
