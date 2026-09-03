@@ -8,7 +8,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
-import type { GateCache } from './gate-cache.js';
+import { detectRefusal, type GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { QeGateCache } from '../qe/gate-events.js';
 import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
@@ -1736,11 +1736,16 @@ export function registerRoutes(
         : null;
     const durableGate = durableRows?.find((r) => r.kind === 'gate');
     if (durableGate !== undefined) {
+      // This path builds the entry inline (not through `fold`), so it must run the SAME refusal
+      // detection (issue #419) — otherwise a gate served from the durable row after a restart would
+      // silently drop the warning that the live/replay paths carry.
+      const refusal = detectRefusal(durableGate.prompt);
       const entry = {
         ord: durableGate.ord ?? 0,
         prompt: durableGate.prompt,
         lifecycle: 'open' as const,
         receivedAt: new Date(durableGate.created_at).toISOString(),
+        ...(refusal !== undefined ? { refusal } : {}),
       };
       gateCache.adopt(id, entry);
       return { runId: id, ...entry };

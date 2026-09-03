@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **Refusal warning on the gate wire (crew#419)**: when a paused unit's prompt reads as a pure
+  sandbox/tool refusal — the worker reporting it could not act (read-only sandbox, rejected writes,
+  "could not modify/regenerate"), with no sign of productive work — `GateInfo` now carries an
+  additive `refusal: { matched, reason }` so an operator does not approve a refusal as if it were
+  work. It is advisory only (never gates a decision) and omitted entirely on a normal gate, so the
+  wire is byte-identical when there is nothing to warn about. `detectRefusal` biases toward NOT
+  flagging: a genuine work transcript that merely mentions "sandbox"/"blocked", or a mixed turn that
+  refused one tool but did real work, stays unflagged. The same detection runs on all three gate
+  paths — live fold, event-log replay, and the durable `interaction_requests` row — so a gate served
+  after a restart carries the same warning. api-types → 0.20.0 (additive).
+
 ## [0.7.13] — 2026-09-03
 
 ### Fixed

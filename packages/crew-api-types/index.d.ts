@@ -430,6 +430,13 @@ export interface GateInfo {
   prompt: string;
   lifecycle: string;
   receivedAt: string;
+  /**
+   * Refusal-detection warning (issue #419, api-types 0.20.0). Present ONLY when the gate prompt
+   * reads as a pure sandbox/tool refusal — the worker reported it could not act, with no sign of
+   * productive work — so an operator does not approve a refusal as if it were work. Additive and
+   * advisory: it never gates a decision, and is omitted entirely on a normal gate.
+   */
+  refusal?: { matched: boolean; reason: string };
 }
 
 /** Approve / reject payload for the steering gate (`POST /runs/:id/gate`). On a
