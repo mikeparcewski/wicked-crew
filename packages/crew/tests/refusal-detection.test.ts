@@ -44,6 +44,13 @@ describe('detectRefusal (issue #419)', () => {
     ).toBeUndefined();
   });
 
+  it('does NOT flag a mixed turn reporting a git-stat summary (Copilot #433 — "N files changed")', () => {
+    // The git diff-stat phrasing is files-FIRST, distinct from "changed N files".
+    expect(
+      detectRefusal('Some writes were rejected, but I recovered: 3 files changed, 12 insertions(+).'),
+    ).toBeUndefined();
+  });
+
   it('returns undefined for a normal gate prompt', () => {
     expect(detectRefusal('Approve the output of unit 1 (clarify — Fix issue #419).')).toBeUndefined();
   });

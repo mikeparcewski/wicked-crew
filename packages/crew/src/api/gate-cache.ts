@@ -43,7 +43,7 @@ export function detectRefusal(text: string): { matched: boolean; reason: string 
   ];
   // Any of these means the turn did real work — veto the flag. Err toward NOT flagging.
   const WORK_DONE =
-    /\bi\s+(?:fixed|implemented|added|changed|edited|wrote|created|updated|refactored|regenerated)\b|\bran\s+tests?\b|\btests?\s+(?:pass|passed|green)\b|\ball tests\b|\bthe fix\b|\bcommitted\b|\bsuccessfully\b|\bchanged\s+\d+\s+(?:file|package)|\bdiff --git\b|\b\d+\s+passed\b/i;
+    /\bi\s+(?:fixed|implemented|added|changed|edited|wrote|created|updated|refactored|regenerated)\b|\bran\s+tests?\b|\btests?\s+(?:pass|passed|green)\b|\ball tests\b|\bthe fix\b|\bcommitted\b|\bsuccessfully\b|\bchanged\s+\d+\s+(?:files?|packages?)|\b\d+\s+(?:files?|packages?)\s+changed\b|\b\d+\s+(?:insertions?|deletions?)\b|\bdiff --git\b|\b\d+\s+passed\b/i;
 
   const hit = SIGNATURES.find((s) => s.re.test(text));
   if (hit === undefined) return undefined;
