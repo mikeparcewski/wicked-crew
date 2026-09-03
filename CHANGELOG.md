@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.13] — 2026-09-03
+
 ### Fixed
 - **Governed-run delivery propagates an internal version bump to codegen + the lockfile (crew#426)**:
   a run that bumps `packages/crew-api-types/package.json` in its worktree used to deliver a branch
@@ -20,12 +22,20 @@ mentioned only where a daemon release depends on them.
   preflight before it commits: `npm install` (re-syncs `node_modules` + `package-lock.json` to the
   worktree's own `package.json`) then `npm run manifest:endpoints` / `generate:api-tests`
   (regenerate the version-derived artifacts), so `git add -A` stages all three at the bumped version.
-  The preflight is scoped to the machinery being present (root `package.json` + `package-lock.json`
-  for the lockfile re-sync; the crew workspace + its api-types package for the codegen) and uses
-  `--prefer-offline`, so it is a no-op for non-npm repos and never reaches the registry for a
-  workspace-internal bump. Defense-in-depth: `apiTypesVersion()` now reads the workspace-local
+  The whole preflight (lockfile re-sync AND codegen) is scoped to the crew workspace — it runs only
+  when the root `package.json` + `package-lock.json` AND `packages/crew` + `packages/crew-api-types`
+  are all present — and uses `--prefer-offline`, so it is a byte-for-byte no-op for any other repo
+  (no `npm install`, no install-time scripts) and never reaches the registry for a workspace-internal
+  bump. Defense-in-depth: `apiTypesVersion()` now reads the workspace-local
   `packages/crew-api-types/package.json` before falling back to `require.resolve`, so codegen stamps
   the correct version even when `node_modules` is absent.
+
+### Changed
+- **Engine floor → core-ts 0.7.10 (crew#427)**: the pinned `wicked-core-ts` moves `^0.7.9` →
+  `^0.7.10`, shipping the fix that lets the non-claude adversarial-review seat (codex) run BOUNDED on
+  the governed-worker path (`--sandbox workspace-write`) — it can now run the verification suite
+  instead of refusing under its default read-only sandbox, and an in-code cap keeps it bounded to its
+  worktree regardless of a stale `clis.toml`.
 
 ## [0.7.12] — 2026-09-02
 
@@ -491,7 +501,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...HEAD
+[0.7.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.9...v0.7.10
