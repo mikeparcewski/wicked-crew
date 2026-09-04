@@ -392,6 +392,8 @@ export async function createServer(
     probes: vacuityProbes,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
     log: (m) => app.log.warn(m),
+    // Non-probe derivation throws are defects — error level, so the diagnostics ring sees them.
+    logError: (m) => app.log.error(m),
   });
   const deliveryCacheArmed =
     options?.deliveryCache?.enabled ??

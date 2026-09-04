@@ -76,6 +76,9 @@ export interface DeliveryDerivationCacheDeps {
   /** Retry-backoff floor after a failed derivation (tests shorten it). */
   retryBaseMs?: number;
   log?: (msg: string) => void;
+  /** ERROR-level channel for a NON-probe derivation throw — a defect, not weather (the daemon
+   *  wires `app.log.error`, which the diagnostics ring also captures). Falls back to `log`. */
+  logError?: (msg: string) => void;
 }
 
 /** Only a COMPLETED repo-scoped run's full derivation can differ from the stat-only tri-state
@@ -103,6 +106,9 @@ export class DeliveryDerivationCache {
   /** Pending retry timers — unref'd, and cleared on {@link stop} so a closed daemon (or a
    *  test's torn-down server) never re-derives into the void. */
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** Set by {@link stop}: a derivation still in flight when the daemon closes must not arm a
+   *  NEW retry timer after the stop already swept the set (Copilot on #435). */
+  private stopped = false;
 
   constructor(private readonly deps: DeliveryDerivationCacheDeps) {}
 
@@ -180,6 +186,7 @@ export class DeliveryDerivationCache {
    *  not at +30s). Unref'd — the interval must never hold the process open. */
   start(intervalMs: number = DELIVERY_SWEEP_INTERVAL_MS): void {
     if (this.timer !== null) return;
+    this.stopped = false;
     void this.sweep();
     this.timer = setInterval(() => {
       void this.sweep();
@@ -188,6 +195,7 @@ export class DeliveryDerivationCache {
   }
 
   stop(): void {
+    this.stopped = true; // in-flight derivations must not arm retries past this point
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -230,13 +238,29 @@ export class DeliveryDerivationCache {
         this.derived.set(session.id, state);
         this.retryDelayMs.delete(session.id);
       } catch (err) {
+        if (!(err instanceof VacuityProbeUnavailable)) {
+          // A NON-probe throw is a DEFECT (a bug in the derivation, a miswired dependency) —
+          // not weather. Hiding it inside the quiet backoff loop would spray retry noise over
+          // a logic error (Copilot on #435), so: record nothing (the honest stat-only degrade
+          // stands), say it at ERROR level, and do NOT retry — in the daemon the next sweep
+          // hits it again and keeps it loud, never silently green.
+          (this.deps.logError ?? this.deps.log)?.(
+            `[runs] DEFECT: delivery derivation for ${session.id} threw a non-probe error (not retried; label reads stat-only): ${
+              err instanceof Error ? (err.stack ?? err.message) : String(err)
+            }`,
+          );
+          return;
+        }
         const delay = this.retryDelayMs.get(session.id) ?? this.deps.retryBaseMs ?? DERIVATION_RETRY_BASE_MS;
         this.retryDelayMs.set(session.id, Math.min(delay * 2, DELIVERY_SWEEP_INTERVAL_MS));
         this.deps.log?.(
-          `[runs] delivery derivation for ${session.id} could not answer (label reads stat-only; retrying in ${delay}ms): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `[runs] delivery derivation for ${session.id} could not answer (label reads stat-only; ${
+            this.stopped ? 'cache stopped — not retried' : `retrying in ${delay}ms`
+          }): ${err.message}`,
         );
+        // A derivation still in flight when stop() ran must not arm a timer the sweep-away
+        // already missed — a closed daemon never re-derives into the void.
+        if (this.stopped) return;
         const timer = setTimeout(() => {
           this.retryTimers.delete(timer);
           void this.warm(session.id);

@@ -389,6 +389,62 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     }
   });
 
+  it('stop() during an in-flight derivation: its late failure arms NO new retry timer (Copilot on #435)', async () => {
+    // stop() sweeps the timer set — a derivation that FAILS after that sweep must not slip a
+    // fresh timer past it, or a closed daemon re-derives into the void on a torn-down adapter.
+    let release!: (err: Error) => void;
+    const gated = new Promise<boolean>((_r, reject) => {
+      release = reject;
+    });
+    const worktreeIsClean = vi.fn(() => gated);
+    const { cache } = build(
+      [view('run-late', { repo_ref: 'r', workdir: '/wt' })],
+      { worktreeExists: () => true, worktreeIsClean },
+      new DeliveryIndex(),
+      5, // a retry, were one wrongly armed, would fire well inside the settle below
+    );
+    const warming = cache.warm('run-late'); // in flight, gated
+    await vi.waitFor(() => expect(worktreeIsClean).toHaveBeenCalledTimes(1));
+    cache.stop();
+    release(new VacuityProbeUnavailable('git status could not answer', 'daemon closing'));
+    await warming;
+    await new Promise((r) => setTimeout(r, 60)); // room for a wrongly-armed 5ms retry to fire
+    expect(worktreeIsClean).toHaveBeenCalledTimes(1); // no retry — the flag held
+  });
+
+  it('a NON-probe throw is a DEFECT: error-logged distinctly, never entered into the quiet retry loop', async () => {
+    // Only VacuityProbeUnavailable means "git could not answer". Anything else is a logic bug —
+    // retrying would hide it behind backoff noise (Copilot on #435).
+    const worktreeIsClean = vi.fn(async () => {
+      throw new Error('boom: miswired dependency');
+    });
+    const log = vi.fn();
+    const logError = vi.fn();
+    const views = [view('run-bug', { repo_ref: 'r', workdir: '/wt' })];
+    const cache = new DeliveryDerivationCache({
+      listViews: async () => views,
+      probes: { worktreeExists: () => true, worktreeIsClean, runBranchIsEmpty: async () => false },
+      isDelivered: () => false,
+      retryBaseMs: 5,
+      log,
+      logError,
+    });
+    try {
+      await cache.warm('run-bug');
+      await new Promise((r) => setTimeout(r, 60)); // room for a wrongly-armed retry to fire
+      expect(worktreeIsClean).toHaveBeenCalledTimes(1); // NOT retried
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(String(logError.mock.calls[0]![0])).toContain('DEFECT'); // distinct from probe noise
+      expect(log).not.toHaveBeenCalled(); // the warn channel carries only probe-unavailable
+      // The label still degrades honestly, never records the broken derivation:
+      expect(
+        cache.read({ id: 'run-bug', status: 'completed', repo_ref: 'r', workdir: '/wt' }),
+      ).toEqual({ delivery: 'stranded' });
+    } finally {
+      cache.stop();
+    }
+  });
+
   it('warm(runId) derives one run immediately (the terminal-frame hook) and skips delivered runs', async () => {
     const worktreeIsClean = vi.fn(async () => true);
     const index = new DeliveryIndex();
@@ -411,26 +467,51 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
 });
 
 describe('campaigns rollup — a probe that cannot answer degrades that request, never 500s', () => {
-  it('serves the stat-only tri-state when the vacuity probe throws (PR #435 review)', async () => {
-    // The rollup still derives on the request path (out of the cache's scope, same shared probe
-    // memo): a raced worktree must cost one request its refinement, not a whole campaign
-    // scoreboard its 200.
+  const rollupDeps = (worktreeIsClean: () => Promise<boolean>, logDefect: (m: string) => void) => {
     const groupIndex = new GroupIndex();
     groupIndex.set('run-x', { label: 'batch-1' });
-    const views = [view('run-x', { repo_ref: 'r', workdir: '/wt' })];
-    const groups = await buildGroups(sessionsById(views), {
+    return {
       groupIndex,
       deliveryUrlFor: () => undefined,
       vacuity: {
         worktreeExists: () => true,
-        worktreeIsClean: async () => {
-          throw new VacuityProbeUnavailable('git status could not answer', 'raced teardown');
-        },
+        worktreeIsClean,
         runBranchIsEmpty: async () => false,
       },
-    });
-    expect(groups).toEqual([
-      { label: 'batch-1', runs: [{ runId: 'run-x', status: 'completed', delivery: 'stranded' }] },
-    ]);
+      logDefect,
+    };
+  };
+  const degraded = [
+    { label: 'batch-1', runs: [{ runId: 'run-x', status: 'completed', delivery: 'stranded' }] },
+  ];
+
+  it('serves the stat-only tri-state QUIETLY when the vacuity probe throws unavailable (PR #435 review)', async () => {
+    // The rollup still derives on the request path (out of the cache's scope, same shared probe
+    // memo): a raced worktree must cost one request its refinement, not a whole campaign
+    // scoreboard its 200. Probe-unavailable is expected weather — no defect log.
+    const logDefect = vi.fn();
+    const views = [view('run-x', { repo_ref: 'r', workdir: '/wt' })];
+    const groups = await buildGroups(
+      sessionsById(views),
+      rollupDeps(async () => {
+        throw new VacuityProbeUnavailable('git status could not answer', 'raced teardown');
+      }, logDefect),
+    );
+    expect(groups).toEqual(degraded);
+    expect(logDefect).not.toHaveBeenCalled();
+  });
+
+  it('an UNEXPECTED throw still degrades (a read endpoint answers) but is error-logged as a defect', async () => {
+    const logDefect = vi.fn();
+    const views = [view('run-x', { repo_ref: 'r', workdir: '/wt' })];
+    const groups = await buildGroups(
+      sessionsById(views),
+      rollupDeps(async () => {
+        throw new Error('boom: logic bug');
+      }, logDefect),
+    );
+    expect(groups).toEqual(degraded);
+    expect(logDefect).toHaveBeenCalledTimes(1);
+    expect(String(logDefect.mock.calls[0]![0])).toContain('DEFECT');
   });
 });

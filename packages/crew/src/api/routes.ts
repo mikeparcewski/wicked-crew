@@ -2858,6 +2858,8 @@ export function registerRoutes(
     groupIndex,
     deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
     vacuity: vacuityProbes,
+    // A non-probe derivation throw in the rollup is a defect — error level, loud in diagnostics.
+    logDefect: (m) => app.log.error(m),
   });
 
   // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────
