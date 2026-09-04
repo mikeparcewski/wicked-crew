@@ -182,6 +182,8 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx.workdir, 'bus.db'), 'SQLite format 3\0scratch\n'); // denylisted-name
     writeFileSync(join(fx.workdir, 'socket.path'), '/Users/alice/run/tool.sock\n'); // socket-name
     writeFileSync(join(fx.workdir, 'deploy.key'), 'PRIVATE KEY MATERIAL\n'); // denylisted-name
+    writeFileSync(join(fx.workdir, '.envrc'), 'export SECRET=1\n'); // denylisted-name (direnv)
+    writeFileSync(join(fx.workdir, 'bus.db-wal'), 'wal frames\n'); // denylisted-name (sidecar)
     mkdirSync(join(fx.workdir, 'coverage'));
     writeFileSync(join(fx.workdir, 'coverage', 'lcov.info'), 'TN:\n'); // scratch-dir
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
@@ -199,6 +201,8 @@ describe('deliver script, driven for real (crew#317)', () => {
     // A GUARD, NOT A SILENT DROP — each exclusion is named with its reason in the phase output.
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db');
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): deploy.key');
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): .envrc');
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db-wal');
     expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
     expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/lcov.info');
     expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');

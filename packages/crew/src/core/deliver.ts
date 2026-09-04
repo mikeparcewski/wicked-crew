@@ -216,7 +216,7 @@ export function deliverPrScript(intent?: string): string {
     '  [ -n "$F" ] || continue',
     '  BN=${F##*/}; RN=""',
     '  case "$BN" in',
-    '    *.db|*.sqlite|*.sqlite2|*.sqlite3|*.sock|*.pid|*.env|*.env.*|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
+    '    *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite2|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.sock|*.pid|*.env|*.env.*|.envrc|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
     '  esac',
     '  case "$BN" in *[Ss][Oo][Cc][Kk][Ee][Tt]*) [ -n "$RN" ] || RN="socket-name";; esac',
     '  [ "$BN" = ".DS_Store" ] && [ -z "$RN" ] && RN="ds-store"',
