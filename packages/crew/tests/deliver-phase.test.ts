@@ -104,7 +104,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('*.db|*.db-wal|*.db-shm|*.sqlite');
     expect(script).toContain('.envrc');
     expect(script).toContain('*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*');
-    expect(script).toContain('*[Ss][Oo][Cc][Kk][Ee][Tt]*');
+    expect(script).toContain('*socket*'); // matched against the lowercased basename
+    expect(script).toContain('tr "[:upper:]" "[:lower:]"');
     expect(script).toContain('*/tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*');
     expect(script).toContain('-gt 1048576');
     // A GUARD, NOT A SILENT DROP: every exclusion is reported with its reason.

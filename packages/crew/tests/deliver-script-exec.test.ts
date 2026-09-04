@@ -184,6 +184,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx.workdir, 'deploy.key'), 'PRIVATE KEY MATERIAL\n'); // denylisted-name
     writeFileSync(join(fx.workdir, '.envrc'), 'export SECRET=1\n'); // denylisted-name (direnv)
     writeFileSync(join(fx.workdir, 'bus.db-wal'), 'wal frames\n'); // denylisted-name (sidecar)
+    writeFileSync(join(fx.workdir, 'SECRETS.PEM'), 'KEY MATERIAL\n'); // denylisted-name (case-insensitive; distinct basename — APFS folds case)
     mkdirSync(join(fx.workdir, 'coverage'));
     writeFileSync(join(fx.workdir, 'coverage', 'lcov.info'), 'TN:\n'); // scratch-dir
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
@@ -203,6 +204,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): deploy.key');
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): .envrc');
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db-wal');
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): SECRETS.PEM');
     expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
     expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/lcov.info');
     expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');

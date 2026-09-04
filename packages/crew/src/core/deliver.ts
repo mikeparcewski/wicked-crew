@@ -215,10 +215,13 @@ export function deliverPrScript(intent?: string): string {
     'while IFS= read -r -d "" F; do',
     '  [ -n "$F" ] || continue',
     '  BN=${F##*/}; RN=""',
-    '  case "$BN" in',
+    // Classify on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot bypass the
+    // denylist by case (review, #439).
+    '  LBN=$(printf "%s" "$BN" | tr "[:upper:]" "[:lower:]")',
+    '  case "$LBN" in',
     '    *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite2|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.sock|*.pid|*.env|*.env.*|.envrc|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
     '  esac',
-    '  case "$BN" in *[Ss][Oo][Cc][Kk][Ee][Tt]*) [ -n "$RN" ] || RN="socket-name";; esac',
+    '  case "$LBN" in *socket*) [ -n "$RN" ] || RN="socket-name";; esac',
     '  [ "$BN" = ".DS_Store" ] && [ -z "$RN" ] && RN="ds-store"',
     '  case "/$F" in */tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*) [ -n "$RN" ] || RN="scratch-dir";; esac',
     '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
