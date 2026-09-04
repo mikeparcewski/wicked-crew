@@ -101,7 +101,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('git ls-files --others --exclude-standard -z');
     expect(script).toContain('git add -- "$F"');
     // The scratch/key-material denylist, the socket-name rule, the scratch dirs, and the size cap.
-    expect(script).toContain('*.db|*.sqlite');
+    expect(script).toContain('*.db|*.db-wal|*.db-shm|*.sqlite');
+    expect(script).toContain('.envrc');
     expect(script).toContain('*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*');
     expect(script).toContain('*[Ss][Oo][Cc][Kk][Ee][Tt]*');
     expect(script).toContain('*/tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*');
