@@ -29,12 +29,18 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
-import { DeliveryIndex, type VacuityProbes } from '../src/api/delivery-index.js';
+import {
+  DeliveryIndex,
+  VacuityProbeUnavailable,
+  type VacuityProbes,
+} from '../src/api/delivery-index.js';
 import {
   DeliveryDerivationCache,
   MAX_CONCURRENT_DERIVATIONS,
 } from '../src/api/delivery-cache.js';
 import { AuditLog } from '../src/api/audit.js';
+import { GroupIndex } from '../src/api/group-index.js';
+import { buildGroups, sessionsById } from '../src/campaigns/rollup.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
@@ -80,6 +86,7 @@ function build(
   views: SessionView[],
   probes: Partial<VacuityProbes> = {},
   deliveryIndex = new DeliveryIndex(),
+  retryBaseMs?: number,
 ): { app: FastifyInstance; cache: DeliveryDerivationCache; adapter: MockAdapter } {
   const adapter: MockAdapter = {
     sessionsDetail: vi.fn().mockResolvedValue(views),
@@ -94,6 +101,7 @@ function build(
     listViews: () => adapter.sessionsDetail() as Promise<SessionView[]>,
     probes: full,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    ...(retryBaseMs !== undefined ? { retryBaseMs } : {}),
   });
   const app = Fastify({ logger: false });
   registerRoutes(
@@ -319,6 +327,68 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     expect(runBranchIsEmpty).not.toHaveBeenCalled();
   });
 
+  it('NEVER caches a failed derivation — the raced terminal warm degrades, retries, and heals (PR #435 review)', async () => {
+    // The defect: the terminal-frame warm derives at the most turbulent instant of a run's life
+    // (concurrent with the engine's terminal reap); a probe that failed used to read `false`
+    // ("not clean") and be CACHED as an honest 'stranded' — pinned forever where no sweep ticks.
+    // Pin the rule: a probe throw leaves the entry untouched (the read keeps the honest
+    // stat-only degrade) and a short-backoff retry re-derives to the truth.
+    let exists = true; // the worktree, reaped between the failed probe and the retry
+    const worktreeIsClean = vi.fn(async () => {
+      throw new VacuityProbeUnavailable('git status could not answer', 'raced the terminal reap');
+    });
+    const runBranchIsEmpty = vi.fn(async () => true); // post-reap truth: branch carries nothing
+    const { cache } = build(
+      [view('run-raced', { repo_ref: 'r', workdir: '/wt' })],
+      { worktreeExists: () => exists, worktreeIsClean, runBranchIsEmpty },
+      new DeliveryIndex(),
+      5, // retry backoff floor, shortened for the test
+    );
+    try {
+      await cache.warm('run-raced'); // the failed derivation itself
+      const facts = { id: 'run-raced', status: 'completed', repo_ref: 'r', workdir: '/wt' } as const;
+      // Not cached: the read still answers the stat-only degrade, never the raced 'stranded'
+      // dressed up as a full derivation. (Both spell 'stranded' here — what is pinned is that
+      // the WRONG shape was not recorded, proven by the heal below.)
+      expect(cache.read(facts)).toEqual({ delivery: 'stranded' });
+      exists = false; // the reap lands
+      // The retry (5ms backoff) re-derives against the post-reap truth and heals to 'vacuous'.
+      await vi.waitFor(() => expect(cache.read(facts)).toEqual({ delivery: 'vacuous' }), {
+        timeout: 2_000,
+      });
+      expect(runBranchIsEmpty).toHaveBeenCalled();
+    } finally {
+      cache.stop(); // clears any pending retry timer
+    }
+  });
+
+  it("a 'stranded' verdict over a worktree that VANISHED mid-derivation is retried, not recorded", async () => {
+    // The reap deletes files depth-first: `git status` can succeed and read "dirty" (deleted
+    // paths) an instant before the .git link disappears. A verdict whose subject is gone is not
+    // an answer — the stat re-check turns it into a retry that lands on the branch-probe truth.
+    let exists = true;
+    const worktreeIsClean = vi.fn(async () => {
+      exists = false; // the reap lands DURING the probe; git still answered "not clean"
+      return false;
+    });
+    const runBranchIsEmpty = vi.fn(async () => true);
+    const { cache } = build(
+      [view('run-vanish', { repo_ref: 'r', workdir: '/wt' })],
+      { worktreeExists: () => exists, worktreeIsClean, runBranchIsEmpty },
+      new DeliveryIndex(),
+      5,
+    );
+    try {
+      await cache.warm('run-vanish');
+      const facts = { id: 'run-vanish', status: 'completed', repo_ref: 'r', workdir: '/wt' } as const;
+      await vi.waitFor(() => expect(cache.read(facts)).toEqual({ delivery: 'vacuous' }), {
+        timeout: 2_000,
+      });
+    } finally {
+      cache.stop();
+    }
+  });
+
   it('warm(runId) derives one run immediately (the terminal-frame hook) and skips delivered runs', async () => {
     const worktreeIsClean = vi.fn(async () => true);
     const index = new DeliveryIndex();
@@ -337,5 +407,30 @@ describe('the background pool — capped, in-flight-guarded, candidates only', (
     ).toEqual({ delivery: 'vacuous' });
     await cache.warm('run-pr');
     expect(worktreeIsClean).toHaveBeenCalledTimes(1); // run-a alone — the PR run never probes
+  });
+});
+
+describe('campaigns rollup — a probe that cannot answer degrades that request, never 500s', () => {
+  it('serves the stat-only tri-state when the vacuity probe throws (PR #435 review)', async () => {
+    // The rollup still derives on the request path (out of the cache's scope, same shared probe
+    // memo): a raced worktree must cost one request its refinement, not a whole campaign
+    // scoreboard its 200.
+    const groupIndex = new GroupIndex();
+    groupIndex.set('run-x', { label: 'batch-1' });
+    const views = [view('run-x', { repo_ref: 'r', workdir: '/wt' })];
+    const groups = await buildGroups(sessionsById(views), {
+      groupIndex,
+      deliveryUrlFor: () => undefined,
+      vacuity: {
+        worktreeExists: () => true,
+        worktreeIsClean: async () => {
+          throw new VacuityProbeUnavailable('git status could not answer', 'raced teardown');
+        },
+        runBranchIsEmpty: async () => false,
+      },
+    });
+    expect(groups).toEqual([
+      { label: 'batch-1', runs: [{ runId: 'run-x', status: 'completed', delivery: 'stranded' }] },
+    ]);
   });
 });

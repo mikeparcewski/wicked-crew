@@ -26,12 +26,19 @@
  * run, so the background layer can never storm git the way the request fan-out did. Probes are
  * injected (the shared TTL-memoized git probes in production), so the campaigns rollup — which
  * still derives on-request over the SAME probe memo — rides warm entries the sweeper refreshed.
+ *
+ * FAILURE RULE (PR #435 review): a derivation whose probes could not answer
+ * (`VacuityProbeUnavailable` — git unspawnable, timeout, a worktree racing the engine's
+ * terminal reap) is NEVER recorded — absence of an answer is not a verdict. The entry stays
+ * untouched (miss ⇒ the honest stat-only degrade) and the run re-derives on a short backoff,
+ * so a raced terminal-frame warm heals in seconds even where the sweep is off.
  */
 
 import type { AgentSession, SessionView } from '../core/types.js';
 import {
   deliveryStateOf,
   deliveryStateWithVacuity,
+  VacuityProbeUnavailable,
   WORKTREE_CLEAN_TTL_MS,
   type DeliveryState,
   type VacuityProbes,
@@ -49,6 +56,13 @@ export const DELIVERY_SWEEP_INTERVAL_MS = WORKTREE_CLEAN_TTL_MS;
  *  active worker's git — the exact contention the request-path fan-out exhibited. */
 export const MAX_CONCURRENT_DERIVATIONS = 3;
 
+/** First retry delay after a derivation whose probes could not answer; doubles per consecutive
+ *  failure up to the sweep cadence. The terminal-frame warm fires at the most turbulent instant
+ *  of a run's life (the engine's terminal reap runs concurrently), so a raced first derivation
+ *  is EXPECTED — the retry is what heals it in seconds even where no sweep ticks (test-built
+ *  daemons keep the interval off). */
+export const DERIVATION_RETRY_BASE_MS = 1_000;
+
 export interface DeliveryDerivationCacheDeps {
   /** The candidate set per sweep — the same ~10ms actor read the routes use. */
   listViews: () => Promise<SessionView[]>;
@@ -59,6 +73,8 @@ export interface DeliveryDerivationCacheDeps {
   /** A run the `DeliveryIndex` already answers needs no derivation — the read path
    *  short-circuits on the recorded URL before it ever consults this cache. */
   isDelivered: (runId: string) => boolean;
+  /** Retry-backoff floor after a failed derivation (tests shorten it). */
+  retryBaseMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -82,6 +98,11 @@ export class DeliveryDerivationCache {
   private readonly waiting: Array<() => void> = [];
   private sweeping = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Per-run backoff after a failed derivation (reset on the next honest verdict). */
+  private readonly retryDelayMs = new Map<string, number>();
+  /** Pending retry timers — unref'd, and cleared on {@link stop} so a closed daemon (or a
+   *  test's torn-down server) never re-derives into the void. */
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: DeliveryDerivationCacheDeps) {}
 
@@ -171,12 +192,19 @@ export class DeliveryDerivationCache {
       clearInterval(this.timer);
       this.timer = null;
     }
+    for (const t of this.retryTimers) clearTimeout(t);
+    this.retryTimers.clear();
   }
 
-  /** Enqueue one run's full derivation (in-flight-guarded, pool-capped). The derivation itself
-   *  fails toward the pre-existing label by construction (`deliveryStateWithVacuity` — every
-   *  probe failure keeps 'stranded'/'none', never invents 'vacuous'); the catch here is for
-   *  infrastructure only (a listViews-shaped probe throwing synchronously). */
+  /** Enqueue one run's full derivation (in-flight-guarded, pool-capped).
+   *
+   *  THE LOAD-BEARING RULE (PR #435 review): a derivation whose probes FAILED is never cached
+   *  as if it were an honest answer. The production probes throw `VacuityProbeUnavailable` when
+   *  git could not answer (a raced teardown, a timeout, a load spike) — recording that as
+   *  'stranded' pinned a WRONG label on vacuous runs, forever where no sweep ticks. On failure
+   *  the entry is left untouched (a miss keeps the honest stat-only degrade; a previous honest
+   *  verdict stands) and the run re-derives after a short backoff, doubling up to the sweep
+   *  cadence — the in-flight guard folds overlapping schedules, so retries can never storm. */
   private schedule(session: SessionFacts): Promise<void> {
     const pending = this.inFlight.get(session.id);
     if (pending !== undefined) return pending;
@@ -184,13 +212,37 @@ export class DeliveryDerivationCache {
       await this.acquire();
       try {
         const state = await deliveryStateWithVacuity(session, undefined, this.deps.probes);
+        // A 'stranded' verdict over a worktree that VANISHED mid-derivation is not an answer
+        // either: the engine's terminal reap races the terminal-frame warm, and a half-removed
+        // tree can read "dirty" (deleted paths in `git status`) the instant before its .git
+        // link disappears. One stat re-check turns that race into a retry, not a pinned label.
+        if (
+          state.delivery === 'stranded' &&
+          typeof session.workdir === 'string' &&
+          session.workdir !== '' &&
+          !this.deps.probes.worktreeExists(session.workdir)
+        ) {
+          throw new VacuityProbeUnavailable(
+            `worktree ${session.workdir} vanished mid-derivation`,
+            'raced the terminal reap',
+          );
+        }
         this.derived.set(session.id, state);
+        this.retryDelayMs.delete(session.id);
       } catch (err) {
+        const delay = this.retryDelayMs.get(session.id) ?? this.deps.retryBaseMs ?? DERIVATION_RETRY_BASE_MS;
+        this.retryDelayMs.set(session.id, Math.min(delay * 2, DELIVERY_SWEEP_INTERVAL_MS));
         this.deps.log?.(
-          `[runs] delivery derivation for ${session.id} failed (label reads stat-only until the next sweep): ${
+          `[runs] delivery derivation for ${session.id} could not answer (label reads stat-only; retrying in ${delay}ms): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(timer);
+          void this.warm(session.id);
+        }, delay);
+        timer.unref?.();
+        this.retryTimers.add(timer);
       } finally {
         this.release();
         this.inFlight.delete(session.id);

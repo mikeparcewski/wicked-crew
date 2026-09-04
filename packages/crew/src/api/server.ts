@@ -398,10 +398,13 @@ export async function createServer(
     !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
   if (deliveryCacheArmed) {
     deliveryCache.start(options?.deliveryCache?.sweepIntervalMs);
-    app.addHook('onClose', async () => {
-      deliveryCache.stop();
-    });
   }
+  // Stopped unconditionally: even with the sweep unarmed, the terminal-frame warm can leave a
+  // failed derivation's retry timer pending, and a closed daemon must never re-derive into the
+  // void (a torn-down test server's adapter included).
+  app.addHook('onClose', async () => {
+    deliveryCache.stop();
+  });
   // The one post-terminal `workOutput` read that resolves a run's delivered PR URL into the
   // durable record (audit entry) + the index the run DTOs echo. Best-effort by construction:
   // a failure here must never fail the run. Triggered on `sessionCompleted` OR

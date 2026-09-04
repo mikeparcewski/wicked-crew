@@ -23,8 +23,10 @@ import type {
   SessionView,
 } from '../core/types.js';
 import {
+  deliveryStateOf,
   deliveryStateWithVacuity,
   isDeliverConflictStranded,
+  type DeliveryState,
   type VacuityProbes,
 } from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
@@ -53,7 +55,17 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
   const url = deps.deliveryUrlFor(view.session.id);
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
   if (isDeliverConflictStranded(view)) return { delivery: 'stranded' };
-  const state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
+  let state: DeliveryState;
+  try {
+    state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
+  } catch {
+    // The production probes throw (`VacuityProbeUnavailable`) when git could not answer — the
+    // absence of an answer, not a verdict (PR #435 review). Serve THIS request the stat-only
+    // tri-state — the same degrade the run DTOs' cache miss answers — rather than 500 a whole
+    // campaign scoreboard over one raced worktree; the next request re-probes past the short
+    // failure memo.
+    state = deliveryStateOf(view.session, undefined, deps.vacuity.worktreeExists);
+  }
   return {
     delivery: state.delivery,
     ...(state.deliverUrl !== undefined ? { deliverUrl: state.deliverUrl } : {}),
