@@ -11,7 +11,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify from 'fastify';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -23,6 +23,7 @@ import { createServer } from '../src/api/server.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import type { SystemSettings } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const savedWorkerHome = process.env['WICKED_WORKER_HOME'];
 
@@ -61,7 +62,7 @@ describe('PUT/GET /settings worker_config_root', () => {
     // Guarded: a pre-assignment failure must surface itself, not this cleanup (Copilot).
     await app?.close();
     app = undefined;
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(dir);
     restoreWorkerHome();
   });
 
@@ -158,7 +159,7 @@ describe('adapter getSettings read-validation', () => {
   afterEach(() => {
     if (savedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
     else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = savedSettings;
-    rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(fakeHome);
   });
 
   function writeSettings(content: unknown): void {
@@ -196,7 +197,7 @@ describe('daemon boot applies the persisted root (createServer)', () => {
 
   afterEach(() => {
     adapter.close();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(dir);
     restoreWorkerHome();
   });
 

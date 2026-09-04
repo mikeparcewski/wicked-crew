@@ -16,7 +16,7 @@
  * project that cannot answer must not reach the binary at all.
  */
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +28,7 @@ import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { attributeHits, CO_LOCATION_NOTE } from '../src/projects/graph.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const PROJECT_ID = 'proj_test_graph';
 
@@ -118,7 +119,7 @@ beforeEach(() => {
 afterEach(async () => {
   await fixture.app?.close();
   delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-  rmSync(fixture.graphRoot, { recursive: true, force: true });
+  removeScratch(fixture.graphRoot);
 });
 
 describe('GET /projects/:id/graph — the graph reports its own standing', () => {

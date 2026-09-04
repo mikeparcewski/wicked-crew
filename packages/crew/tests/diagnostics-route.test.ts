@@ -4,7 +4,7 @@
 // audit to a temp file — plus a scratch `core.db` + `core.db.events/` fixture the handler
 // actually reads, and a fixture studio root carrying the shipped version manifest.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,6 +13,7 @@ import type { DiagnosticsResponse } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { removeScratch } from './setup/scratch.js';
 
 // The engine BINARY names diagnostics probes — spelled by concatenation because
 // tests/core-checkout-policy.test.ts audits quoted `wicked-core` segments (FINDING-094).
@@ -90,7 +91,7 @@ afterAll(async () => {
   await app.close();
   if (savedLogLevel === undefined) delete process.env['LOG_LEVEL'];
   else process.env['LOG_LEVEL'] = savedLogLevel;
-  rmSync(scratch, { recursive: true, force: true });
+  removeScratch(scratch);
 });
 
 describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {

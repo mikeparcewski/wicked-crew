@@ -25,12 +25,13 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { createRequire } from 'node:module';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { GovernancePolicy } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const POLL_INTERVAL_MS = 50;
 const RUN_TIMEOUT_MS = 15000;
@@ -144,7 +145,7 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
   afterAll(async () => {
     if (app) await app.close();
     if (adapter) adapter.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) removeScratch(dir);
   });
 
   async function launchRun(sessionId: string, problem: string): Promise<void> {

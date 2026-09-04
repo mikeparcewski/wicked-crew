@@ -36,6 +36,7 @@ import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RuntimeDeps } from '../src/api/routes.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const RUN_ID = 'ab114181-1111-4222-8333-444455556666';
 
@@ -140,7 +141,7 @@ const apps: FastifyInstance[] = [];
 const roots: string[] = [];
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
-  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  for (const r of roots.splice(0)) removeScratch(r);
 });
 
 describe('crew#418 A — a deliver lift collision strands on the wire, it does not fail the run', () => {

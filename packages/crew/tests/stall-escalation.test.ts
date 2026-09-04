@@ -14,7 +14,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify from 'fastify';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -40,6 +40,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, SessionView, SystemSettings } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const MIN = 60_000;
 
@@ -770,7 +771,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(dir);
   });
 
   it('recycles the wedged cursor unit, reports on /ws, audits, and re-arms on engine events', async () => {

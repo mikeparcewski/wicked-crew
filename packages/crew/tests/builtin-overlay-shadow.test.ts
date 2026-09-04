@@ -21,12 +21,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
+import { removeScratch } from './setup/scratch.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -54,7 +55,7 @@ afterAll(() => {
   if (adapter) adapter.close();
   // See armed-workflow-served.test.ts: close() returns before the actor thread finishes flushing
   // SQLite's WAL sidecars, and `force` does not cover the ENOTEMPTY that races with it.
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (dir) removeScratch(dir);
 });
 
 /** Launch and ignore the run's own outcome — the write under test happens before the run starts,

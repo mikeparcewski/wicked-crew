@@ -12,10 +12,11 @@
 //      feature-detect convention.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, ElicitationUnsupportedError } from '../src/core/adapter.js';
+import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -32,7 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   adapter.close();
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 describe('CoreAdapter.resolveElicitation', () => {

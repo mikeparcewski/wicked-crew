@@ -24,12 +24,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
 
 interface Frame {
   type: string;
@@ -196,7 +197,7 @@ afterAll(async () => {
   else process.env['HOME'] = priorHome;
   if (priorUserProfile === undefined) delete process.env['USERPROFILE'];
   else process.env['USERPROFILE'] = priorUserProfile;
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  removeScratch(dir);
 });
 
 async function launchRun(sessionId: string): Promise<void> {

@@ -13,7 +13,7 @@
 //   - `GET /campaigns/:id` carries the same join as the list.
 
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,6 +29,7 @@ import { DELIVER_LIFT_CONFLICT_MARKER } from '../src/core/deliver.js';
 import { CampaignsUnsupportedError, type CoreAdapter } from '../src/core/adapter.js';
 import type { Campaign, LaunchRunInput, SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const NODE_RUN_ID = 'camp-1:a:a0';
 const PR_URL = 'https://github.com/o/r/pull/7';
@@ -170,7 +171,7 @@ describe('wicked-studio#27 — ad-hoc grouping + campaigns rollup', () => {
   afterEach(async () => {
     await app.close();
     await audit.flush();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   async function launch(body: Record<string, unknown>) {

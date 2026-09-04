@@ -17,12 +17,14 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Campaign } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
+import { quiesceCampaign } from '../setup/quiesce.js';
 
 const require = createRequire(import.meta.url);
 const { Core } = require('wicked-core-ts') as { Core: { prototype: Record<string, unknown> } };
@@ -35,6 +37,10 @@ let adapter: CoreAdapter;
 let app: Awaited<ReturnType<typeof createServer>>;
 let baseUrl = '';
 const savedEnv: Record<string, string | undefined> = {};
+// Every campaign this file launches, so `afterAll` can quiesce each one to terminal before
+// `adapter.close()` — the engine's worktree reaper (crew#429) can still be reaping a
+// still-running campaign's node worktrees after the adapter's event subscription tears down.
+const launchedCampaigns: string[] = [];
 
 /** Init a one-commit git repo (worktree material for the sibling runs). */
 function makeRepo(root: string): void {
@@ -103,13 +109,25 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!supported) return;
-  await app.close();
-  adapter.close();
-  for (const [key, value] of Object.entries(savedEnv)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    await app.close();
+  } finally {
+    // Quiesce BEFORE closing the adapter (crew#429): cancel + await terminal for every campaign
+    // this file launched, so the scheduler has no in-flight node runs left that could still cause
+    // the engine's worktree reaper to touch `scratch` after `adapter.close()` returns.
+    try {
+      const results = await Promise.allSettled(launchedCampaigns.map((id) => quiesceCampaign(adapter, id)));
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+    } finally {
+      adapter.close();
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      removeScratch(scratch);
+    }
   }
-  rmSync(scratch, { recursive: true, force: true });
 });
 
 describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)', () => {
@@ -125,6 +143,7 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
       expect(launch.status).toBe(201);
       expect(launch.body['campaignRegistered']).toBe(true);
       const campaign = launch.body['campaign'] as string;
+      launchedCampaigns.push(campaign);
       const runIds = launch.body['runIds'] as string[];
       expect(runIds).toEqual([`${campaign}:alpha:a0`, `${campaign}:beta:a0`]);
 
@@ -226,6 +245,7 @@ describe.skipIf(!supported)('recon fan-out as an engine campaign (crew#390/#391)
     'a repo-scoped POST /campaigns node provisions engine-natively too — no crew pre-provisioning',
     async () => {
       const campaign = 'crew415-direct';
+      launchedCampaigns.push(campaign);
       const launch = await api('/campaigns', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

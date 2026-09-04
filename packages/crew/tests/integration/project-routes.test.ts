@@ -17,12 +17,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Project, ProjectMember, InteractionRequest, SessionView } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -75,7 +76,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 describe('project CRUD (§1)', () => {

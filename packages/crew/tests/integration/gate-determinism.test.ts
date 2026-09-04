@@ -24,11 +24,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const RUNS = 100;
 const POLL_INTERVAL_MS = 50;
@@ -75,7 +76,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (app) await app.close();
   if (adapter) adapter.close();
-  if (dir) rmSync(dir, { recursive: true, force: true });
+  if (dir) removeScratch(dir);
 });
 
 async function launchRun(sessionId: string): Promise<void> {

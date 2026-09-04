@@ -17,7 +17,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify from 'fastify';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,7 @@ import { AuditLog } from '../src/api/audit.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import type { CrewSystemSettings } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 /** The route's per-key cap on a `studio.*` value, restated so a change to it breaks here too. */
 const CAP_BYTES = 512 * 1024;
@@ -217,7 +218,7 @@ describe('PUT/GET /settings studio.* namespace', () => {
       // ...and the drop is no longer invisible.
       expect(detail.ignored).toEqual(['nonsense', 'Studio.appearance', 'studio.a.b']);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeScratch(dir);
     }
   });
 
@@ -259,7 +260,7 @@ describe('PUT/GET /settings studio.* namespace', () => {
       // ...and every one of them is NAMED as dropped.
       expect(detail.ignored).toEqual(['toString', 'valueOf', 'constructor', 'hasOwnProperty']);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeScratch(dir);
     }
   });
 
@@ -301,7 +302,7 @@ describe('PUT/GET /settings studio.* namespace', () => {
       expect(detail.changed).toEqual(['graphNodeLimit', 'studio.notifications']);
       expect(detail.ignored).toBeUndefined();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeScratch(dir);
     }
   });
 });
@@ -317,7 +318,7 @@ describe('PUT /settings engine keys validate as before (crew#323 regression guar
   afterEach(async () => {
     await app?.close();
     app = undefined;
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
     delete process.env['WICKED_WORKER_HOME'];
   });
 
@@ -394,7 +395,7 @@ describe('adapter getSettings enforces the studio.* cap on READ (crew#325)', () 
     warn.mockRestore();
     if (savedSettings === undefined) delete process.env['WICKED_CREW_SYSTEM_SETTINGS'];
     else process.env['WICKED_CREW_SYSTEM_SETTINGS'] = savedSettings;
-    rmSync(fakeHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(fakeHome);
   });
 
   function writeSettings(content: unknown): void {

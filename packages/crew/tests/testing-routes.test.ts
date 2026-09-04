@@ -23,11 +23,12 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, GovernanceEvalsUnsupportedError } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { removeScratch } from './setup/scratch.js';
 import type {
   GovernanceEvalReport,
   GovernanceEvalSample,
@@ -160,7 +161,7 @@ afterAll(async () => {
   adapter.close();
   // close() returns before the actor thread finishes flushing SQLite's WAL sidecars, and
   // `force` does not cover the ENOTEMPTY that races with it — retries do (the repo pattern).
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 beforeEach(() => {
@@ -235,7 +236,7 @@ describe.runIf(!EVALS_CAPABLE)('the real presence gate (installed wicked-core-ts
       await app2.close();
       bare.close();
       // Same WAL-flush race as the afterAll above — `force` does not cover ENOTEMPTY; retries do.
-      rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      removeScratch(dir2);
     }
   });
 });
@@ -293,7 +294,7 @@ describe.runIf(EVALS_CAPABLE)('the real seam (installed wicked-core-ts carries t
     } finally {
       await app2.close();
       bare.close();
-      rmSync(dir2, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      removeScratch(dir2);
     }
   }, 60000);
 });

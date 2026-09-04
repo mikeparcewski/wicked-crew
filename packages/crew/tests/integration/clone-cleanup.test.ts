@@ -11,10 +11,11 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const INVALID_URL = 'not-a-valid-git-url';
 
@@ -28,7 +29,7 @@ beforeAll(() => {
 
 afterAll(() => {
   adapter.close();
-  rmSync(dbDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dbDir);
 });
 
 describe('cloneAndRegisterRepo cleanup', () => {
@@ -49,7 +50,7 @@ describe('cloneAndRegisterRepo cleanup', () => {
       // Any partial .git written by the failed clone must be gone.
       expect(existsSync(join(preexistingDir, '.git'))).toBe(false);
     } finally {
-      rmSync(preexistingDir, { recursive: true, force: true });
+      removeScratch(preexistingDir);
     }
   });
 

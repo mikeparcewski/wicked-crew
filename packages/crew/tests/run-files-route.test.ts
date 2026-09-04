@@ -30,6 +30,7 @@ import {
 } from '../src/api/run-files.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 /** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
 function git(cwd: string, ...args: string[]): string {
@@ -130,7 +131,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
 
   afterAll(async () => {
     await app.close();
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   const getFile = (runId: string, path?: string) =>

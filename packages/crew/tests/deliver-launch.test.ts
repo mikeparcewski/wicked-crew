@@ -14,13 +14,14 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { DELIVER_PHASE_ID } from '../src/core/deliver.js';
 import type { LaunchOptions } from 'wicked-core-ts';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
 let overlayDir: string;
@@ -57,7 +58,7 @@ afterEach(() => {
   if (priorOverlayDir === undefined) delete process.env['WICKED_WORKFLOWS_DIR'];
   else process.env['WICKED_WORKFLOWS_DIR'] = priorOverlayDir;
   adapter.close();
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 describe('launchRun with deliver:"pr" (crew#293)', () => {
