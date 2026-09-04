@@ -28,6 +28,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
+import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ResumeRefusal } from 'wicked-crew-api-types';
@@ -83,7 +84,7 @@ function buildApp(
     worktreeIsClean?: (p: string) => Promise<boolean>;
     runBranchIsEmpty?: (repoRef: string, runId: string) => Promise<boolean>;
   } = {},
-): FastifyInstance {
+): { app: FastifyInstance; cache: DeliveryDerivationCache } {
   const app = Fastify({ logger: false });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     if (!body) return done(null, undefined);
@@ -92,6 +93,22 @@ function buildApp(
     } catch (e) {
       done(e as Error);
     }
+  });
+  // The refusal's stranded-vs-vacuous split now reads the background delivery-derivation cache
+  // (delivery-cache.ts, GET /runs p99) — built here over the injected probes and returned so a
+  // test can sweep it explicitly, the way `createServer`'s 30s tick does in the daemon. Absent
+  // probes are inert (never stat, never "clean"): the stat-only degraded read then matches the
+  // pre-cache derivation for every non-vacuous shape in this file.
+  const deliveryIndex = new DeliveryIndex();
+  const probes = {
+    worktreeExists: opts.worktreeExists ?? (() => false),
+    worktreeIsClean: opts.worktreeIsClean ?? (async () => false),
+    runBranchIsEmpty: opts.runBranchIsEmpty ?? (async () => false),
+  };
+  const cache = new DeliveryDerivationCache({
+    listViews: () => mockAdapter.sessionsDetail() as Promise<SessionView[]>,
+    probes,
+    isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
   });
   registerRoutes(
     app,
@@ -102,13 +119,14 @@ function buildApp(
     { bus: null, index: new MembershipIndex(), log: () => undefined },
     { audit: AuditLog.noop(), authMode: 'off' },
     {
-      deliveryIndex: new DeliveryIndex(),
-      ...(opts.worktreeExists !== undefined ? { worktreeExists: opts.worktreeExists } : {}),
-      ...(opts.worktreeIsClean !== undefined ? { worktreeIsClean: opts.worktreeIsClean } : {}),
-      ...(opts.runBranchIsEmpty !== undefined ? { runBranchIsEmpty: opts.runBranchIsEmpty } : {}),
+      deliveryIndex,
+      deliveryCache: cache,
+      worktreeExists: probes.worktreeExists,
+      worktreeIsClean: probes.worktreeIsClean,
+      runBranchIsEmpty: probes.runBranchIsEmpty,
     },
   );
-  return app;
+  return { app, cache };
 }
 
 async function resume(app: FastifyInstance, id: string) {
@@ -120,7 +138,7 @@ async function resume(app: FastifyInstance, id: string) {
 describe('crew#311 defect 2 — resume refuses terminal runs with the recovery named', () => {
   it('a cancelled run: 409, recovery retry, engine resume NEVER invoked', async () => {
     const adapter = adapterFor([view('run-c', { status: 'cancelled' })]);
-    const app = buildApp(adapter);
+    const { app } = buildApp(adapter);
     try {
       const { code, body } = await resume(app, 'run-c');
       expect(code).toBe(409);
@@ -136,7 +154,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('a completed STRANDED run: 409, recovery deliver, pointing at POST /runs/:id/deliver', async () => {
     const adapter = adapterFor([view('run-s', { repo_ref: 'repo-1', workdir: '/wt' })]);
-    const app = buildApp(adapter, {
+    const { app } = buildApp(adapter, {
       worktreeExists: () => true,
       worktreeIsClean: async () => false,
     });
@@ -153,11 +171,14 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('a completed VACUOUS run: 409, recovery retry, and the refusal says vacuous', async () => {
     const adapter = adapterFor([view('run-v', { repo_ref: 'repo-1', workdir: '/wt' })]);
-    const app = buildApp(adapter, {
+    const { app, cache } = buildApp(adapter, {
       worktreeExists: () => true,
       worktreeIsClean: async () => true,
     });
     try {
+      // Vacuity is a background derivation now — one sweep stands in for the daemon's tick
+      // (or the terminal-frame warm); an unswept cache would honestly read 'stranded'.
+      await cache.sweep();
       const { code, body } = await resume(app, 'run-v');
       expect(code).toBe(409);
       expect(body.recovery).toBe('retry');
@@ -173,11 +194,12 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
     // The FINDING-003 shape a vacuous completion normally lands in: worktree gone, run branch
     // carrying nothing.
     const adapter = adapterFor([view('run-r', { repo_ref: 'repo-1', workdir: '/gone' })]);
-    const app = buildApp(adapter, {
+    const { app, cache } = buildApp(adapter, {
       worktreeExists: () => false,
       runBranchIsEmpty: async () => true,
     });
     try {
+      await cache.sweep();
       const { code, body } = await resume(app, 'run-r');
       expect(code).toBe(409);
       expect(body.recovery).toBe('retry');
@@ -190,7 +212,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('a completed repo-less run: 409, recovery retry', async () => {
     const adapter = adapterFor([view('run-d')]);
-    const app = buildApp(adapter);
+    const { app } = buildApp(adapter);
     try {
       const { code, body } = await resume(app, 'run-d');
       expect(code).toBe(409);
@@ -203,7 +225,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('a FAILED run still resumes from the cursor (failed is not terminal for resume)', async () => {
     const adapter = adapterFor([view('run-f', { status: 'failed' })]);
-    const app = buildApp(adapter);
+    const { app } = buildApp(adapter);
     try {
       const { code, body } = await resume(app, 'run-f');
       expect(code).toBe(200);
@@ -216,7 +238,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('an AWAITING_HUMAN run still routes through confirmGate (gated resume untouched)', async () => {
     const adapter = adapterFor([view('run-g', { status: 'awaiting_human' })]);
-    const app = buildApp(adapter);
+    const { app } = buildApp(adapter);
     try {
       const { code, body } = await resume(app, 'run-g');
       expect(code).toBe(200);
@@ -230,7 +252,7 @@ describe('crew#311 defect 2 — resume refuses terminal runs with the recovery n
 
   it('an unknown run stays a 404', async () => {
     const adapter = adapterFor([]);
-    const app = buildApp(adapter);
+    const { app } = buildApp(adapter);
     try {
       const { code } = await resume(app, 'run-x');
       expect(code).toBe(404);

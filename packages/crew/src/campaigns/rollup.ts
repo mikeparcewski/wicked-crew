@@ -23,8 +23,11 @@ import type {
   SessionView,
 } from '../core/types.js';
 import {
+  VacuityProbeUnavailable,
+  deliveryStateOf,
   deliveryStateWithVacuity,
   isDeliverConflictStranded,
+  type DeliveryState,
   type VacuityProbes,
 } from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
@@ -36,6 +39,9 @@ export interface RollupDeps {
   deliveryUrlFor: (runId: string) => string | undefined;
   /** The shared TTL-memoized probes behind `'stranded'`/`'vacuous'`. */
   vacuity: VacuityProbes;
+  /** ERROR-level channel — only a NON-probe derivation throw (a defect) is reported here; the
+   *  expected probe-unavailable degrade stays quiet (the probe layer already said it). */
+  logDefect?: (msg: string) => void;
 }
 
 /** Index a session list by run id — built once per request from ONE `sessionsDetail()` read. */
@@ -53,7 +59,25 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
   const url = deps.deliveryUrlFor(view.session.id);
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
   if (isDeliverConflictStranded(view)) return { delivery: 'stranded' };
-  const state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
+  let state: DeliveryState;
+  try {
+    state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
+  } catch (err) {
+    // The production probes throw `VacuityProbeUnavailable` when git could not answer — the
+    // absence of an answer, not a verdict (PR #435 review). Serve THIS request the stat-only
+    // tri-state — the same degrade the run DTOs' cache miss answers — rather than 500 a whole
+    // campaign scoreboard over one raced worktree; the next request re-probes past the short
+    // failure memo. Any OTHER throw is a DEFECT (a bug, not weather): still degrade — a read
+    // endpoint should answer — but say so loudly and distinguishably, never swallow it.
+    if (!(err instanceof VacuityProbeUnavailable)) {
+      deps.logDefect?.(
+        `[campaigns] DEFECT: delivery derivation for ${view.session.id} threw a non-probe error (served the stat-only label): ${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }`,
+      );
+    }
+    state = deliveryStateOf(view.session, undefined, deps.vacuity.worktreeExists);
+  }
   return {
     delivery: state.delivery,
     ...(state.deliverUrl !== undefined ? { deliverUrl: state.deliverUrl } : {}),

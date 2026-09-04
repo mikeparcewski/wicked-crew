@@ -68,7 +68,14 @@ export function deliveryStateOf(
 }
 
 /** The probes behind the `'vacuous'` derivation (crew#311) — injected so route tests can pin the
- *  derivation without staging real repos; production wires the memoized git probes below. */
+ *  derivation without staging real repos; production wires the memoized git probes below.
+ *
+ *  FAILURE CONTRACT (PR #435 review): a production git probe THROWS
+ *  {@link VacuityProbeUnavailable} when git could not answer — spawn failure, timeout, a
+ *  worktree or repo racing teardown, a non-git directory. That is the ABSENCE of an answer, not
+ *  a verdict, and the caller owns the degrade: the delivery cache retries WITHOUT recording
+ *  (never caching a failed probe as an honest label), and the campaigns rollup serves that one
+ *  request the stat-only tri-state. Injected test probes return plain booleans. */
 export interface VacuityProbes {
   /** One stat — the `'stranded'` gate (crew#393; `fs.existsSync` in production). */
   worktreeExists: (path: string) => boolean;
@@ -77,6 +84,21 @@ export interface VacuityProbes {
   /** True ⇔ the run's `wicked/<runId>` branch in the repo `repoRef` names POSITIVELY carries no
    *  commits of its own (or no longer exists) — the reaped-worktree half of vacuity. */
   runBranchIsEmpty: (repoRef: string, runId: string) => Promise<boolean>;
+}
+
+/**
+ * Thrown by the production probes when git COULD NOT ANSWER — infrastructure absence, not a
+ * verdict. The old behavior folded this into `false` ("not clean" / "not empty"), which was
+ * safe while every consumer re-probed within a TTL, but the delivery cache records derivations:
+ * caching a raced probe's `false` pinned a WRONG 'stranded' on a vacuous run (forever, where no
+ * sweep ticks). Distinguishing absence from verdict at the probe layer is what lets the cache
+ * refuse to record it.
+ */
+export class VacuityProbeUnavailable extends Error {
+  constructor(what: string, cause: unknown) {
+    super(`${what}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'VacuityProbeUnavailable';
+  }
 }
 
 /**
@@ -96,11 +118,13 @@ export interface VacuityProbes {
  *     work anywhere, while "reaped tree + commits on the branch" is landed work and stays
  *     `'none'` (nothing left in a worktree to lift).
  *
- * Both shapes now read `'vacuous'`, and only on POSITIVE reads: every probe fails toward the
- * pre-existing label (`'stranded'` / `'none'`), so a non-git directory, a missing repo record,
- * a deleted repo, or a git failure reads exactly as it did before this existed. (One honest
- * edge: an operator who hand-deleted a completed run's branch has made its work unreachable —
- * it reads vacuous, which is what the run now amounts to.)
+ * Both shapes now read `'vacuous'`, and only on POSITIVE reads. A missing repo RECORD still
+ * reads `false` from the branch probe (a permanent state — the label honestly falls back to
+ * `'none'`), but a git failure now PROPAGATES as {@link VacuityProbeUnavailable} instead of
+ * silently keeping the pre-existing label: the caller owns the degrade (see the failure
+ * contract on {@link VacuityProbes}). (One honest edge: an operator who hand-deleted a
+ * completed run's branch has made its work unreachable — it reads vacuous, which is what the
+ * run now amounts to.)
  */
 export async function deliveryStateWithVacuity(
   session: Pick<AgentSession, 'id' | 'status' | 'repo_ref' | 'workdir'>,
@@ -130,47 +154,84 @@ export async function deliveryStateWithVacuity(
  *  unmemoized probe would be two git subprocesses per stranded run per poll. */
 export const WORKTREE_CLEAN_TTL_MS = 30_000;
 
+/** How long a FAILED probe ({@link VacuityProbeUnavailable}) is memoized before a real
+ *  re-probe. Deliberately short: a failure is usually a raced teardown or a load spike, and
+ *  the delivery cache's retry needs a genuine re-probe in ~a second — but a request-path
+ *  consumer (the campaigns rollup) polling over a persistently broken repo must not spawn two
+ *  10s-timeout gits per poll tick either. */
+export const PROBE_FAILURE_TTL_MS = 1_000;
+
+type ProbeMemo<T> = { at: number; value: T } | { at: number; err: VacuityProbeUnavailable };
+
+/** The shared memo shape for both probes: verdicts live for `ttlMs`, failures for
+ *  {@link PROBE_FAILURE_TTL_MS} (re-thrown, not re-spawned, within that window). */
+function memoized<T>(
+  probe: (key: string) => Promise<T>,
+  ttlMs: number,
+  now: () => number,
+): (key: string) => Promise<T> {
+  const memo = new Map<string, ProbeMemo<T>>();
+  return async (key: string): Promise<T> => {
+    const hit = memo.get(key);
+    if (hit !== undefined && now() - hit.at < ('err' in hit ? PROBE_FAILURE_TTL_MS : ttlMs)) {
+      if ('err' in hit) throw hit.err;
+      return hit.value;
+    }
+    try {
+      const value = await probe(key);
+      memo.set(key, { at: now(), value });
+      return value;
+    } catch (err) {
+      const e =
+        err instanceof VacuityProbeUnavailable
+          ? err
+          : new VacuityProbeUnavailable('vacuity probe failed', err);
+      memo.set(key, { at: now(), err: e });
+      throw e;
+    }
+  };
+}
+
 /**
  * The production `worktreeIsClean` probe: the SAME two read-only instruments as the engine's
  * `worktree_is_clean` — uncommitted paths (`git status --porcelain`, untracked included) and
  * run-branch-only commits (`git log --oneline HEAD --not --exclude=wicked/* --branches`) —
  * memoized per worktree path for {@link WORKTREE_CLEAN_TTL_MS}.
  *
- * Fails toward NOT-clean (see {@link deliveryStateWithVacuity} — a failure must keep the
- * pre-existing 'stranded' label, never invent 'vacuous'), and failures obey the TTL too, so a
- * transient git error doesn't pin a run's label until restart.
+ * A verdict comes only from git ANSWERING: exit 0 with empty/non-empty output. Any failure —
+ * git unspawnable, a timeout kill, a 128 "not a git repository", ENOENT from a worktree racing
+ * the terminal reap — throws {@link VacuityProbeUnavailable} (memoized for
+ * {@link PROBE_FAILURE_TTL_MS}) so no consumer can mistake absence for "not clean" and pin a
+ * wrong 'stranded' (PR #435 review). Callers degrade per the {@link VacuityProbes} contract.
  */
 export function gitWorktreeIsClean(
   ttlMs: number = WORKTREE_CLEAN_TTL_MS,
   now: () => number = Date.now,
 ): (path: string) => Promise<boolean> {
-  const memo = new Map<string, { at: number; clean: boolean }>();
   const probe = async (path: string): Promise<boolean> => {
     const gitEmpty = async (args: string[]): Promise<boolean> => {
-      // Read-only git plumbing over the run's own worktree; argv array, never a shell string.
-      const { stdout } = await execCapped('git', args, {
-        cwd: path,
-        timeout: 10_000,
-        windowsHide: true,
-      });
-      return stdout.trim() === '';
+      try {
+        // Read-only git plumbing over the run's own worktree; argv array, never a shell string.
+        // GIT_OPTIONAL_LOCKS=0 (git ≥2.15): `git status` otherwise takes index.lock
+        // opportunistically to write back a refreshed index — a background probe must never
+        // hold a lock a concurrent deliver's `git add`/`git commit` can collide with.
+        const { stdout } = await execCapped('git', args, {
+          cwd: path,
+          timeout: 10_000,
+          windowsHide: true,
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+        });
+        return stdout.trim() === '';
+      } catch (err) {
+        throw new VacuityProbeUnavailable(`git ${args[0] ?? ''} could not answer over ${path}`, err);
+      }
     };
-    try {
-      return (
-        (await gitEmpty(['status', '--porcelain'])) &&
-        (await gitEmpty(['log', '--oneline', 'HEAD', '--not', '--exclude=wicked/*', '--branches']))
-      );
-    } catch {
-      return false;
-    }
+    return (
+      (await gitEmpty(['status', '--porcelain'])) &&
+      (await gitEmpty(['log', '--oneline', 'HEAD', '--not', '--exclude=wicked/*', '--branches']))
+    );
   };
-  return async (path: string): Promise<boolean> => {
-    const hit = memo.get(path);
-    if (hit !== undefined && now() - hit.at < ttlMs) return hit.clean;
-    const clean = await probe(path);
-    memo.set(path, { at: now(), clean });
-    return clean;
-  };
+  return memoized(probe, ttlMs, now);
 }
 
 /**
@@ -180,8 +241,11 @@ export function gitWorktreeIsClean(
  * `refs/heads/wicked/<runId>` no longer exists in the run's repo, or it exists and
  * `git log <branch> --not --exclude=wicked/* --branches` is empty (the branch carries no commit
  * of its own — the exact second instrument of the engine's `worktree_is_clean`, aimed at the
- * branch instead of a checkout). An unresolvable repo, a git failure, or any commit on the
- * branch reads FALSE — the label falls back to `'none'`, never inventing vacuity.
+ * branch instead of a checkout). A repo the registry no longer RESOLVES reads FALSE — a
+ * permanent state, the label honestly falls back to `'none'` — while a git failure or a
+ * registry read failure throws {@link VacuityProbeUnavailable} (absence of an answer, PR #435
+ * review), memoized for {@link PROBE_FAILURE_TTL_MS}; callers degrade per the
+ * {@link VacuityProbes} contract.
  *
  * `resolveRepoRoot` is injected (routes wire it to the adapter's repo registry) and its answer
  * rides the same TTL memo as the verdict, so a `GET /runs` poll costs at most one registry read
@@ -192,26 +256,36 @@ export function gitRunBranchIsEmpty(
   ttlMs: number = WORKTREE_CLEAN_TTL_MS,
   now: () => number = Date.now,
 ): (repoRef: string, runId: string) => Promise<boolean> {
-  const memo = new Map<string, { at: number; empty: boolean }>();
-  const probe = async (repoRef: string, runId: string): Promise<boolean> => {
+  const probe = async (key: string): Promise<boolean> => {
+    const [repoRef, runId] = key.split('\0') as [string, string];
     let root: string | undefined;
     try {
       root = await resolveRepoRoot(repoRef);
-    } catch {
-      root = undefined; // registry read failed — fall toward 'none', never invent vacuity
+    } catch (err) {
+      // A registry READ failure is transient infrastructure — not the same fact as the
+      // registry answering "no such repo".
+      throw new VacuityProbeUnavailable(`repo registry could not answer for ${repoRef}`, err);
     }
-    if (root === undefined) return false;
+    if (root === undefined) return false; // repo record gone — permanent, honestly 'none'
     const branch = `refs/heads/wicked/${runId}`;
     const gitOut = (args: string[]) =>
       // Read-only git plumbing over the registered repo root; argv array, never a shell string.
-      execCapped('git', args, { cwd: root, timeout: 10_000, windowsHide: true });
+      // GIT_OPTIONAL_LOCKS=0: same no-opportunistic-locks posture as the worktree probe — this
+      // root is the repo a deliver (or the operator) may be writing in right now.
+      execCapped('git', args, {
+        cwd: root,
+        timeout: 10_000,
+        windowsHide: true,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      });
     try {
       await gitOut(['rev-parse', '--verify', '--quiet', branch]);
     } catch (err) {
       // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch
       // gone". Anything else (git unspawnable, deleted root ⇒ ENOENT, a 128 "not a git
-      // repository", a timeout kill) is an infra failure and must never invent vacuity.
-      return (err as { code?: unknown }).code === 1;
+      // repository", a timeout kill) is git NOT ANSWERING.
+      if ((err as { code?: unknown }).code === 1) return true;
+      throw new VacuityProbeUnavailable(`git rev-parse could not answer over ${root}`, err);
     }
     try {
       const { stdout } = await gitOut([
@@ -223,18 +297,12 @@ export function gitRunBranchIsEmpty(
         '--branches',
       ]);
       return stdout.trim() === '';
-    } catch {
-      return false;
+    } catch (err) {
+      throw new VacuityProbeUnavailable(`git log could not answer over ${root}`, err);
     }
   };
-  return async (repoRef: string, runId: string): Promise<boolean> => {
-    const key = `${repoRef}\0${runId}`;
-    const hit = memo.get(key);
-    if (hit !== undefined && now() - hit.at < ttlMs) return hit.empty;
-    const empty = await probe(repoRef, runId);
-    memo.set(key, { at: now(), empty });
-    return empty;
-  };
+  const run = memoized(probe, ttlMs, now);
+  return (repoRef: string, runId: string) => run(`${repoRef}\0${runId}`);
 }
 
 /**
