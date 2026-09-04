@@ -10,7 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-09-04
+
 ### Changed
+- **Engine floor → core-ts 0.7.11 (the perf program)**: the pinned `wicked-core-ts` moves
+  `^0.7.10` → `^0.7.11`, shipping the engine side of the perf fixes — agy seat council-disabled
+  (core#354), actor-scoped seat-health bench + abstention-aware quorum + one-wave dispatch
+  (core#355), `StepStatus::TimedOut` (core#357 — arms this release's timed_out classification),
+  and the idle-tick WAL checkpoint (core#356, estate store/memory/knowledge ≥0.14.7).
 - **The seat-health `--version` recovery probe is retired (perf#3)**: a version probe is liveness,
   not readiness — it re-admitted a seat that could never complete a ballot 9× (agy). Readiness now
   lives engine-side as wicked-core#355's dispatch-layer bench (probationary REAL ballot); crew's
@@ -544,7 +551,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...HEAD
+[0.7.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...v0.7.14
 [0.7.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.10...v0.7.11
