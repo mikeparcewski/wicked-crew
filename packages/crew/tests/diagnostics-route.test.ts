@@ -80,7 +80,6 @@ beforeAll(async () => {
     auditPath: join(scratch, 'audit.log'),
     projectEvents: { disabled: true },
     interactiveWsRelay: { disabled: true },
-    seatHealthProbe: { enabled: false },
     stallWatchdog: { enabled: false },
     studioRoot,
   });

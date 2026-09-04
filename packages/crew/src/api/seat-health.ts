@@ -21,13 +21,14 @@
 //   the message (the event carries no seat, so `unitDistributed`/`unitReassigned` are folded
 //   into a per-unit assignment map for the correlation).
 //
-// Recovery without an ok output comes from `startSeatHealthProbe`: every `intervalMs` (default
-// 10 minutes), INACTIVE seats only, run the seat's `version_probe` command with a short timeout;
-// exit 0 flips the seat active. Active seats are never probed — this is a recovery path, not a
-// monitor.
+// Recovery is an `ok` output — full stop. The old `--version` recovery probe (crew#274 §3) is
+// RETIRED (perf recon fix #3): a version probe is liveness, not readiness — it re-admitted a
+// seat that could never complete a ballot 9× (agy), and readiness now lives engine-side as the
+// dispatch-layer bench with a probationary REAL ballot (wicked-core#355). This tracker never
+// gated dispatch (display-only), so an inactive seat keeps receiving work and its next real
+// `ok` output flips it active — recovery by real work, no probe required.
 
 import type { CoreEvent, SeatHealth } from '../core/types.js';
-import { execCapped } from '../core/exec.js';
 import {
   DaemonSignalLog,
   SIGNAL_CORRELATION_WINDOW_MS,
@@ -244,97 +245,4 @@ export class SeatHealthTracker {
   healthFor(key: string): SeatHealth {
     return this.entries.get(key) ?? { status: 'active', since: this.startedAt };
   }
-}
-
-/** The roster slice the probe needs (a `RosterSeat` satisfies it structurally). */
-export interface ProbeSeat {
-  key: string;
-  /** The seat's cheap liveness command, e.g. `["claude", "--version"]`. */
-  version_probe?: unknown;
-  [k: string]: unknown;
-}
-
-export interface SeatProbeOptions {
-  /** Probe cadence. Default 10 minutes — a recovery path, not a monitor. */
-  intervalMs?: number;
-  /** Per-probe timeout. Default 5s; a probe that hangs counts as still-down. */
-  timeoutMs?: number;
-  /** Injectable prober (tests). Resolve `true` ⇔ the command exited 0. */
-  runProbe?: (argv: string[], timeoutMs: number) => Promise<boolean>;
-  log?: (m: string) => void;
-}
-
-/** Default prober: run the version command; exit 0 → true, anything else (incl. timeout) → false. */
-async function defaultRunProbe(argv: string[], timeoutMs: number): Promise<boolean> {
-  const [file, ...args] = argv;
-  if (file === undefined) return false;
-  try {
-    await execCapped(file, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The low-frequency recovery probe (crew#274 §3): every `intervalMs`, for INACTIVE seats only,
- * run the seat's `version_probe`; exit 0 flips the seat active with the message cleared. Quota
- * resets and re-logins are thus detected without operator action. Callers own the guard against
- * probing in tests (the daemon arms this from `createServer`, env-gated).
- */
-export function startSeatHealthProbe(
-  tracker: SeatHealthTracker,
-  roster: () => ProbeSeat[],
-  opts: SeatProbeOptions = {},
-): { stop(): void } {
-  const intervalMs = opts.intervalMs ?? FALLBACK_WINDOW_MS; // 10 min
-  const timeoutMs = opts.timeoutMs ?? 5_000;
-  const runProbe = opts.runProbe ?? defaultRunProbe;
-  const log = opts.log ?? ((): void => undefined);
-  let inFlight = false;
-
-  const tick = async (): Promise<void> => {
-    if (inFlight) return; // a slow round must never stack onto the next interval
-    inFlight = true;
-    try {
-      let seats: ProbeSeat[];
-      try {
-        seats = roster();
-      } catch (err) {
-        log(`[seat-health] roster read failed, skipping probe round: ${String(err)}`);
-        return;
-      }
-      for (const seat of seats) {
-        const key = str(seat.key);
-        if (key === undefined) continue;
-        if (tracker.healthFor(key).status !== 'inactive') continue; // recovery only
-        const probe = seat.version_probe;
-        const argv = Array.isArray(probe)
-          ? probe.filter((s): s is string => typeof s === 'string' && s.length > 0)
-          : [];
-        if (argv.length === 0) continue; // unprobeable seat: only an ok output can recover it
-        try {
-          if (await runProbe(argv, timeoutMs)) {
-            tracker.markActive(key);
-            log(`[seat-health] '${key}' recovered (version probe exited 0)`);
-          }
-        } catch {
-          /* a throwing prober reads as still-down */
-        }
-      }
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  const handle = setInterval(() => {
-    void tick();
-  }, intervalMs);
-  // Never hold the process open for a probe — the daemon's server lifecycle owns shutdown.
-  handle.unref?.();
-  return {
-    stop(): void {
-      clearInterval(handle);
-    },
-  };
 }

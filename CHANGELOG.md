@@ -11,6 +11,11 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Changed
+- **The seat-health `--version` recovery probe is retired (perf#3)**: a version probe is liveness,
+  not readiness — it re-admitted a seat that could never complete a ballot 9× (agy). Readiness now
+  lives engine-side as wicked-core#355's dispatch-layer bench (probationary REAL ballot); crew's
+  tracker stays as the operator display and recovers a seat on its next real `ok` output. The
+  `seatHealthProbe` server option is gone with it.
 - **The stall-watchdog escalation ladder is ON by default, and reassign routes to a DIFFERENT
   seat (perf#4)**: crew#341's ladder shipped OFF (`workerStallEscalateMinutes` absent = detection
   only), and run 616c8661 then burned the engine's full 2h turn ceiling with 106 minutes of output
