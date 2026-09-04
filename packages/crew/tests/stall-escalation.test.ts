@@ -92,7 +92,11 @@ function build(opts?: {
   return { wd, frames, logs, reassigns, audited, tick: (ms) => (nowMs += ms) };
 }
 
-describe('escalation disarms on absent/0 minutes (the explicit opt-out; the DEFAULT is armed — see perf#4 below)', () => {
+// At the WATCHDOG level a config resolving to no/zero/invalid minutes keeps escalation off —
+// whether that came from the operator's explicit `workerStallEscalateMinutes: 0` opt-out or a
+// caller that resolved no value at all. The armed DEFAULT (perf#4) lives a layer up, in
+// DEFAULT_SETTINGS + the server's config fallback — covered by the perf#4 describes below.
+describe('escalation stays off when the resolved config carries no usable minutes', () => {
   it('unset minutes: detection fires, nothing acts, however long the silence', async () => {
     const { wd, frames, reassigns, tick } = build({ config: () => ({ minutes: undefined }) });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
