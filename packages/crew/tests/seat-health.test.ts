@@ -1,15 +1,15 @@
-// crew#274 — seat health: the fold transitions and the recovery probe.
+// crew#274 — seat health: the fold transitions. (The `--version` recovery probe is retired —
+// perf recon fix #3; readiness lives engine-side as the wicked-core#355 bench. Recovery here
+// is a real `ok` output only.)
 //
 // Pure in-memory: events are hand-built CoreEvent frames (the exact wire shapes from
-// wicked-crew-api-types), the probe runs on fake timers with an injected prober. No CLI is
-// ever spawned here.
+// wicked-crew-api-types). No CLI is ever spawned here.
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   FALLBACK_THRESHOLD,
   FALLBACK_WINDOW_MS,
   SeatHealthTracker,
-  startSeatHealthProbe,
 } from '../src/api/seat-health.js';
 import type { CoreEvent } from '../src/core/types.js';
 
@@ -192,87 +192,5 @@ describe('SeatHealthTracker fold (crew#274)', () => {
     t.ingest(stepFailed('r13', 1, `(cli \`agy\` exited 1) ${'x'.repeat(5_000)}`));
     const msg = t.healthFor('agy').message ?? '';
     expect(msg.length).toBeLessThanOrEqual(240);
-  });
-});
-
-describe('seat-health recovery probe (crew#274 §3)', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('probes INACTIVE seats only, and exit 0 flips the seat active with the message cleared', async () => {
-    vi.useFakeTimers();
-    const t = new SeatHealthTracker();
-    t.markInactive('codex', '401 Unauthorized (run codex login)');
-    const probed: string[][] = [];
-    const probe = startSeatHealthProbe(
-      t,
-      () => [
-        { key: 'codex', version_probe: ['codex', '--version'] },
-        { key: 'claude', version_probe: ['claude', '--version'] },
-      ],
-      {
-        intervalMs: FALLBACK_WINDOW_MS,
-        runProbe: async (argv) => {
-          probed.push(argv);
-          return true;
-        },
-      },
-    );
-    await vi.advanceTimersByTimeAsync(FALLBACK_WINDOW_MS);
-    probe.stop();
-    // Active seats are never probed — this is a recovery path, not a monitor.
-    expect(probed).toEqual([['codex', '--version']]);
-    const h = t.healthFor('codex');
-    expect(h.status).toBe('active');
-    expect(h.message).toBeUndefined();
-  });
-
-  it('a non-zero (or timed-out) probe leaves the seat inactive with its message intact', async () => {
-    vi.useFakeTimers();
-    const t = new SeatHealthTracker();
-    t.markInactive('codex', '401 Unauthorized (run codex login)');
-    const probe = startSeatHealthProbe(
-      t,
-      () => [{ key: 'codex', version_probe: ['codex', '--version'] }],
-      { intervalMs: 1_000, runProbe: async () => false },
-    );
-    await vi.advanceTimersByTimeAsync(3_000);
-    probe.stop();
-    const h = t.healthFor('codex');
-    expect(h.status).toBe('inactive');
-    expect(h.message).toBe('401 Unauthorized (run codex login)');
-  });
-
-  it('a seat without a version_probe is skipped (only an ok output can recover it)', async () => {
-    vi.useFakeTimers();
-    const t = new SeatHealthTracker();
-    t.markInactive('mystery', 'exploded');
-    const runProbe = vi.fn(async () => true);
-    const probe = startSeatHealthProbe(t, () => [{ key: 'mystery' }], {
-      intervalMs: 1_000,
-      runProbe,
-    });
-    await vi.advanceTimersByTimeAsync(2_000);
-    probe.stop();
-    expect(runProbe).not.toHaveBeenCalled();
-    expect(t.healthFor('mystery').status).toBe('inactive');
-  });
-
-  it('stop() ends the interval — no probes after teardown', async () => {
-    vi.useFakeTimers();
-    const t = new SeatHealthTracker();
-    t.markInactive('codex', 'down');
-    const runProbe = vi.fn(async () => false);
-    const probe = startSeatHealthProbe(
-      t,
-      () => [{ key: 'codex', version_probe: ['codex', '--version'] }],
-      { intervalMs: 1_000, runProbe },
-    );
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(runProbe).toHaveBeenCalledTimes(1);
-    probe.stop();
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(runProbe).toHaveBeenCalledTimes(1);
   });
 });

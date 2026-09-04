@@ -52,7 +52,6 @@ export async function collectLiveEndpointManifest(): Promise<EndpointManifest> {
       auditPath: join(scratch, 'audit.log'),
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
-      seatHealthProbe: { enabled: false },
       stallWatchdog: { enabled: false },
       // Nonexistent on purpose — headless boot; see the module header.
       studioRoot: join(scratch, 'no-studio-bundle'),

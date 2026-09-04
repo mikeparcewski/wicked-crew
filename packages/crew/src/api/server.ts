@@ -41,7 +41,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-health.js';
+import { SeatHealthTracker } from './seat-health.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
@@ -227,17 +227,9 @@ export interface CreateServerOptions {
   auth?: AuthOptions;
   /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
   auditPath?: string;
-  /**
-   * The seat-health recovery probe (crew#274): every `intervalMs` (default 10 min), INACTIVE
-   * seats only, run the seat's `version_probe`; exit 0 flips the seat active again. `enabled`
-   * defaults to ON in the daemon and OFF under a test runner (VITEST / NODE_ENV=test), so a
-   * test-built server never spawns CLI probes unless it opts in explicitly.
-   */
-  seatHealthProbe?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    timeoutMs?: number;
-  };
+  // (The crew#274 §3 seat-health `--version` recovery probe is retired — perf recon fix #3.
+  // Readiness lives engine-side as the wicked-core#355 dispatch bench; the tracker recovers a
+  // seat on its next real `ok` output. The `seatHealthProbe` option is gone with it.)
   /**
    * The worker stall watchdog (crew#287 detection + crew#341 escalation). For every run whose
    * engine status is `executing`, the daemon tracks the last CoreEvent observed on its own
@@ -917,30 +909,12 @@ export async function createServer(
     offEvent();
   });
 
-  // The seat-health recovery probe (crew#274 §3). A plain setInterval, unref'd, torn down on
-  // close. Default ON in the daemon, OFF under a test runner — a test suite building servers
-  // must never spawn `<cli> --version` children unless it opts in with `enabled: true`.
-  const probeCfg = options?.seatHealthProbe;
-  const underTestRunner =
-    process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test';
-  if (probeCfg?.enabled ?? !underTestRunner) {
-    const probe = startSeatHealthProbe(
-      seatHealth,
-      () => CoreAdapter.roster() as ProbeSeat[],
-      {
-        ...(probeCfg?.intervalMs !== undefined ? { intervalMs: probeCfg.intervalMs } : {}),
-        ...(probeCfg?.timeoutMs !== undefined ? { timeoutMs: probeCfg.timeoutMs } : {}),
-        log: (m) => app.log.warn(m),
-      },
-    );
-    app.addHook('onClose', async () => {
-      probe.stop();
-    });
-  }
+  // (The seat-health `--version` recovery probe that armed here is retired — perf recon
+  // fix #3; see seat-health.ts. Recovery = the seat's next real `ok` output.)
 
-  // Arm the stall watchdog's sweep (crew#287). Same gate as the probe: ON in the daemon, OFF
-  // under a test runner unless a test opts in — a suite building servers over stub adapters
-  // must not have a background interval calling `sessionsDetail()` on them.
+  // Arm the stall watchdog's sweep (crew#287). ON in the daemon, OFF under a test runner
+  // unless a test opts in — a suite building servers over stub adapters must not have a
+  // background interval calling `sessionsDetail()` on them.
   const stallCfg = options?.stallWatchdog;
   if (stallWatchdogArmed) {
     stallWatchdog.start(stallCfg?.sweepIntervalMs);
