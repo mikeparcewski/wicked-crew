@@ -68,14 +68,17 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain(`${LIFT_CONFLICT_MARKER} — rebase`);
   });
 
-  // crew#418 A — a non-fast-forward push (the remote run branch moved) is a lift collision too:
-  // the marker rides it, and every OTHER push failure stays a loud plain failure.
-  it('marks a non-fast-forward push as a LIFT-CONFLICT, other push failures stay plain', () => {
+  // crew#418/#432 — a rejected push happens after the run work was committed. Both a remote
+  // branch race and auth/transport/hook failures must strand recoverably for a post-hoc retry.
+  it('marks every push failure as a recoverable LIFT-CONFLICT', () => {
     expect(script).toContain('if PUSHOUT=$(git push -u origin "$B" 2>&1); then');
     expect(script).toMatch(/\*non-fast-forward\*[^\n]*LIFT-CONFLICT[^\n]*non-fast-forward[^\n]*nothing was pushed/);
-    // The catch-all arm carries NO marker — auth/network/hook failures are terminal, not stranded.
+    // The catch-all carries the same marker — auth/network/hook failures preserve committed work.
     const plainArm = script.split('\n').find((l) => l.includes('deliver: git push of $B failed'))!;
-    expect(plainArm).not.toContain('LIFT-CONFLICT');
+    expect(plainArm).toContain('LIFT-CONFLICT');
+    expect(plainArm).toContain('PUSHERR="${PUSHOUT:0:96}');
+    expect(plainArm).toContain(': > "$S"');
+    expect(plainArm).toContain('retry POST /runs/:id/deliver');
   });
 
   it('pushes -u and opens the PR with gh, URL as the last line', () => {
@@ -88,11 +91,28 @@ describe('deliverPrScript (the hardened field script)', () => {
   // crew#317 — the three defects, pinned as script properties. The BEHAVIOUR of each is driven
   // for real against temp git repos in deliver-script-exec.test.ts; these keep the shape from
   // regressing without paying for a git repo per assertion.
-  it('STAGES AND COMMITS the run’s work before it pushes anything', () => {
-    expect(script).toContain('git add -A');
+  it('stages tracked work then classifies untracked paths before it pushes anything (crew#434)', () => {
+    // Tracked changes always ride; the blanket `git add -A` is gone.
+    expect(script).toContain('git add -u');
+    expect(script).not.toContain('git add -A');
+    expect(script).toContain('S=.wicked-crew-delivery-stranded');
+    // Untracked candidates are enumerated per-file (gitignore honored, NUL-delimited) and staged
+    // individually — not swept.
+    expect(script).toContain('git ls-files --others --exclude-standard -z');
+    expect(script).toContain('git add -- "$F"');
+    // The scratch/key-material denylist, the socket-name rule, the scratch dirs, and the size cap.
+    expect(script).toContain('*.db|*.db-wal|*.db-shm|*.sqlite');
+    expect(script).toContain('.envrc');
+    expect(script).toContain('*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*');
+    expect(script).toContain('*socket*'); // matched against the lowercased basename
+    expect(script).toContain('tr "[:upper:]" "[:lower:]"');
+    expect(script).toContain('*/tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*');
+    expect(script).toContain('-gt 1048576');
+    // A GUARD, NOT A SILENT DROP: every exclusion is reported with its reason.
+    expect(script).toContain('deliver: EXCLUDED ($RN): $F');
     expect(script).toContain('git diff --cached --quiet || git commit -q -m "$M"');
     // The commit precedes both the rebase (which refuses a dirty tree) and the push.
-    expect(script.indexOf('git add -A')).toBeLessThan(script.indexOf('git rebase'));
+    expect(script.indexOf('git add -u')).toBeLessThan(script.indexOf('git rebase'));
     expect(script.indexOf('git commit')).toBeLessThan(script.indexOf('git push -u origin'));
     // Author identity is the repo's own — crew never bakes one in.
     expect(script).not.toContain('user.email');

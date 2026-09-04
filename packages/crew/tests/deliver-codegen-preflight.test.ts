@@ -4,7 +4,7 @@
 // used to deliver a branch whose version-derived codegen (endpoint-manifest.json, the generated api
 // tests) AND package-lock.json were STALE — the worktree has no node_modules, so nothing re-syncs
 // the lockfile and the generators resolve the parent checkout's version. CI's install/drift checks
-// then fail on the delivered PR. The fix is a preflight in `deliverPrScript` (BEFORE `git add -A`):
+// then fail on the delivered PR. The fix is a preflight in `deliverPrScript` (BEFORE staging):
 // `npm install` (re-syncs the lockfile to the worktree's own package.json) + the two `npm run`
 // codegen commands (regenerate the version-stamped artifacts), so the commit carries all three at
 // the bumped version.

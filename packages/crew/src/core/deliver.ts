@@ -17,8 +17,8 @@
  *      to just deliver; ANY other conflict aborts the rebase (pushing nothing) and exits carrying
  *      {@link DELIVER_LIFT_CONFLICT_MARKER}, which crew reads as a recoverable STRAND, never a
  *      pushed conflicted tree;
- *  (d) `git push -u origin <branch>` — a non-fast-forward rejection carries the same lift-conflict
- *      marker (the remote branch moved), every other push failure stays a loud plain failure;
+ *  (d) `git push -u origin <branch>` — every rejected push carries the recovery marker. The run
+ *      work is already committed locally, so an operator can repair auth/transport and retry;
  *  (e) `gh pr create --head <branch> --fill`, with gh's output and exit status captured
  *      SEPARATELY so a gh failure fails the phase carrying gh's own message;
  *  (f) the PR URL is the last line of the phase output.
@@ -65,9 +65,9 @@ import type { PhaseDef, WorkflowDef } from './types.js';
 export const DELIVER_PHASE_ID = 'deliver';
 
 /**
- * The sentinel the deliver script prints when it refuses on a LIFT COLLISION (crew#418) — a
- * rebase conflict it could not union-resolve, or a non-fast-forward push. The run's WORK is
- * complete and committed on its `wicked/<id>` branch; only the lift into origin collided.
+ * The sentinel the deliver script prints when the RUN'S WORK has been committed but its LIFT did
+ * not complete (crew#418/#432): a rebase conflict or any failed push. The work is safe on its
+ * `wicked/<id>` branch; an operator can fix the remote condition and retry delivery.
  *
  * crew keys the "stranded, recoverable" reinterpretation on this EXACT substring appearing in
  * the deliver unit's `denial_reason` (which carries the head+TAIL excerpt of the script's
@@ -143,11 +143,18 @@ export function deliverPrScript(intent?: string): string {
     // would put one branch's work on another and push a branch that never saw it. Refuse instead.
     'C=$(git branch --show-current)',
     '[ "$C" = "$B" ] || { echo "deliver: the worktree is on \'$C\' but the run branch is \'$B\' — refusing to commit one branch\'s work onto another; nothing was pushed"; exit 1; }',
+    // A failed PUSH happens after the product was committed. Keep its worktree from being reaped
+    // by leaving this reserved, untracked recovery sentinel; it is removed HERE (before staging)
+    // so a normal delivery never sees it, and a retry removes it before another attempt (crew#432).
+    'S=.wicked-crew-delivery-stranded',
+    'rm -f -- "$S"',
     // (c1) COMMIT THE RUN'S WORK (crew#317). Agents write files; they do not commit — which is
     // the premise of core#291 and the reason `d1bc72c2` pushed a branch identical to origin/main.
     // Author identity is deliberately NOT set here: the run worktree belongs to the operator's
     // own clone, so `git commit` uses the repo/user config that already exists (and fails loudly,
-    // pushing nothing, if that config is missing). `git add -A` respects .gitignore.
+    // pushing nothing, if that config is missing). Staging is two passes (see below): tracked
+    // changes always ride; untracked paths ride UNLESS a scratch/key-material classifier excludes
+    // them — and every exclusion is reported loudly (crew#434).
     `I='${commitSubjectIntent(intent)}'`,
     'if [ -n "$I" ]; then M="wicked-crew run $R: $I"; else M="wicked-crew run $R"; fi',
     // (c0) DELIVER PREFLIGHT (crew#426) — a governed run that bumps an internal WORKSPACE package's
@@ -159,7 +166,7 @@ export function deliverPrScript(intent?: string): string {
     // api-types to the worktree's bumped version and the committed manifest disagrees, and the
     // lockfile↔package.json drift is a latent install hazard (a repo that pins the dep instead of `*`
     // would fail `npm ci` outright). This blocks EVERY governed run that changes an API field. Re-sync
-    // BOTH here, BEFORE the commit, so the `git add -A` below stages the regenerated
+    // BOTH here, BEFORE the commit, so the tracked-only staging below stages the regenerated
     // endpoint-manifest.json, the generated api-sample test, and the re-synced package-lock.json.
     //
     // Scoped to the CREW WORKSPACE — the whole preflight (lockfile re-sync AND codegen) runs only
@@ -181,7 +188,45 @@ export function deliverPrScript(intent?: string): string {
     '  npm run manifest:endpoints -w packages/crew',
     '  npm run generate:api-tests -w packages/crew',
     'fi',
-    'git add -A',
+    // (c1a) TRACKED CHANGES ALWAYS RIDE. `git add -u` stages every modification/deletion to an
+    // already-tracked path (the run's product for that class), including the crew#426 preflight's
+    // regenerated, already-tracked lockfile/manifest/codegen above.
+    'git add -u',
+    // (c1b) UNTRACKED PATHS — the crew#434 classifier. `git add -A` swept EVERY non-ignored
+    // untracked path into the governed PR, so a repo whose `.gitignore` missed its own test
+    // scratch (a `bus.db`, a `socket.path` with a username, `.webm`/`.gif` recordings) leaked ~31
+    // files into a run's PR. The fix cannot lean on the target repo's `.gitignore` being right, so
+    // each untracked candidate (`git ls-files --others --exclude-standard` — gitignore honored
+    // first, NUL-delimited so odd names survive) is classified per-file: it is staged (it is the
+    // run's deliberately-produced product) UNLESS it looks like scratch or key material —
+    //   • denylisted name/extension: databases (.db/.sqlite*), sockets (.sock), pids (.pid),
+    //     dotenv (.env*), recordings (.gif/.webm/.mp4/.mov), key material
+    //     (*.pem/*.key/*.p12/*.pfx/id_rsa*/*credentials*);
+    //   • a basename containing `socket` (covers `socket.path`, which has no fixed extension);
+    //   • a path under an obvious scratch/cache dir (tmp/ .tmp/ scratch/ .cache/ coverage/) or
+    //     a `.DS_Store`;
+    //   • any otherwise-unrecognised file larger than 1 MiB (a generic net for future scratch).
+    // EVERYTHING ELSE RIDES — the floor's job is hygiene, not taste; an allowlist would silently
+    // drop a legitimate new asset. This is a GUARD, NOT A SILENT DROP (the issue's own words):
+    // every excluded path is printed with its reason, so a clean delivery that skipped files is
+    // still fully auditable in the phase output (retained + served on the run wire), never
+    // laundered. `git add` here never touches the untracked recovery sentinel: it was removed
+    // above, before this pass.
+    'while IFS= read -r -d "" F; do',
+    '  [ -n "$F" ] || continue',
+    '  BN=${F##*/}; RN=""',
+    // Classify on a LOWERCASED basename so DEPLOY.KEY / .ENV / SOCKET.PATH cannot bypass the
+    // denylist by case (review, #439).
+    '  LBN=$(printf "%s" "$BN" | tr "[:upper:]" "[:lower:]")',
+    '  case "$LBN" in',
+    '    *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite2|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.sock|*.pid|*.env|*.env.*|.envrc|*.gif|*.webm|*.mp4|*.mov|*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*) RN="denylisted-name";;',
+    '  esac',
+    '  case "$LBN" in *socket*) [ -n "$RN" ] || RN="socket-name";; esac',
+    '  [ "$BN" = ".DS_Store" ] && [ -z "$RN" ] && RN="ds-store"',
+    '  case "/$F" in */tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*) [ -n "$RN" ] || RN="scratch-dir";; esac',
+    '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
+    '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; else git add -- "$F"; fi',
+    'done < <(git ls-files --others --exclude-standard -z)',
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
     'git diff --cached --quiet || git commit -q -m "$M"',
@@ -244,15 +289,15 @@ export function deliverPrScript(intent?: string): string {
     // that WAS ahead can come out of a rebase carrying nothing of its own.
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
-    // (d) Push. A non-fast-forward rejection (the remote run branch moved under us) is the
-    // push-side twin of the rebase collision — mark it LIFT-CONFLICT so crew strands the run
-    // recoverably; ANY other push failure (auth, network, a rejecting remote hook) stays a loud
-    // terminal failure with git's own words.
+    // (d) Push. Any push failure happens AFTER the work was committed and its branch was proven
+    // ahead. It is therefore a recoverable lift failure, whether the remote branch moved, auth
+    // returned 403, the transport is down, or a hook rejected it. Preserve git's own output AND
+    // print the marker last, so crew strands the run and POST /runs/:id/deliver can retry it.
     'if PUSHOUT=$(git push -u origin "$B" 2>&1); then echo "$PUSHOUT"; else',
     '  echo "$PUSHOUT"',
     '  case "$PUSHOUT" in',
-    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) echo "${DELIVER_LIFT_CONFLICT_MARKER} — push of $B was rejected because the remote branch moved (non-fast-forward); rebase and re-run; nothing was pushed"; exit 1;;`,
-    '    *) echo "deliver: git push of $B failed — nothing was pushed"; exit 1;;',
+    `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; echo "${DELIVER_LIFT_CONFLICT_MARKER} — push of $B was rejected because the remote branch moved (non-fast-forward); rebase and re-run; nothing was pushed"; exit 1;;`,
+    `    *) : > "$S"; PUSHERR="\${PUSHOUT:0:96} ... \${PUSHOUT: -128}"; PUSHERR=\${PUSHERR//$'\\n'/ }; echo "deliver: git push of $B failed after commit: $PUSHERR; retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}"; exit 1;;`,
     '  esac',
     'fi',
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
