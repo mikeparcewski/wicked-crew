@@ -212,10 +212,14 @@ export function gitWorktreeIsClean(
     const gitEmpty = async (args: string[]): Promise<boolean> => {
       try {
         // Read-only git plumbing over the run's own worktree; argv array, never a shell string.
+        // GIT_OPTIONAL_LOCKS=0 (git ≥2.15): `git status` otherwise takes index.lock
+        // opportunistically to write back a refreshed index — a background probe must never
+        // hold a lock a concurrent deliver's `git add`/`git commit` can collide with.
         const { stdout } = await execCapped('git', args, {
           cwd: path,
           timeout: 10_000,
           windowsHide: true,
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
         });
         return stdout.trim() === '';
       } catch (err) {
@@ -266,7 +270,14 @@ export function gitRunBranchIsEmpty(
     const branch = `refs/heads/wicked/${runId}`;
     const gitOut = (args: string[]) =>
       // Read-only git plumbing over the registered repo root; argv array, never a shell string.
-      execCapped('git', args, { cwd: root, timeout: 10_000, windowsHide: true });
+      // GIT_OPTIONAL_LOCKS=0: same no-opportunistic-locks posture as the worktree probe — this
+      // root is the repo a deliver (or the operator) may be writing in right now.
+      execCapped('git', args, {
+        cwd: root,
+        timeout: 10_000,
+        windowsHide: true,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      });
     try {
       await gitOut(['rev-parse', '--verify', '--quiet', branch]);
     } catch (err) {
