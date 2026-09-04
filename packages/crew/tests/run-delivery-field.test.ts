@@ -22,7 +22,7 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,6 +47,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 type MockAdapter = {
   sessionsDetail: ReturnType<typeof vi.fn>;
@@ -198,7 +199,7 @@ describe('crew#393 — session.delivery / deliverUrl on the run DTOs', () => {
       expect(detail.run.session['delivery']).toBe('stranded');
       expect('deliverUrl' in detail.run.session).toBe(false);
     } finally {
-      rmSync(worktree, { recursive: true, force: true });
+      removeScratch(worktree);
     }
   });
 
@@ -422,7 +423,7 @@ describe('gitWorktreeIsClean — the production probe over a real run-worktree l
   });
 
   afterEach(() => {
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   it('a pristine worktree is clean; an uncommitted file is not; a run-branch commit is not', async () => {
@@ -510,7 +511,7 @@ describe('gitRunBranchIsEmpty — the reaped-worktree probe over the parent repo
   });
 
   afterEach(() => {
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   it('an empty run branch is POSITIVELY empty; one carrying a commit is not; a deleted one is empty', async () => {
@@ -576,7 +577,7 @@ describe('DeliveryIndex.hydrate — the restart path over the audit trail', () =
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('a fresh index answers from the trail; newest entry per run wins', async () => {

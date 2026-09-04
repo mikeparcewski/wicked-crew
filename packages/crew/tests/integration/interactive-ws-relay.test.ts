@@ -15,7 +15,7 @@
 // one `/ws` the studio already holds, on the server's own listening port.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -24,6 +24,7 @@ import { EMITTABLE_TYPES } from '../../src/interactive/ws-relay.js';
 import { InteractiveHandoffLedger } from '../../src/interactive/ledger.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { SystemSettings } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const STATUS_POSTED = 'wicked.interactive.status.posted';
 const FEEDBACK_SUBMITTED = 'wicked.interactive.feedback.submitted';
@@ -132,7 +133,7 @@ afterAll(async () => {
     /* ignore */
   }
   await app.close(); // stops the relay subscriber via the onClose hook
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
   if (savedWorkerHome === undefined) delete process.env['WICKED_WORKER_HOME'];
   else process.env['WICKED_WORKER_HOME'] = savedWorkerHome;
 });

@@ -11,10 +11,11 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
+import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
 let overlayDir: string;
@@ -42,7 +43,7 @@ afterEach(() => {
   else process.env['WICKED_WORKFLOWS_DIR'] = priorOverlayDir;
   adapter?.close();
   adapter = undefined;
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 describe('a stale onboarding overlay is cleared on startup', () => {

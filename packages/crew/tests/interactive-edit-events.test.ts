@@ -19,7 +19,7 @@
 //    around it.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, isAbsolute } from 'node:path';
 import {
@@ -43,6 +43,7 @@ import { STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-ev
 import { InteractiveHandoffLedger } from '../src/interactive/ledger.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const FRAGMENT = '<h2 data-wid="slide-2-heading-1">One bus, many hands</h2>';
 
@@ -244,7 +245,7 @@ describe('the INV-2 pre-emit self-check (assist skill Step 3c, deterministically
     dir = mkdtempSync(join(tmpdir(), 'crew-iee-check-'));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('collects results when every output file preserves its fragment’s wids', () => {
@@ -279,7 +280,7 @@ describe('InteractiveHandoffLedger (shared with the draft leg)', () => {
     dir = mkdtempSync(join(tmpdir(), 'crew-ihl-'));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('treats each doc+version handoff as its own row', () => {
@@ -401,7 +402,7 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
 
   afterEach(async () => {
     for (const s of subs) await s.stop();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   async function emitFeedbackProcessed(

@@ -18,7 +18,7 @@
 import { afterAll, beforeAll, afterEach, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
@@ -26,6 +26,7 @@ import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js'
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 /**
  * The fake bridge, as a standalone script. Implements the contract the pool depends on
@@ -156,7 +157,7 @@ afterAll(async () => {
       /* already gone */
     }
   }
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 describe('interactive proxy — acceptance (slice 1)', () => {

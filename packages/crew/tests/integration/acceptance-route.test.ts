@@ -15,13 +15,14 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { RepoEntry, SessionView } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
@@ -79,7 +80,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 async function getAcceptance(id: string, query = '') {
@@ -208,7 +209,7 @@ describe('opt-in bus seam (qeGateEvents)', () => {
       expect(body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
     } finally {
       await app2.close(); // stops the subscriber via the onClose hook
-      rmSync(busDir, { recursive: true, force: true });
+      removeScratch(busDir);
     }
   });
 

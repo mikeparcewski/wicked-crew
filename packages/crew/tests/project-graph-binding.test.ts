@@ -18,7 +18,7 @@
  * before a binary would run. The engine re-verifies all of it against the database itself
  * (`actor::project_code_graph_db`); these tests pin crew's half — the half that has the CAUSE.
  */
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +27,7 @@ import { resolveProjectGraphBinding } from '../src/projects/graph.js';
 import { projectGraphDb, projectGraphManifest } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { ProjectMember, RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const PROJECT_ID = 'proj_bind';
 
@@ -95,7 +96,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-  rmSync(graphRoot, { recursive: true, force: true });
+  removeScratch(graphRoot);
 });
 
 describe('resolveProjectGraphBinding — what a run launched into a project gets to see', () => {

@@ -28,7 +28,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool } from '../../src/interactive/bridge-pool.js';
@@ -41,6 +41,7 @@ import { AuditLog } from '../../src/api/audit.js';
 import { LOCAL_ACTOR } from '../../src/api/auth.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Actor, Project } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 /**
  * The fake bridge: interactive#189's retire wire over a genuine separate pid. Docs live in
@@ -220,7 +221,7 @@ afterAll(async () => {
       /* already gone */
     }
   }
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 describe('governed doc delete — the happy path changes BOTH stores', () => {

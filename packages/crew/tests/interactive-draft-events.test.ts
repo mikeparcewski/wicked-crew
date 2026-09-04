@@ -18,7 +18,7 @@
 //    business; THIS seam's business is everything around it.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -41,6 +41,7 @@ import {
 } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 describe('parseSourceDocCreated', () => {
   const payload = {
@@ -279,7 +280,7 @@ describe('InteractiveHandoffLedger', () => {
     dir = mkdtempSync(join(tmpdir(), 'crew-idl-'));
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('records a launch durably — a fresh load sees it (restart-safe replay dedupe)', () => {
@@ -395,7 +396,7 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
 
   afterEach(async () => {
     for (const s of subs) await s.stop();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   async function emitDocCreated(

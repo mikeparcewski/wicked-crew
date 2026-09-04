@@ -14,11 +14,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { removeScratch } from './setup/scratch.js';
 import type {
   AuditEntry,
   CampaignDef,
@@ -137,7 +138,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 beforeEach(() => {

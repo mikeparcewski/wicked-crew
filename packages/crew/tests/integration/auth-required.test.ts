@@ -18,7 +18,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -26,6 +26,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { tokenHash } from '../../src/api/auth.js';
 import type { AuditEntry, SessionView, SystemSettings } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const TOKENS = {
   observer: 'obs-token-1',
@@ -111,7 +112,7 @@ afterAll(async () => {
   await app.close();
   await localApp.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 function call(

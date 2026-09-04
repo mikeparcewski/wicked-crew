@@ -24,7 +24,7 @@
 //    rides, so the service lands the revision as a generated version. The engine is faked.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -45,6 +45,7 @@ import {
 import { DRAFT_COMPLETED, STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 describe('parseChatPosted', () => {
   const payload = {
@@ -125,7 +126,7 @@ describe('readDocHead (contract b — the versions.json read)', () => {
     root = mkdtempSync(join(tmpdir(), 'crew-ich-root-'));
   });
   afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
+    removeScratch(root);
   });
 
   function seedDoc(name: string, manifest: unknown): string {
@@ -343,7 +344,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
 
   afterEach(async () => {
     for (const s of subs) await s.stop();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   /** Seed a doc workspace the way interactive's initWorkspace/fork would leave it. The default

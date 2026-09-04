@@ -21,7 +21,7 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,7 @@ import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const RUN_ID = '83052f0b-96a8-4a99-ad2a-c84b75111ff0';
 
@@ -193,7 +194,7 @@ const apps: FastifyInstance[] = [];
 
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
-  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  for (const r of roots.splice(0)) removeScratch(r);
 });
 
 describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#393)', () => {
@@ -329,7 +330,7 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
 
   it('409 when the worktree is gone — named, not a script crash', async () => {
     const fx = fixture();
-    rmSync(fx.workdir, { recursive: true, force: true });
+    removeScratch(fx.workdir);
     expect(existsSync(fx.workdir)).toBe(false);
     const { app, execCalls } = buildApp(
       [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })],

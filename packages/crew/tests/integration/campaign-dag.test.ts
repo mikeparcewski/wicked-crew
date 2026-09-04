@@ -19,13 +19,15 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Campaign } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
+import { quiesceCampaign } from '../setup/quiesce.js';
 
 // Presence-gated at COLLECTION time (describe.skipIf needs the answer before beforeAll): napi
 // class methods live on the prototype, so the check needs no spawned engine.
@@ -146,13 +148,20 @@ afterAll(async () => {
   } catch {
     /* ignore */
   }
-  await app.close();
-  adapter.close();
-  for (const [key, value] of Object.entries(savedEnv)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    await app.close();
+  } finally {
+    try {
+      await quiesceCampaign(adapter, CAMPAIGN_ID);
+    } finally {
+      adapter.close();
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      removeScratch(scratch);
+    }
   }
-  rmSync(scratch, { recursive: true, force: true });
 });
 
 async function post(path: string, body?: unknown) {
@@ -278,6 +287,7 @@ describe.skipIf(!supported)('campaign DAG over the API (TH-9)', () => {
     // over the SAME db — the restart shape. The campaign must come back from the store, not from
     // anything the first process held in memory.
     await app.close();
+    await quiesceCampaign(adapter, CAMPAIGN_ID);
     adapter.close();
 
     adapter = new CoreAdapter({ dbPath: join(scratch, 'core.db'), stub: true });

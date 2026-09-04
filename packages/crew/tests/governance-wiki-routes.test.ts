@@ -18,7 +18,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -28,6 +28,7 @@ import {
 import { WIKI_AUTHORING_DOC } from '../src/api/governance-wiki.js';
 import { createServer } from '../src/api/server.js';
 import type { ConformanceRule, GovernanceScoreboard } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const SCOREBOARD: GovernanceScoreboard = {
   rules_total: 4,
@@ -119,7 +120,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 async function get(path: string) {

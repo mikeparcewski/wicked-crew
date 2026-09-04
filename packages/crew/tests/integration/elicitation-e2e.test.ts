@@ -22,12 +22,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
 
 interface Frame {
   type: string;
@@ -193,7 +194,7 @@ afterAll(async () => {
   else process.env['USERPROFILE'] = priorUserProfile;
   if (priorDeadletter === undefined) delete process.env['WICKED_APPS_EMIT_DEADLETTER'];
   else process.env['WICKED_APPS_EMIT_DEADLETTER'] = priorDeadletter;
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  removeScratch(dir);
 });
 
 describe('ACP elicitation end-to-end (real engine + scripted agent)', () => {

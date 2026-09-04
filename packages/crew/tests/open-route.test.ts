@@ -1,4 +1,4 @@
-import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // crew#273 — POST /open: open a file/folder with the OS default app, daemon-side.
@@ -15,6 +15,7 @@ import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { isInsideRoot } from '../src/api/open-path.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const WORKDIR = '/tmp/wicked-open-test/work';
 const EXTRA_ROOT = '/tmp/wicked-open-test/extra';
@@ -203,7 +204,7 @@ describe('isInsideRoot (the containment rule)', () => {
       expect(isInsideRoot(root, link)).toBe(false);
       expect(isInsideRoot(root, join(root, 'real-child.txt'))).toBe(true); // missing → lexical
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      removeScratch(base);
     }
   });
 });
