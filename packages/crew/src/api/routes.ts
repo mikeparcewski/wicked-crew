@@ -444,8 +444,8 @@ export function registerRoutes(
   // tick on a miss, so the list fan-out never spawns git.
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
-  // crew#418 A: a `failed` run whose ONLY failure was the deliver phase's LIFT collision (a
-  // rebase conflict the changelog union merge could not clear, or a non-fast-forward push) is
+  // crew#418/#432: a `failed` run whose ONLY failure was a recoverable deliver LIFT failure (a
+  // rebase conflict, non-fast-forward, or auth/transport/remote push rejection) is
   // reinterpreted on the wire as `completed` + `delivery: 'stranded'` — recoverable, not a hard
   // failure. The engine's durable record stays `failed` (audit trail); this is a wire derivation,
   // exactly like `delivery` itself, applied at the SAME three terminal-status decision points so
@@ -1196,7 +1196,7 @@ export function registerRoutes(
       const views = await adapter.sessionsDetail();
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
-      // crew#418 A: a run stranded by a deliver-phase lift collision reads `failed` from the
+      // crew#418/#432: a run stranded by a recoverable deliver lift failure reads `failed` from the
       // engine but IS liftable post-hoc — normalize its status to `completed` so this route
       // accepts it, exactly as the run wire and the resume route see it.
       const conflictStrand = normalizeStranded(run);
@@ -1227,7 +1227,7 @@ export function registerRoutes(
       }
       deliverInFlight.add(id);
       // The worktree the script runs in. Usually the run's own; but the engine REAPS a
-      // failed-deliver run's worktree once its work is committed (crew#418) — the work then lives
+      // failed-deliver run's worktree once its work is committed (crew#418/#432) — the work then lives
       // on the `wicked/<id>` branch. For such a strand, stand a throwaway worktree back up from
       // that branch and lift THAT; the branch (the record) is untouched. `cleanupWorktree` tears
       // the throwaway down after the lift.

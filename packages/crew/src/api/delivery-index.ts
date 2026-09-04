@@ -329,13 +329,13 @@ export function deliverUnitOf(view: SessionView): WorkUnit | null {
 }
 
 /**
- * Is this a `failed` run whose ONLY failure was the deliver phase's LIFT collision (crew#418)?
+ * Is this a `failed` run whose ONLY failure was a recoverable deliver LIFT failure (crew#418/#432)?
  *
  * The deliver phase is the LAST phase, so a rejected deliver unit whose `denial_reason` carries
  * the deliver script's {@link DELIVER_LIFT_CONFLICT_MARKER} — with EVERY non-deliver unit still
  * `done` — means the run's WORK is complete and committed on its `wicked/<id>` branch: only the
- * lift into origin collided (a rebase conflict the changelog union merge could not clear, or a
- * non-fast-forward push). The engine reports the run `failed` because a Tool phase exited
+ * lift into origin could not complete (a rebase conflict the changelog union merge could not
+ * clear, a non-fast-forward push, or a transport/auth/remote rejection). The engine reports the run `failed` because a Tool phase exited
  * non-zero; crew reinterprets THIS shape on the wire as `completed` + `delivery: 'stranded'`
  * (recoverable via `POST /runs/:id/deliver`) — the same wire-derivation posture as `delivery`
  * itself, leaving the engine's durable `failed` record untouched. The deliver unit stays

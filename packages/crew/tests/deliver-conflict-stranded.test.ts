@@ -402,4 +402,51 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     expect(after.run.session['delivery']).toBe('delivered');
     expect(after.run.session['deliverUrl']).toBe('https://github.com/o/r/pull/71');
   }, 90_000);
+
+  it('a REAL push 403 reaches the failed run wire as stranded and POST /deliver retries after repair (crew#432)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'auth-retry.ts'), 'export const retried = true;\n');
+    git(fx.workdir, 'add', '--', 'auth-retry.ts');
+    const hook = join(fx.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\necho "remote: HTTP 403 authentication failed" >&2\nexit 1\n');
+    chmodSync(hook, 0o755);
+
+    const first = await runDeliverScript(fx.workdir, 'auth retry', fx.env);
+    expect(first.status).not.toBe(0);
+    expect(first.output).toContain('HTTP 403 authentication failed');
+    expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
+    expect(originBranches(fx)).toEqual(['main']);
+
+    const units = [
+      unit({ id: `${RUN_ID}:build`, ord: 3, status: 'done' }),
+      unit({
+        id: `${RUN_ID}:deliver`,
+        ord: 5,
+        status: 'rejected',
+        denial_reason: `Worker FAILED on unit 5: ${first.output.slice(-400)}`,
+        tool_cmd: ['bash', '-lc', 'gh pr create --head "$B" --fill'],
+      }),
+    ];
+    const app = buildApp([view({ status: 'failed', workdir: fx.workdir, units })], {
+      worktreeExists: (p) => existsSync(p),
+      worktreeIsClean: gitWorktreeIsClean(),
+      deliverExec: (workdir, intent) => runDeliverScript(workdir, intent, fx.env),
+    });
+    apps.push(app);
+    await app.ready();
+
+    const stranded = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+      run: { session: Record<string, unknown>; units: WorkUnit[] };
+    };
+    expect(stranded.run.session['status']).toBe('completed');
+    expect(stranded.run.session['delivery']).toBe('stranded');
+    const deliver = stranded.run.units.find((u) => u.id.endsWith(':deliver'))!;
+    expect(deliver.denial_reason).toContain('HTTP 403 authentication failed');
+
+    rmSync(hook);
+    const retried = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+    expect(retried.statusCode).toBe(200);
+    expect((retried.json() as { prUrl: string }).prUrl).toBe('https://github.com/o/r/pull/71');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 90_000);
 });

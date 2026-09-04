@@ -149,9 +149,11 @@ afterEach(() => {
 });
 
 describe('deliver script, driven for real (crew#317)', () => {
-  it('COMMITS the run’s uncommitted work, pushes it, and prints the PR URL last', () => {
+  it('COMMITS the run’s uncommitted work — an UNTRACKED new file rides, pushes it, prints the PR URL last', () => {
     const fx = fixture();
-    // What an agent leaves behind: files written, nothing committed (core#291's premise).
+    // What an agent leaves behind: files written, nothing committed AND nothing staged
+    // (core#291's premise). A brand-new source file the agent never `git add`ed MUST still ride —
+    // that is the run's product, and crew, not the agent, owns staging it.
     writeFileSync(join(fx.workdir, 'attentionReason.ts'), 'export const x = 1;\n');
     writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
 
@@ -164,10 +166,47 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
     const subject = git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim();
     expect(subject).toBe(`wicked-crew run ${RUN_ID}: add the attention-reason helper`);
-    // Both files rode along, and the worktree is clean afterwards.
+    // Both files rode along (the untracked new file included), and the worktree is clean after.
     const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim();
     expect(files.split('\n').sort()).toEqual(['README.md', 'attentionReason.ts']);
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('');
+  }, 60_000);
+
+  it('EXCLUDES untracked scratch/key-material and reports each exclusion, while product rides (crew#434)', () => {
+    const fx = fixture();
+    // The run's product: a tracked edit and an untracked new source file (neither is scratch).
+    writeFileSync(join(fx.workdir, 'README.md'), 'base\nchanged\n');
+    writeFileSync(join(fx.workdir, 'feature.ts'), 'export const feature = 1;\n');
+    // The failed-ignore residue the incident (interactive#199/#200) actually leaked. None of it is
+    // gitignored here, so only the classifier stands between it and the governed PR:
+    writeFileSync(join(fx.workdir, 'bus.db'), 'SQLite format 3\0scratch\n'); // denylisted-name
+    writeFileSync(join(fx.workdir, 'socket.path'), '/Users/alice/run/tool.sock\n'); // socket-name
+    writeFileSync(join(fx.workdir, 'deploy.key'), 'PRIVATE KEY MATERIAL\n'); // denylisted-name
+    mkdirSync(join(fx.workdir, 'coverage'));
+    writeFileSync(join(fx.workdir, 'coverage', 'lcov.info'), 'TN:\n'); // scratch-dir
+    // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
+    writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7)); // oversize-1mib
+
+    const r = runDeliver(fx, { intent: 'ship the feature' });
+
+    expect(r.status).toBe(0);
+    // Only the run's product rode; every scratch/key/oversize path stayed out.
+    const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`)
+      .trim()
+      .split('\n')
+      .sort();
+    expect(files).toEqual(['README.md', 'feature.ts']);
+    // A GUARD, NOT A SILENT DROP — each exclusion is named with its reason in the phase output.
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db');
+    expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): deploy.key');
+    expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
+    expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/lcov.info');
+    expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');
+    // Skipped, never deleted — the excluded files remain untracked in the worktree for the operator.
+    const status = git(fx.workdir, 'status', '--porcelain');
+    for (const p of ['bus.db', 'socket.path', 'deploy.key', 'coverage/', 'rec.bin']) {
+      expect(status).toContain(p);
+    }
   }, 60_000);
 
   it('takes the run’s OWN commits when the tree is already clean — no empty commit', () => {
@@ -213,6 +252,36 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain(ghErr);
     expect(r.output).toContain('deliver: gh pr create failed');
     expect(r.lastLine).not.toContain('http');
+  }, 60_000);
+
+  it('STRANDS a failed push with git’s error intact, then succeeds after the remote is repaired (crew#432)', () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const preserved = true;\n');
+    git(fx.workdir, 'add', '--', 'work.ts');
+    // A server-side rejection exercises the push path after fetch/rebase/commit without relying
+    // on the test host’s network. Its output stands in for GitHub's auth-403/transport text.
+    const hook = join(fx.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\necho "remote: HTTP 403 authentication failed" >&2\nexit 1\n');
+    chmodSync(hook, 0o755);
+
+    const failed = runDeliver(fx);
+
+    expect(failed.status).not.toBe(0);
+    expect(failed.output).toContain('HTTP 403 authentication failed');
+    expect(failed.output).toContain('deliver: LIFT-CONFLICT');
+    // The marker is last so core retains it in the run-unit denial tail and exposes the strand.
+    expect(failed.lastLine).toContain('deliver: LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+    // The committed work remains on the local run branch, ready for post-hoc delivery.
+    expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
+    expect(existsSync(fx.workdir)).toBe(true);
+    expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(true);
+
+    rmSync(hook);
+    const retried = runDeliver(fx);
+    expect(retried.status).toBe(0);
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
   }, 60_000);
 
   it('FAILS when gh exits 0 but produces no PR URL — done is re-derived, not asserted', () => {
