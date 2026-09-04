@@ -1,5 +1,5 @@
 // Worker stall watchdog (crew#287 detection + crew#341 escalation): platform-native liveness
-// for executing runs, and — opt-in — recovery when liveness is gone.
+// for executing runs, and — armed by default since perf#4 — recovery when liveness is gone.
 //
 // A wedged worker emits nothing — no unitOutputDelta, no gate frames — and its run sits in
 // `executing` until an operator notices by absence (run 8aa1cd42: a design unit burned 3+ hours
@@ -261,7 +261,7 @@ export class WorkerStallWatchdog {
                 : ` (escalation armed at ${(escalation.thresholdMs / 60_000).toFixed(1)} min)`),
           );
         }
-        // ── stage 2: act (crew#341, opt-in) — never before stage 1's threshold ──────────
+        // ── stage 2: act (crew#341, default-ON since perf#4) — never before stage 1 ─────
         if (
           escalation !== undefined &&
           quietForMs >= escalation.thresholdMs &&
