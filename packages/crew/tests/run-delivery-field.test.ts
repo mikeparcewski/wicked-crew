@@ -40,6 +40,7 @@ import {
   gitWorktreeIsClean,
   prUrlFrom,
 } from '../src/api/delivery-index.js';
+import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -111,6 +112,7 @@ function buildApp(
   deliveryIndex: DeliveryIndex,
   worktreeExists?: (p: string) => boolean,
   worktreeIsClean?: (p: string) => Promise<boolean>,
+  deliveryCache?: DeliveryDerivationCache,
 ): FastifyInstance {
   const app = Fastify({ logger: false });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -133,6 +135,7 @@ function buildApp(
       deliveryIndex,
       ...(worktreeExists !== undefined ? { worktreeExists } : {}),
       ...(worktreeIsClean !== undefined ? { worktreeIsClean } : {}),
+      ...(deliveryCache !== undefined ? { deliveryCache } : {}),
     },
   );
   return app;
@@ -330,16 +333,36 @@ describe("crew#311 — the 'vacuous' split of 'stranded' and of the reaped 'none
     expect(p1.runBranchIsEmpty).not.toHaveBeenCalled();
   });
 
-  it("route-level: a vacuous completed run is LOUD on both GET /runs and GET /runs/:id", async () => {
+  it("route-level: a vacuous completed run is LOUD on both GET /runs and GET /runs/:id once the background cache derives it", async () => {
     const mockAdapter: MockAdapter = {
       sessionsDetail: vi
         .fn()
         .mockResolvedValue([view('run-empty', { repo_ref: 'repo-1', workdir: '/wt' })]),
       sessions: vi.fn().mockResolvedValue(['run-empty']),
     };
-    const app = buildApp(mockAdapter, new DeliveryIndex(), () => true, async () => true);
+    // Derivation moved off the request path (delivery-cache.ts, GET /runs p99): the routes read
+    // this cache, and the vacuity probes only ever run under its sweep — driven explicitly here,
+    // the way `createServer`'s 30s tick drives it in the daemon.
+    const index = new DeliveryIndex();
+    const cache = new DeliveryDerivationCache({
+      listViews: () => mockAdapter.sessionsDetail() as Promise<SessionView[]>,
+      probes: {
+        worktreeExists: () => true,
+        worktreeIsClean: async () => true,
+        runBranchIsEmpty: async () => false,
+      },
+      isDelivered: (runId) => index.urlFor(runId) !== undefined,
+    });
+    const app = buildApp(mockAdapter, index, () => true, async () => true, cache);
     try {
       await app.ready();
+      // COLD cache: the request degrades to the stat-only tri-state — 'stranded', never a probe.
+      const cold = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
+        runs: { session: Record<string, unknown> }[];
+      };
+      expect(cold.runs[0]!.session['delivery']).toBe('stranded');
+      // One background sweep later the label self-heals to the full derivation.
+      await cache.sweep();
       const list = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
         runs: { session: Record<string, unknown> }[];
       };

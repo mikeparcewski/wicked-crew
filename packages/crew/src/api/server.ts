@@ -14,7 +14,15 @@ import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { GuidanceIndex } from './guidance-index.js';
-import { DeliveryIndex, deliverUnitOf, prUrlFrom } from './delivery-index.js';
+import {
+  DeliveryIndex,
+  deliverUnitOf,
+  gitRunBranchIsEmpty,
+  gitWorktreeIsClean,
+  prUrlFrom,
+  type VacuityProbes,
+} from './delivery-index.js';
+import { DeliveryDerivationCache } from './delivery-cache.js';
 import { coreUnitId } from './evidence.js';
 import { registerClient, broadcast } from '../events/bus.js';
 import { TerminalHub, registerTerminalWs } from '../events/terminals.js';
@@ -258,6 +266,19 @@ export interface CreateServerOptions {
     /** Per-run automatic-reassign budget override — bypasses the settings read (tests). */
     maxEscalations?: number;
   };
+  /**
+   * The background delivery-derivation cache's sweep (GET /runs p99): every `sweepIntervalMs`
+   * (default 30 s = `WORKTREE_CLEAN_TTL_MS`) the daemon re-derives every candidate run's
+   * stranded/vacuous/none label through a ≤3-wide git pool, so the run DTOs only ever READ a
+   * cache and the list fan-out never spawns git. `enabled` defaults to ON in the daemon and OFF
+   * under a test runner (VITEST / NODE_ENV=test), the seat-health-probe posture — the
+   * terminal-frame warm is always on (event-driven, not a timer).
+   */
+  deliveryCache?: {
+    enabled?: boolean;
+    /** Sweep cadence, ms (tests shorten it). */
+    sweepIntervalMs?: number;
+  };
 }
 
 export async function createServer(
@@ -351,6 +372,36 @@ export async function createServer(
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
   await deliveryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // The background delivery-derivation cache (GET /runs p99): the ONLY place the git vacuity
+  // probes run in the daemon — the run DTOs read this cache (degrading to the stat-only
+  // stranded/none label on a miss) and never spawn git on the request path. ONE probes object,
+  // passed to the routes below too, so the campaigns rollup rides the same TTL memo the sweeper
+  // keeps warm. Swept every 30s (WORKTREE_CLEAN_TTL_MS) through a ≤3-wide pool; warmed once per
+  // run at its terminal frame (the CoreEvent subscription below). The sweep is ON in the daemon
+  // and OFF under a test runner — the seat-health-probe posture: a test-built server must never
+  // background-spawn git unless it opts in.
+  const vacuityProbes: VacuityProbes = {
+    worktreeExists: (p) => existsSync(p),
+    worktreeIsClean: gitWorktreeIsClean(),
+    runBranchIsEmpty: gitRunBranchIsEmpty(
+      async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path,
+    ),
+  };
+  const deliveryCache = new DeliveryDerivationCache({
+    listViews: () => adapter.sessionsDetail(),
+    probes: vacuityProbes,
+    isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    log: (m) => app.log.warn(m),
+  });
+  const deliveryCacheArmed =
+    options?.deliveryCache?.enabled ??
+    !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
+  if (deliveryCacheArmed) {
+    deliveryCache.start(options?.deliveryCache?.sweepIntervalMs);
+    app.addHook('onClose', async () => {
+      deliveryCache.stop();
+    });
+  }
   // The one post-terminal `workOutput` read that resolves a run's delivered PR URL into the
   // durable record (audit entry) + the index the run DTOs echo. Best-effort by construction:
   // a failure here must never fail the run. Triggered on `sessionCompleted` OR
@@ -793,12 +844,14 @@ export async function createServer(
     broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
-    // terminal frames trigger it and why a failed deliver is a no-op.
+    // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
+    // derivation cache warms this run (after, so a just-recorded PR URL skips the git pair),
+    // healing the DTO's stranded/vacuous/none label in seconds instead of at the next sweep.
     if (
       (event.type === 'sessionCompleted' || event.type === 'sessionFailed') &&
       session !== undefined
     ) {
-      void resolveRunDelivery(session);
+      void resolveRunDelivery(session).then(() => deliveryCache.warm(session));
     }
     // The foundation record's evidence pointer (§3.2 row 3): a project-bound run that completes
     // gets its run-scope pointer written, best-effort, off the hot path.
@@ -946,7 +999,23 @@ export async function createServer(
       settings: projectSettings,
     },
     { audit, authMode: auth.mode },
-    { seatHealth, retryIndex, groupIndex, guidanceIndex, deliveryIndex, errorRing, studioRoot, dropDocLedgerRows },
+    {
+      seatHealth,
+      retryIndex,
+      groupIndex,
+      guidanceIndex,
+      deliveryIndex,
+      // The delivery machinery built beside the index above: the started cache, and the SAME
+      // probe functions it derives through — so the routes' campaign rollup shares one TTL memo
+      // with the sweeper instead of re-probing on its own clock.
+      deliveryCache,
+      worktreeExists: vacuityProbes.worktreeExists,
+      worktreeIsClean: vacuityProbes.worktreeIsClean,
+      runBranchIsEmpty: vacuityProbes.runBranchIsEmpty,
+      errorRing,
+      studioRoot,
+      dropDocLedgerRows,
+    },
   );
 
   // The UI-emittable direction of the interactive seam. Registered unconditionally (a null relay

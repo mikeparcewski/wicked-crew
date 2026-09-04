@@ -60,7 +60,6 @@ import { GroupIndex } from './group-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
   DeliveryIndex,
-  deliveryStateWithVacuity,
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   isDeliverConflictStranded,
@@ -68,6 +67,7 @@ import {
   type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
+import { DeliveryDerivationCache } from './delivery-cache.js';
 import {
   gitReprovisionWorktree,
   runDeliverScript,
@@ -335,6 +335,12 @@ export interface RuntimeDeps {
    *  the same reason; defaults to the TTL-memoized `gitRunBranchIsEmpty` over the adapter's
    *  repo registry. */
   runBranchIsEmpty?: (repoRef: string, runId: string) => Promise<boolean>;
+  /** The background delivery-derivation cache (GET /runs p99): the run DTOs READ this instead
+   *  of running the two git probes above at assembly — `createServer` builds one over the
+   *  production probes, arms its sweep, and warms it at each run's terminal frame. A
+   *  directly-driven route set gets a COLD, unstarted one over the same injectable probes:
+   *  reads then answer the stat-only tri-state until a test sweeps or warms it explicitly. */
+  deliveryCache?: DeliveryDerivationCache;
   /** The post-hoc deliver exec (crew#393, `POST /runs/:id/deliver`) — spawns the hardened
    *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
    *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
@@ -407,6 +413,17 @@ export function registerRoutes(
         return repos.find((r) => r.id === repoRef)?.root_path;
       }),
   };
+  // The background layer that owns the git probes above (GET /runs p99): the run DTOs read it,
+  // the daemon's sweep/warm feed it. The default (a directly-driven route set) is COLD and
+  // unstarted — no background timer under a unit test, reads degrade to the stat-only
+  // tri-state — while `createServer` injects a started one over the production probes.
+  const deliveryCache =
+    runtime.deliveryCache ??
+    new DeliveryDerivationCache({
+      listViews: () => adapter.sessionsDetail(),
+      probes: vacuityProbes,
+      isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
   const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
@@ -421,7 +438,10 @@ export function registerRoutes(
   // completed code run whose work is sitting unlifted in its worktree is VISIBLE on the wire,
   // legacy records included. The would-be-stranded runs are further split (crew#311): a
   // completed run whose worktree carries NO contribution at all reads `'vacuous'` — units all
-  // "done" with nothing produced must be LOUD on the wire, never silently green.
+  // "done" with nothing produced must be LOUD on the wire, never silently green. The vacuity
+  // split's git probes run in the BACKGROUND (delivery-cache.ts — GET /runs p99): DTO assembly
+  // reads the cache and degrades to the stat-only stranded/none label for at most one sweep
+  // tick on a miss, so the list fan-out never spawns git.
   // Applied at DTO assembly on exactly the two endpoints that serve the run DTO
   // (GET /runs + GET /runs/:id); the internal sessionsDetail() consumers are untouched.
   // crew#418 A: a `failed` run whose ONLY failure was the deliver phase's LIFT collision (a
@@ -448,17 +468,16 @@ export function registerRoutes(
   };
   /** The run's delivery state, honest by construction (crew#393/#311/#418): a recorded PR wins
    *  (`'delivered'`); else a lift-conflict strand reads `'stranded'` from the branch; else the
-   *  worktree-stat derivation (stranded / vacuous / none). */
-  const resolveDelivery = async (
-    view: SessionView,
-    conflictStrand: boolean,
-  ): Promise<DeliveryState> => {
+   *  delivery-derivation CACHE (a background-derived stranded / vacuous / none — GET /runs p99).
+   *  A cache miss answers the stat-only tri-state (one existsSync, the pre-crew#311 label) for
+   *  at most one sweep tick; the request path never spawns git and never awaits a derivation. */
+  const resolveDelivery = (view: SessionView, conflictStrand: boolean): DeliveryState => {
     const url = deliveryIndex.urlFor(view.session.id);
     if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
     if (conflictStrand) return { delivery: 'stranded' };
-    return deliveryStateWithVacuity(view.session, undefined, vacuityProbes);
+    return deliveryCache.read(view.session);
   };
-  const decorateRun = async (view: SessionView): Promise<SessionView> => {
+  const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
@@ -472,7 +491,7 @@ export function registerRoutes(
     }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
-    const state = await resolveDelivery(view, conflictStrand);
+    const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
     return view;
@@ -1015,8 +1034,8 @@ export function registerRoutes(
   // so that terminal-run entries are pruned even when their terminal CoreEvent was missed.
   app.get(
     `${V}/runs`,
-    { config: { manifest: { responseType: '{ runs: SessionView[] }', statusCodes: [200] } } },
-    async (req) => {
+    { config: { manifest: { responseType: '{ runs: SessionView[] }', statusCodes: [200, 400] } } },
+    async (req, reply) => {
     const views = await adapter.sessionsDetail();
     gateCache.reconcile(views);
     elicitationCache.reconcile(views);
@@ -1026,12 +1045,30 @@ export function registerRoutes(
     // resolve, not leak.
     // Fastify parses a REPEATED query param as string[] — normalize so `?include=archived`
     // and `?include=archived&include=archived` behave identically (Copilot).
-    const { include } = req.query as { include?: string | string[] };
+    const { include, limit } = req.query as { include?: string | string[]; limit?: string | string[] };
     const includeArchived = (Array.isArray(include) ? include : [include]).includes('archived');
+    // `?limit=N` — the top N AFTER the actionable-first sort below, so a capped poll still sees
+    // the runs that need a human before the terminal sediment. The default stays UNBOUNDED: the
+    // param used to be read by nobody (silently ignored — the full payload regardless), so an
+    // implicit cap would silently change results for un-migrated callers. A malformed value is
+    // refused loudly instead of ignored (the FINDING-031 posture: ignoring a field runs a
+    // different request than the caller sent) — and a repeated `?limit` is malformed too, since
+    // two caps are an ambiguity, not an idempotent repetition like `include`.
+    let cap: number | undefined;
+    if (limit !== undefined) {
+      const n = Array.isArray(limit) || limit.trim() === '' ? NaN : Number(limit);
+      if (!Number.isInteger(n) || n < 0) {
+        return reply.code(400).send({
+          error: `Invalid ?limit — expected one non-negative integer, got ${JSON.stringify(limit)}`,
+        });
+      }
+      cap = n;
+    }
     const visible = includeArchived
       ? views
       : views.filter((v) => v.session.archived_at == null);
-    return { runs: await Promise.all(sortActionableFirst(visible).map(decorateRun)) };
+    const ordered = sortActionableFirst(visible);
+    return { runs: (cap !== undefined ? ordered.slice(0, cap) : ordered).map(decorateRun) };
   });
 
   // ── Run archival (crew#265) — write-off, not delete ────────────────────────
@@ -1091,7 +1128,7 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    return { run: await decorateRun(run) };
+    return { run: decorateRun(run) };
   });
 
   // ── Post-hoc delivery (crew#393) — lift a stranded run's worktree into a PR ──
@@ -1635,7 +1672,7 @@ export function registerRoutes(
     // The 409 body carries the machine-readable pointer (`ResumeRefusal` in api-types).
     const terminal = run.session.status;
     if (terminal === 'completed' || terminal === 'cancelled') {
-      const state = await resolveDelivery(run, conflictStrand);
+      const state = resolveDelivery(run, conflictStrand);
       const recovery = terminal === 'completed' && state.delivery === 'stranded'
         ? ('deliver' as const)
         : ('retry' as const);

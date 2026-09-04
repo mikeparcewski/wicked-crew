@@ -37,7 +37,7 @@ describe('generated API suite (endpoint-manifest sample)', () => {
       const res = await app.inject({ method: "GET", url: "/api/v1/runs" });
       expect(res.statusCode).toBe(200);
       // The manifest declares this route's codes — the positive must be one of them.
-      expect([200]).toContain(res.statusCode);
+      expect([200,400]).toContain(res.statusCode);
     });
   });
 
