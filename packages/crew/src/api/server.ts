@@ -45,7 +45,10 @@ import { SeatHealthTracker, startSeatHealthProbe, type ProbeSeat } from './seat-
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
-import { DEFAULT_WORKER_STALL_MINUTES } from '../core/types.js';
+import {
+  DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
+  DEFAULT_WORKER_STALL_MINUTES,
+} from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
@@ -243,10 +246,11 @@ export interface CreateServerOptions {
    * `{ type: "workerStalled", session, ord?, quietForMs }` frame on /ws per quiet period and
    * logs at warn. Any new event re-arms. Detection never touches the run.
    *
-   * ESCALATION (crew#341) is OPT-IN and OFF by default: when `workerStallEscalateMinutes`
-   * (setting, or the `escalateMinutes` override) is > 0, a run still silent past that
-   * threshold gets one action per quiet period — `reassign` (default: recycle the wedged
-   * cursor unit in place via the engine's `reassignUnit`, budgeted per run by
+   * ESCALATION (crew#341) is ON BY DEFAULT as of perf#4 (`workerStallEscalateMinutes`
+   * defaults to 30; an explicit 0 — setting or `escalateMinutes` override — disarms): a run
+   * still silent past the threshold gets one action per quiet period — `reassign` (default:
+   * recycle the wedged cursor unit via the engine's `reassignUnit`, routed to a DIFFERENT
+   * seat from the run's pool when one is available, budgeted per run by
    * `workerStallMaxEscalations`) or `notify` (fail-loud `needsYou` frame, run untouched) —
    * each reported on a `workerStallEscalated` /ws frame and audited as `run.stall.escalated`.
    *
@@ -763,12 +767,13 @@ export async function createServer(
     }
   }
 
-  // The worker stall watchdog (crew#287 detection + crew#341 escalation). Built BEFORE the
-  // single CoreEvent subscription below so every relayed frame stamps its run's liveness clock;
-  // armed (sweep interval) further down beside the seat-health probe, under the same
-  // test-runner gate. Detection's sole outputs are one synthetic `workerStalled` /ws frame per
-  // quiet period and a warn log; the escalation stage (OFF unless `workerStallEscalateMinutes`
-  // > 0) additionally recycles the wedged cursor unit in place (`adapter.reassignUnit`) or
+  // The worker stall watchdog (crew#287 detection + crew#341 escalation, armed by default
+  // since perf#4). Built BEFORE the single CoreEvent subscription below so every relayed frame
+  // stamps its run's liveness clock; armed (sweep interval) further down beside the seat-health
+  // probe, under the same test-runner gate. Detection's sole outputs are one synthetic
+  // `workerStalled` /ws frame per quiet period and a warn log; the escalation stage (default
+  // `workerStallEscalateMinutes` 30 — an explicit 0 disarms) recycles the wedged cursor unit
+  // (`adapter.reassignUnit`, routed to a DIFFERENT seat from the run's pool when one exists) or
   // fail-louds, reports on a `workerStallEscalated` frame, and audits `run.stall.escalated`.
   const stallWatchdog = new WorkerStallWatchdog({
     listExecuting: async () =>
@@ -777,13 +782,15 @@ export async function createServer(
         .map((v) => {
           // The CURSOR unit, resolved exactly the way the engine resolves it (`session_units`
           // sorts by ord, then indexes `unit_ix`): its `ord` is what `reassignUnit` validates
-          // against, and its seat is what reassign-in-place re-dispatches to. Views with no
-          // units (older engines, stub adapters) keep the historical `unit_ix` fallback.
+          // against, and its seat is what a reassign moves away from. `seats` is the run's own
+          // pool (`session.clis`) — the failover candidates. Views with no units (older
+          // engines, stub adapters) keep the historical `unit_ix` fallback.
           const cursor = [...v.units].sort((a, b) => a.ord - b.ord)[v.session.unit_ix];
           return {
             id: v.session.id,
             ord: cursor?.ord ?? v.session.unit_ix,
             ...(cursor?.assigned_cli != null ? { cli: cursor.assigned_cli } : {}),
+            ...(Array.isArray(v.session.clis) ? { seats: v.session.clis } : {}),
           };
         }),
     broadcast: (frame) => broadcast(frame),
@@ -794,17 +801,23 @@ export async function createServer(
     escalation: {
       // Resolved per sweep so a PUT /settings change arms/disarms/retunes live. Test overrides
       // bypass the settings read field-by-field, same convention as `stallMinutes` above.
+      // `minutes` falls back to the perf#4 default (armed at 30) the same way `stallMinutes`
+      // falls back above — a stored explicit 0 still reads as OFF.
       config: async () => {
         const o = options?.stallWatchdog;
         const settings = await adapter.getSettings();
         return {
-          minutes: o?.escalateMinutes ?? settings.workerStallEscalateMinutes,
+          minutes:
+            o?.escalateMinutes ??
+            settings.workerStallEscalateMinutes ??
+            DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
           action: o?.escalateAction ?? settings.workerStallEscalateAction,
           maxPerRun: o?.maxEscalations ?? settings.workerStallMaxEscalations,
         };
       },
-      // Reassign IN PLACE: the watchdog passes the cursor unit's current seat, so the engine
-      // re-dispatches to the same CLI rather than re-running the council mid-wedge.
+      // The watchdog passes its failover TARGET (perf#4: a different seat from the run's pool
+      // when one is available, else the current seat recycled in place); null lets the engine
+      // re-run the council.
       reassign: async (runId, ord, cli) => {
         await adapter.reassignUnit(runId, ord, cli ?? null);
       },
@@ -819,6 +832,16 @@ export async function createServer(
           { runId: session, detail },
         );
       },
+    },
+    // The engine's own turn ceiling fired (`stepStatus: "timed_out"`, perf#4) — audit it as
+    // what it is, distinct from an operator cancel. Never sent by older engines; the ambiguous
+    // "cancelled" spelling deliberately triggers nothing (fail SAFE toward notify-only).
+    onTurnTimeout: ({ session, ...detail }) => {
+      audit.record(
+        'run.turn.timedout',
+        { id: 'stall-watchdog', kind: 'system', trust: 'admin' },
+        { runId: session, detail },
+      );
     },
     log: (m) => app.log.warn(m),
   });

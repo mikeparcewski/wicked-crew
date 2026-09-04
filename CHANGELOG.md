@@ -10,6 +10,32 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+- **The stall-watchdog escalation ladder is ON by default, and reassign routes to a DIFFERENT
+  seat (perf#4)**: crew#341's ladder shipped OFF (`workerStallEscalateMinutes` absent = detection
+  only), and run 616c8661 then burned the engine's full 2h turn ceiling with 106 minutes of output
+  silence while the watchdog fired once and watched. `workerStallEscalateMinutes` now defaults to
+  **30** (an explicit `0` disarms — the stored opt-out is honoured as-is; 30 leaves ~55% headroom
+  over the slowest legitimate time-to-first-output observed in the field, ~19.4 min, while still
+  recovering ~4x faster than the 2h ceiling — the 15-minute notify rung is unchanged), and the `reassign`
+  action routes the re-dispatch to a different seat from the run's own pool (`session.clis`) when
+  one is available, skipping seats this run already stall-reassigned away from; a single-seat pool
+  falls back to the in-place recycle. The `workerStallEscalated` frame now carries the failover
+  target in `cli` plus an additive `previousCli` (the stalled seat). The stalled-seat memory is
+  watchdog-local and per-run — a stalled seat is NOT an errored seat: it is never written to the
+  engine's `worker_failed_clis` (resume-path exclusion) and never folded into seat health.
+  Requires no engine change; the only mid-turn recovery used is the engine's existing
+  `reassignUnit` (attempt bump + epoch cancel — the superseded turn's late output drops as stale).
+- **Turn-timeouts are surfaced as what they are (perf#4, engine ≥ StepStatus::TimedOut)**: when a
+  relayed `unitOutputCaptured` carries the new `stepStatus: "timed_out"` (the engine's own
+  `WICKED_UNIT_TIMEOUT_SECS` ceiling — the last-resort backstop the silence ladder exists to
+  preempt), the daemon audits `run.turn.timedout` and logs it loudly as the platform's own
+  timeout, NOT an operator cancel. Compat contract: current/older engines never send the value, so
+  nothing fires; the ambiguous `"cancelled"` spelling (operator OR timeout on old engines)
+  deliberately triggers nothing — automatic action on an operator's cancel is the failure mode the
+  distinguishing status exists to prevent. api-types: `stepStatus` union widened (additive) and
+  `WorkerStallEscalatedFrame.previousCli` added.
+
 ### Added
 - **Refusal warning on the gate wire (crew#419)**: when a paused unit's prompt reads as a pure
   sandbox/tool refusal — the worker reporting it could not act (read-only sandbox, rejected writes,

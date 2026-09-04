@@ -543,7 +543,15 @@ export interface CoreEvent {
   updatedDescription?: string;
   // unitOutputCaptured (EVT-013)
   outputBytes?: number;
-  stepStatus?: 'ok' | 'failed' | 'cancelled';
+  /**
+   * How the worker step finished. `'elicitation_failed'` (DES-002) and `'timed_out'` (perf#4 —
+   * the ENGINE's own turn ceiling, `WICKED_UNIT_TIMEOUT_SECS`) widen the original trio.
+   * `'timed_out'` vs `'cancelled'` is THE wire distinction between the platform's deadline and
+   * an operator cancel: automation may key recovery on `'timed_out'`, and must treat
+   * `'cancelled'` as final. Older engines never send the newer values — consumers keying on
+   * them degrade to doing nothing, which is the safe direction.
+   */
+  stepStatus?: 'ok' | 'failed' | 'cancelled' | 'elicitation_failed' | 'timed_out';
   /** `unitOutputDelta` (api-types 0.5.1): one streamed chunk of a worker's live output text. */
   text?: string;
   // unitPlanned enrichment fields — the wire spelling is camelCase (event_to_json);
@@ -661,13 +669,15 @@ export type WorkerStalledFrame = {
 
 /**
  * The stall watchdog's ESCALATION frame (crew#341; api-types 0.18.0). DAEMON-SYNTHETIC, emitted
- * only when escalation is armed (`SystemSettings.workerStallEscalateMinutes` > 0 — OFF by
- * default) and a detected stall stays silent past that threshold. Reports what the watchdog DID
- * and how it ended, one escalation per quiet period:
+ * only when escalation is armed (`SystemSettings.workerStallEscalateMinutes` > 0 — ON by default
+ * as of perf#4, default 30 minutes; an explicit `0` disarms) and a detected stall stays silent
+ * past that threshold. Reports what the watchdog DID and how it ended, one escalation per quiet
+ * period:
  *
- * - `action: 'reassign'` — the wedged cursor unit was recycled in place (engine `reassignUnit`:
- *   the stale turn is superseded, the session closed, the unit re-dispatched; queued operator
- *   injects survive into the fresh turn). `outcome: 'ok' | 'failed' | 'exhausted'`.
+ * - `action: 'reassign'` — the wedged cursor unit was recycled (engine `reassignUnit`: the stale
+ *   turn is superseded, the session closed, the unit re-dispatched; queued operator injects
+ *   survive into the fresh turn), routed to a DIFFERENT seat from the run's pool when one is
+ *   available (perf#4) and in place otherwise. `outcome: 'ok' | 'failed' | 'exhausted'`.
  * - `action: 'notify'` — surface loudly without touching the run (the fail-loud rung).
  *
  * `needsYou: true` marks the frames a human should act on (failed / exhausted / notify).
@@ -687,8 +697,14 @@ export type WorkerStallEscalatedFrame = {
   outcome: 'ok' | 'failed' | 'exhausted';
   /** True when a human should look; false = the platform recovered on its own. */
   needsYou: boolean;
-  /** action `reassign`: the seat the unit was re-dispatched to, when known. */
+  /** action `reassign`: the seat the unit was re-dispatched to, when known. As of perf#4 this
+   *  is the failover TARGET — a different seat from the run's pool when one exists, else the
+   *  stalled seat recycled in place. */
   cli?: string;
+  /** action `reassign` (perf#4, additive): the seat that was stalled and reassigned AWAY from,
+   *  when the watchdog knew it. Equal to `cli` on a single-seat in-place recycle. Absent on
+   *  frames from daemons predating the field. */
+  previousCli?: string;
   /** action `reassign`: automatic reassigns consumed for this run, this one included. */
   escalations?: number;
   /** outcome `failed`: bounded excerpt of what the recovery call threw. */
@@ -951,8 +967,10 @@ export interface UnitReworkAmendedEvent {
 }
 
 /** P2 — a worker's ApplyStepResult arrived and output is ready to be gated. Fires before GateDecided.
- *  `outputBytes` is the byte length of the worker's output; `stepStatus` is "ok"/"failed"/"cancelled";
- *  `governed` reflects whether the runner armed input governance for this unit. */
+ *  `outputBytes` is the byte length of the worker's output; `stepStatus` is "ok" / "failed" /
+ *  "cancelled" / "elicitation_failed" (DES-002) / "timed_out" (perf#4 — the engine's own turn
+ *  ceiling, kept apart from "cancelled" so an operator cancel is never mistaken for a platform
+ *  timeout); `governed` reflects whether the runner armed input governance for this unit. */
 export interface UnitOutputCapturedEvent {
   type: 'unitOutputCaptured';
   session: string;
@@ -960,7 +978,7 @@ export interface UnitOutputCapturedEvent {
   attempt: number;
   /** Byte length of the worker's raw output — distinguishes 0-byte from 8 MB truncated. */
   outputBytes: number;
-  stepStatus: 'ok' | 'failed' | 'cancelled';
+  stepStatus: 'ok' | 'failed' | 'cancelled' | 'elicitation_failed' | 'timed_out';
   governed: boolean;
 }
 
@@ -1838,16 +1856,23 @@ export interface SystemSettings {
   /**
    * The stall watchdog's ESCALATION threshold (crew#341; api-types 0.18.0): quiet minutes before
    * the watchdog ACTS on a detected stall (see {@link WorkerStallEscalatedFrame}). Integer
-   * 0..1440; **absent or 0 = escalation OFF — the shipped default** (the issue's design: automatic
-   * recovery on a run that is merely slow would be worse than the wedge). Values below
+   * 0..1440; `0` = escalation OFF. **Absent = the daemon default (30 — armed)**: as of perf#4 the
+   * ladder is ON by default (run 616c8661 burned a full 2h turn ceiling with the watchdog
+   * detection-only; the engine's `reassignUnit` supersedes the wedged turn safely, so acting is
+   * strictly better than watching). 30 leaves ~55% headroom over the slowest legitimate
+   * time-to-first-output observed in the field (~19.4 min) while still recovering ~4x faster
+   * than the 2h ceiling. Opt out with an explicit `0`. Values below
    * `workerStallMinutes` escalate at the detection threshold — the ladder never acts before it
    * has notified.
    */
   workerStallEscalateMinutes?: number;
   /**
    * What an armed escalation DOES (crew#341): `'reassign'` (default) recycles the wedged cursor
-   * unit in place — the engine supersedes the stale turn, closes the worker session, bumps the
-   * attempt, and re-dispatches (queued operator injects survive into the fresh turn);
+   * unit — the engine supersedes the stale turn, closes the worker session, bumps the
+   * attempt, and re-dispatches (queued operator injects survive into the fresh turn). As of
+   * perf#4 the watchdog routes the re-dispatch to a DIFFERENT seat from the run's own pool when
+   * one is available (a seat that just sat silent past the escalation threshold is the last
+   * seat to hand the retry to), falling back to an in-place recycle on a single-seat pool.
    * `'notify'` is the fail-loud rung — a `needsYou` `workerStallEscalated` frame + an audit
    * entry, the run untouched.
    */
