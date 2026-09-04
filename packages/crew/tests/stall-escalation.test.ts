@@ -148,22 +148,25 @@ describe('escalation stays off when the resolved config carries no usable minute
 // ── perf#4 — the ladder is ON by default, and reassign routes to a DIFFERENT seat ────────────
 
 describe('perf#4: default-ON', () => {
-  it('the shipped default arms the ladder at 20 minutes (an explicit 0 stays the opt-out)', () => {
-    expect(DEFAULT_WORKER_STALL_ESCALATE_MINUTES).toBe(20);
+  it('the shipped default arms the ladder at 30 minutes (an explicit 0 stays the opt-out)', () => {
+    // 30, not lower: the trigger clock (silence since the last CoreEvent) is the same clock a
+    // slow-but-legitimate first turn rides — the recon's max legitimate time-to-first-output was
+    // ~19.4 min, so 30 keeps ~55% headroom while still beating the 2h ceiling ~4x.
+    expect(DEFAULT_WORKER_STALL_ESCALATE_MINUTES).toBe(30);
     expect(DEFAULT_SETTINGS.workerStallEscalateMinutes).toBe(
       DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
     );
   });
 
-  it('at the default config the ladder acts (reassign) at ~20 min of silence', async () => {
+  it('at the default config the ladder acts (reassign) at ~30 min of silence', async () => {
     const { wd, frames, reassigns, tick } = build({
       config: () => ({ minutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES }),
     });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
-    tick(16 * MIN); // past detect (15), under the 20-min default
+    tick(20 * MIN); // past detect (15) AND past the recon's slowest legitimate first output
     await wd.sweep();
-    expect(reassigns).toEqual([]);
-    tick(5 * MIN); // 21 min — past the default escalation threshold
+    expect(reassigns).toEqual([]); // a merely-slow first turn is not acted on at ~20 min
+    tick(11 * MIN); // 31 min — past the default escalation threshold
     await wd.sweep();
     expect(reassigns).toHaveLength(1);
     expect(escalatedOf(frames)[0]).toMatchObject({ action: 'reassign', outcome: 'ok' });
@@ -910,7 +913,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
     const listeners = new Set<Listener>();
     let reassignCalls = 0;
     const mockAdapter = {
-      // perf#4 flipped the DEFAULT to armed (20 min): absent no longer spells OFF, an explicit
+      // perf#4 flipped the DEFAULT to armed (30 min): absent no longer spells OFF, an explicit
       // 0 does. This store carries the opt-out — exactly a production daemon that disarmed.
       getSettings: async (): Promise<SystemSettings> => ({
         graphNodeLimit: 150,

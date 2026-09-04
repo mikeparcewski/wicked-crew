@@ -125,8 +125,14 @@ export const DEFAULT_WORKER_STALL_MINUTES = 15;
  * watched; the engine's `reassignUnit` supersedes the wedged turn safely (attempt bump + epoch
  * cancel: the stale turn's late output drops, no double-charge), so acting is strictly better
  * than watching. An explicit `workerStallEscalateMinutes: 0` disarms it (the crew#341 opt-out).
+ *
+ * WHY 30: the trigger clock (silence since the last CoreEvent) is exactly the clock a slow but
+ * legitimate first turn rides — the recon's max legitimate time-to-first-output across 68 units
+ * was 1,161s ≈ 19.35 min, which leaves only a 3–6% margin at a 20-minute threshold. 30 minutes
+ * gives ~55% headroom over that observed worst case while still recovering ~4x faster than the
+ * 2h ceiling. The 15-minute detection (notify) rung is unchanged.
  */
-export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 20;
+export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 30;
 
 /**
  * Default `workerStallEscalateAction` (crew#341) when escalation is armed: recycle the wedged
@@ -167,7 +173,7 @@ export interface CrewSystemSettings extends SystemSettings {
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
   workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
-  // perf#4 — the escalation ladder is armed by default: 20 silent minutes → reassign the wedged
+  // perf#4 — the escalation ladder is armed by default: 30 silent minutes → reassign the wedged
   // cursor unit to a different seat. An explicit 0 (via PUT /settings or settings.json) disarms.
   workerStallEscalateMinutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   // crew#393 — repo-scoped CODE-WORK launches (a def with an `executes_code` phase) DELIVER by

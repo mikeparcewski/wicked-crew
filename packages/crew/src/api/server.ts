@@ -239,7 +239,7 @@ export interface CreateServerOptions {
    * logs at warn. Any new event re-arms. Detection never touches the run.
    *
    * ESCALATION (crew#341) is ON BY DEFAULT as of perf#4 (`workerStallEscalateMinutes`
-   * defaults to 20; an explicit 0 — setting or `escalateMinutes` override — disarms): a run
+   * defaults to 30; an explicit 0 — setting or `escalateMinutes` override — disarms): a run
    * still silent past the threshold gets one action per quiet period — `reassign` (default:
    * recycle the wedged cursor unit via the engine's `reassignUnit`, routed to a DIFFERENT
    * seat from the run's pool when one is available, budgeted per run by
@@ -716,7 +716,7 @@ export async function createServer(
   // stamps its run's liveness clock; armed (sweep interval) further down beside the seat-health
   // probe, under the same test-runner gate. Detection's sole outputs are one synthetic
   // `workerStalled` /ws frame per quiet period and a warn log; the escalation stage (default
-  // `workerStallEscalateMinutes` 20 — an explicit 0 disarms) recycles the wedged cursor unit
+  // `workerStallEscalateMinutes` 30 — an explicit 0 disarms) recycles the wedged cursor unit
   // (`adapter.reassignUnit`, routed to a DIFFERENT seat from the run's pool when one exists) or
   // fail-louds, reports on a `workerStallEscalated` frame, and audits `run.stall.escalated`.
   const stallWatchdog = new WorkerStallWatchdog({
@@ -745,7 +745,7 @@ export async function createServer(
     escalation: {
       // Resolved per sweep so a PUT /settings change arms/disarms/retunes live. Test overrides
       // bypass the settings read field-by-field, same convention as `stallMinutes` above.
-      // `minutes` falls back to the perf#4 default (armed at 20) the same way `stallMinutes`
+      // `minutes` falls back to the perf#4 default (armed at 30) the same way `stallMinutes`
       // falls back above — a stored explicit 0 still reads as OFF.
       config: async () => {
         const o = options?.stallWatchdog;

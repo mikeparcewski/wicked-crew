@@ -15,7 +15,9 @@ mentioned only where a daemon release depends on them.
   seat (perf#4)**: crew#341's ladder shipped OFF (`workerStallEscalateMinutes` absent = detection
   only), and run 616c8661 then burned the engine's full 2h turn ceiling with 106 minutes of output
   silence while the watchdog fired once and watched. `workerStallEscalateMinutes` now defaults to
-  **20** (an explicit `0` disarms — the stored opt-out is honoured as-is), and the `reassign`
+  **30** (an explicit `0` disarms — the stored opt-out is honoured as-is; 30 leaves ~55% headroom
+  over the slowest legitimate time-to-first-output observed in the field, ~19.4 min, while still
+  recovering ~4x faster than the 2h ceiling — the 15-minute notify rung is unchanged), and the `reassign`
   action routes the re-dispatch to a different seat from the run's own pool (`session.clis`) when
   one is available, skipping seats this run already stall-reassigned away from; a single-seat pool
   falls back to the in-place recycle. The `workerStallEscalated` frame now carries the failover

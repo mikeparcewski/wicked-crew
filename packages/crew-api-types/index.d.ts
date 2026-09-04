@@ -670,7 +670,7 @@ export type WorkerStalledFrame = {
 /**
  * The stall watchdog's ESCALATION frame (crew#341; api-types 0.18.0). DAEMON-SYNTHETIC, emitted
  * only when escalation is armed (`SystemSettings.workerStallEscalateMinutes` > 0 — ON by default
- * as of perf#4, default 20 minutes; an explicit `0` disarms) and a detected stall stays silent
+ * as of perf#4, default 30 minutes; an explicit `0` disarms) and a detected stall stays silent
  * past that threshold. Reports what the watchdog DID and how it ended, one escalation per quiet
  * period:
  *
@@ -1856,10 +1856,12 @@ export interface SystemSettings {
   /**
    * The stall watchdog's ESCALATION threshold (crew#341; api-types 0.18.0): quiet minutes before
    * the watchdog ACTS on a detected stall (see {@link WorkerStallEscalatedFrame}). Integer
-   * 0..1440; `0` = escalation OFF. **Absent = the daemon default (20 — armed)**: as of perf#4 the
+   * 0..1440; `0` = escalation OFF. **Absent = the daemon default (30 — armed)**: as of perf#4 the
    * ladder is ON by default (run 616c8661 burned a full 2h turn ceiling with the watchdog
    * detection-only; the engine's `reassignUnit` supersedes the wedged turn safely, so acting is
-   * strictly better than watching). Opt out with an explicit `0`. Values below
+   * strictly better than watching). 30 leaves ~55% headroom over the slowest legitimate
+   * time-to-first-output observed in the field (~19.4 min) while still recovering ~4x faster
+   * than the 2h ceiling. Opt out with an explicit `0`. Values below
    * `workerStallMinutes` escalate at the detection threshold — the ladder never acts before it
    * has notified.
    */
@@ -1869,8 +1871,8 @@ export interface SystemSettings {
    * unit — the engine supersedes the stale turn, closes the worker session, bumps the
    * attempt, and re-dispatches (queued operator injects survive into the fresh turn). As of
    * perf#4 the watchdog routes the re-dispatch to a DIFFERENT seat from the run's own pool when
-   * one is available (a seat that just sat silent for 20+ minutes is the last seat to hand the
-   * retry to), falling back to an in-place recycle on a single-seat pool.
+   * one is available (a seat that just sat silent past the escalation threshold is the last
+   * seat to hand the retry to), falling back to an in-place recycle on a single-seat pool.
    * `'notify'` is the fail-loud rung — a `needsYou` `workerStallEscalated` frame + an audit
    * entry, the run untouched.
    */

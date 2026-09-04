@@ -23,16 +23,18 @@
 //   full 2h turn ceiling (106 min of output silence) while the watchdog fired once and watched.
 //   `reassignUnit` is safe on a merely-slow run — the superseded turn is not folded as a
 //   failure, its late output drops on the attempt guard, queued injects survive — so acting at
-//   `DEFAULT_WORKER_STALL_ESCALATE_MINUTES` (20) of TOTAL silence is strictly better than
-//   watching. An explicit `workerStallEscalateMinutes: 0` restores detection-only.
+//   `DEFAULT_WORKER_STALL_ESCALATE_MINUTES` (30 — ~55% headroom over the recon's slowest
+//   legitimate first output of ~19.4 min, still ~4x faster than the 2h ceiling) of TOTAL
+//   silence is strictly better than watching. An explicit `workerStallEscalateMinutes: 0`
+//   restores detection-only.
 // - When armed, a run still silent past the escalation threshold (never before the detection
 //   threshold — the ladder notifies before it acts) gets ONE escalation per quiet period:
 //   - action `reassign` (default): recycle the wedged cursor unit via the engine's
 //     `reassignUnit` — the stale turn is superseded (not folded as a failure), the worker
 //     session closed, the attempt bumped, the unit re-dispatched; queued operator injects
 //     survive into the fresh turn. The re-dispatch is routed to a DIFFERENT seat from the
-//     run's own pool when one is available (perf#4): a seat that just sat silent for 20+
-//     minutes is the last seat to hand the retry to. Seats already stall-reassigned away from
+//     run's own pool when one is available (perf#4): a seat that just sat silent past the
+//     escalation threshold is the last seat to hand the retry to. Seats already stall-reassigned away from
 //     on this run are skipped too; a single-seat pool falls back to the in-place recycle.
 //     NOTE the seat memory is WATCHDOG-LOCAL and per-run: a stalled seat is NOT an errored
 //     seat. It is never written to the engine's `worker_failed_clis` (which the resume path
