@@ -119,8 +119,19 @@ export interface LaunchRunInput {
 export const DEFAULT_WORKER_STALL_MINUTES = 15;
 
 /**
+ * Default `workerStallEscalateMinutes` (perf#4): silent minutes before the watchdog ACTS.
+ * The escalation ladder is ON BY DEFAULT as of perf#4 — run 616c8661 sat wedged for a full 2h
+ * turn ceiling (106 min of output silence) while the detection-only watchdog fired once and
+ * watched; the engine's `reassignUnit` supersedes the wedged turn safely (attempt bump + epoch
+ * cancel: the stale turn's late output drops, no double-charge), so acting is strictly better
+ * than watching. An explicit `workerStallEscalateMinutes: 0` disarms it (the crew#341 opt-out).
+ */
+export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 20;
+
+/**
  * Default `workerStallEscalateAction` (crew#341) when escalation is armed: recycle the wedged
- * cursor unit in place (engine `reassignUnit`).
+ * cursor unit via the engine's `reassignUnit` — routed to a DIFFERENT seat from the run's pool
+ * when one is available (perf#4), in place otherwise.
  */
 export const DEFAULT_WORKER_STALL_ESCALATE_ACTION = 'reassign' as const;
 
@@ -135,9 +146,9 @@ export const DEFAULT_WORKER_STALL_MAX_ESCALATIONS = 2;
  * (`workerStallMinutes`, crew#287; `workerStallEscalateMinutes` /
  * `workerStallEscalateAction` / `workerStallMaxEscalations`, crew#341) live in the published
  * contract as of api-types 0.18.0 and are INHERITED here — what remains local is the
- * `studio.*` restatement below. Note the escalation DEFAULT is OFF
- * (`workerStallEscalateMinutes` absent/0): automatic recovery on a run that is merely slow
- * would be worse than the wedge (crew#341's design).
+ * `studio.*` restatement below. Note the escalation ladder is ON BY DEFAULT as of perf#4
+ * (`workerStallEscalateMinutes` defaults to [`DEFAULT_WORKER_STALL_ESCALATE_MINUTES`]); an
+ * explicit `0` disarms it.
  */
 export interface CrewSystemSettings extends SystemSettings {
   /**
@@ -156,6 +167,9 @@ export interface CrewSystemSettings extends SystemSettings {
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
   workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
+  // perf#4 — the escalation ladder is armed by default: 20 silent minutes → reassign the wedged
+  // cursor unit to a different seat. An explicit 0 (via PUT /settings or settings.json) disarms.
+  workerStallEscalateMinutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   // crew#393 — repo-scoped CODE-WORK launches (a def with an `executes_code` phase) DELIVER by
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.

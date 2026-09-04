@@ -27,9 +27,12 @@ import {
   type WorkerStalledFrame,
 } from '../src/api/stall-watchdog.js';
 import {
+  DEFAULT_SETTINGS,
   DEFAULT_WORKER_STALL_ESCALATE_ACTION,
+  DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   DEFAULT_WORKER_STALL_MAX_ESCALATIONS,
 } from '../src/core/types.js';
+import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { createServer } from '../src/api/server.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -89,7 +92,7 @@ function build(opts?: {
   return { wd, frames, logs, reassigns, audited, tick: (ms) => (nowMs += ms) };
 }
 
-describe('escalation is OFF by default (crew#341: opt-in matters)', () => {
+describe('escalation disarms on absent/0 minutes (the explicit opt-out; the DEFAULT is armed — see perf#4 below)', () => {
   it('unset minutes: detection fires, nothing acts, however long the silence', async () => {
     const { wd, frames, reassigns, tick } = build({ config: () => ({ minutes: undefined }) });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
@@ -138,6 +141,251 @@ describe('escalation is OFF by default (crew#341: opt-in matters)', () => {
   });
 });
 
+// ── perf#4 — the ladder is ON by default, and reassign routes to a DIFFERENT seat ────────────
+
+describe('perf#4: default-ON', () => {
+  it('the shipped default arms the ladder at 20 minutes (an explicit 0 stays the opt-out)', () => {
+    expect(DEFAULT_WORKER_STALL_ESCALATE_MINUTES).toBe(20);
+    expect(DEFAULT_SETTINGS.workerStallEscalateMinutes).toBe(
+      DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
+    );
+  });
+
+  it('at the default config the ladder acts (reassign) at ~20 min of silence', async () => {
+    const { wd, frames, reassigns, tick } = build({
+      config: () => ({ minutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
+    tick(16 * MIN); // past detect (15), under the 20-min default
+    await wd.sweep();
+    expect(reassigns).toEqual([]);
+    tick(5 * MIN); // 21 min — past the default escalation threshold
+    await wd.sweep();
+    expect(reassigns).toHaveLength(1);
+    expect(escalatedOf(frames)[0]).toMatchObject({ action: 'reassign', outcome: 'ok' });
+  });
+});
+
+describe('perf#4: reassign routes to a DIFFERENT seat from the run pool', () => {
+  it('fails over to the first other pool seat, reporting target and stalled seat apart', async () => {
+    const { wd, frames, reassigns, tick } = build({
+      runs: [{ id: 'r-pool', ord: 3, cli: 'claude', seats: ['claude', 'codex', 'pi'] }],
+      config: () => ({ minutes: 30 }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-pool', ord: 3, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    // The engine call carries the TARGET seat — a different one.
+    expect(reassigns).toEqual([{ runId: 'r-pool', ord: 3, cli: 'codex' }]);
+    expect(escalatedOf(frames)[0]).toMatchObject({
+      action: 'reassign',
+      outcome: 'ok',
+      cli: 'codex', // failover target
+      previousCli: 'claude', // the seat that stalled
+    });
+  });
+
+  it('consecutive wedges rotate the pool: never back to a seat that already stalled here', async () => {
+    // After the first failover the cursor seat is codex (the engine re-dispatched there).
+    let cursorCli = 'claude';
+    const { wd, reassigns, tick } = build({
+      listExecuting: async () => [
+        { id: 'r-rotate', ord: 3, cli: cursorCli, seats: ['claude', 'codex', 'pi'] },
+      ],
+      config: () => ({ minutes: 30, maxPerRun: 3 }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-rotate', ord: 3, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns[0]).toEqual({ runId: 'r-rotate', ord: 3, cli: 'codex' });
+
+    // The fresh turn wedges too: claude is remembered as stalled, codex is current → pi.
+    cursorCli = 'codex';
+    wd.ingest(ev({ type: 'unitReassigned', session: 'r-rotate', ord: 3, attempt: 1 }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns[1]).toEqual({ runId: 'r-rotate', ord: 3, cli: 'pi' });
+
+    // Pool exhausted (claude and codex stalled, pi current): fall back to in-place — never
+    // bounce back to a seat that already wedged this run.
+    cursorCli = 'pi';
+    wd.ingest(ev({ type: 'unitReassigned', session: 'r-rotate', ord: 3, attempt: 2 }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns[2]).toEqual({ runId: 'r-rotate', ord: 3, cli: 'pi' });
+  });
+
+  it('a single-seat pool falls back sanely: recycle the same seat in place', async () => {
+    const { wd, frames, reassigns, tick } = build({
+      runs: [{ id: 'r-solo', ord: 1, cli: 'claude', seats: ['claude'] }],
+      config: () => ({ minutes: 30 }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-solo', ord: 1, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-solo', ord: 1, cli: 'claude' }]);
+    expect(escalatedOf(frames)[0]).toMatchObject({
+      outcome: 'ok',
+      cli: 'claude',
+      previousCli: 'claude',
+    });
+  });
+
+  it('an unknown current seat keeps the council re-pick shape (no cli passed)', async () => {
+    const { wd, reassigns, tick } = build({
+      runs: [{ id: 'r-nocli', ord: 2, seats: ['claude', 'codex'] }],
+      config: () => ({ minutes: 30 }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-nocli', ord: 2, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-nocli', ord: 2 }]);
+  });
+
+  it('the stalled-seat memory prunes with the run, like the budget', async () => {
+    let executing: ExecutingRun[] = [
+      { id: 'r-prune', ord: 1, cli: 'claude', seats: ['claude', 'codex'] },
+    ];
+    const { wd, reassigns, tick } = build({
+      listExecuting: async () => executing,
+      config: () => ({ minutes: 30 }),
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-prune', ord: 1, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns[0]).toEqual({ runId: 'r-prune', ord: 1, cli: 'codex' });
+
+    executing = []; // the run left executing
+    await wd.sweep(); // prune
+    executing = [{ id: 'r-prune', ord: 1, cli: 'codex', seats: ['claude', 'codex'] }];
+    await wd.sweep(); // re-seed
+    tick(31 * MIN);
+    await wd.sweep();
+    // Fresh memory: claude is eligible again — a NEW wedge is a new fact.
+    expect(reassigns[1]).toEqual({ runId: 'r-prune', ord: 1, cli: 'claude' });
+  });
+});
+
+describe('perf#4: a stalled seat is NOT an errored seat', () => {
+  it('a stall escalation touches the engine ONLY via reassign, and seat health stays clean', async () => {
+    const { wd, frames, reassigns, tick } = build({
+      runs: [{ id: 'r-health', ord: 3, cli: 'claude', seats: ['claude', 'codex'] }],
+      config: () => ({ minutes: 30 }),
+    });
+    const seatHealth = new SeatHealthTracker();
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-health', ord: 3, text: 'x' }));
+    tick(31 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-health', ord: 3, cli: 'codex' }]);
+
+    // Fold everything the stall produced — the synthetic frames plus the engine's follow-ups —
+    // into the seat-health tracker: NOTHING may mark the stalled seat inactive/errored. (An
+    // errored seat is a stepFailed workerError; a stall reassign deliberately produces none, so
+    // resume-path exclusion — the engine's worker_failed_clis — is never fed either.)
+    for (const f of frames) seatHealth.ingest(f as unknown as CoreEvent);
+    seatHealth.ingest(ev({ type: 'unitReassigned', session: 'r-health', ord: 3, attempt: 1 }));
+    expect(seatHealth.healthFor('claude').status).toBe('active');
+    expect(seatHealth.healthFor('codex').status).toBe('active');
+  });
+
+  it("the engine's turn ceiling (stepStatus timed_out) does not mark the seat errored either", () => {
+    const seatHealth = new SeatHealthTracker();
+    seatHealth.ingest(ev({ type: 'unitDistributed', session: 'r-t', ord: 1, cli: 'codex' }));
+    seatHealth.ingest(
+      ev({
+        type: 'unitOutputCaptured',
+        session: 'r-t',
+        ord: 1,
+        attempt: 0,
+        outputBytes: 64,
+        stepStatus: 'timed_out',
+        governed: false,
+      }),
+    );
+    expect(seatHealth.healthFor('codex').status).toBe('active');
+  });
+});
+
+describe("perf#4: the engine's distinguishing turn-timeout status (compat contract)", () => {
+  it('stepStatus "timed_out" fires the turn-timeout sink and a loud log', () => {
+    const timeouts: { session: string; ord?: number; attempt?: number }[] = [];
+    const logs: string[] = [];
+    const wd = new WorkerStallWatchdog({
+      listExecuting: async () => [],
+      broadcast: () => undefined,
+      onTurnTimeout: (info) => timeouts.push(info),
+      log: (m) => logs.push(m),
+    });
+    wd.ingest(
+      ev({
+        type: 'unitOutputCaptured',
+        session: 'r-ceiling',
+        ord: 6,
+        attempt: 0,
+        outputBytes: 12,
+        stepStatus: 'timed_out',
+        governed: true,
+      }),
+    );
+    expect(timeouts).toEqual([{ session: 'r-ceiling', ord: 6, attempt: 0 }]);
+    expect(logs.some((m) => m.includes('turn ceiling') && m.includes('NOT an operator cancel'))).toBe(
+      true,
+    );
+  });
+
+  it('the ambiguous "cancelled" spelling (old engines: operator OR timeout) triggers NOTHING', () => {
+    // FAIL SAFE: against a current/older engine the new status never arrives, and a cancel must
+    // never be acted on — an operator's Ctrl-C staying final is the whole point of the split.
+    const timeouts: unknown[] = [];
+    const wd = new WorkerStallWatchdog({
+      listExecuting: async () => [],
+      broadcast: () => undefined,
+      onTurnTimeout: (info) => timeouts.push(info),
+    });
+    for (const stepStatus of ['cancelled', 'failed', 'ok', 'elicitation_failed', undefined]) {
+      wd.ingest(
+        ev({
+          type: 'unitOutputCaptured',
+          session: 'r-amb',
+          ord: 1,
+          attempt: 0,
+          outputBytes: 0,
+          ...(stepStatus !== undefined ? { stepStatus } : {}),
+          governed: false,
+        }),
+      );
+    }
+    wd.ingest(ev({ type: 'runCancelled', session: 'r-amb' }));
+    expect(timeouts).toEqual([]);
+  });
+
+  it('a throwing turn-timeout sink is contained and logged', () => {
+    const logs: string[] = [];
+    const wd = new WorkerStallWatchdog({
+      listExecuting: async () => [],
+      broadcast: () => undefined,
+      onTurnTimeout: () => {
+        throw new Error('audit disk full');
+      },
+      log: (m) => logs.push(m),
+    });
+    expect(() =>
+      wd.ingest(
+        ev({
+          type: 'unitOutputCaptured',
+          session: 'r-sink',
+          ord: 1,
+          attempt: 0,
+          outputBytes: 0,
+          stepStatus: 'timed_out',
+          governed: false,
+        }),
+      ),
+    ).not.toThrow();
+    expect(logs.some((m) => m.includes('turn-timeout sink failed'))).toBe(true);
+  });
+});
+
 describe('the reassign rung — recycle the wedged cursor unit in place', () => {
   it('notifies at the detection threshold, acts at the escalation threshold', async () => {
     const { wd, frames, reassigns, audited, tick } = build({ config: () => ({ minutes: 30 }) });
@@ -163,9 +411,11 @@ describe('the reassign rung — recycle the wedged cursor unit in place', () => 
         needsYou: false, // the platform recovered on its own — narrator-visible, nobody paged
         escalations: 1,
         cli: 'claude',
+        previousCli: 'claude', // no seat pool known → in-place recycle (perf#4 fallback)
       },
     ]);
-    // Reassign-IN-PLACE: the engine-true cursor ord and the unit's CURRENT seat.
+    // No `seats` pool on the run → reassign IN PLACE: the engine-true cursor ord and the
+    // unit's CURRENT seat (the pre-perf#4 behaviour, still the single-seat fallback).
     expect(reassigns).toEqual([{ runId: 'r-wedge', ord: 3, cli: 'claude' }]);
     // Audited: an automated actor touching a run is a privileged action.
     expect(audited).toEqual(esc);
@@ -493,9 +743,14 @@ afterEach(() => {
 });
 
 /** One executing run whose view names the cursor unit the way the real engine does. */
-function executingView(id: string, unitIx: number, ords: { ord: number; cli: string | null }[]): SessionView {
+function executingView(
+  id: string,
+  unitIx: number,
+  ords: { ord: number; cli: string | null }[],
+  clis?: string[],
+): SessionView {
   return {
-    session: { id, status: 'executing', unit_ix: unitIx },
+    session: { id, status: 'executing', unit_ix: unitIx, ...(clis !== undefined ? { clis } : {}) },
     units: ords.map((u, i) => ({ id: `${id}:u${i}`, ord: u.ord, assigned_cli: u.cli })),
   } as unknown as SessionView;
 }
@@ -520,11 +775,18 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
       getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
       projectsSupported: (): boolean => false,
       sessionsDetail: async (): Promise<SessionView[]> => [
-        executingView('r-esc', 1, [
-          { ord: 6, cli: null },
-          { ord: 2, cli: 'claude' },
-          { ord: 4, cli: 'codex' },
-        ]),
+        executingView(
+          'r-esc',
+          1,
+          [
+            { ord: 6, cli: null },
+            { ord: 2, cli: 'claude' },
+            { ord: 4, cli: 'codex' },
+          ],
+          // The run's seat pool — the perf#4 failover candidates: codex (the cursor seat)
+          // stalled, so the reassign must route to claude.
+          ['claude', 'codex'],
+        ),
       ],
       reassignUnit: async (runId: string, ord: number, cli?: string | null): Promise<void> => {
         reassigns.push({ runId, ord, cli: cli ?? null });
@@ -591,8 +853,11 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
       expect(first.action).toBe('reassign');
       expect(first.outcome).toBe('ok');
       expect(first.needsYou).toBe(false);
-      expect(first.cli).toBe('codex');
-      expect(reassigns).toEqual([{ runId: 'r-esc', ord: 4, cli: 'codex' }]);
+      // perf#4: the reassign routed AWAY from the stalled cursor seat (codex) to the other
+      // pool seat — target and stalled seat both on the frame.
+      expect(first.cli).toBe('claude');
+      expect(first.previousCli).toBe('codex');
+      expect(reassigns).toEqual([{ runId: 'r-esc', ord: 4, cli: 'claude' }]);
 
       // The engine's reassign events re-armed the watchdog; the budget (1) is now spent, so
       // the SECOND quiet period must fail loud instead of acting again.
@@ -637,11 +902,16 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
     }
   }, 15_000);
 
-  it('stays detection-only through the real server when escalation is not armed (the default)', async () => {
+  it('stays detection-only through the real server on the explicit opt-out (workerStallEscalateMinutes: 0)', async () => {
     const listeners = new Set<Listener>();
     let reassignCalls = 0;
     const mockAdapter = {
-      getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
+      // perf#4 flipped the DEFAULT to armed (20 min): absent no longer spells OFF, an explicit
+      // 0 does. This store carries the opt-out — exactly a production daemon that disarmed.
+      getSettings: async (): Promise<SystemSettings> => ({
+        graphNodeLimit: 150,
+        workerStallEscalateMinutes: 0,
+      }),
       projectsSupported: (): boolean => false,
       sessionsDetail: async (): Promise<SessionView[]> => [
         executingView('r-default', 0, [{ ord: 1, cli: 'claude' }]),
@@ -658,8 +928,8 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
     const app = await createServer(mockAdapter, {
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
-      // NO escalate override, and the settings store carries no workerStallEscalateMinutes:
-      // exactly a production daemon that never opted in.
+      // NO escalate override — the settings store's explicit 0 must be honoured as-is (the
+      // server-side default fallback applies only when the setting is ABSENT).
       stallWatchdog: { enabled: true, sweepIntervalMs: 40, stallMinutes: 0.004 },
     });
     await app.listen({ port: 0, host: '127.0.0.1' });

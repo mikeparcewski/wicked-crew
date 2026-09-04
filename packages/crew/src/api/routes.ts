@@ -2694,7 +2694,7 @@ export function registerRoutes(
     // The escalation ladder's knobs (crew#341). This trio lets the PLATFORM touch runs, so a
     // typo must be a 400, never a silently-dropped key that leaves the operator believing they
     // armed (or disarmed) automatic recovery. `workerStallEscalateMinutes: 0` is the explicit
-    // OFF spelling — and the shipped default is off (absent).
+    // OFF spelling — the shipped default is ON at 20 (perf#4), so 0 is how an operator disarms.
     if (Object.hasOwn(patch, 'workerStallEscalateMinutes')) {
       const mins = patch.workerStallEscalateMinutes;
       if (typeof mins !== 'number' || !Number.isInteger(mins) || mins < 0 || mins > 1440) {
