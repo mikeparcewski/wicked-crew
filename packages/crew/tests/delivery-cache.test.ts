@@ -203,7 +203,22 @@ describe('?limit — honored, post-sort, default unbounded, loud on malformed in
     try {
       await app.ready();
       expect((await listRuns(app, '?limit=0')).runs).toEqual([]);
-      for (const qs of ['?limit=banana', '?limit=-1', '?limit=1.5', '?limit=', '?limit=1&limit=2']) {
+      // Canonical decimal ONLY (Copilot on #435): the `Number(...)` aliases — hex, exponent,
+      // signed, whitespace-padded (`%20` = ' 1', `%2B` = '+1'), Infinity, non-canonical zeros —
+      // are refused exactly like the plainly-garbage spellings, never quietly honored.
+      for (const qs of [
+        '?limit=banana',
+        '?limit=-1',
+        '?limit=1.5',
+        '?limit=',
+        '?limit=1&limit=2',
+        '?limit=0x10',
+        '?limit=2e3',
+        '?limit=%201',
+        '?limit=%2B1',
+        '?limit=Infinity',
+        '?limit=01',
+      ]) {
         const res = await listRuns(app, qs);
         expect(res.code, qs).toBe(400);
         expect(res.error, qs).toContain('limit');

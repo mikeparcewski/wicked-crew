@@ -1056,13 +1056,18 @@ export function registerRoutes(
     // two caps are an ambiguity, not an idempotent repetition like `include`.
     let cap: number | undefined;
     if (limit !== undefined) {
-      const n = Array.isArray(limit) || limit.trim() === '' ? NaN : Number(limit);
-      if (!Number.isInteger(n) || n < 0) {
+      // STRICT canonical decimal only (Copilot on #435): `Number(...)` also admits hex
+      // (`0x10`), exponent (`2e3`), signed (`+1`), and whitespace-padded spellings — surprising
+      // aliases a 400-on-malformed contract must refuse, not quietly honor. `0` is deliberately
+      // VALID and answers the empty list — a real non-negative integer, not a malformation —
+      // while non-canonical zeros (`00`, `01`) are refused with the rest.
+      const canonical = !Array.isArray(limit) && /^(0|[1-9][0-9]*)$/.test(limit);
+      if (!canonical) {
         return reply.code(400).send({
-          error: `Invalid ?limit — expected one non-negative integer, got ${JSON.stringify(limit)}`,
+          error: `Invalid ?limit — expected one non-negative decimal integer, got ${JSON.stringify(limit)}`,
         });
       }
-      cap = n;
+      cap = Number(limit);
     }
     const visible = includeArchived
       ? views
