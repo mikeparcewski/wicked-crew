@@ -138,29 +138,41 @@ describe('draftProblem (the worker prompt seed)', () => {
 
   it('caps a pasted-novel brief instead of ballooning the prompt', () => {
     const big = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o');
-    expect(big.length).toBeLessThan(2500);
+    // Brief capped at 2000 + the (always-present) estate-tool grounding clause + fixed words.
+    expect(big.length).toBeLessThan(2700);
     expect(big).toContain('…');
   });
 
-  it('names the repo SNAPSHOT as READ grounding when one was made — and stays single-line (CREW-UX-8 v4)', () => {
-    // The deliverable stays the ABSOLUTE external-inbox path even when grounded: the run
-    // launches UNBOUND (wicked-core#293 — a repoRef-bound run's tool-permission stream closes
-    // on the first prompt-needing call, so no write works), and the clause hands the worker
-    // the in-inbox SNAPSHOT to read — never the live repo root, which the unbound boundary
-    // denies (wicked-core#294).
+  it('grounds via the estate MCP tools PRIMARILY and names the snapshot as a FALLBACK — single-line (DES-GROUNDING-001 §3.3)', () => {
+    // The PRIMARY grounding is the wicked-estate MCP index (the repo-less draft run passes the
+    // projectGraph binding, so the worker's tools span all bound repos). The deliverable stays
+    // the ABSOLUTE external-inbox path; the snapshot is now only a secondary/offline backup.
     const problem = draftProblem(doc, '/tmp/inbox/my-doc-v1.html', '/tmp/inbox/my-doc-repo');
-    expect(problem).toContain('Ground the document in the repository snapshot at /tmp/inbox/my-doc-repo — read it');
+    // PRIMARY: research via the estate tools, named explicitly, across all bound repos.
+    expect(problem).toContain('wicked-estate MCP tools');
+    expect(problem).toContain('SearchEntity');
+    expect(problem).toContain('FetchContent');
+    expect(problem).toContain('ContextBundle');
+    expect(problem).toContain('RetrieveEntity/TraverseGraph');
+    expect(problem).toContain('never placeholders');
+    // FALLBACK: the snapshot path appears only as the offline backup, after the estate clause.
+    expect(problem).toContain(
+      'If the estate tools are unavailable, fall back to the offline repository snapshot at /tmp/inbox/my-doc-repo',
+    );
+    expect(problem.indexOf('wicked-estate MCP tools')).toBeLessThan(
+      problem.indexOf('fall back to the offline repository snapshot'),
+    );
     expect(problem).toContain('exactly this absolute file path: /tmp/inbox/my-doc-v1.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
-    // The PATH rides VERBATIM — never flattened, never truncated (Copilot, crew#313: the
-    // snapshot sits at exactly one spelling; a respelled path grounds the worker on nothing).
+    // The snapshot PATH rides VERBATIM — never flattened, never truncated (Copilot, crew#313:
+    // the snapshot sits at exactly one spelling; a respelled path grounds the worker on nothing).
     // The prompt budget is enforced BEFORE snapshotting via groundablePath, not by mangling.
     const longButLegal = `/inbox/${'p'.repeat(SNAPSHOT_PATH_MAX - 20)}`;
     expect(draftProblem(doc, '/o.html', longButLegal)).toContain(longButLegal);
     // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
-    // + fixed words.
+    // + the (now always-present) estate-tool clause + fixed words.
     const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
-    expect(worst.length).toBeLessThan(2900);
+    expect(worst.length).toBeLessThan(3000);
   });
 
   it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
@@ -171,9 +183,15 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(groundablePath('p'.repeat(SNAPSHOT_PATH_MAX))).toBe(true); // exactly at budget rides
   });
 
-  it('adds NO grounding clause without a snapshot — unchanged prompt (no fabricated refs)', () => {
-    expect(draftProblem(doc, '/tmp/out.html')).not.toContain('Ground the document');
-    expect(draftProblem(doc, '/tmp/out.html')).toContain('exactly this absolute file path: /tmp/out.html');
+  it('still grounds via the estate tools with NO snapshot — but adds no snapshot-fallback clause (DES-GROUNDING-001 §3.3)', () => {
+    const problem = draftProblem(doc, '/tmp/out.html');
+    // The estate-tool grounding is UNCONDITIONAL — present even when no snapshot was made.
+    expect(problem).toContain('wicked-estate MCP tools');
+    expect(problem).toContain('SearchEntity');
+    // No snapshot ⇒ no offline-backup clause (nothing fabricated).
+    expect(problem).not.toContain('fall back to the offline repository snapshot');
+    expect(problem).not.toContain('repository snapshot');
+    expect(problem).toContain('exactly this absolute file path: /tmp/out.html');
     expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
   });
 });
@@ -835,8 +853,11 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const snapDir = join(runDir, 'repo');
     expect(snapshotExistedAtLaunch, 'snapshot must exist before launchRun').toBe(true);
     expect('repoRef' in grounded).toBe(false);
+    // PRIMARY grounding is the estate MCP index; the snapshot is named only as the offline
+    // fallback (DES-GROUNDING-001 §3.3).
+    expect(grounded.problem).toContain('wicked-estate MCP tools');
     expect(grounded.problem).toContain(
-      `Ground the document in the repository snapshot at ${snapDir} — read it`,
+      `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapDir}`,
     );
     expect(grounded.problem).not.toContain(repoRoot); // the live root never reaches the task
     expect(grounded.problem).toContain(
@@ -855,7 +876,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 2);
     const bare = engine.launches[1]!;
     expect('repoRef' in bare).toBe(false);
-    expect(bare.problem).not.toContain('Ground the document');
+    // Still estate-grounded (§3.3), just no snapshot fallback clause since none was made.
+    expect(bare.problem).toContain('wicked-estate MCP tools');
+    expect(bare.problem).not.toContain('fall back to the offline repository snapshot');
     expect(bare.problem).toContain(join(draftDir, 'bare-doc', 'bare-doc-v1.html'));
     expect(bare.extraWriteRoots).toEqual([join(draftDir, 'bare-doc')]);
     expect(existsSync(join(draftDir, 'bare-doc', 'repo'))).toBe(false);
@@ -866,7 +889,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     const free = engine.launches[2]!;
     expect('repoRef' in free).toBe(false);
     expect('projectId' in free).toBe(false);
-    expect(free.problem).not.toContain('Ground the document');
+    // Unbound docs still carry the estate-tool grounding clause; no snapshot fallback.
+    expect(free.problem).toContain('wicked-estate MCP tools');
+    expect(free.problem).not.toContain('fall back to the offline repository snapshot');
     expect(free.extraWriteRoots).toEqual([join(draftDir, 'free-doc')]);
 
     // ISOLATION is the point (Copilot, crew#313): no launch ever declares the SHARED root, and
@@ -901,7 +926,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // The launch HAPPENED — degradation never eats the doc — but ungrounded: no clause, no
     // snapshot on disk, the standard unbound shape.
     const launch = engine.launches[0]!;
-    expect(launch.problem).not.toContain('Ground the document');
+    // Degraded snapshot ⇒ no fallback clause, but the estate-tool grounding still stands.
+    expect(launch.problem).toContain('wicked-estate MCP tools');
+    expect(launch.problem).not.toContain('fall back to the offline repository snapshot');
     expect(launch.problem).not.toContain(repoRoot);
     expect(existsSync(join(dir, 'drafts', 'big-doc', 'repo'))).toBe(false);
     expect(launch.extraWriteRoots).toEqual([join(dir, 'drafts', 'big-doc')]);
@@ -1176,7 +1203,9 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await emitDocCreated(bus, 'stale-doc', { project_id: 'proj-repo' });
     await waitFor(() => engine.launches.length === 1);
     expect('repoRef' in engine.launches[0]!).toBe(false);
-    expect(engine.launches[0]!.problem).not.toContain('Ground the document');
+    // Registry no longer knows the ref ⇒ no snapshot fallback, estate grounding still present.
+    expect(engine.launches[0]!.problem).toContain('wicked-estate MCP tools');
+    expect(engine.launches[0]!.problem).not.toContain('fall back to the offline repository snapshot');
   });
 
   it('an UNFILED doc completes the full loop -- draft.completed lands with the same idempotency key discipline', async () => {

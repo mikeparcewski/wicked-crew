@@ -268,15 +268,27 @@ export function groundablePath(path: string): boolean {
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
- * the absolute path the finished HTML must land at. When the doc's project is repo-bound
- * (CREW-UX-8 v4), a SHORT grounding clause names the launch-scoped repo SNAPSHOT inside the
- * inbox for the worker to READ — the run itself launches unbound (wicked-core#293) and cannot
- * read the live repo (wicked-core#294), so the snapshot named by this clause is the whole
- * grounding mechanism, not a nudge on top of an engine binding.
+ * the absolute path the finished HTML must land at.
  *
- * `snapshotDir` is embedded VERBATIM — never flattened, never truncated (the snapshot exists
- * at exactly this path; Copilot, crew#313). The caller guards it with {@link groundablePath}
- * BEFORE snapshotting and skips grounding (honest degrade) when the path cannot ride.
+ * PRIMARY grounding (DES-GROUNDING-001 §3.3): every governed worker is now given the
+ * wicked-estate MCP tools pointed at a code graph. This draft run is repo-LESS; when the project's
+ * graph binding resolves it is passed on the launch and the tools span the project's indexed repos —
+ * but for an UNFILED doc, or when `resolveProjectGraphBinding` returns null, the worker instead gets
+ * whatever graph the run binds (its repo's, or none). The clause below therefore instructs the
+ * worker — UNCONDITIONALLY — to research through
+ * those tools (SearchEntity to find, FetchContent to read, ContextBundle to gather related
+ * material, RetrieveEntity/TraverseGraph to follow references) and to ground every claim in what
+ * they return, never in placeholders. The index is the grounding path.
+ *
+ * FALLBACK — the file snapshot: when a launch-scoped repo snapshot was cloned into the inbox
+ * (CREW-UX-8 v4), its path is named ONLY as a secondary/offline backup the worker uses if the
+ * estate tools are unavailable — no longer the whole grounding mechanism. `snapshotDir` is
+ * embedded VERBATIM — never flattened, never truncated (the snapshot exists at exactly this
+ * path; Copilot, crew#313). The caller guards it with {@link groundablePath} BEFORE snapshotting
+ * and omits it (the estate-tool clause still stands alone) when the path cannot ride.
+ *
+ * SINGLE-LINE by contract: the PTY seat runner refuses any embedded newline (FINDING-011), so
+ * every fragment here stays on one line and the brief is flattened+capped by {@link oneLine}.
  */
 export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir?: string): string {
   const sources =
@@ -285,9 +297,13 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir
       : 'There are no source files — the brief alone is the spec.';
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
   const grounding =
-    snapshotDir !== undefined
-      ? `Ground the document in the repository snapshot at ${snapshotDir} — read it and use its real content, never placeholders. `
-      : '';
+    `Ground every claim in the indexed repositories via the wicked-estate MCP tools: ` +
+    `SearchEntity to find relevant code and docs, FetchContent to read them, ContextBundle to gather ` +
+    `related material, and RetrieveEntity/TraverseGraph to follow references — research across all ` +
+    `bound repos and use what those tools return, never placeholders. ` +
+    (snapshotDir !== undefined
+      ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshotDir} instead. `
+      : '');
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
     `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}` +
