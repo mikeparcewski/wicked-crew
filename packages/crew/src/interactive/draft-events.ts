@@ -300,7 +300,7 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir
     `related material, and RetrieveEntity/TraverseGraph to follow references — research across all ` +
     `bound repos and use what those tools return, never placeholders. ` +
     (snapshotDir !== undefined
-      ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshotDir}. `
+      ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshotDir} instead. `
       : '');
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
