@@ -295,7 +295,7 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir
       : 'There are no source files — the brief alone is the spec.';
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
   const grounding =
-    `Ground every claim in the project's indexed repositories via the wicked-estate MCP tools: ` +
+    `Ground every claim in the indexed repositories via the wicked-estate MCP tools: ` +
     `SearchEntity to find relevant code and docs, FetchContent to read them, ContextBundle to gather ` +
     `related material, and RetrieveEntity/TraverseGraph to follow references — research across all ` +
     `bound repos and use what those tools return, never placeholders. ` +
