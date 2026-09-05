@@ -1749,7 +1749,10 @@ export function registerRoutes(
   // wedged unit needs recovering and auto-escalation is off, exhausted, or itself failed. Scoped
   // to `executing` runs only — the same scope the automatic ladder acts within, since only an
   // executing run has a cursor unit to reassign.
-  app.post(`${V}/runs/:id/reassign`, async (req, reply) => {
+  app.post(
+    `${V}/runs/:id/reassign`,
+    { config: { manifest: { requestType: 'ReassignRequest', statusCodes: [200, 400, 404, 409] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = ReassignSchema.safeParse(req.body ?? {});
     if (!parsed.success) {

@@ -449,6 +449,16 @@ export interface GateDecision {
 }
 
 /**
+ * Body of `POST /runs/:id/reassign` — the manual operator lever that reassigns a wedged run's
+ * cursor unit through the same engine path the stall-watchdog's automatic escalation uses
+ * (crew#442). `cli` omitted lets the engine's council re-pick the seat; when present it must be
+ * a seat in the run's own pool (`SessionView.clis`) or the route answers 400.
+ */
+export interface ReassignRequest {
+  cli?: string;
+}
+
+/**
  * A CoreEvent frame as delivered verbatim over `/ws` — a tagged-JSON object
  * discriminated on `type` (wicked-core-ts `event_to_json`). The named optional
  * fields cover the frames the daemon and the studio inspect; the index
