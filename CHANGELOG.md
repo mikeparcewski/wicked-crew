@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.15] — 2026-09-05
+
+### Fixed
+- **A deliver push failure STRANDS the run recoverably instead of hard-failing it (crew#432, #439)**:
+  an auth/transport `git push` failure used to fail the run and reap the worktree — committed work
+  lost, `POST /runs/:id/deliver` refusing the retry. The push-failure arm now carries the strand
+  markers (generalized from the lift-conflict path), the branch + worktree survive, the error rides
+  the run wire, and a post-hoc deliver can re-attempt once the operator repairs the credential.
+  Pinned by a real-git strand-then-succeed-after-repair test.
+- **Deliver stages the run's product, never scratch (crew#434, #439)**: `git add -A` is gone. Tracked
+  modifications stage unconditionally (`git add -u`); untracked paths are classified per-file on a
+  LOWERCASED basename — secret/scratch denylist (db/sqlite + `-wal`/`-shm` sidecars, sock/pid,
+  dotenv incl. `.envrc`, media, key material `*.pem/*.key/*.p12/*.pfx/id_rsa*/*credentials*`),
+  socket-named files, scratch dirs, and a 1 MiB cap — and EVERY exclusion is loudly reported in the
+  phase output (a guard, not a silent drop). Legitimate new source files still ride (pinned).
+- **Integration teardown cannot race the engine reaper (crew#429, #440)**: suites quiesce launched
+  runs/campaigns to terminal before adapter close, and scratch removal goes through a shared
+  retry-tolerant `removeScratch` (`rmSync` maxRetries/retryDelay), adopted across the affected
+  suite class (~70 files). A literal no-race guarantee needs an awaitable engine drain — no such
+  API exists in core-ts ^0.7.x; documented in `tests/setup/scratch.ts` with the upstream ask.
+
 ## [0.7.14] — 2026-09-04
 
 ### Changed
@@ -551,7 +572,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...HEAD
+[0.7.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...v0.7.14
 [0.7.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.11...v0.7.12
