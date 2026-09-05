@@ -271,9 +271,11 @@ export function groundablePath(path: string): boolean {
  * the absolute path the finished HTML must land at.
  *
  * PRIMARY grounding (DES-GROUNDING-001 §3.3): every governed worker is now given the
- * wicked-estate MCP tools pointed at the project's multi-repo code graph. This draft run is
- * repo-LESS but passes the `projectGraph` binding, so the worker's estate tools span ALL bound
- * repos. The clause below therefore instructs the worker — UNCONDITIONALLY — to research through
+ * wicked-estate MCP tools pointed at a code graph. This draft run is repo-LESS; when the project's
+ * graph binding resolves it is passed on the launch and the tools span the project's indexed repos —
+ * but for an UNFILED doc, or when `resolveProjectGraphBinding` returns null, the worker instead gets
+ * whatever graph the run binds (its repo's, or none). The clause below therefore instructs the
+ * worker — UNCONDITIONALLY — to research through
  * those tools (SearchEntity to find, FetchContent to read, ContextBundle to gather related
  * material, RetrieveEntity/TraverseGraph to follow references) and to ground every claim in what
  * they return, never in placeholders. The index is the grounding path.
