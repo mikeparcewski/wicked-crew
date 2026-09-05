@@ -396,6 +396,23 @@ describe("perf#4: the engine's distinguishing turn-timeout status (compat contra
 });
 
 describe('the reassign rung — recycle the wedged cursor unit in place', () => {
+  it('does not let the detection latch suppress escalation at its later exact threshold', async () => {
+    const { wd, frames, reassigns, tick } = build({ config: () => ({ minutes: 30 }) });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
+
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(stalled(frames)).toHaveLength(1);
+    expect(reassigns).toEqual([]);
+
+    // No fresh engine event arrives. The same quiet period must advance from notify to act.
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(stalled(frames)).toHaveLength(1);
+    expect(escalatedOf(frames)).toHaveLength(1);
+    expect(reassigns).toEqual([{ runId: 'r-wedge', ord: 3, cli: 'claude' }]);
+  });
+
   it('notifies at the detection threshold, acts at the escalation threshold', async () => {
     const { wd, frames, reassigns, audited, tick } = build({ config: () => ({ minutes: 30 }) });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
