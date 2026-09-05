@@ -41,6 +41,7 @@ import {
 } from '../src/interactive/edit-events.js';
 import { STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-events.js';
 import { InteractiveHandoffLedger } from '../src/interactive/ledger.js';
+import { projectGraphDb, projectGraphManifest, repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -342,7 +343,15 @@ interface FakeAdapter {
   asAdapter(): CoreAdapter;
 }
 
-function fakeAdapter(): FakeAdapter {
+/** Optional project→repo world for the grounding-binding path: projectMembers/listRepos answer
+ *  from these fixtures. Omitted (the default) = an engine that cannot answer either — the
+ *  graceful-degradation path every pre-existing test rides (binding degrades to null). */
+interface RepoWorld {
+  members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
+  repos?: Array<{ id: string; root_path: string; code_graph_db?: string }>;
+}
+
+function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
   const listeners = new Set<(e: CoreEvent) => void>();
   const state: FakeAdapter = {
     launches: [],
@@ -364,6 +373,12 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        ...(repoWorld !== undefined
+          ? {
+              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
+              listRepos: async () => repoWorld.repos ?? [],
+            }
+          : {}),
       } as unknown as CoreAdapter;
     },
   };
@@ -722,5 +737,100 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     );
     expect(sub!.ledger.has('spike-doc:v2')).toBe(false);
     expect(engine.launches.length).toBe(0);
+  });
+
+  // ── grounding follow-on #1: the (read-only) estate MCP reaches the repo-less EDIT worker ──────
+  //
+  // The gap this closes: the edit seam filed `projectId` but NOT `projectGraph`, so its repo-less
+  // worker hit `run_code_graph_db → None → no estate MCP at all`. The fix is CAPABILITY-ONLY —
+  // resolve the project graph (repoRef undefined) and attach it; no prompt/repo/snapshot change,
+  // so no CREW-UX-8 revise-turn wedge. Binding is resolved from the on-disk manifest, never indexed.
+  describe('project-graph binding (grounding follow-on #1)', () => {
+    beforeEach(() => {
+      process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(dir, 'project-graphs');
+    });
+    afterEach(() => {
+      delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+    });
+
+    /** A built project graph holding `repos` — the db AND the manifest, because `projectGraphStatus`
+     *  ignores a manifest whose database is gone. Mirrors project-graph-binding.test.ts::buildGraph. */
+    function buildProjectGraph(
+      projectId: string,
+      repos: Array<{ repoId: string; rootPath: string }>,
+    ): void {
+      const db = projectGraphDb(projectId);
+      mkdirSync(join(db, '..'), { recursive: true });
+      writeFileSync(db, 'a database is all existsSync checks for here');
+      writeFileSync(
+        projectGraphManifest(projectId),
+        JSON.stringify({
+          version: 1,
+          projectId,
+          repos: repos.map(({ repoId, rootPath }) => ({
+            repoId,
+            label: repoLabel(repoId),
+            rootPath,
+            head: 'abc1234def5678',
+            indexedAt: 1,
+          })),
+        }),
+      );
+    }
+
+    it('a FILED edit whose project graph is built launches with projectGraph.dbPath = the project graph db (repo-less, no label)', async () => {
+      const bus = await import('wicked-bus');
+      buildProjectGraph('proj-graph', [{ repoId: 'repo-a', rootPath: '/repos/repo-a' }]);
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      await arm(engine, { resolveDocsRoot: () => join(dir, 'docs') });
+
+      await emitFeedbackProcessed(bus, { project_id: 'proj-graph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-graph');
+      // The (read-only) estate MCP over the PROJECT's graph now reaches the repo-less edit worker.
+      expect(launch.projectGraph).toEqual({ dbPath: projectGraphDb('proj-graph') });
+      // repo-LESS: no repoLabel, and STILL no repoRef (capability-only, not a repo binding).
+      expect(launch.projectGraph?.repoLabel).toBeUndefined();
+      expect('repoRef' in launch).toBe(false);
+    });
+
+    it('a FILED edit whose project graph was NEVER built launches with NO projectGraph key, and logs the degrade reason', async () => {
+      const bus = await import('wicked-bus');
+      const logged: string[] = [];
+      const engine = fakeAdapter({
+        members: { 'proj-nograph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      await arm(engine, { resolveDocsRoot: () => join(dir, 'docs'), log: (m: string) => logged.push(m) });
+
+      await emitFeedbackProcessed(bus, { project_id: 'proj-nograph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-nograph');
+      expect('projectGraph' in launch).toBe(false);
+      // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
+      expect(logged.some((m) => /no code graph yet|repo-less run gets no code graph/.test(m))).toBe(true);
+    });
+
+    it('an UNFILED edit (no project_id) launches with NO projectGraph key — nothing to bind', async () => {
+      const bus = await import('wicked-bus');
+      // A graph exists for some other project, but this handoff is unfiled, so nothing is resolved.
+      buildProjectGraph('proj-graph', [{ repoId: 'repo-a', rootPath: '/repos/repo-a' }]);
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      await arm(engine, { resolveDocsRoot: () => join(dir, 'docs') });
+
+      await emitFeedbackProcessed(bus); // no project_id → unfiled
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect('projectId' in launch).toBe(false);
+      expect('projectGraph' in launch).toBe(false);
+    });
   });
 });
