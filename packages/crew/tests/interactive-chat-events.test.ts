@@ -43,6 +43,7 @@ import {
   startInteractiveChatSubscriber,
 } from '../src/interactive/chat-events.js';
 import { DRAFT_COMPLETED, STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-events.js';
+import { projectGraphDb, projectGraphManifest, repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -276,7 +277,7 @@ interface FakeAdapter {
  *  launches ungrounded) — the repo-backed test seeds it precisely to prove that. */
 interface RepoWorld {
   members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
-  repos?: Array<{ id: string; root_path: string }>;
+  repos?: Array<{ id: string; root_path: string; code_graph_db?: string }>;
 }
 
 function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
@@ -850,5 +851,107 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const announce = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((announce.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(sub!.ledger.get(chatKey('repo-doc', 0, 'm-r'))?.emittedAt).toBeTruthy();
+  });
+
+  // ── grounding follow-on #1: the (read-only) estate MCP reaches the repo-less CHAT worker ──────
+  //
+  // The gap this closes: the chat seam filed `projectId` but NOT `projectGraph`, so its repo-less
+  // revise worker hit `run_code_graph_db → None → no estate MCP at all`. The fix is CAPABILITY-ONLY
+  // — resolve the project graph (repoRef undefined) and attach it. It is NOT the CREW-UX-8 revise
+  // split being reverted: no repoRef, no snapshot, no live-repo path in the prompt (all still
+  // asserted absent above) — only the index tools get attached. Binding is read from the on-disk
+  // manifest, never indexed.
+  describe('project-graph binding (grounding follow-on #1)', () => {
+    beforeEach(() => {
+      process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(dir, 'project-graphs');
+    });
+    afterEach(() => {
+      delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+    });
+
+    /** A built project graph holding `repos` — the db AND the manifest, because `projectGraphStatus`
+     *  ignores a manifest whose database is gone. Mirrors project-graph-binding.test.ts::buildGraph. */
+    function buildProjectGraph(
+      projectId: string,
+      repos: Array<{ repoId: string; rootPath: string }>,
+    ): void {
+      const db = projectGraphDb(projectId);
+      mkdirSync(join(db, '..'), { recursive: true });
+      writeFileSync(db, 'a database is all existsSync checks for here');
+      writeFileSync(
+        projectGraphManifest(projectId),
+        JSON.stringify({
+          version: 1,
+          projectId,
+          repos: repos.map(({ repoId, rootPath }) => ({
+            repoId,
+            label: repoLabel(repoId),
+            rootPath,
+            head: 'abc1234def5678',
+            indexedAt: 1,
+          })),
+        }),
+      );
+    }
+
+    it('a FILED doc whose project graph is built launches with projectGraph.dbPath = the project graph db (repo-less, no label)', async () => {
+      const bus = await import('wicked-bus');
+      buildProjectGraph('proj-graph', [{ repoId: 'repo-a', rootPath: '/repos/repo-a' }]);
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('bound-doc');
+      const sub = await startSub(engine);
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'bound-doc', { source_message_id: 'm-g', project_id: 'proj-graph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-graph');
+      // The (read-only) estate MCP over the PROJECT's graph now reaches the repo-less revise worker.
+      expect(launch.projectGraph).toEqual({ dbPath: projectGraphDb('proj-graph') });
+      // repo-LESS: no repoLabel (the worker spans every bound repo), and STILL no repoRef/snapshot.
+      expect(launch.projectGraph?.repoLabel).toBeUndefined();
+      expect('repoRef' in launch).toBe(false);
+      expect(launch.problem).not.toContain('repository snapshot');
+    });
+
+    it('a FILED doc whose project graph was NEVER built launches with NO projectGraph key, and logs the degrade reason', async () => {
+      const bus = await import('wicked-bus');
+      const logged: string[] = [];
+      const engine = fakeAdapter({
+        members: { 'proj-nograph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('bound-doc');
+      const sub = await startSub(engine, { log: (m: string) => logged.push(m) });
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'bound-doc', { source_message_id: 'm-n', project_id: 'proj-nograph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-nograph');
+      expect('projectGraph' in launch).toBe(false);
+      // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
+      expect(logged.some((m) => /no code graph yet|repo-less run gets no code graph/.test(m))).toBe(true);
+    });
+
+    it('an UNFILED doc (no project_id) launches with NO projectGraph key — nothing to bind', async () => {
+      const bus = await import('wicked-bus');
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('free-doc');
+      const sub = await startSub(engine);
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'free-doc', { source_message_id: 'm-f' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect('projectId' in launch).toBe(false);
+      expect('projectGraph' in launch).toBe(false);
+    });
   });
 });

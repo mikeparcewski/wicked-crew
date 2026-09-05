@@ -63,6 +63,7 @@ import {
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
@@ -756,6 +757,34 @@ export async function startInteractiveChatSubscriber(
       message: 'A governed crew picked up your ask — revising the document…',
     });
 
+    // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
+    // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
+    // "answer an ask" into an unannounced multi-repo job). Missing or stale degrades to no
+    // binding and the run proceeds exactly as before; the (read-only) estate MCP is a bonus,
+    // never a gate. This is CAPABILITY-ONLY — the grounding follow-on to DES-GROUNDING-001: it
+    // attaches the estate index tools, it does NOT ground the prompt on a repo/snapshot/live path,
+    // so it is not the CREW-UX-8 revise-turn wedge (crew#288) reappearing.
+    //
+    // The decision is RECORDED on both outcomes, like the API launch path (`api/routes.ts`):
+    // "this revision sees the project" and "this revision sees nothing, because X" are equally
+    // facts about what the run could observe. An unexpected failure degrades the same way but says
+    // so — a silent `catch(() => null)` would make a broken binding look identical to a project
+    // that simply has no graph yet.
+    let projectGraphBinding: ProjectGraphBinding | null = null;
+    if (ask.projectId !== undefined) {
+      const decision = await resolveProjectGraphBinding(adapter, ask.projectId, undefined).catch(
+        (err: unknown) => ({
+          binding: null,
+          reason:
+            `the project graph binding could not be resolved ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            `This repo-less run gets no code graph.`,
+        }),
+      );
+      projectGraphBinding = decision.binding;
+      log(`run ${runId}: ${decision.reason}`);
+    }
+
     try {
       await adapter.launchRun({
         problem: chatProblem(ask, currentPath, outPath),
@@ -766,6 +795,12 @@ export async function startInteractiveChatSubscriber(
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
         // never a fabricated 'default' membership.
         ...(ask.projectId !== undefined ? { projectId: ask.projectId } : {}),
+        // The (read-only) estate MCP over the PROJECT's graph — the DES-GROUNDING-001 capability,
+        // now reaching the CHAT seam too (its repo-less workers got `run_code_graph_db → None →
+        // no estate MCP` because they filed projectId WITHOUT projectGraph). Repo-LESS, so this is
+        // exactly the case that gets a graph where it previously got none; NOT a repoRef/snapshot/
+        // live-repo path, so it does not reintroduce the CREW-UX-8 second-turn wedge.
+        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
         // CREW-UX-8: deliberately NO `repoRef`, even when the project has one — a repoRef-bound
         // run's tool-permission stream closes on the first prompt-needing call, so no write
         // destination works (wicked-core#293) — and NO live-repo path in the task either: the

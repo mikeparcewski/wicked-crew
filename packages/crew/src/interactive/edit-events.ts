@@ -45,6 +45,7 @@ import {
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { readDocHead } from './chat-events.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -711,6 +712,32 @@ export async function startInteractiveEditSubscriber(
       message: `A governed crew picked up your edit — reworking ${items.length === 1 ? 'the block' : `${items.length} blocks`}…`,
     });
 
+    // Resolve the project's graph BEFORE the launch, never indexing (a refresh is
+    // `wicked-estate index` per member, bounded at 600s EACH — doing that inside a launch turns
+    // "answer an edit" into an unannounced multi-repo job). Missing or stale degrades to no
+    // binding and the run proceeds exactly as before; the (read-only) estate MCP is a bonus,
+    // never a gate. This is CAPABILITY-ONLY — the grounding follow-on to DES-GROUNDING-001: it
+    // attaches the estate index tools, it does NOT ground the prompt on a repo/snapshot/live path.
+    //
+    // The decision is RECORDED on both outcomes, like the API launch path (`api/routes.ts`): "this
+    // edit sees the project" and "this edit sees nothing, because X" are equally facts about what
+    // the run could observe. An unexpected failure degrades the same way but says so — a silent
+    // `catch(() => null)` would make a broken binding look identical to a project with no graph yet.
+    let projectGraphBinding: ProjectGraphBinding | null = null;
+    if (handoff.projectId !== undefined) {
+      const decision = await resolveProjectGraphBinding(adapter, handoff.projectId, undefined).catch(
+        (err: unknown) => ({
+          binding: null,
+          reason:
+            `the project graph binding could not be resolved ` +
+            `(${err instanceof Error ? err.message : String(err)}). ` +
+            `This repo-less run gets no code graph.`,
+        }),
+      );
+      projectGraphBinding = decision.binding;
+      log(`run ${runId}: ${decision.reason}`);
+    }
+
     try {
       const input: LaunchRunInput = {
         problem: editProblem(handoff, handoffPath),
@@ -720,6 +747,12 @@ export async function startInteractiveEditSubscriber(
         // The 7b surface: a project-bound doc's governed edits are FILED — the run lands in
         // the project's activity feed instead of floating unattributed.
         ...(handoff.projectId !== undefined ? { projectId: handoff.projectId } : {}),
+        // The (read-only) estate MCP over the PROJECT's graph — the DES-GROUNDING-001 capability,
+        // now reaching the EDIT seam too (its repo-less workers got `run_code_graph_db → None → no
+        // estate MCP` because they filed projectId WITHOUT projectGraph). Repo-LESS, so this is
+        // exactly the case that gets a graph where it previously got none; NOT a repoRef/snapshot/
+        // live-repo path, so it does not reintroduce the CREW-UX-8 second-turn wedge.
+        ...(projectGraphBinding !== null ? { projectGraph: projectGraphBinding } : {}),
         // The task names the handoff JSON + per-block output files under `runDir`, which sits
         // OUTSIDE the unit's sandbox — the wrapped-CLI boundary would deny both the reads and
         // the deliverable writes (crew#263, same shape as the draft path). One declared root

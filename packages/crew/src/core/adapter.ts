@@ -37,6 +37,7 @@ import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 
 
 
@@ -977,6 +978,23 @@ export class CoreAdapter {
         );
       }
       opts.extraWriteRoots = input.extraWriteRoots;
+    }
+    // SAFETY NET (grounding follow-on #1): ANY project-filed launch that did not already resolve a
+    // project-graph binding gets one here, so no future project-filed caller can silently ship a run
+    // that sees only its own repo — the exact gap the chat/edit seams had (projectId filed WITHOUT
+    // projectGraph → `run_code_graph_db → None` → no estate MCP). The `=== undefined` guard means the
+    // seams that ALREADY resolved (draft/demo/chat/edit — and POST /runs via routes.ts) pass their
+    // own `projectGraph` and are NOT re-resolved here. `repoRef` is threaded through so a repo-bound
+    // launch gets the `repoLabel` the cross-field validation below requires; a repo-less one binds
+    // with no label. Resolving reads the on-disk manifest and NEVER indexes; any failure degrades to
+    // no binding (the launch is unaffected). Whatever it sets flows into the SAME version-guard +
+    // cross-field validation below — capability-only, never a prompt/repo/snapshot change. The
+    // graph.ts→adapter import is type-only on graph.ts's side, so this value import is no runtime cycle.
+    if (input.projectId !== undefined && input.projectGraph === undefined) {
+      const decision = await resolveProjectGraphBinding(this, input.projectId, input.repoRef).catch(
+        (): { binding: ProjectGraphBinding | null } => ({ binding: null }),
+      );
+      if (decision.binding !== null) input.projectGraph = decision.binding;
     }
     if (input.projectGraph !== undefined) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): the run would silently get
