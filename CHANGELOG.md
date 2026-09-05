@@ -10,6 +10,29 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.16] — 2026-09-05
+
+### Fixed
+- **The stall-watchdog escalation actually acts now (crew#442, #443).** A live 58-min wedge
+  exposed a sweep re-entrancy DEADLOCK: `sweep()`'s `sweeping` guard had no timeout on its awaited
+  engine calls, so a hung `listExecuting`/reassign pinned the guard `true` forever and silently
+  killed the whole watchdog after the first 15-min detection frame — no escalation ever fired.
+  Every awaited engine call inside the sweep is now bounded (`SWEEP_ENGINE_TIMEOUT_MS`), so the
+  guard always releases; a skipped sweep logs loudly. A regression test proves a hung
+  `listExecuting` cannot permanently wedge the watchdog.
+
+### Added
+- **Manual operator reassign lever: `POST /runs/:id/reassign` (crew#442, #443).** Recovers a wedged
+  run's cursor unit through the same engine path the automatic escalation uses, for when
+  auto-escalation is off, exhausted, or itself failed. `cli` optional (omit to let the council
+  re-pick; when present it is soft-validated against the run's own seat pool), executing-only,
+  audited as `run.reassigned`. api-type `ReassignRequest`.
+
+### Changed
+- **Engine floor → core-ts 0.7.14; studio dist → 0.4.11.** core-ts 0.7.14 ships #377 (opencode is
+  the first governed non-claude ACP seat, via harness-provisioned config). studio 0.4.11 ships the
+  rail/chrome control affordances (#183), bundled as the default local UI via `build:with-studio`.
+
 ## [0.7.15] — 2026-09-05
 
 ### Fixed
@@ -572,7 +595,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...HEAD
+[0.7.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...v0.7.14
 [0.7.13]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.12...v0.7.13
