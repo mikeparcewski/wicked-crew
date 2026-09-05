@@ -71,8 +71,36 @@ export type { WorkerStalledFrame, WorkerStallEscalatedFrame };
 /** Default sweep cadence — frequent enough that `quietForMs` is at most ~30s stale. */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
 
+/**
+ * Bound on a single sweep's engine round-trip (`listExecuting()`, `reassign()`), comfortably
+ * under the sweep cadence (crew#442): the re-entrancy guard's `finally` only releases once its
+ * awaited call SETTLES, so an engine call that never settles — plausible while a run is
+ * genuinely wedged, or during a governed-run council's capacity spike — used to pin the guard
+ * forever, silently killing detection AND escalation for every run the daemon watches. A bounded
+ * timeout guarantees the guard always releases, degrading a hang to one skipped/failed attempt.
+ */
+export const SWEEP_ENGINE_TIMEOUT_MS = 10_000;
+
 /** Bound on the `error` excerpt an escalation frame / audit entry carries. */
 const ESCALATION_ERROR_EXCERPT_CHARS = 300;
+
+/**
+ * Races `promise` against a timer so a hung engine call can never pin the sweep's re-entrancy
+ * guard forever (crew#442). Rejects with a distinct, greppable message on timeout; the timer is
+ * always cleared so a fast-settling promise leaves nothing armed.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise, timedOut]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 /** The slice of a run the sweep needs; the server maps it from `sessionsDetail()`. */
 export interface ExecutingRun {
@@ -207,12 +235,24 @@ export class WorkerStallWatchdog {
 
   /** One detection pass. Public so tests drive it directly; the armed interval calls it too. */
   async sweep(): Promise<void> {
-    if (this.sweeping) return; // a slow engine read must never stack sweeps
+    if (this.sweeping) {
+      // Loud, not silent (crew#442): with the timeout below, this should be rare and
+      // self-resolving — but a stuck sweep with no signal at all is exactly what let the
+      // original deadlock run for 58 minutes unnoticed.
+      this.log(
+        '[stall-watchdog] sweep SKIPPED — a previous sweep is still in flight (a slow or hung engine call?)',
+      );
+      return;
+    }
     this.sweeping = true;
     try {
       let executing: ExecutingRun[];
       try {
-        executing = await this.deps.listExecuting();
+        executing = await withTimeout(
+          this.deps.listExecuting(),
+          SWEEP_ENGINE_TIMEOUT_MS,
+          'listExecuting()',
+        );
       } catch (err) {
         this.log(`[stall-watchdog] run listing failed, skipping sweep: ${String(err)}`);
         return;
@@ -413,7 +453,10 @@ export class WorkerStallWatchdog {
         }
         const seat = target ?? run.cli;
         try {
-          await this.deps.escalation?.reassign(run.id, ord, seat);
+          const reassign = this.deps.escalation?.reassign(run.id, ord, seat);
+          if (reassign !== undefined) {
+            await withTimeout(reassign, SWEEP_ENGINE_TIMEOUT_MS, `reassignUnit(${run.id}, ord ${ord})`);
+          }
           frame = {
             ...base,
             action: 'reassign',

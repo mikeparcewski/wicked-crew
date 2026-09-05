@@ -674,6 +674,13 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/runs/:id/reassign",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/runs/:id/resume",
       "requestType": null,
       "responseType": null,

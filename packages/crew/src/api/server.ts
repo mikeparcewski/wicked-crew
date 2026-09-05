@@ -41,6 +41,7 @@ import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
+import { resolveCursorUnit } from '../core/cursor.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
@@ -772,16 +773,16 @@ export async function createServer(
       (await adapter.sessionsDetail())
         .filter((v) => v.session.status === 'executing')
         .map((v) => {
-          // The CURSOR unit, resolved exactly the way the engine resolves it (`session_units`
-          // sorts by ord, then indexes `unit_ix`): its `ord` is what `reassignUnit` validates
-          // against, and its seat is what a reassign moves away from. `seats` is the run's own
-          // pool (`session.clis`) — the failover candidates. Views with no units (older
-          // engines, stub adapters) keep the historical `unit_ix` fallback.
-          const cursor = [...v.units].sort((a, b) => a.ord - b.ord)[v.session.unit_ix];
+          // The CURSOR unit (shared with the manual reassign route, `core/cursor.ts`): its
+          // `ord` is what `reassignUnit` validates against, and its seat is what a reassign
+          // moves away from. `seats` is the run's own pool (`session.clis`) — the failover
+          // candidates. Views with no units (older engines, stub adapters) keep the historical
+          // `unit_ix` fallback.
+          const cursor = resolveCursorUnit(v);
           return {
             id: v.session.id,
             ord: cursor?.ord ?? v.session.unit_ix,
-            ...(cursor?.assigned_cli != null ? { cli: cursor.assigned_cli } : {}),
+            ...(cursor?.cli !== undefined ? { cli: cursor.cli } : {}),
             ...(Array.isArray(v.session.clis) ? { seats: v.session.clis } : {}),
           };
         }),
