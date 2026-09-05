@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
   DEFAULT_SWEEP_INTERVAL_MS,
+  SWEEP_ENGINE_TIMEOUT_MS,
   WorkerStallWatchdog,
   type ExecutingRun,
   type WorkerStallEscalatedFrame,
@@ -200,6 +201,74 @@ describe('WorkerStallWatchdog (crew#287) — fake run, stubbed clock', () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(sweeps).toHaveLength(3);
       expect(DEFAULT_SWEEP_INTERVAL_MS).toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // crew#442: a hung engine call used to pin `sweeping` forever — the re-entrancy guard's
+  // `finally` only releases once its awaited call SETTLES, and an unsettled promise never does.
+  // A bounded timeout guarantees it always settles, degrading a hang to one skipped attempt
+  // instead of silently killing detection AND escalation for every run, forever.
+  it('a hung listExecuting() times out instead of wedging the sweep forever — a later sweep still runs', async () => {
+    vi.useFakeTimers();
+    try {
+      let listCalls = 0;
+      let hang = true;
+      const { wd, logs } = build({
+        listExecuting: () => {
+          listCalls++;
+          return hang ? new Promise<ExecutingRun[]>(() => undefined) : Promise.resolve([]);
+        },
+      });
+      const swept = wd.sweep();
+      await vi.advanceTimersByTimeAsync(SWEEP_ENGINE_TIMEOUT_MS);
+      await swept; // must resolve — not hang forever
+      expect(
+        logs.some((m) => m.includes('run listing failed') && m.includes('timed out')),
+      ).toBe(true);
+
+      // The guard released: a fresh sweep actually queries the engine again, not stuck.
+      hang = false;
+      await wd.sweep();
+      expect(listCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a sweep still in flight is SKIPPED loudly, not silently, and the guard releases once it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveList: ((runs: ExecutingRun[]) => void) | undefined;
+      let listCalls = 0;
+      const { wd, frames, logs } = build({
+        listExecuting: () => {
+          listCalls++;
+          // Only the FIRST call is manually controlled (genuinely in flight); any later call
+          // (the guard-released third sweep) resolves immediately — the test doesn't need it
+          // to hang too, only to prove the engine gets queried again.
+          if (listCalls === 1) {
+            return new Promise<ExecutingRun[]>((resolve) => {
+              resolveList = resolve;
+            });
+          }
+          return Promise.resolve([]);
+        },
+      });
+      const first = wd.sweep(); // genuinely in flight — the engine call has not resolved yet
+      await Promise.resolve();
+      await wd.sweep(); // a second sweep while the first is still pending must skip, not stack
+      expect(listCalls).toBe(1); // the second call never touched the engine
+      expect(logs.some((m) => /SKIPPED/.test(m))).toBe(true);
+      expect(frames).toEqual([]);
+
+      resolveList?.([]); // let the first sweep complete — well under the timeout
+      await first;
+
+      // The guard released: a fresh sweep actually queries the engine again, not stuck "in flight".
+      await wd.sweep();
+      expect(listCalls).toBe(2);
     } finally {
       vi.useRealTimers();
     }

@@ -17,9 +17,10 @@ import Fastify from 'fastify';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
+  SWEEP_ENGINE_TIMEOUT_MS,
   WorkerStallWatchdog,
   type ExecutingRun,
   type StallEscalationConfig,
@@ -395,6 +396,23 @@ describe("perf#4: the engine's distinguishing turn-timeout status (compat contra
 });
 
 describe('the reassign rung — recycle the wedged cursor unit in place', () => {
+  it('does not let the detection latch suppress escalation at its later exact threshold', async () => {
+    const { wd, frames, reassigns, tick } = build({ config: () => ({ minutes: 30 }) });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
+
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(stalled(frames)).toHaveLength(1);
+    expect(reassigns).toEqual([]);
+
+    // No fresh engine event arrives. The same quiet period must advance from notify to act.
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(stalled(frames)).toHaveLength(1);
+    expect(escalatedOf(frames)).toHaveLength(1);
+    expect(reassigns).toEqual([{ runId: 'r-wedge', ord: 3, cli: 'claude' }]);
+  });
+
   it('notifies at the detection threshold, acts at the escalation threshold', async () => {
     const { wd, frames, reassigns, audited, tick } = build({ config: () => ({ minutes: 30 }) });
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
@@ -529,6 +547,44 @@ describe('the reassign rung — recycle the wedged cursor unit in place', () => 
     tick(31 * MIN);
     await wd.sweep();
     expect(escalatedOf(frames)[1]?.outcome).toBe('exhausted');
+  });
+
+  // crew#442: a hung reassign() is the OTHER unbounded engine call inside the sweep guard — left
+  // unbounded, it would pin `sweeping` exactly like a hung listExecuting() does, silently killing
+  // detection AND escalation for every run the daemon watches, not just this one.
+  it('a hung reassign() times out, reports outcome "failed", and releases the guard for the next sweep', async () => {
+    vi.useFakeTimers();
+    try {
+      let listCalls = 0;
+      const { wd, frames, logs, tick } = build({
+        listExecuting: async () => {
+          listCalls++;
+          return [{ id: 'r-wedge', ord: 3, cli: 'claude' }];
+        },
+        config: () => ({ minutes: 30 }),
+        reassign: () => new Promise(() => undefined), // never resolves
+      });
+      wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
+      tick(31 * MIN);
+      const swept = wd.sweep();
+      await vi.advanceTimersByTimeAsync(SWEEP_ENGINE_TIMEOUT_MS);
+      await swept; // must resolve — not hang forever
+
+      const esc = escalatedOf(frames);
+      expect(esc).toHaveLength(1);
+      expect(esc[0]).toMatchObject({ outcome: 'failed', needsYou: true, escalations: 1 });
+      expect(esc[0]?.error).toContain('timed out');
+      expect(logs.some((m) => m.includes('ESCALATION FAILED'))).toBe(true);
+
+      // The guard released: a later sweep queries the engine again, not stuck "in flight".
+      expect(listCalls).toBe(1);
+      tick(1 * MIN);
+      await wd.sweep();
+      expect(listCalls).toBe(2);
+      expect(logs.some((m) => /SKIPPED/.test(m))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('an unknown cursor (no ord anywhere) fails loud WITHOUT consuming budget', async () => {

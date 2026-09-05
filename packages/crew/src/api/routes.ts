@@ -8,6 +8,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
+import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
 import { QeGateCache } from '../qe/gate-events.js';
@@ -250,6 +251,12 @@ const InjectSchema = z.object({
   message: z.string().min(1),
   /** `"all"` broadcasts to every active worker; any other value is a CLI key. */
   target: z.string().min(1).default('all'),
+}).strict();
+
+// The manual reassign lever (crew#442): `cli` omitted lets the engine's council re-pick, the
+// same shape the automatic stall-watchdog escalation uses for an unknown failover target.
+const ReassignSchema = z.object({
+  cli: z.string().min(1).optional(),
 }).strict();
 
 export const OpenTerminalSchema = z.object({
@@ -1732,6 +1739,51 @@ export function registerRoutes(
       await adapter.injectWorkerMessage(id, parsed.data.message, parsed.data.target);
       audit.record('run.injected', actorOf(req), { runId: id, detail: { target: parsed.data.target } });
       return reply.send({ status: 'ok' });
+    } catch (err) {
+      return reply.code(409).send({ error: message(err) });
+    }
+  });
+
+  // The manual operator lever (crew#442): recycles a run's CURSOR unit via the same
+  // `adapter.reassignUnit` path the stall-watchdog's automatic escalation uses, for when a
+  // wedged unit needs recovering and auto-escalation is off, exhausted, or itself failed. Scoped
+  // to `executing` runs only — the same scope the automatic ladder acts within, since only an
+  // executing run has a cursor unit to reassign.
+  app.post(
+    `${V}/runs/:id/reassign`,
+    { config: { manifest: { requestType: 'ReassignRequest', statusCodes: [200, 400, 404, 409] } } },
+    async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = ReassignSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
+    }
+    const views = await adapter.sessionsDetail();
+    const run = views.find((v) => v.session.id === id);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    if (run.session.status !== 'executing') {
+      return reply.code(409).send({
+        error: `run ${id} is ${run.session.status}, not executing — only an executing run has a cursor unit to reassign`,
+      });
+    }
+    const requestedCli = parsed.data.cli;
+    if (requestedCli !== undefined) {
+      const pool = Array.isArray(run.session.clis) ? run.session.clis : [];
+      if (!pool.includes(requestedCli)) {
+        return reply.code(400).send({
+          error: `cli "${requestedCli}" is not in this run's seat pool (${pool.join(', ') || 'none known'})`,
+        });
+      }
+    }
+    const cursor = resolveCursorUnit(run);
+    const ord = cursor?.ord ?? run.session.unit_ix;
+    try {
+      await adapter.reassignUnit(id, ord, requestedCli ?? null);
+      audit.record('run.reassigned', actorOf(req), {
+        runId: id,
+        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) },
+      });
+      return reply.send({ status: 'ok', ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
