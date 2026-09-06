@@ -309,6 +309,26 @@ export function recallClause(intent?: RecallIntent): string {
   );
 }
 
+/** The propose clause (DES-MEM-FACETED-001 write side): instruct the worker to record a reusable
+ *  learning by calling the wicked-estate MCP `proposal.submit` tool. This is a SAFE write — the
+ *  proposal lands in a review queue, inert (never recalled or applied) until an operator approves
+ *  it, so it can never pollute anything. Unconditional (every worker may propose). SINGLE-LINE by
+ *  contract (the PTY seat runner refuses embedded newlines). Provenance is stamped by the server
+ *  from the run env, so the worker supplies only content/facets. */
+export function proposeClause(): string {
+  return (
+    `When you learn something reusable that would help a future run — a CLI quirk, a repo build ` +
+    `gotcha, a tool behavior, a project decision — record it: call the wicked-estate MCP ` +
+    `proposal.submit tool with kind_type "memory", payload {"content":"<the learning>","tier":"procedural"}, ` +
+    `and facets tagging ONLY the natural axis it is about (e.g. {"cli":"codex"} for a codex quirk, not ` +
+    `tied to this repo). NEVER include secrets, credentials, tokens, API keys, or personal data — a ` +
+    `promoted proposal becomes shared memory. proposal.submit is a PERMITTED safe write even though your ` +
+    `estate MCP is otherwise read-only (it refuses your other writes) — the proposal is inert (never ` +
+    `recalled or applied) until a human reviews it, so proposing costs nothing and pollutes nothing; ` +
+    `capturing nothing is fine; never fabricate. `
+  );
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
@@ -356,9 +376,10 @@ export function draftProblem(
   // The recall clause (DES-MEM-FACETED-001 Phase 3) sits right beside grounding; `''` when the
   // intent carries no axis, so an unfiled draft reads exactly as it did before this phase.
   const recall = recallClause(intent);
+  const propose = proposeClause();
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}` +
+    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}${propose}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
 }

@@ -141,7 +141,7 @@ describe('draftProblem (the worker prompt seed)', () => {
   it('caps a pasted-novel brief instead of ballooning the prompt', () => {
     const big = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o');
     // Brief capped at 2000 + the (always-present) estate-tool grounding clause + fixed words.
-    expect(big.length).toBeLessThan(2700);
+    expect(big.length).toBeLessThan(3400);
     expect(big).toContain('…');
   });
 
@@ -174,7 +174,7 @@ describe('draftProblem (the worker prompt seed)', () => {
     // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
     // + the (now always-present) estate-tool clause + fixed words.
     const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
-    expect(worst.length).toBeLessThan(3000);
+    expect(worst.length).toBeLessThan(3900);
   });
 
   it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
@@ -248,10 +248,27 @@ describe('draftProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
 
   it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
     const problem = draftProblem(doc, '/tmp/out.html', undefined, { project: 'proj-test' });
-    expect(problem).toContain('{"project":"proj-test"}');
-    expect(problem).not.toContain('"cli"');
-    expect(problem).not.toContain('"repo"');
+    // The recall INTENT object is exactly {"project":...} — the closing brace right after the value
+    // proves no cli/repo axis leaked in (a stray axis would push the brace past the value). A blanket
+    // not.toContain('"cli"') can't be used: the propose clause legitimately carries a {"cli":"codex"}
+    // example. undefined/null keys must never appear anywhere.
+    expect(problem).toContain('intent {"project":"proj-test"} and');
     expect(problem).not.toContain('undefined');
+  });
+
+  it('unconditionally instructs the worker to submit reusable learnings to the proposal queue', () => {
+    // The propose clause (DES-MEM-FACETED-001 write side) is present regardless of intent — every
+    // worker may propose — and points at the estate MCP proposal.submit tool (a SAFE write: inert
+    // until an operator approves it). Single-line by contract.
+    const withIntent = draftProblem(doc, '/tmp/out.html', undefined, { project: 'p1' });
+    const noIntent = draftProblem(doc, '/tmp/out.html', undefined, undefined);
+    for (const p of [withIntent, noIntent]) {
+      expect(p).toContain('proposal.submit');
+      expect(p).toContain('kind_type "memory"');
+      // the clause forbids leaking secrets/PII into shared memory
+      expect(p).toContain('NEVER include secrets');
+      expect(p).not.toMatch(/[\n\r\t]/);
+    }
   });
 });
 

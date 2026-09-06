@@ -202,7 +202,7 @@ describe('chatProblem (the worker prompt seed)', () => {
 
   it('caps a pasted-novel ask instead of ballooning the prompt', () => {
     const big = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o');
-    expect(big.length).toBeLessThan(2500);
+    expect(big.length).toBeLessThan(3200);
     expect(big).toContain('…');
   });
 
@@ -242,10 +242,12 @@ describe('chatProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
 
   it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
     const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
-    expect(problem).toContain('{"project":"proj-test"}');
-    expect(problem).not.toContain('"cli"');
-    expect(problem).not.toContain('"repo"');
+    // The recall INTENT object is exactly {"project":...}; the propose clause legitimately carries a
+    // {"cli":"codex"} example, so scope the axis check to the recall intent rather than a blanket not.
+    expect(problem).toContain('intent {"project":"proj-test"} and');
     expect(problem).not.toContain('undefined');
+    // the propose clause (write side) rides every interactive prompt
+    expect(problem).toContain('proposal.submit');
   });
 });
 

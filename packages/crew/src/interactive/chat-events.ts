@@ -60,6 +60,7 @@ import {
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
   oneLine,
+  proposeClause,
   recallClause,
   type RecallIntent,
 } from './draft-events.js';
@@ -292,11 +293,12 @@ export function chatProblem(
   // (see the split above), but recall is a repo-LESS estate MCP call, so it rides here too — `''`
   // when the intent carries no axis, keeping the proven CREW-UX-5 shape for an unfiled ask.
   const recall = recallClause(intent);
+  const propose = proposeClause();
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
     `The user's ask: ${oneLine(ask.text, 2000)} ` +
     `The document's CURRENT version is the HTML file at this absolute path — read it first: ${currentPath} ` +
-    `${recall}` +
+    `${recall}${propose}` +
     `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
