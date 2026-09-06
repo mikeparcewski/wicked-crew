@@ -114,9 +114,17 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** Cap any external text (upstream stderr / JSON-RPC error / tool-result body) carried into an
+ *  {@link EstateMcpError}: route code surfaces `err.message` in a 502, so an uncapped body could
+ *  leak large/sensitive payloads and bloat the HTTP error. */
+function capText(s: string): string {
+  return s.length > 200 ? `${s.slice(0, 200)}… (${s.length} chars)` : s;
+}
+
 /** Build an {@link EstateMcpError} from a JSON-RPC `error` object. */
 function estateErrorFrom(err: Record<string, unknown>): EstateMcpError {
-  const message = typeof err['message'] === 'string' ? err['message'] : 'unknown estate-mcp error';
+  const message =
+    typeof err['message'] === 'string' ? capText(err['message']) : 'unknown estate-mcp error';
   return typeof err['code'] === 'number' ? new EstateMcpError(message, err['code']) : new EstateMcpError(message);
 }
 
@@ -136,17 +144,17 @@ function unwrapToolResult(msg: Record<string, unknown>): unknown {
   }
   const text = first['text'];
   // Cap any raw tool-result text carried into an error: route code surfaces `err.message` in a 502,
-  // so an uncapped body could leak large/sensitive payloads and bloat the HTTP error.
-  const cap = (s: string): string => (s.length > 200 ? `${s.slice(0, 200)}… (${s.length} chars)` : s);
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    throw new EstateMcpError(`estate-mcp tool result text was not JSON: ${cap(text)}`);
+    throw new EstateMcpError(`estate-mcp tool result text was not JSON: ${capText(text)}`);
   }
   if (result['isError'] === true) {
     const detail =
-      isRecord(payload) && typeof payload['message'] === 'string' ? cap(payload['message']) : cap(text);
+      isRecord(payload) && typeof payload['message'] === 'string'
+        ? capText(payload['message'])
+        : capText(text);
     throw new EstateMcpError(detail);
   }
   return payload;
@@ -248,7 +256,7 @@ export async function callEstateProposalTool(
         rejectPromise(
           new EstateMcpError(
             `wicked-estate-mcp exited before answering ${tool}` +
-              (stderrBuf.trim() !== '' ? `: ${stderrBuf.trim()}` : ''),
+              (stderrBuf.trim() !== '' ? `: ${capText(stderrBuf.trim())}` : ''),
           ),
         ),
       );
