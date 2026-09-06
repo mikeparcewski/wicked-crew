@@ -220,6 +220,35 @@ describe('chatProblem (the worker prompt seed)', () => {
   });
 });
 
+describe('chatProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
+  const ask = { documentId: 'my-doc', text: 'make it bolder', sourceMessageId: 'm-1' };
+
+  it('PRESENT with the correct project intent JSON when an intent with a project is passed', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+    // The recall clause is repo-LESS — it does NOT reintroduce the CREW-UX-8 repo grounding.
+    expect(problem).not.toContain('repository snapshot');
+  });
+
+  it('ABSENT when no intent / an empty intent is passed (back-compat — existing behavior)', () => {
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html')).not.toContain('memory.recall');
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html', {})).not.toContain('memory.recall');
+    // The unfiled/no-intent prompt is byte-identical to before this phase.
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html', {})).toBe(
+      chatProblem(ask, '/i/current.html', '/o/revised.html'),
+    );
+  });
+
+  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
+    expect(problem).toContain('{"project":"proj-test"}');
+    expect(problem).not.toContain('"cli"');
+    expect(problem).not.toContain('"repo"');
+    expect(problem).not.toContain('undefined');
+  });
+});
+
 describe('the interactive-chat workflow def (workflows-as-data)', () => {
   const def = INTERACTIVE_CHAT_WORKFLOW_DEF;
 

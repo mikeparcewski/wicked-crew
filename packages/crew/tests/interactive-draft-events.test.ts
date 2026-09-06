@@ -35,6 +35,8 @@ import {
   draftProblem,
   draftIdempotencyKey,
   groundablePath,
+  recallClause,
+  recallIntentObject,
   SNAPSHOT_PATH_MAX,
   resolveProjectRepo,
   startInteractiveDraftSubscriber,
@@ -193,6 +195,63 @@ describe('draftProblem (the worker prompt seed)', () => {
     expect(problem).not.toContain('repository snapshot');
     expect(problem).toContain('exactly this absolute file path: /tmp/out.html');
     expect(draftProblem(doc, '/tmp/out.html', undefined)).toBe(draftProblem(doc, '/tmp/out.html'));
+  });
+});
+
+describe('recallClause / recallIntentObject (DES-MEM-FACETED-001 Phase 3, shared helper)', () => {
+  it('builds the intent object from only the DEFINED axes — no undefined/null keys', () => {
+    expect(recallIntentObject({ project: 'p1' })).toEqual({ project: 'p1' });
+    expect(recallIntentObject({ project: 'p1', cli: 'claude', repo: 'r1' })).toEqual({
+      project: 'p1',
+      cli: 'claude',
+      repo: 'r1',
+    });
+    // An axis left undefined never becomes a key — JSON.stringify carries only what was threaded.
+    const json = JSON.stringify(recallIntentObject({ project: 'p1' }));
+    expect(json).toBe('{"project":"p1"}');
+    expect(json).not.toContain('undefined');
+    expect(json).not.toContain('null');
+    expect(json).not.toContain('cli');
+    expect(json).not.toContain('repo');
+  });
+
+  it('returns undefined (→ omitted clause) for no intent and for an all-undefined intent', () => {
+    expect(recallIntentObject(undefined)).toBeUndefined();
+    expect(recallIntentObject({})).toBeUndefined();
+    expect(recallClause(undefined)).toBe('');
+    expect(recallClause({})).toBe('');
+  });
+
+  it('emits a single-line memory.recall clause carrying the intent JSON when an axis is present', () => {
+    const clause = recallClause({ project: 'proj-test' });
+    expect(clause).toContain('memory.recall');
+    expect(clause).toContain('intent {"project":"proj-test"}');
+    expect(clause).not.toMatch(/[\n\r\t]/);
+  });
+});
+
+describe('draftProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
+  const doc = { documentId: 'my-doc', brief: 'a brief', sourcePaths: [], style: 'web', projectId: 'proj-test' };
+
+  it('PRESENT with the correct project intent JSON when an intent with a project is passed', () => {
+    const problem = draftProblem(doc, '/tmp/out.html', undefined, { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+  });
+
+  it('ABSENT when no intent / an empty intent is passed (back-compat — existing behavior)', () => {
+    expect(draftProblem(doc, '/tmp/out.html')).not.toContain('memory.recall');
+    expect(draftProblem(doc, '/tmp/out.html', undefined, {})).not.toContain('memory.recall');
+    // The unfiled/no-intent prompt is byte-identical to before this phase.
+    expect(draftProblem(doc, '/tmp/out.html', undefined, {})).toBe(draftProblem(doc, '/tmp/out.html'));
+  });
+
+  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+    const problem = draftProblem(doc, '/tmp/out.html', undefined, { project: 'proj-test' });
+    expect(problem).toContain('{"project":"proj-test"}');
+    expect(problem).not.toContain('"cli"');
+    expect(problem).not.toContain('"repo"');
+    expect(problem).not.toContain('undefined');
   });
 });
 
