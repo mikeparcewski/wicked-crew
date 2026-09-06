@@ -42,6 +42,7 @@ import {
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
   oneLine,
+  proposeClause,
   recallClause,
   type RecallIntent,
 } from './draft-events.js';
@@ -206,12 +207,13 @@ export function editProblem(
   // The recall clause (DES-MEM-FACETED-001 Phase 3): a repo-LESS estate MCP call, so it rides the
   // edit prompt too — `''` when the intent carries no axis, leaving an unfiled handoff unchanged.
   const recall = recallClause(intent);
+  const propose = proposeClause();
   return (
     `Fulfil ${handoff.items.length} structural edit(s) on the wicked-interactive document ` +
     `"${handoff.documentId}" (editing version ${handoff.version}). Read the handoff file at ` +
     `${handoffPath} — a JSON file whose items array carries, per edit: the user's instruction, ` +
     `the element's current HTML fragment, and the exact absolute output_path where the edited ` +
-    `fragment must be saved. ${recall}The user asked: ${gist.length > 0 ? gist : '(no instruction text)'}`
+    `fragment must be saved. ${recall}${propose}The user asked: ${gist.length > 0 ? gist : '(no instruction text)'}`
   );
 }
 
