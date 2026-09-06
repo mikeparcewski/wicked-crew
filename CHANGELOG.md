@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.17] — 2026-09-05
+
+### Added
+- **Interactive draft/chat/edit workers ground in the wicked-estate MCP index (DES-GROUNDING-001, crew#446, #447).** The draft worker now researches through the estate index tools (`SearchEntity`/`FetchContent`/`ContextBundle`) with the offline repository snapshot demoted to a fallback (#446); chat and edit runs pass the `projectGraph` binding through to their workers so they get the same read-only estate MCP (#447). Ends the all-placeholder documents produced when a worker had no live repository grounding.
+
+### Changed
+- **Engine floor → core-ts 0.7.15.** Ships the grounding keystone (workers surface the estate MCP tools via `--mcp-config` + `permissions.allow`; the estate MCP runs `--readonly` so writes against operator stores are refused), the Boundary 1 OS-sandbox write-deny floor (worktree is the only writable root; a `SandboxUnenforced` disclose-and-continue event when the sandbox can't arm), and the bash-indexer deny (the wicked-estate CLI family is denied in worker Bash).
+
 ## [0.7.16] — 2026-09-05
 
 ### Fixed
@@ -595,7 +603,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...HEAD
+[0.7.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.13...v0.7.14
