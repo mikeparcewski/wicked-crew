@@ -2931,13 +2931,20 @@ export function registerRoutes(
   // GET /proposals?kind_type=&state= → proposal.list → { proposals: Proposal[] }.
   app.get(`${V}/proposals`, async (req, reply) => {
     const q = req.query as { kind_type?: string | string[]; state?: string | string[] };
-    const first = (v: string | string[] | undefined): string | undefined =>
-      (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
-    const kindType = first(q.kind_type);
-    const state = first(q.state);
-    if (state !== undefined && !['pending', 'approved', 'rejected'].includes(state)) {
+    const rawOf = (v: string | string[] | undefined): string | undefined =>
+      Array.isArray(v) ? v[0] : v;
+    const rawKind = rawOf(q.kind_type);
+    const rawState = rawOf(q.state);
+    // Fail-loud: a PRESENT-but-blank param (`?state=` / `?state=%20`) is a client error, NOT a
+    // silent "no filter" — else a client accidentally issues a broader query than intended.
+    if (rawKind !== undefined && rawKind.trim() === '') {
+      return reply.code(400).send({ error: '`kind_type` must not be empty' });
+    }
+    if (rawState !== undefined && !['pending', 'approved', 'rejected'].includes(rawState.trim())) {
       return reply.code(400).send({ error: '`state` must be one of pending|approved|rejected' });
     }
+    const kindType = rawKind?.trim() || undefined;
+    const state = rawState?.trim() || undefined;
     const args: Record<string, unknown> = {};
     if (kindType !== undefined) args.kind_type = kindType;
     if (state !== undefined) args.state = state;

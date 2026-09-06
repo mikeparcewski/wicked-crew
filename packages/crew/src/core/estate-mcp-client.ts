@@ -135,14 +135,18 @@ function unwrapToolResult(msg: Record<string, unknown>): unknown {
     throw new EstateMcpError('estate-mcp tool result had no text content');
   }
   const text = first['text'];
+  // Cap any raw tool-result text carried into an error: route code surfaces `err.message` in a 502,
+  // so an uncapped body could leak large/sensitive payloads and bloat the HTTP error.
+  const cap = (s: string): string => (s.length > 200 ? `${s.slice(0, 200)}… (${s.length} chars)` : s);
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    throw new EstateMcpError(`estate-mcp tool result text was not JSON: ${text}`);
+    throw new EstateMcpError(`estate-mcp tool result text was not JSON: ${cap(text)}`);
   }
   if (result['isError'] === true) {
-    const detail = isRecord(payload) && typeof payload['message'] === 'string' ? payload['message'] : text;
+    const detail =
+      isRecord(payload) && typeof payload['message'] === 'string' ? cap(payload['message']) : cap(text);
     throw new EstateMcpError(detail);
   }
   return payload;

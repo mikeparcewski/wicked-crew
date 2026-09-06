@@ -90,6 +90,19 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     expect(proposalTool).not.toHaveBeenCalled();
   });
 
+  it('400s a PRESENT-but-blank state/kind_type (fail-loud, never a silent no-filter)', async () => {
+    for (const url of [
+      '/api/v1/proposals?state=',
+      '/api/v1/proposals?state=%20',
+      '/api/v1/proposals?kind_type=',
+      '/api/v1/proposals?kind_type=%20',
+    ]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(400);
+    }
+    expect(proposalTool).not.toHaveBeenCalled();
+  });
+
   // ── POST /proposals/:id/approve ───────────────────────────────────────────────
 
   it('approves a memory proposal → promoted, forwarding the id', async () => {
