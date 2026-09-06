@@ -321,9 +321,11 @@ export function proposeClause(): string {
     `gotcha, a tool behavior, a project decision — record it: call the wicked-estate MCP ` +
     `proposal.submit tool with kind_type "memory", payload {"content":"<the learning>","tier":"procedural"}, ` +
     `and facets tagging ONLY the natural axis it is about (e.g. {"cli":"codex"} for a codex quirk, not ` +
-    `tied to this repo). proposal.submit is a PERMITTED safe write even though your other estate-MCP ` +
-    `writes are read-only — the proposal is inert (never recalled or applied) until a human reviews it, ` +
-    `so proposing costs nothing and pollutes nothing; capturing nothing is fine; never fabricate. `
+    `tied to this repo). NEVER include secrets, credentials, tokens, API keys, or personal data — a ` +
+    `promoted proposal becomes shared memory. proposal.submit is a PERMITTED safe write even though your ` +
+    `estate MCP is otherwise read-only (it refuses your other writes) — the proposal is inert (never ` +
+    `recalled or applied) until a human reviews it, so proposing costs nothing and pollutes nothing; ` +
+    `capturing nothing is fine; never fabricate. `
   );
 }
 

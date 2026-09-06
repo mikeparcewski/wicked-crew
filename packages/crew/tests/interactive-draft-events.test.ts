@@ -174,7 +174,7 @@ describe('draftProblem (the worker prompt seed)', () => {
     // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
     // + the (now always-present) estate-tool clause + fixed words.
     const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
-    expect(worst.length).toBeLessThan(3700);
+    expect(worst.length).toBeLessThan(3900);
   });
 
   it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
@@ -265,6 +265,8 @@ describe('draftProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     for (const p of [withIntent, noIntent]) {
       expect(p).toContain('proposal.submit');
       expect(p).toContain('kind_type "memory"');
+      // the clause forbids leaking secrets/PII into shared memory
+      expect(p).toContain('NEVER include secrets');
       expect(p).not.toMatch(/[\n\r\t]/);
     }
   });
