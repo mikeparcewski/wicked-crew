@@ -803,9 +803,12 @@ export async function startInteractiveChatSubscriber(
         // axis (the reliably-available axis on this seam). An unfiled ask leaves it undefined, so
         // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
         // launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: chatProblem(ask, currentPath, outPath, {
-          ...(ask.projectId !== undefined ? { project: ask.projectId } : {}),
-        }),
+        problem: chatProblem(
+          ask,
+          currentPath,
+          outPath,
+          ask.projectId !== undefined ? { project: ask.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,

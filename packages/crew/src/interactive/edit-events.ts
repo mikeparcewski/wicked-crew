@@ -753,9 +753,11 @@ export async function startInteractiveEditSubscriber(
         // `project` axis (the reliably-available axis on this seam). An unfiled handoff leaves it
         // undefined, so the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope
         // here — the launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: editProblem(handoff, handoffPath, {
-          ...(handoff.projectId !== undefined ? { project: handoff.projectId } : {}),
-        }),
+        problem: editProblem(
+          handoff,
+          handoffPath,
+          handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_EDIT_WORKFLOW,

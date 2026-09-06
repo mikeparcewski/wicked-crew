@@ -944,9 +944,12 @@ export async function startInteractiveDraftSubscriber(
         // axis (the reliably-available axis on this seam). An unfiled doc leaves it undefined, so
         // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
         // launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: draftProblem(doc, outPath, snapshotDir, {
-          ...(doc.projectId !== undefined ? { project: doc.projectId } : {}),
-        }),
+        problem: draftProblem(
+          doc,
+          outPath,
+          snapshotDir,
+          doc.projectId !== undefined ? { project: doc.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
