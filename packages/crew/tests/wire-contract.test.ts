@@ -27,7 +27,7 @@ import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
-import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema } from '../src/api/routes.js';
+import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -303,6 +303,17 @@ accepts<z.input<typeof TestingReconSchema>, Wire.TestingReconBody>();
 accepts<z.input<typeof LaunchCampaignSchema>, Wire.LaunchCampaignBody>();
 // POST /projects/:id/graph/refresh — the additive `force` body (estate-migration path).
 accepts<z.input<typeof RefreshProjectGraphSchema>, Wire.RefreshProjectGraphBody>();
+
+// Memory management (DES-MEM-FACETED-001, api-types 0.22.0) — the shapes the /memory routes build
+// from estate must satisfy the contract, and the retire body the contract lets a client send must
+// parse against the route schema.
+respondsWith<Wire.ListMemoriesResponse, { memories: Wire.MemoryItem[] }>();
+respondsWith<
+  Wire.MemoryCoverageResponse,
+  { total: number; by_tier: Record<string, number>; by_kind: Record<string, number> }
+>();
+respondsWith<Wire.RetireMemoryResponse, { erased: number }>();
+accepts<z.input<typeof RetireMemorySchema>, Wire.RetireMemoryBody>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {
