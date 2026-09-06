@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.20.0",
+  "apiTypesVersion": "0.21.0",
   "endpoints": [
     {
       "method": "GET",
@@ -435,6 +435,27 @@
         502,
         503
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/proposals",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/proposals/:id/approve",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/proposals/:id/reject",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": []
     },
     {
       "method": "GET",
