@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.19] — 2026-09-06
+
+### Added
+
+- Memory-management API: `GET /api/v1/memory` (browse existing memories),
+  `GET /api/v1/memory/coverage`, and `POST /api/v1/memory/retire` — the
+  manage-existing half of the governed-knowledge surface, alongside the
+  proposals API shipped in 0.7.18 (#454). `wicked-crew-api-types` 0.22.0 adds
+  the `MemoryItem` / `ListMemoriesResponse` / coverage DTOs.
+
+### Changed
+
+- Bundled `wicked-studio` dist bumped to 0.4.13: the unified **Steering**
+  surface. Policies and Memories are now sub-sections that each show both
+  agent proposals (review/approve/reject) and manage-existing (browse/retire
+  for memories, type-filtered rule management for policies). The seven
+  per-steering-type pages collapse into one view with a type filter, and the
+  standalone top-level Proposals page is folded into the sub-sections.
+
 ## [0.7.18] — 2026-09-06
 
 ### Added
@@ -614,7 +633,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...HEAD
+[0.7.19]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...v0.7.16
