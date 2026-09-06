@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.21.0",
+  "apiTypesVersion": "0.22.0",
   "endpoints": [
     {
       "method": "GET",
@@ -266,6 +266,39 @@
       "responseType": null,
       "statusCodes": [
         200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory",
+      "requestType": null,
+      "responseType": "ListMemoriesResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/coverage",
+      "requestType": null,
+      "responseType": "MemoryCoverageResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/retire",
+      "requestType": "RetireMemoryBody",
+      "responseType": "RetireMemoryResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
       ]
     },
     {

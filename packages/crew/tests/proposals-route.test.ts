@@ -3,7 +3,7 @@
 //   POST /api/v1/proposals/:id/approve → proposal.approve
 //   POST /api/v1/proposals/:id/reject  → proposal.reject
 //
-// Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateProposalTool)
+// Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateTool)
 // — no `wicked-estate-mcp` process is ever spawned. Covers: the right tool + args reach the client,
 // the response is shaped through, the handed_off outcome passes through as-is, and the fail-loud
 // ladder (bad state / whitespace id → 400 without calling the client; estate -32602 → 400; any other
@@ -49,7 +49,7 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
       undefined,
       undefined,
       undefined,
-      { callEstateProposalTool: proposalTool as (t: string, a: Record<string, unknown>) => Promise<unknown> },
+      { callEstateTool: proposalTool as (t: string, a: Record<string, unknown>) => Promise<unknown> },
     );
     await app.ready();
   });

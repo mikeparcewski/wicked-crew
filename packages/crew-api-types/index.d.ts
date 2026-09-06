@@ -2821,3 +2821,87 @@ export type ApproveProposalResponse =
 export interface RejectProposalResponse {
   ok: true;
 }
+
+// ── Memory management (governed-knowledge surface, DES-MEM-FACETED-001, api-types 0.22.0) ──────
+//
+// The studio's surface for managing the memories that ALREADY exist in the operator store — the
+// counterpart to the proposal queue (which decides learnings not yet stored). Backed by the estate
+// MCP memory tools (memory.recall / memory.coverage / memory.erase) exposed over crew's /api/v1.
+// The granularity is estate's, surfaced honestly: browse is query-based (no "list all"), and
+// retire is SUBTREE-scoped (no per-id delete).
+
+/**
+ * One memory as browsed from the store (`GET /memory`, from estate `memory.recall`).
+ *
+ * estate `memory.recall` is query-based and token-budgeted — there is NO "list all" — and returns
+ * `{ memory_id, scope, content, tier, score }` per item. It does NOT surface per-item `facets`, so
+ * `facets` is presently always `{}` (kept in the shape for forward-compatibility and to mirror
+ * `Proposal.facets`); `score` is the recall relevance score, absent when estate omits it.
+ */
+export interface MemoryItem {
+  /** Stable memory-node id (estate `memory_id`). */
+  id: string;
+  /** The memory body. */
+  content: string;
+  /** Tier: `working` | `episodic` | `semantic` | `procedural` | `archival`. */
+  tier: string;
+  /** The memory's own hierarchical scope path (slash-separated `kind:id` segments; `""` = root). */
+  scope: string;
+  /** Orthogonal facets (axis → value). Always `{}` today — estate `memory.recall` does not return
+   *  per-item facets; present for forward-compatibility. */
+  facets: Record<string, string>;
+  /** Recall relevance score; absent when estate omits it. */
+  score?: number;
+}
+
+/**
+ * `GET /memory` query filters. All optional. `scope_prefix` is the browse knob — a subtree filter
+ * where `""` matches EVERY memory (the same predicate as retire); `scope` is inheritance-visibility
+ * (ancestor-or-self). `facets` is a JSON-encoded object of axis→value strings (the recall intent
+ * tuple). `limit` is the recall TOKEN budget (estate exposes no row-count cap), bounding the SIZE
+ * of the returned slice — NOT a memory count.
+ */
+export interface ListMemoriesQuery {
+  query?: string;
+  scope?: string;
+  scope_prefix?: string;
+  /** JSON-encoded `Record<string, string>` (axis→value); a malformed value is a 400. */
+  facets?: string;
+  /** Positive integer; the recall token budget. */
+  limit?: string;
+}
+
+/** `GET /memory` → 200. */
+export interface ListMemoriesResponse {
+  memories: MemoryItem[];
+}
+
+/** `GET /memory/coverage` query — an optional subtree filter (`""`/omitted = global totals). */
+export interface MemoryCoverageQuery {
+  scope_prefix?: string;
+}
+
+/**
+ * `GET /memory/coverage` → 200 (estate `memory.coverage`). Memory-node counts, optionally scoped to
+ * a subtree: `total`, plus per-tier and per-kind breakdowns.
+ */
+export interface MemoryCoverageResponse {
+  total: number;
+  by_tier: Record<string, number>;
+  by_kind: Record<string, number>;
+}
+
+/**
+ * `POST /memory/retire` body. Retire is SUBTREE-scoped, never per-id: estate `memory.erase`
+ * hard-deletes EVERY memory whose scope equals or descends from `scope_prefix`. `scope_prefix` is
+ * required and must be non-empty (estate refuses a total wipe) — the surface must show the operator
+ * the whole subtree it will remove, not a single row.
+ */
+export interface RetireMemoryBody {
+  scope_prefix: string;
+}
+
+/** `POST /memory/retire` → 200. The number of memories the subtree wipe deleted. */
+export interface RetireMemoryResponse {
+  erased: number;
+}

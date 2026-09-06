@@ -18,14 +18,18 @@ import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output
 import type {
   ApproveProposalResponse,
   LaunchRunInput,
+  ListMemoriesResponse,
   ListProposalsResponse,
+  MemoryCoverageResponse,
+  MemoryItem,
   RejectProposalResponse,
+  RetireMemoryResponse,
   RosterSeat,
   SessionStatus,
   SessionView,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
-import { callEstateProposalTool, EstateMcpError } from '../core/estate-mcp-client.js';
+import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
@@ -146,6 +150,69 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
         }, and ignoring ${unknown.length > 1 ? 'them' : 'it'} would run a different request than you sent`
       : what;
   return { error, details: err.issues };
+}
+
+/** First value of a possibly-repeated query param, WITHOUT trimming — `''` is PRESERVED because a
+ *  blank `scope`/`scope_prefix` is meaningful to estate (root / whole-subtree), unlike an omitted
+ *  one. Returns undefined only when the param is absent. */
+function firstQueryValue(v: string | string[] | undefined): string | undefined {
+  return Array.isArray(v) ? v[0] : v;
+}
+
+/** A JSON object whose every value is a string (a facet/intent tuple, axis→value). */
+function isStringRecord(v: unknown): v is Record<string, string> {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    !Array.isArray(v) &&
+    Object.values(v as Record<string, unknown>).every((x) => typeof x === 'string')
+  );
+}
+
+/** A JSON object whose every value is a number (a coverage breakdown map). */
+function isNumberRecord(v: unknown): v is Record<string, number> {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    !Array.isArray(v) &&
+    Object.values(v as Record<string, unknown>).every((x) => typeof x === 'number')
+  );
+}
+
+/** The broad-browse recall token budget for `GET /memory` when the caller passes no `limit` — larger
+ *  than estate's own 2000 default so a browse returns a meaningful slice, not a conversational one. */
+const MEMORY_BROWSE_TOKEN_BUDGET = 8000;
+
+/**
+ * Shape one estate `memory.recall` item (`{ memory_id, scope, content, tier, score }`) into the wire
+ * {@link MemoryItem}. estate recall does NOT surface per-item facets, so `facets` defaults to `{}`
+ * (mapped defensively so a future estate that DOES carry them rides through); `score` is dropped
+ * when absent. String fields missing on the wire degrade to `''` rather than throwing on one item.
+ */
+function shapeMemoryItem(raw: unknown): MemoryItem {
+  const r: Record<string, unknown> =
+    typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const item: MemoryItem = {
+    id: str(r['memory_id']),
+    content: str(r['content']),
+    tier: str(r['tier']),
+    scope: str(r['scope']),
+    facets: isStringRecord(r['facets']) ? r['facets'] : {},
+  };
+  if (typeof r['score'] === 'number') item.score = r['score'];
+  return item;
+}
+
+/** Shape the estate `memory.coverage` result (`{ total, by_tier, by_kind }`) into the wire
+ *  {@link MemoryCoverageResponse}. A shape estate never produces is an UPSTREAM fault — thrown as an
+ *  {@link EstateMcpError} (→ 502), never silently coerced to zeroes. */
+function shapeMemoryCoverage(raw: unknown): MemoryCoverageResponse {
+  const r = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : undefined;
+  if (r === undefined || typeof r['total'] !== 'number' || !isNumberRecord(r['by_tier']) || !isNumberRecord(r['by_kind'])) {
+    throw new EstateMcpError('memory.coverage returned an unexpected shape');
+  }
+  return { total: r['total'], by_tier: r['by_tier'], by_kind: r['by_kind'] };
 }
 
 // Closed facet vocabularies for the `GET /governance/rules` browse filters (wiki-mgmt) — the
@@ -289,6 +356,14 @@ export const OpenPathSchema = z.object({
   runId: z.string().min(1).optional(),
 }).strict();
 
+/** `POST /memory/retire` body (DES-MEM-FACETED-001). `scope_prefix` is REQUIRED and, after trim,
+ *  non-empty (enforced in the route so the 400 names the total-wipe guard): estate `memory.erase`
+ *  is subtree-scoped and refuses an empty prefix. `.strict()` for the FINDING-031 posture — an
+ *  unknown field is a 400, never silently ignored into a broader erase than the caller sent. */
+export const RetireMemorySchema = z.object({
+  scope_prefix: z.string(),
+}).strict();
+
 /**
  * A SKIN-OWNED settings key (crew#323): one lowercase segment under the `studio.` namespace,
  * e.g. `studio.appearance`, `studio.notifications`. The daemon never interprets these values —
@@ -366,10 +441,12 @@ export interface RuntimeDeps {
    *  Injectable so route tests never shell out to git; defaults to {@link gitReprovisionWorktree}. */
   reprovisionWorktree?: WorktreeReprovisioner;
   openWithOs?: (target: string) => Promise<void>;
-  /** The estate-MCP proposal-queue client behind `/proposals*` (DES-MEM-FACETED-001 §5.0).
-   *  Injectable so route tests never spawn `wicked-estate-mcp`; defaults to the real spawn-per-call
-   *  client (NON-`--readonly`, `WICKED_MEMORY_DB` pinned to the operator global store). */
-  callEstateProposalTool?: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** The estate-MCP client behind `/proposals*` AND `/memory*` (DES-MEM-FACETED-001) — one seam for
+   *  every operator-facing estate tool (`proposal.*` + `memory.recall`/`memory.coverage`/
+   *  `memory.erase`). Injectable so route tests never spawn `wicked-estate-mcp`; defaults to the
+   *  real spawn-per-call client (NON-`--readonly`, `WICKED_MEMORY_DB` pinned to the operator global
+   *  store — memory.erase is a WRITE). */
+  callEstateTool?: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
@@ -446,10 +523,10 @@ export function registerRoutes(
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
   const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
-  // The estate proposal-queue client behind `/proposals*` (DES-MEM-FACETED-001 §5.0). The default
-  // is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no process
-  // is ever spawned.
-  const proposalTool = runtime.callEstateProposalTool ?? callEstateProposalTool;
+  // The estate MCP client behind `/proposals*` AND `/memory*` (DES-MEM-FACETED-001) — one seam. The
+  // default is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no
+  // process is ever spawned.
+  const estateTool = runtime.callEstateTool ?? callEstateTool;
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
@@ -2921,7 +2998,7 @@ export function registerRoutes(
   // fault (502), kept distinct from a client mistake (400: a bad `state`/`id`, or estate's own
   // -32602 invalid-params) — the FINDING-031 posture that a malformed filter is refused, never
   // silently honored as a different request.
-  const proposalUpstreamError = (reply: FastifyReply, err: unknown): FastifyReply => {
+  const estateUpstreamError = (reply: FastifyReply, err: unknown): FastifyReply => {
     if (err instanceof EstateMcpError && err.code === -32602) {
       return reply.code(400).send({ error: err.message });
     }
@@ -2952,9 +3029,9 @@ export function registerRoutes(
     if (kindType !== undefined) args.kind_type = kindType;
     if (state !== undefined) args.state = state;
     try {
-      return (await proposalTool('proposal.list', args)) as ListProposalsResponse;
+      return (await estateTool('proposal.list', args)) as ListProposalsResponse;
     } catch (err) {
-      return proposalUpstreamError(reply, err);
+      return estateUpstreamError(reply, err);
     }
   });
 
@@ -2974,9 +3051,9 @@ export function registerRoutes(
       // §5.2). Policy→steering routing is OUT OF SCOPE here: a `handed_off` outcome is passed
       // through as-is for a later steering-write to consume; memory proposals return `promoted` and
       // need nothing more.
-      return (await proposalTool('proposal.approve', { id })) as ApproveProposalResponse;
+      return (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
     } catch (err) {
-      return proposalUpstreamError(reply, err);
+      return estateUpstreamError(reply, err);
     }
   });
 
@@ -2990,11 +3067,155 @@ export function registerRoutes(
       return reply.code(400).send({ error: '`id` is required' });
     }
     try {
-      return (await proposalTool('proposal.reject', { id })) as RejectProposalResponse;
+      return (await estateTool('proposal.reject', { id })) as RejectProposalResponse;
     } catch (err) {
-      return proposalUpstreamError(reply, err);
+      return estateUpstreamError(reply, err);
     }
   });
+
+  // ── Memory management (governed-knowledge surface, DES-MEM-FACETED-001) ───────
+  // Browse + retire the EXISTING operator memory store — the studio counterpart to /proposals:
+  // proposals DECIDE learnings not yet stored; these MANAGE what already is. The estate memory
+  // tools live ONLY on the estate MCP (memory.recall / memory.coverage / memory.erase), reached
+  // through the SAME `estateTool` seam and `estateUpstreamError` ladder as /proposals — a client
+  // mistake (non-integer limit, malformed facets JSON, empty retire scope_prefix, or estate's own
+  // -32602 invalid-params) is a 400; an upstream estate/transport fault, or a malformed estate
+  // response, is a 502.
+  //
+  // GRANULARITY, stated honestly (the estate contract, not a convenience wrapper):
+  //   • BROWSE is query-based. estate has no "list all"; `memory.recall` returns a token-budgeted,
+  //     relevance-ranked slice. Broad browse = an empty `query` + `scope_prefix` (subtree filter,
+  //     "" = every memory) + a large token budget. `limit` IS that token budget — estate exposes no
+  //     row-count cap — so it bounds the SIZE of the slice, not a memory count.
+  //   • recall returns { memory_id, scope, content, tier, score } and does NOT surface per-item
+  //     facets, so MemoryItem.facets is always {} (mapped defensively for a future estate).
+  //   • RETIRE is SUBTREE-scoped, never per-id. estate exposes NO per-memory delete: `memory.erase`
+  //     hard-deletes EVERY memory whose scope equals or descends from `scope_prefix`, and refuses an
+  //     empty prefix (a total-wipe guard). So retire takes a `scope_prefix` and reports how many
+  //     memories the subtree wipe removed — the UI must show the operator the subtree, not one row.
+
+  // GET /memory?query=&scope=&scope_prefix=&facets=<json>&limit= → memory.recall → { memories }.
+  app.get(
+    `${V}/memory`,
+    { config: { manifest: { responseType: 'ListMemoriesResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
+      const q = req.query as {
+        query?: string | string[];
+        scope?: string | string[];
+        scope_prefix?: string | string[];
+        facets?: string | string[];
+        limit?: string | string[];
+      };
+      // `query` defaults to "" (broad browse). scope / scope_prefix forward verbatim WHEN PRESENT —
+      // a blank value is meaningful to estate (root / whole-subtree), so it is not dropped.
+      const args: Record<string, unknown> = { query: firstQueryValue(q.query) ?? '' };
+      const scope = firstQueryValue(q.scope);
+      if (scope !== undefined) args.scope = scope;
+      const scopePrefix = firstQueryValue(q.scope_prefix);
+      if (scopePrefix !== undefined) args.scope_prefix = scopePrefix;
+      // `facets` is the recall `intent` tuple (axis→value). Present-but-blank is a client error
+      // (fail-loud, never a silent no-filter — FINDING-031); a present value must parse to a JSON
+      // object of string values (estate further validates each axis and answers -32602 → 400).
+      const rawFacets = firstQueryValue(q.facets);
+      if (rawFacets !== undefined) {
+        if (rawFacets.trim() === '') {
+          return reply.code(400).send({ error: '`facets` must not be empty' });
+        }
+        let parsedFacets: unknown;
+        try {
+          parsedFacets = JSON.parse(rawFacets);
+        } catch {
+          return reply.code(400).send({ error: '`facets` must be a JSON object of axis:value strings' });
+        }
+        if (!isStringRecord(parsedFacets)) {
+          return reply.code(400).send({ error: '`facets` must be a JSON object of axis:value strings' });
+        }
+        args.intent = parsedFacets;
+      }
+      // `limit` is the recall token budget (estate has no row-count cap). Omitted/blank ⇒ the broad
+      // browse budget; a present value must be a positive integer (mirrors GET /audit's `limit`).
+      const rawLimit = firstQueryValue(q.limit);
+      let tokenBudget = MEMORY_BROWSE_TOKEN_BUDGET;
+      if (rawLimit !== undefined && rawLimit.trim() !== '') {
+        const n = Number(rawLimit);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+          return reply.code(400).send({ error: '`limit` must be a positive integer (the recall token budget)' });
+        }
+        tokenBudget = n;
+      }
+      args.token_budget = tokenBudget;
+      try {
+        const raw = await estateTool('memory.recall', args);
+        const items =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['items'] : undefined;
+        if (!Array.isArray(items)) {
+          throw new EstateMcpError('memory.recall returned an unexpected shape');
+        }
+        const body: ListMemoriesResponse = { memories: items.map(shapeMemoryItem) };
+        return body;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // GET /memory/coverage?scope_prefix= → memory.coverage → { total, by_tier, by_kind }.
+  app.get(
+    `${V}/memory/coverage`,
+    { config: { manifest: { responseType: 'MemoryCoverageResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
+      const q = req.query as { scope_prefix?: string | string[] };
+      const scopePrefix = firstQueryValue(q.scope_prefix);
+      const args: Record<string, unknown> = {};
+      if (scopePrefix !== undefined) args.scope_prefix = scopePrefix;
+      try {
+        return shapeMemoryCoverage(await estateTool('memory.coverage', args));
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
+
+  // POST /memory/retire { scope_prefix } → memory.erase → { erased }. SUBTREE-scoped (no per-id
+  // delete in estate); an empty scope_prefix is refused at the route (a 400 BEFORE any spawn) — the
+  // same total-wipe guard estate enforces with -32602.
+  app.post(
+    `${V}/memory/retire`,
+    {
+      config: {
+        manifest: {
+          requestType: 'RetireMemoryBody',
+          responseType: 'RetireMemoryResponse',
+          statusCodes: [200, 400, 502],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = RetireMemorySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid retire request'));
+      }
+      const scopePrefix = parsed.data.scope_prefix.trim();
+      if (scopePrefix === '') {
+        return reply.code(400).send({
+          error:
+            '`scope_prefix` must not be empty — memory.erase is subtree-scoped (no per-id delete) and refuses a total wipe',
+        });
+      }
+      try {
+        const raw = await estateTool('memory.erase', { scope_prefix: scopePrefix });
+        const deleted =
+          typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['deleted_count'] : undefined;
+        if (typeof deleted !== 'number') {
+          throw new EstateMcpError('memory.erase returned an unexpected shape');
+        }
+        const body: RetireMemoryResponse = { erased: deleted };
+        return body;
+      } catch (err) {
+        return estateUpstreamError(reply, err);
+      }
+    },
+  );
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
   registerProjectRoutes(app, adapter, { ...projects, settings: projectSettings }, security);

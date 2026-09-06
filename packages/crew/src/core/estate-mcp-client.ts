@@ -161,14 +161,19 @@ function unwrapToolResult(msg: Record<string, unknown>): unknown {
 }
 
 /**
- * Call one `proposal.*` tool on the estate MCP and return its unwrapped result.
+ * Call one estate MCP tool by name and return its unwrapped result.
+ *
+ * Generic over the tool name — the proposal queue (`proposal.*`) and the memory-management surface
+ * (`memory.recall` / `memory.coverage` / `memory.erase`) both go through here — so a single
+ * spawn-per-call `wicked-estate-mcp` client (NON-`--readonly`, `WICKED_MEMORY_DB` pinned) serves
+ * every operator-facing estate tool.
  *
  * Spawns the server, performs the handshake, issues the `tools/call`, reads the id-2 response
  * (line-buffered), unwraps the MCP envelope, then closes stdin and kills the child. Throws
  * {@link EstateMcpError} on a JSON-RPC error, a malformed response, an early process exit, a spawn
  * failure, or the timeout.
  */
-export async function callEstateProposalTool(
+export async function callEstateTool(
   tool: string,
   args: Record<string, unknown>,
   io: EstateMcpIo = {},

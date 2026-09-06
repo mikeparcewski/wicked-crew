@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  callEstateProposalTool,
+  callEstateTool,
   EstateMcpError,
   estateMcpExe,
   resolveMemoryDbPath,
@@ -86,7 +86,7 @@ function readFrames(logPath: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-describe('callEstateProposalTool', () => {
+describe('callEstateTool', () => {
   const dirs: string[] = [];
   afterEach(() => {
     for (const d of dirs.splice(0)) removeScratch(d);
@@ -96,7 +96,7 @@ describe('callEstateProposalTool', () => {
     const fx = makeFixture();
     dirs.push(fx.dir);
 
-    const result = (await callEstateProposalTool(
+    const result = (await callEstateTool(
       'proposal.list',
       { kind_type: 'memory', state: 'pending' },
       { spawn: spawnFake(fx, 'ok'), timeoutMs: 5000 },
@@ -134,7 +134,7 @@ describe('callEstateProposalTool', () => {
     dirs.push(fx.dir);
 
     await expect(
-      callEstateProposalTool('proposal.approve', { id: 'p1' }, { spawn: spawnFake(fx, 'rpcerror'), timeoutMs: 5000 }),
+      callEstateTool('proposal.approve', { id: 'p1' }, { spawn: spawnFake(fx, 'rpcerror'), timeoutMs: 5000 }),
     ).rejects.toMatchObject({ name: 'EstateMcpError', code: -32603, message: 'boom from estate' });
   });
 
@@ -142,7 +142,7 @@ describe('callEstateProposalTool', () => {
     const fx = makeFixture();
     dirs.push(fx.dir);
 
-    const err = await callEstateProposalTool(
+    const err = await callEstateTool(
       'proposal.reject',
       { id: 'p1' },
       { spawn: spawnFake(fx, 'exit'), timeoutMs: 5000 },
