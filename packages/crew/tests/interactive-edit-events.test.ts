@@ -214,6 +214,8 @@ describe('editProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     // {"cli":"codex"} example, so scope the axis check to the recall intent rather than a blanket not.
     expect(problem).toContain('intent {"project":"proj-test"} and');
     expect(problem).not.toContain('undefined');
+    // the propose clause (write side) rides every interactive prompt
+    expect(problem).toContain('proposal.submit');
   });
 });
 
