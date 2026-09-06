@@ -2929,7 +2929,10 @@ export function registerRoutes(
   };
 
   // GET /proposals?kind_type=&state= → proposal.list → { proposals: Proposal[] }.
-  app.get(`${V}/proposals`, async (req, reply) => {
+  app.get(
+    `${V}/proposals`,
+    { config: { manifest: { responseType: 'ListProposalsResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
     const q = req.query as { kind_type?: string | string[]; state?: string | string[] };
     const rawOf = (v: string | string[] | undefined): string | undefined =>
       Array.isArray(v) ? v[0] : v;
@@ -2958,7 +2961,10 @@ export function registerRoutes(
   // POST /proposals/:id/approve → proposal.approve →
   //   { outcome:'promoted', active_id }  — a MEMORY proposal, now an active memory (complete);
   //   { outcome:'handed_off', payload }  — a POLICY proposal, returned VERBATIM.
-  app.post(`${V}/proposals/:id/approve`, async (req, reply) => {
+  app.post(
+    `${V}/proposals/:id/approve`,
+    { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id.trim() === '') {
       return reply.code(400).send({ error: '`id` is required' });
@@ -2975,7 +2981,10 @@ export function registerRoutes(
   });
 
   // POST /proposals/:id/reject → proposal.reject → { ok: true }.
-  app.post(`${V}/proposals/:id/reject`, async (req, reply) => {
+  app.post(
+    `${V}/proposals/:id/reject`,
+    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id.trim() === '') {
       return reply.code(400).send({ error: '`id` is required' });

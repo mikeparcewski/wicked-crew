@@ -440,22 +440,34 @@
       "method": "GET",
       "path": "/api/v1/proposals",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "ListProposalsResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
+      ]
     },
     {
       "method": "POST",
       "path": "/api/v1/proposals/:id/approve",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "ApproveProposalResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
+      ]
     },
     {
       "method": "POST",
       "path": "/api/v1/proposals/:id/reject",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "RejectProposalResponse",
+      "statusCodes": [
+        200,
+        400,
+        502
+      ]
     },
     {
       "method": "GET",
