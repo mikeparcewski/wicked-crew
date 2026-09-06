@@ -37,6 +37,7 @@ import {
   groundablePath,
   recallClause,
   recallIntentObject,
+  captureClause,
   SNAPSHOT_PATH_MAX,
   resolveProjectRepo,
   startInteractiveDraftSubscriber,
@@ -140,8 +141,9 @@ describe('draftProblem (the worker prompt seed)', () => {
 
   it('caps a pasted-novel brief instead of ballooning the prompt', () => {
     const big = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o');
-    // Brief capped at 2000 + the (always-present) estate-tool grounding clause + fixed words.
-    expect(big.length).toBeLessThan(2700);
+    // Brief capped at 2000 + the (always-present) estate-tool grounding clause + the (always-present)
+    // Phase-5 capture clause + fixed words.
+    expect(big.length).toBeLessThan(3200);
     expect(big).toContain('…');
   });
 
@@ -172,9 +174,10 @@ describe('draftProblem (the worker prompt seed)', () => {
     const longButLegal = `/inbox/${'p'.repeat(SNAPSHOT_PATH_MAX - 20)}`;
     expect(draftProblem(doc, '/o.html', longButLegal)).toContain(longButLegal);
     // WORST CASE stays bounded: pasted-novel brief (capped at 2000) + a guarded path (≤300)
-    // + the (now always-present) estate-tool clause + fixed words.
+    // + the (now always-present) estate-tool clause + the (always-present) Phase-5 capture clause
+    // + fixed words.
     const worst = draftProblem({ ...doc, brief: 'x'.repeat(10_000) }, '/o.html', longButLegal);
-    expect(worst.length).toBeLessThan(3000);
+    expect(worst.length).toBeLessThan(3600);
   });
 
   it('groundablePath guards the clause budget: verbatim-or-nothing (Copilot, crew#313)', () => {
@@ -230,6 +233,47 @@ describe('recallClause / recallIntentObject (DES-MEM-FACETED-001 Phase 3, shared
   });
 });
 
+describe('captureClause (DES-MEM-FACETED-001 Phase 5, shared helper)', () => {
+  it('is UNCONDITIONAL (no intent) and single-line (PTY FINDING-011)', () => {
+    const clause = captureClause();
+    expect(clause.length).toBeGreaterThan(0);
+    expect(clause).not.toMatch(/[\n\r\t]/);
+  });
+
+  it('names the capture file and the facets/tier contract the worker must write', () => {
+    const clause = captureClause();
+    expect(clause).toContain('.wicked-session/captures.jsonl');
+    expect(clause).toContain('"facets"');
+    expect(clause).toContain('"tier":"procedural"');
+    // Tags the natural axis (cli/repo/tool/project), never fabricates.
+    expect(clause).toContain('cli/repo/tool/project');
+    expect(clause).toContain('never fabricate');
+  });
+
+  it('is stable — the same fixed instruction on every call (no hidden state)', () => {
+    expect(captureClause()).toBe(captureClause());
+  });
+});
+
+describe('draftProblem capture clause (DES-MEM-FACETED-001 Phase 5)', () => {
+  const doc = { documentId: 'my-doc', brief: 'a brief', sourcePaths: [], style: 'web' };
+
+  it('PRESENT unconditionally — even with no intent and no snapshot (every worker may capture)', () => {
+    const problem = draftProblem(doc, '/tmp/out.html');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).toContain('"tier":"procedural"');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+  });
+
+  it('rides alongside the recall clause without disturbing it', () => {
+    const problem = draftProblem(doc, '/tmp/out.html', undefined, { project: 'proj-test' });
+    // Both clauses present; recall (Phase 3) is unaffected by the capture clause (Phase 5).
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).not.toMatch(/[\n\r\t]/);
+  });
+});
+
 describe('draftProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
   const doc = { documentId: 'my-doc', brief: 'a brief', sourcePaths: [], style: 'web', projectId: 'proj-test' };
 
@@ -246,12 +290,14 @@ describe('draftProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     expect(draftProblem(doc, '/tmp/out.html', undefined, {})).toBe(draftProblem(doc, '/tmp/out.html'));
   });
 
-  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+  it('carries only the defined axes in the recall intent JSON (no undefined/null keys)', () => {
     const problem = draftProblem(doc, '/tmp/out.html', undefined, { project: 'proj-test' });
-    expect(problem).toContain('{"project":"proj-test"}');
-    expect(problem).not.toContain('"cli"');
-    expect(problem).not.toContain('"repo"');
-    expect(problem).not.toContain('undefined');
+    // Scoped to the recall INTENT object — the Phase-5 capture clause deliberately carries an
+    // example {"cli":"codex"}, so a blanket `"cli"` check would false-positive on it.
+    expect(problem).toContain('with intent {"project":"proj-test"} and');
+    expect(problem).not.toContain('with intent {"project":"proj-test","cli"');
+    expect(problem).not.toContain('with intent {"project":"proj-test","repo"');
+    expect(problem).not.toContain('"project":undefined');
   });
 });
 

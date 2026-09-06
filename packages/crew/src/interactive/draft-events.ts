@@ -309,6 +309,32 @@ export function recallClause(intent?: RecallIntent): string {
   );
 }
 
+// ── The capture-a-learning clause (DES-MEM-FACETED-001 Phase 5) ────────────────────────────────
+//
+// The WRITE side of faceted memory. The worker gets NO writable memory store (its estate MCP stays
+// read-only, --readonly, Phase 1+2): it records a reusable learning by APPENDING a JSON line to a
+// capture file inside its own working directory (`.wicked-session/captures.jsonl`). That file is
+// UNTRUSTED worktree scratch — a later crew "promotion" phase (Phase 7, separate) validates each
+// line and writes only the approved ones to the global store. This clause is the INSTRUCTION that
+// tells the worker to do it — the recall clause's write-side sibling, shared by all three
+// interactive prompt builders (draft/chat/edit) exactly like `recallClause`.
+
+/** The capture clause (DES-MEM-FACETED-001 Phase 5): instruct the worker to append a reusable
+ *  learning to `.wicked-session/captures.jsonl` in its working directory. UNLIKE {@link recallClause}
+ *  this is UNCONDITIONAL — every interactive worker may capture, so there is no intent to gate on —
+ *  but it stays a separate helper so it can be toggled/tested independently of recall. SINGLE-LINE
+ *  by contract (the PTY seat runner refuses embedded newlines — FINDING-011). */
+export function captureClause(): string {
+  return (
+    `When you learn something reusable that would help a future run — a CLI quirk, a repo build ` +
+    `gotcha, a tool behavior, a project decision — record it: append ONE JSON line to ` +
+    `.wicked-session/captures.jsonl (relative to your working directory) of the form ` +
+    `{"content":"<the learning>","facets":{"<axis>":"<value>"},"tier":"procedural"}. Tag ONLY the ` +
+    `natural axis the learning is about (cli/repo/tool/project) — e.g. a codex quirk is ` +
+    `{"cli":"codex"}, not tied to this repo. Capturing nothing is fine; never fabricate. `
+  );
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
@@ -356,9 +382,12 @@ export function draftProblem(
   // The recall clause (DES-MEM-FACETED-001 Phase 3) sits right beside grounding; `''` when the
   // intent carries no axis, so an unfiled draft reads exactly as it did before this phase.
   const recall = recallClause(intent);
+  // The capture clause (DES-MEM-FACETED-001 Phase 5) — recall's write-side sibling, right beside
+  // it. UNCONDITIONAL: every interactive worker may record a reusable learning to its capture file.
+  const capture = captureClause();
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}` +
+    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}${capture}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
 }

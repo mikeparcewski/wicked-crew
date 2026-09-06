@@ -187,6 +187,11 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx.workdir, 'SECRETS.PEM'), 'KEY MATERIAL\n'); // denylisted-name (case-insensitive; distinct basename — APFS folds case)
     mkdirSync(join(fx.workdir, 'coverage'));
     writeFileSync(join(fx.workdir, 'coverage', 'lcov.info'), 'TN:\n'); // scratch-dir
+    // The DES-MEM-FACETED-001 Phase 5 worker capture dir: untrusted per-run scratch that the
+    // capture clause tells the worker to append to — never a deliverable (Phase 7 promotion
+    // consumes it). A plain `.jsonl` under a non-standard dir would otherwise ride via c1b.
+    mkdirSync(join(fx.workdir, '.wicked-session'));
+    writeFileSync(join(fx.workdir, '.wicked-session', 'captures.jsonl'), '{"content":"a codex quirk","facets":{"cli":"codex"},"tier":"procedural"}\n'); // wicked-session
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
     writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7)); // oversize-1mib
 
@@ -207,6 +212,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): SECRETS.PEM');
     expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
     expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/lcov.info');
+    expect(r.output).toContain('deliver: EXCLUDED (wicked-session): .wicked-session/captures.jsonl');
     expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');
     // Skipped, never deleted — the excluded files remain untracked in the worktree for the operator.
     const status = git(fx.workdir, 'status', '--porcelain');

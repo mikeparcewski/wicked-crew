@@ -61,6 +61,7 @@ import {
   STATUS_POSTED,
   oneLine,
   recallClause,
+  captureClause,
   type RecallIntent,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
@@ -292,11 +293,14 @@ export function chatProblem(
   // (see the split above), but recall is a repo-LESS estate MCP call, so it rides here too — `''`
   // when the intent carries no axis, keeping the proven CREW-UX-5 shape for an unfiled ask.
   const recall = recallClause(intent);
+  // The capture clause (DES-MEM-FACETED-001 Phase 5) — recall's write-side sibling, right beside
+  // it. UNCONDITIONAL: every interactive worker may record a reusable learning to its capture file.
+  const capture = captureClause();
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
     `The user's ask: ${oneLine(ask.text, 2000)} ` +
     `The document's CURRENT version is the HTML file at this absolute path — read it first: ${currentPath} ` +
-    `${recall}` +
+    `${recall}${capture}` +
     `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`
   );
 }

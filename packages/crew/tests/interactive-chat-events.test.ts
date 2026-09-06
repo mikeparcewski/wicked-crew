@@ -202,7 +202,8 @@ describe('chatProblem (the worker prompt seed)', () => {
 
   it('caps a pasted-novel ask instead of ballooning the prompt', () => {
     const big = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o');
-    expect(big.length).toBeLessThan(2500);
+    // Ask capped at 2000 + the (always-present) Phase-5 capture clause + fixed words.
+    expect(big.length).toBeLessThan(3000);
     expect(big).toContain('…');
   });
 
@@ -240,12 +241,34 @@ describe('chatProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     );
   });
 
-  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+  it('carries only the defined axes in the recall intent JSON (no undefined/null keys)', () => {
     const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
-    expect(problem).toContain('{"project":"proj-test"}');
-    expect(problem).not.toContain('"cli"');
-    expect(problem).not.toContain('"repo"');
-    expect(problem).not.toContain('undefined');
+    // Scoped to the recall INTENT object — the Phase-5 capture clause deliberately carries an
+    // example {"cli":"codex"}, so a blanket `"cli"` check would false-positive on it.
+    expect(problem).toContain('with intent {"project":"proj-test"} and');
+    expect(problem).not.toContain('with intent {"project":"proj-test","cli"');
+    expect(problem).not.toContain('with intent {"project":"proj-test","repo"');
+    expect(problem).not.toContain('"project":undefined');
+  });
+});
+
+describe('chatProblem capture clause (DES-MEM-FACETED-001 Phase 5)', () => {
+  const ask = { documentId: 'my-doc', text: 'make it bolder', sourceMessageId: 'm-1' };
+
+  it('PRESENT unconditionally — even with no intent (every worker may capture), single-line', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).toContain('"tier":"procedural"');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+    // The capture clause is repo-LESS — it does NOT reintroduce the CREW-UX-8 repo grounding.
+    expect(problem).not.toContain('repository snapshot');
+  });
+
+  it('rides alongside the recall clause without disturbing it', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).not.toMatch(/[\n\r\t]/);
   });
 });
 

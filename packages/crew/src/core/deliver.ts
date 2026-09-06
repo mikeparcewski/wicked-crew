@@ -205,6 +205,10 @@ export function deliverPrScript(intent?: string): string {
     //   • a basename containing `socket` (covers `socket.path`, which has no fixed extension);
     //   • a path under an obvious scratch/cache dir (tmp/ .tmp/ scratch/ .cache/ coverage/) or
     //     a `.DS_Store`;
+    //   • a path under `.wicked-session/` — the DES-MEM-FACETED-001 Phase 5 worker capture dir
+    //     (`captures.jsonl`): untrusted per-run scratch that Phase 7 promotion consumes, never a
+    //     product to deliver. (The interactive seams write it to their inbox, not the worktree, but
+    //     the capture clause ships to every governed worker, so guard it here belt-and-suspenders.)
     //   • any otherwise-unrecognised file larger than 1 MiB (a generic net for future scratch).
     // EVERYTHING ELSE RIDES — the floor's job is hygiene, not taste; an allowlist would silently
     // drop a legitimate new asset. This is a GUARD, NOT A SILENT DROP (the issue's own words):
@@ -224,6 +228,8 @@ export function deliverPrScript(intent?: string): string {
     '  case "$LBN" in *socket*) [ -n "$RN" ] || RN="socket-name";; esac',
     '  [ "$BN" = ".DS_Store" ] && [ -z "$RN" ] && RN="ds-store"',
     '  case "/$F" in */tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*) [ -n "$RN" ] || RN="scratch-dir";; esac',
+    // DES-MEM-FACETED-001 Phase 5: the worker capture dir is per-run scratch, never a deliverable.
+    '  case "/$F" in */.wicked-session/*) [ -n "$RN" ] || RN="wicked-session";; esac',
     '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
     '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; else git add -- "$F"; fi',
     'done < <(git ls-files --others --exclude-standard -z)',

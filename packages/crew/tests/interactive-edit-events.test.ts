@@ -169,7 +169,8 @@ describe('editProblem + handoff file items (the worker contract)', () => {
       { ...handoff, items: [{ selector: 'a', instruction: 'x'.repeat(5000), fragment: '<p data-wid="a">x</p>' }] },
       '/o.json',
     );
-    expect(big.length).toBeLessThan(1200);
+    // Instruction gist capped at 600 + the (always-present) Phase-5 capture clause + fixed words.
+    expect(big.length).toBeLessThan(1700);
     expect(big).toContain('…');
   });
 
@@ -208,12 +209,36 @@ describe('editProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
     );
   });
 
-  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+  it('carries only the defined axes in the recall intent JSON (no undefined/null keys)', () => {
     const problem = editProblem(handoff, '/tmp/edits/handoff.json', { project: 'proj-test' });
-    expect(problem).toContain('{"project":"proj-test"}');
-    expect(problem).not.toContain('"cli"');
-    expect(problem).not.toContain('"repo"');
-    expect(problem).not.toContain('undefined');
+    // Scoped to the recall INTENT object — the Phase-5 capture clause deliberately carries an
+    // example {"cli":"codex"}, so a blanket `"cli"` check would false-positive on it.
+    expect(problem).toContain('with intent {"project":"proj-test"} and');
+    expect(problem).not.toContain('with intent {"project":"proj-test","cli"');
+    expect(problem).not.toContain('with intent {"project":"proj-test","repo"');
+    expect(problem).not.toContain('"project":undefined');
+  });
+});
+
+describe('editProblem capture clause (DES-MEM-FACETED-001 Phase 5)', () => {
+  const handoff = {
+    documentId: 'my-doc',
+    version: 5,
+    items: [{ selector: 'a', instruction: 'punchier', fragment: '<p data-wid="a">x</p>' }],
+  };
+
+  it('PRESENT unconditionally — even with no intent (every worker may capture), single-line', () => {
+    const problem = editProblem(handoff, '/tmp/edits/handoff.json');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).toContain('"tier":"procedural"');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+  });
+
+  it('rides alongside the recall clause without disturbing it', () => {
+    const problem = editProblem(handoff, '/tmp/edits/handoff.json', { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).toContain('.wicked-session/captures.jsonl');
+    expect(problem).not.toMatch(/[\n\r\t]/);
   });
 });
 
