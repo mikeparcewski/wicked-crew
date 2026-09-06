@@ -60,6 +60,8 @@ import {
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
   oneLine,
+  recallClause,
+  type RecallIntent,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -280,11 +282,21 @@ export function isAnswerableDocKind(kind: string): boolean {
  * live-repo path in the task (wicked-core#294). Revision grounding returns when either of
  * those is fixed.
  */
-export function chatProblem(ask: ChatAsk, currentPath: string, outPath: string): string {
+export function chatProblem(
+  ask: ChatAsk,
+  currentPath: string,
+  outPath: string,
+  intent?: RecallIntent,
+): string {
+  // The recall clause (DES-MEM-FACETED-001 Phase 3): the revision leg carries no repo grounding
+  // (see the split above), but recall is a repo-LESS estate MCP call, so it rides here too — `''`
+  // when the intent carries no axis, keeping the proven CREW-UX-5 shape for an unfiled ask.
+  const recall = recallClause(intent);
   return (
     `Revise the wicked-interactive document "${ask.documentId}" per the user's ask. ` +
     `The user's ask: ${oneLine(ask.text, 2000)} ` +
     `The document's CURRENT version is the HTML file at this absolute path — read it first: ${currentPath} ` +
+    `${recall}` +
     `The revised COMPLETE document MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -787,7 +799,16 @@ export async function startInteractiveChatSubscriber(
 
     try {
       await adapter.launchRun({
-        problem: chatProblem(ask, currentPath, outPath),
+        // DES-MEM-FACETED-001 Phase 3: thread the ask's project as the recall intent's `project`
+        // axis (the reliably-available axis on this seam). An unfiled ask leaves it undefined, so
+        // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
+        // launch carries the whole council roster via `clisJson`, not one assigned seat).
+        problem: chatProblem(
+          ask,
+          currentPath,
+          outPath,
+          ask.projectId !== undefined ? { project: ask.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,

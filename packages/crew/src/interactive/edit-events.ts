@@ -42,6 +42,8 @@ import {
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
   oneLine,
+  recallClause,
+  type RecallIntent,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -195,14 +197,21 @@ export function handoffFileItems(handoff: StructuralHandoff, outDir: string): Ha
  * The run's problem statement. Single-line (PTY contract); the bulky fragments ride in the
  * handoff FILE, so only identity, the capped instruction gist, and the file path ride here.
  */
-export function editProblem(handoff: StructuralHandoff, handoffPath: string): string {
+export function editProblem(
+  handoff: StructuralHandoff,
+  handoffPath: string,
+  intent?: RecallIntent,
+): string {
   const gist = oneLine(handoff.items.map((i) => i.instruction).filter((s) => s.length > 0).join('; '), 600);
+  // The recall clause (DES-MEM-FACETED-001 Phase 3): a repo-LESS estate MCP call, so it rides the
+  // edit prompt too — `''` when the intent carries no axis, leaving an unfiled handoff unchanged.
+  const recall = recallClause(intent);
   return (
     `Fulfil ${handoff.items.length} structural edit(s) on the wicked-interactive document ` +
     `"${handoff.documentId}" (editing version ${handoff.version}). Read the handoff file at ` +
     `${handoffPath} — a JSON file whose items array carries, per edit: the user's instruction, ` +
     `the element's current HTML fragment, and the exact absolute output_path where the edited ` +
-    `fragment must be saved. The user asked: ${gist.length > 0 ? gist : '(no instruction text)'}`
+    `fragment must be saved. ${recall}The user asked: ${gist.length > 0 ? gist : '(no instruction text)'}`
   );
 }
 
@@ -740,7 +749,15 @@ export async function startInteractiveEditSubscriber(
 
     try {
       const input: LaunchRunInput = {
-        problem: editProblem(handoff, handoffPath),
+        // DES-MEM-FACETED-001 Phase 3: thread the handoff's project as the recall intent's
+        // `project` axis (the reliably-available axis on this seam). An unfiled handoff leaves it
+        // undefined, so the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope
+        // here — the launch carries the whole council roster via `clisJson`, not one assigned seat).
+        problem: editProblem(
+          handoff,
+          handoffPath,
+          handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_EDIT_WORKFLOW,

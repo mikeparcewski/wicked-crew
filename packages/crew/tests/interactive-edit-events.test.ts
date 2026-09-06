@@ -186,6 +186,37 @@ describe('editProblem + handoff file items (the worker contract)', () => {
   });
 });
 
+describe('editProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
+  const handoff = {
+    documentId: 'my-doc',
+    version: 5,
+    items: [{ selector: 'a', instruction: 'punchier', fragment: '<p data-wid="a">x</p>' }],
+  };
+
+  it('PRESENT with the correct project intent JSON when an intent with a project is passed', () => {
+    const problem = editProblem(handoff, '/tmp/edits/handoff.json', { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+  });
+
+  it('ABSENT when no intent / an empty intent is passed (back-compat — existing behavior)', () => {
+    expect(editProblem(handoff, '/tmp/edits/handoff.json')).not.toContain('memory.recall');
+    expect(editProblem(handoff, '/tmp/edits/handoff.json', {})).not.toContain('memory.recall');
+    // The unfiled/no-intent prompt is byte-identical to before this phase.
+    expect(editProblem(handoff, '/tmp/edits/handoff.json', {})).toBe(
+      editProblem(handoff, '/tmp/edits/handoff.json'),
+    );
+  });
+
+  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+    const problem = editProblem(handoff, '/tmp/edits/handoff.json', { project: 'proj-test' });
+    expect(problem).toContain('{"project":"proj-test"}');
+    expect(problem).not.toContain('"cli"');
+    expect(problem).not.toContain('"repo"');
+    expect(problem).not.toContain('undefined');
+  });
+});
+
 describe('the interactive-edit workflow def (workflows-as-data)', () => {
   const def = INTERACTIVE_EDIT_WORKFLOW_DEF;
 

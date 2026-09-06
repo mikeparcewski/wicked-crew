@@ -265,6 +265,50 @@ export function groundablePath(path: string): boolean {
   return path.length <= SNAPSHOT_PATH_MAX && !/[\n\r\t]/.test(path);
 }
 
+// ── The recall-prior-learnings clause (DES-MEM-FACETED-001 Phase 3) ───────────────────────────
+//
+// Phases 1+2 gave the worker's (read-only) estate MCP a faceted `memory.recall`: pass an `intent`
+// of `{axis:value}` and it returns memories whose facets are a SUBSET of the intent,
+// specificity-ranked. This phase makes the interactive workers USE it — a sibling to the grounding
+// clause above: before starting, recall prior decisions/patterns for this work and build on them.
+// Shared by all three interactive prompt builders (draft/chat/edit), like `oneLine` and `DOC_NAME`.
+
+/** The facet axes a recall intent can carry. Every axis is OPTIONAL and only defined ones ride the
+ *  clause — `memory.recall` matches on a subset, so a `{project}`-only intent is legitimate.
+ *  `project` is the reliably-available axis threaded today; `cli`/`repo` are Phase 6. */
+export interface RecallIntent {
+  project?: string;
+  cli?: string;
+  repo?: string;
+}
+
+/** The non-empty subset of DEFINED axes for a recall intent, or `undefined` when no axis is set.
+ *  Only defined axes are included, so `JSON.stringify` never emits `undefined`/`null` keys — the
+ *  clause carries exactly the facets that were threaded. */
+export function recallIntentObject(intent?: RecallIntent): Record<string, string> | undefined {
+  if (intent === undefined) return undefined;
+  const obj: Record<string, string> = {};
+  if (intent.project !== undefined) obj['project'] = intent.project;
+  if (intent.cli !== undefined) obj['cli'] = intent.cli;
+  if (intent.repo !== undefined) obj['repo'] = intent.repo;
+  return Object.keys(obj).length > 0 ? obj : undefined;
+}
+
+/** The recall clause (DES-MEM-FACETED-001 Phase 3): instruct the worker to call the read-only
+ *  wicked-estate MCP `memory.recall` with the faceted intent BEFORE it starts, then ground its
+ *  work in what returns. Empty (no axis) ⇒ `''` — omitted entirely, exactly like the grounding
+ *  clause omits the snapshot fallback when there is no snapshot. SINGLE-LINE by contract (the PTY
+ *  seat runner refuses embedded newlines; `JSON.stringify` of a flat string map never emits one). */
+export function recallClause(intent?: RecallIntent): string {
+  const intentObj = recallIntentObject(intent);
+  if (intentObj === undefined) return '';
+  return (
+    `Before you start, recall relevant prior learnings and decisions for this work: call the ` +
+    `wicked-estate MCP memory.recall tool with intent ${JSON.stringify(intentObj)} and a query ` +
+    `describing the task, then ground your work in what it returns (it may be empty — that is fine). `
+  );
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything doc-specific: identity, brief, sources, style, and
@@ -290,7 +334,12 @@ export function groundablePath(path: string): boolean {
  * SINGLE-LINE by contract: the PTY seat runner refuses any embedded newline (FINDING-011), so
  * every fragment here stays on one line and the brief is flattened+capped by {@link oneLine}.
  */
-export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir?: string): string {
+export function draftProblem(
+  doc: SourceDocCreated,
+  outPath: string,
+  snapshotDir?: string,
+  intent?: RecallIntent,
+): string {
   const sources =
     doc.sourcePaths.length > 0
       ? `Source materials to read: ${doc.sourcePaths.join(', ')}.`
@@ -304,9 +353,12 @@ export function draftProblem(doc: SourceDocCreated, outPath: string, snapshotDir
     (snapshotDir !== undefined
       ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshotDir} instead. `
       : '');
+  // The recall clause (DES-MEM-FACETED-001 Phase 3) sits right beside grounding; `''` when the
+  // intent carries no axis, so an unfiled draft reads exactly as it did before this phase.
+  const recall = recallClause(intent);
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}` +
+    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
 }
@@ -888,7 +940,16 @@ export async function startInteractiveDraftSubscriber(
     }
     try {
       await adapter.launchRun({
-        problem: draftProblem(doc, outPath, snapshotDir),
+        // DES-MEM-FACETED-001 Phase 3: thread the doc's project as the recall intent's `project`
+        // axis (the reliably-available axis on this seam). An unfiled doc leaves it undefined, so
+        // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
+        // launch carries the whole council roster via `clisJson`, not one assigned seat).
+        problem: draftProblem(
+          doc,
+          outPath,
+          snapshotDir,
+          doc.projectId !== undefined ? { project: doc.projectId } : undefined,
+        ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
