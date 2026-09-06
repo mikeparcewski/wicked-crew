@@ -2765,3 +2765,59 @@ export interface DiagnosticsResponse {
   recentErrors: DiagnosticsRecentError[];
   acp: AcpDiagnostics;
 }
+
+// ── Memory proposal queue (DES-MEM-FACETED-001 §5.0, api-types 0.21.0) ─────────
+
+/**
+ * A proposal's lifecycle state. A proposal is INERT while `pending` (never recalled/applied);
+ * `approve` promotes its payload to the active store and marks it `approved`, `reject` marks it
+ * `rejected`.
+ */
+export type ProposalState = 'pending' | 'approved' | 'rejected';
+
+/**
+ * One entry in the estate proposal queue — a type-generic, inert write agents submit and operators
+ * decide (estate #162). The shape is the estate MCP `proposal.list` wire form verbatim.
+ */
+export interface Proposal {
+  /** Stable proposal-node id. */
+  id: string;
+  /** `"memory"` | `"policy:<steering_type>"` | future — the router key `approve` promotes by. */
+  kind_type: string;
+  /** The proposed content (a memory body, a policy rule, …). Opaque here; narrowed by `kind_type`. */
+  payload: unknown;
+  /** Agent-declared orthogonal facets (axis → value). */
+  facets: Record<string, string>;
+  /** Run/unit/agent attribution — AUTHORITY-STAMPED by the estate MCP from its launch env, never
+   *  taken from the submitter. Empty when the server had no `WICKED_RUN_*` env. */
+  provenance: Record<string, string>;
+  state: ProposalState;
+  /** Unix seconds. */
+  created_at: number;
+}
+
+/** `GET /proposals` query filters — both optional; omitting a filter lists across that dimension. */
+export interface ListProposalsQuery {
+  kind_type?: string;
+  state?: ProposalState;
+}
+
+/** `GET /proposals` → 200. */
+export interface ListProposalsResponse {
+  proposals: Proposal[];
+}
+
+/**
+ * `POST /proposals/:id/approve` → 200. A MEMORY proposal is `promoted` (its payload is now an
+ * active memory, `active_id`) and is complete. A POLICY proposal is `handed_off` — its payload is
+ * returned verbatim for a later steering-write to consume; routing it into steering is NOT yet
+ * implemented (DES-MEM-FACETED-001 §5.2).
+ */
+export type ApproveProposalResponse =
+  | { outcome: 'promoted'; active_id: string }
+  | { outcome: 'handed_off'; payload: unknown };
+
+/** `POST /proposals/:id/reject` → 200. */
+export interface RejectProposalResponse {
+  ok: true;
+}

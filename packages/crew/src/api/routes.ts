@@ -15,8 +15,17 @@ import { QeGateCache } from '../qe/gate-events.js';
 import { buildAcceptanceView, resolveRunWorkflow } from '../qe/acceptance.js';
 import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js';
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
-import type { LaunchRunInput, RosterSeat, SessionStatus, SessionView } from '../core/types.js';
+import type {
+  ApproveProposalResponse,
+  LaunchRunInput,
+  ListProposalsResponse,
+  RejectProposalResponse,
+  RosterSeat,
+  SessionStatus,
+  SessionView,
+} from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
+import { callEstateProposalTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
@@ -357,6 +366,10 @@ export interface RuntimeDeps {
    *  Injectable so route tests never shell out to git; defaults to {@link gitReprovisionWorktree}. */
   reprovisionWorktree?: WorktreeReprovisioner;
   openWithOs?: (target: string) => Promise<void>;
+  /** The estate-MCP proposal-queue client behind `/proposals*` (DES-MEM-FACETED-001 §5.0).
+   *  Injectable so route tests never spawn `wicked-estate-mcp`; defaults to the real spawn-per-call
+   *  client (NON-`--readonly`, `WICKED_MEMORY_DB` pinned to the operator global store). */
+  callEstateProposalTool?: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
@@ -433,6 +446,10 @@ export function registerRoutes(
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
   const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
+  // The estate proposal-queue client behind `/proposals*` (DES-MEM-FACETED-001 §5.0). The default
+  // is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no process
+  // is ever spawned.
+  const proposalTool = runtime.callEstateProposalTool ?? callEstateProposalTool;
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
@@ -2893,6 +2910,90 @@ export function registerRoutes(
       detail: { changed: Object.keys(safe), ...(ignored.length > 0 ? { ignored } : {}) },
     });
     return { settings };
+  });
+
+  // ── Memory proposal queue (DES-MEM-FACETED-001 §5.0) ─────────────────────────
+  // The estate proposal queue over HTTP, so a studio operator can review the learnings workers
+  // propose and approve/reject them. The queue tools live ONLY on the estate MCP (JSON-RPC over
+  // stdio, estate #162), reached through `proposalTool` — a spawn-per-call `wicked-estate-mcp`
+  // client, NON-`--readonly` (this is the OPERATOR surface: it lists AND mutates), with
+  // WICKED_MEMORY_DB pinned to the operator global store. A queue/estate failure is an UPSTREAM
+  // fault (502), kept distinct from a client mistake (400: a bad `state`/`id`, or estate's own
+  // -32602 invalid-params) — the FINDING-031 posture that a malformed filter is refused, never
+  // silently honored as a different request.
+  const proposalUpstreamError = (reply: FastifyReply, err: unknown): FastifyReply => {
+    if (err instanceof EstateMcpError && err.code === -32602) {
+      return reply.code(400).send({ error: err.message });
+    }
+    return reply.code(502).send({ error: message(err) });
+  };
+
+  // GET /proposals?kind_type=&state= → proposal.list → { proposals: Proposal[] }.
+  app.get(
+    `${V}/proposals`,
+    { config: { manifest: { responseType: 'ListProposalsResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
+    const q = req.query as { kind_type?: string | string[]; state?: string | string[] };
+    const rawOf = (v: string | string[] | undefined): string | undefined =>
+      Array.isArray(v) ? v[0] : v;
+    const rawKind = rawOf(q.kind_type);
+    const rawState = rawOf(q.state);
+    // Fail-loud: a PRESENT-but-blank param (`?state=` / `?state=%20`) is a client error, NOT a
+    // silent "no filter" — else a client accidentally issues a broader query than intended.
+    if (rawKind !== undefined && rawKind.trim() === '') {
+      return reply.code(400).send({ error: '`kind_type` must not be empty' });
+    }
+    if (rawState !== undefined && !['pending', 'approved', 'rejected'].includes(rawState.trim())) {
+      return reply.code(400).send({ error: '`state` must be one of pending|approved|rejected' });
+    }
+    const kindType = rawKind?.trim() || undefined;
+    const state = rawState?.trim() || undefined;
+    const args: Record<string, unknown> = {};
+    if (kindType !== undefined) args.kind_type = kindType;
+    if (state !== undefined) args.state = state;
+    try {
+      return (await proposalTool('proposal.list', args)) as ListProposalsResponse;
+    } catch (err) {
+      return proposalUpstreamError(reply, err);
+    }
+  });
+
+  // POST /proposals/:id/approve → proposal.approve →
+  //   { outcome:'promoted', active_id }  — a MEMORY proposal, now an active memory (complete);
+  //   { outcome:'handed_off', payload }  — a POLICY proposal, returned VERBATIM.
+  app.post(
+    `${V}/proposals/:id/approve`,
+    { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (id.trim() === '') {
+      return reply.code(400).send({ error: '`id` is required' });
+    }
+    try {
+      // TODO: route handed_off policy payload to steering (crew steering-write, DES-MEM-FACETED-001
+      // §5.2). Policy→steering routing is OUT OF SCOPE here: a `handed_off` outcome is passed
+      // through as-is for a later steering-write to consume; memory proposals return `promoted` and
+      // need nothing more.
+      return (await proposalTool('proposal.approve', { id })) as ApproveProposalResponse;
+    } catch (err) {
+      return proposalUpstreamError(reply, err);
+    }
+  });
+
+  // POST /proposals/:id/reject → proposal.reject → { ok: true }.
+  app.post(
+    `${V}/proposals/:id/reject`,
+    { config: { manifest: { responseType: 'RejectProposalResponse', statusCodes: [200, 400, 502] } } },
+    async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (id.trim() === '') {
+      return reply.code(400).send({ error: '`id` is required' });
+    }
+    try {
+      return (await proposalTool('proposal.reject', { id })) as RejectProposalResponse;
+    } catch (err) {
+      return proposalUpstreamError(reply, err);
+    }
   });
 
   // ── Projects (DES-PROJECT-001) — the 9-route experience-plane surface ────────
