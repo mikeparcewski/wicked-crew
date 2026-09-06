@@ -10,6 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.18] — 2026-09-06
+
+### Added
+- **Governed-knowledge proposal queue — the human review loop (DES-MEM-FACETED-001).** Interactive workers now recall faceted memory before working and **propose** reusable learnings into a built-in review queue, and operators review them in a new studio surface:
+  - **crew#449** — a recall clause on draft/chat/edit tells the worker to `memory.recall` with the session's faceted intent and ground in what returns.
+  - **crew#451** — a propose clause tells the worker to submit reusable learnings via the estate MCP `proposal.submit` (a safe write: the proposal is inert until approved; secrets/PII forbidden).
+  - **crew#452** — the proposals API: an estate-mcp JSON-RPC client + `GET /api/v1/proposals` and `POST /api/v1/proposals/:id/{approve,reject}`, plus the `crew-api-types` `Proposal` contract.
+
+### Changed
+- **Engine floor → core-ts 0.7.16; studio dist → 0.4.12.** core-ts 0.7.16 stamps run provenance (`WICKED_RUN_ID`/`WICKED_RUN_UNIT`/`WICKED_RUN_AGENT`) into the worker's estate-mcp so proposals are attributable; studio 0.4.12 ships the proposal approval-queue surface, bundled as the default local UI via `build:with-studio`.
+
 ## [0.7.17] — 2026-09-05
 
 ### Added
@@ -603,7 +614,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...HEAD
+[0.7.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.14...v0.7.15
