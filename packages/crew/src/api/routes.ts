@@ -74,6 +74,7 @@ import {
 } from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
+import { RunTimingIndex } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
   DeliveryIndex,
@@ -529,6 +530,10 @@ export interface RuntimeDeps {
    *  trail (the SAME `run.launched` scan as `retryIndex`) so attaches survive a restart; a
    *  directly-driven route set gets a fresh one. */
   groupIndex?: GroupIndex;
+  /** Run→launch-time index (home command-center run metrics) — `createServer` hydrates one from
+   *  the audit trail (the SAME `run.launched` scan as `retryIndex`) so a restarted daemon still
+   *  echoes `AgentSession.created_at`; a directly-driven route set gets a fresh one. */
+  runTimingIndex?: RunTimingIndex;
   /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
    *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
   guidanceIndex?: GuidanceIndex;
@@ -620,6 +625,7 @@ export function registerRoutes(
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
   const groupIndex = runtime.groupIndex ?? new GroupIndex();
+  const runTimingIndex = runtime.runTimingIndex ?? new RunTimingIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
@@ -715,6 +721,12 @@ export function registerRoutes(
     }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
+    // Run launch time (home command-center run metrics): unix SECONDS from the `run.launched`
+    // audit entry, ABSENT when the daemon has no launch record for this run (onboarding/campaign
+    // runs launched off POST /runs, pre-field runs) — never fabricated, so a bucketed KPI can
+    // exclude an undated run rather than dating it with a false now.
+    const createdAt = runTimingIndex.createdAtFor(view.session.id);
+    if (createdAt !== undefined) view.session.created_at = createdAt;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -1225,6 +1237,11 @@ export function registerRoutes(
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
+      // Run launch time (home command-center run metrics): stamp the same instant the
+      // `run.launched` audit entry just recorded, so `AgentSession.created_at` answers immediately
+      // and matches the trail a restart rehydrates from. `Date.now()` is millis; the index stores
+      // whole seconds.
+      runTimingIndex.set(runId, Date.now());
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and

@@ -255,6 +255,33 @@ export interface AgentSession {
    * `GET /campaigns`.
    */
   group_label?: string;
+  /**
+   * When this run was LAUNCHED — unix SECONDS (home command-center run metrics; api-types 0.24.0).
+   * Daemon-derived at DTO assembly on BOTH `GET /runs` and `GET /runs/:id` from the `run.launched`
+   * audit entry's timestamp (the daemon's durable system-of-record for run provenance — task #88),
+   * joined exactly like {@link retry_of} / {@link guidance} and hydrated from the SAME trail scan
+   * at boot, so it survives a daemon restart.
+   *
+   * This is the ONE launch instant the daemon records: "created" and "started" are the SAME event
+   * here — the engine's `AgentSession` (wicked-core `domain.rs`) carries no launch time, so there
+   * is no separate queued-vs-started split to expose. Unlocks time-bucketed KPI deltas and a real
+   * 7/30/90-day range on the home dashboard.
+   *
+   * ABSENT — never `null`, never fabricated — when the daemon has no `run.launched` entry for the
+   * run: a run launched OFF the `POST /runs` path (a repo's onboarding run, a campaign's own
+   * DAG-node runs), a run predating this field, or a `--db`-isolated daemon reading a trail that
+   * never saw the launch. Read with `typeof === 'number'`; a bucketed KPI or a 7/30/90-day range
+   * must EXCLUDE an undated run, never date it with a fabricated now.
+   *
+   * COST (deferred, not faked): a per-run cost/spend figure is deliberately NOT joined onto this
+   * DTO. Cost exists only on the per-unit {@link CliUsageEvent} (`costUsd`), streamed over `/ws`
+   * and never accumulated per run daemon-side — a reliable per-run total would require replaying
+   * the durable event log per run on this hot path (the unbounded cost the GET /runs delivery-cache
+   * architecture forbids) or a new live cliUsage accumulator plus a durable per-run store. A burn
+   * chart should sum `cliUsage.costUsd` from the live `/ws` stream (or `GET /runs/:id/events`) for
+   * now; a joined `AgentSession.cost` is a follow-up once that store exists.
+   */
+  created_at?: number;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
