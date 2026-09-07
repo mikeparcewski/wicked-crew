@@ -1135,6 +1135,21 @@ export interface ConformanceRule {
   obligations?: string[];
   /** The frozen acceptance-criteria text (becomes a claim's `criteria` when the rule decides a gate). */
   criteria?: string;
+  /**
+   * Unix-SECONDS timestamp of when this rule FIRST entered the store — the "added" time the Steering
+   * surface sorts + date-filters on (NOT the latest-edit time), stamped once by the engine on first
+   * create and preserved across updates (api-types 0.23.0).
+   *
+   * WIRED-BUT-PENDING A CORE-TS BUMP: the field exists on the engine's `ConformanceRule`
+   * (wicked-core `conformance.rs`, serialized with `skip_serializing_if = Option::is_none`), but it
+   * landed AFTER the published `core-ts-v0.7.16` this daemon builds against — so a rule served by
+   * the current binding carries NO `created_at`. The daemon passes the field through verbatim
+   * (`listConformanceRules` returns the parsed rows unchanged), so it begins flowing the moment
+   * crew re-pins to a core-ts that includes it — no daemon change needed. ABSENT — never
+   * fabricated — on any rule the engine did not stamp (pre-field rows, and every row from a
+   * pre-bump binding), so a `since`/`until` filter cannot assert an undated rule in range.
+   */
+  created_at?: number;
 }
 
 /** Facet query for `GET /governance/rules/preview`. All fields are optional. */
@@ -1170,6 +1185,21 @@ export interface RuleBrowseQuery {
    * contradict, and picking a winner silently would answer a question the caller didn't ask).
    */
   include_retired?: 'true' | 'false';
+  /**
+   * Inclusive LOWER date bound (api-types 0.23.0): keep only rules with `created_at >= since`.
+   * Unix SECONDS, a non-negative integer (a present-but-non-integer value is a 400). Applied
+   * server-side over the listed rows, alongside the facet filters. A rule with NO `created_at`
+   * is EXCLUDED whenever `since` (or `until`) is set — see {@link ConformanceRule.created_at}: on
+   * a pre-bump core-ts binding NO rule carries the field, so this filter narrows to empty until the
+   * engine surfaces it. Omitted ⇒ no lower bound.
+   */
+  since?: number;
+  /**
+   * Inclusive UPPER date bound (api-types 0.23.0): keep only rules with `created_at <= until`.
+   * Same units/validation/undated-exclusion as {@link RuleBrowseQuery.since}. Omitted ⇒ no upper
+   * bound.
+   */
+  until?: number;
 }
 
 // ── Steering management (STEERING program) ──────────────────────────────────────
@@ -2876,6 +2906,15 @@ export interface MemoryItem {
   /** Relevance score — only present on a `memory.recall` item; `memory.list` (the browse) is not
    *  relevance-ranked, so it is absent there. */
   score?: number;
+  /**
+   * Unix-SECONDS timestamp of when this memory FIRST entered the store — the "added" time the
+   * governance surface sorts + date-filters on (api-types 0.23.0). Populated from estate
+   * `memory.list`, which returns `created_at` per item; ABSENT — never fabricated — on a memory
+   * whose creation time the store did not report (and on a `memory.recall`-sourced item, which
+   * carries none). Additive: absence is the one spelling of "unknown", so a `since`/`until` filter
+   * cannot assert an undated memory in range.
+   */
+  created_at?: number;
 }
 
 /**
@@ -2894,6 +2933,20 @@ export interface ListMemoriesQuery {
   facets?: string;
   /** Positive integer; caps the returned row count. */
   limit?: string;
+  /**
+   * Inclusive LOWER date bound (api-types 0.23.0): keep only memories with `created_at >= since`.
+   * Unix SECONDS, a non-negative integer (a present-but-non-integer value is a 400). Applied
+   * server-side over the loaded set, alongside `query`/`facets`. A memory with NO `created_at`
+   * is EXCLUDED whenever `since` (or `until`) is set — an unknown creation time is not asserted
+   * in range. Omitted ⇒ no lower bound.
+   */
+  since?: number;
+  /**
+   * Inclusive UPPER date bound (api-types 0.23.0): keep only memories with `created_at <= until`.
+   * Same units/validation/undated-exclusion as {@link ListMemoriesQuery.since}. Omitted ⇒ no
+   * upper bound.
+   */
+  until?: number;
 }
 
 /** `GET /memory` → 200. */
