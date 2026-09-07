@@ -1239,10 +1239,12 @@ export function registerRoutes(
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       // Run launch time (home command-center run metrics): reuse the EXACT `ts` the `run.launched`
       // audit entry just stamped (not a second `Date.now()`), so the live value equals what a restart
-      // rehydrates from the trail — no 1s drift across a second boundary. When audit is disabled
-      // (`ts === 0`) there is no trail to rehydrate from, so fall back to `Date.now()` — the value is
-      // transient (lost on restart) but created_at is still answered live. Millis → whole seconds in the index.
-      runTimingIndex.set(runId, launchedAt > 0 ? launchedAt : Date.now());
+      // rehydrates from the trail — no 1s drift across a second boundary. `created_at` is derived ONLY
+      // from that durable entry, never fabricated: when audit is disabled (`ts === 0`, the `noop` trail
+      // route-unit tests build) nothing is stamped, so `created_at` stays ABSENT — the honest answer
+      // for a run with no durable launch record, which a bucketed KPI excludes. `createServer` always
+      // builds a REAL trail, so this fires on every production launch. Millis → whole seconds in the index.
+      if (launchedAt > 0) runTimingIndex.set(runId, launchedAt);
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and

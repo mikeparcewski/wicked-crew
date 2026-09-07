@@ -105,8 +105,16 @@ describe('run metrics — created_at on the run DTO', () => {
   let mockAdapter: MockAdapter;
   let runTimingIndex: RunTimingIndex;
   let app: FastifyInstance;
+  // A REAL temp-file trail, not `AuditLog.noop()`: `created_at` is stamped ONLY from the durable
+  // `run.launched` entry (routes.ts never fabricates one), so exercising the present-path means
+  // recording a real launch — the same seam `createServer` builds in production. A noop trail would
+  // make the "launched → created_at present" pin pass only via a path production never takes.
+  let dir: string;
+  let audit: AuditLog;
 
   beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-run-metrics-dto-'));
+    audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
     mockAdapter = {
       sessionsDetail: vi.fn().mockResolvedValue([view('run-a'), view('run-b')]),
       sessions: vi.fn().mockResolvedValue(['run-a']),
@@ -116,12 +124,13 @@ describe('run metrics — created_at on the run DTO', () => {
       projectMemberDetach: vi.fn(),
     };
     runTimingIndex = new RunTimingIndex();
-    app = buildApp(mockAdapter, runTimingIndex);
+    app = buildApp(mockAdapter, runTimingIndex, audit);
     await app.ready();
   });
 
   afterEach(async () => {
     await app?.close();
+    removeScratch(dir);
   });
 
   it('a run launched via POST /runs → created_at is a unix-SECONDS number on both endpoints', async () => {
