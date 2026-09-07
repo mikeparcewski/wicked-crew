@@ -56,7 +56,7 @@ import '../styles/crew.css';
 
 const title = 'wicked-crew — the control plane: intent in, verified work out';
 const description =
-  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Codex, Copilot, opencode, Pi, Antigravity) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
+  'wicked-crew is the control plane for governed agent delivery — the harness for your agent harnesses. Intent in; governed, verified work out: your own installed CLIs (Claude Code, Antigravity, Codex, opencode, Pi, Copilot) run as governed workers over persistent ACP sessions, in git worktrees, through durable multi-agent workflows where "done" is re-derived from evidence, never self-graded. The acceptance gate reads the QE evidence ledger and resolves it deny-dominates — a CONDITIONAL verdict holds the run. Governance is more than a gate: steering doctrine across seven types and governed knowledge — agents propose, humans promote — are authored through the same API, and the requirements graph in wicked-estate becomes the source of truth every phase reads. One public API, no privileged clients: the studio console ships inside crew as a pure client of /api/v1, and governed generation answers the document engine over the bus. Crash-resumable by construction. Runs on the agents and plans you already pay for. Local-first.';
 const repo = 'https://github.com/mikeparcewski/wicked-crew';
 
 // The deterministic floor: policies wired in series across a build → ship gate.
@@ -386,8 +386,8 @@ const crewVersion = __WICKED_CREW_VERSION__;
       <p class="skins-landing">
         <span class="skins-landing-chip">shipped</span>
         <b>The Project model</b> — projects group runs and docs across both skins: members, a merged
-        activity feed, open-gate rollups, and a project-scoped code graph — <b>blast radius across
-        member repos</b> via the API, computed by the same estate CLI behind the studio’s repo graph.
+        feed, gate rollups, and a project-scoped <b>code graph in wicked-estate</b> — the source of
+        truth each phase reads before it acts; blast radius across member repos is one read of it.
       </p>
     </div>
   </section>
@@ -453,10 +453,11 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <h2 id="gc-h">“Done” is re-derived — and no model can approve it.</h2>
         <p class="sec-sub">
           A real transition — <b>build → ship</b> — behind a dual gate that <b>deny-dominates</b>:
-          deterministic checks re-verified against the worktree, plus an LLM judge that can <b>fail</b> a
-          gate but <b>never approve</b> one. The <code>verdict.json</code> switch is <b>read from the QE
-          evidence ledger</b>, written by <a href="https://wg.wickedagile.com">wicked-garden’s QE
-          fleet</a> — never asserted. It plays itself; click a switch to take over.
+          deterministic checks, each a projection of <b>steering doctrine</b> (seven types, authored via
+          crew’s <code>/api/v1</code>), plus an LLM judge that can <b>fail</b> a gate but <b>never
+          approve</b> one. The <code>verdict.json</code> switch is <b>read from the QE evidence
+          ledger</b> that <a href="https://wg.wickedagile.com">wicked-garden’s QE fleet</a> writes —
+          never asserted. Click a switch to take over.
         </p>
       </div>
 
@@ -584,12 +585,12 @@ const crewVersion = __WICKED_CREW_VERSION__;
         <div class="kicker">Workflows are data, not code</div>
         <h2 id="wf-h">Drop a <code>*.json</code>. It’s a workflow.</h2>
         <p class="sec-sub">
-          <b>10 built-ins ship</b> — feature, bug, migration, <b>collab</b> (a real propose →
-          critique → revise → verdict discussion between two CLIs) and more, each as
-          <b>acyclic-validated JSON</b>. Author your own two ways: drop a file in
-          <code>~/.config/wicked-core/workflows/</code>, or <code>POST /api/v1/workflows</code> —
-          validated, persisted, <b>hot-registered in the running engine</b>, and the studio ships a
-          builder for it. It auto-cycles the defs below — click one to pin it.
+          <b>10 built-ins ship</b> — feature, bug, migration, <b>collab</b> (two CLIs: propose →
+          critique → revise → verdict), and <b>capture-learnings</b>, where agents <b>propose</b>
+          lessons a human <b>promotes</b> to steering — each as <b>acyclic-validated JSON</b>. Author
+          your own: drop a file in <code>~/.config/wicked-core/workflows/</code>, or
+          <code>POST /api/v1/workflows</code> — validated, persisted, <b>hot-registered in the
+          engine</b>, and the studio ships a builder for it.
         </p>
       </div>
 
