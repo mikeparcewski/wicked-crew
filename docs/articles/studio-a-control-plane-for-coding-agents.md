@@ -251,7 +251,7 @@ product of it.
 
 ```sh
 git clone https://github.com/mikeparcewski/wicked-crew
-cd wicked-crew && npm install && npm run build
+cd wicked-crew && npm install && npm run build:with-studio
 node packages/crew/dist/cli/index.js serve
 # open http://127.0.0.1:7701
 ```
