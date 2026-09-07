@@ -3129,8 +3129,11 @@ export function registerRoutes(
     `${V}/proposals/:id/approve`,
     { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
     async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (id.trim() === '') {
+    // Normalize ONCE and use the trimmed value throughout — an id like `%20pol1%20`
+    // decodes to a padded, non-empty string that would otherwise ride upstream as-is
+    // and into `proposal:<id>` derivations.
+    const id = (req.params as { id: string }).id.trim();
+    if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
     }
     let approved: ApproveProposalResponse;
