@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.23] — 2026-09-07
+
+### Added
+- **`created_at` + `since`/`until` date filters on memory + rules (#463).** `GET /api/v1/memory`
+  and `GET /api/v1/governance/rules` expose `created_at` and accept inclusive `since`/`until`
+  (unix seconds) bounds (api-types 0.23.0). Memory `created_at` flows today; rule `created_at`
+  flows once a core-ts that surfaces it is pinned.
+
+### Changed
+- **Bundles wicked-studio 0.4.15** — the governed-knowledge dashboard (`/steering/dashboard`, the
+  un-buried consolidated review inbox + `key=value` facet autocomplete, a project-homepage
+  "Needs review" band) and the nav tweaks (logo dot removed, health-colored heart, Ask `?`-circle,
+  "Test" below Make, custom site name).
+
 ## [0.7.22] — 2026-09-07
 
 ### Fixed
@@ -685,7 +699,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...HEAD
+[0.7.23]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...v0.7.20
