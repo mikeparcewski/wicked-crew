@@ -10,6 +10,29 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.21] — 2026-09-07
+
+### Added
+
+- **`capture-learnings` workflow (#458).** A crew-only governed workflow —
+  churn → hotspots → capture — whose phases reference the new
+  `wicked-garden-repo-learn` skill via `skill_ref` (the method lives in the skill;
+  a governed worker's prompt rides a single ~1022B PTY line, so inlining it would
+  truncate). A run mines a repo's git churn + estate hotspots into faceted
+  **memory AND policy** proposals reviewed in the Steering surfaces. New guard
+  test asserts each phase keeps its `skill_ref` and never re-inlines the method.
+- **Policy → steering landing.** Approving a **policy** proposal
+  (`proposal.approve` → `handed_off`) now lands it as a real steering rule
+  (`policy:<type>` → steering_type; `{rule,severity}` → `ConformanceRule`),
+  closing the DES-MEM-FACETED-001 §5.2 TODO; `ApproveProposalResponse` gains an
+  optional `landing`. Memory proposals still return `promoted` unchanged.
+
+### Changed
+
+- Bundled `wicked-studio` dist bumped to 0.4.14 — the per-repo **Capture
+  learnings** action on the Repositories panel launches the `capture-learnings`
+  run.
+
 ## [0.7.20] — 2026-09-07
 
 ### Changed
@@ -651,7 +674,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...HEAD
+[0.7.21]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...v0.7.18
