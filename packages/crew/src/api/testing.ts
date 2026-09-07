@@ -30,9 +30,17 @@ import {
   ProjectsUnsupportedError,
   type CoreAdapter,
 } from '../core/adapter.js';
-import type { Actor, GovernanceEvalSample, LaunchRunInput } from '../core/types.js';
+import type {
+  Actor,
+  EvalRunPerTypeCount,
+  GovernanceEvalReport,
+  GovernanceEvalSample,
+  LaunchRunInput,
+  SteeringType,
+} from '../core/types.js';
 import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
+import type { EvalRunStore } from './eval-store.js';
 import { API_PREFIX } from './api-prefix.js';
 import { STEERING_TYPE_VALUES } from './governance-steering.js';
 import { resolveScopeRepos } from './multiscope.js';
@@ -131,6 +139,30 @@ export interface TestingRoutesDeps {
    *  entries stamp `created_at` LIVE, not only after a restart re-hydrates the trail (Copilot #466).
    *  Optional so route-unit tests can omit it; `registerRoutes` always supplies it. */
   runTimingIndex?: RunTimingIndex;
+  /** The eval RUN history store — every `POST /testing/evals/run` is recorded here (best-effort)
+   *  so `GET /testing/evals[/:id]` can serve a real history. Optional so route-level unit tests
+   *  that never touch the eval routes can omit it; `registerRoutes` always supplies it. */
+  evalStore?: EvalRunStore;
+}
+
+/**
+ * Derive the per-steering-type rollup from a report's results — the same four counts as the
+ * report summary, grouped by `sample.steering_type`, so the Evals dashboard's "which type carries
+ * the gaps" view is a stored field rather than a per-request recompute over the full results.
+ */
+export function perTypeRollup(
+  results: GovernanceEvalReport['results'],
+): Partial<Record<SteeringType, EvalRunPerTypeCount>> {
+  const out: Partial<Record<SteeringType, EvalRunPerTypeCount>> = {};
+  for (const r of results) {
+    const type = r.sample.steering_type as SteeringType;
+    const bucket = (out[type] ??= { total: 0, caught: 0, gaps: 0, false_positives: 0 });
+    bucket.total += 1;
+    if (r.verdict === 'caught') bucket.caught += 1;
+    else if (r.verdict === 'gap') bucket.gaps += 1;
+    else if (r.verdict === 'false_positive') bucket.false_positives += 1;
+  }
+  return out;
 }
 
 export function registerTestingRoutes(
@@ -167,10 +199,30 @@ export function registerTestingRoutes(
         // Passed through verbatim — no reshaping on our side of the seam: the report IS the
         // pinned contract, snake_case and all (`summary.false_positives`, `nearest_rules`).
         // (Spread-rebuilt args: exactOptionalPropertyTypes — an absent key, never `undefined`.)
-        return await adapter.runGovernanceEvals({
+        const report = await adapter.runGovernanceEvals({
           ...(parsed.data.type !== undefined ? { type: parsed.data.type } : {}),
           ...(parsed.data.corpus !== undefined ? { corpus: parsed.data.corpus } : {}),
         });
+        // Record the run in the eval history (best-effort, LOUD-NON-FATAL): the report is the
+        // contract and must answer even if persistence fails, so a store miss is warned and
+        // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged.
+        if (deps.evalStore !== undefined) {
+          try {
+            deps.evalStore.record({
+              actor: actorOf(req).id,
+              corpus: parsed.data.corpus ?? null,
+              type_filter: parsed.data.type ?? null,
+              rule_store: adapter.dbPath,
+              summary: report.summary,
+              per_type: perTypeRollup(report.results),
+              degraded: report.degraded,
+              results: report.results,
+            });
+          } catch (persistErr) {
+            req.log.warn(`eval run recorded to the report but NOT to history: ${message(persistErr)}`);
+          }
+        }
+        return report;
       } catch (err) {
         if (err instanceof GovernanceEvalsUnsupportedError) {
           return reply.code(501).send({ error: err.message });
@@ -179,6 +231,39 @@ export function registerTestingRoutes(
         // nothing here maps to 400.
         return reply.code(500).send({ error: message(err) });
       }
+    },
+  );
+
+  // ── The eval RUN history (the Evals section's list + drilldown) ──────────────
+  // Read back what the run route records. GLOBAL per daemon — evals judge a store, not a
+  // workspace, so there is no repo/project scope (unlike recon campaign runs). `?type=` / `?corpus=`
+  // narrow the list to comparable runs. A daemon with no history (or an addon that never recorded
+  // one) answers `{ runs: [] }`, never an error — an empty history is a valid state, not a fault.
+  app.get(
+    `${V}/testing/evals`,
+    { config: { manifest: { responseType: 'ListEvalRunsResponse', statusCodes: [200] } } },
+    async (req) => {
+      if (deps.evalStore === undefined) return { runs: [] };
+      const q = req.query as { type?: string; corpus?: string };
+      return {
+        runs: deps.evalStore.list({
+          ...(q.type !== undefined ? { type_filter: q.type } : {}),
+          ...(q.corpus !== undefined ? { corpus: q.corpus } : {}),
+        }),
+      };
+    },
+  );
+
+  // One run WITH its full per-sample results — the drilldown behind a history row (the same report
+  // the run's original POST returned). 404 when the id is unknown or its detail file is gone.
+  app.get(
+    `${V}/testing/evals/:id`,
+    { config: { manifest: { responseType: 'EvalRunDetail', statusCodes: [200, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const detail = deps.evalStore?.get(id) ?? null;
+      if (detail === null) return reply.code(404).send({ error: `no eval run '${id}'` });
+      return detail;
     },
   );
 

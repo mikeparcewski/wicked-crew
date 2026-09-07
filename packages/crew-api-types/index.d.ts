@@ -1509,6 +1509,66 @@ export interface ImportEvalCorpusResponse {
   embedded: boolean;
 }
 
+// ── Eval run history (crew-side EvalRunStore) — the Evals section's real list ───
+
+/**
+ * One steering type's slice of an eval run's rollup — the same four counts as
+ * {@link GovernanceEvalSummary}, derived from the run's results grouped by `sample.steering_type`.
+ * This is what makes "which steering type carries the gaps" a stored field, not a per-request
+ * recompute over the full results.
+ */
+export interface EvalRunPerTypeCount {
+  total: number;
+  caught: number;
+  gaps: number;
+  false_positives: number;
+}
+
+/**
+ * One PERSISTED eval run — the listable rollup row (`GET /testing/evals`). A run is one
+ * `POST /testing/evals/run` and its report, stamped with WHO ran it, WHAT it ran against, and
+ * WHEN, so the Evals section is a real history instead of a single session-local report that a
+ * reload loses. The per-sample `results` are NOT here — they live on {@link EvalRunDetail} (the
+ * drilldown), so listing the history stays cheap no matter how large a custom corpus is.
+ *
+ * Evals take no repo/project (they judge a STORE, not a workspace), so this is a single GLOBAL
+ * feed per daemon — unlike recon campaign runs, which file into projects.
+ */
+export interface EvalRunSummary {
+  /** Server-minted run id. */
+  id: string;
+  /** Unix SECONDS the run was recorded (the crew `created_at` convention — see AgentSession). */
+  created_at: number;
+  /** The authenticated actor who ran it. */
+  actor: string;
+  /** The corpus scope (`evals:<name>`), or null for the engine's built-in dev-behaviors corpus. */
+  corpus: string | null;
+  /** The single steering type the run was narrowed to, or null when it ran all seven. */
+  type_filter: SteeringType | null;
+  /** The steering rule store the run was judged against (the daemon's `--db` steering store). */
+  rule_store: string;
+  /** The report's rollup, verbatim ({@link GovernanceEvalSummary}). */
+  summary: GovernanceEvalSummary;
+  /** Per-steering-type rollup, derived from the results — present only for the types the run covered. */
+  per_type: Partial<Record<SteeringType, EvalRunPerTypeCount>>;
+  /** `'facet-only'` when the run degraded to facet matching; null when it ran full-fidelity. */
+  degraded: 'facet-only' | null;
+}
+
+/**
+ * One eval run WITH its full per-sample results (`GET /testing/evals/:id`) — the drilldown behind a
+ * history row. `results` is the same verbatim {@link GovernanceEvalResult} array the run's original
+ * `POST /testing/evals/run` returned, so the existing report view renders it unchanged.
+ */
+export interface EvalRunDetail extends EvalRunSummary {
+  results: GovernanceEvalResult[];
+}
+
+/** The `GET /testing/evals` 200 body — the eval run history, newest first. */
+export interface ListEvalRunsResponse {
+  runs: EvalRunSummary[];
+}
+
 /**
  * The `POST /testing/recon` request body (api-types 0.15.0) — the Testing page's campaign-recon
  * trigger. `problem` is the recon brief, passed to every launched run VERBATIM (the client owns

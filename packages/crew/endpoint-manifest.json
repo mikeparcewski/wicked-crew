@@ -826,6 +826,25 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/api/v1/testing/evals",
+      "requestType": null,
+      "responseType": "ListEvalRunsResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/evals/:id",
+      "requestType": null,
+      "responseType": "EvalRunDetail",
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/testing/evals/run",
       "requestType": "RunGovernanceEvalsBody",
