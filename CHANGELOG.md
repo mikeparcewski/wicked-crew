@@ -10,6 +10,17 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.22] — 2026-09-07
+
+### Fixed
+
+- Policy-proposal landing normalizes the severity before the enum check: a
+  capture worker naturally writes the English word `"warning"`, but the engine's
+  enum is the short `"warn"` (info/error/critical are already the natural words).
+  `"warning"` (and case/whitespace variants) now maps to `warn`, so a derived
+  middle-band policy lands as a steering rule instead of failing loud on
+  approval. A genuinely out-of-enum severity still fails loud (never silent).
+
 ## [0.7.21] — 2026-09-07
 
 ### Added
@@ -674,7 +685,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...HEAD
+[0.7.22]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...v0.7.19

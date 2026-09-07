@@ -216,15 +216,26 @@ export function policyProposalToRule(
     };
   }
   const rawSeverity = body['severity'];
+  // Normalize common LLM drift before the enum check: a model naturally writes the English word
+  // "warning", but the engine's enum is the short "warn" (info/error/critical are already the
+  // natural words). Tolerate case/whitespace too. A capture worker that says "warning" must still
+  // land its policy — otherwise every derived policy at the middle band silently fails to land.
+  const normSeverity =
+    typeof rawSeverity === 'string'
+      ? (() => {
+          const s = rawSeverity.trim().toLowerCase();
+          return s === 'warning' ? 'warn' : s;
+        })()
+      : rawSeverity;
   const severity =
-    rawSeverity === 'info' || rawSeverity === 'warn' || rawSeverity === 'error' || rawSeverity === 'critical'
-      ? rawSeverity
+    normSeverity === 'info' || normSeverity === 'warn' || normSeverity === 'error' || normSeverity === 'critical'
+      ? normSeverity
       : undefined;
   if (rawSeverity !== undefined && severity === undefined) {
     return {
       error:
         `the approved policy proposal payload has an invalid severity ${JSON.stringify(rawSeverity)} — ` +
-        'expected info|warn|error|critical',
+        'expected info|warn|error|critical (or the natural "warning" for warn)',
     };
   }
   const language = facets?.['language'];
