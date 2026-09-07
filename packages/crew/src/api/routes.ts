@@ -179,15 +179,13 @@ function isNumberRecord(v: unknown): v is Record<string, number> {
   );
 }
 
-/** The broad-browse recall token budget for `GET /memory` when the caller passes no `limit` — larger
- *  than estate's own 2000 default so a browse returns a meaningful slice, not a conversational one. */
-const MEMORY_BROWSE_TOKEN_BUDGET = 8000;
-
 /**
- * Shape one estate `memory.recall` item (`{ memory_id, scope, content, tier, score }`) into the wire
- * {@link MemoryItem}. estate recall does NOT surface per-item facets, so `facets` defaults to `{}`
- * (mapped defensively so a future estate that DOES carry them rides through); `score` is dropped
- * when absent. String fields missing on the wire degrade to `''` rather than throwing on one item.
+ * Shape one estate `memory.list` item (`{ memory_id, scope, content, tier, facets, created_at }`)
+ * into the wire {@link MemoryItem}. `memory.list` (the management browse) surfaces per-item
+ * `facets` — the reason the surface can filter by facet at all; `score` is absent (list is not
+ * relevance-ranked) and simply omitted. String fields missing on the wire degrade to `''` rather
+ * than throwing on one item. (The same shape parses a `memory.recall` item unchanged — recall
+ * carries no facets, so `facets` degrades to `{}`.)
  */
 function shapeMemoryItem(raw: unknown): MemoryItem {
   const r: Record<string, unknown> =
@@ -3076,46 +3074,48 @@ export function registerRoutes(
   // ── Memory management (governed-knowledge surface, DES-MEM-FACETED-001) ───────
   // Browse + retire the EXISTING operator memory store — the studio counterpart to /proposals:
   // proposals DECIDE learnings not yet stored; these MANAGE what already is. The estate memory
-  // tools live ONLY on the estate MCP (memory.recall / memory.coverage / memory.erase), reached
+  // tools live ONLY on the estate MCP (memory.list / memory.coverage / memory.erase), reached
   // through the SAME `estateTool` seam and `estateUpstreamError` ladder as /proposals — a client
   // mistake (non-integer limit, malformed facets JSON, empty retire scope_prefix, or estate's own
   // -32602 invalid-params) is a 400; an upstream estate/transport fault, or a malformed estate
   // response, is a 502.
   //
   // GRANULARITY, stated honestly (the estate contract, not a convenience wrapper):
-  //   • BROWSE is query-based. estate has no "list all"; `memory.recall` returns a token-budgeted,
-  //     relevance-ranked slice. Broad browse = an empty `query` + `scope_prefix` (subtree filter,
-  //     "" = every memory) + a large token budget. `limit` IS that token budget — estate exposes no
-  //     row-count cap — so it bounds the SIZE of the slice, not a memory count.
-  //   • recall returns { memory_id, scope, content, tier, score } and does NOT surface per-item
-  //     facets, so MemoryItem.facets is always {} (mapped defensively for a future estate).
+  //   • BROWSE lists the COMPLETE in-scope set. `memory.list` (DES-MEM-FACETED-001) returns every
+  //     memory under `scope_prefix` ("" / omitted = all), each carrying its facets — NOT
+  //     relevance-ranked or facet-intent-filtered. This is why an operator can see faceted memories
+  //     at all: `memory.recall` retrieves nothing for an empty query and EXCLUDES faceted memories
+  //     under empty intent, so it can never inventory the store. `query`/`facets`/`limit` are then
+  //     applied HERE as post-filters over that complete set (see below) — filtering, not retrieval.
+  //   • list returns { memory_id, scope, content, tier, facets, created_at }; facets ride through to
+  //     MemoryItem.facets, powering the surface's facet filter.
   //   • RETIRE is SUBTREE-scoped, never per-id. estate exposes NO per-memory delete: `memory.erase`
   //     hard-deletes EVERY memory whose scope equals or descends from `scope_prefix`, and refuses an
   //     empty prefix (a total-wipe guard). So retire takes a `scope_prefix` and reports how many
   //     memories the subtree wipe removed — the UI must show the operator the subtree, not one row.
 
-  // GET /memory?query=&scope=&scope_prefix=&facets=<json>&limit= → memory.recall → { memories }.
+  // GET /memory?query=&scope_prefix=&facets=<json>&limit= → memory.list + post-filter → { memories }.
   app.get(
     `${V}/memory`,
     { config: { manifest: { responseType: 'ListMemoriesResponse', statusCodes: [200, 400, 502] } } },
     async (req, reply) => {
       const q = req.query as {
         query?: string | string[];
-        scope?: string | string[];
         scope_prefix?: string | string[];
         facets?: string | string[];
         limit?: string | string[];
       };
-      // `query` defaults to "" (broad browse). scope / scope_prefix forward verbatim WHEN PRESENT —
-      // a blank value is meaningful to estate (root / whole-subtree), so it is not dropped.
-      const args: Record<string, unknown> = { query: firstQueryValue(q.query) ?? '' };
-      const scope = firstQueryValue(q.scope);
-      if (scope !== undefined) args.scope = scope;
+      // `scope_prefix` is the ONLY estate-side argument to memory.list (a subtree filter; blank /
+      // omitted = every memory). Forward verbatim WHEN PRESENT — a blank value is meaningful
+      // (whole-subtree), so it is not dropped.
+      const args: Record<string, unknown> = {};
       const scopePrefix = firstQueryValue(q.scope_prefix);
       if (scopePrefix !== undefined) args.scope_prefix = scopePrefix;
-      // `facets` is the recall `intent` tuple (axis→value). Present-but-blank is a client error
+      // `facets` narrows the COMPLETE list client-of-estate-side to memories carrying every given
+      // axis:value (management filter, NOT a recall intent). Present-but-blank is a client error
       // (fail-loud, never a silent no-filter — FINDING-031); a present value must parse to a JSON
-      // object of string values (estate further validates each axis and answers -32602 → 400).
+      // object of string values.
+      let facetFilter: Record<string, string> | undefined;
       const rawFacets = firstQueryValue(q.facets);
       if (rawFacets !== undefined) {
         if (rawFacets.trim() === '') {
@@ -3130,28 +3130,37 @@ export function registerRoutes(
         if (!isStringRecord(parsedFacets)) {
           return reply.code(400).send({ error: '`facets` must be a JSON object of axis:value strings' });
         }
-        args.intent = parsedFacets;
+        facetFilter = parsedFacets;
       }
-      // `limit` is the recall token budget (estate has no row-count cap). Omitted/blank ⇒ the broad
-      // browse budget; a present value must be a positive integer (mirrors GET /audit's `limit`).
+      // `limit` caps the returned ROW count over the complete set (memory.list has no cap of its
+      // own). Omitted/blank ⇒ every matching memory; a present value must be a positive integer.
       const rawLimit = firstQueryValue(q.limit);
-      let tokenBudget = MEMORY_BROWSE_TOKEN_BUDGET;
+      let limit: number | undefined;
       if (rawLimit !== undefined && rawLimit.trim() !== '') {
         const n = Number(rawLimit);
         if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-          return reply.code(400).send({ error: '`limit` must be a positive integer (the recall token budget)' });
+          return reply.code(400).send({ error: '`limit` must be a positive integer' });
         }
-        tokenBudget = n;
+        limit = n;
       }
-      args.token_budget = tokenBudget;
+      // `query`, when present, is a case-insensitive CONTENT substring filter over the complete set
+      // — a management search that finds faceted memories too (unlike relevance recall).
+      const query = (firstQueryValue(q.query) ?? '').trim().toLowerCase();
       try {
-        const raw = await estateTool('memory.recall', args);
+        const raw = await estateTool('memory.list', args);
         const items =
           typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['items'] : undefined;
         if (!Array.isArray(items)) {
-          throw new EstateMcpError('memory.recall returned an unexpected shape');
+          throw new EstateMcpError('memory.list returned an unexpected shape');
         }
-        const body: ListMemoriesResponse = { memories: items.map(shapeMemoryItem) };
+        let memories = items.map(shapeMemoryItem);
+        if (query !== '') memories = memories.filter((m) => m.content.toLowerCase().includes(query));
+        if (facetFilter !== undefined) {
+          const pairs = Object.entries(facetFilter);
+          memories = memories.filter((m) => pairs.every(([k, v]) => m.facets[k] === v));
+        }
+        if (limit !== undefined) memories = memories.slice(0, limit);
+        const body: ListMemoriesResponse = { memories };
         return body;
       } catch (err) {
         return estateUpstreamError(reply, err);

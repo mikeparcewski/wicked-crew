@@ -2847,27 +2847,30 @@ export interface MemoryItem {
   tier: string;
   /** The memory's own hierarchical scope path (slash-separated `kind:id` segments; `""` = root). */
   scope: string;
-  /** Orthogonal facets (axis → value). Always `{}` today — estate `memory.recall` does not return
-   *  per-item facets; present for forward-compatibility. */
+  /** Orthogonal facets (axis → value) the memory is tagged with. Populated by estate `memory.list`
+   *  (the management browse) — this is what powers the surface's facet filter. `{}` for an
+   *  unfaceted memory (and for a `memory.recall`-sourced item, which carries no facets). */
   facets: Record<string, string>;
-  /** Recall relevance score; absent when estate omits it. */
+  /** Relevance score — only present on a `memory.recall` item; `memory.list` (the browse) is not
+   *  relevance-ranked, so it is absent there. */
   score?: number;
 }
 
 /**
- * `GET /memory` query filters. All optional. `scope_prefix` is the browse knob — a subtree filter
- * where `""` matches EVERY memory (the same predicate as retire); `scope` is inheritance-visibility
- * (ancestor-or-self). `facets` is a JSON-encoded object of axis→value strings (the recall intent
- * tuple). `limit` is the recall TOKEN budget (estate exposes no row-count cap), bounding the SIZE
- * of the returned slice — NOT a memory count.
+ * `GET /memory` query filters. All optional. The browse itself lists the COMPLETE in-scope set via
+ * estate `memory.list`; `query`, `facets`, and `limit` are applied server-side as post-filters over
+ * that set (they are NOT a relevance query). `scope_prefix` is the only estate-side argument — a
+ * subtree filter where `""`/omitted matches EVERY memory (the same predicate as retire). `query` is
+ * a case-insensitive CONTENT substring match. `facets` is a JSON-encoded object of axis→value
+ * strings; an item is kept only if it carries every pair. `limit` caps the returned ROW count.
  */
 export interface ListMemoriesQuery {
+  /** Case-insensitive content substring filter over the complete set. */
   query?: string;
-  scope?: string;
   scope_prefix?: string;
   /** JSON-encoded `Record<string, string>` (axis→value); a malformed value is a 400. */
   facets?: string;
-  /** Positive integer; the recall token budget. */
+  /** Positive integer; caps the returned row count. */
   limit?: string;
 }
 

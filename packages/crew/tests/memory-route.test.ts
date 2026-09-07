@@ -1,11 +1,12 @@
 // Route tests for the memory-management surface (DES-MEM-FACETED-001):
-//   GET  /api/v1/memory           → memory.recall (broad browse)
+//   GET  /api/v1/memory           → memory.list (complete browse) + query/facet/limit post-filter
 //   GET  /api/v1/memory/coverage  → memory.coverage
 //   POST /api/v1/memory/retire    → memory.erase  (SUBTREE-scoped — no per-id delete in estate)
 //
 // Fastify inject() with a mock adapter and a STUBBED estate-mcp client (runtime.callEstateTool) —
-// no `wicked-estate-mcp` process is ever spawned. Covers: the right tool + args reach the client,
-// the recall/coverage responses are shaped through, retire refuses an empty scope_prefix (400
+// no `wicked-estate-mcp` process is ever spawned. Covers: browse calls memory.list with only
+// scope_prefix (query/facets/limit are CREW-side post-filters over the complete set, never
+// forwarded), facets ride through to MemoryItem.facets, retire refuses an empty scope_prefix (400
 // without calling the client) and forwards a valid one, and the fail-loud ladder (bad limit /
 // malformed facets → 400 without the client; estate -32602 → 400; a malformed estate response or
 // any other estate/transport failure → 502).
@@ -61,11 +62,11 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
   // ── GET /memory (browse) ──────────────────────────────────────────────────────
 
-  it('browses with a broad default: empty query + the large browse token budget, shaping items', async () => {
+  it('browses the complete set via memory.list (no query/budget), passing facets through', async () => {
     estateTool.mockResolvedValueOnce({
       items: [
-        { memory_id: 'm1', scope: 'org:acme', content: 'a fact', tier: 'semantic', score: 0.9 },
-        { memory_id: 'm2', scope: '', content: 'root note', tier: 'episodic', score: 0.1 },
+        { memory_id: 'm1', scope: 'org:acme', content: 'a fact', tier: 'semantic', facets: { cli: 'codex' }, created_at: 100 },
+        { memory_id: 'm2', scope: '', content: 'root note', tier: 'episodic', facets: {}, created_at: 90 },
       ],
     });
 
@@ -74,30 +75,65 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       memories: [
-        { id: 'm1', content: 'a fact', tier: 'semantic', scope: 'org:acme', facets: {}, score: 0.9 },
-        { id: 'm2', content: 'root note', tier: 'episodic', scope: '', facets: {}, score: 0.1 },
+        { id: 'm1', content: 'a fact', tier: 'semantic', scope: 'org:acme', facets: { cli: 'codex' } },
+        { id: 'm2', content: 'root note', tier: 'episodic', scope: '', facets: {} },
       ],
     });
-    expect(estateTool).toHaveBeenCalledWith('memory.recall', { query: '', token_budget: 8000 });
+    // memory.list takes only scope_prefix (absent here) — no query, no token_budget, no intent.
+    expect(estateTool).toHaveBeenCalledWith('memory.list', {});
   });
 
-  it('forwards query, scope, scope_prefix and facets (as intent) to memory.recall', async () => {
-    estateTool.mockResolvedValueOnce({ items: [] });
+  it('forwards scope_prefix to memory.list but NOT query/facets/limit (those are post-filters)', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [
+        { memory_id: 'm1', scope: 'org:acme/agent:claude', content: 'deploy runbook', tier: 'semantic', facets: { cli: 'codex' }, created_at: 100 },
+        { memory_id: 'm2', scope: 'org:acme/agent:claude', content: 'deploy checklist', tier: 'semantic', facets: { cli: 'claude' }, created_at: 90 },
+        { memory_id: 'm3', scope: 'org:acme/agent:claude', content: 'unrelated', tier: 'episodic', facets: { cli: 'codex' }, created_at: 80 },
+      ],
+    });
 
     const facets = encodeURIComponent(JSON.stringify({ cli: 'codex' }));
     const res = await app.inject({
       method: 'GET',
-      url: `/api/v1/memory?query=deploy&scope=org:acme&scope_prefix=org:acme/agent:claude&facets=${facets}&limit=500`,
+      url: `/api/v1/memory?query=deploy&scope_prefix=org:acme/agent:claude&facets=${facets}&limit=500`,
     });
 
     expect(res.statusCode).toBe(200);
-    expect(estateTool).toHaveBeenCalledWith('memory.recall', {
-      query: 'deploy',
-      scope: 'org:acme',
-      scope_prefix: 'org:acme/agent:claude',
-      intent: { cli: 'codex' },
-      token_budget: 500,
+    // Only scope_prefix reaches estate; query + facets narrow the returned set, limit caps it.
+    expect(estateTool).toHaveBeenCalledWith('memory.list', { scope_prefix: 'org:acme/agent:claude' });
+    // m1 matches "deploy" AND cli=codex; m2 fails the facet; m3 fails the query substring.
+    expect(res.json()).toEqual({
+      memories: [{ id: 'm1', content: 'deploy runbook', tier: 'semantic', scope: 'org:acme/agent:claude', facets: { cli: 'codex' } }],
     });
+  });
+
+  it('applies query as a case-insensitive content substring filter (finds faceted memories)', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [
+        { memory_id: 'm1', scope: 's', content: 'The DEPLOY step', tier: 'semantic', facets: { cli: 'codex' }, created_at: 1 },
+        { memory_id: 'm2', scope: 's', content: 'something else', tier: 'semantic', facets: {}, created_at: 2 },
+      ],
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?query=deploy' });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { memories: { id: string }[] }).memories.map((m) => m.id)).toEqual(['m1']);
+  });
+
+  it('caps the returned rows with limit (a row cap over the complete set)', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [
+        { memory_id: 'm1', scope: 's', content: 'a', tier: 'working', facets: {}, created_at: 1 },
+        { memory_id: 'm2', scope: 's', content: 'b', tier: 'working', facets: {}, created_at: 2 },
+        { memory_id: 'm3', scope: 's', content: 'c', tier: 'working', facets: {}, created_at: 3 },
+      ],
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?limit=2' });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { memories: unknown[] }).memories).toHaveLength(2);
   });
 
   it('forwards a blank scope_prefix (root subtree = every memory) rather than dropping it', async () => {
@@ -106,14 +142,10 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/memory?scope_prefix=' });
 
     expect(res.statusCode).toBe(200);
-    expect(estateTool).toHaveBeenCalledWith('memory.recall', {
-      query: '',
-      scope_prefix: '',
-      token_budget: 8000,
-    });
+    expect(estateTool).toHaveBeenCalledWith('memory.list', { scope_prefix: '' });
   });
 
-  it('drops the score when estate omits it, and defaults facets to {}', async () => {
+  it('omits score (memory.list is not relevance-ranked) and defaults facets to {} when absent', async () => {
     estateTool.mockResolvedValueOnce({
       items: [{ memory_id: 'm3', scope: 'p:x', content: 'no score', tier: 'working' }],
     });
@@ -149,19 +181,16 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(estateTool).not.toHaveBeenCalled();
   });
 
-  it('maps an estate -32602 (e.g. a bad facet axis) to 400', async () => {
-    estateTool.mockRejectedValueOnce(new EstateMcpError('invalid intent: axis must match ^[a-z]', -32602));
+  it('maps an estate -32602 on the list call to 400', async () => {
+    estateTool.mockRejectedValueOnce(new EstateMcpError('invalid params: scope_prefix', -32602));
 
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/memory?facets=${encodeURIComponent(JSON.stringify({ BadAxis: 'x' }))}`,
-    });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?scope_prefix=org:acme' });
 
     expect(res.statusCode).toBe(400);
-    expect((res.json() as { error: string }).error).toContain('invalid intent');
+    expect((res.json() as { error: string }).error).toContain('invalid params');
   });
 
-  it('502s a malformed recall response (items missing)', async () => {
+  it('502s a malformed list response (items missing)', async () => {
     estateTool.mockResolvedValueOnce({ notItems: [] });
 
     const res = await app.inject({ method: 'GET', url: '/api/v1/memory' });
