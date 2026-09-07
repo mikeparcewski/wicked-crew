@@ -3111,8 +3111,9 @@ export function registerRoutes(
       const args: Record<string, unknown> = {};
       const scopePrefix = firstQueryValue(q.scope_prefix);
       if (scopePrefix !== undefined) args.scope_prefix = scopePrefix;
-      // `facets` narrows the COMPLETE list client-of-estate-side to memories carrying every given
-      // axis:value (management filter, NOT a recall intent). Present-but-blank is a client error
+      // `facets` narrows the COMPLETE list crew-side (after the estate fetch) to memories carrying
+      // every given axis:value (a management filter, NOT a recall intent). Present-but-blank is a
+      // client error
       // (fail-loud, never a silent no-filter — FINDING-031); a present value must parse to a JSON
       // object of string values.
       let facetFilter: Record<string, string> | undefined;
@@ -3134,6 +3135,10 @@ export function registerRoutes(
       }
       // `limit` caps the returned ROW count over the complete set (memory.list has no cap of its
       // own). Omitted/blank ⇒ every matching memory; a present value must be a positive integer.
+      // NOTE: a management browse deliberately fetches the COMPLETE in-scope set before filtering —
+      // the operator memory store is operator-scale, and the studio surface filters that set
+      // client-side, so a server-side cap would hide memories from the filter. Server-side paging
+      // for a store large enough to need it is a future enhancement, not this surface's contract.
       const rawLimit = firstQueryValue(q.limit);
       let limit: number | undefined;
       if (rawLimit !== undefined && rawLimit.trim() !== '') {
