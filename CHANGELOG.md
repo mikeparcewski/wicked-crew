@@ -10,6 +10,24 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.20] — 2026-09-07
+
+### Changed
+
+- `GET /api/v1/memory` now browses via estate's `memory.list` instead of
+  `memory.recall`. The management surface could not inventory the store: recall
+  retrieves nothing for an empty query and excludes faceted memories under empty
+  intent. `memory.list` returns the COMPLETE in-scope set with per-item facets;
+  `query` / `facets` / `limit` become crew-side post-filters over that set
+  (query = case-insensitive content substring, so faceted memories are findable;
+  facets = keep items carrying every axis:value; limit = row cap). Only
+  `scope_prefix` reaches estate. Facets now ride through to `MemoryItem.facets`,
+  powering the surface's facet filter (#456). Requires an estate binary with
+  `memory.list` (estate ≥ 0.16.4).
+- `wicked-crew-api-types`: `MemoryItem.facets` is now populated (no longer always
+  `{}`); `ListMemoriesQuery` drops the recall-only `scope`, and `query`/`facets`/
+  `limit` are documented as post-filters (`limit` is a row cap).
+
 ## [0.7.19] — 2026-09-06
 
 ### Added
@@ -633,7 +651,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...HEAD
+[0.7.20]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.16...v0.7.17
