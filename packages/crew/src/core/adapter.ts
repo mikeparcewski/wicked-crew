@@ -510,6 +510,50 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     ],
   },
   {
+    // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
+    // then propose its durable learnings — BOTH faceted MEMORIES and repo POLICIES — as inert estate
+    // MCP `proposal.submit` proposals a human later reviews.
+    //
+    // ONE workflow, not four. "Go multi-workflow" is realized as multi-PHASE composition inside a
+    // single governed run, NOT as separate churn-analysis / hotspot-read / derive-memories /
+    // derive-policies RUNS, because:
+    //   • Context threading: the learning method is a dependent chain (churn ranking → hotspot
+    //     cross-reference → capture). Crew threads each phase's output into the next phase's prompt
+    //     automatically (plan.rs folds prior context); separate runs share NOTHING, so a split would
+    //     sever that thread and each run would re-establish repo understanding from scratch.
+    //   • Council cost: every phase convenes a ~6-seat council (the ecosystem's spikiest operation,
+    //     serialized on purpose). Four runs multiply that; three phases in one run pay it once each.
+    //   • The Memories-vs-Policies review split is a proposal-KIND concern, not a workflow-identity
+    //     one: `kind_type` routes memory→studio Memories and policy:<type>→Steering downstream, so a
+    //     SINGLE `capture` phase emits both from the one shared understanding — splitting derive-
+    //     memories / derive-policies would re-run a council over the same context for no new evidence.
+    //   • Reuse already lives below the run: the reusable unit is the SKILL (and hotspot-read is
+    //     already a reusable capability via `wicked-garden-search`; survey via `survey-repo`).
+    //
+    // The METHOD lives in the garden skill `wicked-garden-repo-learn`, referenced per-phase by
+    // `skill_ref` — the engine emits only a short `Invoke your skill "wicked-garden:repo-learn"…`
+    // directive and the worker loads SKILL.md from the installed plugin. The bounded git-churn
+    // sampling, the estate MCP tool names, and the proposal payload schemas that used to sit inline as
+    // ~600-column prose now live in that skill; the inline `instructions` here are a one-line phase
+    // ORIENTATION only. That matters because a governed worker's prompt rides a single PTY line capped
+    // at 1022 bytes (>=1023B is SILENTLY discarded — wicked-core execute_wrapped.rs), and the planner
+    // folds this text onto that line alongside the run intent, so long inline prose here would blow
+    // the line. Crew-only (NOT core-seeded), so the overlay write is the only def the engine resolves
+    // — no core mirror, and deliberately NOT in builtin-overlay-shadow's MIRRORED_IDS.
+    //
+    // The worker's estate MCP already opens the operator GLOBAL memory store and permits
+    // `proposal.submit` under `--readonly` (a safe write, provenance server-stamped from WICKED_RUN_*),
+    // so proposals land in the same queue the studio Memories/Policies surfaces review. Onboarding IS
+    // about the repo, so the skill tags learnings `repo:`/`project:`.
+    id: 'capture-learnings',
+    is_system: true,
+    phases: [
+      { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'hotspots', kind: 'recon', instructions: 'Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it via the estate MCP to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate MCP proposals per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
     id: 'domain-graph-slice',
     is_system: true,
     phases: [

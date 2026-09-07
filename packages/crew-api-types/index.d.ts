@@ -2808,14 +2808,36 @@ export interface ListProposalsResponse {
 }
 
 /**
+ * The result of landing an approved POLICY proposal as a steering rule (DES-MEM-FACETED-001 §5.2).
+ * estate performs no rules-write for a policy proposal (the AW-11 invariant) — it hands the payload
+ * to crew, the one governed rules-write path, which shapes a `ConformanceRule` and upserts it. Like
+ * the steering-author landing (crew#388) the estate decision (approve) stands regardless, so a
+ * landing that could not complete reports `outcome:"failed"` with a loud, operator-readable `error`
+ * (recoverable by hand via `POST /governance/rules`) rather than turning the approve into a 500.
+ */
+export interface PolicyLandingResult {
+  /** `landed` = the steering rule is in the store; `failed` = the proposal is approved but no rule
+   *  was written — `error` says why. */
+  outcome: 'landed' | 'failed';
+  /** The upserted rule's id (deterministic `proposal:<proposalId>`, idempotent on replay). Present on `landed`. */
+  ruleId?: string;
+  /** The steering type derived from the proposal's `kind_type` (`policy:<type>`). Present on `landed`. */
+  steering_type?: SteeringType;
+  /** Present iff `outcome:"failed"` — the loud reason the rule did not land. */
+  error?: string;
+}
+
+/**
  * `POST /proposals/:id/approve` → 200. A MEMORY proposal is `promoted` (its payload is now an
- * active memory, `active_id`) and is complete. A POLICY proposal is `handed_off` — its payload is
- * returned verbatim for a later steering-write to consume; routing it into steering is NOT yet
- * implemented (DES-MEM-FACETED-001 §5.2).
+ * active memory, `active_id`) and is complete. A POLICY proposal is `handed_off` — its `payload`
+ * (`{ rule, severity }`) is still returned verbatim, and `landing` now reports the steering rule
+ * crew created from it (`landing.outcome:"landed"` with the `ruleId`), or the loud reason it could
+ * not (`landing.outcome:"failed"`). `landing` is absent only from responses served by a daemon
+ * predating the policy→steering landing (forward-additive, DES-MEM-FACETED-001 §5.2).
  */
 export type ApproveProposalResponse =
   | { outcome: 'promoted'; active_id: string }
-  | { outcome: 'handed_off'; payload: unknown };
+  | { outcome: 'handed_off'; payload: unknown; landing?: PolicyLandingResult };
 
 /** `POST /proposals/:id/reject` → 200. */
 export interface RejectProposalResponse {
