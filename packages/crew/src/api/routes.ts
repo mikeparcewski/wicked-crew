@@ -1215,7 +1215,7 @@ export function registerRoutes(
       // Who launched it — the engine's LaunchOptions carries no actor field
       // (checked, wicked-core-ts 0.6.0), so the crew-side trail is the system
       // of record for run provenance (task #88).
-      audit.record('run.launched', actorOf(req), {
+      const launchedAt = audit.record('run.launched', actorOf(req), {
         runId,
         detail: {
           ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
@@ -1237,11 +1237,11 @@ export function registerRoutes(
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
-      // Run launch time (home command-center run metrics): stamp the same instant the
-      // `run.launched` audit entry just recorded, so `AgentSession.created_at` answers immediately
-      // and matches the trail a restart rehydrates from. `Date.now()` is millis; the index stores
-      // whole seconds.
-      runTimingIndex.set(runId, Date.now());
+      // Run launch time (home command-center run metrics): reuse the EXACT `ts` the `run.launched`
+      // audit entry just stamped (not a second `Date.now()`), so the live value equals what a restart
+      // rehydrates from the trail — no 1s drift across a second boundary. `ts` is millis (0 if audit
+      // is disabled → skip); the index converts to whole seconds.
+      if (launchedAt > 0) runTimingIndex.set(runId, launchedAt);
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and

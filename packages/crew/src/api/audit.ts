@@ -69,8 +69,11 @@ export class AuditLog {
    * wait on fsync of a sidecar), serialized so lines never interleave, loud on
    * failure. `flush()` awaits the chain — tests and shutdown use it.
    */
-  record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): void {
-    if (this.disabled) return;
+  /** Returns the unix-millis `ts` stamped on the entry (0 when disabled) so a caller can reuse the
+   *  EXACT durable timestamp — e.g. the run-timing index, which must match what a restart rehydrates
+   *  from the trail rather than drift by a second off a second `Date.now()`. */
+  record(action: string, actor: Actor, fields?: { runId?: string; detail?: Record<string, unknown> }): number {
+    if (this.disabled) return 0;
     const entry: AuditEntry = {
       ts: Date.now(),
       action,
@@ -92,6 +95,7 @@ export class AuditLog {
         } — the action itself succeeded; the trail has a hole`,
       );
     });
+    return entry.ts;
   }
 
   /** Await every append issued so far. */
