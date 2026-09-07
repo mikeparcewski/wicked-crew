@@ -1239,9 +1239,10 @@ export function registerRoutes(
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       // Run launch time (home command-center run metrics): reuse the EXACT `ts` the `run.launched`
       // audit entry just stamped (not a second `Date.now()`), so the live value equals what a restart
-      // rehydrates from the trail — no 1s drift across a second boundary. `ts` is millis (0 if audit
-      // is disabled → skip); the index converts to whole seconds.
-      if (launchedAt > 0) runTimingIndex.set(runId, launchedAt);
+      // rehydrates from the trail — no 1s drift across a second boundary. When audit is disabled
+      // (`ts === 0`) there is no trail to rehydrate from, so fall back to `Date.now()` — the value is
+      // transient (lost on restart) but created_at is still answered live. Millis → whole seconds in the index.
+      runTimingIndex.set(runId, launchedAt > 0 ? launchedAt : Date.now());
       if (b.projectId !== undefined) {
         // The engine attached the crew.run membership ATOMICALLY with the launch record
         // (DES-PROJECT-001 §2.2) — this is the post-commit half: tag future /ws frames and
