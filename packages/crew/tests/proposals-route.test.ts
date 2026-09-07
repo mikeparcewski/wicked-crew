@@ -189,6 +189,40 @@ describe('proposal queue routes (DES-MEM-FACETED-001 §5.0)', () => {
     );
   });
 
+  it('normalizes the natural-word severity "warning" (and case/whitespace) to warn so a capture worker\'s policy still lands', async () => {
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'pin the version', severity: ' Warning ' } })
+      .mockResolvedValueOnce({
+        proposals: [
+          { id: 'polw', kind_type: 'policy:testing', payload: { rule: 'pin the version', severity: ' Warning ' }, facets: {}, provenance: {}, state: 'approved', created_at: 5 },
+        ],
+      });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/polw/approve' });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { landing: { outcome: string } }).landing.outcome).toBe('landed');
+    expect(adapter.upsertConformanceRule).toHaveBeenCalledWith(
+      expect.objectContaining({ severity: 'warn', steering_type: 'testing' }),
+    );
+  });
+
+  it('still fails LOUD on a genuinely invalid severity (not a known synonym)', async () => {
+    proposalTool
+      .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'loud' } })
+      .mockResolvedValueOnce({
+        proposals: [{ id: 'polbad', kind_type: 'policy:security', payload: { rule: 'x', severity: 'loud' }, facets: {}, provenance: {}, state: 'approved', created_at: 6 }],
+      });
+
+    const res = await app.inject({ method: 'POST', url: '/api/v1/proposals/polbad/approve' });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { landing: { outcome: string; error: string } };
+    expect(body.landing.outcome).toBe('failed');
+    expect(body.landing.error).toContain('invalid severity');
+    expect(adapter.upsertConformanceRule).not.toHaveBeenCalled();
+  });
+
   it('fails the landing LOUD (never a silent drop) when kind_type does not name a steering type — proposal stays approved, no rule written', async () => {
     proposalTool
       .mockResolvedValueOnce({ outcome: 'handed_off', payload: { rule: 'x', severity: 'warn' } })
