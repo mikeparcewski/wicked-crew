@@ -17,16 +17,19 @@ import { buildEvidenceBundle, coreUnitId, evidenceFilename } from './evidence.js
 import { outputUnavailableReason, resolveUnit, unitKeysFor } from './unit-output.js';
 import type {
   ApproveProposalResponse,
+  ConformanceRule,
   LaunchRunInput,
   ListMemoriesResponse,
   ListProposalsResponse,
   MemoryCoverageResponse,
   MemoryItem,
+  PolicyLandingResult,
   RejectProposalResponse,
   RetireMemoryResponse,
   RosterSeat,
   SessionStatus,
   SessionView,
+  SteeringType,
 } from '../core/types.js';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
@@ -167,6 +170,81 @@ function isStringRecord(v: unknown): v is Record<string, string> {
     !Array.isArray(v) &&
     Object.values(v as Record<string, unknown>).every((x) => typeof x === 'string')
   );
+}
+
+/**
+ * Map an APPROVED policy proposal (estate `proposal.approve` → `handed_off`) into a steering
+ * ConformanceRule (DES-MEM-FACETED-001 §5.2). A policy proposal's `kind_type` is
+ * `policy:<steering_type>` and its `payload` is `{ rule, severity }`; estate writes NOTHING for it
+ * (the AW-11 "no rules.write on estate" invariant) and hands the payload back for crew — the ONE
+ * governed rules-write path — to land. Returns the rule to upsert plus the resolved steering type,
+ * or a loud `error` string when the proposal cannot be shaped into a valid rule (a malformed
+ * `kind_type` / missing `rule` / out-of-enum `severity`) — the caller reports it as a failed
+ * landing, never a silent drop (the crew#388 anti-silent-loss doctrine).
+ *
+ * The rule id is DETERMINISTIC (`proposal:<id>`) so a re-driven landing UPSERTS the same rule
+ * (idempotent) instead of minting a duplicate; it sits OUTSIDE the reserved `PAT-/POL-` namespace,
+ * which UI/chat/proposal-authored rules are free to do (INV-C1). The rule carries NO `effect`
+ * (recall-only — exactly what `{rule, severity}` supports: an enforcement rule would need a
+ * non-blank `applies_to`, which the payload does not carry, and INV-S3 fails such a rule closed).
+ * `steering_type` is validated against the vocabulary here so the engine's INV-S1 never rejects it
+ * as an unknown page.
+ */
+export function policyProposalToRule(
+  proposalId: string,
+  kindType: string,
+  payload: unknown,
+  facets: Record<string, string> | undefined,
+): { rule: ConformanceRule; steeringType: SteeringType } | { error: string } {
+  const steeringType = kindType.startsWith('policy:') ? kindType.slice('policy:'.length) : '';
+  if (!STEERING_TYPES.has(steeringType)) {
+    return {
+      error:
+        `the approved proposal's kind_type ${JSON.stringify(kindType)} does not name a steering ` +
+        `type — expected \`policy:<${STEERING_TYPE_VALUES.join('|')}>\``,
+    };
+  }
+  const body =
+    typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  const statement = typeof body['rule'] === 'string' ? (body['rule'] as string).trim() : '';
+  if (statement === '') {
+    return {
+      error:
+        'the approved policy proposal payload has no `rule` string to make a rule statement from',
+    };
+  }
+  const rawSeverity = body['severity'];
+  const severity =
+    rawSeverity === 'info' || rawSeverity === 'warn' || rawSeverity === 'error' || rawSeverity === 'critical'
+      ? rawSeverity
+      : undefined;
+  if (rawSeverity !== undefined && severity === undefined) {
+    return {
+      error:
+        `the approved policy proposal payload has an invalid severity ${JSON.stringify(rawSeverity)} — ` +
+        'expected info|warn|error|critical',
+    };
+  }
+  const language = facets?.['language'];
+  const rule: ConformanceRule = {
+    id: `proposal:${proposalId}`,
+    rule_type: 'policy',
+    statement,
+    // A policy proposal SHOULD carry severity; a missing one defaults to `warn` (the middle band)
+    // rather than failing the landing, but a present-but-garbage one fails loud above.
+    severity: severity ?? 'warn',
+    // REQUIRED engine-side (f32, no serde default, INV-C2 `[0,1]`); the payload carries none, so a
+    // fixed authority — the same 0.8 the steering-author landing defaults to.
+    confidence: 0.8,
+    // Only the `language` facet maps onto the engine's Targets facet object; `repo`/`project`
+    // facets have no ConformanceRule slot and are dropped (see the route's open question).
+    targets: typeof language === 'string' && language !== '' ? { language } : {},
+    provenance: { source: 'proposal', source_kinds: [] },
+    steering_type: steeringType as SteeringType,
+  };
+  return { rule, steeringType: steeringType as SteeringType };
 }
 
 /** A JSON object whose every value is a number (a coverage breakdown map). */
@@ -3034,25 +3112,108 @@ export function registerRoutes(
   });
 
   // POST /proposals/:id/approve → proposal.approve →
-  //   { outcome:'promoted', active_id }  — a MEMORY proposal, now an active memory (complete);
-  //   { outcome:'handed_off', payload }  — a POLICY proposal, returned VERBATIM.
+  //   { outcome:'promoted', active_id }              — a MEMORY proposal, now an active memory (complete);
+  //   { outcome:'handed_off', payload, landing }     — a POLICY proposal, LANDED here as a steering rule.
+  //
+  // The policy→steering landing (DES-MEM-FACETED-001 §5.2): estate performs NO rules-write (the
+  // AW-11 invariant) — it marks the proposal approved and hands its `{ rule, severity }` payload
+  // back, and CREW is the one governed rules-write path. On a `handed_off` outcome we recover the
+  // proposal's `kind_type` (which carries the `policy:<steering_type>` the approve response does
+  // NOT echo), shape a `ConformanceRule` from it, and upsert it via the single-writer actor. The
+  // posture mirrors the steering-author landing (crew#388): the estate decision (approve) already
+  // stands, so a landing failure is reported LOUD in-band as `landing.outcome:"failed"` — never a
+  // 500, never the silent no-op that crew#388 exists to end — and `payload` is still returned for
+  // backward compatibility. The MEMORY path is UNTOUCHED: a `promoted` outcome returns immediately
+  // with no extra estate call and no landing.
   app.post(
     `${V}/proposals/:id/approve`,
     { config: { manifest: { responseType: 'ApproveProposalResponse', statusCodes: [200, 400, 502] } } },
     async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (id.trim() === '') {
+    // Normalize ONCE and use the trimmed value throughout — an id like `%20pol1%20`
+    // decodes to a padded, non-empty string that would otherwise ride upstream as-is
+    // and into `proposal:<id>` derivations.
+    const id = (req.params as { id: string }).id.trim();
+    if (id === '') {
       return reply.code(400).send({ error: '`id` is required' });
     }
+    let approved: ApproveProposalResponse;
     try {
-      // TODO: route handed_off policy payload to steering (crew steering-write, DES-MEM-FACETED-001
-      // §5.2). Policy→steering routing is OUT OF SCOPE here: a `handed_off` outcome is passed
-      // through as-is for a later steering-write to consume; memory proposals return `promoted` and
-      // need nothing more.
-      return (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
+      approved = (await estateTool('proposal.approve', { id })) as ApproveProposalResponse;
     } catch (err) {
       return estateUpstreamError(reply, err);
     }
+    // MEMORY proposal (or any future non-policy outcome): estate already promoted it — pass through
+    // verbatim, exactly as before. No extra estate round-trip on the memory path.
+    if (approved.outcome !== 'handed_off') {
+      return approved;
+    }
+    // POLICY proposal — land the handed-off payload as a steering rule.
+    const landFailed = (error: string): ApproveProposalResponse => {
+      audit.record('governance.steering.landing_failed', actorOf(req), {
+        detail: { proposalId: id, error },
+      });
+      return { outcome: 'handed_off', payload: approved.payload, landing: { outcome: 'failed', error } };
+    };
+    // A pre-steering engine would SILENTLY DROP `steering_type` and the other steering fields
+    // (ConformanceRule has no deny_unknown_fields), persisting a rule that enforces differently than
+    // authored — the same guard POST /governance/rules applies. Fail loud (before any further estate
+    // round-trip), persist nothing.
+    if (!adapter.steeringSupported()) {
+      return landFailed(
+        `${new SteeringUnsupportedError('Landing an approved policy proposal').message} — the ` +
+          `installed engine would silently drop the rule's steering fields; upgrade wicked-core-ts (>= 0.7.5)`,
+      );
+    }
+    // Recover the proposal's `kind_type` + `facets`: `proposal.approve` does not echo them, and the
+    // steering type lives ONLY in `kind_type` (`policy:<type>`). The proposal is `approved` now, so
+    // read it back from the approved queue.
+    let proposal: { kind_type?: unknown; facets?: unknown } | undefined;
+    try {
+      const listed = (await estateTool('proposal.list', { state: 'approved' })) as ListProposalsResponse;
+      proposal = listed.proposals.find((p) => p.id === id);
+    } catch (err) {
+      return landFailed(
+        `the policy proposal was approved but its record could not be re-read to land a steering ` +
+          `rule (${message(err)}); land it by hand via POST ${V}/governance/rules`,
+      );
+    }
+    if (proposal === undefined || typeof proposal.kind_type !== 'string') {
+      return landFailed(
+        `the policy proposal was approved but could not be found in the approved queue to recover ` +
+          `its steering type; land it by hand via POST ${V}/governance/rules`,
+      );
+    }
+    const built = policyProposalToRule(
+      id,
+      proposal.kind_type,
+      approved.payload,
+      isStringRecord(proposal.facets) ? proposal.facets : undefined,
+    );
+    if ('error' in built) {
+      return landFailed(built.error);
+    }
+    try {
+      await adapter.upsertConformanceRule(built.rule);
+    } catch (err) {
+      return landFailed(
+        `the store refused the steering rule derived from the approved policy proposal: ${message(err)}`,
+      );
+    }
+    audit.record('governance.rule.upserted', actorOf(req), {
+      detail: {
+        id: built.rule.id,
+        source: 'proposal',
+        via: 'proposal-approve',
+        steeringType: built.steeringType,
+        proposalId: id,
+      },
+    });
+    const landing: PolicyLandingResult = {
+      outcome: 'landed',
+      ruleId: built.rule.id,
+      steering_type: built.steeringType,
+    };
+    return { outcome: 'handed_off', payload: approved.payload, landing };
   });
 
   // POST /proposals/:id/reject → proposal.reject → { ok: true }.
