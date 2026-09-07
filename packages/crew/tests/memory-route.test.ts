@@ -73,10 +73,11 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/memory' });
 
     expect(res.statusCode).toBe(200);
+    // `created_at` (unix seconds) rides through from memory.list verbatim — the date-filter anchor.
     expect(res.json()).toEqual({
       memories: [
-        { id: 'm1', content: 'a fact', tier: 'semantic', scope: 'org:acme', facets: { cli: 'codex' } },
-        { id: 'm2', content: 'root note', tier: 'episodic', scope: '', facets: {} },
+        { id: 'm1', content: 'a fact', tier: 'semantic', scope: 'org:acme', facets: { cli: 'codex' }, created_at: 100 },
+        { id: 'm2', content: 'root note', tier: 'episodic', scope: '', facets: {}, created_at: 90 },
       ],
     });
     // memory.list takes only scope_prefix (absent here) — no query, no token_budget, no intent.
@@ -103,7 +104,7 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
     expect(estateTool).toHaveBeenCalledWith('memory.list', { scope_prefix: 'org:acme/agent:claude' });
     // m1 matches "deploy" AND cli=codex; m2 fails the facet; m3 fails the query substring.
     expect(res.json()).toEqual({
-      memories: [{ id: 'm1', content: 'deploy runbook', tier: 'semantic', scope: 'org:acme/agent:claude', facets: { cli: 'codex' } }],
+      memories: [{ id: 'm1', content: 'deploy runbook', tier: 'semantic', scope: 'org:acme/agent:claude', facets: { cli: 'codex' }, created_at: 100 }],
     });
   });
 
@@ -134,6 +135,64 @@ describe('memory-management routes (DES-MEM-FACETED-001)', () => {
 
     expect(res.statusCode).toBe(200);
     expect((res.json() as { memories: unknown[] }).memories).toHaveLength(2);
+  });
+
+  // ── since / until date-range filter (unix seconds, inclusive) ─────────────────
+
+  it('filters by since (inclusive lower bound) over created_at, excluding older rows', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [
+        { memory_id: 'm1', scope: 's', content: 'new', tier: 'working', facets: {}, created_at: 200 },
+        { memory_id: 'm2', scope: 's', content: 'boundary', tier: 'working', facets: {}, created_at: 150 },
+        { memory_id: 'm3', scope: 's', content: 'old', tier: 'working', facets: {}, created_at: 100 },
+      ],
+    });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?since=150' });
+    expect(res.statusCode).toBe(200);
+    // 150 is inclusive; 100 falls out. since/until are post-filters — estate still sees only args {}.
+    expect((res.json() as { memories: { id: string }[] }).memories.map((m) => m.id)).toEqual(['m1', 'm2']);
+    expect(estateTool).toHaveBeenCalledWith('memory.list', {});
+  });
+
+  it('filters by until (inclusive upper bound) and combines with since into a closed range', async () => {
+    estateTool.mockResolvedValue({
+      items: [
+        { memory_id: 'm1', scope: 's', content: 'newest', tier: 'working', facets: {}, created_at: 300 },
+        { memory_id: 'm2', scope: 's', content: 'mid', tier: 'working', facets: {}, created_at: 200 },
+        { memory_id: 'm3', scope: 's', content: 'oldest', tier: 'working', facets: {}, created_at: 100 },
+      ],
+    });
+    const upper = await app.inject({ method: 'GET', url: '/api/v1/memory?until=200' });
+    expect((upper.json() as { memories: { id: string }[] }).memories.map((m) => m.id)).toEqual(['m2', 'm3']);
+    const range = await app.inject({ method: 'GET', url: '/api/v1/memory?since=200&until=200' });
+    expect((range.json() as { memories: { id: string }[] }).memories.map((m) => m.id)).toEqual(['m2']);
+  });
+
+  it('excludes a memory with no created_at once a date bound is set (never dated with a fabricated now)', async () => {
+    estateTool.mockResolvedValueOnce({
+      items: [
+        { memory_id: 'm1', scope: 's', content: 'dated', tier: 'working', facets: {}, created_at: 500 },
+        { memory_id: 'm2', scope: 's', content: 'undated', tier: 'working', facets: {} },
+      ],
+    });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/memory?since=1' });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { memories: { id: string }[] }).memories.map((m) => m.id)).toEqual(['m1']);
+  });
+
+  it('400s a non-integer since / until and never calls the client', async () => {
+    for (const url of [
+      '/api/v1/memory?since=abc',
+      '/api/v1/memory?since=1.5',
+      '/api/v1/memory?since=-3',
+      '/api/v1/memory?until=xyz',
+      '/api/v1/memory?until=-1',
+    ]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(400);
+      expect((res.json() as { error: string }).error).toMatch(/since|until/);
+    }
+    expect(estateTool).not.toHaveBeenCalled();
   });
 
   it('forwards a blank scope_prefix (root subtree = every memory) rather than dropping it', async () => {

@@ -260,6 +260,54 @@ describe('GET /api/v1/governance/rules — browse facets', () => {
   });
 });
 
+// The `since`/`until` date filter (unix seconds, inclusive) over each rule's `created_at`. NOTE:
+// `created_at` is wired-but-pending a core-ts bump — the field exists on the engine's
+// ConformanceRule but landed after the published binding this daemon builds against, so a LIVE
+// pre-bump rule carries none and any date bound narrows to empty. These tests stub dated rows to
+// pin the filter's behavior for when the bump lands (and the undated-exclusion that holds today).
+describe('GET /api/v1/governance/rules — since/until date filter', () => {
+  const ids = (body: Record<string, unknown>) =>
+    (body['rules'] as ConformanceRule[]).map((r) => r.id);
+
+  const DATED: ConformanceRule[] = [
+    rule({ id: 'DAT-300', created_at: 300 }),
+    rule({ id: 'DAT-200', created_at: 200 }),
+    rule({ id: 'DAT-100', created_at: 100 }),
+    rule({ id: 'UNDATED' }), // no created_at — the shape a pre-bump binding serves
+  ];
+
+  beforeAll(() => {
+    listedRules = DATED;
+  });
+
+  it('filters by since (inclusive lower bound), excluding older AND undated rows', async () => {
+    const { status, body } = await get('/api/v1/governance/rules?since=200');
+    expect(status).toBe(200);
+    // 200 inclusive; DAT-100 falls out; UNDATED (no created_at) cannot be asserted in range.
+    expect(ids(body)).toEqual(['DAT-300', 'DAT-200']);
+  });
+
+  it('filters by until (inclusive upper bound) and closes a range with since', async () => {
+    const upper = await get('/api/v1/governance/rules?until=200');
+    expect(ids(upper.body)).toEqual(['DAT-200', 'DAT-100']); // UNDATED excluded
+    const range = await get('/api/v1/governance/rules?since=200&until=200');
+    expect(ids(range.body)).toEqual(['DAT-200']);
+  });
+
+  it('excludes every undated rule once a bound is set — the current pre-bump behavior', async () => {
+    const { body } = await get('/api/v1/governance/rules?since=0');
+    expect(ids(body)).toEqual(['DAT-300', 'DAT-200', 'DAT-100']); // UNDATED gone, even at since=0
+  });
+
+  it('rejects a non-integer since / until with 400 — never a silent no-filter', async () => {
+    for (const bad of ['since=abc', 'since=1.5', 'since=-3', 'until=nope', 'until=-1']) {
+      const res = await get(`/api/v1/governance/rules?${bad}`);
+      expect(res.status, bad).toBe(400);
+      expect(res.body['error']).toMatch(/since|until/);
+    }
+  });
+});
+
 describe('DELETE /api/v1/governance/rules/:id — the retire route the wiki REUSES', () => {
   it('retires an existing rule (200) and answers 404 for an unknown id', async () => {
     retirable = new Set(['POL-002']);

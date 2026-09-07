@@ -162,6 +162,39 @@ function firstQueryValue(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
+/**
+ * Parse an optional `since`/`until` date-bound query param (unix SECONDS). Returns the parsed
+ * non-negative integer, `undefined` when the param is absent or blank, or the sentinel `'invalid'`
+ * when it is present but not a non-negative integer — the caller turns `'invalid'` into a 400 that
+ * names the offending param (a silently-dropped bad bound would answer a different date question
+ * than the one asked).
+ */
+function parseUnixSecondsParam(raw: string | undefined): number | undefined | 'invalid' {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return 'invalid';
+  return n;
+}
+
+/**
+ * Inclusive `[since, until]` date-range predicate (unix seconds) shared by the memory + rules
+ * browse filters. An item with NO `created_at` is EXCLUDED whenever either bound is set — an
+ * unknown creation time is never asserted in range, and never fabricated (crew never invents a
+ * timestamp for a row the store did not stamp). With NEITHER bound set every item passes, so the
+ * un-filtered browse is unchanged.
+ */
+function withinDateRange(
+  createdAt: number | undefined,
+  since: number | undefined,
+  until: number | undefined,
+): boolean {
+  if (since === undefined && until === undefined) return true;
+  if (typeof createdAt !== 'number') return false;
+  if (since !== undefined && createdAt < since) return false;
+  if (until !== undefined && createdAt > until) return false;
+  return true;
+}
+
 /** A JSON object whose every value is a string (a facet/intent tuple, axis→value). */
 function isStringRecord(v: unknown): v is Record<string, string> {
   return (
@@ -288,6 +321,9 @@ function shapeMemoryItem(raw: unknown): MemoryItem {
     facets: isStringRecord(r['facets']) ? r['facets'] : {},
   };
   if (typeof r['score'] === 'number') item.score = r['score'];
+  // `created_at` (unix seconds) rides through from estate `memory.list` verbatim — the "added" time
+  // the surface date-filters on. Absent on an item the store did not stamp; never fabricated.
+  if (typeof r['created_at'] === 'number') item.created_at = r['created_at'];
   return item;
 }
 
@@ -2314,6 +2350,27 @@ export function registerRoutes(
         return invalid('status', status, 'active|retired|all');
       }
       const layer = facet('layer');
+      // `since`/`until` (unix SECONDS, inclusive) date-bound the listed rows by each rule's
+      // `created_at`. A present-but-non-integer bound is a 400. NOTE: `created_at` is wired-but-
+      // pending a core-ts bump — it landed on the engine's `ConformanceRule` after the published
+      // core-ts this daemon builds against, so on the current binding NO rule carries it and this
+      // filter narrows to empty. The pass-through is verbatim (`listConformanceRules` returns the
+      // parsed rows unchanged), so the bound starts working the moment crew re-pins to a core-ts
+      // that surfaces it — a rule with no `created_at` is excluded, never dated with a fabricated now.
+      const since = facet('since');
+      const sinceSecs = parseUnixSecondsParam(since);
+      if (sinceSecs === 'invalid') {
+        return reply
+          .code(400)
+          .send({ error: `since must be a non-negative integer in unix seconds (got \`${since ?? ''}\`)` });
+      }
+      const until = facet('until');
+      const untilSecs = parseUnixSecondsParam(until);
+      if (untilSecs === 'invalid') {
+        return reply
+          .code(400)
+          .send({ error: `until must be a non-negative integer in unix seconds (got \`${until ?? ''}\`)` });
+      }
       const rules = (await adapter.listConformanceRules()).filter(
         (r) =>
           (severity === undefined || r.severity === severity) &&
@@ -2323,7 +2380,9 @@ export function registerRoutes(
           // steering engine always stamps it, but filter defensively over mixed-era rows.
           (steeringType === undefined || (r.steering_type ?? DEFAULT_STEERING_TYPE) === steeringType) &&
           // `retired` is absent on rows written before the field existed, which read as active.
-          (status === 'all' || (status === 'retired') === (r.retired === true)),
+          (status === 'all' || (status === 'retired') === (r.retired === true)) &&
+          // Undated rules (every rule on a pre-bump core-ts) are excluded once a bound is set.
+          withinDateRange(r.created_at, sinceSecs, untilSecs),
       );
       return { rules };
     },
@@ -3276,6 +3335,8 @@ export function registerRoutes(
         scope_prefix?: string | string[];
         facets?: string | string[];
         limit?: string | string[];
+        since?: string | string[];
+        until?: string | string[];
       };
       // `scope_prefix` is the ONLY estate-side argument to memory.list (a subtree filter; blank /
       // omitted = every memory). Forward verbatim WHEN PRESENT — a blank value is meaningful
@@ -3320,6 +3381,18 @@ export function registerRoutes(
         }
         limit = n;
       }
+      // `since`/`until` (unix SECONDS, inclusive) date-bound the complete set crew-side by each
+      // memory's `created_at`. A present-but-non-integer bound is a 400 (fail-loud, never a silent
+      // no-filter); a memory with no `created_at` is excluded once either bound is set (see
+      // withinDateRange). Applied BEFORE the row cap, so `limit` cuts the dated set.
+      const since = parseUnixSecondsParam(firstQueryValue(q.since));
+      if (since === 'invalid') {
+        return reply.code(400).send({ error: '`since` must be a non-negative integer (unix seconds)' });
+      }
+      const until = parseUnixSecondsParam(firstQueryValue(q.until));
+      if (until === 'invalid') {
+        return reply.code(400).send({ error: '`until` must be a non-negative integer (unix seconds)' });
+      }
       // `query`, when present, is a case-insensitive CONTENT substring filter over the complete set
       // — a management search that finds faceted memories too (unlike relevance recall).
       const query = (firstQueryValue(q.query) ?? '').trim().toLowerCase();
@@ -3335,6 +3408,9 @@ export function registerRoutes(
         if (facetFilter !== undefined) {
           const pairs = Object.entries(facetFilter);
           memories = memories.filter((m) => pairs.every(([k, v]) => m.facets[k] === v));
+        }
+        if (since !== undefined || until !== undefined) {
+          memories = memories.filter((m) => withinDateRange(m.created_at, since, until));
         }
         if (limit !== undefined) memories = memories.slice(0, limit);
         const body: ListMemoriesResponse = { memories };
