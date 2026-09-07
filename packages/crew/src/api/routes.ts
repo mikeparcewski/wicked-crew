@@ -2360,12 +2360,16 @@ export function registerRoutes(
       const since = facet('since');
       const sinceSecs = parseUnixSecondsParam(since);
       if (sinceSecs === 'invalid') {
-        return invalid('since', since ?? '', 'a non-negative integer (unix seconds)');
+        return reply
+          .code(400)
+          .send({ error: `since must be a non-negative integer in unix seconds (got \`${since ?? ''}\`)` });
       }
       const until = facet('until');
       const untilSecs = parseUnixSecondsParam(until);
       if (untilSecs === 'invalid') {
-        return invalid('until', until ?? '', 'a non-negative integer (unix seconds)');
+        return reply
+          .code(400)
+          .send({ error: `until must be a non-negative integer in unix seconds (got \`${until ?? ''}\`)` });
       }
       const rules = (await adapter.listConformanceRules()).filter(
         (r) =>

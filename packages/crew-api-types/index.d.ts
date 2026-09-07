@@ -1193,13 +1193,13 @@ export interface RuleBrowseQuery {
    * a pre-bump core-ts binding NO rule carries the field, so this filter narrows to empty until the
    * engine surfaces it. Omitted ⇒ no lower bound.
    */
-  since?: number;
+  since?: string;
   /**
    * Inclusive UPPER date bound (api-types 0.23.0): keep only rules with `created_at <= until`.
    * Same units/validation/undated-exclusion as {@link RuleBrowseQuery.since}. Omitted ⇒ no upper
    * bound.
    */
-  until?: number;
+  until?: string;
 }
 
 // ── Steering management (STEERING program) ──────────────────────────────────────
@@ -2940,13 +2940,13 @@ export interface ListMemoriesQuery {
    * is EXCLUDED whenever `since` (or `until`) is set — an unknown creation time is not asserted
    * in range. Omitted ⇒ no lower bound.
    */
-  since?: number;
+  since?: string;
   /**
    * Inclusive UPPER date bound (api-types 0.23.0): keep only memories with `created_at <= until`.
    * Same units/validation/undated-exclusion as {@link ListMemoriesQuery.since}. Omitted ⇒ no
    * upper bound.
    */
-  until?: number;
+  until?: string;
 }
 
 /** `GET /memory` → 200. */
