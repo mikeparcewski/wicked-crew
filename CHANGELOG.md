@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.24] — 2026-09-08
+
+### Added
+- **Per-run `created_at` on the run DTO** (#464/#466) — the daemon joins each run's launch instant
+  (from the `run.launched` audit trail, hydrated at boot) onto `GET /runs` / `GET /runs/:id`, so the
+  studio dashboards can bucket on real time. Recorded at every launch site via a shared helper.
+- **The eval-run store** (#467) — every `POST /testing/evals/run` is persisted (crew-side
+  `EvalRunStore`, daemon-scoped), so `GET /testing/evals[/:id]` serves a real history + drilldown.
+  api-types **0.25.0** carries the `EvalRun*` types + the `created_at` / delivery-window additions.
+
+### Changed
+- Bundles **wicked-studio 0.5.0** (the command-deck landing rebuild + nav usability wave) as the
+  default local UI.
+
 ## [0.7.23] — 2026-09-07
 
 ### Added
@@ -699,7 +713,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...HEAD
+[0.7.24]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...v0.7.24
 [0.7.23]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.20...v0.7.21
