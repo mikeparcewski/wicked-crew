@@ -42,7 +42,7 @@ import type { AuditLog } from './audit.js';
 import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import type { EvalRunStore } from './eval-store.js';
 import { API_PREFIX } from './api-prefix.js';
-import { STEERING_TYPE_VALUES } from './governance-steering.js';
+import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
 import { resolveScopeRepos } from './multiscope.js';
 import { buildReconCampaign, RECON_INTAKE_GATE_TOKEN } from '../campaigns/plan.js';
 import { resolveProjectGraphBinding } from '../projects/graph.js';
@@ -150,8 +150,6 @@ export interface TestingRoutesDeps {
  * report summary, grouped by `sample.steering_type`, so the Evals dashboard's "which type carries
  * the gaps" view is a stored field rather than a per-request recompute over the full results.
  */
-const STEERING_TYPE_SET: ReadonlySet<string> = new Set(STEERING_TYPE_VALUES);
-
 export function perTypeRollup(
   results: GovernanceEvalReport['results'],
 ): Partial<Record<SteeringType, EvalRunPerTypeCount>> {
@@ -161,8 +159,9 @@ export function perTypeRollup(
     // vocabulary — see the sample-schema comment). Only bucket the 7 known types so `per_type`'s
     // keys stay strictly within `SteeringType` (the api-types contract, `Partial<Record<...>>`); an
     // off-vocabulary type is skipped, not cast in (Copilot #467). It still counts in the engine's
-    // `summary`, so per_type totals are "per KNOWN type", which may sum to ≤ summary.total.
-    if (!STEERING_TYPE_SET.has(r.sample.steering_type)) continue;
+    // `summary`, so per_type totals are "per KNOWN type", which may sum to ≤ summary.total. Reuses
+    // the ONE steering-type set (governance-steering.ts) rather than a second membership set.
+    if (!STEERING_TYPES.has(r.sample.steering_type)) continue;
     const type = r.sample.steering_type as SteeringType;
     const bucket = (out[type] ??= { total: 0, caught: 0, gaps: 0, false_positives: 0 });
     bucket.total += 1;
@@ -216,7 +215,7 @@ export function registerTestingRoutes(
         // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged.
         if (deps.evalStore !== undefined) {
           try {
-            deps.evalStore.record({
+            await deps.evalStore.record({
               actor: actorOf(req).id,
               corpus: parsed.data.corpus ?? null,
               type_filter: parsed.data.type ?? null,
@@ -254,7 +253,7 @@ export function registerTestingRoutes(
       if (deps.evalStore === undefined) return { runs: [] };
       const q = req.query as { type?: string; corpus?: string };
       return {
-        runs: deps.evalStore.list({
+        runs: await deps.evalStore.list({
           ...(q.type !== undefined ? { type_filter: q.type } : {}),
           ...(q.corpus !== undefined ? { corpus: q.corpus } : {}),
         }),
@@ -269,7 +268,7 @@ export function registerTestingRoutes(
     { config: { manifest: { responseType: 'EvalRunDetail', statusCodes: [200, 404] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const detail = deps.evalStore?.get(id) ?? null;
+      const detail = (await deps.evalStore?.get(id)) ?? null;
       if (detail === null) return reply.code(404).send({ error: `no eval run '${id}'` });
       return detail;
     },

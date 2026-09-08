@@ -36,7 +36,7 @@
  * degrades one row, never the store — reads skip what does not parse, exactly like the audit trail.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { crewStateHome } from '../projects/state-home.js';
@@ -76,20 +76,21 @@ export class EvalRunStore {
 
   /**
    * Record one eval run: write the detail file, then append the rollup index line. Returns the
-   * recorded {@link EvalRunSummary} (with its minted id + timestamp). Throws only on a hard write
-   * failure — the caller records best-effort and never fails the run on a persistence miss.
+   * recorded {@link EvalRunSummary} (with its minted id + timestamp). ASYNC (fs/promises) so the
+   * write never blocks the daemon's event loop on a large results file (Copilot #467) — the caller
+   * records best-effort and never fails the run on a persistence miss.
    */
-  record(input: RecordEvalRunInput): EvalRunSummary {
+  async record(input: RecordEvalRunInput): Promise<EvalRunSummary> {
     const { results, ...rest } = input;
     const summary: EvalRunSummary = { id: this.mintId(), created_at: this.now(), ...rest };
     const detail: EvalRunDetail = { ...summary, results };
     // Detail first, so a listed row always resolves to a readable drilldown (an orphan detail after
     // a crash before the index append is harmless).
-    mkdirSync(this.resultsDir, { recursive: true });
+    await mkdir(this.resultsDir, { recursive: true });
     const tmp = join(this.resultsDir, `${summary.id}.json.tmp-${process.pid}`);
-    writeFileSync(tmp, JSON.stringify(detail), 'utf8');
-    renameSync(tmp, this.detailPath(summary.id));
-    appendFileSync(this.indexPath, `${JSON.stringify(summary)}\n`, 'utf8');
+    await writeFile(tmp, JSON.stringify(detail), 'utf8');
+    await rename(tmp, this.detailPath(summary.id));
+    await appendFile(this.indexPath, `${JSON.stringify(summary)}\n`, 'utf8');
     return summary;
   }
 
@@ -98,10 +99,10 @@ export class EvalRunStore {
    * A line that does not parse is skipped (a torn final line after a crash is expected once) — the
    * rest of the history still lists.
    */
-  list(filter?: { type_filter?: string | null; corpus?: string | null }): EvalRunSummary[] {
+  async list(filter?: { type_filter?: string | null; corpus?: string | null }): Promise<EvalRunSummary[]> {
     let raw: string;
     try {
-      raw = readFileSync(this.indexPath, 'utf8');
+      raw = await readFile(this.indexPath, 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []; // nothing recorded yet
       this.warn(`[eval-store] could not read ${this.indexPath}: ${message(err)} — the history reads empty`);
@@ -125,7 +126,7 @@ export class EvalRunStore {
   }
 
   /** One run WITH its full results, or null when the id is unknown (or its detail file is gone). */
-  get(id: string): EvalRunDetail | null {
+  async get(id: string): Promise<EvalRunDetail | null> {
     // The `:id` route param is user-controlled: reject anything that is not a safe id token BEFORE
     // it touches the filesystem, so an encoded separator / traversal id (`../…`, `%2e%2e%2f…`)
     // can never escape the results dir to read an unintended `.json` (Copilot #467). Minted ids are
@@ -133,7 +134,7 @@ export class EvalRunStore {
     if (!EVAL_RUN_ID_RE.test(id)) return null;
     let raw: string;
     try {
-      raw = readFileSync(this.detailPath(id), 'utf8');
+      raw = await readFile(this.detailPath(id), 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
       this.warn(`[eval-store] could not read detail for ${id}: ${message(err)}`);

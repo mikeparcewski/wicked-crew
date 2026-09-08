@@ -47,14 +47,14 @@ function input(over: Partial<RecordEvalRunInput> = {}): RecordEvalRunInput {
 }
 
 describe('EvalRunStore — record / list / get', () => {
-  it('records a run, mints id + created_at, and lists the rollup WITHOUT results', () => {
+  it('records a run, mints id + created_at, and lists the rollup WITHOUT results', async () => {
     const store = new EvalRunStore(dir, () => undefined, () => 1_700_000_100, () => 'run-1');
-    const summary = store.record(input());
+    const summary = await store.record(input());
     expect(summary.id).toBe('run-1');
     expect(summary.created_at).toBe(1_700_000_100);
     expect(summary.actor).toBe('mikeparcewski');
 
-    const [row, ...rest] = store.list();
+    const [row, ...rest] = await store.list();
     expect(rest).toHaveLength(0);
     expect(row!.id).toBe('run-1');
     expect(row!.summary).toEqual({ total: 3, caught: 1, gaps: 1, false_positives: 1 });
@@ -63,87 +63,87 @@ describe('EvalRunStore — record / list / get', () => {
     expect('results' in row!).toBe(false);
   });
 
-  it('get() returns the full run WITH results; an unknown id is null', () => {
+  it('get() returns the full run WITH results; an unknown id is null', async () => {
     const store = new EvalRunStore(dir, () => undefined, () => 1, () => 'run-x');
-    store.record(input());
-    const detail = store.get('run-x');
+    await store.record(input());
+    const detail = await store.get('run-x');
     expect(detail).not.toBeNull();
     expect(detail!.results).toHaveLength(3);
     expect(detail!.results[1]!.verdict).toBe('gap');
-    expect(store.get('does-not-exist')).toBeNull();
+    expect(await store.get('does-not-exist')).toBeNull();
   });
 
-  it('lists newest first (append order reversed)', () => {
+  it('lists newest first (append order reversed)', async () => {
     let n = 0;
     const store = new EvalRunStore(dir, () => undefined, () => 1_700_000_000 + n, () => `run-${n++}`);
-    store.record(input()); // run-0
-    store.record(input()); // run-1
-    store.record(input()); // run-2
-    expect(store.list().map((r) => r.id)).toEqual(['run-2', 'run-1', 'run-0']);
+    await store.record(input()); // run-0
+    await store.record(input()); // run-1
+    await store.record(input()); // run-2
+    expect((await store.list()).map((r) => r.id)).toEqual(['run-2', 'run-1', 'run-0']);
   });
 
-  it('an empty (never-written) store lists empty, never throws', () => {
+  it('an empty (never-written) store lists empty, never throws', async () => {
     const store = new EvalRunStore(join(dir, 'nope'), () => undefined);
-    expect(store.list()).toEqual([]);
-    expect(store.get('anything')).toBeNull();
+    expect(await store.list()).toEqual([]);
+    expect(await store.get('anything')).toBeNull();
     // Listing must not have created the root — the store writes lazily, on first record.
     expect(existsSync(join(dir, 'nope'))).toBe(false);
   });
 });
 
 describe('EvalRunStore — filters', () => {
-  it('narrows the list by type_filter and by corpus', () => {
+  it('narrows the list by type_filter and by corpus', async () => {
     let i = 0;
     const store = new EvalRunStore(dir, () => undefined, () => i, () => `run-${i++}`);
-    store.record(input({ type_filter: 'security', corpus: null }));
-    store.record(input({ type_filter: null, corpus: 'evals:dev' }));
-    store.record(input({ type_filter: 'security', corpus: 'evals:dev' }));
+    await store.record(input({ type_filter: 'security', corpus: null }));
+    await store.record(input({ type_filter: null, corpus: 'evals:dev' }));
+    await store.record(input({ type_filter: 'security', corpus: 'evals:dev' }));
 
-    expect(store.list({ type_filter: 'security' }).map((r) => r.id).sort()).toEqual(['run-0', 'run-2']);
-    expect(store.list({ corpus: 'evals:dev' }).map((r) => r.id).sort()).toEqual(['run-1', 'run-2']);
-    expect(store.list({ type_filter: null }).map((r) => r.id)).toEqual(['run-1']);
+    expect((await store.list({ type_filter: 'security' })).map((r) => r.id).sort()).toEqual(['run-0', 'run-2']);
+    expect((await store.list({ corpus: 'evals:dev' })).map((r) => r.id).sort()).toEqual(['run-1', 'run-2']);
+    expect((await store.list({ type_filter: null })).map((r) => r.id)).toEqual(['run-1']);
     // A filter that matches nothing is an empty list, not an error.
-    expect(store.list({ corpus: 'evals:missing' })).toEqual([]);
+    expect(await store.list({ corpus: 'evals:missing' })).toEqual([]);
   });
 });
 
 describe('EvalRunStore — tolerant reads (one bad row never blanks the history)', () => {
-  it('skips a torn index line but keeps the readable rows', () => {
+  it('skips a torn index line but keeps the readable rows', async () => {
     let i = 0;
     const store = new EvalRunStore(dir, () => undefined, () => i, () => `run-${i++}`);
-    store.record(input()); // run-0
-    store.record(input()); // run-1
+    await store.record(input()); // run-0
+    await store.record(input()); // run-1
     // Corrupt the middle of the index with a torn line (a crash-torn append).
     appendFileSync(join(dir, 'runs.jsonl'), '{ this is not json\n', 'utf8');
-    store.record(input()); // run-2
-    expect(store.list().map((r) => r.id)).toEqual(['run-2', 'run-1', 'run-0']);
+    await store.record(input()); // run-2
+    expect((await store.list()).map((r) => r.id)).toEqual(['run-2', 'run-1', 'run-0']);
   });
 
-  it('a listed row whose detail file is gone → get() is null, list() still shows the row', () => {
+  it('a listed row whose detail file is gone → get() is null, list() still shows the row', async () => {
     const store = new EvalRunStore(dir, () => undefined, () => 1, () => 'run-gone');
-    store.record(input());
+    await store.record(input());
     rmSync(join(dir, 'results', 'run-gone.json'));
-    expect(store.list().map((r) => r.id)).toEqual(['run-gone']); // the rollup survives
-    expect(store.get('run-gone')).toBeNull(); // the drilldown is honestly absent
+    expect((await store.list()).map((r) => r.id)).toEqual(['run-gone']); // the rollup survives
+    expect(await store.get('run-gone')).toBeNull(); // the drilldown is honestly absent
   });
 
-  it('a detail file with malformed JSON → get() is null, not a throw', () => {
+  it('a detail file with malformed JSON → get() is null, not a throw', async () => {
     const store = new EvalRunStore(dir, () => undefined, () => 1, () => 'run-bad');
-    store.record(input());
+    await store.record(input());
     writeFileSync(join(dir, 'results', 'run-bad.json'), '{ broken', 'utf8');
-    expect(store.get('run-bad')).toBeNull();
+    expect(await store.get('run-bad')).toBeNull();
   });
 
-  it('rejects a path-manipulation id BEFORE touching the fs (Copilot #467)', () => {
+  it('rejects a path-manipulation id BEFORE touching the fs (Copilot #467)', async () => {
     const store = new EvalRunStore(dir, () => undefined, () => 1, () => 'run-ok');
-    store.record(input());
+    await store.record(input());
     // Plant a file OUTSIDE the results dir that a traversal id would otherwise reach.
     writeFileSync(join(dir, 'secret.json'), JSON.stringify({ id: 'x', results: [] }), 'utf8');
     for (const bad of ['../secret', '..%2Fsecret', 'a/../../secret', 'a.b', 'x/y', './x', '']) {
-      expect(store.get(bad)).toBeNull();
+      expect(await store.get(bad)).toBeNull();
     }
     // A well-formed id still resolves.
-    expect(store.get('run-ok')).not.toBeNull();
+    expect(await store.get('run-ok')).not.toBeNull();
   });
 });
 
@@ -154,10 +154,10 @@ describe('EvalRunStore — root resolution', () => {
     expect(defaultEvalStoreRoot({}).endsWith(join('.wicked-crew', 'evals'))).toBe(true);
   });
 
-  it('writes a parseable one-object-per-line index and a detail file under the root', () => {
+  it('writes a parseable one-object-per-line index and a detail file under the root', async () => {
     const root = join(dir, 'explicit');
     const store = new EvalRunStore(root, () => undefined, () => 1, () => 'r');
-    store.record(input());
+    await store.record(input());
     expect(existsSync(join(root, 'runs.jsonl'))).toBe(true);
     expect(existsSync(join(root, 'results', 'r.json'))).toBe(true);
     const raw = readFileSync(join(root, 'runs.jsonl'), 'utf8').trim();
