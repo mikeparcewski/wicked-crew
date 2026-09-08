@@ -13,6 +13,7 @@ import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
+import { RunTimingIndex } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
   DeliveryIndex,
@@ -350,13 +351,17 @@ export async function createServer(
   // boot stays at three full-file trail scans, not four (the crew#321 consolidation note).
   const retryIndex = new RetryIndex();
   const groupIndex = new GroupIndex();
+  // Run launch time (home command-center run metrics): the third consumer of the `run.launched`
+  // scan — the entry's `ts` is the durable launch instant `AgentSession.created_at` echoes.
+  const runTimingIndex = new RunTimingIndex();
   try {
     const launchEntries = await audit.readAll({ action: 'run.launched' });
     retryIndex.hydrateFromLaunchEntries(launchEntries);
     groupIndex.hydrateFromLaunchEntries(launchEntries);
+    runTimingIndex.hydrateFromLaunchEntries(launchEntries);
   } catch (err) {
     app.log.warn(
-      `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped until restart): ${
+      `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -1006,6 +1011,7 @@ export async function createServer(
       seatHealth,
       retryIndex,
       groupIndex,
+      runTimingIndex,
       guidanceIndex,
       deliveryIndex,
       // The delivery machinery built beside the index above: the started cache, and the SAME

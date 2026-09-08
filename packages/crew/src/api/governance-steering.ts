@@ -29,6 +29,7 @@ import { z } from 'zod';
 import { SteeringUnsupportedError, type CoreAdapter } from '../core/adapter.js';
 import type { Actor, SteeringImportEntry, SteeringImportResult } from '../core/types.js';
 import type { AuditLog } from './audit.js';
+import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import { API_PREFIX } from './api-prefix.js';
 
 const V = API_PREFIX;
@@ -153,6 +154,10 @@ export interface SteeringRoutesDeps {
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
   /** The default council roster for the authoring run (already parsed). */
   roster: () => unknown[];
+  /** The run→launch-time index (home command-center run metrics) — so the steering-author run's
+   *  `run.launched` entry stamps `created_at` LIVE, not only after a restart re-hydrates the trail
+   *  (Copilot #466). Optional so route-unit tests can omit it; `registerRoutes` always supplies it. */
+  runTimingIndex?: RunTimingIndex;
 }
 
 export function registerGovernanceSteeringRoutes(
@@ -351,15 +356,13 @@ export function registerGovernanceSteeringRoutes(
           ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
         });
         // The same trail entry POST /runs writes — this IS a run launch, findable by the same
-        // `?action=run.launched` query — plus the steering detail the Steering header renders.
-        audit.record('run.launched', actorOf(req), {
-          runId,
-          detail: {
-            workflow: 'steering-author',
-            steeringType: type,
-            sources: sources.length,
-            ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
-          },
+        // `?action=run.launched` query — plus the steering detail the Steering header renders; the
+        // shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
+        recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+          workflow: 'steering-author',
+          steeringType: type,
+          sources: sources.length,
+          ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
         });
         return reply.code(201).send({ runId });
       } catch (err) {

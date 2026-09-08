@@ -74,6 +74,7 @@ import {
 } from './diagnostics.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
+import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import {
   DeliveryIndex,
@@ -529,6 +530,10 @@ export interface RuntimeDeps {
    *  trail (the SAME `run.launched` scan as `retryIndex`) so attaches survive a restart; a
    *  directly-driven route set gets a fresh one. */
   groupIndex?: GroupIndex;
+  /** Run→launch-time index (home command-center run metrics) — `createServer` hydrates one from
+   *  the audit trail (the SAME `run.launched` scan as `retryIndex`) so a restarted daemon still
+   *  echoes `AgentSession.created_at`; a directly-driven route set gets a fresh one. */
+  runTimingIndex?: RunTimingIndex;
   /** Run→operator-guidance index (CREW-UX-7) — `createServer` hydrates one from the audit trail
    *  so a restarted daemon still echoes `guidance`; a directly-driven route set gets a fresh one. */
   guidanceIndex?: GuidanceIndex;
@@ -620,6 +625,7 @@ export function registerRoutes(
   const signedIn = runtime.signedIn ?? signedInHeuristic;
   const retryIndex = runtime.retryIndex ?? new RetryIndex();
   const groupIndex = runtime.groupIndex ?? new GroupIndex();
+  const runTimingIndex = runtime.runTimingIndex ?? new RunTimingIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
@@ -715,6 +721,12 @@ export function registerRoutes(
     }
     const guidance = guidanceIndex.guidanceFor(view.session.id);
     if (guidance !== undefined) view.session.guidance = guidance;
+    // Run launch time (home command-center run metrics): unix SECONDS from the `run.launched`
+    // audit entry, ABSENT when the daemon has no launch record for this run (onboarding/campaign
+    // runs launched off POST /runs, pre-field runs) — never fabricated, so a bucketed KPI can
+    // exclude an undated run rather than dating it with a false now.
+    const createdAt = runTimingIndex.createdAtFor(view.session.id);
+    if (createdAt !== undefined) view.session.created_at = createdAt;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -1203,24 +1215,29 @@ export function registerRoutes(
       // Who launched it — the engine's LaunchOptions carries no actor field
       // (checked, wicked-core-ts 0.6.0), so the crew-side trail is the system
       // of record for run provenance (task #88).
-      audit.record('run.launched', actorOf(req), {
-        runId,
-        detail: {
-          ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
-          ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
-          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-          // crew#393: the RESOLVED delivery decision, not just the caller's field — so the
-          // trail says what the run will actually do, and whether the daemon decided it.
-          deliver,
-          ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
-          // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
-          // restarted daemon's hydrate) reads it back from exactly this entry.
-          ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
-          // wicked-studio#27: the trail is likewise the durable record of the group attach —
-          // the group index (and a restarted daemon's hydrate) reads it back from here.
-          ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
-          ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
-        },
+      // `run.launched` is the system of record for run provenance (the engine's LaunchOptions
+      // carries no actor field — task #88). `recordRunLaunched` writes the trail entry AND stamps
+      // the run-timing index with the SAME durable `ts` (home command-center run metrics): the live
+      // `created_at` equals what a restart rehydrates from the trail — no 1s drift, and no fabricated
+      // value (audit disabled → nothing stamped → `created_at` ABSENT, the honest answer for a run
+      // with no durable launch record). `createServer` always builds a REAL trail, so this fires on
+      // every production launch. The SHARED helper (Copilot #466) is why the recon/steering-author
+      // launchers stamp identically instead of leaving their runs undated until a restart.
+      recordRunLaunched(audit, runTimingIndex, actorOf(req), runId, {
+        ...(b.workflow !== undefined ? { workflow: b.workflow } : {}),
+        ...(b.repoRef !== undefined ? { repoRef: b.repoRef } : {}),
+        ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+        // crew#393: the RESOLVED delivery decision, not just the caller's field — so the
+        // trail says what the run will actually do, and whether the daemon decided it.
+        deliver,
+        ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
+        // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
+        // restarted daemon's hydrate) reads it back from exactly this entry.
+        ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
+        // wicked-studio#27: the trail is likewise the durable record of the group attach —
+        // the group index (and a restarted daemon's hydrate) reads it back from here.
+        ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
+        ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
@@ -3511,6 +3528,8 @@ export function registerRoutes(
     audit,
     actorOf,
     roster: () => CoreAdapter.roster(),
+    // So the steering-author run's `run.launched` entry stamps `created_at` live too (Copilot #466).
+    runTimingIndex,
   });
 
   // ── Testing (crew-testing) — governance evals + eval corpora + the recon trigger ────────────
@@ -3523,6 +3542,9 @@ export function registerRoutes(
     actorOf,
     roster: () => CoreAdapter.roster(),
     projects: { bus: projects.bus, index: projects.index },
+    // So the recon fan's `run.launched` entries stamp `created_at` live too (Copilot #466), not
+    // just after a restart re-hydrates the trail.
+    runTimingIndex,
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──
