@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.25] — 2026-09-08
+
+### Changed
+- **Re-bundle the studio skin at 0.5.1.** Bumps the bundled `wicked-studio` dependency
+  `^0.5.0` → `^0.5.1` (lockfile re-resolved) so `build:with-studio` ships the dashboard-honesty
+  fixes from studio #200/#201 (governed-tests tile framing, store-wide-vs-loaded memory stats).
+  No daemon behavior change.
+
 ## [0.7.24] — 2026-09-08
 
 ### Added
@@ -713,7 +721,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...HEAD
+[0.7.25]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...v0.7.25
 [0.7.24]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...v0.7.24
 [0.7.23]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.21...v0.7.22
