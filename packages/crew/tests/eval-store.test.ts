@@ -133,6 +133,18 @@ describe('EvalRunStore — tolerant reads (one bad row never blanks the history)
     writeFileSync(join(dir, 'results', 'run-bad.json'), '{ broken', 'utf8');
     expect(store.get('run-bad')).toBeNull();
   });
+
+  it('rejects a path-manipulation id BEFORE touching the fs (Copilot #467)', () => {
+    const store = new EvalRunStore(dir, () => undefined, () => 1, () => 'run-ok');
+    store.record(input());
+    // Plant a file OUTSIDE the results dir that a traversal id would otherwise reach.
+    writeFileSync(join(dir, 'secret.json'), JSON.stringify({ id: 'x', results: [] }), 'utf8');
+    for (const bad of ['../secret', '..%2Fsecret', 'a/../../secret', 'a.b', 'x/y', './x', '']) {
+      expect(store.get(bad)).toBeNull();
+    }
+    // A well-formed id still resolves.
+    expect(store.get('run-ok')).not.toBeNull();
+  });
 });
 
 describe('EvalRunStore — root resolution', () => {

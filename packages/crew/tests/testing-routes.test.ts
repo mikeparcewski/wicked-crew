@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, GovernanceEvalsUnsupportedError } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { perTypeRollup } from '../src/api/testing.js';
 import { removeScratch } from './setup/scratch.js';
 import type {
   GovernanceEvalReport,
@@ -498,5 +499,19 @@ describe('the eval RUN history — GET /api/v1/testing/evals[/:id]', () => {
     const runs = list.body['runs'] as Array<Record<string, unknown>>;
     expect(runs).toHaveLength(1);
     expect(runs[0]!['type_filter']).toBe('security');
+  });
+});
+
+describe('perTypeRollup — keys stay within the SteeringType vocabulary (Copilot #467)', () => {
+  it('buckets the 7 known types and SKIPS an off-vocabulary steering_type (open wire string)', () => {
+    const rollup = perTypeRollup([
+      { sample: { id: 'a', description: '', kind: 'bad', steering_type: 'security' }, expected: 'deny', fired: [], verdict: 'caught' },
+      { sample: { id: 'b', description: '', kind: 'good', steering_type: 'security' }, expected: 'allow', fired: [], verdict: 'false_positive' },
+      // An off-vocabulary type the engine's open-string field could carry — must NOT become a key.
+      { sample: { id: 'c', description: '', kind: 'bad', steering_type: 'made-up-type' }, expected: 'deny', fired: [], verdict: 'gap' },
+    ]);
+    expect(Object.keys(rollup)).toEqual(['security']);
+    expect(rollup.security).toEqual({ total: 2, caught: 1, gaps: 0, false_positives: 1 });
+    expect((rollup as Record<string, unknown>)['made-up-type']).toBeUndefined();
   });
 });

@@ -150,11 +150,19 @@ export interface TestingRoutesDeps {
  * report summary, grouped by `sample.steering_type`, so the Evals dashboard's "which type carries
  * the gaps" view is a stored field rather than a per-request recompute over the full results.
  */
+const STEERING_TYPE_SET: ReadonlySet<string> = new Set(STEERING_TYPE_VALUES);
+
 export function perTypeRollup(
   results: GovernanceEvalReport['results'],
 ): Partial<Record<SteeringType, EvalRunPerTypeCount>> {
   const out: Partial<Record<SteeringType, EvalRunPerTypeCount>> = {};
   for (const r of results) {
+    // `sample.steering_type` is an OPEN string on the wire (the engine validates it against its own
+    // vocabulary — see the sample-schema comment). Only bucket the 7 known types so `per_type`'s
+    // keys stay strictly within `SteeringType` (the api-types contract, `Partial<Record<...>>`); an
+    // off-vocabulary type is skipped, not cast in (Copilot #467). It still counts in the engine's
+    // `summary`, so per_type totals are "per KNOWN type", which may sum to ≤ summary.total.
+    if (!STEERING_TYPE_SET.has(r.sample.steering_type)) continue;
     const type = r.sample.steering_type as SteeringType;
     const bucket = (out[type] ??= { total: 0, caught: 0, gaps: 0, false_positives: 0 });
     bucket.total += 1;

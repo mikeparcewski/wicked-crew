@@ -126,6 +126,11 @@ export class EvalRunStore {
 
   /** One run WITH its full results, or null when the id is unknown (or its detail file is gone). */
   get(id: string): EvalRunDetail | null {
+    // The `:id` route param is user-controlled: reject anything that is not a safe id token BEFORE
+    // it touches the filesystem, so an encoded separator / traversal id (`../…`, `%2e%2e%2f…`)
+    // can never escape the results dir to read an unintended `.json` (Copilot #467). Minted ids are
+    // hex; the `-` allows the test-shaped `run-1` ids — no `.`, `/`, or other path syntax gets through.
+    if (!EVAL_RUN_ID_RE.test(id)) return null;
     let raw: string;
     try {
       raw = readFileSync(this.detailPath(id), 'utf8');
@@ -147,6 +152,10 @@ export class EvalRunStore {
     return join(this.resultsDir, `${id}.json`);
   }
 }
+
+/** A safe eval-run id: the minted hex ids plus the `-`/`_` a test id uses — no path syntax. Used to
+ *  reject a user-controlled `:id` before it reaches the filesystem (path-traversal guard). */
+const EVAL_RUN_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
