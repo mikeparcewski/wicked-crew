@@ -55,6 +55,7 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
+import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
@@ -592,6 +593,11 @@ export interface RuntimeDeps {
   /** The studio asset root `createServer` resolved (bundled or overridden) — diagnostics reads
    *  the bundle's shipped version manifest from it. Absent = headless = `studioBundle: null`. */
   studioRoot?: string;
+  /** The eval RUN history store behind `/testing/evals[/:id]` — `createServer` builds one over the
+   *  daemon state home so every `POST /testing/evals/run` is recorded; a directly-driven route set
+   *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
+   *  nothing under `~/.wicked-crew`. */
+  evalStore?: EvalRunStore;
 }
 
 /**
@@ -3545,6 +3551,9 @@ export function registerRoutes(
     // So the recon fan's `run.launched` entries stamp `created_at` live too (Copilot #466), not
     // just after a restart re-hydrates the trail.
     runTimingIndex,
+    // The eval history store: `createServer` supplies a real one (state-home-rooted); a
+    // directly-driven route set records nothing unless it injects one (no `~/.wicked-crew` writes).
+    ...(runtime.evalStore !== undefined ? { evalStore: runtime.evalStore } : {}),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

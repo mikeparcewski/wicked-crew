@@ -11,6 +11,7 @@ import { GateCache } from './gate-cache.js';
 import { ElicitationCache } from './elicitation-cache.js';
 import { registerAuthHooks, resolveAuth, type AuthOptions } from './auth.js';
 import { AuditLog } from './audit.js';
+import { EvalRunStore } from './eval-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex } from './run-timing-index.js';
@@ -229,6 +230,10 @@ export interface CreateServerOptions {
   auth?: AuthOptions;
   /** Audit-trail path override (tests). Default `~/.wicked-crew/audit.log` / `WICKED_CREW_AUDIT_LOG`. */
   auditPath?: string;
+  /** Eval-run-history root override (tests). Default the state home's `evals/` /
+   *  `WICKED_CREW_EVAL_STORE`. Symmetric with `auditPath` — a createServer-driven test isolates its
+   *  eval history here instead of writing the operator's real `~/.wicked-crew/evals/`. */
+  evalStoreRoot?: string;
   // (The crew#274 §3 seat-health `--version` recovery probe is retired — perf recon fix #3.
   // Readiness lives engine-side as the wicked-core#355 dispatch bench; the tracker recovers a
   // seat on its next real `ok` output. The `seatHealthProbe` option is gone with it.)
@@ -322,6 +327,13 @@ export async function createServer(
   app.addHook('onClose', async () => {
     await audit.flush(); // don't lose the trail's tail on shutdown
   });
+
+  // The eval RUN history behind `/testing/evals[/:id]` — rooted under the daemon's resolved state
+  // home (so a `--db`-isolated daemon keeps its eval history isolated too), synchronous writes, no
+  // shutdown flush to await (each run persists inline before its POST answers). The `evalStoreRoot`
+  // option lets a createServer-driven test isolate its history off the real home (symmetric with
+  // `auditPath`); production omits it and resolves through the state-home seam.
+  const evalStore = new EvalRunStore(options?.evalStoreRoot, (m) => app.log.warn(m));
 
   // Seat sign-in: export the persisted worker-config root as WICKED_WORKER_HOME at boot (the
   // PUT /settings route re-applies it on every change). The engine reads the env PER SPAWN
@@ -1024,6 +1036,7 @@ export async function createServer(
       errorRing,
       studioRoot,
       dropDocLedgerRows,
+      evalStore,
     },
   );
 

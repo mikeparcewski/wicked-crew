@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.24.0",
+  "apiTypesVersion": "0.25.0",
   "endpoints": [
     {
       "method": "GET",
@@ -823,6 +823,25 @@
         400,
         500,
         501
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/evals",
+      "requestType": null,
+      "responseType": "ListEvalRunsResponse",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/testing/evals/:id",
+      "requestType": null,
+      "responseType": "EvalRunDetail",
+      "statusCodes": [
+        200,
+        404
       ]
     },
     {

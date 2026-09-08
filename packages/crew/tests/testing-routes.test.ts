@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, GovernanceEvalsUnsupportedError } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { perTypeRollup } from '../src/api/testing.js';
 import { removeScratch } from './setup/scratch.js';
 import type {
   GovernanceEvalReport,
@@ -150,7 +151,12 @@ beforeAll(async () => {
     return IMPORT_ANSWER;
   };
 
-  app = await createServer(adapter, { auditPath: join(dir, 'audit.log') });
+  app = await createServer(adapter, {
+    auditPath: join(dir, 'audit.log'),
+    // Isolate the eval history off the operator's real ~/.wicked-crew/evals (the run route records
+    // every POST /testing/evals/run through this store).
+    evalStoreRoot: join(dir, 'evals'),
+  });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   baseUrl = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
@@ -194,6 +200,12 @@ async function post(path: string, body?: unknown) {
       ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
       : {}),
   });
+  const text = await res.text();
+  return { status: res.status, text, body: JSON.parse(text) as Record<string, unknown> };
+}
+
+async function get(path: string) {
+  const res = await fetch(`${baseUrl}${path}`);
   const text = await res.text();
   return { status: res.status, text, body: JSON.parse(text) as Record<string, unknown> };
 }
@@ -428,5 +440,78 @@ describe('POST /api/v1/testing/corpora/import', () => {
     const res = await post('/api/v1/testing/corpora/import', VALID);
     expect(res.status).toBe(500);
     expect(res.body['error']).toBe('knowledge store locked');
+  });
+});
+
+// The eval RUN history the run route records (crew-side EvalRunStore) — the Evals section's list +
+// drilldown. Stub-adapter path: a `POST /testing/evals/run` returns REPORT verbatim AND is recorded,
+// so the GET routes read it back. A unique `corpus` tag per case makes assertions robust against the
+// rows the run-route cases above already recorded into the same (per-suite) store.
+describe('the eval RUN history — GET /api/v1/testing/evals[/:id]', () => {
+  it('a successful run is RECORDED — it appears in the history with the DERIVED rollup, no results', async () => {
+    evalsSupported = true;
+    expect((await post('/api/v1/testing/evals/run', { corpus: 'evals:hist-a' })).status).toBe(200);
+
+    const list = await get(`/api/v1/testing/evals?corpus=${encodeURIComponent('evals:hist-a')}`);
+    expect(list.status).toBe(200);
+    const runs = list.body['runs'] as Array<Record<string, unknown>>;
+    expect(runs).toHaveLength(1);
+    const row = runs[0]!;
+    expect(row['corpus']).toBe('evals:hist-a');
+    expect(row['type_filter']).toBeNull();
+    expect(row['summary']).toEqual(REPORT.summary);
+    // per_type is DERIVED from the results (1 security caught, 2 development [1 gap + 1 fp]) — a
+    // stored field, not a per-request recompute.
+    const perType = row['per_type'] as Record<string, unknown>;
+    expect(perType['security']).toEqual({ total: 1, caught: 1, gaps: 0, false_positives: 0 });
+    expect(perType['development']).toEqual({ total: 2, caught: 0, gaps: 1, false_positives: 1 });
+    // A rollup row is cheap — the per-sample results are NOT on it (they live on the drilldown).
+    expect('results' in row).toBe(false);
+    expect(typeof row['id']).toBe('string');
+    expect(typeof row['created_at']).toBe('number');
+    expect(row['rule_store']).toContain('core.db'); // the daemon's own steering store the run judged
+    expect(row['degraded']).toBeNull();
+  });
+
+  it('the drilldown returns the full per-sample results, snake_case verbatim', async () => {
+    evalsSupported = true;
+    expect((await post('/api/v1/testing/evals/run', { corpus: 'evals:hist-b' })).status).toBe(200);
+    const list = await get(`/api/v1/testing/evals?corpus=${encodeURIComponent('evals:hist-b')}`);
+    const id = (list.body['runs'] as Array<Record<string, unknown>>)[0]!['id'] as string;
+
+    const detail = await get(`/api/v1/testing/evals/${id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body['id']).toBe(id);
+    // The same verbatim report the run returned — the report view renders it unchanged.
+    expect(detail.body['results']).toEqual(REPORT.results);
+    expect(detail.body['summary']).toEqual(REPORT.summary);
+  });
+
+  it('an unknown run id → 404, not a crash', async () => {
+    const res = await get('/api/v1/testing/evals/does-not-exist');
+    expect(res.status).toBe(404);
+  });
+
+  it('?type= narrows the history to comparable runs (the request type, not the sample types)', async () => {
+    evalsSupported = true;
+    await post('/api/v1/testing/evals/run', { type: 'security', corpus: 'evals:hist-c' });
+    const list = await get(`/api/v1/testing/evals?type=security&corpus=${encodeURIComponent('evals:hist-c')}`);
+    const runs = list.body['runs'] as Array<Record<string, unknown>>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!['type_filter']).toBe('security');
+  });
+});
+
+describe('perTypeRollup — keys stay within the SteeringType vocabulary (Copilot #467)', () => {
+  it('buckets the 7 known types and SKIPS an off-vocabulary steering_type (open wire string)', () => {
+    const rollup = perTypeRollup([
+      { sample: { id: 'a', description: '', kind: 'bad', steering_type: 'security' }, expected: 'deny', fired: [], verdict: 'caught' },
+      { sample: { id: 'b', description: '', kind: 'good', steering_type: 'security' }, expected: 'allow', fired: [], verdict: 'false_positive' },
+      // An off-vocabulary type the engine's open-string field could carry — must NOT become a key.
+      { sample: { id: 'c', description: '', kind: 'bad', steering_type: 'made-up-type' }, expected: 'deny', fired: [], verdict: 'gap' },
+    ]);
+    expect(Object.keys(rollup)).toEqual(['security']);
+    expect(rollup.security).toEqual({ total: 2, caught: 1, gaps: 0, false_positives: 1 });
+    expect((rollup as Record<string, unknown>)['made-up-type']).toBeUndefined();
   });
 });
