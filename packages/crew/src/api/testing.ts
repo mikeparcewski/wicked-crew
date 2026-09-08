@@ -32,6 +32,7 @@ import {
 } from '../core/adapter.js';
 import type { Actor, GovernanceEvalSample, LaunchRunInput } from '../core/types.js';
 import type { AuditLog } from './audit.js';
+import { recordRunLaunched, type RunTimingIndex } from './run-timing-index.js';
 import { API_PREFIX } from './api-prefix.js';
 import { STEERING_TYPE_VALUES } from './governance-steering.js';
 import { resolveScopeRepos } from './multiscope.js';
@@ -126,6 +127,10 @@ export interface TestingRoutesDeps {
   /** The membership plumbing POST /runs uses for projectId filing (index tag + post-commit event).
    *  Optional so route-level unit tests can omit it; `registerRoutes` always supplies it. */
   projects?: { bus: ProjectBus | null; index: MembershipIndex };
+  /** The run→launch-time index (home command-center run metrics) — so a recon fan's `run.launched`
+   *  entries stamp `created_at` LIVE, not only after a restart re-hydrates the trail (Copilot #466).
+   *  Optional so route-unit tests can omit it; `registerRoutes` always supplies it. */
+  runTimingIndex?: RunTimingIndex;
 }
 
 export function registerTestingRoutes(
@@ -363,16 +368,14 @@ export function registerTestingRoutes(
             }
           }
           // The same trail entry POST /runs writes — each node IS a run launch this route
-          // caused, findable by the same `?action=run.launched` query, grouped by the label.
-          audit.record('run.launched', actorOf(req), {
-            runId,
-            detail: {
-              campaign,
-              recon: true,
-              ...gateDetail,
-              repoRef: scope.repos[i]!.id,
-              ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-            },
+          // caused, findable by the same `?action=run.launched` query, grouped by the label — and
+          // the shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
+          recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+            campaign,
+            recon: true,
+            ...gateDetail,
+            repoRef: scope.repos[i]!.id,
+            ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
           });
         }
         return reply.code(201).send({
@@ -434,16 +437,14 @@ export function registerTestingRoutes(
           return reply.code(busy ? 409 : 400).send({ error: msg });
         }
         // The same trail entry POST /runs writes — this IS a run launch, findable by the same
-        // `?action=run.launched` query — plus the shared campaign label the fan is grouped by.
-        audit.record('run.launched', actorOf(req), {
-          runId,
-          detail: {
-            campaign,
-            recon: true,
-            ...gateDetail,
-            ...(target !== null ? { repoRef: target.id } : {}),
-            ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-          },
+        // `?action=run.launched` query — plus the shared campaign label the fan is grouped by; the
+        // shared helper stamps `created_at` from the SAME durable ts (Copilot #466).
+        recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+          campaign,
+          recon: true,
+          ...gateDetail,
+          ...(target !== null ? { repoRef: target.id } : {}),
+          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
         });
         fileIntoProject(runId, Date.now());
         runIds.push(runId);

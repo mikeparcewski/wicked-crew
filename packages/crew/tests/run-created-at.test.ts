@@ -20,7 +20,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
-import { RunTimingIndex } from '../src/api/run-timing-index.js';
+import { RunTimingIndex, recordRunLaunched } from '../src/api/run-timing-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
@@ -235,5 +235,45 @@ describe('RunTimingIndex — millis → whole unix seconds', () => {
     const idx = new RunTimingIndex();
     idx.set('r1', 1_755_800_999_999);
     expect(idx.createdAtFor('r1')).toBe(1_755_800_999);
+  });
+});
+
+// The shared launch seam (Copilot #466): EVERY route that launches a run records `run.launched` AND
+// stamps the index through this one helper, so a recon fan / steering-author run gets `created_at`
+// live too — never absent-until-restart. Pinned directly (cheaper than standing up those routes).
+describe('recordRunLaunched — record + stamp, from the SAME durable ts', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-record-launch-'));
+  });
+  afterEach(() => removeScratch(dir));
+
+  const actor = { id: 'mikeparcewski', kind: 'human', trust: 'admin' } as const;
+
+  it('a REAL trail: records the entry AND stamps the index to the SAME whole second', async () => {
+    const audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
+    const idx = new RunTimingIndex();
+    const ts = recordRunLaunched(audit, idx, actor, 'run-z', { recon: true });
+    expect(ts).toBeGreaterThan(0);
+    expect(idx.createdAtFor('run-z')).toBe(Math.floor(ts / 1000));
+    await audit.flush();
+    const entries = await audit.read({ action: 'run.launched' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.runId).toBe('run-z');
+    expect(entries[0]!.ts).toBe(ts); // the index and the trail share the ONE ts — no drift
+  });
+
+  it('a NOOP trail (audit disabled): records nothing and stamps nothing — created_at stays ABSENT', () => {
+    const idx = new RunTimingIndex();
+    const ts = recordRunLaunched(AuditLog.noop(), idx, actor, 'run-z', { recon: true });
+    expect(ts).toBe(0);
+    expect(idx.createdAtFor('run-z')).toBeUndefined();
+  });
+
+  it('an ABSENT index is tolerated (a route-unit test that omits it): no throw, entry still recorded', async () => {
+    const audit = new AuditLog(join(dir, 'audit.log'), () => undefined);
+    expect(() => recordRunLaunched(audit, undefined, actor, 'run-z', {})).not.toThrow();
+    await audit.flush();
+    expect(await audit.read({ action: 'run.launched' })).toHaveLength(1);
   });
 });

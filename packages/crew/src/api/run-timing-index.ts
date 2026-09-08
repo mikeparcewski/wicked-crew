@@ -16,7 +16,7 @@
  */
 
 import type { AuditLog } from './audit.js';
-import type { AuditEntry } from '../core/types.js';
+import type { Actor, AuditEntry } from '../core/types.js';
 
 /**
  * Millis → whole unix SECONDS. The DTO field (`AgentSession.created_at`) and every other
@@ -75,4 +75,25 @@ export class RunTimingIndex {
   createdAtFor(runId: string): number | undefined {
     return this.runToCreatedAt.get(runId);
   }
+}
+
+/**
+ * Record a `run.launched` audit entry AND stamp the run-timing index with the SAME durable `ts`, so
+ * `created_at` is answered LIVE (not only after a restart re-hydrates the trail) for EVERY route
+ * that launches a run — `POST /runs` and the recon/steering-author launchers alike. Centralized
+ * here (Copilot #466) so a new launch site can never again record the trail without stamping the
+ * index. `ts === 0` (audit disabled — the `noop` trail route-unit tests build) stamps nothing,
+ * keeping `created_at` derived ONLY from a durable entry, never fabricated. Returns the millis `ts`
+ * for a caller that needs it (0 when audit is disabled).
+ */
+export function recordRunLaunched(
+  audit: AuditLog,
+  runTimingIndex: RunTimingIndex | undefined,
+  actor: Actor,
+  runId: string,
+  detail: Record<string, unknown>,
+): number {
+  const ts = audit.record('run.launched', actor, { runId, detail });
+  if (ts > 0) runTimingIndex?.set(runId, ts);
+  return ts;
 }
