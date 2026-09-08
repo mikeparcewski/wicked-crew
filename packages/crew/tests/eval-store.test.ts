@@ -147,6 +147,22 @@ describe('EvalRunStore — tolerant reads (one bad row never blanks the history)
   });
 });
 
+describe('EvalRunStore — concurrent writes are serialized (Copilot #467)', () => {
+  it('records fired concurrently all land as whole, parseable index lines (no interleaving)', async () => {
+    let i = 0;
+    const store = new EvalRunStore(dir, () => undefined, () => i, () => `run-${i++}`);
+    // Fire 25 records at once — without serialization their index appends could interleave.
+    await Promise.all(Array.from({ length: 25 }, () => store.record(input())));
+
+    // Every non-empty index line parses (no torn/interleaved lines) and all 25 ids are present once.
+    const lines = readFileSync(join(dir, 'runs.jsonl'), 'utf8').split('\n').filter((l) => l.trim() !== '');
+    expect(lines).toHaveLength(25);
+    const ids = lines.map((l) => (JSON.parse(l) as { id: string }).id); // throws if any line is torn
+    expect(new Set(ids).size).toBe(25);
+    expect((await store.list())).toHaveLength(25);
+  });
+});
+
 describe('EvalRunStore — root resolution', () => {
   it('defaultEvalStoreRoot honors the WICKED_CREW_EVAL_STORE override (the tests-pin precedent)', () => {
     expect(defaultEvalStoreRoot({ WICKED_CREW_EVAL_STORE: '/tmp/pinned/evals' })).toBe('/tmp/pinned/evals');

@@ -62,6 +62,9 @@ export interface RecordEvalRunInput extends Omit<EvalRunSummary, 'id' | 'created
 export class EvalRunStore {
   private readonly indexPath: string;
   private readonly resultsDir: string;
+  /** Serializes writes so two concurrent `record()`s never interleave a partial index line or
+   *  reorder detail-then-index — the same promise-chain discipline the audit JSONL writer uses. */
+  private writeTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     root: string = defaultEvalStoreRoot(),
@@ -77,21 +80,32 @@ export class EvalRunStore {
   /**
    * Record one eval run: write the detail file, then append the rollup index line. Returns the
    * recorded {@link EvalRunSummary} (with its minted id + timestamp). ASYNC (fs/promises) so the
-   * write never blocks the daemon's event loop on a large results file (Copilot #467) — the caller
-   * records best-effort and never fails the run on a persistence miss.
+   * write never blocks the daemon's event loop on a large results file, and SERIALIZED behind any
+   * in-flight write (the audit-trail pattern) so concurrent eval runs never interleave a partial
+   * line (Copilot #467) — the caller records best-effort and never fails the run on a miss.
    */
   async record(input: RecordEvalRunInput): Promise<EvalRunSummary> {
     const { results, ...rest } = input;
     const summary: EvalRunSummary = { id: this.mintId(), created_at: this.now(), ...rest };
     const detail: EvalRunDetail = { ...summary, results };
-    // Detail first, so a listed row always resolves to a readable drilldown (an orphan detail after
-    // a crash before the index append is harmless).
+    // Queue behind the previous write (ignoring its outcome — one failure must not wedge the queue),
+    // then do this write. `writeTail` advances swallowing errors so the chain never breaks; `await
+    // run` still surfaces THIS write's error to THIS caller (the route catches it best-effort).
+    const run = this.writeTail.catch(() => undefined).then(() => this.writeRun(summary, detail));
+    this.writeTail = run.catch(() => undefined);
+    await run;
+    return summary;
+  }
+
+  /** The actual write, in the one order that keeps a listed row always resolvable: detail file
+   *  (atomic tmp+rename) FIRST, then the rollup index append (an orphan detail after a crash before
+   *  the append is harmless; a dangling index row would not be). */
+  private async writeRun(summary: EvalRunSummary, detail: EvalRunDetail): Promise<void> {
     await mkdir(this.resultsDir, { recursive: true });
     const tmp = join(this.resultsDir, `${summary.id}.json.tmp-${process.pid}`);
     await writeFile(tmp, JSON.stringify(detail), 'utf8');
     await rename(tmp, this.detailPath(summary.id));
     await appendFile(this.indexPath, `${JSON.stringify(summary)}\n`, 'utf8');
-    return summary;
   }
 
   /**
