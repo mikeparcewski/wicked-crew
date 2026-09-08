@@ -1,6 +1,6 @@
 {
   "name": "wicked-crew-workspace",
-  "version": "0.7.23",
+  "version": "0.7.24",
   "private": true,
   "workspaces": [
     "packages/crew-api-types",
