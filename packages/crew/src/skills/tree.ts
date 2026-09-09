@@ -8,7 +8,9 @@
  * file" into "write wherever the link points". Therefore:
  *
  *   - `walkFiles` refuses a symlinked ROOT (the skill dir itself replaced by a link) and skips
- *     symlink entries (never followed, never copied, never hashed);
+ *     symlink entries (never followed, never copied, never hashed); `walkTree` is the variant a
+ *     VERIFICATION uses — it ENUMERATES link entries with their link text (still never followed)
+ *     so an injected link cannot hide from `current`'s hash (codex round 5);
  *   - `copyFiles` PREFLIGHTS every destination — each `rel` must be a safe relative path (no `..`,
  *     `.`, empty or separator-carrying segment, no absolute/drive prefix, no NUL:
  *     `assertSafeRelSegments`) and symlink-free (`assertNoSymlinkComponents`) — BEFORE it creates a
@@ -32,6 +34,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -113,10 +116,12 @@ export function assertSafeRelSegments(rel: string): string[] {
 /**
  * `join(root, ...segments)` after an lstat walk that refuses a symlink at ANY component — the
  * leaf included. A component that does not exist yet ends the walk (a not-yet-written leaf, or
- * its new parent dirs — the write creates them). Any filesystem error other than ENOENT
- * propagates: an unreadable component is not judged lexically. `root` itself is not walked — the
- * caller decides what its root is (the store walks from the SKILLS root down, so a skill dir
- * replaced by a link is a component, not a root).
+ * its new parent dirs — the write creates them); so does a component whose parent turned out to
+ * be a REGULAR FILE (ENOTDIR — nothing below a file exists, and no link can be crossed through
+ * one; whether the caller may write there is the caller's preflight, `containedDestinations`).
+ * Any other filesystem error propagates: an unreadable component is not judged lexically. `root`
+ * itself is not walked — the caller decides what its root is (the store walks from the SKILLS
+ * root down, so a skill dir replaced by a link is a component, not a root).
  */
 export function assertNoSymlinkComponents(root: string, segments: ReadonlyArray<string>): string {
   // The walk joins each segment onto its parent, so a `..` (or a separator smuggled inside a
@@ -133,7 +138,8 @@ export function assertNoSymlinkComponents(root: string, segments: ReadonlyArray<
     try {
       st = lstatSync(cur);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') break;
       throw err;
     }
     if (st.isSymbolicLink()) throw new SymlinkComponentError(segments.join('/'), seg);
@@ -182,6 +188,58 @@ export function walkFiles(root: string, skipDir?: (rel: string) => boolean): Fil
   return out;
 }
 
+/** One symlink entry: `rel` POSIX-relative to the walk root, `target` its link text as read (never followed). */
+export interface LinkRecord {
+  rel: string;
+  abs: string;
+  target: string;
+}
+
+/** A whole tree, links ENUMERATED (not followed, not skipped): what a snapshot verification must see. */
+export interface TreeListing {
+  files: FileRecord[];
+  links: LinkRecord[];
+}
+
+/**
+ * Every regular file AND every symlink under `root`, sorted by `rel` — the walk `walkFiles` does,
+ * except that a symlink entry is LISTED with its link text instead of skipped (codex round 5 on
+ * #480: a verification that skips links leaves an injected outside-pointing link invisible to the
+ * hash). A link is never followed and never descended; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` still
+ * prune real directories and files, but a LINK bearing one of those names is listed too (the
+ * snapshot's `.venv` link is exactly that). A symlinked `root` is refused like `walkFiles`.
+ */
+export function walkTree(root: string): TreeListing {
+  const files: FileRecord[] = [];
+  const links: LinkRecord[] = [];
+  try {
+    if (lstatSync(root).isSymbolicLink()) throw new SymlinkComponentError(root, root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { files, links };
+    throw err;
+  }
+  const visit = (dir: string, relDir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = relDir === '' ? entry.name : `${relDir}/${entry.name}`;
+      const abs = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        links.push({ rel, abs, target: readlinkSync(abs) });
+      } else if (entry.isDirectory()) {
+        if (SKIP_DIR_NAMES.has(entry.name)) continue;
+        visit(abs, rel);
+      } else if (entry.isFile()) {
+        if (SKIP_FILE_NAMES.has(entry.name)) continue;
+        files.push({ rel, abs });
+      }
+    }
+  };
+  visit(root, '');
+  const byRel = <T extends { rel: string }>(a: T, b: T): number => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
+  files.sort(byRel);
+  links.sort(byRel);
+  return { files, links };
+}
+
 export function sha256Hex(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex');
 }
@@ -192,11 +250,29 @@ export function sha256Hex(data: Buffer | string): string {
  * which is what lets a baseline snapshot and the effective copy be compared by hash alone.
  */
 export function hashFileSet(files: ReadonlyArray<FileRecord>): string {
+  return hashTree(files, []);
+}
+
+/**
+ * One hash over a file set AND its symlink entries: the files as `hashFileSet` spells them, then
+ * every link as `rel \0 -> \0 <link text> \n` (sorted). With no links this IS `hashFileSet`, so a
+ * link-free tree hashes as before; a link added, removed or re-pointed changes the hash — which is
+ * what lets `current` verification refuse an injected link (codex round 5). Only `rel` and the link
+ * TEXT enter the hash, never what the link reaches: two trees with the same layout, bytes and link
+ * texts hash equal wherever they live.
+ */
+export function hashTree(files: ReadonlyArray<FileRecord>, links: ReadonlyArray<Pick<LinkRecord, 'rel' | 'target'>>): string {
   const h = createHash('sha256');
   for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
     h.update(f.rel);
     h.update('\0');
     h.update(sha256Hex(readFileSync(f.abs)));
+    h.update('\n');
+  }
+  for (const l of [...links].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
+    h.update(l.rel);
+    h.update('\0->\0');
+    h.update(l.target);
     h.update('\n');
   }
   return h.digest('hex');

@@ -101,6 +101,29 @@ describe('portabilityIssueOf', () => {
     expect(portabilityIssueOf('run `bash -lc echo`')).toBeNull();
     expect(portabilityIssueOf('use sh to run it')).toBeNull();
   });
+
+  it('consumes interpreter options that take a SEPARATE value, so the script path after them is still seen (codex round 5)', () => {
+    // The two codex probes.
+    expect(portabilityIssueOf('run `python3 -W ignore scripts/foo.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `node --require foo scripts/x.js`')).toBe('cwd-script');
+    // More value-taking options, mixed with bare flags and `=` forms.
+    expect(portabilityIssueOf('run `python3 -X dev -u -W error::DeprecationWarning scripts/a/b.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `node -r dotenv/config --loader ts-node/esm lib/x.mjs`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `node --import ./register.mjs --require=foo lib/x.js`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `uv run --python 3.12 --with rich scripts/x.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `python3 -m pytest tests/test_x.py`')).toBe('cwd-script'); // the path after the module is cwd-relative too
+    // A value-taking option with NO path after it is not an invocation: the value is the value.
+    expect(portabilityIssueOf('run `python3 -m pytest`')).toBeNull();
+    expect(portabilityIssueOf('run `python3 -W ignore`')).toBeNull();
+    expect(portabilityIssueOf('run `python3 -W scripts/foo.py`')).toBeNull(); // `scripts/foo.py` IS the -W argument here
+    expect(portabilityIssueOf('run `node --require foo`')).toBeNull();
+    expect(portabilityIssueOf('run `python3 -c "import scripts.x"`')).toBeNull();
+    expect(portabilityIssueOf('run `node -e "console.log(1)"`')).toBeNull();
+    // (An inline program that itself names a `./`-relative file is still cwd-dependent — the standing `./` rule flags it.)
+    expect(portabilityIssueOf('run `node -e "require(\'./lib/x.js\')"`')).toBe('cwd-script');
+    // Attached values keep working as bare flags.
+    expect(portabilityIssueOf('run `python3 -Wignore scripts/foo.py`')).toBe('cwd-script');
+  });
 });
 
 describe('parseFrontmatter — a real YAML grammar with a strict subset (codex round 3)', () => {

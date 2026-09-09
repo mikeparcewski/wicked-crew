@@ -2378,15 +2378,11 @@ export class CoreAdapter {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
       }
-      // skills_root (skills keystone): the same rule as worker_config_root — absolute or "" (= the
-      // state-home default). A hand-edited relative path is dropped rather than re-rooting the
-      // skills store against an arbitrary cwd.
-      if ('skills_root' in parsed) {
-        const r = parsed.skills_root;
-        if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.skills_root;
-      }
-      // The v3 `skills_mirror` knob is withdrawn (design v3.2 §1 — wicked never writes into the
-      // user's CLI directories): a hand-edited value is dropped, never read.
+      // The skills root is NOT a setting (skills keystone, codex round 5): `<state home>/skills`,
+      // full stop. A `skills_root` left in a pre-release settings.json is dropped on read, never
+      // honored — like the v3 `skills_mirror` knob withdrawn before it (design v3.2 §1 — wicked
+      // never writes into the user's CLI directories).
+      if ('skills_root' in parsed) delete (parsed as Record<string, unknown>)['skills_root'];
       if ('skills_mirror' in parsed) delete (parsed as Record<string, unknown>)['skills_mirror'];
       // deliverDefault (crew#393): 'pr' | 'none' only — same values PUT /settings admits. A
       // hand-edited anything-else falls back to the shipped default ('pr') rather than turning

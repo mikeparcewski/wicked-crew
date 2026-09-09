@@ -14,6 +14,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -23,6 +24,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -42,7 +44,7 @@ import {
   SkillsStore,
   type SnapshotManifest,
 } from '../src/skills/store.js';
-import { hashFileSet, removeTreeForce, sha256Hex, walkFiles } from '../src/skills/tree.js';
+import { hashFileSet, hashTree, removeTreeForce, sha256Hex, walkFiles, walkTree } from '../src/skills/tree.js';
 import { noVenv, VENV_READY_MARKER, type VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { CLOCK, FIXTURE_PLUGIN, REGISTERED_REFS, scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -674,7 +676,7 @@ describe('the skills root ITSELF is checked before every read and mutation (code
     rmSync(s.root); // the link only — teardown removes the copy with the base
   });
 
-  it("an ANCESTOR swapped under the running daemon (the root's canonical path moved) is refused by the bound identity, although the root entry is a real directory through the link; a reroot binds afresh", () => {
+  it("an ANCESTOR swapped under the running daemon (the root's canonical path moved) is refused by the bound identity, although the root entry is a real directory through the link; a FRESH store binds afresh (the root is never re-aimed — codex round 5)", () => {
     const parent = join(s.base, 'parent');
     const root = join(parent, 'root');
     mkdirSync(parent, { recursive: true });
@@ -694,9 +696,18 @@ describe('the skills root ITSELF is checked before every read and mutation (code
     expect(() => store.manifest()).toThrow(SkillsRootInvalidError);
     expect(() => store.manifest()).toThrow(/canonical path/);
     expect(() => store.writeSupport('scripts/_python.sh', 'x', 1)).toThrow(SkillsRootInvalidError);
-    // The settings changed (`skills_root` re-applied): the store binds the identity it now sees.
-    store.reroot(root);
-    expect(store.manifest().revision).toBe(1);
+    // A restart (a fresh store over the same path) binds the identity it now sees — there is no
+    // `reroot`: the root is `<state home>/skills` for the store's whole lifetime.
+    const fresh = new SkillsStore({
+      root,
+      registeredSkillRefs: () => REGISTERED_REFS,
+      provisionVenv: noVenv,
+      source: () => pluginSourceAt(s.upstream),
+      now: () => CLOCK,
+      warn: () => undefined,
+    });
+    expect(fresh.manifest().revision).toBe(1);
+    expect('reroot' in store).toBe(false);
     rmSync(parent);
   });
 });
@@ -1079,31 +1090,61 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
     }
   });
 
-  it('a publish that started on root A and finds the store re-rooted to B after its await ABORTS — nothing is written to either root (the codex root-switch probe)', async () => {
+  it('a publish whose root MOVES under it during its await (an ancestor link repointed at a copy) ABORTS — nothing is written to either tree (the codex root-switch probe, without a reroot: the root is never re-aimed)', async () => {
     const gate = gatedProvisioner();
-    const a = scaffold({ provisionVenv: gate.provisioner });
-    const b = scaffold({ provisionVenv: gate.provisioner });
+    const base = mkdtempSync(join(tmpdir(), 'skills-switch-'));
     try {
-      a.store.seed();
-      b.store.seed(); // root B: also revision 1 — a numeric CAS alone would accept it
-      const inFlight = a.store.publish(1);
+      // The store's root is reached THROUGH `via -> a`; `b` is a byte-identical copy (also revision 1 —
+      // a numeric CAS alone would accept it).
+      const a = join(base, 'a');
+      const b = join(base, 'b');
+      mkdirSync(a);
+      symlinkSync(a, join(base, 'via'));
+      const upstream = join(base, 'upstream');
+      cpSync(FIXTURE_PLUGIN, upstream, { recursive: true });
+      const store = new SkillsStore({
+        root: join(base, 'via', 'root'),
+        registeredSkillRefs: () => REGISTERED_REFS,
+        provisionVenv: gate.provisioner,
+        source: () => pluginSourceAt(upstream),
+        now: () => CLOCK,
+        warn: () => undefined,
+      });
+      store.seed();
+      cpSync(a, b, { recursive: true });
+      const inFlight = store.publish(1);
       await new Promise((resolve) => setImmediate(resolve));
-      a.store.reroot(b.root); // the settings changed under the running publish
+      rmSync(join(base, 'via'));
+      symlinkSync(b, join(base, 'via')); // the root's canonical path now lands in the copy
+      gate.release();
+      // The bound identity refuses first (`SkillsRootInvalidError`); had the root vanished instead,
+      // `SkillsRootChangedError` names it — either way nothing is written to either tree.
+      await expect(inFlight).rejects.toThrow(/canonical path/);
+      expect(existsSync(join(a, 'root', 'snapshots'))).toBe(false);
+      expect(existsSync(join(b, 'root', 'snapshots'))).toBe(false);
+      expect(store.isPublishing()).toBe(false);
+      expect(readdirSync(join(a, 'root')).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+      expect(readdirSync(join(b, 'root')).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+    } finally {
+      removeScratch(base);
+    }
+  });
+
+  it('a root that VANISHES during the await is SkillsRootChangedError (the 2xx root-changed envelope) — nothing published', async () => {
+    const gate = gatedProvisioner();
+    const v = scaffold({ provisionVenv: gate.provisioner });
+    try {
+      v.store.seed();
+      const inFlight = v.store.publish(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      rmSync(v.root, { recursive: true, force: true });
       gate.release();
       await expect(inFlight).rejects.toBeInstanceOf(SkillsRootChangedError);
-      await expect(inFlight).rejects.toMatchObject({ from: a.root, to: b.root });
-      expect(existsSync(join(a.root, 'snapshots'))).toBe(false);
-      expect(existsSync(join(b.root, 'snapshots'))).toBe(false);
-      expect(b.store.currentSnapshot()).toBeNull();
-      expect(b.store.revision()).toBe(1);
-      expect(a.store.isPublishing()).toBe(false);
-      // Aimed at B now, a fresh publish lands in B only.
-      const r = await a.store.publish(1);
-      expect(r.snapshot?.path).toBe(realpathSync(join(b.root, 'snapshots', '000001')));
-      expect(existsSync(join(a.root, 'snapshots'))).toBe(false);
+      await expect(inFlight).rejects.toMatchObject({ root: v.root, revision: 1 });
+      await expect(inFlight).rejects.toThrow(/vanished/);
+      expect(existsSync(v.root)).toBe(false);
     } finally {
-      removeScratch(a.base);
-      removeScratch(b.base);
+      removeScratch(v.base);
     }
   });
 });
@@ -1330,6 +1371,252 @@ describe('enablement, reset, CAS (design v3 §7)', () => {
   });
 });
 
+describe('catalog recomputation is CONTAINED — every internal read walks from the root (codex round 5)', () => {
+  /** Point `effective/skills/gamma` OUTSIDE the store, at a copy whose bytes would flip every derived field if read. */
+  const linkGammaOutside = (): string => {
+    const outside = join(s.base, 'outside-gamma');
+    mkdirSync(join(outside, 'refs'), { recursive: true });
+    // If these bytes were ever read: kind → fork-worker (context: fork), portable → false (a plugin-root ref), and beta's mandate chain would change.
+    writeFileSync(join(outside, 'SKILL.md'), '---\nname: wicked-garden-gamma\ncontext: fork\n---\n\nrun ${CLAUDE_PLUGIN_ROOT}/scripts/x.py — OUTSIDE BYTES\n');
+    writeFileSync(join(outside, 'refs', 'leak.md'), 'python3 scripts/leak.py\n');
+    rmSync(join(s.root, 'effective', 'skills', 'gamma'), { recursive: true });
+    symlinkSync(outside, join(s.root, 'effective', 'skills', 'gamma'));
+    return outside;
+  };
+
+  it('analyze/publish over `effective/skills/gamma -> /outside` BLOCK with a path-invalid naming gamma; kind/portable are NOT derived from the outside bytes', () => {
+    s.store.seed();
+    const before = s.store.manifest().skills['wicked-garden-gamma'];
+    expect(before).toMatchObject({ kind: 'module', portable: true, core: true });
+    linkGammaOutside();
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const refusal = analyzed.findings.find((f) => f.kind === 'path-invalid');
+    expect(refusal).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma' });
+    expect(refusal?.evidence).toMatch(/crosses a symlink at gamma/);
+    // The derived fields kept their last honest values — the outside SKILL.md (fork, plugin-root ref) was never consumed.
+    const after = s.store.manifest().skills['wicked-garden-gamma'];
+    expect(after).toMatchObject({ kind: 'module', portable: true });
+    // fs-drift is reported too (the recorded files are no longer regular files on a link-free path), never trusted.
+    expect(analyzed.findings.some((f) => f.kind === 'fs-drift')).toBe(true);
+  });
+
+  it('a mutation on ANOTHER skill still lands, carries the refusal as a WARNING naming gamma, and reads nothing outside', () => {
+    s.store.seed();
+    linkGammaOutside();
+    const off = s.store.disable('wicked-garden-delta', 1);
+    expect(off.verdict).toBe('warnings');
+    expect(off.revision).toBe(2);
+    expect(off.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ severity: 'warning', skill: 'wicked-garden-gamma' });
+    expect(s.store.manifest().skills['wicked-garden-delta']?.enabled).toBe(false);
+    expect(s.store.manifest().skills['wicked-garden-gamma']).toMatchObject({ kind: 'module', portable: true });
+    const edit = s.store.writeFile('wicked-garden-beta', 'SKILL.md', '---\nname: wicked-garden-beta\nmandates: [wicked-garden-gamma]\n---\n\nedited\n', off.revision);
+    expect(edit.verdict).toBe('warnings');
+    expect(edit.findings.map((f) => f.kind)).toContain('path-invalid');
+    // A mutation ON the linked skill is refused outright (containment on the write path).
+    const own = s.store.writeFile('wicked-garden-gamma', 'SKILL.md', 'x', edit.revision);
+    expect(own).toMatchObject({ verdict: 'blocked', revision: edit.revision });
+  });
+
+  it('a recorded FILE replaced by a link (the leaf) is drift, never read — its bytes never judge portability; a linked SUBDIRECTORY inside a real skill dir is refused by name', () => {
+    s.store.seed();
+    const outside = join(s.base, 'outside-notes.md');
+    writeFileSync(outside, 'python3 scripts/leak.py\n'); // a cwd-script: would flip beta to non-portable if read
+    const beta = join(s.root, 'effective', 'skills', 'beta');
+    const edit = s.store.writeFile('wicked-garden-beta', 'refs/notes.md', 'plain notes\n', 1);
+    expect(edit.verdict).toBe('clear');
+    expect(s.store.manifest().skills['wicked-garden-beta']?.portable).toBe(true);
+    rmSync(join(beta, 'refs', 'notes.md'));
+    symlinkSync(outside, join(beta, 'refs', 'notes.md'));
+    const leaf = s.store.analyze();
+    expect(leaf.findings.find((f) => f.kind === 'fs-drift')?.evidence).toContain('skills/beta/refs/notes.md');
+    expect(s.store.manifest().skills['wicked-garden-beta']?.portable).toBe(true); // the linked file's cwd-script never counted
+    // A linked SUBDIRECTORY (`beta/refs -> outside dir` holding the recorded file): a mutation's
+    // recompute walks to the record and REFUSES it by name (a warning on the other skill's
+    // mutation); the validation pass sees the record vanish from the link-free walk (drift) —
+    // either way the outside bytes never judge portability.
+    rmSync(join(beta, 'refs'), { recursive: true });
+    const outsideDir = join(s.base, 'outside-refs');
+    mkdirSync(outsideDir);
+    writeFileSync(join(outsideDir, 'notes.md'), 'python3 scripts/leak.py\n');
+    symlinkSync(outsideDir, join(beta, 'refs'));
+    const off = s.store.disable('wicked-garden-delta', edit.revision);
+    expect(off.verdict).toBe('warnings');
+    const refusal = off.findings.find((f) => f.kind === 'path-invalid');
+    expect(refusal).toMatchObject({ severity: 'warning', skill: 'wicked-garden-beta', file: 'skills/beta/refs/notes.md' });
+    expect(refusal?.evidence).toMatch(/crosses a symlink at refs/);
+    expect(s.store.manifest().skills['wicked-garden-beta']?.portable).toBe(true);
+    const dir = s.store.analyze();
+    expect(dir.findings.find((f) => f.kind === 'fs-drift')?.evidence).toContain('skills/beta/refs/notes.md');
+    expect(s.store.manifest().skills['wicked-garden-beta']?.portable).toBe(true);
+  });
+});
+
+describe('incompatible file-map paths are refused BEFORE mutation; replace/add are staged (codex round 5)', () => {
+  it("codex's map — a valid SKILL.md plus `x` AND `x/y` — is blocked for replace with the notes intact and the revision unchanged", () => {
+    s.store.seed();
+    const notes = join(s.root, 'effective', 'skills', 'alpha', 'refs', 'notes.md');
+    const before = readFileSync(notes, 'utf8');
+    const replaced = s.store.replace(
+      'wicked-garden-alpha',
+      { 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n\nreplaced\n', x: 'a file\n', 'x/y': 'needs x as a directory\n' },
+      1,
+    );
+    expect(replaced).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(replaced.findings.filter((f) => f.kind === 'path-invalid')).toHaveLength(1);
+    expect(replaced.findings[0]).toMatchObject({ kind: 'path-invalid', skill: 'wicked-garden-alpha', file: 'x' });
+    expect(replaced.findings[0]?.evidence).toBe('"x" is a file AND a directory prefix of "x/y"');
+    expect(readFileSync(notes, 'utf8')).toBe(before);
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'), 'utf8')).not.toContain('replaced');
+    expect(existsSync(join(s.root, 'effective', 'skills', 'alpha', 'x'))).toBe(false);
+    expect(s.store.revision()).toBe(1);
+    // Deeper prefixes count too (`a/b` under `a/b/c`), whichever order the keys arrive in.
+    const deep = s.store.replace('wicked-garden-alpha', { 'a/b/c': '1', 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n', 'a/b': '2' }, 1);
+    expect(deep.verdict).toBe('blocked');
+    expect(deep.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ file: 'a/b' });
+  });
+
+  it('add has the same rule: `x` + `x/y` is blocked with no directory created and no manifest entry', () => {
+    s.store.seed();
+    const added = s.store.add('wicked-garden-zeta', { 'SKILL.md': '---\nname: wicked-garden-zeta\n---\n\nz\n', x: '1', 'x/y': '2' }, 1);
+    expect(added).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(added.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ skill: 'wicked-garden-zeta', file: 'x' });
+    expect(existsSync(join(s.root, 'effective', 'skills', 'zeta'))).toBe(false);
+    expect(s.store.manifest().skills['wicked-garden-zeta']).toBeUndefined();
+  });
+
+  it('a key colliding with an existing entry OF THE OTHER KIND on disk is refused before mutation: a directory the swap cannot clear, a non-own file where a parent is needed', () => {
+    s.store.seed();
+    // `alpha/refs/` holds a nested skill? No — plant a symlink inside it so the directory survives the own-file removal.
+    const alphaRefs = join(s.root, 'effective', 'skills', 'alpha', 'refs');
+    symlinkSync(join(s.base, 'nowhere'), join(alphaRefs, 'dangling'));
+    const before = readFileSync(join(alphaRefs, 'notes.md'), 'utf8');
+    const asFile = s.store.replace('wicked-garden-alpha', { 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n', refs: 'refs is a file now\n' }, 1);
+    expect(asFile).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(asFile.findings[0]).toMatchObject({ kind: 'path-invalid', file: 'refs' });
+    expect(asFile.findings[0]?.evidence).toContain('names an existing directory');
+    expect(readFileSync(join(alphaRefs, 'notes.md'), 'utf8')).toBe(before);
+    rmSync(join(alphaRefs, 'dangling'));
+    // A directory made ONLY of own files (and empty dirs) IS clearable: `refs` as a file lands once notes.md is parked.
+    const cleared = s.store.replace('wicked-garden-alpha', { 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n', refs: 'refs is a file now\n' }, 1);
+    expect(cleared.verdict).toBe('clear');
+    expect(readFileSync(join(alphaRefs), 'utf8')).toBe('refs is a file now\n');
+    expect(existsSync(join(s.root, 'effective', 'skills', 'alpha', 'nested', 'SKILL.md'))).toBe(true); // the nested child untouched
+    // Now `refs` is an own regular FILE: a key needing it as a directory is fine for replace (the file is parked first)…
+    const back = s.store.replace('wicked-garden-alpha', { 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n', 'refs/notes.md': 'notes again\n' }, cleared.revision);
+    expect(back.verdict).toBe('clear');
+    expect(readFileSync(join(alphaRefs, 'notes.md'), 'utf8')).toBe('notes again\n');
+    // …but a key needing a NON-own file as a directory — the nested child's SKILL.md — is refused before mutation.
+    const throughChild = s.store.replace('wicked-garden-alpha', { 'SKILL.md': '---\nname: wicked-garden-alpha\n---\n', 'nested/SKILL.md/x.md': 'x' }, back.revision);
+    expect(throughChild).toMatchObject({ verdict: 'blocked', revision: back.revision });
+    expect(throughChild.findings[0]?.kind).toBe('path-invalid'); // the nested-ownership guard names it first; either way nothing moved
+    expect(readFileSync(join(alphaRefs, 'notes.md'), 'utf8')).toBe('notes again\n');
+  });
+});
+
+describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
+  const syncedProvisioner: VenvProvisioner = async (baselineDir) => {
+    mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+    writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+    return 'synced';
+  };
+
+  it('the content hash covers link entries (path + link text): the permitted `.venv` link verifies, and is part of the recorded hash', async () => {
+    const v = scaffold({ provisionVenv: syncedProvisioner });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1);
+      expect(r.verdict).toBe('clear');
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const hash = v.store.manifest().baseline;
+      const tree = walkTree(snap.path);
+      expect(tree.links).toEqual([{ rel: '.venv', abs: join(snap.path, '.venv'), target: join('..', '..', 'baseline', hash, '.venv') }]);
+      const files = tree.files.filter((f) => f.rel !== 'snapshot.json');
+      expect(snap.contentHash).toBe(hashTree(files, tree.links));
+      expect(snap.contentHash).not.toBe(hashFileSet(files)); // a hash that skipped the link would not be this one
+      expect(storeOver(v).currentSnapshot()).toEqual({ gen: 1, path: snap.path });
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+
+  it('an injected outside-pointing link is REFUSED by the same store instance — hash mismatch first, unexpected-link by name when the hash is forged', async () => {
+    const v = scaffold({ provisionVenv: syncedProvisioner });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      chmodSync(snap.path, 0o755);
+      symlinkSync(join(v.base, 'outside'), join(snap.path, 'evil'));
+      expect(() => v.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+      expect(() => v.store.currentSnapshot()).toThrow(/content hash mismatch/);
+      // Forge the hash to cover the link: the link itself is then refused by name.
+      const tree = walkTree(snap.path);
+      const forged = snapshotManifest(snap.path);
+      forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+      unlock(join(snap.path, 'snapshot.json'));
+      writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+      expect(() => v.store.currentSnapshot()).toThrow(/unexpected symlink evil -> /);
+      rmSync(join(snap.path, 'evil'));
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+
+  it('the `.venv` link must be EXACTLY the baseline env link: re-pointed outside → refused; present while snapshot.json says skipped → refused; absent while it says synced → refused', async () => {
+    const v = scaffold({ provisionVenv: syncedProvisioner });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const forgeHash = (): void => {
+        const tree = walkTree(snap.path);
+        const forged = snapshotManifest(snap.path);
+        forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+        unlock(join(snap.path, 'snapshot.json'));
+        writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+      };
+      chmodSync(snap.path, 0o755);
+      // Re-pointed at an outside env (the hash forged to match): refused for its link text.
+      const outsideVenv = join(v.base, 'outside-venv');
+      mkdirSync(outsideVenv);
+      rmSync(join(snap.path, '.venv'));
+      symlinkSync(outsideVenv, join(snap.path, '.venv'));
+      forgeHash();
+      expect(() => v.store.currentSnapshot()).toThrow(/\.venv -> .* is not the baseline env link publish wrote/);
+      // Restored to the exact text publish wrote (it resolves to this root's baseline env): verifies again.
+      const hash = v.store.manifest().baseline;
+      rmSync(join(snap.path, '.venv'));
+      symlinkSync(join('..', '..', 'baseline', hash, '.venv'), join(snap.path, '.venv'));
+      forgeHash();
+      expect(v.store.currentSnapshot()?.gen).toBe(1);
+      // Absent while synced: refused.
+      rmSync(join(snap.path, '.venv'));
+      forgeHash();
+      expect(() => v.store.currentSnapshot()).toThrow(/records the baseline env as synced but the generation has no \.venv link/);
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+
+  it('a snapshot published WITHOUT an env (skipped) refuses an injected `.venv` link even when it points at a real baseline env', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const hash = s.store.manifest().baseline;
+    mkdirSync(join(s.root, 'baseline', hash, '.venv'), { recursive: true });
+    chmodSync(snap.path, 0o755);
+    symlinkSync(join('..', '..', 'baseline', hash, '.venv'), join(snap.path, '.venv'));
+    expect(() => s.store.currentSnapshot()).toThrow(/content hash mismatch/);
+    const tree = walkTree(snap.path);
+    const forged = snapshotManifest(snap.path);
+    forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+    unlock(join(snap.path, 'snapshot.json'));
+    writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+    expect(() => s.store.currentSnapshot()).toThrow(/is present although snapshot\.json records the env as skipped/);
+  });
+});
+
 describe('skill-scoped containment (design v3 §API) — no-follow from the ROOT', () => {
   beforeEach(() => {
     s.store.seed();
@@ -1338,7 +1625,6 @@ describe('skill-scoped containment (design v3 §API) — no-follow from the ROOT
   it.each([
     ['../gamma/SKILL.md', 'invalid'],
     ['/etc/passwd', 'invalid'],
-    ['%2e%2e/gamma/SKILL.md', 'invalid'],
     ['refs\\notes.md', 'invalid'],
     ['C:evil', 'invalid'],
     ['', 'invalid'],
@@ -1350,6 +1636,14 @@ describe('skill-scoped containment (design v3 §API) — no-follow from the ROOT
     } catch (err) {
       expect((err as SkillPathError).reason).toBe(reason);
     }
+  });
+
+  it('never URL-decodes a path itself (codex round 5): Fastify decodes the wildcard ONCE before the store sees it, so a literal `%2e%2e` or `%2F` here is a filename, not an escape', () => {
+    // At the route, `%2e%2e%2Fgamma/SKILL.md` arrives as `../gamma/SKILL.md` and is refused (tests/skills-routes.test.ts);
+    // a store fed the literal spelling (as a client sending `%252e%252e` would produce) addresses a file of that odd name.
+    expect(s.store.resolveSkillFile('wicked-garden-alpha', '%2e%2e/gamma/SKILL.md').rel).toBe('%2e%2e/gamma/SKILL.md');
+    expect(s.store.resolveSkillFile('wicked-garden-alpha', 'a%2Fb.txt').rel).toBe('a%2Fb.txt');
+    expect(s.store.resolveSkillFile('wicked-garden-alpha', '100%.txt').rel).toBe('100%.txt');
   });
 
   it('refuses a symlink on any path component (lstat walk, never realpath)', () => {

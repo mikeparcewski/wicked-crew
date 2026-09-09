@@ -18,10 +18,12 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import { afterAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { crewStateHome } from '../src/projects/state-home.js';
+import { resolveSkillsRoot } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -90,12 +92,23 @@ describe('hermetic env arming (tests/setup/hermetic-home.ts)', () => {
     expectArmed('WICKED_CREW_KNOWLEDGE_DB', join(homedir(), '.wicked-estate'));
   });
 
-  it('the skills root and source are armed away from the real ~/.wicked-crew and ~/.claude', () => {
-    // Every `createServer` boot runs the skills seam: un-armed it copies the developer's REAL
-    // installed plugin cache into ~/.wicked-crew/skills. (The seam never writes into the user's
-    // CLI directories — design v3.2 §1 — so there is no mirror home to arm; see
-    // tests/skills-no-user-cli-writes.test.ts.)
-    expectArmed('WICKED_CREW_SKILLS_ROOT', join(homedir(), '.wicked-crew'));
+  it('the daemon STATE HOME is armed away from the real ~/.wicked-crew — the skills root has no override of its own, by design', () => {
+    // Every `createServer` boot runs the skills seam over `<state home>/skills` (skills keystone,
+    // codex round 5: the root is not a setting and has no env override — `WICKED_CREW_SKILLS_ROOT`
+    // is retired). Un-armed, an in-process boot resolves the operator's REAL `~/.wicked-crew` and
+    // the seam would seed, publish into or reap from the operator's real skills root. The harness
+    // configures the state home the way the CLI does (`setCrewStateHome`).
+    const stateHome = crewStateHome();
+    const real = join(homedir(), '.wicked-crew');
+    expect(stateHome === real || stateHome.startsWith(real + sep), `crewStateHome() resolves to ${stateHome} — under the operator's real ~/.wicked-crew`).toBe(false);
+    expect(isInside(stateHome, tmpdir()), `crewStateHome() (${stateHome}) is not under the OS temp root — the hermetic base must be disposable per process`).toBe(true);
+    expect(resolveSkillsRoot()).toBe(join(stateHome, 'skills'));
+    expect(process.env['WICKED_CREW_SKILLS_ROOT'], 'the retired root override must not be armed — it has no effect').toBeUndefined();
+  });
+
+  it('the skills plugin source is armed away from the real ~/.claude', () => {
+    // (The seam never writes into the user's CLI directories — design v3.2 §1 — so there is no
+    // mirror home to arm; see tests/skills-no-user-cli-writes.test.ts.)
     expectArmed('WICKED_CREW_SKILLS_SOURCE', join(homedir(), '.claude'));
     expect(process.env['WICKED_CREW_SKILLS_MIRROR_HOME']).toBeUndefined();
   });

@@ -118,6 +118,53 @@ describe('GET /skills, files, reads', () => {
   });
 });
 
+describe('route paths are decoded EXACTLY ONCE — by Fastify (codex round 5)', () => {
+  it('`100%25.txt` round-trips as the filename `100%.txt`; the literal `a%252Fb.txt` stays `a%2Fb.txt` (never becomes the path a/b.txt)', async () => {
+    for (const [encoded, name] of [
+      ['100%25.txt', '100%.txt'],
+      ['a%252Fb.txt', 'a%2Fb.txt'],
+      ['sp%20ace%20%2B%20plus.md', 'sp ace + plus.md'],
+    ] as const) {
+      const put = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/skills/wicked-garden-gamma/files/refs/${encoded}`,
+        payload: { content: `content of ${name}\n`, expectedRevision: (await manifest()).revision },
+      });
+      expect(put.statusCode, encoded).toBe(200);
+      expect((put.json() as SkillMutationResult).verdict, encoded).toBe('clear');
+      const get = await app.inject({ method: 'GET', url: `/api/v1/skills/wicked-garden-gamma/files/refs/${encoded}` });
+      expect(get.statusCode, encoded).toBe(200);
+      expect(get.json() as SkillReadResult).toMatchObject({ path: `skills/gamma/refs/${name}`, content: `content of ${name}\n` });
+      expect(existsSync(join(s.root, 'effective', 'skills', 'gamma', 'refs', name)), encoded).toBe(true);
+    }
+    // The literal-percent name is ONE file, not a nested path: no `refs/a/b.txt` ever appeared.
+    expect(existsSync(join(s.root, 'effective', 'skills', 'gamma', 'refs', 'a', 'b.txt'))).toBe(false);
+    const tree = await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-gamma/files' });
+    expect((tree.json() as { files: Array<{ path: string }> }).files.map((f) => f.path)).toEqual(
+      expect.arrayContaining(['refs/100%.txt', 'refs/a%2Fb.txt', 'refs/sp ace + plus.md']),
+    );
+  });
+
+  it('a raw `%2F` IS a separator (Fastify decodes it before routing): `a%2Fb.txt` addresses refs/a/b.txt; an encoded dot-dot is still refused; a malformed escape is Fastify\'s own 400', async () => {
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/wicked-garden-gamma/files/refs/a%2Fb.txt',
+      payload: { content: 'nested\n', expectedRevision: 1 },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(existsSync(join(s.root, 'effective', 'skills', 'gamma', 'refs', 'a', 'b.txt'))).toBe(true);
+    const escaped = await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-gamma/files/%2e%2e%2Fbeta/SKILL.md' });
+    expect(escaped.statusCode).toBe(400);
+    expect((escaped.json() as { error: string }).error).toContain('".."');
+    const malformed = await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-gamma/files/%E0%A4%A' });
+    expect(malformed.statusCode).toBe(400);
+    const support = await app.inject({ method: 'PUT', url: '/api/v1/skills/support/scripts/100%25.sh', payload: { content: '#!/bin/sh\n', expectedRevision: 2 } });
+    expect(support.statusCode).toBe(200);
+    expect(existsSync(join(s.root, 'effective', 'scripts', '100%.sh'))).toBe(true);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/skills/support/scripts/100%25.sh' })).statusCode).toBe(200);
+  });
+});
+
 describe('mutations — 2xx verdicts, CAS 409, strict bodies', () => {
   it('PUT a file with the current revision → 200 clear; stale revision → 409 naming the current one', async () => {
     const ok = await app.inject({

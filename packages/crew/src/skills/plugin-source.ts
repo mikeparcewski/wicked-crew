@@ -52,11 +52,38 @@ export function pluginVersionAt(dir: string): string | null {
 }
 
 /**
- * Numeric dotted-version order (`12.9.0` < `12.32.0`). A segment that is not a plain integer
- * sorts BELOW any integer, so a `-beta` cache entry never outranks a release; equal-length
- * numeric prefixes fall back to the shorter-first rule.
+ * A TOTAL order over version strings, so "highest version wins" never depends on `readdir` order
+ * (Copilot on #480). Numeric dotted order first (`12.9.0` < `12.32.0`; a shorter release sorts
+ * before a longer one with the same prefix; a non-integer segment sorts below any integer). A
+ * prerelease suffix (`12.0.0-beta`, everything after the first `-`) sorts BELOW its release
+ * (`12.0.0-beta` < `12.0.0`), and two prereleases compare identifier by identifier the semver way
+ * (numeric identifiers numerically and before alphanumeric ones, then lexically, shorter first).
+ * Distinct strings NEVER compare equal: whatever survives all of that (`12.00.0` vs `12.0.0`) is
+ * ordered lexically.
  */
 export function compareVersions(a: string, b: string): number {
+  if (a === b) return 0;
+  const [coreA, preA] = splitPrerelease(a);
+  const [coreB, preB] = splitPrerelease(b);
+  const core = compareDotted(coreA, coreB);
+  if (core !== 0) return core;
+  if (preA === null && preB !== null) return 1;
+  if (preA !== null && preB === null) return -1;
+  if (preA !== null && preB !== null) {
+    const pre = comparePrerelease(preA, preB);
+    if (pre !== 0) return pre;
+  }
+  return a < b ? -1 : 1;
+}
+
+/** `12.0.0-beta.1` → [`12.0.0`, `beta.1`]; no `-` → [`v`, null]. */
+function splitPrerelease(v: string): [string, string | null] {
+  const dash = v.indexOf('-');
+  return dash === -1 ? [v, null] : [v.slice(0, dash), v.slice(dash + 1)];
+}
+
+/** Dotted numeric segments: shorter-first on a shared prefix, a non-integer segment below any integer. */
+function compareDotted(a: string, b: string): number {
   const pa = a.split('.');
   const pb = b.split('.');
   const n = Math.max(pa.length, pb.length);
@@ -68,6 +95,28 @@ export function compareVersions(a: string, b: string): number {
     const na = /^\d+$/.test(sa) ? Number(sa) : -1;
     const nb = /^\d+$/.test(sb) ? Number(sb) : -1;
     if (na !== nb) return na < nb ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Semver prerelease identifiers: numeric before alphanumeric, numeric numerically, else lexically; shorter first. */
+function comparePrerelease(a: string, b: string): number {
+  const pa = a.split('.');
+  const pb = b.split('.');
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i += 1) {
+    const sa = pa[i];
+    const sb = pb[i];
+    if (sa === undefined) return -1;
+    if (sb === undefined) return 1;
+    const numA = /^\d+$/.test(sa);
+    const numB = /^\d+$/.test(sb);
+    if (numA && numB) {
+      if (Number(sa) !== Number(sb)) return Number(sa) < Number(sb) ? -1 : 1;
+      continue;
+    }
+    if (numA !== numB) return numA ? -1 : 1;
+    if (sa !== sb) return sa < sb ? -1 : 1;
   }
   return 0;
 }

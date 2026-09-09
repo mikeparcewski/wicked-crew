@@ -50,6 +50,7 @@ import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
+import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime } from '../skills/runtime.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
 import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
@@ -288,11 +289,13 @@ export interface CreateServerOptions {
     sweepIntervalMs?: number;
   };
   /**
-   * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` (or
-   * `skills_root`) from the LIVE installed wicked-garden plugin, publishes a first immutable
-   * snapshot when none exists (its `views/copilot/` generated alongside), and exports
-   * `WICKED_SKILLS_SNAPSHOT` for the engine. It never writes into the user's own CLI directories
-   * (design v3.2 §1). `disabled: true` registers the routes without a store (they answer 503) —
+   * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` — the ONE
+   * root, not a setting (codex round 5) — from the LIVE installed wicked-garden plugin, publishes a
+   * first immutable snapshot when none exists (its `views/copilot/` generated alongside), and
+   * exports `WICKED_SKILLS_SNAPSHOT` for the engine. It never writes into the user's own CLI
+   * directories (design v3.2 §1): the boot REFUSES (`SkillsRootUnfencedError`) a root whose
+   * canonical path leaves the state home or lands inside one. `disabled: true` registers the
+   * routes without a store (they answer 503) —
    * the manifest collector and tests that must not touch a plugin cache use it. `source` /
    * `provisionVenv` aim a test at a fixture plugin root and a provisioner that spawns nothing
    * (`noVenv`) — a boot test must never run the host's `uv` or download anything; production omits
@@ -366,22 +369,27 @@ export async function createServer(
   const bootSettings = await adapter.getSettings();
   applyWorkerConfigRoot(bootSettings.worker_config_root);
 
-  // The skills seam (skills keystone): same boot + on-change discipline as the worker-config root.
-  // The store hangs off the resolved state home (never a `~/.wicked-crew` literal, crew#353) unless
-  // `skills_root` names another — the worker Read fence is core's explicit denylist of state-home
-  // subtrees (v3.1 §1; tests/fixtures/state-home-subtrees.json is the shared registry), with the
-  // resolved snapshot the one non-denied path; the core-by-reference closure is seeded from the workflow catalog
-  // the daemon serves (built-ins + user-registered), read at use time so a later registration
-  // counts at the next publish. `apply` never throws and never fails open: no installed plugin is
-  // the logged fallback (engine input unset); a blocked first publish or a corrupt root points the
-  // engine at a refusal path so launches fail loudly (skills/runtime.ts). Awaited: a first publish
-  // provisions the baseline env before it returns.
+  // The skills seam (skills keystone): boot-time only — there is NO skills setting to re-apply on
+  // PUT /settings (codex round 5: `skills_root` and its env override are retired). The store hangs
+  // off `<state home>/skills` (never a `~/.wicked-crew` literal, crew#353), and the boot ASSERTS the
+  // root is fenced before the store exists: canonically inside the state home, outside every user
+  // CLI directory, not a symlink — a violation is a daemon start error (`SkillsRootUnfencedError`,
+  // skills/root-fence.ts). The worker Read fence is core's explicit denylist of state-home subtrees
+  // (v3.1 §1; tests/fixtures/state-home-subtrees.json is the shared registry), with the resolved
+  // snapshot the one non-denied path; the core-by-reference closure is seeded from the workflow
+  // catalog the daemon serves (built-ins + user-registered), read at use time so a later
+  // registration counts at the next publish. `apply` never throws and never fails open: no
+  // installed plugin is the logged fallback (engine input unset); a blocked first publish or a
+  // corrupt root points the engine at a refusal path so launches fail loudly (skills/runtime.ts).
+  // Awaited: a first publish provisions the baseline env before it returns.
   let skillsRuntime: SkillsRuntime | undefined;
   if (options?.skills?.disabled !== true) {
     const source = options?.skills?.source;
+    const skillsRoot = resolveSkillsRoot();
+    assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
     skillsRuntime = new SkillsRuntime({
       store: new SkillsStore({
-        root: resolveSkillsRoot(bootSettings.skills_root),
+        root: skillsRoot,
         registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
         provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
         ...(source !== undefined ? { source } : {}),
@@ -389,7 +397,7 @@ export async function createServer(
       }),
       log: (m) => app.log.warn(m),
     });
-    await skillsRuntime.apply(bootSettings);
+    await skillsRuntime.apply();
   }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the

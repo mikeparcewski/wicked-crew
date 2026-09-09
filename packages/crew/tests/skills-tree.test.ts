@@ -22,11 +22,14 @@ import {
   assertNoSymlinkComponents,
   assertSafeRelSegments,
   copyFiles,
+  hashFileSet,
+  hashTree,
   makeTreeReadOnly,
   removeTreeForce,
   SymlinkComponentError,
   UnsafePathSegmentError,
   walkFiles,
+  walkTree,
   writeFileAtomic,
 } from '../src/skills/tree.js';
 
@@ -51,6 +54,63 @@ describe('walkFiles', () => {
     symlinkSync(real, join(base, 'linked-root'));
     expect(() => walkFiles(join(base, 'linked-root'))).toThrow(SymlinkComponentError);
     expect(walkFiles(join(base, 'missing'))).toEqual([]);
+  });
+});
+
+describe('walkTree + hashTree — a verification that SEES links (codex round 5)', () => {
+  it('lists every symlink with its link text (never followed, never descended), files as walkFiles does; a `.venv` LINK is listed although a `.venv` DIR is pruned', () => {
+    const real = join(base, 'real');
+    mkdirSync(join(real, 'sub'), { recursive: true });
+    mkdirSync(join(real, '.venv', 'bin'), { recursive: true }); // a real .venv dir: pruned
+    writeFileSync(join(real, '.venv', 'bin', 'python'), '');
+    writeFileSync(join(real, 'a.md'), 'a');
+    writeFileSync(join(base, 'elsewhere.md'), 'outside');
+    mkdirSync(join(base, 'outside-dir'));
+    writeFileSync(join(base, 'outside-dir', 'secret.md'), 'secret');
+    symlinkSync(join(base, 'elsewhere.md'), join(real, 'sub', 'link.md'));
+    symlinkSync(join(base, 'outside-dir'), join(real, 'dirlink')); // a link to a DIRECTORY is listed, not walked into
+    symlinkSync(join(base, 'nowhere'), join(real, 'dangling'));
+    const tree = walkTree(real);
+    expect(tree.files.map((f) => f.rel)).toEqual(['a.md']);
+    expect(tree.links.map((l) => [l.rel, l.target])).toEqual([
+      ['dangling', join(base, 'nowhere')],
+      ['dirlink', join(base, 'outside-dir')],
+      ['sub/link.md', join(base, 'elsewhere.md')],
+    ]);
+    expect(tree.files.some((f) => f.rel.includes('secret'))).toBe(false); // nothing beyond a link is enumerated
+    // A .venv LINK is what a snapshot carries: listed.
+    const snap = join(base, 'snap');
+    mkdirSync(snap);
+    symlinkSync(join('..', 'real', '.venv'), join(snap, '.venv'));
+    expect(walkTree(snap).links).toEqual([{ rel: '.venv', abs: join(snap, '.venv'), target: join('..', 'real', '.venv') }]);
+    // A symlinked root is refused; a missing root is empty.
+    symlinkSync(real, join(base, 'linked-root'));
+    expect(() => walkTree(join(base, 'linked-root'))).toThrow(SymlinkComponentError);
+    expect(walkTree(join(base, 'missing'))).toEqual({ files: [], links: [] });
+  });
+
+  it('hashTree equals hashFileSet with no links, and changes when a link is added, removed or re-pointed — by link TEXT, never by what it reaches', () => {
+    const real = join(base, 'real');
+    mkdirSync(real);
+    writeFileSync(join(real, 'a.md'), 'a');
+    const files = walkFiles(real);
+    expect(hashTree(files, [])).toBe(hashFileSet(files));
+    const withLink = hashTree(files, [{ rel: '.venv', target: '../../baseline/x/.venv' }]);
+    expect(withLink).not.toBe(hashFileSet(files));
+    expect(hashTree(files, [{ rel: '.venv', target: '../../baseline/y/.venv' }])).not.toBe(withLink);
+    expect(hashTree(files, [{ rel: 'other', target: '../../baseline/x/.venv' }])).not.toBe(withLink);
+    // Order-independent, target-existence-independent: the same text hashes the same wherever it points.
+    expect(
+      hashTree(files, [
+        { rel: 'b', target: '/nowhere' },
+        { rel: 'a', target: '/elsewhere' },
+      ]),
+    ).toBe(
+      hashTree(files, [
+        { rel: 'a', target: '/elsewhere' },
+        { rel: 'b', target: '/nowhere' },
+      ]),
+    );
   });
 });
 

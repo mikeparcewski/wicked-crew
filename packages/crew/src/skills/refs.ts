@@ -18,10 +18,12 @@
  * any of them is Claude-only: excluded from every non-Claude delivery view the snapshot carries
  * (`views/copilot/`, design v3.2 §4) and from the per-launch `--skill` lists core builds.
  *
- * Path tokens keep EVERY legal filename character (`+`, `@`, `~`, `%`, `=`, `,`, `:` …): a
+ * Path tokens keep every ORDINARY filename character (`+`, `@`, `~`, `%`, `=`, `,`, `:` …): a
  * reference truncated at the first unusual character would validate a PREFIX of the file it names
  * (`scripts/a+b.py` → `scripts/a`), so the token runs until whitespace, a quote/backtick, a
- * bracket/paren, or a shell separator (`|;&<>`) — trailing sentence punctuation is then trimmed.
+ * bracket/paren/brace, a shell separator (`|;&<>`) or a glob metacharacter (`*`, `?` — `foo*` is a
+ * pattern, not a file the snapshot can carry; `PATH_CHARS` is the one stop set) — trailing sentence
+ * punctuation is then trimmed.
  */
 
 import { posix } from 'node:path';
@@ -38,17 +40,28 @@ export interface TextRef {
   kind: 'plugin-root' | 'relative';
 }
 
-/** A path token: everything up to whitespace, a quote/backtick, a bracket/paren/brace, or a shell separator. */
+/** A path token: everything up to whitespace, a quote/backtick, a bracket/paren/brace, a shell separator, or a glob metacharacter (`*`, `?`). */
 const PATH_CHARS = '[^\\s"\'`()\\[\\]{}<>|;&*?]';
 const PLUGIN_ROOT_RE = new RegExp(`\\$\\{CLAUDE_PLUGIN_ROOT\\}(\\/${PATH_CHARS}*)?`, 'g');
 // A `../`-prefixed path token not glued to a preceding path character (so `a/../b` inside a
 // longer path is not re-read as a reference of its own).
 const RELATIVE_RE = new RegExp(`(?<![A-Za-z0-9_./-])((?:\\.\\.\\/)+${PATH_CHARS}*)`, 'g');
-// A shell invocation of a plugin script by a cwd-relative path: an interpreter, optional flags
-// (`-u`, `--frozen`, `-m mod` is NOT a path), then a path token that is relative — not absolute,
-// not `$`-expanded, not `~` — and looks like a script (carries a `/`, or a script extension).
+// A shell invocation of a plugin script by a cwd-relative path: an interpreter, optional options,
+// then a path token that is relative — not absolute, not `$`-expanded, not `~` — and looks like a
+// script (carries a `/`, or a script extension). Options come in two shapes (codex round 5): a
+// bare flag (`-u`, `--frozen`, `--require=x`), and an option whose VALUE is the NEXT token —
+// python `-W ignore` / `-X dev` / `-m mod` / `-c code`, node `--require x` / `-r x` / `--loader x`
+// / `--import x` / `-e code`, uv `--python x` / `--with x` / `--directory x`, bash `-c cmd` … —
+// which is consumed WITH its value so the script path after it is still seen (`python3 -W ignore
+// scripts/foo.py`, `node --require foo scripts/x.js` used to read as portable). A value-taking
+// option with no path after it (`python3 -m pytest`, `python3 -c "print(1)"`) is not an invocation.
 const INTERPRETER = '(?:python3?|uv\\s+run|bash|sh|zsh|node|npx|tsx|deno\\s+run)';
-const FLAG = '(?:\\s+-{1,2}[A-Za-z0-9_-]+(?:=\\S+)?)*';
+const VALUED_OPTION =
+  '(?:-[WXmcQrepCo]|--(?:require|loader|experimental-loader|import|eval|print|env-file|conditions|input-type|python|with|directory|project|config|import-map))';
+// The bare-flag alternative must NOT be able to match a value-taking option that has a value (the
+// negative lookahead): otherwise backtracking would read `-W` as a bare flag and its value
+// `scripts/foo.py` as the script (`python3 -W scripts/foo.py` is NOT an invocation of that file).
+const FLAG = `(?:\\s+(?:${VALUED_OPTION}\\s+\\S+|(?!${VALUED_OPTION}\\s)-{1,2}[A-Za-z0-9_-]+(?:=\\S+)?))*`;
 const SEG = '[A-Za-z0-9_.+@%=,:~-]+';
 const RELATIVE_SCRIPT = `(?:\\.{1,2}\\/)?(?:${SEG}\\/)*${SEG}(?:\\/|\\.(?:py|sh|bash|zsh|mjs|cjs|js|ts))`;
 const CWD_SCRIPT_RE = new RegExp(

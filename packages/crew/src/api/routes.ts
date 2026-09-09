@@ -3049,17 +3049,11 @@ export function registerRoutes(
         });
       }
     }
-    // skills_root (skills keystone): the worker_config_root rule. (The v3 `skills_mirror` knob is
-    // withdrawn — design v3.2 §1: wicked never writes into the user's CLI directories; a client
-    // still sending it is an unknown key, dropped and NAMED in the audit entry like any other.)
-    if (Object.hasOwn(patch, 'skills_root')) {
-      const root = patch.skills_root;
-      if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
-        return reply.code(400).send({
-          error: 'skills_root must be an absolute path, or "" for the default (<state home>/skills)',
-        });
-      }
-    }
+    // There is NO skills setting (skills keystone, codex round 5): the skills root is
+    // `<state home>/skills`, full stop — `skills_root` is retired (a configurable root let a PUT
+    // aim seeding at `~/.codex/skills`), and the v3 `skills_mirror` knob was withdrawn before it
+    // (design v3.2 §1: wicked never writes into the user's CLI directories). A client still sending
+    // either is an unknown key, dropped and NAMED in the audit entry like any other.
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
     if (Object.hasOwn(patch, 'workerStallMinutes')) {
@@ -3143,7 +3137,6 @@ export function registerRoutes(
     const allowed: (keyof import('../core/types.js').CrewSystemSettings)[] = [
       'graphNodeLimit',
       'worker_config_root',
-      'skills_root',
       'workerStallMinutes',
       'workerStallEscalateMinutes',
       'workerStallEscalateAction',
@@ -3173,10 +3166,7 @@ export function registerRoutes(
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
-    // Re-apply the skills settings the same way (skills keystone): re-root the store, seed/publish
-    // when needed (awaited — a publish provisions the baseline env first), export
-    // WICKED_SKILLS_SNAPSHOT for the engine's next spawn.
-    await runtime.skills?.apply(settings);
+    // (No skills re-apply: the skills root is not a setting — skills/runtime.ts, codex round 5.)
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {

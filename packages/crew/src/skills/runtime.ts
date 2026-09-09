@@ -1,12 +1,15 @@
 /**
- * The skills seam as the daemon holds it: ONE store + the one thing every settings application
- * re-derives from it — the engine env (`WICKED_SKILLS_SNAPSHOT`).
+ * The skills seam as the daemon holds it: ONE store over `<state home>/skills` + the one thing the
+ * daemon derives from it — the engine env (`WICKED_SKILLS_SNAPSHOT`).
  *
- * `apply(settings)` is called at boot (`createServer`) and on every `PUT /settings`, exactly like
- * `applyWorkerConfigRoot` for `worker_config_root`: re-root to `skills_root`, seed from the live
- * plugin when the root is empty, publish a first snapshot when none exists, export the resolved
- * snapshot path. It never throws — but it does NOT fail open either. The degradation ladder
- * (design v3 §3; codex review of #480) distinguishes three outcomes:
+ * `apply()` is called at boot (`createServer`), after the root passed the fence (root-fence.ts):
+ * seed from the live plugin when the root is empty, publish a first snapshot when none exists,
+ * export the resolved snapshot path. There is NO skills setting to re-apply on `PUT /settings` —
+ * the root is `<state home>/skills`, full stop (design v3.1 §1 one storage root; v3.2 §1 never a
+ * user CLI directory; codex round 5 on #480 retired `skills_root` and `WICKED_CREW_SKILLS_ROOT`:
+ * a configurable root let seeding write into `~/.codex/skills`). `apply` never throws — but it does
+ * NOT fail open either. The degradation ladder (design v3 §3; codex review of #480) distinguishes
+ * three outcomes:
  *
  *   published      `current` verified → `WICKED_SKILLS_SNAPSHOT=<resolved snapshot>`.
  *   fallback       ABSENT configuration — no wicked-garden installed, nothing to seed from. The ONE
@@ -24,7 +27,7 @@
  *                  path: every launch fails loudly naming it until the operator fixes the catalog
  *                  and publishes. Finding `skills.blocked` (error).
  *   config-error   an INVALID configuration — a corrupt manifest, a `current` link that fails
- *                  verification, an unusable `skills_root`. Same refusal path
+ *                  verification, a root that is not the directory the store bound. Same refusal path
  *                  (`<root>/refused/skills.config`), same loud launch failure: recorded disablement
  *                  is never bypassed by "restoring" the live cache. Finding `skills.config` (error).
  *
@@ -32,27 +35,26 @@
  * REAL path of `snapshots/<gen>` (v3.1 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set.
  * Beside it, always, `WICKED_CREW_STATE_HOME` = the canonical realpath of the daemon state home —
  * core derives the worker fence from it and cross-checks that the snapshot is
- * `<state home>/skills/snapshots/<gen>` (core#399 round 3). A `skills_root` OUTSIDE the state home
- * therefore publishes fine but every launch is refused by core: `apply` reports that as a
- * `skills.config` WARNING on the `published` state (engine-env.ts).
+ * `<state home>/skills/snapshots/<gen>` (core#399 round 3). Because the root IS
+ * `<state home>/skills` (asserted at boot, identity-checked on every operation), that cross-check
+ * holds by construction — there is no "root outside the state home" state to report any more.
  *
  * NOTHING here writes into the user's own CLI directories (design v3.2 §1): the v3 additive
- * mirror into `~/.codex/skills` & co. is withdrawn, and with it the `skills_mirror` setting. Skills
- * reach non-Claude workers only through the per-launch delivery core performs from the snapshot
- * (the generated `views/copilot/` for copilot, `--skill` lists for pi); a CLI without a lever runs
- * without wicked skills — never through a side channel into the user's home.
+ * mirror into the user's codex/pi/copilot/opencode skill dirs is withdrawn, and with it the
+ * `skills_mirror` setting. Skills reach non-Claude workers only through the per-launch delivery
+ * core performs from the snapshot (the generated `views/copilot/` for copilot, `--skill` lists for
+ * pi); a CLI without a lever runs without wicked skills — never through a side channel into the
+ * user's home.
  *
  * `health()` is the last outcome, surfaced read-only on `GET /diagnostics` (`skills`).
  */
 
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
-import type { CoreEvent, SystemSettings } from '../core/types.js';
+import type { CoreEvent } from '../core/types.js';
 import { applySkillsSnapshotEnv, canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
-import { resolveSkillsRoot, SKILLS_DIRNAME, SkillsSourceUnavailableError, SNAPSHOTS_DIRNAME, type SkillsStore } from './store.js';
-
-export type SkillsSettings = Pick<SystemSettings, 'skills_root'>;
+import { SkillsSourceUnavailableError, type SkillsStore } from './store.js';
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
@@ -67,7 +69,7 @@ export interface SkillsHealthFinding {
 /** The seam's last outcome — what `GET /diagnostics` reports as `skills`. */
 export interface SkillsHealth {
   state: SkillsHealthState;
-  /** The resolved skills root, or `null` when the daemon booted without the seam. */
+  /** The skills root (`<state home>/skills`), or `null` when the daemon booted without the seam. */
   root: string | null;
   /** The verified published snapshot, or `null`. */
   current: { gen: number; path: string } | null;
@@ -115,10 +117,9 @@ export class SkillsRuntime {
     return this.lastHealth;
   }
 
-  /** Boot / settings re-apply. Never throws; never fails open (module header). */
-  async apply(settings: SkillsSettings): Promise<SkillsHealth> {
-    const root = resolveSkillsRoot(settings.skills_root);
-    if (root !== this.store.root) this.store.reroot(root);
+  /** Boot entry point. Never throws; never fails open (module header). Idempotent: a seeded, published root is only re-verified. */
+  async apply(): Promise<SkillsHealth> {
+    const root = this.store.root;
     let ready: Awaited<ReturnType<SkillsStore['ensureReady']>>;
     try {
       ready = await this.store.ensureReady();
@@ -205,9 +206,6 @@ export class SkillsRuntime {
    * Export the VERIFIED current snapshot for the engine (with the fenced state home beside it).
    * With nothing published (or an unverifiable `current`) the engine input is NOT touched here —
    * `apply` decided it. Answers the health it recorded, or `null` when there was nothing to export.
-   * A snapshot that is not `<state home>/skills/snapshots/<gen>` (a `skills_root` pointed outside
-   * the state home) is published but every launch is refused by core's cross-check — reported as a
-   * `skills.config` WARNING so the operator sees why before the first refused launch.
    */
   afterPublish(): SkillsHealth | null {
     let current: { gen: number; path: string } | null;
@@ -237,18 +235,7 @@ export class SkillsRuntime {
     // here on opens its pin at this generation (and accumulates later publishes) until the engine's
     // `skillsSnapshotHanded` says which one it used or the run ends (live-generations.ts).
     this.store.live.exported(current.gen);
-    const stateHome = canonicalCrewStateHome();
-    const findings: SkillsHealthFinding[] = [];
-    const fencedSnapshots = join(stateHome, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + sep;
-    if (!current.path.startsWith(fencedSnapshots)) {
-      const message =
-        `skills root ${this.store.root} is outside the daemon state home ${stateHome}: core derives the worker fence from ` +
-        `${CREW_STATE_HOME_ENGINE_ENV} and cross-checks that ${SKILLS_SNAPSHOT_ENGINE_ENV} is <state home>/skills/snapshots/<gen>, ` +
-        `so every launch will be REFUSED until skills_root is "" (the default) and WICKED_CREW_SKILLS_ROOT is unset`;
-      this.log(`[skills] skills.config (warning): ${message}`);
-      findings.push({ kind: 'skills.config', severity: 'warning', message });
-    }
-    return this.record({ state: 'published', root: this.store.root, current, engineInput: current.path, stateHome, findings });
+    return this.record({ state: 'published', root: this.store.root, current, engineInput: current.path, stateHome: canonicalCrewStateHome(), findings: [] });
   }
 
   private record(health: SkillsHealth): SkillsHealth {

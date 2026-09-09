@@ -6,7 +6,10 @@
  * produced" and the wrong one for "may I write here") and accepts the root itself. Writes into the
  * effective plugin root need the stricter rule:
  *
- *   1. decode the URL path exactly once (a malformed escape is a bad path, not a 500);
+ *   1. the URL wildcard arrives DECODED EXACTLY ONCE — by Fastify (find-my-way decodes every `%xx`,
+ *      `%2F` included, before routing; a malformed escape is Fastify's own 400) — and the store
+ *      never decodes again (codex round 5 on #480: a second decode turned `100%25.txt` into a
+ *      refused `100%.txt` and the literal filename `a%252Fb.txt` into the path `a/b.txt`);
  *   2. normalize into segments — refuse empty, `.`, `..`, backslashes, NUL, absolute / drive-prefixed;
  *   3. lstat-walk EVERY existing component and refuse a symlink anywhere on the way (the plugin
  *      tree carries none; one appearing is either an attack or an accident, and either way the
@@ -27,15 +30,6 @@ export class SkillPathError extends Error {
   constructor(readonly reason: SkillPathReason, message: string) {
     super(message);
     this.name = 'SkillPathError';
-  }
-}
-
-/** Decode a URL wildcard once; a malformed escape (`%E0%A4%A`) is `invalid`. */
-export function decodePathParam(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    throw new SkillPathError('invalid', `invalid path ${JSON.stringify(raw)}: malformed percent-escape`);
   }
 }
 

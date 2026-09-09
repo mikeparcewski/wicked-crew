@@ -431,10 +431,12 @@ accepts<z.input<typeof SkillRevisionSchema>, Wire.SkillRevisionBody>();
 accepts<z.input<typeof PutSkillFileSchema>, Wire.PutSkillFileBody>();
 accepts<z.input<typeof AddSkillSchema>, Wire.AddSkillBody>();
 accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
-// The ONE settings addition: optional on the wire, validated at the PUT boundary. (`skills_mirror`
-// is withdrawn — design v3.2 §1 — and must NOT be on the wire: the daemon never writes into the
-// user's CLI directories, so a knob for it would be a lie.)
-respondsWith<Wire.SystemSettings['skills_root'], string | undefined>();
+// NO skills setting is on the wire (codex round 5 / coordinator decision): the root is
+// `<state home>/skills`, full stop — `skills_root` is retired with its env override (a configurable
+// root let a PUT aim seeding at `~/.codex/skills`), and `skills_mirror` was withdrawn before it
+// (design v3.2 §1: the daemon never writes into the user's CLI directories, so a knob for either
+// would be a lie). Both must stay OFF the contract.
+respondsWith<'skills_root' extends keyof Wire.SystemSettings ? never : true, true>();
 respondsWith<'skills_mirror' extends keyof Wire.SystemSettings ? never : true, true>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {

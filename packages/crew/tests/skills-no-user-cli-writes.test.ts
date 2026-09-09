@@ -10,12 +10,22 @@
 // `homedir()` at all.
 
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Fastify from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { ElicitationCache } from '../src/api/elicitation-cache.js';
+import { GateCache } from '../src/api/gate-cache.js';
+import { registerRoutes } from '../src/api/routes.js';
+import type { CoreAdapter } from '../src/core/adapter.js';
+import { DEFAULT_SETTINGS, type SystemSettings } from '../src/core/types.js';
+import { crewStateHome } from '../src/projects/state-home.js';
+import { assertSkillsRootFenced, SkillsRootUnfencedError } from '../src/skills/root-fence.js';
+import { SkillsRuntime } from '../src/skills/runtime.js';
+import { resolveSkillsRoot } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
@@ -53,6 +63,22 @@ function fingerprint(root: string): string {
 let s: Scaffold;
 const savedHome = process.env['HOME'];
 const savedProfile = process.env['USERPROFILE'];
+/** The retired root override — spelled here only to prove it cannot redirect the root. */
+const RETIRED_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
+const savedRetiredEnv = process.env[RETIRED_ROOT_ENV];
+
+/** In-memory settings store with the adapter's exact merge semantics (defaults + patch). */
+function memoryAdapter(): CoreAdapter {
+  let store: SystemSettings = { ...DEFAULT_SETTINGS };
+  return {
+    getSettings: async () => ({ ...store }),
+    updateSettings: async (patch: Partial<SystemSettings>) => {
+      store = { ...store, ...patch };
+      return { ...store };
+    },
+    listWorkflows: () => [],
+  } as unknown as CoreAdapter;
+}
 
 beforeEach(() => {
   s = scaffold();
@@ -75,6 +101,8 @@ afterEach(() => {
   else process.env['HOME'] = savedHome;
   if (savedProfile === undefined) delete process.env['USERPROFILE'];
   else process.env['USERPROFILE'] = savedProfile;
+  if (savedRetiredEnv === undefined) delete process.env[RETIRED_ROOT_ENV];
+  else process.env[RETIRED_ROOT_ENV] = savedRetiredEnv;
   removeScratch(s.base);
 });
 
@@ -116,11 +144,48 @@ describe('no code path writes outside the skills root (design v3.2 §1)', () => 
     expect(readdirSync(join((current as { path: string }).path, 'views'))).toEqual(['copilot']);
   });
 
-  it('static guard: no skills module but the read-only plugin discovery touches homedir()', () => {
+  it('the root cannot be REDIRECTED into the home — not by a settings PUT (skills_root is not a setting), not by the retired env (codex round 5)', async () => {
+    const homeBefore = fingerprint(s.home);
+    s.store.seed();
+    const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
+    const app = Fastify({ logger: false });
+    registerRoutes(app, memoryAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, { skills: runtime });
+    await app.ready();
+    try {
+      const codexSkills = join(s.home, '.codex', 'skills');
+      // (a) PUT /settings {skills_root: ~/.codex/skills}: 200, the key is DROPPED, the store is not re-aimed, nothing is seeded there.
+      const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_root: codexSkills } });
+      expect(put.statusCode).toBe(200);
+      expect(Object.hasOwn((put.json() as { settings: Record<string, unknown> }).settings, 'skills_root')).toBe(false);
+      expect(s.store.root).toBe(s.root);
+      expect(existsSync(join(codexSkills, 'manifest.json'))).toBe(false);
+      // (b) The retired env override: `resolveSkillsRoot()` ignores it — the root stays <state home>/skills, outside the home.
+      process.env[RETIRED_ROOT_ENV] = codexSkills;
+      expect(resolveSkillsRoot()).toBe(join(crewStateHome(), 'skills'));
+      expect(resolveSkillsRoot().startsWith(s.home)).toBe(false);
+      // …and a boot apply over the runtime re-verifies its own root, re-aims nothing, seeds nothing elsewhere.
+      await runtime.apply();
+      expect(s.store.root).toBe(s.root);
+      expect(runtime.health().root).toBe(s.root);
+      // (c) The fence refuses the codex location outright when asked (HOME is the fake home here).
+      expect(() => assertSkillsRootFenced(codexSkills, { stateHome: join(s.home, '.codex') })).toThrow(SkillsRootUnfencedError);
+      expect(fingerprint(s.home)).toBe(homeBefore);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('static guard: no skills module but the read-only plugin discovery and the root FENCE touches homedir(); the fence imports nothing that writes', () => {
     const offenders: string[] = [];
+    const WRITE_API = /\b(writeFileSync|mkdirSync|rmSync|rmdirSync|renameSync|symlinkSync|copyFileSync|openSync|writeSync|chmodSync|unlinkSync|appendFileSync|createWriteStream|mkdtempSync)\b/;
     for (const file of readdirSync(SKILLS_SRC).filter((f) => f.endsWith('.ts')).sort()) {
-      if (file === 'plugin-source.ts') continue; // reads `<home>/.claude/plugins/cache` to DISCOVER the installed plugin; never writes
       const text = readFileSync(join(SKILLS_SRC, file), 'utf8');
+      if (file === 'plugin-source.ts') continue; // reads `<home>/.claude/plugins/cache` to DISCOVER the installed plugin; never writes
+      if (file === 'root-fence.ts') {
+        // Reads homedir() and names the user CLI dirs to REFUSE a root inside them (codex round 5) — and may not write, period.
+        if (WRITE_API.test(text)) offenders.push(`${file} (the fence imports or names a filesystem write API)`);
+        continue;
+      }
       if (/\bhomedir\b/.test(text)) offenders.push(file);
       if (/\.codex|\.pi\/agent|\.copilot\/skills|opencode\/skills/.test(text.replace(/^\s*(\/\/|\*|\/\*\*?).*$/gm, ''))) offenders.push(`${file} (names a user CLI dir outside a comment)`);
     }

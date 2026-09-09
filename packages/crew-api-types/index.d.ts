@@ -2366,18 +2366,15 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
-  /**
-   * The daemon-owned SKILLS root (skills keystone; api-types 0.27.0, additive) — the directory
-   * holding `manifest.json`, `baseline/<hash>/`, `effective/`, `snapshots/<gen>/` and the
-   * `current` symlink. Modeled on `worker_config_root`: absolute path when set; `""` or absent =
-   * the default `<state home>/skills`. Applied at boot and on every settings change: the daemon
-   * re-roots its store, seeds it from the live installed plugin when it is empty, publishes a
-   * first snapshot when none exists, and exports `WICKED_SKILLS_SNAPSHOT=<resolved current
-   * snapshot>` for the engine's next worker spawn — no restart. This is the ONLY skills setting:
-   * the daemon never writes into the user's own CLI directories (design v3.2 §1), so there is no
-   * mirror knob.
+  /*
+   * There is NO skills setting (skills keystone, api-types 0.27.0). The daemon-owned skills root is
+   * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
+   * `snapshots/<gen>/` and the `current` symlink — full stop: not configurable (a `skills_root` a
+   * client sends is dropped and named in the audit entry's `ignored`; design v3.1 §1 one storage
+   * root, v3.2 §1 never a user CLI directory), and there is no mirror knob either (the daemon never
+   * writes into the user's own CLI directories). `GET /skills` → `root` and `GET /diagnostics` →
+   * `skills.root` report where it is.
    */
-  skills_root?: string;
   /**
    * The repo-scoped launch delivery DEFAULT (crew#393; api-types 0.18.0, additive). What a
    * `POST /runs` with `repoRef` + a CODE-WORK `workflow` (a def with at least one

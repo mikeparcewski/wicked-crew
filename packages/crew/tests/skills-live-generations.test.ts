@@ -210,14 +210,16 @@ describe('SkillsStore reaping honours live pins', () => {
     expect(s.store.generationsOnDisk()).toEqual([]);
   });
 
-  it('re-rooting does not carry pins across roots (the next event reads the new root)', async () => {
+  it('pins belong to ONE store over ONE root: a store over another root starts with none (the root is never re-aimed — codex round 5)', async () => {
     await publishTimes(2);
+    s.store.observeEvent(handed('run-r', 2));
+    expect([...s.store.live.pinned()]).toEqual([2]);
     const other = scaffold();
     try {
       other.store.seed();
-      s.store.reroot(other.root);
-      s.store.observeEvent(ev('sessionStarted', 'run-r')); // other root: nothing handed → no pin
-      expect([...s.store.live.pinned()]).toEqual([]);
+      other.store.observeEvent(ev('sessionStarted', 'run-r')); // other root: nothing handed → no pin
+      expect([...other.store.live.pinned()]).toEqual([]);
+      expect([...s.store.live.pinned()]).toEqual([2]); // …and the first store's ledger is untouched
     } finally {
       removeScratch(other.base);
     }

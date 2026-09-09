@@ -80,9 +80,11 @@
  * ONE publish at a time (a second concurrent request is refused, `SkillsPublishInFlightError`; the
  * route answers it as a 2xx `blocked` `publish-in-flight` envelope — nothing was written, so it is
  * not a 409, codex round 3). The operation binds the root's identity (path + realpath) at start and
- * re-checks it after every await: a `skills_root` change while the baseline env was provisioning
- * aborts the publish (`SkillsRootChangedError` → the 2xx `blocked` `root-changed` envelope) —
- * nothing is written to the new root by an operation that validated the old one. Provisions the
+ * re-checks it after every await: a root whose canonical path moved or vanished while the baseline
+ * env was provisioning aborts the publish (`SkillsRootChangedError` → the 2xx `blocked`
+ * `root-changed` envelope) — nothing is written through a root the operation did not validate. (The
+ * root is never re-aimed: `<state home>/skills`, full stop — root-fence.ts; there is no `skills_root`
+ * setting and no env override, codex round 5.) Provisions the
  * baseline's `.venv` (awaited; one provisioning per baseline
  * hash — a concurrent caller awaits the in-flight one; a snapshot never links an env still being
  * written; a FAILED provisioning is BLOCKING, `venv-failed` — the shared env is required, not
@@ -128,8 +130,9 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  type Stats,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { basename, dirname, join, posix, resolve } from 'node:path';
 
 import { readFileCapped } from '../api/run-files.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -158,7 +161,7 @@ import {
   skillDirsOf,
   SKILLS_SUBDIR,
 } from './bundle.js';
-import { containedPath, decodePathParam, SkillPathError, validateRelSegments } from './contain.js';
+import { containedPath, SkillPathError, validateRelSegments } from './contain.js';
 import { coreClosure } from './core-closure.js';
 import { derivedSkillName, parseFrontmatter, PLUGIN_NAME, SKILL_NAME_PREFIX, skillKindOf } from './frontmatter.js';
 import {
@@ -189,6 +192,7 @@ import {
   assertNoSymlinkComponents,
   copyFiles,
   hashFileSet,
+  hashTree,
   makeTreeReadOnly,
   pruneEmptyDirs,
   removeFiles,
@@ -196,14 +200,14 @@ import {
   sha256Hex,
   SymlinkComponentError,
   walkFiles,
+  walkTree,
   writeFileAtomic,
   type FileRecord,
+  type LinkRecord,
 } from './tree.js';
 import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvProvisioner } from './venv.js';
 
-/** Explicit root override — the more specific instruction, and what the hermetic test harness arms. */
-export const SKILLS_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
-/** The default root's name under the daemon state home — a top-level entry `tests/fixtures/state-home-subtrees.json` registers. */
+/** The root's name under the daemon state home — a top-level entry `tests/fixtures/state-home-subtrees.json` registers. */
 export const SKILLS_DIRNAME = 'skills';
 export const MANIFEST_FILENAME = 'manifest.json';
 export const EFFECTIVE_DIRNAME = 'effective';
@@ -248,14 +252,13 @@ const STAGING_PREFIX = '.staging-';
 export const CURRENT_TMP_PREFIX = '.tmp-current-';
 
 /**
- * Where the root lives: env override, then the `skills_root` setting (absolute only — a relative
- * path is meaningless against an arbitrary cwd), then `<state home>/skills` (design v3.1 §1: the
- * same storage root as every other crew store).
+ * Where the root lives: `<state home>/skills` — full stop (design v3.1 §1: the same storage root as
+ * every other crew store; v3.2 §1: never a user CLI directory). There is no setting and no env
+ * override (codex round 5 on #480: a configurable root let seeding write into `~/.codex/skills`);
+ * the daemon's state home is the ONE knob (`--db`), and the boot asserts the resolved root stays
+ * fenced (root-fence.ts). Tests redirect the state home, never the root.
  */
-export function resolveSkillsRoot(setting: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
-  const override = env[SKILLS_ROOT_ENV];
-  if (override !== undefined && override !== '') return override;
-  if (typeof setting === 'string' && setting !== '' && isAbsolute(setting)) return setting;
+export function resolveSkillsRoot(): string {
   return join(crewStateHome(), SKILLS_DIRNAME);
 }
 
@@ -315,16 +318,16 @@ export class SkillsPublishInFlightError extends Error {
   }
 }
 
-/** The skills root changed identity while a publish was awaiting its baseline env — the operation
- *  is aborted, nothing was written. The route answers a 2xx `blocked` `root-changed` envelope, not
- *  a 409 (codex round 3). */
+/** The skills root changed identity (its canonical path moved, or it vanished) while a publish was
+ *  awaiting its baseline env — the operation is aborted, nothing was written. The route answers a
+ *  2xx `blocked` `root-changed` envelope, not a 409 (codex round 3). */
 export class SkillsRootChangedError extends Error {
   constructor(
-    readonly from: string,
-    readonly to: string,
+    readonly root: string,
+    detail: string,
     readonly revision: number,
   ) {
-    super(`publish aborted: the skills root changed from ${from} to ${to} while the baseline environment was being provisioned — nothing was published; re-read GET /skills and publish against the new root`);
+    super(`publish aborted: the skills root ${root} ${detail} while the baseline environment was being provisioned — nothing was published; re-read GET /skills and retry`);
     this.name = 'SkillsRootChangedError';
   }
 }
@@ -340,7 +343,7 @@ export class SkillsRootInvalidError extends Error {
     readonly root: string,
     detail: string,
   ) {
-    super(`skills root ${root} is not usable: ${detail} — every read and mutation is refused; restore the directory (or fix skills_root) and restart`);
+    super(`skills root ${root} is not usable: ${detail} — every read and mutation is refused; restore the directory under the daemon state home and restart`);
     this.name = 'SkillsRootInvalidError';
   }
 }
@@ -480,6 +483,17 @@ function errnoCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException).code;
 }
 
+/** `lstat`, or `null` when nothing can stand at `path` — it does not exist (ENOENT) or a parent is a regular file (ENOTDIR). */
+function lstatOrNull(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw err;
+  }
+}
+
 /** The dir a user-added skill lands at: always top-level (`skills/<name minus the prefix>`). */
 export function dirForUserSkill(name: string): string {
   return `${SKILLS_SUBDIR}/${name.slice(SKILL_NAME_PREFIX.length)}`;
@@ -539,7 +553,8 @@ export class SkillsStore {
   /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
   private readonly venvInFlight = new Map<string, Promise<SkillVenvState>>();
   /** The canonical (realpath) identity of the root the store BOUND — recorded the first time the
-   *  root is seen as a real directory (boot / seed), compared on every operation, reset by `reroot`. */
+   *  root is seen as a real directory (boot / seed), compared on every operation for the store's
+   *  whole lifetime (the root is never re-aimed: a new root is a new store). */
   private boundRootReal: string | null = null;
 
   constructor(opts: SkillsStoreOptions) {
@@ -555,15 +570,6 @@ export class SkillsStore {
 
   get root(): string {
     return this.rootDir;
-  }
-
-  /**
-   * Re-aim the store (the `skills_root` setting changed). Touches no disk. A publish in flight
-   * against the previous root detects the change at its next await and aborts (module header).
-   */
-  reroot(root: string): void {
-    this.rootDir = root;
-    this.boundRootReal = null; // a new root has its own identity — bound the first time it is seen
   }
 
   /** Whether a publish is running right now (diagnostics + tests). */
@@ -818,16 +824,65 @@ export class SkillsStore {
     const parsed = this.parseSnapshotManifest(lexical);
     if (typeof parsed === 'string') return invalid(parsed);
     if (parsed.gen !== Number(dirName)) return invalid(`snapshot.json says gen ${parsed.gen} but the directory is ${dirName}`);
-    const hash = this.snapshotHash(real);
+    // EVERY entry is judged, links included (codex round 5): the walk enumerates symlinks instead of
+    // skipping them, the hash covers them (path + link text), and the only link a generation may
+    // carry is `.venv` at its root, pointing at THIS root's baseline env for the recorded baseline.
+    const tree = walkTree(real);
+    const hash = this.snapshotHash(tree);
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
+    const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
+    if (linkProblem !== null) return invalid(linkProblem);
     return { gen: parsed.gen, path: real };
   }
 
-  /** Hash over a snapshot dir's files, `snapshot.json` excluded (the `.venv` link is skipped by the walk). */
-  private snapshotHash(dir: string): string {
-    return hashFileSet(walkFiles(dir).filter((f) => f.rel !== SNAPSHOT_MANIFEST_FILENAME));
+  /** Hash over a snapshot tree — files (`snapshot.json` excluded) AND link entries (path + link text). */
+  private snapshotHash(tree: { files: FileRecord[]; links: LinkRecord[] }): string {
+    return hashTree(
+      tree.files.filter((f) => f.rel !== SNAPSHOT_MANIFEST_FILENAME),
+      tree.links,
+    );
+  }
+
+  /** The link text publish writes for a snapshot's `.venv`: relative on POSIX, the absolute target for a Windows junction. */
+  private venvLinkText(baseline: string): { text: string; absTarget: string } {
+    const absTarget = baselineVenvDir(this.baselineDir(baseline));
+    return {
+      text: process.platform === 'win32' ? absTarget : posix.join('..', '..', BASELINE_DIRNAME, baseline, VENV_LINKNAME),
+      absTarget,
+    };
+  }
+
+  /**
+   * Why a generation's symlinks are not acceptable, or `null`: any link other than the root-level
+   * `.venv` is refused by name and target; `.venv` may exist only when `snapshot.json` records the
+   * env as `synced`, must carry EXACTLY the link text publish writes (the relative path to this
+   * root's `baseline/<recorded baseline>/.venv`), and must resolve to that very directory (a
+   * dangling or redirected link is refused — a worker's `uv run` through it would create or read
+   * an env somewhere else). A `synced` snapshot WITHOUT the link is not what publish wrote either.
+   */
+  private snapshotLinkProblem(snapshotDir: string, links: ReadonlyArray<LinkRecord>, parsed: SnapshotManifest): string | null {
+    const venv = links.find((l) => l.rel === VENV_LINKNAME);
+    for (const l of links) {
+      if (l.rel !== VENV_LINKNAME) return `unexpected symlink ${l.rel} -> ${l.target}: a published generation carries no link but its root-level ${VENV_LINKNAME}`;
+    }
+    if (venv === undefined) {
+      return parsed.venv === 'synced' ? `snapshot.json records the baseline env as synced but the generation has no ${VENV_LINKNAME} link` : null;
+    }
+    if (parsed.venv !== 'synced') return `${VENV_LINKNAME} -> ${venv.target} is present although snapshot.json records the env as ${parsed.venv}`;
+    const expected = this.venvLinkText(parsed.gardenSource.baseline);
+    if (venv.target !== expected.text) return `${VENV_LINKNAME} -> ${venv.target} is not the baseline env link publish wrote (${expected.text})`;
+    let resolved: string;
+    let expectedReal: string;
+    try {
+      resolved = realpathSync(join(snapshotDir, VENV_LINKNAME));
+      expectedReal = realpathSync(expected.absTarget);
+    } catch (err) {
+      return `${VENV_LINKNAME} does not resolve to the baseline env ${expected.absTarget} (${errnoCode(err) ?? 'error'})`;
+    }
+    if (resolved !== expectedReal) return `${VENV_LINKNAME} resolves to ${resolved}, not the baseline env ${expectedReal}`;
+    return null;
   }
 
   /** `snapshot.json` at `dir`, structurally validated — or the reason it is not one. */
@@ -1156,7 +1211,7 @@ export class SkillsStore {
         typeof parsed !== 'string' &&
         parsed.gen === m.published.gen &&
         parsed.contentHash === m.published.contentHash &&
-        this.snapshotHash(dir) === parsed.contentHash
+        this.snapshotHash(walkTree(dir)) === parsed.contentHash
       ) {
         this.warn(`[skills] finishing an interrupted publish: current -> ${generationDirName(parsed.gen)}`);
         this.flipCurrent(parsed.gen);
@@ -1231,8 +1286,9 @@ export class SkillsStore {
    * Rebuild the catalog from the file records: register skills for every `skills/**\/SKILL.md`
    * under its PATH-DERIVED name (a differing declared name is warned here and blocks at publish),
    * keep existing entries' state, recompute every content-derived field and the core closure.
+   * Answers the recompute's refusals (a skill behind a symlink — `recomputeDerived`).
    */
-  private rebuildCatalog(m: SkillManifest): void {
+  private rebuildCatalog(m: SkillManifest): SkillConflictFinding[] {
     const present = new Set(Object.entries(m.files).filter(([, r]) => r.effectiveHash !== null).map(([rel]) => rel));
     const dirs = skillDirsOf([...present].map((rel) => ({ rel })));
     const byDir = new Map(Object.entries(m.skills).map(([name, e]) => [e.dir, name]));
@@ -1253,7 +1309,7 @@ export class SkillsStore {
       };
       byDir.set(dir, name);
     }
-    this.recomputeDerived(m);
+    return this.recomputeDerived(m);
   }
 
   /**
@@ -1261,10 +1317,21 @@ export class SkillsStore {
    * identity is one thing). A declared frontmatter name that differs is warned here and reported
    * as `name-mismatch` (blocking) at publish; two dirs deriving the same name (`a-b/c` and `a/b-c`)
    * cannot both be registered — the second is left for publish to report as `unregistered-skill`.
+   * The `SKILL.md` is read CONTAINED (lstat-walked from the root; codex round 5): a dir behind a
+   * link is warned and left unregistered, never read through.
    */
   private nameForDir(m: SkillManifest, dir: string): string | null {
     const derived = derivedSkillName(dir.slice(`${SKILLS_SUBDIR}/`.length));
-    const parsed = parseFrontmatter(readFileSync(this.pluginPath(`${dir}/SKILL.md`), 'utf8'));
+    let skillMd: Buffer | null;
+    try {
+      skillMd = this.containedEffectiveBytes(`${dir}/SKILL.md`);
+    } catch (err) {
+      if (!(err instanceof SkillPathError)) throw err;
+      this.warn(`[skills] ${dir}/SKILL.md is not reachable without crossing a symlink (${err.message}); not registered — publish reports it`);
+      return null;
+    }
+    if (skillMd === null) return null; // a record without a regular file behind it — drift, reported at publish
+    const parsed = parseFrontmatter(skillMd.toString('utf8'));
     if (!parsed.ok) {
       this.warn(`[skills] ${dir}/SKILL.md frontmatter does not parse (${parsed.reason}); keyed by the path-derived name ${derived} — publish blocks until it parses`);
     } else {
@@ -1300,8 +1367,17 @@ export class SkillsStore {
    * sides — a user DELETION counts as the user's side) or a refresh's name-collision flag — the
    * latter only meaningful while the skill is user-added (upstream shipped the name at another
    * dir); refresh clears and re-derives it.
+   *
+   * CONTAINED (codex round 5): every byte this reads — a skill's `SKILL.md`, every recorded file it
+   * judges portability from — is reached by an lstat walk from the SKILLS ROOT through the skill
+   * dir and every component below it, never by a bare join that would follow `effective/skills/
+   * gamma -> /outside` because only the leaf was checked. A skill whose dir (or a file inside it)
+   * crosses a link is SKIPPED — its derived fields keep their last values, nothing outside is read —
+   * and the refusal is answered as a blocking `path-invalid` finding: publish/analyze report it
+   * blocking; a mutation on ANOTHER skill carries it as a warning (that mutation did land).
    */
-  private recomputeDerived(m: SkillManifest): void {
+  private recomputeDerived(m: SkillManifest): SkillConflictFinding[] {
+    const refused: SkillConflictFinding[] = [];
     const catalogMd = new Map<string, string>();
     const byOwner = this.recordsByOwner(m);
     for (const [name, entry] of Object.entries(m.skills)) {
@@ -1312,7 +1388,22 @@ export class SkillsStore {
       const fileConflict = records.some(([, r]) => r.conflict);
       entry.upgradeAvailable = fileConflict;
       entry.conflict = fileConflict || (entry.conflict && userAdded);
-      const skillMd = this.regularFileBytes(this.pluginPath(`${entry.dir}/SKILL.md`));
+      // The skill dir first — walked from the root — so a linked dir is ONE finding, not one per file.
+      let skillDirAbs: string;
+      try {
+        skillDirAbs = this.containedEffective(entry.dir.split('/'));
+      } catch (err) {
+        refused.push(this.pathFinding(err, name, entry.dir));
+        continue;
+      }
+      const below = (rel: string): Buffer | null => this.regularFileBytes(containedPath(skillDirAbs, rel.slice(entry.dir.length + 1).split('/')));
+      let skillMd: Buffer | null;
+      try {
+        skillMd = below(`${entry.dir}/SKILL.md`);
+      } catch (err) {
+        refused.push(this.pathFinding(err, name, `${entry.dir}/SKILL.md`));
+        continue;
+      }
       let kind: SkillKind = 'module';
       if (skillMd !== null) {
         const text = skillMd.toString('utf8');
@@ -1321,20 +1412,48 @@ export class SkillsStore {
         if (parsed.ok) kind = skillKindOf(parsed.fields);
       }
       entry.kind = kind;
-      // Judged from what is on disk as a REGULAR file: a recorded file that vanished or became a
-      // link (a direct edit) is drift — publish reports it; the mutation in progress must not die on it.
-      entry.portable = records
-        .filter(([, r]) => r.effectiveHash !== null)
-        .every(([rel]) => {
-          const buf = this.regularFileBytes(this.pluginPath(rel));
-          return buf === null || looksBinary(buf) || portabilityIssueOf(buf.toString('utf8')) === null;
-        });
+      // Judged from what is on disk as a REGULAR file reached without crossing a link: a recorded
+      // file that vanished is drift (publish reports it; the mutation in progress must not die on
+      // it); one that became a link, or sits behind one, is refused and reported — never read.
+      let portable = true;
+      for (const [rel, r] of records) {
+        if (r.effectiveHash === null) continue;
+        let buf: Buffer | null;
+        try {
+          buf = below(rel);
+        } catch (err) {
+          refused.push(this.pathFinding(err, name, rel));
+          continue;
+        }
+        if (buf === null || looksBinary(buf)) continue;
+        if (portabilityIssueOf(buf.toString('utf8')) !== null) portable = false;
+      }
+      entry.portable = portable;
     }
     const closure = coreClosure(this.registeredRefs(), catalogMd);
     for (const [name, entry] of Object.entries(m.skills)) entry.core = closure.core.has(name);
+    return refused;
   }
 
-  /** The bytes of `abs` when it is a REGULAR file (never through a link), `null` when absent or anything else. */
+  /** The recompute's refusals as WARNINGS — for a mutation that landed on another skill (the blocking form is publish's). */
+  private recomputeWarnings(m: SkillManifest): SkillConflictFinding[] {
+    return this.recomputeDerived(m).map((f) => ({ ...f, severity: 'warning' as const }));
+  }
+
+  /**
+   * The bytes of the REGULAR file at plugin-relative `rel` in `effective/`, every component
+   * lstat-walked from the skills root (`containedEffective`; a link anywhere on the way is a
+   * `SkillPathError` the caller decides on — never a read through it), `null` when absent.
+   */
+  private containedEffectiveBytes(rel: string): Buffer | null {
+    return this.regularFileBytes(this.containedEffective(rel.split('/')));
+  }
+
+  /**
+   * The bytes of `abs` when it is a REGULAR file, `null` when absent or anything else. The leaf is
+   * lstat'ed here; the PATH to it is the caller's business (`containedEffectiveBytes` /
+   * `recomputeDerived` walk it from the root — a bare join is never enough, codex round 5).
+   */
   private regularFileBytes(abs: string): Buffer | null {
     try {
       if (!lstatSync(abs).isFile()) return null;
@@ -1373,15 +1492,16 @@ export class SkillsStore {
   }
 
   /**
-   * Contain a skill-relative path (raw from the URL): decode once, validate, refuse a path a NESTED
-   * skill owns (registered or merely present on disk), lstat-walk FROM THE ROOT through the skill
-   * dir refusing symlinks. Returns the on-disk target in `effective/` and both spellings of the path.
+   * Contain a skill-relative path (the URL wildcard as Fastify hands it — ALREADY decoded once, never
+   * decoded again; codex round 5): validate, refuse a path a NESTED skill owns (registered or merely
+   * present on disk), lstat-walk FROM THE ROOT through the skill dir refusing symlinks. Returns the
+   * on-disk target in `effective/` and both spellings of the path.
    */
   resolveSkillFile(name: string, rawRel: string): { abs: string; rel: string; pluginRel: string } {
     const m = this.manifest();
     const entry = m.skills[name];
     if (entry === undefined) throw new UnknownSkillError(name);
-    const segments = validateRelSegments(decodePathParam(rawRel));
+    const segments = validateRelSegments(rawRel);
     const rel = segments.join('/');
     const pluginRel = `${entry.dir}/${rel}`;
     const owner = owningSkillDir(pluginRel, this.ownershipDirs(m));
@@ -1403,7 +1523,7 @@ export class SkillsStore {
    * name the store itself owns (`RESERVED_SUPPORT_NAMES`), no symlinks.
    */
   resolveSupportFile(rawRel: string): { abs: string; rel: string } {
-    const segments = validateRelSegments(decodePathParam(rawRel));
+    const segments = validateRelSegments(rawRel);
     const rel = segments.join('/');
     const head = segments[0] ?? '';
     if (head === SKILLS_SUBDIR) {
@@ -1521,8 +1641,8 @@ export class SkillsStore {
     }
     // The walk above ended at the leaf without crossing a link: an existing entry here is the real file.
     const skillMd = this.entryExists(skillMdAbs) && lstatSync(skillMdAbs).isFile() ? readFileSync(skillMdAbs, 'utf8') : undefined;
-    this.recomputeDerived(m); // `core` from the live registered refs, never the cached entry
-    const findings = frontmatterGuard(skillMd, name, { isCore: entry.core, file: skillMdRel });
+    const recompute = this.recomputeWarnings(m); // `core` from the live registered refs, never the cached entry
+    const findings = [...frontmatterGuard(skillMd, name, { isCore: entry.core, file: skillMdRel }), ...recompute];
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     if (entry.enabled) return this.result(m, name, findings);
     entry.enabled = true;
@@ -1534,8 +1654,8 @@ export class SkillsStore {
   disable(name: string, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
     const entry = this.requireEntry(m, name, expectedRevision);
-    this.recomputeDerived(m);
-    const findings = compact([coreDisableGuard(name, entry)]);
+    const recompute = this.recomputeWarnings(m);
+    const findings = [...compact([coreDisableGuard(name, entry)]), ...recompute];
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     if (!entry.enabled) return this.result(m, name, findings);
     entry.enabled = false;
@@ -1605,7 +1725,7 @@ export class SkillsStore {
     }
     entry.editedAt = null;
     entry.conflict = false;
-    this.recomputeDerived(m);
+    findings.push(...this.recomputeWarnings(m));
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -1625,7 +1745,7 @@ export class SkillsStore {
     writeFileAtomic(target.abs, content);
     entry.editedAt = this.now();
     this.refreshRecords(m, entry.dir);
-    this.recomputeDerived(m);
+    findings.push(...this.recomputeWarnings(m));
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -1670,25 +1790,160 @@ export class SkillsStore {
    * Every destination of a multi-file write, lstat-walked from the ROOT (the skill dir AND every
    * component below it): a symlinked child directory inside the skill would otherwise redirect a
    * descendant write outside the store (codex round 2: `gamma/link -> /outside` + `link/victim.txt`).
-   * Answers the blocking `path-invalid` finding for the first refused path, or the resolved targets.
+   * And every destination is checked for an entry OF THE OTHER KIND already standing there (codex
+   * round 5): a key that names an existing directory (one the swap cannot clear — it holds anything
+   * but the skill's own files and empty dirs), or a key whose would-be parent is an existing NON-own
+   * regular file, cannot land; refused here, BEFORE any mutation, so the ENOTDIR/EISDIR the
+   * placement would hit never happens after the old files are gone. Answers the blocking
+   * `path-invalid` finding for the first refused path, or the resolved targets.
    */
   private containedDestinations(
     name: string,
     dir: string,
     files: Readonly<Record<string, string>>,
+    own: ReadonlyArray<FileRecord>,
   ): { targets: Array<{ rel: string; abs: string; text: string }> } | { finding: SkillConflictFinding } {
     const targets: Array<{ rel: string; abs: string; text: string }> = [];
+    const ownAbs = new Set(own.map((f) => f.abs));
+    const kindConflict = (rel: string, evidence: string): { finding: SkillConflictFinding } => ({
+      finding: finding(
+        'path-invalid',
+        'blocking',
+        'a files map lays each key out as a regular file; an entry of the other kind already standing on that path (a directory where the file goes, a file where a parent directory goes) cannot be replaced by it — nothing was changed',
+        evidence,
+        { skill: name, file: rel },
+      ),
+    });
     for (const [rel, text] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      let abs: string;
       try {
-        targets.push({ rel, abs: this.containedEffective([...dir.split('/'), ...rel.split('/')]), text });
+        abs = this.containedEffective([...dir.split('/'), ...rel.split('/')]);
       } catch (err) {
         return { finding: this.pathFinding(err, name, rel) };
       }
+      // The walk ended without crossing a link, so an existing entry here is real. A DIRECTORY at
+      // the destination survives the replace unless it holds nothing but own files / empty dirs.
+      const st = lstatOrNull(abs);
+      if (st !== null && st.isDirectory() && !this.clearableDir(abs, ownAbs)) {
+        return kindConflict(rel, `${rel} names an existing directory in ${dir} that is not made of the skill's own files alone`);
+      }
+      if (st !== null && !st.isDirectory() && !st.isFile()) {
+        return kindConflict(rel, `${rel} names an existing entry in ${dir} that is neither a file nor a directory`);
+      }
+      // A would-be PARENT that exists as a non-directory (a regular file the replace does not remove) blocks the child.
+      const segments = rel.split('/');
+      let parent = this.pluginPath(dir);
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        parent = join(parent, segments[i] as string);
+        const pst = lstatOrNull(parent);
+        if (pst === null) break; // nothing below exists yet — the write creates it
+        if (!pst.isDirectory()) {
+          if (ownAbs.has(parent)) break; // an own file the swap parks first — the directory can then be made
+          return kindConflict(rel, `${rel} needs ${segments.slice(0, i + 1).join('/')} as a directory, but a file the replace does not remove stands there`);
+        }
+      }
+      targets.push({ rel, abs, text });
     }
     return { targets };
   }
 
-  /** Add a user skill at `skills/<name minus the prefix>`. */
+  /** Whether a directory holds nothing but the skill's own regular files (removed by the swap) and empty subdirectories. */
+  private clearableDir(dir: string, ownAbs: ReadonlySet<string>): boolean {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isSymbolicLink()) return false;
+      if (entry.isDirectory()) {
+        if (!this.clearableDir(abs, ownAbs)) return false;
+        continue;
+      }
+      if (!entry.isFile() || !ownAbs.has(abs)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * The atomic heart of `add` and `replace` (codex round 5): the replacement is WRITTEN in full into
+   * a staging dir under the root, THEN the skill's own files are parked (renamed) into a second
+   * staging dir and their empty parents pruned, THEN the staged files are renamed into place. Every
+   * step is a same-filesystem rename; any failure in the swap ROLLS BACK — what was placed is
+   * removed, what was parked is renamed back (mode bits ride the rename) — and answers a blocking
+   * `path-invalid` finding: the skill is byte-for-byte what it was, the revision unchanged. The
+   * removal used to come first, so a placement that failed (`x` a file, `x/y` needing it as a
+   * directory) had already destroyed the notes it could not replace.
+   */
+  private swapOwnFiles(
+    name: string,
+    dir: string,
+    own: ReadonlyArray<FileRecord>,
+    targets: ReadonlyArray<{ rel: string; abs: string; text: string }>,
+    modes: ReadonlyMap<string, number>,
+  ): SkillConflictFinding | null {
+    const effective = this.effectiveDir();
+    const staging = join(this.rootDir, `${STAGING_PREFIX}swap-${randomBytes(6).toString('hex')}`);
+    const stagedDir = join(staging, 'new');
+    const parkedDir = join(staging, 'old');
+    const parked: Array<{ from: string; to: string }> = [];
+    const placed: string[] = [];
+    try {
+      // 1. The whole replacement lands in staging first — a write failure here touches nothing live.
+      const staged = targets.map((t) => {
+        const src = join(stagedDir, ...t.rel.split('/'));
+        const mode = modes.get(`${dir}/${t.rel}`);
+        writeFileAtomic(src, t.text, mode === undefined ? {} : { mode });
+        return { src, dest: t.abs, rel: t.rel };
+      });
+      try {
+        // 2. Park the own files (rename, never delete), prune what they leave empty.
+        for (const f of own) {
+          const to = join(parkedDir, ...f.rel.split('/'));
+          mkdirSync(dirname(to), { recursive: true });
+          renameSync(f.abs, to);
+          parked.push({ from: f.abs, to });
+        }
+        for (const f of own) pruneEmptyDirs(dirname(f.abs), effective);
+        // 3. Place: a destination that is (now) an empty directory tree is removed first.
+        for (const p of staged) {
+          this.removeEmptyDirTree(p.dest);
+          mkdirSync(dirname(p.dest), { recursive: true });
+          renameSync(p.src, p.dest);
+          placed.push(p.dest);
+        }
+        return null;
+      } catch (err) {
+        for (const d of placed) rmSync(d, { force: true });
+        // Prune the parents of EVERY staged destination, not only the placed ones: the failing
+        // placement had already created its parent directories before its rename failed.
+        for (const p of staged) pruneEmptyDirs(dirname(p.dest), effective);
+        for (const { from, to } of parked) {
+          mkdirSync(dirname(from), { recursive: true });
+          renameSync(to, from);
+        }
+        const code = errnoCode(err);
+        return finding(
+          'path-invalid',
+          'blocking',
+          'the replacement could not be laid out as files (a path collided with an entry of the other kind on disk); the swap was rolled back — the skill is exactly what it was, nothing was written',
+          `${code === undefined ? 'error' : code}: ${err instanceof Error ? err.message : String(err)}`,
+          { skill: name, file: dir },
+        );
+      }
+    } finally {
+      removeTreeForce(staging);
+    }
+  }
+
+  /** Remove `path` when it is a directory tree holding only (empty) directories; anything else is left alone. */
+  private removeEmptyDirTree(path: string): void {
+    const st = lstatOrNull(path);
+    if (st === null || !st.isDirectory()) return;
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (!entry.isDirectory()) return;
+      this.removeEmptyDirTree(join(path, entry.name));
+    }
+    if (readdirSync(path).length === 0) rmSync(path, { recursive: false, force: true });
+  }
+
+  /** Add a user skill at `skills/<name minus the prefix>` — staged, then swapped in (`swapOwnFiles`). */
   add(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
     this.assertRevision(m, expectedRevision);
@@ -1700,9 +1955,10 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, dir)]);
     }
-    const destinations = this.containedDestinations(name, dir, files);
+    const destinations = this.containedDestinations(name, dir, files, []);
     if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
-    for (const t of destinations.targets) writeFileAtomic(t.abs, t.text);
+    const swap = this.swapOwnFiles(name, dir, [], destinations.targets, new Map());
+    if (swap !== null) return this.blocked(m, [swap]);
     m.skills[name] = {
       dir,
       kind: 'module',
@@ -1715,7 +1971,7 @@ export class SkillsStore {
       conflict: false,
     };
     this.refreshRecords(m, dir);
-    this.recomputeDerived(m);
+    findings.push(...this.recomputeWarnings(m));
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -1723,7 +1979,8 @@ export class SkillsStore {
   /**
    * Replace the skill's own files wholesale (nested skills — registered or on disk — untouched); an
    * existing file's mode bits survive the replace. EVERY destination is lstat-walked from the root
-   * BEFORE the first byte moves: a refused path blocks the whole replace with nothing removed.
+   * and checked against entries of the other kind BEFORE the first byte moves, and the swap itself
+   * is staged + rolled back on failure (`swapOwnFiles`): a refused or failed replace changes nothing.
    */
   replace(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
@@ -1735,19 +1992,16 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
-    const destinations = this.containedDestinations(name, entry.dir, files);
-    if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
     const effective = this.effectiveDir();
     const own = this.ownFilesIn(effective, entry.dir, this.ownershipDirs(m));
+    const destinations = this.containedDestinations(name, entry.dir, files, own);
+    if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
     const modes = new Map(own.map((f) => [f.rel, lstatSync(f.abs).mode & 0o777]));
-    removeFiles(own, effective);
-    for (const t of destinations.targets) {
-      const mode = modes.get(`${entry.dir}/${t.rel}`);
-      writeFileAtomic(t.abs, t.text, mode === undefined ? {} : { mode });
-    }
+    const swap = this.swapOwnFiles(name, entry.dir, own, destinations.targets, modes);
+    if (swap !== null) return this.blocked(m, [swap]);
     entry.editedAt = this.now();
     this.refreshRecords(m, entry.dir);
-    this.recomputeDerived(m);
+    findings.push(...this.recomputeWarnings(m));
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -1762,7 +2016,8 @@ export class SkillsStore {
 
   private filesGuards(name: string, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
     const out: SkillConflictFinding[] = [];
-    for (const rel of Object.keys(files).sort()) {
+    const keys = Object.keys(files).sort();
+    for (const rel of keys) {
       try {
         const norm = validateRelSegments(rel).join('/');
         if (norm !== rel) {
@@ -1773,6 +2028,30 @@ export class SkillsStore {
         out.push(finding('path-invalid', 'blocking', 'the path must stay inside the skill directory', err.message, { skill: name, file: rel }));
       }
       out.push(...compact([nestedSkillCreateGuard(rel, name), supportFileGuard(rel, name)]));
+    }
+    // Incompatible paths within ONE map (codex round 5): a key that is also a directory prefix of
+    // another (`x` and `x/y`) cannot both land — the first makes `x` a file, the second needs it as
+    // a directory. Refused here, before any mutation, whichever of add/replace carries the map.
+    const ancestors = new Map<string, string>();
+    for (const rel of keys) {
+      const segments = rel.split('/');
+      for (let i = 1; i < segments.length; i += 1) {
+        const prefix = segments.slice(0, i).join('/');
+        if (!ancestors.has(prefix)) ancestors.set(prefix, rel);
+      }
+    }
+    for (const rel of keys) {
+      const under = ancestors.get(rel);
+      if (under === undefined) continue;
+      out.push(
+        finding(
+          'path-invalid',
+          'blocking',
+          'a files map lays each key out as a regular file, so a key cannot also be a directory on the way to another key — the two cannot both exist on disk',
+          `${JSON.stringify(rel)} is a file AND a directory prefix of ${JSON.stringify(under)}`,
+          { skill: name, file: rel },
+        ),
+      );
     }
     out.push(...compact([nonPortableGuard(files, name)]));
     return out;
@@ -2003,7 +2282,7 @@ export class SkillsStore {
     // The new baseline is the one `recomputeDerived` / `hasBaselineDir` read from now on.
     m.baselines[newHash] = this.baselineRecord(source);
     m.baseline = newHash;
-    this.rebuildCatalog(m);
+    findings.push(...this.rebuildCatalog(m).map((f) => ({ ...f, severity: 'warning' as const })));
     for (const [name, entry] of Object.entries(m.skills)) {
       if (conflicts.has(name)) entry.conflict = true;
       else if (entry.upgradeAvailable) conflicts.add(name);
@@ -2086,7 +2365,7 @@ export class SkillsStore {
     return { root: this.rootDir, real: realpathSync(this.rootDir) };
   }
 
-  /** After EVERY await: the store must still be aimed at the very directory the operation started on. */
+  /** After EVERY await: the root must still be the very directory the operation started on. */
   private assertRootUnchanged(bound: { root: string; real: string }, revision: number): void {
     let real: string | null;
     try {
@@ -2094,9 +2373,8 @@ export class SkillsStore {
     } catch {
       real = null;
     }
-    if (this.rootDir !== bound.root || real !== bound.real) {
-      throw new SkillsRootChangedError(bound.root, this.rootDir, revision);
-    }
+    if (real === null) throw new SkillsRootChangedError(bound.root, 'vanished', revision);
+    if (real !== bound.real) throw new SkillsRootChangedError(bound.root, `moved (its canonical path is now ${real}, it was ${bound.real})`, revision);
   }
 
   /**
@@ -2145,7 +2423,14 @@ export class SkillsStore {
     const gen = this.nextGeneration(m);
     const views = this.viewFiles(v);
     const allFiles = sortedRels([...v.snapshotFiles, ...views.files]);
-    const contentHash = hashFileSet(allFiles);
+    // The shared per-baseline env is linked ONLY when it exists (a Windows junction needs its
+    // target; a dangling link would let a worker's `uv run` create the env THROUGH it into the
+    // baseline). The link is part of the content hash — path + link text — so `current`
+    // verification sees it added, removed or re-pointed (codex round 5). `snapshot.json.venv`
+    // carries the state either way.
+    const venvDir = baselineVenvDir(this.baselineDir(m.baseline));
+    const venvLink = venv === 'synced' && existsSync(venvDir) ? this.venvLinkText(m.baseline) : null;
+    const contentHash = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }]);
     const snapshots = this.snapshotsDir();
     mkdirSync(snapshots, { recursive: true });
     this.sweepStaging(snapshots);
@@ -2175,13 +2460,7 @@ export class SkillsStore {
       views: { copilot: { dir: COPILOT_VIEW_REL, skills: views.copilotSkills } },
     };
     writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);
-    // The shared per-baseline env, linked ONLY when it exists (a Windows junction needs its target;
-    // a dangling link would let a worker's `uv run` create the env THROUGH it into the baseline).
-    // `snapshot.json.venv` carries the state either way.
-    const venvDir = baselineVenvDir(this.baselineDir(m.baseline));
-    if (venv === 'synced' && existsSync(venvDir)) {
-      this.symlink(posix.join('..', '..', BASELINE_DIRNAME, m.baseline, VENV_LINKNAME), join(staging, VENV_LINKNAME), venvDir);
-    }
+    if (venvLink !== null) this.symlink(venvLink.text, join(staging, VENV_LINKNAME), venvLink.absTarget);
     const dest = this.snapshotDir(gen);
     if (this.entryExists(dest)) {
       removeTreeForce(staging);
@@ -2280,10 +2559,10 @@ export class SkillsStore {
     renameSync(tmp, link);
   }
 
-  /** A directory symlink: relative target on POSIX; Windows junctions need the absolute target (and it must exist). */
-  private symlink(relTarget: string, linkPath: string, absTarget: string): void {
+  /** A directory symlink: the given link text on POSIX (relative); Windows junctions need the absolute target (and it must exist). */
+  private symlink(linkText: string, linkPath: string, absTarget: string): void {
     if (process.platform === 'win32') symlinkSync(absTarget, linkPath, 'junction');
-    else symlinkSync(relTarget, linkPath);
+    else symlinkSync(linkText, linkPath);
   }
 
   /**
@@ -2420,7 +2699,9 @@ export class SkillsStore {
         ),
       );
     }
-    this.recomputeDerived(m);
+    // Derived fields are recomputed CONTAINED: a skill whose dir (or a file in it) crosses a symlink
+    // is skipped, never read through, and BLOCKS here by name (codex round 5).
+    findings.push(...this.recomputeDerived(m));
     const catalogMd = new Map<string, string>();
     for (const [name, entry] of Object.entries(m.skills)) {
       const rel = `${entry.dir}/SKILL.md`;

@@ -36,7 +36,6 @@ import {
   EFFECTIVE_DIRNAME,
   MANIFEST_FILENAME,
   SKILLS_DIRNAME,
-  SKILLS_ROOT_ENV,
   SNAPSHOTS_DIRNAME,
 } from '../src/skills/store.js';
 import { noVenv, UV_CACHE_DIRNAME } from '../src/skills/venv.js';
@@ -186,8 +185,11 @@ describe('STATIC — every state-home join in src/ names a registered entry', ()
 });
 
 describe('DYNAMIC — a booted daemon creates nothing under the state home the registry does not classify', () => {
-  const OVERRIDES = [SKILLS_ROOT_ENV, 'WICKED_CREW_AUDIT_LOG', 'WICKED_CREW_PROJECT_GRAPH_ROOT', 'WICKED_CREW_PROJECT_SETTINGS'] as const;
+  // (No skills-root override to clear: the root has none — `<state home>/skills`, codex round 5.)
+  const OVERRIDES = ['WICKED_CREW_AUDIT_LOG', 'WICKED_CREW_PROJECT_GRAPH_ROOT', 'WICKED_CREW_PROJECT_SETTINGS'] as const;
   const saved = new Map<string, string | undefined>();
+  /** The state home the harness armed — restored after (never unset: an unset window is the disease, crew#396). */
+  const armedStateHome = crewStateHome();
   let scratch: string;
   let stateHome: string;
   let adapter: CoreAdapter;
@@ -225,7 +227,7 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
   afterAll(async () => {
     await app.close();
     adapter.close();
-    setCrewStateHome(undefined);
+    setCrewStateHome(armedStateHome);
     for (const k of OVERRIDES) {
       const v = saved.get(k);
       if (v === undefined) delete process.env[k];
