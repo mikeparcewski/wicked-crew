@@ -1510,14 +1510,44 @@ export interface GovernanceEvalUnexercisedRule {
 }
 
 /**
- * Rule-side coverage of an eval run (core #394): how many rules of the judged store fired on at
- * least one sample (`exercised`), and which fired on none (`unexercised`). Together with
- * `summary` it separates "the corpus lacks a behavior" from "the store lacks a rule" — the two
- * readings a bare gap count conflates.
+ * One steering type's row of {@link GovernanceEvalRuleCoverage.per_type} (evals.rs `TypeCoverage`):
+ * how many of the run's eligible decide-lane rules OF THAT TYPE fired for at least one sample, and
+ * how many fired for none. `unexercised` here is a COUNT — the ids are the parent's `unexercised`
+ * list, whose rows each carry their `steering_type`, so the two reconcile per type.
+ */
+export interface GovernanceEvalTypeCoverage {
+  exercised: number;
+  unexercised: number;
+}
+
+/**
+ * Rule-side coverage of an eval run (core #394/#395 — evals.rs `RuleCoverage`): the decide-lane
+ * rules ELIGIBLE for the run (every active effect-bearing rule, narrowed to the run's `--type`
+ * slice when one was given) partitioned into `exercised` (fired — blocking or not — for at least
+ * one sample; a COUNT) and `unexercised` (fired for none; the ids, each with its steering type).
+ * Together with `summary` it separates "the corpus lacks a behavior" from "the store lacks a rule"
+ * — the two readings a bare gap count conflates. `recall_only` counts the active rules in the slice
+ * carrying NO effect — outside the partition because the gate never fires them (core #395).
+ * `per_type` is the same partition per steering type — all seven keys, zeros included (the engine
+ * pins the shape).
+ *
+ * Every engine that emits `rule_coverage` at all (core #394 onward) serializes all four fields on
+ * every report (serde, no skip). `recall_only` and `per_type` are declared optional on the CONTRACT
+ * only because the daemon persists a run's coverage VERBATIM and validates none of its fields, so a
+ * stored record is exactly as complete as its producer made it and the contract never promises what
+ * was never checked: a consumer reads an absent `per_type` as "the engine reports no per-type
+ * coverage" (the offline comparison says exactly that), never as zeros. `exercised` and
+ * `unexercised` are required — no engine ever emitted one without the other.
+ *
+ * A run's `results[].fired` is NOT this partition's evidence: `fired` is the BLOCKING subset of the
+ * firings, and under a type filter it may name rules of OTHER types — the filter slices the samples
+ * and this denominator, never the gate (evals.rs `run_evals` / `evaluate_sample`).
  */
 export interface GovernanceEvalRuleCoverage {
   exercised: number;
   unexercised: GovernanceEvalUnexercisedRule[];
+  recall_only?: number;
+  per_type?: Record<SteeringType, GovernanceEvalTypeCoverage>;
 }
 
 /**

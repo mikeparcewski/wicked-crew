@@ -1586,8 +1586,12 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
    *  `, rule_coverage: …` / `, degraded: …` fragments verbatim (`''` omits the key — a malformed
    *  wire shape); `rulesList: 'usage'` answers `rules list` with the usage banner (an engine
    *  without the command); `at` / `version` / `invoked` place a SECOND such engine elsewhere (the
-   *  cwd shim of S14l) with its own version string and invocation marker. */
-  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; coverageJs?: string; degradedJs?: string; rulesList?: 'json' | 'usage'; at?: string; version?: string; invoked?: string } = {}): void {
+   *  cwd shim of S14l) with its own version string and invocation marker; `beforeVersion` /
+   *  `afterList` splice sh into the `--version` answer / after the `rules list` answer — how a fake
+   *  sabotages ITSELF between two spawns (the spawn-error cases of codex round 7). */
+  function okEngine(
+    opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; coverageJs?: string; degradedJs?: string; rulesList?: 'json' | 'usage'; at?: string; version?: string; invoked?: string; beforeVersion?: string; afterList?: string } = {},
+  ): void {
     const rowsJs =
       opts.rowsJs ??
       'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: x.kind === "bad" ? "deny" : "allow", fired: [], verdict: x.kind === "bad" ? "gap" : "caught" }));';
@@ -1603,10 +1607,11 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       'const count = (v) => results.filter((r) => r.verdict === v).length;',
       `process.stdout.write(JSON.stringify({ results, summary: ${summaryJs}${degradedJs}${coverageJs} }));`,
     ].join(' ');
+    const afterList = opts.afterList === undefined ? '' : ` ${opts.afterList};`;
     const rulesList =
       opts.rulesList === 'usage'
         ? '  "rules list") echo "usage: wicked-core <status | repos | run --problem ...> [--db <path>]"; exit 0;;'
-        : `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}'; exit 0;;`;
+        : `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}';${afterList} exit 0;;`;
     fakeCore(
       [
         `touch "${join(fixture, opts.invoked ?? 'engine-invoked')}"`,
@@ -1625,6 +1630,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         `    "${process.execPath}" -e '${evalJs}' "$corpus"`,
         '    exit $?;;',
         'esac',
+        ...(opts.beforeVersion === undefined ? [] : [opts.beforeVersion]),
         `echo "${opts.version ?? 'wicked-core 9.9.9-fake'}"`,
       ].join('\n'),
       opts.at === undefined ? undefined : join(opts.at, coreBin),
@@ -1787,6 +1793,34 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(silent.status).toBe(1);
     expect(silent.stderr).toMatch(/wicked-core --version printed nothing/);
     expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('codex round 7: an engine that resolved and answered --version but cannot be SPAWNED for a later step — made non-executable under the run before `rules ingest` (EACCES), removed before `rules eval` (ENOENT) — is a TOOL FAILURE (exit 1) naming the step, the errno and the executable; never a TypeError on the missing output (exit 2), nothing published', () => {
+    const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // (a) The fake strips its OWN execute bit while answering the probe: the probe ran, the build was
+    // hashed (the file is still readable), and the ingest spawn is the first to hit exec's EACCES.
+    okEngine({ beforeVersion: 'chmod 644 "$0"' });
+    const binary = realpathSync(join(fakeBin, coreBin)); // the resolved path `run` spawns and names
+    const ingest = runWithPath();
+    expect(ingest.status).toBe(1);
+    expect(ingest.stderr).toMatch(new RegExp(`^evals-internal-corpus run: TOOL FAILURE \\(${coreBin} 9\\.9\\.9-fake\\) — rules ingest could not be executed \\(EACCES\\) — ${escape(binary)}: spawnSync ${escape(binary)} EACCES$`, 'm'));
+    expect(ingest.stderr).not.toMatch(/TypeError|Cannot read properties/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json'))).toBe(false);
+    // (b) The fake removes itself right after answering `rules list` (the last spawn before the eval):
+    // ingest and list ran, the corpus was staged, and the eval spawn finds no file — ENOENT.
+    okEngine({ afterList: 'rm -f "$0"' });
+    const evalRun = runWithPath();
+    expect(evalRun.status).toBe(1);
+    expect(evalRun.stderr).toMatch(new RegExp(`^evals-internal-corpus run: TOOL FAILURE \\(${coreBin} 9\\.9\\.9-fake\\) — rules eval could not be executed \\(ENOENT\\) — ${escape(binary)}: spawnSync ${escape(binary)} ENOENT$`, 'm'));
+    expect(evalRun.stderr).not.toMatch(/TypeError|Cannot read properties/);
+    expect(existsSync(binary)).toBe(false); // the fake did remove itself — the failure is the spawn's, not a fixture accident
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    expect(existsSync(join(fixture, 'corpus-dir.txt'))).toBe(false); // the eval branch never ran
+    expect(readdirSync(outDir).filter((f) => f.endsWith('.tmp') || f.endsWith('.lock'))).toEqual([]);
+    // Control: the same fake without the sabotage publishes (the hooks themselves are inert).
+    okEngine();
+    expect(runWithPath().status).toBe(0);
   });
 
   it('S14n: an executable LOOKUP that fails for any reason but absence is a TOOL FAILURE (exit 1), never the SKIP — a PATH directory the process may not search (real EACCES on stat, ahead of a working engine), an I/O fault (injected EIO on stat / access); `access` EACCES on a regular file stays `blocked`; ENOENT and ENOTDIR (a PATH entry that is a file) are absence and still SKIP; resolveExecutable() names syscall, errno and candidate; the hook is inert outside the test env (codex round 6)', async () => {

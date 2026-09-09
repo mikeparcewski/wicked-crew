@@ -1957,8 +1957,10 @@ export function verifyEngineReport(report, samples) {
  * Why `rc` is not a `rule_coverage` of THESE rows, or null when it is. Two kinds, kept apart:
  *   `{ malformed }`    — not the wire shape (api-types `GovernanceEvalRuleCoverage`): `exercised` a
  *                        non-negative integer, `unexercised` an array of `{ rule_id, steering_type }`
- *                        with a known steering type, `recall_only` (the engine's third field, outside
- *                        the api-types shape — optional here) a non-negative integer when present;
+ *                        with a known steering type, `recall_only` (the engine's third field —
+ *                        optional on the api-types shape since 0.27.0, so optional here) a
+ *                        non-negative integer when present; `per_type` (the fourth) is passed
+ *                        through — the offline comparison reconciles it against the totals;
  *   `{ inconsistent }` — the shape is fine but the numbers contradict the rows. The engine's
  *                        definition (wicked-governance `evals.rs`, `rule_coverage` + `run_evals`): a
  *                        rule is EXERCISED when ANY evaluated claim fired it — blocking or not (a
@@ -2064,7 +2066,12 @@ export function readPublishedReport(outDir) {
  * deleted, and `rules eval` EXACTLY the verified samples, staged as a one-file corpus DIR inside a
  * fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json files or an
  * `evals:` scope, never a file — and it loads EVERY *.json in the directory it is given, so the
- * staging dir is never shared or reused) with a TEMP knowledge db. The report is VERIFIED
+ * staging dir is never shared or reused) with a TEMP knowledge db. Every one of those later spawns
+ * is checked for a spawn ERROR before its exit status or output is read (`spawnFailure`): an engine
+ * removed (ENOENT) or made non-executable (EACCES) after the probe answered, a missing interpreter,
+ * a resource fault — `spawnSync` then returns `.error` with no process, no status and no output, and
+ * that is a tool FAILURE naming the step, the errno and the executable, never a TypeError on the
+ * missing output (codex round 7). The report is VERIFIED
  * (`verifyEngineReport`: exactly one row per staged sample, engine verdicts, `fired` arrays, a
  * summary that is the rows' tally — else a named tool failure, nothing published) and every row
  * stamped with its `payload_hash`; report + meta then publish as ONE generation (`publishReport`)
@@ -2073,6 +2080,29 @@ export function readPublishedReport(outDir) {
  * never be mistaken for our own. Non-zero only when the tool itself fails, its report does not
  * verify, or the published samples do not verify.
  */
+/**
+ * Why a spawn of the RESOLVED engine did not run, or null when a process ran: `spawnSync` reports a
+ * failure to start the process in `.error` and leaves `status`, `stdout` and `stderr` unset — there
+ * was no process. The file resolved and answered `--version`, so this is the executable removed
+ * (ENOENT) or made non-executable (EACCES) under the run, a script whose interpreter is gone, or a
+ * resource fault (EAGAIN, EMFILE). Read BEFORE `status` or the outputs, so `.trim()` never runs on
+ * undefined (codex round 7). The text is a tool failure naming the step, the errno and the file.
+ */
+export function spawnFailure(step, result, binary) {
+  if (result.error === undefined) return null;
+  return `${step} could not be executed (${result.error.code ?? 'spawn error'}) — ${binary}: ${result.error.message}`;
+}
+
+/** A finished engine step's exit for a failure message: `exit N`, or `signal SIG…` when it was killed. */
+function exitOf(result) {
+  return result.status === null ? `signal ${result.signal}` : `exit ${result.status}`;
+}
+
+/** A finished engine step's output for a failure message — stderr first, stdout as the fallback, never undefined. */
+function outputOf(result) {
+  return ((result.stderr || result.stdout) ?? '').trim() || '(no output)';
+}
+
 export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   assertPinIntegrity(pin, pinPath);
   const { samples, meta } = readPublishedSamples(outDir, pin);
@@ -2113,8 +2143,11 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
     const rulesDb = join(tmp, 'rules.db');
     const knowledgeDb = join(tmp, 'knowledge.db');
     const ingest = spawnSync(binary, ['rules', 'ingest', rulesDir, '--db', rulesDb], { encoding: 'utf8' });
+    // `.error` FIRST: a spawn that never produced a process has no status and no output to read.
+    const ingestSpawn = spawnFailure('rules ingest', ingest, binary);
+    if (ingestSpawn !== null) return { failure: ingestSpawn, engine: engineVersion };
     if (ingest.status !== 0) {
-      return { failure: `rules ingest failed (exit ${ingest.status}): ${(ingest.stderr || ingest.stdout).trim()}`, engine: engineVersion };
+      return { failure: `rules ingest failed (${exitOf(ingest)}): ${outputOf(ingest)}`, engine: engineVersion };
     }
     // The rule snapshot the run is judged by — read back from the store BEFORE it is deleted.
     const listed = spawnSync(binary, ['rules', 'list', '--db', rulesDb, '--include-retired', '--json'], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
@@ -2127,8 +2160,10 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
       encoding: 'utf8',
       maxBuffer: GIT_MAX_BUFFER,
     });
+    const evalSpawn = spawnFailure('rules eval', evalRun, binary);
+    if (evalSpawn !== null) return { failure: evalSpawn, engine: engineVersion };
     if (evalRun.status !== 0) {
-      return { failure: `rules eval failed (exit ${evalRun.status}): ${(evalRun.stderr || evalRun.stdout).trim()}`, engine: engineVersion };
+      return { failure: `rules eval failed (${exitOf(evalRun)}): ${outputOf(evalRun)}`, engine: engineVersion };
     }
     let report;
     try {

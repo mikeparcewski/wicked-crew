@@ -91,7 +91,9 @@ with exec's own search semantics (every `PATH` entry in order, an EMPTY entry be
 is the exit-zero SKIP; a lookup that fails any other way, `stat` EACCES on a PATH directory or
 EIO, is a tool failure naming syscall, errno and candidate, because which file a spawn would run
 cannot be determined) and spawns THAT absolute path for every call — the file hashed into the
-provenance is the file that ran — stages exactly those samples in a fresh private temp dir, verifies the
+provenance is the file that ran; every later spawn is checked for a spawn ERROR before its output
+is read, so an engine removed (ENOENT) or made non-executable (EACCES) after the probe is a tool
+failure naming the step, errno and executable, never a TypeError — stages exactly those samples in a fresh private temp dir, verifies the
 engine's report before publication (exactly one row per staged sample, engine verdicts, `fired`
 arrays, every row consistent with its sample's kind — `expected` deny/allow by kind, never `gap`
 on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking verdict fired —

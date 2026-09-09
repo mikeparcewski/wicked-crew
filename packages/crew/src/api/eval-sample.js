@@ -54,8 +54,9 @@ export const ImportEvalCorpusSchema = z
 export const PAYLOAD_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 /**
- * Canonical JSON: object keys codepoint-sorted at every depth, arrays in order, `undefined`
- * members dropped (as `JSON.stringify` drops them), compact. Two structurally equal values
+ * Canonical JSON: object keys codepoint-sorted at every depth, arrays in order, compact.
+ * `undefined` follows `JSON.stringify` exactly: an `undefined` OBJECT member is dropped, while an
+ * `undefined` ARRAY entry becomes `null` (an array keeps its length). Two structurally equal values
  * serialize to the same bytes regardless of the key order they were built in.
  *
  * @param {unknown} value

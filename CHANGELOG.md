@@ -50,6 +50,15 @@ mentioned only where a daemon release depends on them.
   sha256 of the sample's full payload (id, description, kind, steering_type, signals), stamped by
   a producer that held the samples (the engine echoes no signals); the offline comparison keys
   comparability on it.
+  Codex round 7 — api-types **0.27.0**: `GovernanceEvalRuleCoverage` is completed with the
+  engine's other two serialized fields — `recall_only` (the active rules of the slice carrying no
+  effect, core #395) and `per_type` (the same partition per steering type: all seven keys, an
+  `{ exercised, unexercised }` count pair each — evals.rs `RuleCoverage` / `TypeCoverage`) — both
+  optional on the contract only because the daemon persists a run's coverage verbatim and validates
+  none of it (a consumer reads an absent `per_type` as "no per-type coverage", never as zeros). The
+  wire-contract test pins the engine's COMPLETE report shape — the fixture is evals.rs's own
+  pinned-serialization test — with key-exact pins in both directions, beside the pre-#394 report
+  (no coverage) and a two-field record, which still validate.
 - **The INTERNAL evals corpus** — `e2e/corpus/wicked-internal-corpus.json` pins five wicked
   repos (estate v0.16.6 · garden v12.31.0 · crew v0.7.24 · studio v0.5.0 · interactive v0.8.1) to
   the commit each tag resolved to plus an ACTION window of ≥ 50 real commits behind it (walk
@@ -133,6 +142,11 @@ mentioned only where a daemon release depends on them.
   candidate (every lookup error used to be swallowed as "not installed"); a regular file without
   execute permission stays `blocked`. A `tar` that fails or cannot be spawned inside `materialize`
   is a `ToolError` (exit 1), not a plain Error (exit 2) — Copilot.
+  Codex round 7: `run` inspects `.error` on the `rules ingest` and `rules eval` spawns BEFORE
+  reading their exit status or output — an engine removed (ENOENT) or made non-executable (EACCES)
+  after the `--version` probe answered is a TOOL FAILURE (exit 1) naming the step, the errno and the
+  executable, where it used to throw a TypeError on the undefined output (exit 2, the errno lost); a
+  step killed by a signal reports `signal SIG…` instead of `exit null`.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
@@ -149,6 +163,21 @@ mentioned only where a daemon release depends on them.
   An `exercised` count above the fired ids is valid warn-only exercise; a count BELOW, an id both
   fired and unexercised, or a duplicate unexercised id is the record contradicting itself — a
   reconciliation error. Two valid records always reconcile.
+  Codex round 7 — type filters: the engine's `--type` slices the samples and the coverage
+  DENOMINATOR but not the gate (evals.rs `run_evals` / `decide_lane_rules` vs `evaluate_sample`), so
+  a filtered run's rows may fire rules OUTSIDE the denominator — `fired: ['SECURITY-DENY']` beside
+  `exercised: 0` is a valid development-filtered record, which used to fail against itself. Each
+  record's coverage is now reconciled against the denominator it was produced under, reported per
+  side in `coverage_reconciliation`: unfiltered against the rows' blocking-fired ids (`'rows'`);
+  filtered against the engine's own `per_type[<filter>]` row (`'per_type'`), or not at all when the
+  record has none (`'n/a (engine reports no per-type coverage)'`). `per_type`, when present, must
+  sum to `exercised` and agree per type with the listed rows; a listed-unexercised id that fired is
+  a contradiction under any filter (the row types the rule into the slice). Two runs under
+  different filters are not comparable (`differing-type-filter`) and get no coverage delta; under
+  the same filter a fired id is typed into the slice only when the other side lists it unexercised
+  — `gained`/`lost` stay certain, `unidentified` counts what the other side cannot type, listed
+  candidates are asserted only when the silent side is complete, and a fired-only id is always
+  withheld by name (it may be a rule of another type, outside the denominator).
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
   eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
