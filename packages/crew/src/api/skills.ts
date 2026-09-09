@@ -22,8 +22,12 @@
  * (codex round 3). 409 (`{error, revision}`) is reserved for EXACTLY ONE thing: a stale
  * `expectedRevision` (a CAS conflict — the revision the client holds no longer matches). 404 an
  * unknown skill or file; 400 a body the schemas refuse or a READ path containment refuses (a read
- * has no verdict envelope); 503 an unseeded root or a `current` link that fails verification; 502
- * no plugin source to refresh from. Thin by design: validation is zod (strict, unknown keys named);
+ * has no verdict envelope); 503 an unseeded root, a `current` link that fails verification, or a
+ * skills root that is not the directory the store bound (a symlink standing in for it, an ancestor
+ * swapped under the daemon — `SkillsRootInvalidError`, codex round 4: every read and mutation is
+ * refused, none redirected); 502 no plugin source to refresh from. A refresh whose destination is
+ * refused (a symlinked `effective/` parent) is a 2xx `blocked` `path-invalid` envelope with nothing
+ * changed, like every other write. Thin by design: validation is zod (strict, unknown keys named);
  * everything else is the store's. Nothing here (or anywhere in the store) writes outside the
  * skills root — the user's own CLI directories are never touched (design v3.2 §1).
  */
@@ -42,6 +46,7 @@ import {
   SkillsPublishError,
   SkillsPublishInFlightError,
   SkillsRootChangedError,
+  SkillsRootInvalidError,
   SkillsSourceUnavailableError,
   SkillsUnseededError,
   UnknownSkillError,
@@ -112,6 +117,7 @@ function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof SkillsUnseededError) return reply.code(503).send({ error: err.message });
   if (err instanceof SkillsCurrentInvalidError) return reply.code(503).send({ error: err.message });
   if (err instanceof SkillsManifestCorruptError) return reply.code(503).send({ error: err.message });
+  if (err instanceof SkillsRootInvalidError) return reply.code(503).send({ error: err.message });
   if (err instanceof SkillsPublishError) return reply.code(503).send({ error: err.message });
   if (err instanceof SkillsSourceUnavailableError) return reply.code(502).send({ error: err.message });
   if (err instanceof UnknownSkillError) return reply.code(404).send({ error: err.message });

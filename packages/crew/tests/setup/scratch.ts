@@ -30,7 +30,11 @@ import { join } from 'node:path';
 const REMOVE_RETRIES = 20;
 const REMOVE_RETRY_DELAY_MS = 100;
 
-/** Give every directory under `root` (root included) its owner write bit back; best-effort. */
+/**
+ * Give every directory under `root` (root included) its owner `rwx` bits back (`| 0o700`, not the
+ * write bit alone): removing an entry needs a writable parent, and enumerating / descending into a
+ * locked or `0o000` directory needs `r` and `x` too. Best-effort; symlinks never followed.
+ */
 function restoreWriteBits(root: string): void {
   let st;
   try {

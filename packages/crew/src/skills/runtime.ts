@@ -47,6 +47,7 @@
 
 import { join, sep } from 'node:path';
 
+import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent, SystemSettings } from '../core/types.js';
 import { applySkillsSnapshotEnv, canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { resolveSkillsRoot, SKILLS_DIRNAME, SkillsSourceUnavailableError, SNAPSHOTS_DIRNAME, type SkillsStore } from './store.js';
@@ -123,6 +124,7 @@ export class SkillsRuntime {
       ready = await this.store.ensureReady();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      this.store.live.exported(null); // no published generation is handed to launches from here on
       if (err instanceof SkillsSourceUnavailableError) {
         applySkillsSnapshotEnv(null);
         // Say what actually happened to the variable: `applySkillsSnapshotEnv(null)` restores the
@@ -162,6 +164,7 @@ export class SkillsRuntime {
         .join('; ');
       const refusal = refusalPath(root, 'skills.blocked');
       applySkillsSnapshotEnv(refusal);
+      this.store.live.exported(null);
       const message = `first publish BLOCKED — no snapshot: ${named}`;
       this.log(`[skills] skills.blocked: ${message}; ${SKILLS_SNAPSHOT_ENGINE_ENV}=${refusal} so every launch fails loudly until the catalog is fixed and published`);
       return this.record({
@@ -178,11 +181,24 @@ export class SkillsRuntime {
   }
 
   /**
-   * One CoreEvent from the daemon's event listener: pins the current generation to the live run
-   * the event belongs to, releases (and reaps) at the run's terminal frame — live-generations.ts.
+   * One CoreEvent from the daemon's event listener: pins the generation the engine reports it
+   * handed the live run the event belongs to, releases (and reaps) at the run's terminal frame —
+   * live-generations.ts.
    */
   observe(event: CoreEvent): void {
     this.store.observeEvent(event);
+  }
+
+  /**
+   * One launch notice from the adapter (`CoreAdapter.onLaunch`): the daemon is handing a run or
+   * campaign to the engine — open its launch pin at the generation the env exports right now,
+   * BEFORE the engine call, so no spawn can read the env ahead of the pin — or the engine refused
+   * it (release the pin; nothing will spawn). The pin is otherwise released only by the engine's
+   * `skillsSnapshotHanded` report or the terminal frame — never by publish count (codex round 4).
+   */
+  launched(notice: LaunchNotice): void {
+    if (notice.status === 'handed') this.store.live.launched(notice.kind, notice.id);
+    else this.store.live.launchRejected(notice.kind, notice.id);
   }
 
   /**
@@ -201,6 +217,7 @@ export class SkillsRuntime {
       const message = err instanceof Error ? err.message : String(err);
       const refusal = refusalPath(this.store.root, 'skills.config');
       applySkillsSnapshotEnv(refusal);
+      this.store.live.exported(null);
       this.log(`[skills] skills.config: ${message}; ${SKILLS_SNAPSHOT_ENGINE_ENV}=${refusal}`);
       return this.record({
         state: 'config-error',
@@ -211,12 +228,15 @@ export class SkillsRuntime {
         findings: [{ kind: 'skills.config', severity: 'error', message }],
       });
     }
-    if (current === null) return null;
+    if (current === null) {
+      this.store.live.exported(null);
+      return null;
+    }
     applySkillsSnapshotEnv(current.path);
-    // Record the generation crew just handed to launches: a run reading `WICKED_SKILLS_SNAPSHOT`
-    // may spawn a worker before the engine's `skillsSnapshotHanded` is observed, so reaping keeps
-    // this generation until that event confirms which one the launch used (live-generations.ts).
-    this.store.live.launched(current.gen);
+    // Record the generation the env now hands to launches: every launch the adapter announces from
+    // here on opens its pin at this generation (and accumulates later publishes) until the engine's
+    // `skillsSnapshotHanded` says which one it used or the run ends (live-generations.ts).
+    this.store.live.exported(current.gen);
     const stateHome = canonicalCrewStateHome();
     const findings: SkillsHealthFinding[] = [];
     const fencedSnapshots = join(stateHome, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + sep;

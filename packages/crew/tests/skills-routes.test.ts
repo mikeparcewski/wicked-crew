@@ -8,7 +8,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, realpathSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -327,6 +327,44 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     const res = await app.inject({ method: 'POST', url: '/api/v1/skills/refresh-baseline', payload: { expectedRevision: 1 } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ verdict: 'clear', taken: [], added: [], removed: [], revision: 1 });
+  });
+
+  it('a refresh whose destination is refused (a symlinked effective parent) is a 200 blocked path-invalid envelope — never a 500 — with nothing changed (codex round 4)', async () => {
+    mkdirSync(join(s.upstream, 'skills', 'gamma', 'refs'), { recursive: true });
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'refs', 'new.md'), 'upstream added\n');
+    const outside = join(s.base, 'outside-refs');
+    mkdirSync(outside);
+    symlinkSync(outside, join(s.root, 'effective', 'skills', 'gamma', 'refs'));
+    const res = await app.inject({ method: 'POST', url: '/api/v1/skills/refresh-baseline', payload: { expectedRevision: 1 } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as SkillMutationResult;
+    expect(body).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(body.findings[0]).toMatchObject({ kind: 'path-invalid', skill: 'wicked-garden-gamma', file: 'skills/gamma/refs/new.md' });
+    expect(readdirSync(outside)).toEqual([]);
+    expect((await manifest()).revision).toBe(1);
+  });
+
+  it('a skills root replaced by a symlink after boot answers 503 on every route — nothing is read or written through it (codex round 4)', async () => {
+    const copy = join(s.base, 'copy');
+    cpSync(s.root, copy, { recursive: true });
+    rmSync(s.root, { recursive: true });
+    symlinkSync(copy, s.root);
+    for (const [method, url, payload] of [
+      ['GET', '/api/v1/skills', undefined],
+      ['GET', '/api/v1/skills/wicked-garden-gamma/files/SKILL.md', undefined],
+      ['PUT', '/api/v1/skills/wicked-garden-gamma/files/SKILL.md', { content: 'x', expectedRevision: 1 }],
+      ['POST', '/api/v1/skills/wicked-garden-delta/disable', { expectedRevision: 1 }],
+      ['POST', '/api/v1/skills/refresh-baseline', { expectedRevision: 1 }],
+      ['POST', '/api/v1/skills/publish', { expectedRevision: 1 }],
+      ['POST', '/api/v1/skills/analyze', undefined],
+    ] as const) {
+      const res = await app.inject({ method, url, ...(payload === undefined ? {} : { payload }) });
+      expect(res.statusCode, `${method} ${url}`).toBe(503);
+      expect((res.json() as { error: string }).error, `${method} ${url}`).toContain('symlink stands in for the skills root');
+    }
+    expect(existsSync(join(copy, 'snapshots'))).toBe(false);
+    expect(readFileSync(join(copy, 'effective', 'skills', 'gamma', 'SKILL.md'), 'utf8')).not.toBe('x');
+    rmSync(s.root);
   });
 });
 

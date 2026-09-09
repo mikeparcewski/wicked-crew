@@ -9,8 +9,13 @@
  *
  *   - `walkFiles` refuses a symlinked ROOT (the skill dir itself replaced by a link) and skips
  *     symlink entries (never followed, never copied, never hashed);
- *   - `copyFiles` lstat-walks every destination path and refuses a symlink component before it
- *     creates a parent or writes a byte (`assertNoSymlinkComponents`);
+ *   - `copyFiles` PREFLIGHTS every destination — each `rel` must be a safe relative path (no `..`,
+ *     `.`, empty or separator-carrying segment, no absolute/drive prefix, no NUL:
+ *     `assertSafeRelSegments`) and symlink-free (`assertNoSymlinkComponents`) — BEFORE it creates a
+ *     parent or writes a byte, independent of where the record came from (codex round 4: a
+ *     manifest-sourced skill name became a copilot-view path `views/…/<name>/SKILL.md`, and a
+ *     `../…` name would have joined out of the staging dir). A refused record writes NOTHING —
+ *     not the records ahead of it either;
  *   - `writeFileAtomic` refuses a symlink at the target, opens its temp file with `O_EXCL`
  *     (`'wx'` — fails on ANY pre-existing entry, a pre-planted symlink included) under an
  *     unpredictable name, and preserves the target's mode bits (an executable support script
@@ -61,6 +66,50 @@ export class SymlinkComponentError extends Error {
   }
 }
 
+/** A relative path whose SHAPE could join out of its root (`..`, an absolute piece, a separator in a
+ *  segment, a NUL) — refused before any lstat, whatever produced it. */
+export class UnsafePathSegmentError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: string,
+  ) {
+    super(`unsafe path ${JSON.stringify(path)}: ${reason} — the joined path must stay inside its root`);
+    this.name = 'UnsafePathSegmentError';
+  }
+}
+
+/**
+ * Why ONE path component is not a safe segment, or `null`. A segment may not be empty, `.` or `..`,
+ * may not carry a separator (`/` or `\`), a NUL, or a drive prefix (`C:`). The ONE rule every
+ * joined component in the store goes through (contain.ts, `copyFiles`, the view generator).
+ */
+export function unsafeSegmentReason(seg: string): string | null {
+  if (seg === '' || seg === '.' || seg === '..') return `segment ${JSON.stringify(seg)}`;
+  if (seg.includes('/') || seg.includes('\\')) return `segment ${JSON.stringify(seg)} carries a separator`;
+  if (seg.includes('\0')) return 'NUL byte';
+  if (/^[A-Za-z]:/.test(seg)) return `segment ${JSON.stringify(seg)} carries a drive prefix`;
+  return null;
+}
+
+/**
+ * Split a POSIX-relative path into segments, refusing anything that could escape: empty, absolute
+ * (`/…`), drive-prefixed, backslashes, NUL, and a `.` / `..` / empty segment. Throws
+ * `UnsafePathSegmentError`. Lexical only — the caller walks the result for symlinks.
+ */
+export function assertSafeRelSegments(rel: string): string[] {
+  if (rel === '') throw new UnsafePathSegmentError(rel, 'empty — the root itself is not a file');
+  if (rel.includes('\0')) throw new UnsafePathSegmentError(rel, 'NUL byte');
+  if (rel.includes('\\')) throw new UnsafePathSegmentError(rel, 'backslash — paths are POSIX');
+  if (rel.startsWith('/')) throw new UnsafePathSegmentError(rel, 'absolute');
+  if (/^[A-Za-z]:/.test(rel)) throw new UnsafePathSegmentError(rel, 'drive prefix');
+  const segments = rel.split('/');
+  for (const seg of segments) {
+    const why = unsafeSegmentReason(seg);
+    if (why !== null) throw new UnsafePathSegmentError(rel, why);
+  }
+  return segments;
+}
+
 /**
  * `join(root, ...segments)` after an lstat walk that refuses a symlink at ANY component — the
  * leaf included. A component that does not exist yet ends the walk (a not-yet-written leaf, or
@@ -70,6 +119,13 @@ export class SymlinkComponentError extends Error {
  * replaced by a link is a component, not a root).
  */
 export function assertNoSymlinkComponents(root: string, segments: ReadonlyArray<string>): string {
+  // The walk joins each segment onto its parent, so a `..` (or a separator smuggled inside a
+  // segment) would climb out of `root` before any lstat ran — refused lexically first, whatever
+  // the caller already checked (codex round 4: `copyFiles` used to trust its records' shape).
+  for (const seg of segments) {
+    const why = unsafeSegmentReason(seg);
+    if (why !== null) throw new UnsafePathSegmentError(segments.join('/'), why);
+  }
   let cur = root;
   for (const seg of segments) {
     cur = join(cur, seg);
@@ -147,16 +203,24 @@ export function hashFileSet(files: ReadonlyArray<FileRecord>): string {
 }
 
 /**
- * Copy every record to `destRoot/<rel>`, creating parents — after refusing a symlink at any
- * destination component (a pre-planted link under the effective root would otherwise redirect
- * the copy). `copyFileSync` carries the source mode bits (libuv `copyfile`), so an executable
- * baseline script lands executable.
+ * Copy every record to `destRoot/<rel>`, creating parents. EVERY destination is preflighted
+ * first — the shape (`assertSafeRelSegments`: a `..`, an absolute or drive-prefixed piece, a
+ * separator inside a segment, a NUL is refused, whatever produced the record) and the walk
+ * (`assertNoSymlinkComponents`: a pre-planted link under the destination would redirect the
+ * copy) — and only then does the first byte move, so a refused record leaves NOTHING written
+ * (codex round 4: the per-record check used to run only when the record was reached, after the
+ * ones ahead of it had landed). `copyFileSync` carries the source mode bits (libuv `copyfile`),
+ * so an executable baseline script lands executable.
  */
 export function copyFiles(files: ReadonlyArray<FileRecord>, destRoot: string): void {
+  const plan: Array<{ src: string; dest: string }> = [];
   for (const f of files) {
-    const dest = assertNoSymlinkComponents(destRoot, f.rel.split('/'));
+    const dest = assertNoSymlinkComponents(destRoot, assertSafeRelSegments(f.rel));
+    plan.push({ src: f.abs, dest });
+  }
+  for (const { src, dest } of plan) {
     mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(f.abs, dest);
+    copyFileSync(src, dest);
   }
 }
 

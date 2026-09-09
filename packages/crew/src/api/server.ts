@@ -977,8 +977,16 @@ export async function createServer(
       })();
     }
   });
+  // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
+  // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
+  // `skillsSnapshotHanded` report or the terminal frame (live-generations.ts). Unregistered on
+  // close like the event listener.
+  const offLaunch = adapter.onLaunch((notice) => {
+    skillsRuntime?.launched(notice);
+  });
   app.addHook('onClose', async () => {
     offEvent();
+    offLaunch();
   });
 
   // (The seat-health `--version` recovery probe that armed here is retired — perf recon

@@ -73,6 +73,7 @@ beforeAll(async () => {
     dbPath,
     projectsSupported: () => false,
     getSettings: async () => ({}),
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: () => () => {},
   } as unknown as CoreAdapter;
 

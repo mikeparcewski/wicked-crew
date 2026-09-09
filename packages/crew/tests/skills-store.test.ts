@@ -10,6 +10,7 @@
 
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -31,13 +33,16 @@ import {
   COPILOT_VIEW_SKILLS_REL,
   RevisionMismatchError,
   SkillsCurrentInvalidError,
+  SkillsManifestCorruptError,
+  SkillsPublishError,
   SkillsPublishInFlightError,
   SkillsRootChangedError,
+  SkillsRootInvalidError,
   SkillsSourceUnavailableError,
   SkillsStore,
   type SnapshotManifest,
 } from '../src/skills/store.js';
-import { hashFileSet, removeTreeForce, walkFiles } from '../src/skills/tree.js';
+import { hashFileSet, removeTreeForce, sha256Hex, walkFiles } from '../src/skills/tree.js';
 import { noVenv, VENV_READY_MARKER, type VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { CLOCK, FIXTURE_PLUGIN, REGISTERED_REFS, scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -582,6 +587,220 @@ describe('persisted manifest paths never escape the root (codex round 3)', () =>
     }
     // The request path is validated the same way through resolveSkillFile (the raw `..` never reaches disk).
     expect(() => s.store.resolveSkillFile('wicked-garden-gamma', '../../outside/victim.txt')).toThrow(SkillPathError);
+  });
+});
+
+describe('persisted skill KEYS never escape the root (codex round 4)', () => {
+  it("a crafted skill KEY (../../../../outside) is refused at PARSE — before it could ever become a copilot-view path — and so is a key that is not its dir's path-derived name", async () => {
+    s.store.seed();
+    const manifestPath = join(s.root, 'manifest.json');
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as { skills: Record<string, unknown> };
+    const gamma = raw.skills['wicked-garden-gamma'];
+    // The codex probe: the key becomes `views/copilot/.github/skills/<key>/SKILL.md` at publish.
+    const escaped = structuredClone(raw);
+    delete escaped.skills['wicked-garden-gamma'];
+    escaped.skills['../../../../outside'] = gamma;
+    writeFileSync(manifestPath, JSON.stringify(escaped));
+    expect(() => storeOver(s).manifest()).toThrow(SkillsManifestCorruptError);
+    expect(() => storeOver(s).manifest()).toThrow(/skill key/);
+    await expect(storeOver(s).publish(1)).rejects.toBeInstanceOf(SkillsManifestCorruptError);
+    expect(existsSync(join(s.root, 'snapshots'))).toBe(false); // nothing was staged, let alone copied
+    expect(existsSync(join(s.root, 'outside'))).toBe(false);
+    expect(existsSync(join(s.base, 'outside'))).toBe(false);
+    // A well-formed key that is NOT the path-derived name of its dir is refused too: the key, the
+    // directory and the invocation identity are one thing (a shadow of another skill's identity).
+    const shadow = structuredClone(raw);
+    delete shadow.skills['wicked-garden-gamma'];
+    shadow.skills['wicked-garden-beta-shadow'] = gamma; // sits at skills/gamma, which derives wicked-garden-gamma
+    writeFileSync(manifestPath, JSON.stringify(shadow));
+    expect(() => storeOver(s).manifest()).toThrow(/path-derived name/);
+    // A key without the prefix (a copilot-view segment that is not a skill name) is refused.
+    const bare = structuredClone(raw);
+    delete bare.skills['wicked-garden-gamma'];
+    bare.skills['gamma'] = gamma;
+    writeFileSync(manifestPath, JSON.stringify(bare));
+    expect(() => storeOver(s).manifest()).toThrow(/skill key/);
+    writeFileSync(manifestPath, JSON.stringify(raw)); // restore so teardown is quiet
+    expect(storeOver(s).manifest().revision).toBe(1);
+  });
+});
+
+describe('the skills root ITSELF is checked before every read and mutation (codex round 4)', () => {
+  const ops = (store: SkillsStore): Array<[string, () => unknown]> => [
+    ['manifest', () => store.manifest()],
+    ['isSeeded', () => store.isSeeded()],
+    ['listFiles', () => store.listFiles('wicked-garden-gamma')],
+    ['resolveSkillFile', () => store.resolveSkillFile('wicked-garden-gamma', 'SKILL.md')],
+    ['resolveSupportFile', () => store.resolveSupportFile('scripts/_python.sh')],
+    ['writeFile', () => store.writeFile('wicked-garden-gamma', 'SKILL.md', '---\nname: wicked-garden-gamma\n---\n\nhijack\n', 1)],
+    ['writeSupport', () => store.writeSupport('scripts/_python.sh', 'hijack\n', 1)],
+    ['enable', () => store.enable('wicked-garden-delta', 1)],
+    ['disable', () => store.disable('wicked-garden-delta', 1)],
+    ['reset', () => store.reset('wicked-garden-gamma', 1)],
+    ['add', () => store.add('wicked-garden-zeta', { 'SKILL.md': '---\nname: wicked-garden-zeta\n---\n' }, 1)],
+    ['replace', () => store.replace('wicked-garden-gamma', { 'SKILL.md': '---\nname: wicked-garden-gamma\n---\n' }, 1)],
+    ['refreshBaseline', () => store.refreshBaseline(1)],
+    ['analyze', () => store.analyze()],
+    ['currentSnapshot', () => store.currentSnapshot()],
+  ];
+  const treeDigest = (dir: string): string => JSON.stringify(walkFiles(dir).map((f) => [f.rel, sha256Hex(readFileSync(f.abs))]));
+
+  it('a root replaced by a symlink to a COPIED store after boot refuses EVERY operation (reads, writes, commit, publish, refresh, current) — and the copy is untouched', async () => {
+    s.store.seed(); // boot: the store binds the root's identity here
+    expect(s.store.manifest().revision).toBe(1);
+    const copy = join(s.base, 'copy');
+    cpSync(s.root, copy, { recursive: true });
+    const before = treeDigest(copy);
+    rmSync(s.root, { recursive: true });
+    symlinkSync(copy, s.root);
+    // The SAME instance (bound at boot) — every op is refused by the root check, none redirected.
+    for (const [name, op] of ops(s.store)) {
+      expect(op, name).toThrow(SkillsRootInvalidError);
+      expect(op, name).toThrow(/symlink stands in for the skills root/);
+    }
+    await expect(s.store.readFile('wicked-garden-gamma', 'SKILL.md')).rejects.toBeInstanceOf(SkillsRootInvalidError);
+    await expect(s.store.readSupport('scripts/_python.sh')).rejects.toBeInstanceOf(SkillsRootInvalidError);
+    await expect(s.store.publish(1)).rejects.toBeInstanceOf(SkillsRootInvalidError);
+    await expect(s.store.ensureReady()).rejects.toBeInstanceOf(SkillsRootInvalidError);
+    // A FRESH instance (a restart) refuses too — a link standing in for the root is never bound.
+    for (const [name, op] of ops(storeOver(s))) expect(op, name).toThrow(SkillsRootInvalidError);
+    // Reaping from the event listener never throws — it skips, and says so.
+    s.store.reapStale();
+    expect(s.warnings.some((w) => w.includes('reaping skipped') && w.includes('skills root'))).toBe(true);
+    // Nothing reached the copy: no file changed, no manifest commit, no snapshot, no staging.
+    expect(treeDigest(copy)).toBe(before);
+    expect(existsSync(join(copy, 'snapshots'))).toBe(false);
+    expect(readdirSync(copy).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+    rmSync(s.root); // the link only — teardown removes the copy with the base
+  });
+
+  it("an ANCESTOR swapped under the running daemon (the root's canonical path moved) is refused by the bound identity, although the root entry is a real directory through the link; a reroot binds afresh", () => {
+    const parent = join(s.base, 'parent');
+    const root = join(parent, 'root');
+    mkdirSync(parent, { recursive: true });
+    const store = new SkillsStore({
+      root,
+      registeredSkillRefs: () => REGISTERED_REFS,
+      provisionVenv: noVenv,
+      source: () => pluginSourceAt(s.upstream),
+      now: () => CLOCK,
+      warn: () => undefined,
+    });
+    store.seed(); // binds realpath(<base>/parent/root)
+    expect(store.manifest().revision).toBe(1);
+    renameSync(parent, join(s.base, 'parent-moved'));
+    symlinkSync(join(s.base, 'parent-moved'), parent);
+    expect(lstatSync(root).isDirectory()).toBe(true); // reached THROUGH the parent link — lstat alone would pass it
+    expect(() => store.manifest()).toThrow(SkillsRootInvalidError);
+    expect(() => store.manifest()).toThrow(/canonical path/);
+    expect(() => store.writeSupport('scripts/_python.sh', 'x', 1)).toThrow(SkillsRootInvalidError);
+    // The settings changed (`skills_root` re-applied): the store binds the identity it now sees.
+    store.reroot(root);
+    expect(store.manifest().revision).toBe(1);
+    rmSync(parent);
+  });
+});
+
+describe('provisioning paths are validated before ANY filesystem operation (codex round 4)', () => {
+  it('a symlinked `baseline/<hash>` refuses the publish before the provisioner runs, before any removal, marker write or chmod — the link target is untouched; a symlinked uv cache and a missing baseline dir are refused too', async () => {
+    let calls = 0;
+    const v = scaffold({
+      provisionVenv: async (baselineDir) => {
+        calls += 1;
+        mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+        writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+        return 'synced';
+      },
+    });
+    try {
+      v.store.seed();
+      const hash = v.store.manifest().baseline;
+      const hashDir = join(v.root, 'baseline', hash);
+      const outside = join(v.base, 'outside-baseline');
+      cpSync(hashDir, outside, { recursive: true });
+      // An env WITHOUT a ready marker under the link target: the old code removed it THROUGH the link.
+      mkdirSync(join(outside, '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(outside, '.venv', 'bin', 'half'), 'torn\n');
+      const modeBefore = lstatSync(outside).mode;
+      rmSync(hashDir, { recursive: true });
+      symlinkSync(outside, hashDir);
+      await expect(v.store.publish(1)).rejects.toBeInstanceOf(SkillsPublishError);
+      await expect(v.store.publish(1)).rejects.toThrow(/before any filesystem operation/);
+      await expect(v.store.publish(1)).rejects.toThrow(/crosses a symlink/);
+      expect(calls).toBe(0); // uv never ran
+      expect(existsSync(join(outside, '.venv', 'bin', 'half'))).toBe(true); // nothing removed through the link
+      expect(existsSync(join(outside, '.venv', VENV_READY_MARKER))).toBe(false); // no marker written
+      expect(lstatSync(outside).mode).toBe(modeBefore); // no chmod
+      expect(lstatSync(join(outside, '.venv', 'bin', 'half')).mode & 0o222).not.toBe(0);
+      expect(existsSync(join(v.root, 'snapshots'))).toBe(false);
+      expect(v.store.revision()).toBe(1);
+      // Restore a real baseline dir; a symlinked `.uv-cache` (where uv would write) is refused the same way.
+      rmSync(hashDir);
+      cpSync(outside, hashDir, { recursive: true });
+      rmSync(join(hashDir, '.venv'), { recursive: true });
+      symlinkSync(join(v.base, 'outside-cache'), join(v.root, '.uv-cache'));
+      await expect(v.store.publish(1)).rejects.toThrow(/\.uv-cache/);
+      expect(calls).toBe(0);
+      rmSync(join(v.root, '.uv-cache'));
+      // A manifest naming a baseline that is NOT on disk is refused, never provisioned into a void.
+      rmSync(hashDir, { recursive: true });
+      await expect(v.store.publish(1)).rejects.toThrow(/does not exist/);
+      expect(calls).toBe(0);
+      // With the baseline back, the same publish provisions and lands.
+      cpSync(outside, hashDir, { recursive: true });
+      rmSync(join(hashDir, '.venv'), { recursive: true });
+      const ok = await v.store.publish(1);
+      expect(ok.verdict).toBe('clear');
+      expect(calls).toBe(1);
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+});
+
+describe('mandates come from the PARSED frontmatter (codex round 4)', () => {
+  it('an escaped scalar counts: `mandates: ["wicked-garden-\\u0067amma"]` makes gamma core; a declared mandate the catalog lacks blocks with its frontmatter line; a non-string entry is frontmatter-invalid', async () => {
+    s.store.seed();
+    // beta's BODY no longer mentions gamma; the frontmatter DECLARES it — spelled with a YAML escape
+    // the raw text does not contain — plus a phantom in the Claude colon form.
+    const w = s.store.writeFile(
+      'wicked-garden-beta',
+      'SKILL.md',
+      '---\nname: wicked-garden-beta\nmandates:\n  - "wicked-garden-\\u0067amma"\n  - wicked-garden:phantom\n---\n\nNo prose mention of any skill here.\n',
+      1,
+    );
+    expect(w.verdict).toBe('clear');
+    expect(s.store.manifest().skills['wicked-garden-gamma']?.core).toBe(true);
+    const off = s.store.disable('wicked-garden-gamma', w.revision);
+    expect(off.verdict).toBe('blocked');
+    expect(off.findings[0]?.kind).toBe('core-disable');
+    const r = await s.store.publish(w.revision);
+    expect(r.verdict).toBe('blocked');
+    expect(r.findings.find((f) => f.kind === 'core-missing')).toMatchObject({
+      severity: 'blocking',
+      skill: 'wicked-garden-beta',
+      file: 'skills/beta/SKILL.md',
+      line: 5,
+      againstSkill: 'wicked-garden-phantom',
+    });
+    expect(s.store.currentSnapshot()).toBeNull();
+    // A frontmatter SCALAR mentioning a name is not prose and not a mandate: only the declared list
+    // and the body count (the frontmatter block is never regex-scanned).
+    const desc = s.store.writeFile(
+      'wicked-garden-beta',
+      'SKILL.md',
+      '---\nname: wicked-garden-beta\ndescription: unlike wicked-garden-ghost, this one ranks\n---\n\nUse the **wicked-garden-gamma** skill.\n',
+      w.revision,
+    );
+    expect(desc.verdict).toBe('clear');
+    const ok = await s.store.publish(desc.revision);
+    expect(ok.findings.filter((f) => f.kind === 'core-missing')).toEqual([]);
+    expect(ok.verdict).toBe('clear');
+    // A non-string entry is a strict-subset failure, never a silently skipped mandate.
+    const bad = s.store.writeFile('wicked-garden-beta', 'SKILL.md', '---\nname: wicked-garden-beta\nmandates: [123]\n---\n', ok.revision);
+    expect(bad.verdict).toBe('blocked');
+    expect(bad.findings[0]?.kind).toBe('frontmatter-invalid');
+    expect(bad.findings[0]?.evidence).toContain('non-empty strings');
   });
 });
 
@@ -1371,5 +1590,43 @@ describe('refresh-baseline — three-way per FILE (design v3 §7)', () => {
     const r = s.store.refreshBaseline(1);
     expect(r).toMatchObject({ verdict: 'clear', taken: [], kept: [], added: [], removed: [], revision: 1 });
     expect(r.baseline).toBe(r.previous_baseline);
+  });
+
+  it('is ATOMIC against a refused destination: an upstream plugin-version change AHEAD of an upstream-added file whose effective parent is a symlink → 2xx blocked path-invalid with NOTHING changed (codex round 4)', () => {
+    s.store.seed();
+    const before = JSON.stringify(s.store.manifest());
+    const pluginJson = join(s.root, 'effective', '.claude-plugin', 'plugin.json');
+    const pluginJsonBefore = readFileSync(pluginJson, 'utf8');
+    const baselinesBefore = s.store.baselinesOnDisk();
+    // Upstream: bump the plugin version (`.claude-plugin/…` sorts BEFORE `skills/…` — the old code
+    // copied it first) and add a file under gamma/refs.
+    upstreamWrite('.claude-plugin/plugin.json', '{"name": "wicked-garden", "version": "1.1.0"}\n');
+    upstreamWrite('skills/gamma/refs/new.md', 'new upstream file\n');
+    // Effective: `skills/gamma/refs` is a symlink to outside — the added file's destination crosses it.
+    const outside = join(s.base, 'outside-refs');
+    mkdirSync(outside);
+    symlinkSync(outside, join(s.root, 'effective', 'skills', 'gamma', 'refs'));
+    const r = s.store.refreshBaseline(1);
+    expect(r).toMatchObject({ verdict: 'blocked', revision: 1, taken: [], kept: [], added: [], removed: [], conflicts: [] });
+    expect(r.findings).toHaveLength(1);
+    expect(r.findings[0]).toMatchObject({ kind: 'path-invalid', severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/refs/new.md' });
+    expect(r.findings[0]?.evidence).toMatch(/crosses a symlink at refs/);
+    // NOTHING changed: the file ahead of the refusal was not copied, nothing landed through the
+    // link, the manifest is byte-identical, no baseline was captured, no staging lingers.
+    expect(readFileSync(pluginJson, 'utf8')).toBe(pluginJsonBefore);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(JSON.stringify(s.store.manifest())).toBe(before);
+    expect(s.store.revision()).toBe(1);
+    expect(s.store.baselinesOnDisk()).toEqual(baselinesBefore);
+    expect(readdirSync(s.root).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+    // With the destination fixed, the SAME refresh lands whole.
+    rmSync(join(s.root, 'effective', 'skills', 'gamma', 'refs'));
+    const ok = s.store.refreshBaseline(1);
+    expect(ok.verdict).toBe('clear');
+    expect(ok.revision).toBe(2);
+    expect(readFileSync(pluginJson, 'utf8')).toContain('1.1.0');
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'gamma', 'refs', 'new.md'), 'utf8')).toBe('new upstream file\n');
+    expect(ok.taken).toEqual(['wicked-garden-gamma']);
+    expect(s.store.baselinesOnDisk()).toEqual([ok.baseline]);
   });
 });

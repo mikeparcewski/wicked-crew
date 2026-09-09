@@ -33,6 +33,39 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — codex round-4 hardening** (PR #480). Six fixes to the crew-owned skills root:
+  (1) persisted skill KEYS are validated at manifest parse — a safe single segment in the skill-name
+  charset that IS the path-derived name of its `dir` (the copilot view lays a skill out under its
+  key) — and `copyFiles` preflights EVERY destination's shape (`..`, absolute, separator, NUL) and
+  symlink walk before the first byte moves, so a refused record writes nothing; (2) the skills root
+  ITSELF is checked before every read and mutation (`manifest`, every contained path, the manifest
+  commit, `current`, seed, provisioning, publish, reaping): a real directory, never a symlink, whose
+  canonical path is the one bound at boot — a root replaced by a link to a copied store (or an
+  ancestor swapped under the daemon) refuses every operation with a loud 503
+  (`SkillsRootInvalidError`), never redirects one; (3) provisioning validates `baseline/<hash>`
+  (content-hash charset, reached without crossing a link, a real directory), the `.venv` and marker
+  paths and the daemon's `.uv-cache` BEFORE `ensureVenv` removes, syncs, writes a marker or chmods
+  anything — a symlinked hash dir refuses the publish before uv runs; (4) refresh-baseline is ATOMIC
+  against refusal: the three-way merge is decided in memory, every destination (takes and removals)
+  is preflighted, then the baseline is captured, the takes are staged under the root and swapped —
+  a refused destination answers the normal 2xx `blocked` `path-invalid` envelope with nothing
+  changed (no file copied or removed, no baseline captured, revision unchanged) instead of a 500
+  after the files ahead of it had landed; (5) the core closure consumes DECLARED mandates from the
+  parsed YAML `mandates:` list (escaped scalars count, the Claude colon form is normalized, entries
+  must be non-empty strings, each positioned by its node's line) and scans prose over the BODY only —
+  the frontmatter block is never regex-scanned (verified over the live 12.32.0 catalog: the closure is
+  unchanged, 8 skills, 0 absent); (6) launch pins never expire by publish count: every launch the
+  daemon hands the engine (`CoreAdapter.onLaunch` — launchRun, resumeRun, confirmGate,
+  launchCampaign, resumeCampaign; a campaign's engine-launched node runs under the campaign's
+  umbrella pin) opens a pin at the exported generation BEFORE the engine call, accumulates every later
+  publish, and is released only by the engine's `skillsSnapshotHanded` report for that session, the
+  run's / campaign's terminal frame, or the engine rejecting the launch; reaping skips any generation
+  with an unreleased launch pin. Plus, from core#399's round 4: the atomic `current` relink creates
+  its transient link INSIDE `snapshots/` (`.tmp-current-<hex>`, a `snapshots/.tmp-*` entry core's
+  launch-time fence classifies) and renames it over `skills/current`, so no unclassified child ever
+  appears under `skills/` during a publish (the former `skills/current.tmp-<hex>` would have refused a
+  launch listing `skills/` in that window); `tests/fixtures/state-home-subtrees.json` mirrors core's
+  copy byte-for-byte (the v3.3 §1 sibling-generation fence and its residuals in the `$comment`).
 - **Skills keystone — codex round-3 hardening** (PR #480, on top of design v3.2). Nine fixes to the
   crew-owned skills root: (1) every PERSISTED manifest path is validated at parse — a skill `dir`, a
   baseline identifier or a file-record key carrying `..`/an absolute piece/a separator is a corrupt
@@ -266,9 +299,11 @@ mentioned only where a daemon release depends on them.
   await it) and AWAITED before a publish returns, marked complete on disk, locked read-only, and
   linked from a snapshot only once it exists. The env is REQUIRED, not best-effort: a bundle with a
   `pyproject.toml` whose env cannot be built (uv missing, sync error, lock failure) BLOCKS the
-  publish (`venv-failed`). Publish is SERIALIZED (one at a time; a concurrent one is a 409) and
-  root-bound (a `skills_root` change under a running publish aborts it — 409 — with nothing written
-  to either root). A published generation is locked read-only, and `current` is re-verified
+  publish (`venv-failed`). Publish is SERIALIZED (one at a time; a concurrent one wrote nothing and
+  answers a 2xx `blocked` `publish-in-flight` envelope) and root-bound (a `skills_root` change under
+  a running publish aborts it — a 2xx `blocked` `root-changed` envelope — with nothing written to
+  either root); 409 is reserved for a stale `expectedRevision` alone. A published generation is
+  locked read-only, and `current` is re-verified
   (`snapshot.json` shape — its rows may only name safe `skills/…` dirs deriving their own names —
   and content hash) on EVERY read, so a snapshot modified under a running daemon is refused by that
   daemon, not only after a restart. Ownership of a path follows the deepest `SKILL.md` ON DISK, so a

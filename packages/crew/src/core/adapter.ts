@@ -888,10 +888,27 @@ export function humanGatePhaseIds(wf: WorkflowDef): string[] {
  * endpoint and the WS fan-out funnel through this stable API — so when the
  * in-flight core-ts subscribe/teardown signature lands, only this file changes.
  */
+/**
+ * A launch the daemon hands the engine — or one the engine refused. `handed` is notified BEFORE the
+ * engine call (the skills seam opens a generation pin for the launch, so no worker spawn can read
+ * `WICKED_SKILLS_SNAPSHOT` ahead of the pin — live-generations.ts); `rejected` follows a call that
+ * threw (nothing will ever spawn for it). Every path a spawn can originate from goes through here:
+ * `launchRun` (POST /runs, onboarding, testing, steering), `resumeRun`, `confirmGate`,
+ * `launchCampaign`, `resumeCampaign`.
+ */
+export interface LaunchNotice {
+  kind: 'run' | 'campaign';
+  /** The run's session id (`LaunchRunInput.sessionId` / the run id) or the campaign's `CampaignDef.id`. */
+  id: string;
+  status: 'handed' | 'rejected';
+}
+export type LaunchListener = (notice: LaunchNotice) => void;
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
+  private readonly launchListeners = new Set<LaunchListener>();
   private closed = false;
   /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
   private readonly _builtinOverlayWritten = new Set<string>();
@@ -982,6 +999,39 @@ export class CoreAdapter {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Register a launch listener (`LaunchNotice`). Returns an unsubscribe function. */
+  onLaunch(listener: LaunchListener): () => void {
+    this.launchListeners.add(listener);
+    return () => {
+      this.launchListeners.delete(listener);
+    };
+  }
+
+  private notifyLaunch(notice: LaunchNotice): void {
+    for (const listener of this.launchListeners) {
+      try {
+        listener(notice);
+      } catch {
+        /* isolate a faulty listener — a launch is never failed by its observers */
+      }
+    }
+  }
+
+  /**
+   * Hand a launch to the engine with its notices: `handed` BEFORE the call (the pin is open before
+   * any spawn can read the env), `rejected` when the call throws (nothing will spawn — the pin is
+   * released). The result and the error pass through untouched.
+   */
+  private async handedToEngine<T>(kind: LaunchNotice['kind'], id: string, call: () => Promise<T>): Promise<T> {
+    this.notifyLaunch({ kind, id, status: 'handed' });
+    try {
+      return await call();
+    } catch (err) {
+      this.notifyLaunch({ kind, id, status: 'rejected' });
+      throw err;
+    }
   }
 
   /** The production council roster (static), parsed to seats. */
@@ -1178,17 +1228,17 @@ export class CoreAdapter {
           'deliverable floor to',
       );
     }
-    return this.core.launchRun(opts);
+    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts));
   }
 
   /** Resume a run from its persisted cursor → the status token. */
   resumeRun(runId: string): Promise<string> {
-    return this.core.resumeRun(runId);
+    return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
   /** Resolve a human gate: approve (optional amend) or reject → the status token. */
   confirmGate(runId: string, approve: boolean, amend?: string): Promise<string> {
-    return this.core.confirmGate(runId, approve, amend);
+    return this.handedToEngine('run', runId, () => this.core.confirmGate(runId, approve, amend));
   }
 
   /** Cancel a run → the status token. */
@@ -1236,7 +1286,9 @@ export class CoreAdapter {
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
-    return surface.launchCampaign(JSON.stringify(def));
+    // The campaign's DAG-node runs are launched INSIDE the engine (their ids are minted there), so
+    // the campaign is what the daemon can account for: pinned under `def.id` until its terminal frame.
+    return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(def)));
   }
 
   /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —
@@ -1258,7 +1310,8 @@ export class CoreAdapter {
 
   /** Resume a campaign from its persisted state → the campaign status token. */
   resumeCampaign(id: string): Promise<string> {
-    return this._campaigns('Resuming a campaign').resumeCampaign(id);
+    const surface = this._campaigns('Resuming a campaign');
+    return this.handedToEngine('campaign', id, () => surface.resumeCampaign(id));
   }
 
   /** Cancel a campaign (in-flight node Runs cancelled, the rest marked) → the status token. */

@@ -44,6 +44,7 @@ export async function collectLiveEndpointManifest(): Promise<EndpointManifest> {
     projectsSupported: () => false,
     getSettings: async () => ({}),
     // The daemon's single CoreEvent fan-out subscribes at boot; no event ever arrives here.
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: () => () => {},
   } as unknown as CoreAdapter;
   try {

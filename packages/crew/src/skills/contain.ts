@@ -17,7 +17,7 @@
  * decides WHERE.
  */
 
-import { assertNoSymlinkComponents, SymlinkComponentError } from './tree.js';
+import { assertNoSymlinkComponents, assertSafeRelSegments, SymlinkComponentError, unsafeSegmentReason, UnsafePathSegmentError } from './tree.js';
 
 /** `reserved`: a name the store itself owns at that level (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`). */
 export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root' | 'reserved';
@@ -45,19 +45,13 @@ export function decodePathParam(raw: string): string {
  * and `.` / `..` / empty segments.
  */
 export function validateRelSegments(rel: string): string[] {
-  const bad = (why: string): never => {
-    throw new SkillPathError('invalid', `invalid path ${JSON.stringify(rel)}: ${why}`);
-  };
-  if (rel === '') bad('empty — the root itself is not a file');
-  if (rel.includes('\0')) bad('NUL byte');
-  if (rel.includes('\\')) bad('backslash — paths are POSIX');
-  if (rel.startsWith('/')) bad('absolute');
-  if (/^[A-Za-z]:/.test(rel)) bad('drive prefix');
-  const segments = rel.split('/');
-  for (const seg of segments) {
-    if (seg === '' || seg === '.' || seg === '..') bad(`segment ${JSON.stringify(seg)}`);
+  // The ONE segment rule (tree.ts `assertSafeRelSegments`), spoken in the file manager's error type.
+  try {
+    return assertSafeRelSegments(rel);
+  } catch (err) {
+    if (err instanceof UnsafePathSegmentError) throw new SkillPathError('invalid', `invalid path ${JSON.stringify(rel)}: ${err.reason}`);
+    throw err;
   }
-  return segments;
 }
 
 /**
@@ -78,17 +72,16 @@ export function containedPath(root: string, segments: ReadonlyArray<string>): st
   // symlink walk ever ran. The request's own path is validated by `validateRelSegments`; this is
   // the same rule applied to the FINAL joined path so the trusted-`dir` half cannot escape either.
   for (const seg of segments) {
-    if (seg === '' || seg === '.' || seg === '..') {
-      throw new SkillPathError('invalid', `unsafe path segment ${JSON.stringify(seg)} — the joined path must stay inside the skills root`);
-    }
-    if (seg.includes('/') || seg.includes('\\') || seg.includes('\0') || /^[A-Za-z]:/.test(seg)) {
-      throw new SkillPathError('invalid', `unsafe path segment ${JSON.stringify(seg)} — a component may not carry a separator, a drive prefix, or a NUL`);
+    const why = unsafeSegmentReason(seg);
+    if (why !== null) {
+      throw new SkillPathError('invalid', `unsafe path segment ${JSON.stringify(seg)} (${why}) — the joined path must stay inside the skills root`);
     }
   }
   try {
     return assertNoSymlinkComponents(root, segments);
   } catch (err) {
     if (err instanceof SymlinkComponentError) throw new SkillPathError('symlink', err.message);
+    if (err instanceof UnsafePathSegmentError) throw new SkillPathError('invalid', err.message);
     throw err;
   }
 }

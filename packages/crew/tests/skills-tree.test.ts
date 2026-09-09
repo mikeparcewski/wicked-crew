@@ -20,10 +20,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   assertNoSymlinkComponents,
+  assertSafeRelSegments,
   copyFiles,
   makeTreeReadOnly,
   removeTreeForce,
   SymlinkComponentError,
+  UnsafePathSegmentError,
   walkFiles,
   writeFileAtomic,
 } from '../src/skills/tree.js';
@@ -73,6 +75,28 @@ describe('assertNoSymlinkComponents + copyFiles', () => {
     expect(() => assertNoSymlinkComponents(trap, ['scripts', 'run.sh'])).toThrow(/crosses a symlink at scripts/);
     // A not-yet-existing tail ends the walk: the write creates it.
     expect(assertNoSymlinkComponents(trap, ['fresh', 'file.md'])).toBe(join(trap, 'fresh', 'file.md'));
+  });
+
+  it('copyFiles PREFLIGHTS every destination: an unsafe record (`..`, absolute, empty, separator or drive prefix in a segment) is refused and NOTHING is written — not the safe records ahead of it (codex round 4)', () => {
+    const src = join(base, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'a.md'), 'a');
+    writeFileSync(join(src, 'b.md'), 'b');
+    const dest = join(base, 'dest');
+    mkdirSync(dest);
+    for (const bad of ['../escape.md', '/abs.md', '', 'x/../y.md', 'x/./y.md', 'seg\\win.md', 'C:evil.md', 'a//b.md']) {
+      expect(() => copyFiles([{ rel: 'ok/a.md', abs: join(src, 'a.md') }, { rel: bad, abs: join(src, 'b.md') }], dest), bad).toThrow(UnsafePathSegmentError);
+      expect(readdirSync(dest), bad).toEqual([]); // the safe record AHEAD of the refusal did not land either
+    }
+    expect(existsSync(join(base, 'escape.md'))).toBe(false);
+    // The walk itself refuses an unsafe segment lexically, before any lstat — whatever the caller checked.
+    expect(() => assertNoSymlinkComponents(dest, ['..', 'x'])).toThrow(UnsafePathSegmentError);
+    expect(() => assertNoSymlinkComponents(dest, ['views', 'a/b'])).toThrow(UnsafePathSegmentError);
+    expect(() => assertSafeRelSegments('views/copilot/.github/skills/../../../../outside/SKILL.md')).toThrow(/".."/);
+    expect(assertSafeRelSegments('views/copilot/.github/skills/wicked-garden-gamma/SKILL.md')).toHaveLength(6);
+    // A safe set lands whole.
+    copyFiles([{ rel: 'ok/a.md', abs: join(src, 'a.md') }, { rel: 'ok/b.md', abs: join(src, 'b.md') }], dest);
+    expect(walkFiles(dest).map((f) => f.rel)).toEqual(['ok/a.md', 'ok/b.md']);
   });
 });
 
