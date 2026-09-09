@@ -90,6 +90,14 @@ describe('hermetic env arming (tests/setup/hermetic-home.ts)', () => {
     expectArmed('WICKED_CREW_KNOWLEDGE_DB', join(homedir(), '.wicked-estate'));
   });
 
+  it('the skills root, source and mirror home are armed away from the real ~/.wicked-crew, ~/.claude and ~/.codex', () => {
+    // Every `createServer` boot runs the skills seam: un-armed it copies the developer's REAL
+    // installed plugin cache into ~/.wicked-crew/skills and mirrors into the real ~/.codex/skills.
+    expectArmed('WICKED_CREW_SKILLS_ROOT', join(homedir(), '.wicked-crew'));
+    expectArmed('WICKED_CREW_SKILLS_SOURCE', join(homedir(), '.claude'));
+    expectArmed('WICKED_CREW_SKILLS_MIRROR_HOME', join(homedir(), '.codex'));
+  });
+
   it('the setup file is registered in vitest.config.ts (the arming has no other entry point)', () => {
     const config = readFileSync(join(PKG_ROOT, 'vitest.config.ts'), 'utf8');
     expect(

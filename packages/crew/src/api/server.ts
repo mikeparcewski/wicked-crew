@@ -48,6 +48,11 @@ import { SeatHealthTracker } from './seat-health.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
+import { registeredSkillRefs } from '../skills/core-closure.js';
+import type { PluginSource } from '../skills/plugin-source.js';
+import { defaultMirrorHome, SkillsRuntime } from '../skills/runtime.js';
+import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
+import { uvSyncBaseline } from '../skills/venv.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   DEFAULT_WORKER_STALL_MINUTES,
@@ -282,6 +287,20 @@ export interface CreateServerOptions {
     /** Sweep cadence, ms (tests shorten it). */
     sweepIntervalMs?: number;
   };
+  /**
+   * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` (or
+   * `skills_root`) from the LIVE installed wicked-garden plugin, publishes a first immutable
+   * snapshot when none exists, exports `WICKED_SKILLS_SNAPSHOT` for the engine, and mirrors
+   * portable skills into the non-Claude CLIs' skill dirs (`skills_mirror`). `disabled: true`
+   * registers the routes without a store (they answer 503) — the manifest collector and tests that
+   * must not touch a plugin cache use it. `source` / `mirrorHome` aim a test at a fixture plugin
+   * root and a temp home; production omits both (live discovery, the real home).
+   */
+  skills?: {
+    disabled?: boolean;
+    source?: () => PluginSource | null;
+    mirrorHome?: string;
+  };
 }
 
 export async function createServer(
@@ -342,7 +361,30 @@ export async function createServer(
   // unset/empty restores the env this process booted with (an operator-exported
   // WICKED_WORKER_HOME — or the test harness's hermetic arming, crew#396 — survives), falling
   // back to the engine default ~/.wicked-worker when the process booted without one.
-  applyWorkerConfigRoot((await adapter.getSettings()).worker_config_root);
+  const bootSettings = await adapter.getSettings();
+  applyWorkerConfigRoot(bootSettings.worker_config_root);
+
+  // The skills seam (skills keystone): same boot + on-change discipline as the worker-config root.
+  // The store hangs off the resolved state home (never a `~/.wicked-crew` literal, crew#353) unless
+  // `skills_root` names another; the core-by-reference closure is seeded from the workflow catalog
+  // the daemon serves (built-ins + user-registered), read at use time so a later registration
+  // counts at the next publish. `apply` never throws: no installed plugin is a logged fallback.
+  let skillsRuntime: SkillsRuntime | undefined;
+  if (options?.skills?.disabled !== true) {
+    const source = options?.skills?.source;
+    skillsRuntime = new SkillsRuntime({
+      store: new SkillsStore({
+        root: resolveSkillsRoot(bootSettings.skills_root),
+        registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+        provisionVenv: uvSyncBaseline,
+        ...(source !== undefined ? { source } : {}),
+        warn: (m) => app.log.warn(m),
+      }),
+      mirrorHome: options?.skills?.mirrorHome ?? defaultMirrorHome(),
+      log: (m) => app.log.warn(m),
+    });
+    skillsRuntime.apply(bootSettings);
+  }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
   // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
@@ -880,6 +922,9 @@ export async function createServer(
     // (Copilot on #301).
     if (stallWatchdogArmed) stallWatchdog.ingest(event);
     terminals.route(event);
+    // Skills keystone: a live run pins the snapshot generation it may be reading; its terminal
+    // frame releases the pin and reaps generations no other live run holds (design v3 §1).
+    skillsRuntime?.observe(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
     broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
@@ -1040,6 +1085,7 @@ export async function createServer(
       studioRoot,
       dropDocLedgerRows,
       evalStore,
+      ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
     },
   );
 

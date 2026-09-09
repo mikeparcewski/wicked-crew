@@ -1326,6 +1326,298 @@ export interface SteeringLandingResult {
   error?: string;
 }
 
+// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.26.0) ──
+//
+// Skills are files (skills keystone, design v3). The daemon owns ONE effective `wicked-garden`-shaped
+// plugin root — `<state home>/skills/effective/`, the dependency closure of the installed plugin:
+// `.claude-plugin/{plugin.json,archetypes.json,components.json}`, `skills/**` (nested layout
+// verbatim), `scripts/**` minus CI + dev tools, `schemas/`, `docs/examples/`, `pyproject.toml`,
+// `uv.lock` — seeded from the LIVE installed plugin into a content-addressed
+// `baseline/<contentHash>/`. The operator edits files in place, replaces a skill, adds one,
+// disables one (manifest state — the files stay), resets one (content from the baseline; never
+// enablement). Nothing a worker runs is read from `effective/`: PUBLISHING validates the whole
+// tree and writes an IMMUTABLE `snapshots/<gen>/` (enabled skills only, closure included,
+// `snapshot.json`), then flips `current -> snapshots/<gen>`; the engine receives the resolved
+// snapshot path as `WICKED_SKILLS_SNAPSHOT`. `/skills` is a file manager whose EVERY mutation is
+// CAS-guarded (`expectedRevision`) and answers 2xx `{verdict, findings[], revision}` — a
+// `blocked` verdict is a normal response, a stale revision is the one 409.
+
+/** What a skill IS, from its frontmatter — fork-first: `context: fork` → fork worker (a subagent
+ *  body); else `user-invocable: true` → router (an operator-facing entry point); else module (a
+ *  nested reference skill routers/workers pull in). */
+export type SkillKind = 'router' | 'fork-worker' | 'module';
+
+/** `shipped` = every own file byte-identical to the baseline; `override` = a shipped skill with
+ *  edited/replaced files; `user-added` = no baseline (added through the API, or upstream dropped
+ *  it while the operator's edits were kept). */
+export type SkillProvenance = 'shipped' | 'override' | 'user-added';
+
+/** Where a baseline was captured from. `claude-plugin-cache` covers the marketplace cache AND the
+ *  hand-installed `plugins/wicked-garden` copy (both are "the installed plugin"); `checkout` is a
+ *  git working tree; `directory` any other explicit plugin-shaped directory. */
+export type SkillSourceKind = 'claude-plugin-cache' | 'checkout' | 'directory';
+
+/** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash and
+ *  shared read-only by every snapshot): `pending` until the sync answers, `synced` on success,
+ *  `failed` (logged) when uv errored, `skipped` when uv is not installed or the bundle carries no
+ *  `pyproject.toml`. */
+export type SkillVenvState = 'pending' | 'synced' | 'failed' | 'skipped';
+
+/** One captured baseline — keyed in `SkillManifest.baselines` by the content hash of its bundle
+ *  (sorted relative paths + sha256 digests), never by the version string alone: two installs of
+ *  "12.32.0" with different bytes are two baselines. */
+export interface SkillBaselineRecord {
+  /** `version` from the source's `.claude-plugin/plugin.json`. */
+  plugin_version: string;
+  source: { kind: SkillSourceKind; path: string };
+  /** HEAD sha for a `checkout` source; `null` otherwise (or when git could not answer). */
+  git_sha: string | null;
+  /** ISO-8601 instant the baseline was captured. */
+  captured_at: string;
+  venv: SkillVenvState;
+}
+
+export interface SkillEntry {
+  /** Plugin-relative directory, nested layout preserved (`skills/engineering/frontend`). Never
+   *  renamed — sibling `../` links depend on it. */
+  dir: string;
+  kind: SkillKind;
+  /** Core-by-reference: in the registered-reference closure — a `skill_ref` of a workflow the
+   *  daemon knows (core drop-ins, crew-generated, user-registered) or a skill one of those names in
+   *  its SKILL.md (repo-learn → search, mem). Disabling or renaming it is blocking. */
+  core: boolean;
+  /** `false` when the skill's files resolve `${CLAUDE_PLUGIN_ROOT}`, invoke `scripts/…` relative
+   *  to the cwd, or link `../` — Claude-only by nature; excluded from the non-Claude CLI mirror. */
+  portable: boolean;
+  /** Manifest state, orthogonal to content: a disabled skill's files stay in `effective/` and are
+   *  excluded from the next published snapshot. Reset never flips it. */
+  enabled: boolean;
+  provenance: SkillProvenance;
+  /** ISO-8601 instant of the last edit/replace/add through the API; `null` when untouched. */
+  editedAt: string | null;
+  /** A refreshed baseline changed a file this skill overrides — the new side is readable as
+   *  `?side=baseline` for diffing; the operator's content is kept. */
+  upgradeAvailable: boolean;
+  /** `upgradeAvailable`, or the last refresh found a name collision (upstream now ships a skill
+   *  under this user-added name at another dir). Cleared by reset / a later refresh. */
+  conflict: boolean;
+}
+
+/** One managed file (plugin-relative path → hashes). `baselineHash` `null` = user-added file;
+ *  `effectiveHash` `null` = a baseline file absent from `effective/` (removed by a direct
+ *  filesystem edit — reset restores it; the skill reads `override` until then). */
+export interface SkillFileRecord {
+  baselineHash: string | null;
+  effectiveHash: string | null;
+  /** The hash this file had in the most recent published snapshot; `null` = never published. */
+  lastPublishedHash: string | null;
+  /** The last refresh saw BOTH sides change (kept the effective side). */
+  conflict: boolean;
+}
+
+/** The most recent publish. */
+export interface SkillPublishedRecord {
+  gen: number;
+  /** Hash over the snapshot's files (sorted relative paths + sha256 digests), `snapshot.json` excluded. */
+  contentHash: string;
+  /** ISO-8601 instant. */
+  at: string;
+}
+
+export interface SkillMirrorLedgerEntry {
+  /** sha256 of the `SKILL.md` as the daemon last saw it (what it wrote, or what it adopted). */
+  hash: string;
+  /** `written` = the daemon placed it; `adopted` = a garden-named entry that pre-existed at first
+   *  run (tracked so it is kept in sync, never deleted). */
+  origin: 'written' | 'adopted';
+}
+
+/** The non-Claude CLI mirror's state (design v3 §8): what the daemon wrote/adopted where, so it
+ *  never overwrites an entry whose on-disk hash differs from its ledger and never deletes an entry
+ *  it did not write. Ledger keys are absolute target dirs (`~/.codex/skills`, …). */
+export interface SkillMirrorState {
+  ledger: Record<string, Record<string, SkillMirrorLedgerEntry>>;
+  /** Enabled skills the last pass skipped for being non-portable. */
+  skipped_non_portable: string[];
+  /** Per target: entries whose on-disk hash differs from the ledger — left alone, named here. */
+  foreign_modified: Record<string, string[]>;
+  /** ISO-8601 instant of the last mirror pass; `null` before the first. */
+  last_run: string | null;
+}
+
+/** `<skills root>/manifest.json` — the state of the daemon-owned root. */
+export interface SkillManifest {
+  version: 2;
+  /** Monotonic; bumped by EVERY mutation. Every mutating request carries it as `expectedRevision`. */
+  revision: number;
+  /** Content hash of the current baseline (`baseline/<hash>/`). */
+  baseline: string;
+  baselines: Record<string, SkillBaselineRecord>;
+  /** Keyed by frontmatter `name` (`wicked-garden-<dir segments joined by '-'>`). */
+  skills: Record<string, SkillEntry>;
+  /** Every managed file under `effective/`, plugin-relative. */
+  files: Record<string, SkillFileRecord>;
+  published: SkillPublishedRecord | null;
+  mirror: SkillMirrorState;
+}
+
+/** `GET /skills` 200 body. 503 when the root is not seeded (no installed plugin was found). */
+export interface SkillsManifestResponse {
+  manifest: SkillManifest;
+  revision: number;
+  /** The resolved skills root on the daemon host. */
+  root: string;
+  /** The published snapshot `current` resolves to, or `null` before the first publish. */
+  current: { gen: number; path: string } | null;
+}
+
+export interface SkillFileEntry {
+  /** POSIX path relative to the skill dir. */
+  path: string;
+  size: number;
+  sha256: string;
+  /** This file's manifest record (`null` for a file present on disk but not yet recorded). */
+  record: SkillFileRecord | null;
+}
+
+/** `GET /skills/:name/files` 200 body — the skill's OWN files (a nested skill's files are its own). */
+export interface SkillFileTree {
+  name: string;
+  dir: string;
+  enabled: boolean;
+  files: SkillFileEntry[];
+}
+
+/** `GET /skills/:name/files/*path` and `GET /skills/support/*path` 200 body — a typed, capped read.
+ *  Save is disabled on `truncated` or `binary`. `?side=baseline` reads the baseline copy instead
+ *  (the "new side" of a refresh conflict). */
+export interface SkillReadResult {
+  /** Plugin-relative path served. */
+  path: string;
+  /** UTF-8 text — the first 512 KB when `truncated`; `null` when `binary` (there is no text to show). */
+  content: string | null;
+  /** The file's FULL size in bytes. */
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+}
+
+export type SkillFindingKind =
+  | 'name-invalid'
+  | 'name-collision'
+  | 'name-mismatch'
+  | 'frontmatter-invalid'
+  | 'missing-skill-md'
+  | 'unregistered-skill'
+  | 'nested-skill-create'
+  | 'core-disable'
+  | 'core-rename'
+  | 'core-missing'
+  | 'support-file-edit'
+  | 'non-portable'
+  | 'unresolved-ref'
+  | 'path-invalid'
+  | 'unknown-skill'
+  | 'no-baseline'
+  | 'fs-drift'
+  | 'refresh-conflict'
+  | 'empty-snapshot';
+
+export type SkillFindingSeverity = 'warning' | 'blocking';
+
+/** `blocked` = at least one blocking finding (nothing was written / published); `warnings` =
+ *  proceeded with warnings; `clear` = nothing to say. */
+export type SkillVerdict = 'clear' | 'warnings' | 'blocked';
+
+export interface SkillConflictFinding {
+  kind: SkillFindingKind;
+  severity: SkillFindingSeverity;
+  /** The skill this finding is about, or `null` for a catalog / support-file finding. */
+  skill: string | null;
+  /** Plugin-relative file the finding names, or `null`. */
+  file: string | null;
+  /** 1-based line in `file`, when the finding is anchored to one. */
+  line: number | null;
+  /** The OTHER catalog skill this finding is against (a collision, a core guard), or `null`. */
+  againstSkill: string | null;
+  againstIsCore: boolean;
+  /** The concrete fact (names, paths, the parse error). */
+  evidence: string;
+  /** Why it matters. */
+  explanation: string;
+}
+
+/** `POST /skills/analyze` 200 body (a dry run of the publish validation) — and the base of every
+ *  mutation result. */
+export interface SkillAnalyzeResult {
+  verdict: SkillVerdict;
+  findings: SkillConflictFinding[];
+  revision: number;
+}
+
+/** Every `/skills` mutation's 200 body. `blocked` ⇒ nothing was written and `revision` is unchanged. */
+export interface SkillMutationResult extends SkillAnalyzeResult {
+  skill?: SkillEntry & { name: string };
+}
+
+/** `POST /skills/publish` 200 body. `snapshot` is `null` when the verdict is `blocked`. */
+export interface SkillPublishResult extends SkillAnalyzeResult {
+  snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
+}
+
+/** `POST /skills/refresh-baseline` 200 body — the three-way merge per FILE (baseline_old /
+ *  baseline_new / effective): unchanged → take new; user-modified & upstream-unchanged → keep;
+ *  both changed → keep + `conflict` (new side readable as `?side=baseline`); upstream-deleted &
+ *  user-unmodified → remove; upstream-deleted & user-modified → keep as user-added; a new upstream
+ *  skill under a user-added name → conflict. 502 when no plugin is installed. */
+export interface SkillRefreshResult extends SkillAnalyzeResult {
+  previous_baseline: string;
+  baseline: string;
+  plugin_version: string;
+  /** Skills whose files were replaced from the new baseline. */
+  taken: string[];
+  /** Skills that kept operator content (upstream unchanged, or a flagged conflict). */
+  kept: string[];
+  added: string[];
+  removed: string[];
+  /** Skills flagged `conflict` by this refresh. */
+  conflicts: string[];
+}
+
+/** The 409 body of every `/skills` mutation whose `expectedRevision` is stale. */
+export interface SkillRevisionConflict {
+  error: string;
+  /** The current revision — re-read `GET /skills` (or use this) and retry. */
+  revision: number;
+}
+
+/** The body of `POST /skills/:name/{enable,disable,reset}`, `POST /skills/publish` and
+ *  `POST /skills/refresh-baseline`. */
+export interface SkillRevisionBody {
+  expectedRevision: number;
+}
+
+/** `PUT /skills/:name/files/*path` and `PUT /skills/support/*path` body. `content` is UTF-8 text,
+ *  at most 512 KB. */
+export interface PutSkillFileBody {
+  content: string;
+  expectedRevision: number;
+}
+
+/** `POST /skills` body — add a user skill. `files` maps skill-relative POSIX paths to UTF-8 text
+ *  and must include `SKILL.md`; the skill lands at `skills/<name minus "wicked-garden-">`. */
+export interface AddSkillBody {
+  name: string;
+  files: Record<string, string>;
+  expectedRevision: number;
+}
+
+/** `POST /skills/:name/replace` body — replace the skill's OWN files wholesale (nested skills untouched). */
+export interface ReplaceSkillBody {
+  files: Record<string, string>;
+  expectedRevision: number;
+}
+
 // ── Governance wiki management (scoreboard + meta) ─────────────────────────────
 
 /**
@@ -2044,6 +2336,25 @@ export interface SystemSettings {
    * the engine default `~/.wicked-worker`.
    */
   worker_config_root?: string;
+  /**
+   * The daemon-owned SKILLS root (skills keystone; api-types 0.26.0, additive) — the directory
+   * holding `manifest.json`, `baseline/<hash>/`, `effective/`, `snapshots/<gen>/` and the
+   * `current` symlink. Modeled on `worker_config_root`: absolute path when set; `""` or absent =
+   * the default `<state home>/skills`. Applied at boot and on every settings change: the daemon
+   * re-roots its store, seeds it from the live installed plugin when it is empty, publishes a
+   * first snapshot when none exists, and exports `WICKED_SKILLS_SNAPSHOT=<resolved current
+   * snapshot>` for the engine's next worker spawn — no restart.
+   */
+  skills_root?: string;
+  /**
+   * Mirror the published snapshot's enabled, PORTABLE skills as `<name>/SKILL.md` into the
+   * non-Claude CLIs' skill dirs (`~/.codex/skills` always; `~/.pi/agent/skills`,
+   * `~/.config/opencode/skills`, `~/.copilot/skills` when those dirs exist) after every publish
+   * (api-types 0.26.0). ON by default (absent reads as `true`). Additive, never exclusive: the
+   * daemon adopts pre-existing garden-named entries into its ledger, never overwrites an entry
+   * whose hash differs from the ledger, and never deletes an entry it did not write.
+   */
+  skills_mirror?: boolean;
   /**
    * The repo-scoped launch delivery DEFAULT (crew#393; api-types 0.18.0, additive). What a
    * `POST /runs` with `repoRef` + a CODE-WORK `workflow` (a def with at least one

@@ -806,6 +806,175 @@
       "statusCodes": []
     },
     {
+      "method": "GET",
+      "path": "/api/v1/skills",
+      "requestType": null,
+      "responseType": "SkillsManifestResponse",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills",
+      "requestType": "AddSkillBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/disable",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/enable",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/:name/files",
+      "requestType": null,
+      "responseType": "SkillFileTree",
+      "statusCodes": [
+        200,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/:name/files/*",
+      "requestType": null,
+      "responseType": "SkillReadResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/skills/:name/files/*",
+      "requestType": "PutSkillFileBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/replace",
+      "requestType": "ReplaceSkillBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/reset",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/analyze",
+      "requestType": null,
+      "responseType": "SkillAnalyzeResult",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/publish",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillPublishResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/refresh-baseline",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillRefreshResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/support/*",
+      "requestType": null,
+      "responseType": "SkillReadResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/skills/support/*",
+      "requestType": "PutSkillFileBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/terminals",
       "requestType": null,

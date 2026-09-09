@@ -88,3 +88,11 @@ process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(base, 'wicked-core-settings.js
 process.env['WICKED_CREW_AUDIT_LOG'] = join(base, 'audit.log');
 process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(base, 'project-graphs');
 process.env['WICKED_CREW_KNOWLEDGE_DB'] = join(base, 'knowledge.db');
+// The skills seam (skills keystone): every `createServer` boot seeds the skills root from the
+// installed wicked-garden plugin and mirrors the published snapshot into the CLIs' skill dirs.
+// Un-armed, a test boot would (a) copy the developer's real plugin cache into ~/.wicked-crew/skills
+// and (b) write into the real ~/.codex/skills. Root → temp; source → a path that holds no plugin,
+// so the seed says "no source" (fast, no copy) unless a test aims it at a fixture; mirror home → temp.
+process.env['WICKED_CREW_SKILLS_ROOT'] = join(base, 'skills');
+process.env['WICKED_CREW_SKILLS_SOURCE'] = join(base, 'no-plugin-source');
+process.env['WICKED_CREW_SKILLS_MIRROR_HOME'] = join(base, 'mirror-home');

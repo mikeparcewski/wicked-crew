@@ -55,6 +55,8 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
+import { registerSkillsRoutes } from './skills.js';
+import type { SkillsRuntime } from '../skills/runtime.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -599,6 +601,10 @@ export interface RuntimeDeps {
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
    *  nothing under `~/.wicked-crew`. */
   evalStore?: EvalRunStore;
+  /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
+   *  (seeded from the installed plugin, published, mirrored); a directly-driven route set gets
+   *  none and `/skills*` answers 503 unless a test injects one over a fixture root. */
+  skills?: SkillsRuntime;
 }
 
 /**
@@ -3039,6 +3045,20 @@ export function registerRoutes(
         });
       }
     }
+    // skills_root / skills_mirror (skills keystone): the worker_config_root rule for the root; a
+    // strict boolean for the mirror — it writes into other CLIs' homes, so a typo must be a 400,
+    // never a silently-dropped key that leaves the operator believing they turned it off.
+    if (Object.hasOwn(patch, 'skills_root')) {
+      const root = patch.skills_root;
+      if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
+        return reply.code(400).send({
+          error: 'skills_root must be an absolute path, or "" for the default (<state home>/skills)',
+        });
+      }
+    }
+    if (Object.hasOwn(patch, 'skills_mirror') && typeof patch.skills_mirror !== 'boolean') {
+      return reply.code(400).send({ error: 'skills_mirror must be a boolean' });
+    }
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
     if (Object.hasOwn(patch, 'workerStallMinutes')) {
@@ -3122,6 +3142,8 @@ export function registerRoutes(
     const allowed: (keyof import('../core/types.js').CrewSystemSettings)[] = [
       'graphNodeLimit',
       'worker_config_root',
+      'skills_root',
+      'skills_mirror',
       'workerStallMinutes',
       'workerStallEscalateMinutes',
       'workerStallEscalateAction',
@@ -3151,6 +3173,9 @@ export function registerRoutes(
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
+    // Re-apply the skills settings the same way (skills keystone): re-root the store, seed/publish
+    // when needed, export WICKED_SKILLS_SNAPSHOT for the engine's next spawn, mirror per the flag.
+    runtime.skills?.apply(settings);
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {
@@ -3555,6 +3580,17 @@ export function registerRoutes(
     // The eval history store: `createServer` supplies a real one (state-home-rooted); a
     // directly-driven route set records nothing unless it injects one (no `~/.wicked-crew` writes).
     ...(runtime.evalStore !== undefined ? { evalStore: runtime.evalStore } : {}),
+  });
+
+  // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────
+  // Manifest + typed reads, guarded CAS writes, refresh/publish/analyze. `createServer` injects the
+  // runtime it booted (store seeded from the installed plugin, snapshot published, mirror applied);
+  // a directly-driven route set answers 503 unless a test injects one over a fixture root.
+  registerSkillsRoutes(app, {
+    ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
+    audit,
+    actorOf,
+    getSettings: () => adapter.getSettings(),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

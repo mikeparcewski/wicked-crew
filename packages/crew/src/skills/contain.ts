@@ -1,0 +1,89 @@
+/**
+ * Skill-scoped containment for the `/skills` file manager (design v3 §API).
+ *
+ * NOT `api/open-path.ts` `isInsideRoot`: that helper FOLLOWS symlinks (a `<root>/link-to-outside`
+ * resolves to its real target, which is the right question for "may I open this file the run
+ * produced" and the wrong one for "may I write here") and accepts the root itself. Writes into the
+ * effective plugin root need the stricter rule:
+ *
+ *   1. decode the URL path exactly once (a malformed escape is a bad path, not a 500);
+ *   2. normalize into segments — refuse empty, `.`, `..`, backslashes, NUL, absolute / drive-prefixed;
+ *   3. lstat-walk EVERY existing component and refuse a symlink anywhere on the way (the plugin
+ *      tree carries none; one appearing is either an attack or an accident, and either way the
+ *      write must not follow it);
+ *   4. the root itself is not a file — an empty remainder is refused.
+ *
+ * Atomic tmp+rename writes are the store's job (`tree.ts` `writeFileAtomic`); this module only
+ * decides WHERE.
+ */
+
+import { lstatSync } from 'node:fs';
+import { join } from 'node:path';
+
+export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root';
+
+/** A skill-relative path the store refuses. `reason` names why; the route answers 400 with `message`. */
+export class SkillPathError extends Error {
+  constructor(readonly reason: SkillPathReason, message: string) {
+    super(message);
+    this.name = 'SkillPathError';
+  }
+}
+
+/** Decode a URL wildcard once; a malformed escape (`%E0%A4%A`) is `invalid`. */
+export function decodePathParam(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new SkillPathError('invalid', `invalid path ${JSON.stringify(raw)}: malformed percent-escape`);
+  }
+}
+
+/**
+ * Validate a POSIX-relative path into its segments. Rejects: empty, NUL, backslashes (paths are
+ * POSIX; a backslash is never a separator here and never a filename), absolute / drive-prefixed,
+ * and `.` / `..` / empty segments.
+ */
+export function validateRelSegments(rel: string): string[] {
+  const bad = (why: string): never => {
+    throw new SkillPathError('invalid', `invalid path ${JSON.stringify(rel)}: ${why}`);
+  };
+  if (rel === '') bad('empty — the root itself is not a file');
+  if (rel.includes('\0')) bad('NUL byte');
+  if (rel.includes('\\')) bad('backslash — paths are POSIX');
+  if (rel.startsWith('/')) bad('absolute');
+  if (/^[A-Za-z]:/.test(rel)) bad('drive prefix');
+  const segments = rel.split('/');
+  for (const seg of segments) {
+    if (seg === '' || seg === '.' || seg === '..') bad(`segment ${JSON.stringify(seg)}`);
+  }
+  return segments;
+}
+
+/**
+ * `join(root, ...segments)` after an lstat walk refusing any symlink component. A component that
+ * does not exist yet ends the walk (a not-yet-written leaf, or its new parent dirs) — the write
+ * creates them. Any filesystem error other than ENOENT propagates: an unreadable component is not
+ * judged lexically.
+ */
+export function containedPath(root: string, segments: ReadonlyArray<string>): string {
+  if (segments.length === 0) throw new SkillPathError('root', 'the root itself is not a file');
+  let cur = root;
+  for (const seg of segments) {
+    cur = join(cur, seg);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw new SkillPathError(
+        'symlink',
+        `${segments.join('/')} crosses a symlink at ${seg} — the skills root never follows links`,
+      );
+    }
+  }
+  return join(root, ...segments);
+}

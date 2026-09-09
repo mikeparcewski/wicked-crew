@@ -212,6 +212,31 @@ mentioned only where a daemon release depends on them.
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
   `facet-only` + `rule_coverage` passthrough, the parsed snake_case guard, 501 parity, and the
   internal-corpus pin / samples / materialize / run semantics over a git fixture).
+- **Crew-owned skills root** (skills keystone, design v3; companion to wicked-core#396). The daemon
+  seeds `<state home>/skills` from the LIVE installed wicked-garden plugin (the marketplace cache's
+  highest version, else the hand-installed copy — never a repo checkout) into a content-hash
+  `baseline/<hash>/`, keeps the operator-edited `effective/` root beside it, and PUBLISHES immutable
+  `snapshots/<gen>/` (enabled skills only, dependency closure, `snapshot.json`) behind an atomically
+  flipped `current` link — handing the engine `WICKED_SKILLS_SNAPSHOT=<resolved snapshot>` at every
+  spawn. The newest three generations are kept; older ones are reaped only once no live run pins
+  them (pins fold from the CoreEvent stream). Publish validates the whole tree: every
+  `${CLAUDE_PLUGIN_ROOT}/…` and `../…` reference of an enabled skill must resolve inside the
+  snapshot (file:line on failure), and the core-by-reference closure (every registered workflow
+  `skill_ref` + transitive SKILL.md mandates) cannot be disabled or renamed.
+- **`/api/v1/skills*` file manager** — `GET /skills`, `GET /skills/:name/files[/*path]`,
+  `PUT /skills/:name/files/*path`, `GET|PUT /skills/support/*path`, `POST /skills`,
+  `POST /skills/:name/{enable,disable,reset,replace}`, `POST /skills/{refresh-baseline,publish,analyze}`.
+  Every mutation is CAS-guarded (`expectedRevision`; 409 only on a stale one) and answers 2xx
+  `{verdict, findings[], revision}` — a `blocked` verdict is a normal response. Skill-scoped
+  containment (lstat walk refusing symlinks, `..`/absolute/encoded escapes, nested-skill ownership),
+  atomic writes, typed capped reads (`content: null` on binary). Reset restores content only, never
+  enablement; refresh-baseline merges three-way per FILE. api-types **0.26.0** carries the
+  `Skill*` contract + the `skills_root` / `skills_mirror` settings.
+- **Portable-skill mirror** — after each publish the enabled, portable skills are mirrored as
+  `<name>/SKILL.md` into `~/.codex/skills` (and the pi/opencode/copilot skill dirs where present),
+  behind `skills_mirror` (default on). An adoption ledger in the manifest adopts pre-existing
+  garden entries, never overwrites a foreign-modified one, never deletes what the daemon did not
+  write; non-portable skills are noted, not mirrored.
 
 ## [0.7.25] — 2026-09-08
 
