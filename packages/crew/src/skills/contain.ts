@@ -22,8 +22,12 @@
 
 import { assertNoSymlinkComponents, assertSafeRelSegments, SymlinkComponentError, unsafeSegmentReason, UnsafePathSegmentError } from './tree.js';
 
-/** `reserved`: a name the store itself owns at that level (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`). */
-export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root' | 'reserved';
+/**
+ * `reserved`: a name the store itself owns at that level (`snapshot.json`, `manifest.json`, `current`,
+ * `views/`, `.venv`). `outside-closure`: a support path outside the bundle closure — the ONE allowlist
+ * of what the seed copies and a snapshot may carry (bundle.ts `inBundleClosure`; codex round 6).
+ */
+export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root' | 'reserved' | 'outside-closure';
 
 /** A skill-relative path the store refuses. `reason` names why; the route answers 400 with `message`. */
 export class SkillPathError extends Error {

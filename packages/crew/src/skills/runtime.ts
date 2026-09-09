@@ -19,9 +19,11 @@
  *                  `skills.fallback`. Finding `skills.fallback` (warning). The log line says which
  *                  of the two happened — "restored to <value>" or "left unset" — never one for the
  *                  other (Copilot on #480).
- *   blocked        the FIRST publish is blocked (a defective catalog: unresolved refs, a missing
- *                  required skill, a missing plugin catalog, a baseline env that could not be
- *                  provisioned). There is no snapshot to offer and the live cache is NOT a
+ *   blocked        the FIRST publish is blocked (a defective catalog: a reference that ESCAPES the
+ *                  plugin root, a missing required skill, a missing plugin catalog, a file outside
+ *                  the bundle closure, a baseline env that could not be provisioned — a reference
+ *                  whose target is merely MISSING is a warning and publishes, design v3.4 §1).
+ *                  There is no snapshot to offer and the live cache is NOT a
  *                  substitute — the engine input is pointed at a path that does not exist
  *                  (`<root>/refused/skills.blocked`), which the engine treats as an invalid explicit
  *                  path: every launch fails loudly naming it until the operator fixes the catalog
@@ -31,13 +33,13 @@
  *                  (`<root>/refused/skills.config`), same loud launch failure: recorded disablement
  *                  is never bypassed by "restoring" the live cache. Finding `skills.config` (error).
  *
- * What the engine is handed for skills is ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute
- * REAL path of `snapshots/<gen>` (v3.1 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set.
- * Beside it, always, `WICKED_CREW_STATE_HOME` = the canonical realpath of the daemon state home —
- * core derives the worker fence from it and cross-checks that the snapshot is
- * `<state home>/skills/snapshots/<gen>` (core#399 round 3). Because the root IS
- * `<state home>/skills` (asserted at boot, identity-checked on every operation), that cross-check
- * holds by construction — there is no "root outside the state home" state to report any more.
+ * What the engine is handed is EXACTLY ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL
+ * path of `snapshots/<gen>` (v3.1 §2, v3.4 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set,
+ * and `WICKED_CREW_STATE_HOME` is RETIRED as an engine input (v3.4 §2): core derives the state home
+ * it fences from the snapshot path's fixed layout (`<state home>/skills/snapshots/<gen>` — parent
+ * `snapshots`, grandparent `skills`, else a config error naming the path). Because the root IS
+ * `<state home>/skills` (asserted at boot, identity-checked on every operation), that layout holds
+ * by construction. The canonical state home is still REPORTED (`health().stateHome`) for humans.
  *
  * NOTHING here writes into the user's own CLI directories (design v3.2 §1): the v3 additive
  * mirror into the user's codex/pi/copilot/opencode skill dirs is withdrawn, and with it the
@@ -53,7 +55,7 @@ import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { applySkillsSnapshotEnv, canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
+import { applySkillsSnapshotEnv, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { SkillsSourceUnavailableError, type SkillsStore } from './store.js';
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
@@ -75,7 +77,9 @@ export interface SkillsHealth {
   current: { gen: number; path: string } | null;
   /** What `WICKED_SKILLS_SNAPSHOT` is exported as right now (`null` = unset / boot value). */
   engineInput: string | null;
-  /** What `WICKED_CREW_STATE_HOME` is exported as (the canonical state home core fences); `null` when `disabled`. */
+  /** The canonical daemon state home — reported for HUMANS (`GET /diagnostics`); NOT an engine input
+   *  (v3.4 §2: core reads only `WICKED_SKILLS_SNAPSHOT` and derives the state home from its layout).
+   *  `null` when `disabled`. */
   stateHome: string | null;
   findings: SkillsHealthFinding[];
 }
@@ -141,7 +145,7 @@ export class SkillsRuntime {
           root,
           current: null,
           engineInput: restored ?? null,
-          stateHome: process.env[CREW_STATE_HOME_ENGINE_ENV] ?? null,
+          stateHome: canonicalCrewStateHome(),
           findings: [{ kind: 'skills.fallback', severity: 'warning', message }],
         });
       }
@@ -153,7 +157,7 @@ export class SkillsRuntime {
         root,
         current: null,
         engineInput: refusal,
-        stateHome: process.env[CREW_STATE_HOME_ENGINE_ENV] ?? null,
+        stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.config', severity: 'error', message }],
       });
     }
@@ -173,9 +177,16 @@ export class SkillsRuntime {
         root,
         current: null,
         engineInput: refusal,
-        stateHome: process.env[CREW_STATE_HOME_ENGINE_ENV] ?? null,
+        stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.blocked', severity: 'error', message }],
       });
+    }
+    if (ready.published !== null && ready.published.verdict === 'warnings') {
+      // A first publish WITH warnings landed (design v3.4 §1): the snapshot is written and handed
+      // over; the warnings are upstream content bugs the operator fixes locally or upstream — say
+      // them once, by kind and file:line, so the day-one log is honest about what shipped.
+      const named = ready.published.findings.map((f) => `${f.kind}${f.file === null ? '' : ` ${f.file}${f.line === null ? '' : `:${f.line}`}`}`).join('; ');
+      this.log(`[skills] first publish landed with ${ready.published.findings.length} warning(s) (published as found; fix in the editor or upstream): ${named}`);
     }
     this.afterPublish();
     return this.lastHealth;
@@ -203,9 +214,9 @@ export class SkillsRuntime {
   }
 
   /**
-   * Export the VERIFIED current snapshot for the engine (with the fenced state home beside it).
-   * With nothing published (or an unverifiable `current`) the engine input is NOT touched here —
-   * `apply` decided it. Answers the health it recorded, or `null` when there was nothing to export.
+   * Export the VERIFIED current snapshot for the engine — the ONE engine input (v3.4 §2). With
+   * nothing published (or an unverifiable `current`) the engine input is NOT touched here — `apply`
+   * decided it. Answers the health it recorded, or `null` when there was nothing to export.
    */
   afterPublish(): SkillsHealth | null {
     let current: { gen: number; path: string } | null;
@@ -222,7 +233,7 @@ export class SkillsRuntime {
         root: this.store.root,
         current: null,
         engineInput: refusal,
-        stateHome: process.env[CREW_STATE_HOME_ENGINE_ENV] ?? null,
+        stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.config', severity: 'error', message }],
       });
     }

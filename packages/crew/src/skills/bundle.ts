@@ -1,29 +1,51 @@
 /**
  * The bundle = the DEPENDENCY CLOSURE of the plugin root (design v3 §4), not a directory heuristic:
  *
- *   .claude-plugin/{plugin.json, archetypes.json, components.json}   the manifest + the catalogs the
+ *   .claude-plugin/*                                                  the manifest + the catalogs the
  *                                                                     runtime reads (archetypes_v11.py
  *                                                                     raises when archetypes.json is
- *                                                                     absent) — all three REQUIRED at
+ *                                                                     absent) — plugin.json, archetypes.json
+ *                                                                     and components.json REQUIRED at
  *                                                                     publish (`REQUIRED_PLUGIN_CATALOGS`)
  *   skills/**                                                         nested layout VERBATIM — never renamed
  *   scripts/**  minus ci/ and the wg dev tools                        what `${CLAUDE_PLUGIN_ROOT}/scripts/…` resolves
- *   schemas/                                                          `../schemas/evidence.json` links
- *   docs/examples/                                                    `qe/refs/campaign.md` → the copyable workflows
+ *   schemas/**                                                        `../schemas/evidence.json` links
+ *   docs/examples/**                                                  `qe/refs/campaign.md` → the copyable workflows
  *   pyproject.toml, uv.lock                                           `uv run` from the plugin root needs them
  *
  * Hooks, the site, tests, `.venv`, the operator's `_meta/`, and everything else a plugin checkout
  * carries never come along. The content hash of THIS set is the baseline's identity.
+ *
+ * # ONE allowlist (codex round 6 on #480)
+ *
+ * `inBundleClosure` is the closure as a predicate over a plugin-relative path — the single source
+ * three consumers share: the seed/refresh copy (`pluginBundleFiles` keeps only members), the support
+ * file API (`store.resolveSupportFile` refuses a path outside it with an `outside-closure` blocked
+ * envelope) and publish/analyze (a file found under `effective/` outside it — a direct filesystem
+ * edit — is a BLOCKING `outside-closure` finding naming the path). What the seed would not copy,
+ * the API cannot add and a snapshot never ships.
+ *
+ * # No-follow BELOW the source root (codex round 6)
+ *
+ * The plugin root is resolved ONCE (`realPluginRoot` — an operator's symlinked config dir reaches
+ * it legitimately); every designated entry below it — the manifest dir and each file in it, each
+ * root file, each bundle directory and everything under it — is lstat-walked, and a symlink among
+ * them refuses the whole ingestion by name (`PluginSourceSymlinkError`): nothing is copied. A link
+ * inside a PRUNED subtree (`scripts/ci/`, `node_modules/`, `.venv/`) is never reached — it is not
+ * part of the closure, so it is neither copied nor judged.
  */
 
-import { existsSync } from 'node:fs';
+import { lstatSync, readdirSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { PLUGIN_MANIFEST_REL } from './plugin-source.js';
-import { toPosix, walkFiles, type FileRecord } from './tree.js';
+import { noFollowEntry, PLUGIN_MANIFEST_REL, PluginSourceSymlinkError, realPluginRoot } from './plugin-source.js';
+import { SKIP_FILE_NAMES, toPosix, walkTree, type FileRecord } from './tree.js';
 
 /** The plugin subdirectory skills live in (and the prefix of every manifest `dir`). */
 export const SKILLS_SUBDIR = 'skills';
+
+/** The manifest directory: every regular file directly under it rides the bundle (`.claude-plugin/*`). */
+export const PLUGIN_MANIFEST_DIRNAME = '.claude-plugin';
 
 /**
  * The runtime catalogs every snapshot MUST carry beside `plugin.json` (design v3 §4): garden's
@@ -33,12 +55,12 @@ export const SKILLS_SUBDIR = 'skills';
  * defective install the publish names, not a seed failure).
  */
 export const REQUIRED_PLUGIN_CATALOGS: ReadonlyArray<string> = [
-  '.claude-plugin/archetypes.json',
-  '.claude-plugin/components.json',
+  `${PLUGIN_MANIFEST_DIRNAME}/archetypes.json`,
+  `${PLUGIN_MANIFEST_DIRNAME}/components.json`,
 ];
 
-/** Root-level files copied when present (`plugin.json` is required — its absence means "not a plugin"). */
-const OPTIONAL_ROOT_FILES: ReadonlyArray<string> = [...REQUIRED_PLUGIN_CATALOGS, 'pyproject.toml', 'uv.lock'];
+/** Root-level files copied when present. */
+const BUNDLE_ROOT_FILES: ReadonlyArray<string> = ['pyproject.toml', 'uv.lock'];
 
 /** Directories copied whole (POSIX-relative to the plugin root). */
 const BUNDLE_DIRS: ReadonlyArray<string> = [SKILLS_SUBDIR, 'scripts', 'schemas', 'docs/examples'];
@@ -46,6 +68,26 @@ const BUNDLE_DIRS: ReadonlyArray<string> = [SKILLS_SUBDIR, 'scripts', 'schemas',
 /** Top-level `scripts/` entries that are dev tooling, never runtime: CI and the `wg` maintainer CLI. */
 function isScriptsDevDir(rel: string): boolean {
   return !rel.includes('/') && (rel === 'ci' || rel === 'wg' || rel.startsWith('wg-'));
+}
+
+/** The human spelling of the closure — for findings and refusals. */
+export const BUNDLE_CLOSURE_SPELLING = `${PLUGIN_MANIFEST_DIRNAME}/*, ${SKILLS_SUBDIR}/**, scripts/** (minus ci/ and wg*/), schemas/**, docs/examples/**, ${BUNDLE_ROOT_FILES.join(', ')}`;
+
+/**
+ * Whether a plugin-relative POSIX path is a member of the bundle closure (module header: the ONE
+ * allowlist). Lexical — the caller has already validated the path's shape.
+ */
+export function inBundleClosure(rel: string): boolean {
+  const segments = rel.split('/');
+  if (segments.length === 2 && segments[0] === PLUGIN_MANIFEST_DIRNAME) return true;
+  if (segments.length === 1) return BUNDLE_ROOT_FILES.includes(rel);
+  for (const dir of BUNDLE_DIRS) {
+    const prefix = `${dir}/`;
+    if (!rel.startsWith(prefix)) continue;
+    if (dir === 'scripts' && isScriptsDevDir(rel.slice(prefix.length).split('/')[0] ?? '')) return false;
+    return true;
+  }
+  return false;
 }
 
 /** The plugin root has no `.claude-plugin/plugin.json`. */
@@ -56,19 +98,41 @@ export class NotAPluginRootError extends Error {
   }
 }
 
-/** The bundle file set of `pluginRoot`, sorted by `rel`. */
+/**
+ * The bundle file set of `pluginRoot`, sorted by `rel` — every member of the closure the source
+ * carries, reached without following a link below the once-resolved root (module header). Throws
+ * `NotAPluginRootError` (no manifest) or `PluginSourceSymlinkError` (a link among the designated
+ * entries — nothing is copied by the caller either).
+ */
 export function pluginBundleFiles(pluginRoot: string): FileRecord[] {
-  const manifestAbs = join(pluginRoot, PLUGIN_MANIFEST_REL);
-  if (!existsSync(manifestAbs)) throw new NotAPluginRootError(pluginRoot);
-  const out: FileRecord[] = [{ rel: toPosix(PLUGIN_MANIFEST_REL), abs: manifestAbs }];
-  for (const rel of OPTIONAL_ROOT_FILES) {
-    const abs = join(pluginRoot, ...rel.split('/'));
-    if (existsSync(abs)) out.push({ rel, abs });
+  const root = realPluginRoot(pluginRoot);
+  if (root === null) throw new NotAPluginRootError(pluginRoot);
+  const manifestAbs = noFollowEntry(root, [PLUGIN_MANIFEST_DIRNAME, 'plugin.json'], pluginRoot);
+  if (manifestAbs === null || !lstatSync(manifestAbs).isFile()) throw new NotAPluginRootError(pluginRoot);
+  const out: FileRecord[] = [];
+  // `.claude-plugin/*`: every regular file directly under the manifest dir (the dir itself was walked
+  // no-follow on the way to plugin.json); a link among them is refused by name.
+  const manifestDir = join(root, PLUGIN_MANIFEST_DIRNAME);
+  for (const entry of readdirSync(manifestDir, { withFileTypes: true })) {
+    const rel = `${PLUGIN_MANIFEST_DIRNAME}/${entry.name}`;
+    if (entry.isSymbolicLink()) throw new PluginSourceSymlinkError(pluginRoot, rel, readlinkSync(join(manifestDir, entry.name)));
+    if (entry.isFile() && !SKIP_FILE_NAMES.has(entry.name)) out.push({ rel, abs: join(manifestDir, entry.name) });
+  }
+  for (const rel of BUNDLE_ROOT_FILES) {
+    const abs = noFollowEntry(root, [rel], pluginRoot);
+    if (abs !== null && lstatSync(abs).isFile()) out.push({ rel, abs });
   }
   for (const dir of BUNDLE_DIRS) {
-    const skip = dir === 'scripts' ? isScriptsDevDir : undefined;
-    for (const f of walkFiles(join(pluginRoot, ...dir.split('/')), skip)) {
-      out.push({ rel: `${dir}/${f.rel}`, abs: f.abs });
+    const abs = noFollowEntry(root, dir.split('/'), pluginRoot);
+    if (abs === null || !lstatSync(abs).isDirectory()) continue;
+    // Links are ENUMERATED, never skipped (`walkTree`): a linked `skills/<x>` dir or a linked file
+    // inside a skill is refused by name rather than silently left out of the bundle.
+    const tree = walkTree(abs, dir === 'scripts' ? isScriptsDevDir : undefined);
+    const link = tree.links[0];
+    if (link !== undefined) throw new PluginSourceSymlinkError(pluginRoot, `${dir}/${link.rel}`, link.target);
+    for (const f of tree.files) {
+      const rel = `${dir}/${f.rel}`;
+      if (inBundleClosure(rel)) out.push({ rel, abs: f.abs }); // the predicate is the source of truth; the prune above is its fast path
     }
   }
   return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));

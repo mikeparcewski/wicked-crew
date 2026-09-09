@@ -11,10 +11,22 @@
  * tests, and for an operator who deliberately wants a checkout or that hand copy. A machine without
  * the cache has no source at all: crew does not vendor garden — the seed says "install garden
  * first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine input unset.
+ *
+ * # No-follow BELOW the root (codex round 6 on #480)
+ *
+ * The source ROOT may legitimately be reached through a symlink — operators symlink `~/.claude`,
+ * and the marketplace cache may sit behind a linked config dir — so the root is resolved ONCE
+ * (`realPluginRoot`, the one place a link is followed) and every designated entry BELOW it is
+ * lstat-walked (`noFollowEntry`): the manifest dir, `plugin.json`, each catalog, each root file,
+ * each bundle directory and everything inside it. A symlink among them is refused by name
+ * (`PluginSourceSymlinkError`) — a seed refuses to start (the runtime's `skills.config`), a
+ * refresh answers a `blocked` envelope — and nothing is copied: a linked catalog or a linked skill
+ * dir would otherwise copy bytes from outside the declared source into the daemon's root and hand
+ * them to every worker.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 
@@ -41,10 +53,73 @@ export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env, home: stri
   return configured !== undefined && configured !== '' ? configured : join(home, '.claude');
 }
 
-/** The plugin manifest's `version` at `dir`, or `null` when `dir` is not a plugin root. */
+/**
+ * A designated entry of the plugin source is a symlink — the seed/refresh is refused by name and
+ * nothing is copied (module header). `entry` is the plugin-relative POSIX path of the link.
+ */
+export class PluginSourceSymlinkError extends Error {
+  constructor(
+    readonly root: string,
+    readonly entry: string,
+    readonly target: string,
+  ) {
+    super(
+      `plugin source ${root}: ${entry} is a symlink (-> ${target}) — the plugin source is copied into the daemon's skills root and ` +
+        'handed to every worker, so a link among its designated files or directories would copy whatever it reaches; ' +
+        'refused, nothing was copied (the source root itself may be reached through a link; its contents may not)',
+    );
+    this.name = 'PluginSourceSymlinkError';
+  }
+}
+
+/**
+ * The plugin root with every link resolved — the ONE place a link is followed (an operator's
+ * symlinked config dir reaches the root). `null` when it does not exist or is not a directory.
+ */
+export function realPluginRoot(dir: string): string | null {
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return null;
+    throw err;
+  }
+  return lstatSync(real).isDirectory() ? real : null;
+}
+
+/**
+ * `join(root, ...segments)` after lstat-walking every segment BELOW the canonical root: a symlink at
+ * any of them throws `PluginSourceSymlinkError` naming it; a component that does not exist (or sits
+ * below a regular file) answers `null`. `sourceSpelling` is the root as the operator spelled it, for
+ * the error.
+ */
+export function noFollowEntry(root: string, segments: ReadonlyArray<string>, sourceSpelling: string = root): string | null {
+  let cur = root;
+  for (let i = 0; i < segments.length; i += 1) {
+    cur = join(cur, segments[i] as string);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
+    if (st.isSymbolicLink()) throw new PluginSourceSymlinkError(sourceSpelling, segments.slice(0, i + 1).join('/'), readlinkSync(cur));
+  }
+  return cur;
+}
+
+/**
+ * The plugin manifest's `version` at `dir`, or `null` when `dir` is not a plugin root. The manifest
+ * is read NO-FOLLOW below the (once-resolved) root: a symlinked `.claude-plugin/` or `plugin.json`
+ * throws `PluginSourceSymlinkError` — never a version read through a link (codex round 6).
+ */
 export function pluginVersionAt(dir: string): string | null {
-  const manifest = join(dir, PLUGIN_MANIFEST_REL);
-  if (!existsSync(manifest)) return null;
+  const root = realPluginRoot(dir);
+  if (root === null) return null;
+  const manifest = noFollowEntry(root, PLUGIN_MANIFEST_REL.split(sep), dir);
+  if (manifest === null || !lstatSync(manifest).isFile()) return null;
   const parsed: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
   if (typeof parsed !== 'object' || parsed === null) return null;
   const version = (parsed as { version?: unknown }).version;

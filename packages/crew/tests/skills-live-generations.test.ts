@@ -309,4 +309,44 @@ describe('CoreAdapter.onLaunch — every launch the daemon hands the engine is a
     await adapter.confirmGate('no-such-run-2', false).catch(() => undefined);
     expect(notices.some((n) => n.id === 'no-such-run-2')).toBe(false);
   });
+
+  it('a launch listener that THROWS on `handed` FAILS the launch with that very error — the engine is never called, the other listeners see `rejected` (their pins released); a pin recorded on `handed` exists synchronously, ahead of the engine call, and holds the generation across publishes (codex round 6)', async () => {
+    const boom = new Error('pin ledger unavailable');
+    const notices: LaunchNotice[] = [];
+    adapter.onLaunch((n) => notices.push(n));
+    const offBoom = adapter.onLaunch((n) => {
+      if (n.status === 'handed') throw boom;
+    });
+    // Rejected with the LISTENER's error (identity, not a wrapper): the engine's answer — whatever
+    // the stub would have said — never came back, because the call was never made.
+    await expect(adapter.launchRun({ problem: 'probe failing listener', sessionId: 's-boom', clisJson: SEATS })).rejects.toBe(boom);
+    expect(notices.filter((n) => n.id === 's-boom').map((n) => n.status)).toEqual(['handed', 'rejected']);
+    offBoom();
+
+    // The positive half, with the real ledger behind the listener: the pin is open BEFORE the engine
+    // call, so no generation a launch is being recorded against can be reaped under it.
+    const sc = scaffold();
+    try {
+      sc.store.seed();
+      const runtime = new SkillsRuntime({ store: sc.store, log: () => undefined });
+      expect((await sc.store.publish(1)).verdict).toBe('clear');
+      expect(runtime.afterPublish()?.current?.gen).toBe(1);
+      let pinnedAtHandoff: number[] | null = null;
+      adapter.onLaunch((n) => {
+        runtime.launched(n);
+        if (n.status === 'handed' && n.id === 's-pin') pinnedAtHandoff = [...sc.store.live.pinned()];
+      });
+      await adapter.launchRun({ problem: 'probe pin', sessionId: 's-pin', clisJson: SEATS }).catch(() => undefined);
+      expect(pinnedAtHandoff).toEqual([1]); // recorded synchronously on `handed`, before any spawn could read the env
+      if (sc.store.live.openLaunches().includes('run:s-pin')) {
+        // The stub accepted the launch: the pin stays open until the engine accounts for it, whatever gets published meanwhile.
+        for (let i = 0; i < KEEP_GENERATIONS + 2; i += 1) expect((await sc.store.publish(sc.store.revision())).verdict).toBe('clear');
+        expect(sc.store.generationsOnDisk()).toContain(1);
+        runtime.observe(ev('sessionCompleted', 's-pin'));
+        expect(sc.store.generationsOnDisk()).not.toContain(1);
+      }
+    } finally {
+      removeScratch(sc.base);
+    }
+  });
 });

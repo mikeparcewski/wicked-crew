@@ -91,7 +91,10 @@
  * best-effort), re-checks the CAS, validates the WHOLE tree — frontmatter (strict subset), name ==
  * path, no cross-catalog name collision, the core closure COMPLETE (a missing registered ref or an
  * absent transitive mandate is BLOCKING), every `${CLAUDE_PLUGIN_ROOT}/<p>` and `../<p>` reference
- * of an enabled skill resolving INSIDE the would-be snapshot (never out of it), the plugin manifest
+ * of an enabled skill judged by TARGET (one that ESCAPES the plugin root is BLOCKING; one whose
+ * target is MISSING inside it is a WARNING — design v3.4 §1: an upstream content bug publishes as
+ * found, `verdict: 'warnings'`), every support file INSIDE the bundle closure (a file outside the
+ * ONE allowlist — bundle.ts `inBundleClosure` — is BLOCKING, `outside-closure`), the plugin manifest
  * naming the plugin and the `.claude-plugin/*` catalogs present AND well-formed, no unregistered
  * `SKILL.md` — then: allocates the generation from the FILESYSTEM (max existing + 1), writes
  * `snapshots/.staging-<random>/` (the snapshot files + the generated views), renames it to
@@ -154,6 +157,8 @@ import type {
   SkillVenvState,
 } from '../core/types.js';
 import {
+  BUNDLE_CLOSURE_SPELLING,
+  inBundleClosure,
   NotAPluginRootError,
   owningSkillDir,
   pluginBundleFiles,
@@ -179,7 +184,7 @@ import {
   type CatalogView,
 } from './guards.js';
 import { LiveGenerations } from './live-generations.js';
-import { discoverLivePlugin, gitStateOf, type PluginSource } from './plugin-source.js';
+import { discoverLivePlugin, gitStateOf, PluginSourceSymlinkError, type PluginSource } from './plugin-source.js';
 import {
   extractPluginRootRefs,
   extractRelativeRefs,
@@ -195,7 +200,6 @@ import {
   hashTree,
   makeTreeReadOnly,
   pruneEmptyDirs,
-  removeFiles,
   removeTreeForce,
   sha256Hex,
   SymlinkComponentError,
@@ -505,6 +509,9 @@ export function generationDirName(gen: number): string {
 }
 const GENERATION_DIR_RE = /^\d{6}$/;
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
+/** The persisted enums `snapshot.json` may carry — validated on read, never trusted as free text (codex round 6). */
+const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'checkout', 'directory']);
+const VENV_STATES: ReadonlySet<string> = new Set<SkillVenvState>(['pending', 'synced', 'failed', 'skipped']);
 /** POSIX write bits — a locked env / snapshot carries none (mirrors tree.ts). */
 const WRITE_BITS = 0o222;
 
@@ -676,20 +683,25 @@ export class SkillsStore {
 
   isSeeded(): boolean {
     this.assertRootIdentity(); // never answered THROUGH a link standing in for the root
-    return existsSync(this.manifestPath());
+    // lstat, not exists (codex round 6): a `manifest.json` that is a SYMLINK counts as seeded, so the
+    // seed never wipes `effective/` around it — and `manifest()` refuses it by name, never follows it.
+    return lstatOrNull(this.manifestPath()) !== null;
   }
 
   /** The manifest, or `SkillsUnseededError` / `SkillsManifestCorruptError` / `SkillsRootInvalidError`. */
   manifest(): SkillManifest {
     this.assertRootIdentity(); // every read and mutation begins here — the root is checked first
     const path = this.manifestPath();
-    let raw: string;
-    try {
-      raw = readFileSync(path, 'utf8');
-    } catch (err) {
-      if (errnoCode(err) === 'ENOENT') throw new SkillsUnseededError(this.rootDir);
-      throw err;
+    // NO-FOLLOW (codex round 6): the manifest is lstat'ed before it is read — a symlink standing in
+    // for `manifest.json` would route every catalog read (and every commit) through a file outside
+    // the skills root; it is refused by name, never followed. A missing manifest is "unseeded".
+    const st = lstatOrNull(path);
+    if (st === null) throw new SkillsUnseededError(this.rootDir);
+    if (st.isSymbolicLink()) {
+      throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is a symlink (-> ${readlinkSync(path)}) — the store never reads its state through a link`);
     }
+    if (!st.isFile()) throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is not a regular file`);
+    const raw = readFileSync(path, 'utf8');
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -824,6 +836,19 @@ export class SkillsStore {
     const parsed = this.parseSnapshotManifest(lexical);
     if (typeof parsed === 'string') return invalid(parsed);
     if (parsed.gen !== Number(dirName)) return invalid(`snapshot.json says gen ${parsed.gen} but the directory is ${dirName}`);
+    // The recorded baseline AUTHORIZES the `.venv` link below, so it is never trusted as free text
+    // (codex round 6): `parseSnapshotManifest` demanded the content-hash charset (no traversal fits
+    // in a 64-hex segment), and here it must also be a baseline THIS root's `manifest.json` knows —
+    // the metadata of a copied or crafted snapshot cannot name an env the store never captured.
+    let known: SkillManifest;
+    try {
+      known = this.manifest();
+    } catch (err) {
+      return invalid(`the recorded baseline ${parsed.gardenSource.baseline} cannot be cross-checked against ${MANIFEST_FILENAME} (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (known.baselines[parsed.gardenSource.baseline] === undefined) {
+      return invalid(`snapshot.json records baseline ${parsed.gardenSource.baseline}, which ${MANIFEST_FILENAME} does not know — the metadata is not this root's`);
+    }
     // EVERY entry is judged, links included (codex round 5): the walk enumerates symlinks instead of
     // skipping them, the hash covers them (path + link text), and the only link a generation may
     // carry is `.venv` at its root, pointing at THIS root's baseline env for the recorded baseline.
@@ -861,6 +886,15 @@ export class SkillsStore {
    * root's `baseline/<recorded baseline>/.venv`), and must resolve to that very directory (a
    * dangling or redirected link is refused — a worker's `uv run` through it would create or read
    * an env somewhere else). A `synced` snapshot WITHOUT the link is not what publish wrote either.
+   *
+   * The link is verified INDEPENDENTLY of the metadata text (codex round 6: an altered manifest,
+   * link and recorded hash used to let an outside-pointing `.venv` verify, because the expected
+   * target was JOINED from a `gardenSource.baseline` validated only as a string). The only two facts
+   * of `snapshot.json` this decision consumes are that the baseline is a 64-hex content hash
+   * (`parseSnapshotManifest`) that `manifest.json` knows (`verifyCurrent`); the env it must reach is
+   * then walked FROM THE ROOT with lstat — no link at `baseline`, `<hash>` or `.venv` — must be a
+   * REAL directory, and the link's canonical target must equal that directory's canonical path
+   * inside the canonical root.
    */
   private snapshotLinkProblem(snapshotDir: string, links: ReadonlyArray<LinkRecord>, parsed: SnapshotManifest): string | null {
     const venv = links.find((l) => l.rel === VENV_LINKNAME);
@@ -871,25 +905,47 @@ export class SkillsStore {
       return parsed.venv === 'synced' ? `snapshot.json records the baseline env as synced but the generation has no ${VENV_LINKNAME} link` : null;
     }
     if (parsed.venv !== 'synced') return `${VENV_LINKNAME} -> ${venv.target} is present although snapshot.json records the env as ${parsed.venv}`;
-    const expected = this.venvLinkText(parsed.gardenSource.baseline);
+    const hash = parsed.gardenSource.baseline; // 64-hex by parse; a manifest.json key by verifyCurrent
+    const expected = this.venvLinkText(hash);
     if (venv.target !== expected.text) return `${VENV_LINKNAME} -> ${venv.target} is not the baseline env link publish wrote (${expected.text})`;
+    let envDir: string;
+    try {
+      envDir = containedPath(this.rootDir, [BASELINE_DIRNAME, hash, VENV_LINKNAME]);
+    } catch (err) {
+      if (err instanceof SkillPathError) return `${VENV_LINKNAME} -> ${venv.target}: the baseline env is not reachable without following a link (${err.message})`;
+      throw err;
+    }
+    const envStat = lstatOrNull(envDir);
+    if (envStat === null || !envStat.isDirectory()) return `${VENV_LINKNAME} -> ${venv.target} names ${envDir}, which is not a real directory`;
     let resolved: string;
-    let expectedReal: string;
+    let rootReal: string;
     try {
       resolved = realpathSync(join(snapshotDir, VENV_LINKNAME));
-      expectedReal = realpathSync(expected.absTarget);
+      rootReal = realpathSync(this.rootDir);
     } catch (err) {
-      return `${VENV_LINKNAME} does not resolve to the baseline env ${expected.absTarget} (${errnoCode(err) ?? 'error'})`;
+      return `${VENV_LINKNAME} -> ${venv.target} does not resolve (${errnoCode(err) ?? 'error'})`;
     }
-    if (resolved !== expectedReal) return `${VENV_LINKNAME} resolves to ${resolved}, not the baseline env ${expectedReal}`;
+    const expectedReal = join(rootReal, BASELINE_DIRNAME, hash, VENV_LINKNAME);
+    if (resolved !== expectedReal) return `${VENV_LINKNAME} resolves to ${resolved}, not the baseline env ${expectedReal} inside the canonical root ${rootReal}`;
     return null;
   }
 
-  /** `snapshot.json` at `dir`, structurally validated — or the reason it is not one. */
+  /**
+   * `snapshot.json` at `dir`, read NO-FOLLOW and structurally validated — or the reason it is not
+   * one. Every field a decision consumes is regex- or enum-validated here (codex round 6):
+   * `gardenSource.baseline` must be a sha256 content hash (it authorizes the `.venv` link — a free
+   * string could carry `..`), `venv` one of the four states, `gardenSource.kind` a known source kind,
+   * every skill row a safe relative `skills/…` dir deriving its name.
+   */
   private parseSnapshotManifest(dir: string): SnapshotManifest | string {
+    const path = join(dir, SNAPSHOT_MANIFEST_FILENAME);
+    const st = lstatOrNull(path);
+    if (st === null) return `no ${SNAPSHOT_MANIFEST_FILENAME} in ${dir}`;
+    if (st.isSymbolicLink()) return `${SNAPSHOT_MANIFEST_FILENAME} in ${dir} is a symlink (-> ${readlinkSync(path)}) — the store never reads snapshot metadata through a link`;
+    if (!st.isFile()) return `${SNAPSHOT_MANIFEST_FILENAME} in ${dir} is not a regular file`;
     let raw: string;
     try {
-      raw = readFileSync(join(dir, SNAPSHOT_MANIFEST_FILENAME), 'utf8');
+      raw = readFileSync(path, 'utf8');
     } catch (err) {
       return `no readable ${SNAPSHOT_MANIFEST_FILENAME} in ${dir} (${errnoCode(err) ?? 'error'})`;
     }
@@ -907,9 +963,14 @@ export class SkillsStore {
     if (!s.skills.every(isSnapshotSkillRow)) {
       return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, portable: boolean} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
     }
-    if (typeof s.gardenSource !== 'object' || s.gardenSource === null || typeof s.gardenSource.baseline !== 'string') {
-      return `${SNAPSHOT_MANIFEST_FILENAME} has no gardenSource.baseline`;
+    const gs = s.gardenSource as Partial<SnapshotManifest['gardenSource']> | null | undefined;
+    if (typeof gs !== 'object' || gs === null || typeof gs.baseline !== 'string' || !CONTENT_HASH_RE.test(gs.baseline)) {
+      return `${SNAPSHOT_MANIFEST_FILENAME} has no gardenSource.baseline that is a sha256 content hash — the recorded baseline authorizes the ${VENV_LINKNAME} link and is never trusted as free text`;
     }
+    if (typeof gs.path !== 'string' || typeof gs.plugin_version !== 'string' || !SOURCE_KINDS.has(String(gs.kind))) {
+      return `${SNAPSHOT_MANIFEST_FILENAME} gardenSource is not {kind: ${[...SOURCE_KINDS].join('|')}, path, plugin_version, baseline}`;
+    }
+    if (!VENV_STATES.has(String(s.venv))) return `${SNAPSHOT_MANIFEST_FILENAME} has no venv state (${[...VENV_STATES].join('|')})`;
     if (!isSnapshotViews(s.views, s.skills as SnapshotSkillRow[])) {
       return `${SNAPSHOT_MANIFEST_FILENAME} has no well-formed views block ({copilot: {dir: "${COPILOT_VIEW_REL}", skills: [portable names]}})`;
     }
@@ -965,7 +1026,9 @@ export class SkillsStore {
   /**
    * Seed the root from the live plugin when it has no manifest. Idempotent: a seeded root is left
    * alone. A torn earlier seed (dirs but no manifest) is cleared and redone. Throws
-   * `SkillsSourceUnavailableError` when no plugin is installed.
+   * `SkillsSourceUnavailableError` when no plugin is installed, and `PluginSourceSymlinkError` when
+   * a designated entry of the source is a symlink (codex round 6) — BEFORE the root is created:
+   * nothing is copied, the runtime reports it as `skills.config` naming the entry.
    */
   seed(): SeedResult {
     if (this.isSeeded()) return { seeded: false, baseline: null, source: null };
@@ -1520,7 +1583,8 @@ export class SkillsStore {
 
   /**
    * Contain a root support path: not under `skills/` (those belong to a skill's endpoint), not a
-   * name the store itself owns (`RESERVED_SUPPORT_NAMES`), no symlinks.
+   * name the store itself owns (`RESERVED_SUPPORT_NAMES`), INSIDE the bundle closure (the ONE
+   * allowlist — bundle.ts `inBundleClosure`; codex round 6), no symlinks.
    */
   resolveSupportFile(rawRel: string): { abs: string; rel: string } {
     const segments = validateRelSegments(rawRel);
@@ -1536,6 +1600,16 @@ export class SkillsStore {
       throw new SkillPathError(
         'reserved',
         `${rel}: ${head} is reserved — the store generates it at publish (${SNAPSHOT_MANIFEST_FILENAME}, ${VIEWS_DIRNAME}/), links it (${VENV_LINKNAME}, ${CURRENT_LINKNAME}) or keeps its state in it (${MANIFEST_FILENAME}); a support file by that name would be overwritten or break the snapshot`,
+      );
+    }
+    // The bundle closure is the ONE allowlist (bundle.ts; codex round 6): a support path the seed
+    // would never copy (hooks/, tests/, the site, a stray docs/ page, the scripts/ dev tooling) is
+    // not a support file the store manages — it cannot be added or read through the API, and a
+    // snapshot never ships it. A write answers the 2xx `blocked` `outside-closure` envelope.
+    if (!inBundleClosure(rel)) {
+      throw new SkillPathError(
+        'outside-closure',
+        `${rel} is outside the bundle closure — the support tree a snapshot carries is exactly what the seed copies (${BUNDLE_CLOSURE_SPELLING}); hooks, tests, the site and everything else a plugin checkout holds never ride a snapshot`,
       );
     }
     return { abs: this.containedEffective(segments), rel };
@@ -1580,6 +1654,15 @@ export class SkillsStore {
    */
   private pathFinding(err: unknown, skill: string | null, file: string): SkillConflictFinding {
     if (!(err instanceof SkillPathError)) throw err;
+    if (err.reason === 'outside-closure') {
+      return finding(
+        'outside-closure',
+        'blocking',
+        `the bundle closure (${BUNDLE_CLOSURE_SPELLING}) is the ONE allowlist of what the seed copies and a snapshot may carry; a support file outside it would ship a tree the plugin contract excludes — nothing was written`,
+        err.message,
+        { skill, file },
+      );
+    }
     const explanation =
       err.reason === 'symlink'
         ? 'the skills root never follows symlinks — a link on the path (the skill directory itself, a child directory, or a baseline ancestor included) would redirect the operation outside the store'
@@ -1696,23 +1779,24 @@ export class SkillsStore {
     const own = this.ownFilesIn(effective, entry.dir, owned);
     // Preflight: every destination path — the files to restore AND the files to remove — must be
     // symlink-free from the root BEFORE anything is removed; a refusal is a blocked envelope.
+    const staging = join(this.rootDir, `${STAGING_PREFIX}reset-${randomBytes(6).toString('hex')}`);
+    const stagedDir = join(staging, 'new');
+    let place: Array<{ src: string; dest: string }>;
     try {
       for (const f of own) this.containedEffective(f.rel.split('/'));
-      for (const f of fresh) this.containedEffective(f.rel.split('/'));
+      place = fresh.map((f) => ({ src: join(stagedDir, ...f.rel.split('/')), dest: this.containedEffective(f.rel.split('/')) }));
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
-    // Stage the baseline bytes into a temp dir under the root, then remove + swap: a failure before
-    // the swap leaves effective/ untouched (the destinations were just verified symlink-free).
-    const staging = join(this.rootDir, `${STAGING_PREFIX}reset-${randomBytes(6).toString('hex')}`);
+    // Stage the baseline bytes under the root, then the park-and-place transaction (`swapStaged`,
+    // codex round 6): the own files are PARKED by rename — never removed outright — the staged files
+    // placed, and any failure in between rolls back, so the skill is byte-for-byte what it was and
+    // the revision unchanged. The old order removed the own files first, so a mid-swap failure left
+    // a torn skill behind a 500 with the manifest still claiming the previous content.
     try {
-      copyFiles(fresh, staging);
-      removeFiles(own, effective);
-      for (const f of fresh) {
-        const dest = this.containedEffective(f.rel.split('/'));
-        mkdirSync(dirname(dest), { recursive: true });
-        renameSync(join(staging, ...f.rel.split('/')), dest);
-      }
+      copyFiles(fresh, stagedDir);
+      const swap = this.swapStaged(name, entry.dir, staging, own, place);
+      if (swap !== null) return this.blocked(m, [swap]);
     } finally {
       removeTreeForce(staging);
     }
@@ -1863,13 +1947,11 @@ export class SkillsStore {
 
   /**
    * The atomic heart of `add` and `replace` (codex round 5): the replacement is WRITTEN in full into
-   * a staging dir under the root, THEN the skill's own files are parked (renamed) into a second
-   * staging dir and their empty parents pruned, THEN the staged files are renamed into place. Every
-   * step is a same-filesystem rename; any failure in the swap ROLLS BACK — what was placed is
-   * removed, what was parked is renamed back (mode bits ride the rename) — and answers a blocking
-   * `path-invalid` finding: the skill is byte-for-byte what it was, the revision unchanged. The
-   * removal used to come first, so a placement that failed (`x` a file, `x/y` needing it as a
-   * directory) had already destroyed the notes it could not replace.
+   * a staging dir under the root, THEN the skill's own files are parked and the staged files placed
+   * by the park-and-place transaction every multi-file swap shares (`swapStaged` — reset and refresh
+   * go through the same one, codex round 6). Any failure ROLLS BACK: the skill is byte-for-byte
+   * what it was, the revision unchanged. The removal used to come first, so a placement that failed
+   * (`x` a file, `x/y` needing it as a directory) had already destroyed the notes it could not replace.
    */
   private swapOwnFiles(
     name: string,
@@ -1878,57 +1960,83 @@ export class SkillsStore {
     targets: ReadonlyArray<{ rel: string; abs: string; text: string }>,
     modes: ReadonlyMap<string, number>,
   ): SkillConflictFinding | null {
-    const effective = this.effectiveDir();
     const staging = join(this.rootDir, `${STAGING_PREFIX}swap-${randomBytes(6).toString('hex')}`);
     const stagedDir = join(staging, 'new');
+    try {
+      // The whole replacement lands in staging first — a write failure here touches nothing live.
+      const place = targets.map((t) => {
+        const src = join(stagedDir, ...t.rel.split('/'));
+        const mode = modes.get(`${dir}/${t.rel}`);
+        writeFileAtomic(src, t.text, mode === undefined ? {} : { mode });
+        return { src, dest: t.abs };
+      });
+      return this.swapStaged(name, dir, staging, own, place);
+    } finally {
+      removeTreeForce(staging);
+    }
+  }
+
+  /**
+   * The park-and-place transaction EVERY multi-file swap goes through — replace/add (codex round 5),
+   * reset and refresh-baseline (codex round 6: both used to remove or overwrite effective files in
+   * place, so a filesystem error mid-swap left partial content behind a 500 while the manifest
+   * revision stayed where it was). `park` is every existing file the swap removes OR overwrites;
+   * `place` every staged source (already written under `staging/new`) and its destination.
+   *
+   *   1. park: every `park` file is RENAMED into `staging/old` (never deleted), then the directories
+   *      it left empty are pruned up to `effective/`;
+   *   2. place: every staged file is renamed into its destination (a destination that is now an
+   *      empty directory tree is removed first, parents are created).
+   *
+   * Every step is a same-filesystem rename. Any failure ROLLS BACK — what was placed is removed and
+   * its parents pruned, what was parked is renamed back (mode bits ride the rename) — and answers a
+   * blocking `path-invalid` finding: the tree is byte-for-byte what it was, and the caller commits
+   * nothing, so the revision is unchanged iff nothing changed. The caller owns `staging` and removes
+   * it afterwards.
+   */
+  private swapStaged(
+    skill: string | null,
+    label: string,
+    staging: string,
+    park: ReadonlyArray<FileRecord>,
+    place: ReadonlyArray<{ src: string; dest: string }>,
+  ): SkillConflictFinding | null {
+    const effective = this.effectiveDir();
     const parkedDir = join(staging, 'old');
     const parked: Array<{ from: string; to: string }> = [];
     const placed: string[] = [];
     try {
-      // 1. The whole replacement lands in staging first — a write failure here touches nothing live.
-      const staged = targets.map((t) => {
-        const src = join(stagedDir, ...t.rel.split('/'));
-        const mode = modes.get(`${dir}/${t.rel}`);
-        writeFileAtomic(src, t.text, mode === undefined ? {} : { mode });
-        return { src, dest: t.abs, rel: t.rel };
-      });
-      try {
-        // 2. Park the own files (rename, never delete), prune what they leave empty.
-        for (const f of own) {
-          const to = join(parkedDir, ...f.rel.split('/'));
-          mkdirSync(dirname(to), { recursive: true });
-          renameSync(f.abs, to);
-          parked.push({ from: f.abs, to });
-        }
-        for (const f of own) pruneEmptyDirs(dirname(f.abs), effective);
-        // 3. Place: a destination that is (now) an empty directory tree is removed first.
-        for (const p of staged) {
-          this.removeEmptyDirTree(p.dest);
-          mkdirSync(dirname(p.dest), { recursive: true });
-          renameSync(p.src, p.dest);
-          placed.push(p.dest);
-        }
-        return null;
-      } catch (err) {
-        for (const d of placed) rmSync(d, { force: true });
-        // Prune the parents of EVERY staged destination, not only the placed ones: the failing
-        // placement had already created its parent directories before its rename failed.
-        for (const p of staged) pruneEmptyDirs(dirname(p.dest), effective);
-        for (const { from, to } of parked) {
-          mkdirSync(dirname(from), { recursive: true });
-          renameSync(to, from);
-        }
-        const code = errnoCode(err);
-        return finding(
-          'path-invalid',
-          'blocking',
-          'the replacement could not be laid out as files (a path collided with an entry of the other kind on disk); the swap was rolled back — the skill is exactly what it was, nothing was written',
-          `${code === undefined ? 'error' : code}: ${err instanceof Error ? err.message : String(err)}`,
-          { skill: name, file: dir },
-        );
+      for (const f of park) {
+        const to = join(parkedDir, ...f.rel.split('/'));
+        mkdirSync(dirname(to), { recursive: true });
+        renameSync(f.abs, to);
+        parked.push({ from: f.abs, to });
       }
-    } finally {
-      removeTreeForce(staging);
+      for (const f of park) pruneEmptyDirs(dirname(f.abs), effective);
+      for (const p of place) {
+        this.removeEmptyDirTree(p.dest);
+        mkdirSync(dirname(p.dest), { recursive: true });
+        renameSync(p.src, p.dest);
+        placed.push(p.dest);
+      }
+      return null;
+    } catch (err) {
+      for (const d of placed) rmSync(d, { force: true });
+      // Prune the parents of EVERY destination, not only the placed ones: the failing placement had
+      // already created its parent directories before its rename failed.
+      for (const p of place) pruneEmptyDirs(dirname(p.dest), effective);
+      for (const { from, to } of parked) {
+        mkdirSync(dirname(from), { recursive: true });
+        renameSync(to, from);
+      }
+      const code = errnoCode(err);
+      return finding(
+        'path-invalid',
+        'blocking',
+        'the files could not be laid out on disk (a path collided with an entry of the other kind, or the filesystem refused a rename mid-swap); the swap was rolled back — every parked file is back byte-for-byte, nothing was written, the revision is unchanged',
+        `${code === undefined ? 'error' : code}: ${err instanceof Error ? err.message : String(err)}`,
+        { skill, file: label },
+      );
     }
   }
 
@@ -2107,9 +2215,29 @@ export class SkillsStore {
     const m = this.manifest();
     this.assertRevision(m, expectedRevision);
     const source = this.requireSource('no installed wicked-garden plugin found to refresh from');
-    const bundle = pluginBundleFiles(source.path);
-    const newHash = hashFileSet(bundle);
     const previous = m.baseline;
+    let bundle: FileRecord[];
+    try {
+      bundle = pluginBundleFiles(source.path);
+    } catch (err) {
+      if (!(err instanceof PluginSourceSymlinkError)) throw err;
+      // A symlink among the source's designated entries (codex round 6): refused by name as the
+      // normal 2xx `blocked` envelope — nothing copied, no baseline captured, the revision unchanged.
+      return {
+        verdict: 'blocked',
+        findings: [this.sourceSymlinkFinding(err)],
+        revision: m.revision,
+        previous_baseline: previous,
+        baseline: previous,
+        plugin_version: source.plugin_version,
+        taken: [],
+        kept: [],
+        added: [],
+        removed: [],
+        conflicts: [],
+      };
+    }
+    const newHash = hashFileSet(bundle);
     const base = (extra: Partial<SkillRefreshResult> = {}): SkillRefreshResult => ({
       verdict: 'clear',
       findings: [],
@@ -2245,6 +2373,7 @@ export class SkillsStore {
     // captured baseline is refused, never read through); a refusal here leaves `effective/` and
     // the manifest untouched and reaps the unreferenced capture.
     const staging = join(this.rootDir, `${STAGING_PREFIX}refresh-${randomBytes(6).toString('hex')}`);
+    const stagedDir = join(staging, 'new');
     try {
       let sources: FileRecord[];
       try {
@@ -2254,16 +2383,23 @@ export class SkillsStore {
         this.reapBaselines();
         return blocked;
       }
-      copyFiles(sources, staging);
-      for (const rel of removals) {
-        const dest = destinations.get(rel) as string;
-        rmSync(dest, { force: true });
-        pruneEmptyDirs(dirname(dest), this.effectiveDir());
-      }
+      copyFiles(sources, stagedDir);
+      // The park-and-place transaction (`swapStaged`, codex round 6): what the merge REMOVES and what
+      // a take OVERWRITES are both parked by rename before a single placement, so a failure mid-swap
+      // restores every effective file byte-for-byte, the manifest is never committed (the revision
+      // is unchanged) and the unreferenced new baseline is reaped — the old code removed and
+      // overwrote in place, leaving partial content behind a 500.
+      const park: FileRecord[] = removals.map((rel) => ({ rel, abs: destinations.get(rel) as string }));
       for (const rel of takes) {
         const dest = destinations.get(rel) as string;
-        mkdirSync(dirname(dest), { recursive: true });
-        renameSync(join(staging, ...rel.split('/')), dest);
+        if (lstatOrNull(dest)?.isFile() === true) park.push({ rel, abs: dest });
+      }
+      const place = takes.map((rel) => ({ src: join(stagedDir, ...rel.split('/')), dest: destinations.get(rel) as string }));
+      const swap = this.swapStaged(null, `${BASELINE_DIRNAME}/${newHash}`, staging, park, place);
+      if (swap !== null) {
+        const blocked = base({ verdict: 'blocked', findings: [swap] });
+        this.reapBaselines();
+        return blocked;
       }
     } finally {
       removeTreeForce(staging);
@@ -2637,9 +2773,21 @@ export class SkillsStore {
       .sort();
   }
 
+  /** The 2xx `blocked` finding for a plugin source whose designated entry is a symlink (seed/refresh; codex round 6). */
+  private sourceSymlinkFinding(err: PluginSourceSymlinkError): SkillConflictFinding {
+    return finding(
+      'path-invalid',
+      'blocking',
+      'the plugin source is copied INTO the skills root and handed to every worker; a symlink among its designated files or directories would copy whatever the link reaches — the ingestion is refused by name and nothing was copied (the source root itself may be reached through a link; its contents may not)',
+      err.message,
+      { file: err.entry },
+    );
+  }
+
   /**
-   * Whole-tree validation (v3 §API "unresolved refs blocking at publish", §5 core closure, §6
-   * nested ownership). Mutates `m` IN MEMORY for bookkeeping only (drift into the file records,
+   * Whole-tree validation (v3 §API refs — an ESCAPE blocking, a MISSING target a warning per design
+   * v3.4 §1 —, §5 core closure, §6 nested ownership, the bundle closure as the ONE allowlist —
+   * codex round 6). Mutates `m` IN MEMORY for bookkeeping only (drift into the file records,
    * derived fields, the core closure) — the caller decides whether that is persisted (publish
    * commits it; analyze and a blocked publish drop it). Never touches `effective/`.
    */
@@ -2797,7 +2945,23 @@ export class SkillsStore {
     for (const f of scanned) {
       const owner = ownerOf.get(f.rel) ?? null;
       if (owner === null) {
-        if (!f.rel.startsWith(`${SKILLS_SUBDIR}/`)) snapshotFiles.push({ rel: f.rel, abs: f.abs });
+        if (f.rel.startsWith(`${SKILLS_SUBDIR}/`)) continue;
+        // A support file is admitted ONLY inside the bundle closure (the ONE allowlist, bundle.ts;
+        // codex round 6): a file outside it under effective/ got there by a direct filesystem edit
+        // (the API refuses the path) — reported BLOCKING by name, never shipped.
+        if (!inBundleClosure(f.rel)) {
+          findings.push(
+            finding(
+              'outside-closure',
+              'blocking',
+              `a file outside the bundle closure (${BUNDLE_CLOSURE_SPELLING}) sits under effective/ — a direct filesystem edit the API would have refused; a snapshot never ships it: remove it (or move it into the closure) and publish again`,
+              `${f.rel} is outside the bundle closure`,
+              { file: f.rel },
+            ),
+          );
+          continue;
+        }
+        snapshotFiles.push({ rel: f.rel, abs: f.abs });
         continue;
       }
       const name = registered.get(owner);
@@ -2834,19 +2998,30 @@ export class SkillsStore {
         const buf = readFileSync(f.abs);
         if (looksBinary(buf)) continue;
         const text = buf.toString('utf8');
+        // Severity follows the TARGET (design v3.4 §1): a reference that ESCAPES the plugin root is a
+        // boundary claim — blocking; one whose target is MISSING inside it is a content bug the
+        // skill's author owns — a warning, published as found (the live 12.32.0 plugin carries 18 of
+        // them; garden's own structural gate treats them as advisory, wicked-garden#1111 tracks them).
+        const anchor = (line: number): { skill: string; file: string; line: number } => ({ skill: name, file: f.rel, line });
         for (const ref of extractPluginRootRefs(text)) {
           const verdict = resolves(ref.path);
           if (verdict === 'ok') continue;
           findings.push(
-            finding(
-              'unresolved-ref',
-              'blocking',
-              verdict === 'escape'
-                ? 'a `${CLAUDE_PLUGIN_ROOT}` reference must stay inside the plugin root; one that climbs out of it (`..`) reaches whatever lies beside the snapshot on the worker host'
-                : 'the snapshot is the plugin root workers see; a `${CLAUDE_PLUGIN_ROOT}` reference that does not resolve inside it fails at first use',
-              `\${CLAUDE_PLUGIN_ROOT}/${ref.path}${verdict === 'escape' ? ' — escapes the plugin root' : whyMissing(ref.path)}`,
-              { skill: name, file: f.rel, line: ref.line },
-            ),
+            verdict === 'escape'
+              ? finding(
+                  'unresolved-ref',
+                  'blocking',
+                  'a `${CLAUDE_PLUGIN_ROOT}` reference must stay inside the plugin root; one that climbs out of it (`..`) reaches whatever lies beside the snapshot on the worker host — a boundary the snapshot must not cross',
+                  `\${CLAUDE_PLUGIN_ROOT}/${ref.path} — escapes the plugin root`,
+                  anchor(ref.line),
+                )
+              : finding(
+                  'unresolved-ref',
+                  'warning',
+                  "the snapshot is the plugin root workers see; a `${CLAUDE_PLUGIN_ROOT}` reference that names nothing inside it fails at first use — a content bug the skill's author owns (fix it in the editor, or upstream), published as found",
+                  `\${CLAUDE_PLUGIN_ROOT}/${ref.path}${whyMissing(ref.path)}`,
+                  anchor(ref.line),
+                ),
           );
         }
         for (const ref of extractRelativeRefs(text)) {
@@ -2854,13 +3029,21 @@ export class SkillsStore {
           const verdict = target === null ? 'escape' : resolves(target);
           if (verdict === 'ok') continue;
           findings.push(
-            finding(
-              'unresolved-ref',
-              'blocking',
-              'a `../` link must land inside the snapshot; one that climbs out of the plugin root or into a skill the snapshot omits is broken for every worker',
-              `${ref.path}${target === null || verdict === 'escape' ? ' — escapes the plugin root' : whyMissing(target)}`,
-              { skill: name, file: f.rel, line: ref.line },
-            ),
+            target === null || verdict === 'escape'
+              ? finding(
+                  'unresolved-ref',
+                  'blocking',
+                  'a `../` link must land inside the plugin root; one that climbs out of it reaches whatever lies beside the snapshot on the worker host — a boundary the snapshot must not cross',
+                  `${ref.path} — escapes the plugin root`,
+                  anchor(ref.line),
+                )
+              : finding(
+                  'unresolved-ref',
+                  'warning',
+                  "a `../` link that lands inside the plugin root on nothing the snapshot carries (a file the bundle omits, or a skill that is disabled) is broken for every worker at first use — a content bug the skill's author owns, published as found",
+                  `${ref.path}${whyMissing(target)}`,
+                  anchor(ref.line),
+                ),
           );
         }
       }

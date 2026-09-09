@@ -18,9 +18,9 @@
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -28,7 +28,7 @@ import { createServer } from '../src/api/server.js';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
-import { CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import {
   BASELINE_DIRNAME,
@@ -43,6 +43,8 @@ import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN } from './support/skills-fixture.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** Whatever the process carried under the RETIRED engine-input name before the boot — crew must leave it untouched (v3.4 §2). */
+const stateHomeEnvBefore = process.env['WICKED_CREW_STATE_HOME'];
 const SRC = join(HERE, '..', 'src');
 const REGISTRY_PATH = join(HERE, 'fixtures', 'state-home-subtrees.json');
 
@@ -261,11 +263,22 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
     expect(process.env['WICKED_SKILLS_SNAPSHOT']?.startsWith(join(stateHome, SKILLS_DIRNAME, 'snapshots')) || process.env['WICKED_SKILLS_SNAPSHOT']?.includes(`/${SKILLS_DIRNAME}/snapshots/`)).toBe(true);
   });
 
-  it('hands the engine the fenced state home beside the snapshot, and the snapshot IS <state home>/skills/snapshots/<gen> — core\'s cross-check passes, no warning (core#399 round 3)', async () => {
+  it('hands the engine EXACTLY ONE variable — WICKED_SKILLS_SNAPSHOT, laid out as <state home>/skills/snapshots/<gen> with every component a real directory (v3.4 §2); WICKED_CREW_STATE_HOME is NOT exported, the state home is only REPORTED', async () => {
     const canonical = realpathSync(stateHome);
-    expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonical);
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]?.startsWith(join(canonical, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + '/')).toBe(true);
+    // Retired as an engine input (v3.4 §2; core#399 pass 6 retires it on the engine side): crew exports nothing beside the snapshot.
+    expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
+    const handed = process.env[SKILLS_SNAPSHOT_ENGINE_ENV] as string;
+    expect(handed.startsWith(join(canonical, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + '/')).toBe(true);
+    // The exact shape core derives the state home from: parent `snapshots`, grandparent `skills`,
+    // great-grandparent the canonical state home; the LAST component a real generation directory —
+    // never the `current` link — so `realpath` is a fixed point.
+    expect(basename(dirname(handed))).toBe(SNAPSHOTS_DIRNAME);
+    expect(basename(dirname(dirname(handed)))).toBe(SKILLS_DIRNAME);
+    expect(dirname(dirname(dirname(handed)))).toBe(canonical);
+    expect(/^\d{6}$/.test(basename(handed))).toBe(true);
+    expect(realpathSync(handed)).toBe(handed);
+    expect(lstatSync(handed).isDirectory()).toBe(true);
     const skills = ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
-    expect(skills).toMatchObject({ state: 'published', stateHome: canonical, engineInput: process.env[SKILLS_SNAPSHOT_ENGINE_ENV], findings: [] });
+    expect(skills).toMatchObject({ state: 'published', stateHome: canonical, engineInput: handed, findings: [] });
   });
 });

@@ -33,6 +33,49 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — design v3.4 (from the integrated functional test) + codex round-6 REJECT**
+  (PR #480). The trio's first publish against the LIVE wicked-garden 12.32.0 plugin was BLOCKED by
+  18 `unresolved-ref` findings in 7 skills (one of them core), so the skills seam shipped unusable
+  on day one; garden's own structural gate treats those as advisory (wicked-garden#1111 tracks the
+  content fixes). **Design v3.4 §1 — ref severity follows the TARGET:** an `unresolved-ref` that
+  ESCAPES the plugin root (`${CLAUDE_PLUGIN_ROOT}/../x`, a `../` climbing out) stays `blocking`; one
+  whose target is MISSING inside it (a file the bundle omits, a reference into a disabled skill) is a
+  `warning`, and a publish with only warnings answers `verdict: 'warnings'` WITH the findings and a
+  written snapshot (`current` flipped, the engine input exported); `analyze` mirrors it; the boot log
+  names the warnings once by file:line. **Design v3.4 §2 — exactly one engine input:**
+  `WICKED_CREW_STATE_HOME` is RETIRED as an engine input (reverses the round-4 "passed alongside"
+  decision) — crew exports only `WICKED_SKILLS_SNAPSHOT`, the realpath of
+  `<state home>/skills/snapshots/<gen>` with every component a real directory, and core#399 derives
+  the state home from that layout (parent `snapshots`, grandparent `skills`); `GET /diagnostics`
+  keeps reporting `skills.stateHome` for humans. **Codex round 6:** (C1) the `.venv` link
+  authorization no longer trusts `snapshot.json` — `gardenSource.baseline` must be a 64-hex content
+  hash that `manifest.json` knows, `venv` / `gardenSource.kind` are enum-validated, and the link is
+  verified INDEPENDENTLY of the metadata text: `baseline/<hash>/.venv` is lstat-walked from the root
+  (no link at any component), must be a real directory, and the link's canonical target must equal
+  that directory's canonical path inside the canonical root (a tampered manifest + retargeted link +
+  forged hash used to verify); (H1) `manifest.json` and every `snapshot.json` are read NO-FOLLOW — a
+  symlink standing in for either is refused by name (`isSeeded` is lstat-based, so the seed never
+  wipes `effective/` around a linked manifest); (H2) reset and refresh-baseline go through the SAME
+  park-and-rollback transaction as replace/add (`swapStaged`): every file a swap removes OR
+  overwrites is parked by rename before a single placement, and a mid-swap failure restores the tree
+  byte-for-byte with the revision unchanged (a refresh also reaps its unreferenced new baseline) —
+  both used to remove/overwrite in place, leaving partial content behind a 500; (H3) the plugin
+  SOURCE is ingested no-follow BELOW a once-resolved root (an operator's symlinked config dir still
+  reaches it): a symlinked `plugin.json`, catalog, root file, `skills/<x>` dir or any link inside a
+  bundle dir refuses the seed (`skills.config`, nothing created) or the refresh (a 2xx `blocked`
+  `path-invalid` naming the entry, nothing copied); (M1) the bundle closure is ONE allowlist
+  (`bundle.ts` `inBundleClosure`: `.claude-plugin/*`, `skills/**`, `scripts/**` minus `ci/` + `wg*/`,
+  `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) shared by the seed, the support API
+  (a PUT outside it is a 2xx `blocked` `outside-closure` envelope — a new finding kind, api-types
+  0.27.0 — and a GET a 400) and publish/analyze (a file found under `effective/` outside it is
+  BLOCKING by path); (M2) the core-closure drift check is NON-skippable: the vendored
+  `tests/fixtures/core-workflow-skill-refs.json` records wicked-core's `workflows/*.json` skill_refs
+  at the pinned core-ts version, must equal the pin (else "refresh the fixture with the core-ts
+  bump") and be ⊆ `registeredSkillRefs(BUILTIN_WORKFLOWS)`; the runtime source stays
+  `adapter.listWorkflows()` (the engine has no separate catalog — core's JSON are drop-ins crew
+  registers) and the sibling-checkout comparison stays as the local extra; (M3) a launch-pin
+  listener failure FAILS the launch — the engine is never called, the other listeners see
+  `rejected`, and the listener's error surfaces as the launch error (it used to be swallowed).
 - **Skills keystone — codex round-5 hardening; the skills root is not a setting** (PR #480). Six
   fixes to the crew-owned skills root: (1) the `skills_root` setting and the `WICKED_CREW_SKILLS_ROOT`
   env override are RETIRED (coordinator decision) — a configurable root accepting any absolute path

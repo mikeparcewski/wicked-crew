@@ -1512,6 +1512,14 @@ export type SkillFindingKind =
   | 'core-missing'
   | 'support-file-edit'
   | 'non-portable'
+  /** A `${CLAUDE_PLUGIN_ROOT}/<p>` or `../<p>` reference in an enabled skill's files that does not
+   *  resolve inside the would-be snapshot. Severity follows the TARGET (design v3.4 §1): a reference
+   *  that ESCAPES the plugin root (`..` climbing out — it reaches whatever lies beside the snapshot on
+   *  the worker host) is `blocking`; one whose target is MISSING (it normalizes inside the root but
+   *  the snapshot does not carry it — a file the bundle omits, or a skill that is disabled) is a
+   *  `warning`: a content bug the skill's author owns, published as found — a publish with only
+   *  warnings answers `verdict: 'warnings'` with the findings AND a written snapshot (api-types
+   *  0.27.0). */
   | 'unresolved-ref'
   | 'path-invalid'
   | 'unknown-skill'
@@ -1539,7 +1547,15 @@ export type SkillFindingKind =
   | 'publish-in-flight'
   /** A publish was aborted because the skills root changed under it — nothing was written to either
    *  root; a 2xx `blocked` envelope (api-types 0.27.0). Re-read `GET /skills` and retry. */
-  | 'root-changed';
+  | 'root-changed'
+  /** A path outside the bundle closure — the ONE allowlist of what the seed copies, what the support
+   *  API may address, and what a snapshot may carry: the files directly under `.claude-plugin`,
+   *  everything under `skills`, `schemas` and `docs/examples`, everything under `scripts` except the
+   *  `ci` and `wg`-prefixed dev tooling, plus `pyproject.toml` and `uv.lock`. A support add/PUT there
+   *  is a 2xx `blocked` envelope (nothing written); a file found there under `effective/` at
+   *  publish/analyze (a direct filesystem edit) is a BLOCKING finding naming the path — a snapshot
+   *  never ships it (api-types 0.27.0). */
+  | 'outside-closure';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
 

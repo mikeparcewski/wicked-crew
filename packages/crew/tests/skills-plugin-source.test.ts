@@ -2,12 +2,19 @@
 // explicit `WICKED_CREW_SKILLS_SOURCE` — never the hand-installed `plugins/wicked-garden` copy
 // (the stale artifact the operator's clis.toml hack pointed workers at; codex review of #480).
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { compareVersions, discoverLivePlugin, livePluginCacheDir, SKILLS_SOURCE_ENV } from '../src/skills/plugin-source.js';
+import {
+  compareVersions,
+  discoverLivePlugin,
+  livePluginCacheDir,
+  PluginSourceSymlinkError,
+  pluginSourceAt,
+  SKILLS_SOURCE_ENV,
+} from '../src/skills/plugin-source.js';
 import { removeScratch } from './setup/scratch.js';
 
 let home: string;
@@ -71,6 +78,30 @@ describe('discoverLivePlugin', () => {
     cfg = join(home, '.claude');
     for (const v of ['12.0.0-beta', '12.0.0-alpha', '12.0.0-beta.1', '12.0.0-rc.1']) plugin(join(livePluginCacheDir(cfg), v), v);
     expect(discoverLivePlugin({ env: {}, home })?.plugin_version).toBe('12.0.0-rc.1');
+  });
+
+  it('reads plugin.json NO-FOLLOW below a once-resolved root (codex round 6): a symlinked source ROOT is accepted; a symlinked `.claude-plugin/` or `plugin.json` throws PluginSourceSymlinkError naming it — in the live cache too, never a silent skip to another version', () => {
+    plugin(join(home, 'real-plugin'), '3.0.0');
+    const link = join(home, 'linked-plugin');
+    symlinkSync(join(home, 'real-plugin'), link);
+    expect(discoverLivePlugin({ env: { [SKILLS_SOURCE_ENV]: link }, home })).toEqual({ path: link, kind: 'directory', plugin_version: '3.0.0' });
+    // A symlinked manifest FILE inside the root.
+    const tampered = join(home, 'tampered');
+    mkdirSync(join(tampered, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(home, 'outside.json'), JSON.stringify({ name: 'wicked-garden', version: '4.0.0' }));
+    symlinkSync(join(home, 'outside.json'), join(tampered, '.claude-plugin', 'plugin.json'));
+    expect(() => pluginSourceAt(tampered)).toThrow(PluginSourceSymlinkError);
+    expect(() => pluginSourceAt(tampered)).toThrow(/\.claude-plugin\/plugin\.json is a symlink/);
+    // A symlinked manifest DIR.
+    const tampered2 = join(home, 'tampered2');
+    mkdirSync(tampered2);
+    symlinkSync(join(home, 'real-plugin', '.claude-plugin'), join(tampered2, '.claude-plugin'));
+    expect(() => pluginSourceAt(tampered2)).toThrow(/\.claude-plugin is a symlink/);
+    // In the live cache the refusal is loud too: a tampered version dir is not skipped in favour of another.
+    plugin(join(livePluginCacheDir(cfg), '5.0.0'), '5.0.0');
+    mkdirSync(join(livePluginCacheDir(cfg), '6.0.0', '.claude-plugin'), { recursive: true });
+    symlinkSync(join(home, 'outside.json'), join(livePluginCacheDir(cfg), '6.0.0', '.claude-plugin', 'plugin.json'));
+    expect(() => discoverLivePlugin({ env: {}, home })).toThrow(PluginSourceSymlinkError);
   });
 });
 

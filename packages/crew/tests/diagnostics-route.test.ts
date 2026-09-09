@@ -13,7 +13,11 @@ import type { DiagnosticsResponse } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { canonicalCrewStateHome } from '../src/skills/engine-env.js';
 import { removeScratch } from './setup/scratch.js';
+
+/** Whatever the process carried under the RETIRED engine-input name — crew must leave it untouched (v3.4 §2). */
+const stateHomeEnvBefore = process.env['WICKED_CREW_STATE_HOME'];
 
 // The engine BINARY names diagnostics probes — spelled by concatenation because
 // tests/core-checkout-policy.test.ts audits quoted `wicked-core` segments (FINDING-094).
@@ -150,9 +154,11 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(body.skills.engineInput).toBe(process.env['WICKED_SKILLS_SNAPSHOT'] ?? null);
     expect(body.skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
     expect(typeof body.skills.root).toBe('string');
-    // The fenced state home is exported (and reported) whatever the skills outcome (core#399 round 3).
+    // The canonical state home is REPORTED for humans whatever the skills outcome; it is NOT an engine
+    // input (v3.4 §2: core reads only WICKED_SKILLS_SNAPSHOT), so crew exports nothing under that name.
     expect(typeof body.skills.stateHome).toBe('string');
-    expect(body.skills.stateHome).toBe(process.env['WICKED_CREW_STATE_HOME']);
+    expect(body.skills.stateHome).toBe(canonicalCrewStateHome());
+    expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
   });
 
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {

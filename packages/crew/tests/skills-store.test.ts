@@ -28,9 +28,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { pluginBundleFiles } from '../src/skills/bundle.js';
+import { inBundleClosure, pluginBundleFiles } from '../src/skills/bundle.js';
 import { containedPath, SkillPathError } from '../src/skills/contain.js';
-import { pluginSourceAt } from '../src/skills/plugin-source.js';
+import { PluginSourceSymlinkError, pluginSourceAt } from '../src/skills/plugin-source.js';
 import {
   COPILOT_VIEW_SKILLS_REL,
   RevisionMismatchError,
@@ -288,39 +288,45 @@ describe('publish (design v3 §1)', () => {
     expect(snapshotManifest(p2).views.copilot.skills).toEqual(['wicked-garden-gamma']);
   });
 
-  it('is BLOCKED — nothing written, revision untouched — when an enabled skill references a file the snapshot omits, naming file:line', async () => {
+  it('a reference whose target is MISSING inside the plugin root is a WARNING: the publish LANDS (snapshot written, current flipped, verdict warnings) naming file:line — design v3.4 §1', async () => {
     s.store.seed();
-    // Disabling alpha is legal (not core)… but alpha/nested links `../SKILL.md`, alpha's own file.
+    // Disabling alpha is legal (not core)… but alpha/nested links `../SKILL.md`, alpha's own file —
+    // a target the snapshot OMITS (it belongs to a disabled skill): inside the root, missing.
     const r1 = s.store.disable('wicked-garden-alpha', 1);
     expect(r1.verdict).toBe('clear');
-    const blocked = await s.store.publish(r1.revision);
-    expect(blocked.verdict).toBe('blocked');
-    expect(blocked.snapshot).toBeNull();
-    expect(s.store.currentSnapshot()).toBeNull();
-    expect(existsSync(join(s.root, 'snapshots'))).toBe(false);
-    const ref = blocked.findings.find((f) => f.kind === 'unresolved-ref');
-    expect(ref).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-alpha-nested', file: 'skills/alpha/nested/SKILL.md', line: 10 });
+    const r = await s.store.publish(r1.revision);
+    expect(r.verdict).toBe('warnings');
+    expect(r.snapshot).toMatchObject({ gen: 1 });
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    const ref = r.findings.find((f) => f.kind === 'unresolved-ref');
+    expect(ref).toMatchObject({ severity: 'warning', skill: 'wicked-garden-alpha-nested', file: 'skills/alpha/nested/SKILL.md', line: 10 });
     expect(ref?.evidence).toContain('DISABLED skill wicked-garden-alpha');
-    // A blocked publish does not stale the caller's revision — and persists nothing.
-    expect(blocked.revision).toBe(r1.revision);
-    expect(s.store.revision()).toBe(r1.revision);
+    expect(ref?.explanation).toContain("content bug the skill's author owns");
+    expect(r.findings.some((f) => f.severity === 'blocking')).toBe(false);
+    // The publish moved the revision (it landed); analyze mirrors the same warnings without moving it.
+    expect(r.revision).toBe(r1.revision + 1);
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('warnings');
+    expect(analyzed.findings.filter((f) => f.kind === 'unresolved-ref')).toHaveLength(1);
+    expect(s.store.revision()).toBe(r.revision);
 
-    // A `${CLAUDE_PLUGIN_ROOT}` reference to a file the bundle never carried blocks the same way.
-    // The write itself is admitted with a WARNING (beta was portable; a plugin-root ref makes it
-    // Claude-only) — resolvability is publish's question, not the file manager's.
-    const r2 = s.store.enable('wicked-garden-alpha', blocked.revision);
+    // A `${CLAUDE_PLUGIN_ROOT}` reference to a file the bundle never carried is the same kind of
+    // warning. The write itself is admitted with a WARNING (beta was portable; a plugin-root ref makes
+    // it Claude-only) — resolvability is publish's question, not the file manager's.
+    const r2 = s.store.enable('wicked-garden-alpha', r.revision);
     const r3 = s.store.writeFile('wicked-garden-beta', 'refs/extra.md', 'see `${CLAUDE_PLUGIN_ROOT}/scripts/missing.py`\n', r2.revision);
     expect(r3.verdict).toBe('warnings');
     expect(r3.findings.map((f) => f.kind)).toEqual(['non-portable']);
     expect(r3.skill?.portable).toBe(false);
     const again = await s.store.publish(r3.revision);
-    expect(again.verdict).toBe('blocked');
-    expect(again.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({
-      skill: 'wicked-garden-beta',
-      file: 'skills/beta/refs/extra.md',
-      line: 1,
-    });
-    expect(again.findings.find((f) => f.kind === 'unresolved-ref')?.evidence).toContain('scripts/missing.py');
+    expect(again.verdict).toBe('warnings');
+    expect(again.snapshot?.gen).toBe(2);
+    const missing = again.findings.filter((f) => f.kind === 'unresolved-ref');
+    expect(missing).toHaveLength(1); // alpha is enabled again, so alpha/nested's link resolves; only beta's is left
+    expect(missing[0]).toMatchObject({ severity: 'warning', skill: 'wicked-garden-beta', file: 'skills/beta/refs/extra.md', line: 1 });
+    expect(missing[0]?.evidence).toContain('scripts/missing.py — no such file in effective/');
+    // The warning ships WITH the snapshot: the file is in the generation exactly as written.
+    expect(readFileSync(join(again.snapshot?.path ?? '', 'skills', 'beta', 'refs', 'extra.md'), 'utf8')).toContain('missing.py');
   });
 
   it('a `${CLAUDE_PLUGIN_ROOT}/..` reference is an ESCAPE (never the root); a `dir/` reference resolves', async () => {
@@ -413,7 +419,8 @@ describe('publish (design v3 §1)', () => {
 
   it('a BLOCKED publish persists nothing — not the drift it observed, not the provisioning state', async () => {
     s.store.seed();
-    const off = s.store.disable('wicked-garden-alpha', 1); // alpha/nested's `../SKILL.md` now escapes the snapshot
+    // An ESCAPING ref blocks (v3.4 §1 — a merely missing target would publish with a warning).
+    const off = s.store.writeFile('wicked-garden-beta', 'refs/escape.md', 'see `${CLAUDE_PLUGIN_ROOT}/../x`\n', 1);
     editedOnDisk(s, 'gamma', 'edited on disk');
     const before = JSON.stringify(s.store.manifest());
     const blocked = await s.store.publish(off.revision);
@@ -1615,6 +1622,45 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
     writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
     expect(() => s.store.currentSnapshot()).toThrow(/is present although snapshot\.json records the env as skipped/);
   });
+
+  it('the recorded baseline never authorizes the link as free text (codex round 6): a traversal string and an unknown 64-hex hash are refused although the hash verifies; a `baseline/<hash>/.venv` replaced by a link is refused by the walk, never resolved; the legitimate link verifies', async () => {
+    const v = scaffold({ provisionVenv: syncedProvisioner });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1);
+      expect(r.verdict).toBe('clear');
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const hash = v.store.manifest().baseline;
+      const pristine = snapshotManifest(snap.path);
+      const metadata = join(snap.path, 'snapshot.json');
+      unlock(metadata);
+      const withBaseline = (baseline: string): void => {
+        writeFileSync(metadata, `${JSON.stringify({ ...pristine, gardenSource: { ...pristine.gardenSource, baseline } }, null, 2)}\n`);
+      };
+      // snapshot.json is not part of the content hash, so these edits alone would have verified under
+      // the old code, which JOINED the baseline string straight into the expected link target.
+      withBaseline('../../../outside');
+      expect(() => v.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+      expect(() => v.store.currentSnapshot()).toThrow(/gardenSource\.baseline that is a sha256 content hash/);
+      withBaseline('a'.repeat(64)); // well-formed, but no baseline THIS root's manifest.json ever captured
+      expect(() => v.store.currentSnapshot()).toThrow(/which manifest\.json does not know/);
+      writeFileSync(metadata, `${JSON.stringify({ ...pristine, venv: 'sync' }, null, 2)}\n`); // an enum outside the four states
+      expect(() => v.store.currentSnapshot()).toThrow(/has no venv state/);
+      withBaseline(hash);
+      expect(v.store.currentSnapshot()?.gen).toBe(1); // the legitimate link verifies
+      // The env ITSELF replaced by a link to an outside dir — link text, hash and manifest untouched:
+      // the lstat walk from the root refuses the crossing at `.venv`; nothing is resolved through it.
+      const envDir = join(v.root, 'baseline', hash, '.venv');
+      const outside = join(v.base, 'outside-env');
+      mkdirSync(join(outside, 'bin'), { recursive: true });
+      removeTreeForce(envDir);
+      symlinkSync(outside, envDir);
+      expect(() => v.store.currentSnapshot()).toThrow(/not reachable without following a link/);
+      expect(readdirSync(outside)).toEqual(['bin']); // nothing read or written through it
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
 });
 
 describe('skill-scoped containment (design v3 §API) — no-follow from the ROOT', () => {
@@ -1922,5 +1968,206 @@ describe('refresh-baseline — three-way per FILE (design v3 §7)', () => {
     expect(readFileSync(join(s.root, 'effective', 'skills', 'gamma', 'refs', 'new.md'), 'utf8')).toBe('new upstream file\n');
     expect(ok.taken).toEqual(['wicked-garden-gamma']);
     expect(s.store.baselinesOnDisk()).toEqual([ok.baseline]);
+  });
+});
+
+describe('design v3.4 §1 — the live 12.32.0 shapes publish with WARNINGS; an escape still BLOCKS', () => {
+  it('a `${CLAUDE_PLUGIN_ROOT}` path to a file that does not exist, a `../` link resolving inside the root to nothing, and a prose `../` into a sibling checkout are three warnings — snapshot written, current flipped; `${CLAUDE_PLUGIN_ROOT}/../x` blocks', async () => {
+    // The three shapes the integrated functional test found in wicked-garden 12.32.0 (18 findings in
+    // 7 skills; wicked-garden#1111 tracks the content fixes), planted in a beta refs file BEFORE the seed.
+    mkdirSync(join(s.upstream, 'skills', 'beta', 'refs'), { recursive: true });
+    writeFileSync(
+      join(s.upstream, 'skills', 'beta', 'refs', 'live-shapes.md'),
+      [
+        'sh "${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/some/script.py"', // runtime-exec/SKILL.md:24 — the first resolves, the second names nothing
+        'Formal JSON Schema: [`schemas/evidence.json`](../schemas/evidence.json)', // qe/refs/evidence.md:35 → skills/beta/schemas/… (inside the root, absent)
+        '   as the sibling checkout `../wicked-core/crates/wicked-governance/schemas`, or', // domain/vendor/README.md:41 → skills/beta/wicked-core/… (inside the root, absent)
+        '',
+      ].join('\n'),
+    );
+    s.store.seed();
+    const r = await s.store.publish(1);
+    expect(r.verdict).toBe('warnings');
+    expect(r.snapshot?.gen).toBe(1);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    const refs = r.findings.filter((f) => f.kind === 'unresolved-ref');
+    expect(refs.map((f) => [f.severity, f.file, f.line])).toEqual([
+      ['warning', 'skills/beta/refs/live-shapes.md', 1],
+      ['warning', 'skills/beta/refs/live-shapes.md', 2],
+      ['warning', 'skills/beta/refs/live-shapes.md', 3],
+    ]);
+    expect(refs[0]?.evidence).toContain('scripts/some/script.py — no such file in effective/');
+    expect(refs[1]?.evidence).toContain('../schemas/evidence.json');
+    expect(refs[2]?.evidence).toContain('../wicked-core/crates/wicked-governance/schemas');
+    expect(r.findings.some((f) => f.severity === 'blocking')).toBe(false);
+    expect(r.findings.length).toBeGreaterThan(0); // the wire's `warnings` verdict: a non-empty findings[] AND a snapshot
+    expect(existsSync(join(r.snapshot?.path ?? '', 'skills', 'beta', 'refs', 'live-shapes.md'))).toBe(true);
+    // An ESCAPE is still a boundary claim — blocking, nothing written, the revision unchanged.
+    const w = s.store.writeFile('wicked-garden-beta', 'refs/escape.md', 'see `${CLAUDE_PLUGIN_ROOT}/../x`\n', r.revision);
+    const blocked = await s.store.publish(w.revision);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+    const escape = blocked.findings.find((f) => f.kind === 'unresolved-ref' && f.severity === 'blocking');
+    expect(escape).toMatchObject({ file: 'skills/beta/refs/escape.md', line: 1 });
+    expect(escape?.evidence).toContain('escapes the plugin root');
+    expect(blocked.findings.filter((f) => f.kind === 'unresolved-ref' && f.severity === 'warning')).toHaveLength(3); // the warnings are still reported beside it
+    expect(s.store.generationsOnDisk()).toEqual([1]);
+    expect(s.store.revision()).toBe(w.revision);
+  });
+});
+
+describe('metadata is read NO-FOLLOW (codex round 6)', () => {
+  it('a `manifest.json` replaced by a symlink to a copy is refused by name — nothing is read or committed through it, and the seed does not wipe around it', () => {
+    s.store.seed();
+    const copy = join(s.base, 'manifest-copy.json');
+    cpSync(join(s.root, 'manifest.json'), copy);
+    rmSync(join(s.root, 'manifest.json'));
+    symlinkSync(copy, join(s.root, 'manifest.json'));
+    expect(s.store.isSeeded()).toBe(true); // a link counts as "seeded": the seed never wipes effective/ around it
+    expect(() => s.store.manifest()).toThrow(SkillsManifestCorruptError);
+    expect(() => s.store.manifest()).toThrow(/manifest\.json is a symlink/);
+    expect(() => s.store.listFiles('wicked-garden-alpha')).toThrow(SkillsManifestCorruptError);
+    expect(() => s.store.disable('wicked-garden-alpha', 1)).toThrow(SkillsManifestCorruptError);
+    expect(s.store.seed().seeded).toBe(false);
+    expect(existsSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'))).toBe(true);
+    expect(readFileSync(copy, 'utf8')).toContain('"revision": 1'); // the copy is untouched: no commit went through the link
+  });
+
+  it('a `snapshot.json` replaced by a symlink to a valid copy is refused by name — `current` never reads snapshot metadata through a link', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const gen = (r.snapshot as NonNullable<typeof r.snapshot>).path;
+    const metadata = join(gen, 'snapshot.json');
+    const copy = join(s.base, 'snapshot-copy.json');
+    cpSync(metadata, copy);
+    unlock(metadata);
+    rmSync(metadata);
+    symlinkSync(copy, metadata);
+    expect(() => s.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    expect(() => s.store.currentSnapshot()).toThrow(/snapshot\.json in .* is a symlink/);
+    await expect(storeOver(s).ensureReady()).rejects.toThrow(/is a symlink/);
+  });
+});
+
+describe('the plugin SOURCE is ingested no-follow below its root (codex round 6)', () => {
+  it('a symlinked plugin.json, a symlinked catalog, or a symlinked skills/<x> dir refuses the SEED by name — nothing is created under the root', () => {
+    const outside = join(s.base, 'outside-src');
+    mkdirSync(join(outside, 'skill'), { recursive: true });
+    writeFileSync(join(outside, 'plugin.json'), '{"name": "wicked-garden", "version": "9.9.9"}\n');
+    writeFileSync(join(outside, 'archetypes.json'), '{"archetypes": {}}\n');
+    writeFileSync(join(outside, 'skill', 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\noutside\n');
+    for (const [rel, target] of [
+      ['.claude-plugin/plugin.json', join(outside, 'plugin.json')],
+      ['.claude-plugin/archetypes.json', join(outside, 'archetypes.json')],
+      ['skills/gamma', join(outside, 'skill')],
+    ] as const) {
+      const fresh = scaffold();
+      try {
+        const p = join(fresh.upstream, ...rel.split('/'));
+        rmSync(p, { recursive: true, force: true });
+        symlinkSync(target, p);
+        expect(() => fresh.store.seed(), rel).toThrow(PluginSourceSymlinkError);
+        expect(() => fresh.store.seed(), rel).toThrow(new RegExp(`${rel.replace(/[./]/g, '\\$&')} is a symlink`));
+        expect(existsSync(fresh.root), rel).toBe(false); // refused BEFORE the root is created: nothing copied
+      } finally {
+        removeScratch(fresh.base);
+      }
+    }
+  });
+
+  it('a symlinked source ROOT with a clean tree is accepted (operators symlink their config dir): the root is resolved once, its contents walked no-follow, the same bundle identity', () => {
+    const link = join(s.base, 'upstream-link');
+    symlinkSync(s.upstream, link);
+    const viaLink = new SkillsStore({
+      root: s.root,
+      registeredSkillRefs: () => REGISTERED_REFS,
+      provisionVenv: noVenv,
+      source: () => pluginSourceAt(link),
+      now: () => CLOCK,
+      warn: () => undefined,
+    });
+    const seeded = viaLink.seed();
+    expect(seeded.seeded).toBe(true);
+    expect(seeded.source?.path).toBe(link); // recorded as the operator spelled it
+    expect(rels(join(s.root, 'effective'))).toEqual(pluginBundleFiles(s.upstream).map((f) => f.rel));
+    expect(seeded.baseline).toBe(hashFileSet(pluginBundleFiles(s.upstream))); // through the link or not: the same bundle, the same identity
+  });
+
+  it('a REFRESH over a source that grew a symlinked entry is the 2xx blocked path-invalid envelope naming the entry — nothing copied, no baseline captured, the revision unchanged', () => {
+    s.store.seed();
+    const before = JSON.stringify(s.store.manifest());
+    const baselines = s.store.baselinesOnDisk();
+    const outside = join(s.base, 'outside-refs');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'evil.md'), 'outside bytes\n');
+    mkdirSync(join(s.upstream, 'skills', 'gamma', 'refs'), { recursive: true });
+    symlinkSync(outside, join(s.upstream, 'skills', 'gamma', 'refs', 'linked'));
+    const r = s.store.refreshBaseline(1);
+    expect(r).toMatchObject({ verdict: 'blocked', revision: 1, taken: [], added: [], removed: [], conflicts: [] });
+    expect(r.findings).toHaveLength(1);
+    expect(r.findings[0]).toMatchObject({ kind: 'path-invalid', severity: 'blocking', file: 'skills/gamma/refs/linked' });
+    expect(r.findings[0]?.evidence).toContain('skills/gamma/refs/linked is a symlink');
+    expect(JSON.stringify(s.store.manifest())).toBe(before);
+    expect(s.store.baselinesOnDisk()).toEqual(baselines);
+    expect(existsSync(join(s.root, 'effective', 'skills', 'gamma', 'refs'))).toBe(false);
+    expect(rels(join(s.root, 'effective')).some((rel) => rel.includes('evil'))).toBe(false);
+  });
+});
+
+describe('the bundle closure is the ONE allowlist (codex round 6)', () => {
+  it('a support add/PUT outside the closure is a blocked `outside-closure` envelope (nothing written); inside it lands', () => {
+    s.store.seed();
+    for (const rel of ['hooks/hooks.json', 'tests/x.py', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'site/index.html', 'README.md']) {
+      const r = s.store.writeSupport(rel, 'x\n', 1);
+      expect(r, rel).toMatchObject({ verdict: 'blocked', revision: 1 });
+      expect(r.findings, rel).toHaveLength(1);
+      expect(r.findings[0], rel).toMatchObject({ kind: 'outside-closure', severity: 'blocking', file: rel });
+      expect(existsSync(join(s.root, 'effective', ...rel.split('/'))), rel).toBe(false);
+      expect(() => s.store.resolveSupportFile(rel), rel).toThrow(SkillPathError);
+    }
+    expect(s.store.revision()).toBe(1);
+    const ok = s.store.writeSupport('docs/examples/new.yml', 'a: 1\n', 1);
+    expect(ok.verdict).toBe('warnings'); // the usual support-file-edit warning, nothing more
+    expect(ok.findings.map((f) => f.kind)).toEqual(['support-file-edit']);
+    expect(s.store.writeSupport('.claude-plugin/extra.json', '{}\n', ok.revision).verdict).toBe('warnings');
+    expect(s.store.writeSupport('uv.lock', 'version = 1\n', ok.revision + 1).verdict).toBe('warnings');
+  });
+
+  it('a file found under effective/ outside the closure (a direct filesystem edit) BLOCKS publish and analyze by path — hooks/x and tests/x — and a snapshot never ships it', async () => {
+    s.store.seed();
+    mkdirSync(join(s.root, 'effective', 'hooks'));
+    writeFileSync(join(s.root, 'effective', 'hooks', 'hooks.json'), '{}\n');
+    mkdirSync(join(s.root, 'effective', 'tests'));
+    writeFileSync(join(s.root, 'effective', 'tests', 'x.py'), 'print(1)\n');
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const outside = analyzed.findings.filter((f) => f.kind === 'outside-closure');
+    expect(outside.map((f) => [f.severity, f.file])).toEqual([
+      ['blocking', 'hooks/hooks.json'],
+      ['blocking', 'tests/x.py'],
+    ]);
+    expect(analyzed.findings.find((f) => f.kind === 'fs-drift')?.evidence).toContain('hooks/hooks.json'); // reported as drift too
+    const blocked = await s.store.publish(1);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+    expect(s.store.revision()).toBe(1);
+    // Removed: the same catalog publishes clear, and the generation carries neither path.
+    rmSync(join(s.root, 'effective', 'hooks'), { recursive: true });
+    rmSync(join(s.root, 'effective', 'tests'), { recursive: true });
+    const ok = await s.store.publish(1);
+    expect(ok.verdict).toBe('clear');
+    expect(rels(ok.snapshot?.path ?? '').some((rel) => rel.startsWith('hooks/') || rel.startsWith('tests/'))).toBe(false);
+  });
+
+  it('inBundleClosure IS the seed closure as a predicate: every seeded file is a member, the excluded fixture paths are not', () => {
+    const seeded = pluginBundleFiles(s.upstream).map((f) => f.rel);
+    expect(seeded.length).toBeGreaterThan(0);
+    expect(seeded.every(inBundleClosure)).toBe(true);
+    for (const rel of ['hooks/hooks.json', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'scripts/wg-dev/x.py', 'tests/x', 'README.md', '.claude-plugin/nested/x.json', 'snapshot.json', 'manifest.json']) {
+      expect(inBundleClosure(rel), rel).toBe(false);
+    }
+    for (const rel of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'skills/x/SKILL.md', 'scripts/_python.sh', 'scripts/wgx/y.py', 'schemas/evidence.json', 'docs/examples/campaign.yml', 'pyproject.toml', 'uv.lock']) {
+      expect(inBundleClosure(rel), rel).toBe(true);
+    }
   });
 });

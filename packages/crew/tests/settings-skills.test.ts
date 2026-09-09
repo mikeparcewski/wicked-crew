@@ -26,7 +26,7 @@ import { createServer } from '../src/api/server.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
-import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import { assertSkillsRootFenced, canonicalPath, SkillsRootUnfencedError, userCliDirs } from '../src/skills/root-fence.js';
 import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
@@ -39,6 +39,8 @@ import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixtur
 const RETIRED_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
 const savedSnapshotEnv = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
 const savedRetiredEnv = process.env[RETIRED_ROOT_ENV];
+/** Whatever the process carried under the RETIRED engine-input name — crew must leave it untouched (v3.4 §2). */
+const stateHomeEnvBefore = process.env['WICKED_CREW_STATE_HOME'];
 /** The state home the harness armed (tests/setup/hermetic-home.ts) — every test restores it. */
 const armedStateHome = crewStateHome();
 
@@ -325,9 +327,10 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(res.statusCode).toBe(200);
       expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: real });
       expect((res.json() as SkillsManifestResponse).root).toBe(root);
-      // The fenced state home is exported beside the snapshot, and the snapshot IS
-      // <state home>/skills/snapshots/<gen> by construction — core's cross-check passes, no finding.
-      expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome());
+      // Exactly ONE engine input (v3.4 §2): nothing is exported beside the snapshot — the retired
+      // WICKED_CREW_STATE_HOME is untouched — and the snapshot IS <state home>/skills/snapshots/<gen>
+      // by construction, the layout core derives the state home from.
+      expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
       expect(real.startsWith(join(canonicalCrewStateHome(), SKILLS_DIRNAME, 'snapshots') + '/')).toBe(true);
       const skills = await diagnostics(app);
       expect(skills).toEqual({ state: 'published', root, current: { gen: 1, path: real }, engineInput: real, stateHome: canonicalCrewStateHome(), findings: [] });
@@ -386,8 +389,8 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(skills.state).toBe('fallback');
       expect(skills.root).toBe(join(dir, 'skills'));
       expect(skills.engineInput).toBe(BOOT_SKILLS_SNAPSHOT ?? null); // diagnostics say what the env actually holds
-      expect(skills.stateHome).toBe(canonicalCrewStateHome()); // the fence is exported whatever the skills outcome
-      expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome());
+      expect(skills.stateHome).toBe(canonicalCrewStateHome()); // REPORTED for humans whatever the skills outcome — never an engine input (v3.4 §2)
+      expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
       expect(skills.findings[0]?.message).toContain('install wicked-garden first');
       expect(existsSync(join(dir, 'skills'))).toBe(false); // a seed with no source creates nothing

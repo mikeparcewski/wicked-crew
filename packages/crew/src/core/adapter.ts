@@ -1009,28 +1009,61 @@ export class CoreAdapter {
     };
   }
 
+  /**
+   * Deliver a launch notice to EVERY listener; a listener's failure PROPAGATES (codex round 6 on
+   * crew#480 — the notices used to be delivered under a swallowing try/catch). The `handed` notice is
+   * what pins the skills generation the launch is about to read (skills/runtime.ts →
+   * live-generations.ts): a pin that could not be recorded means the generation could be reaped
+   * under the spawn, so the launch must not proceed and the failure is the launch's failure. Every
+   * listener is still notified (a later one is not skipped because an earlier one threw); the FIRST
+   * error is what propagates.
+   */
   private notifyLaunch(notice: LaunchNotice): void {
+    let failure: { err: unknown } | null = null;
     for (const listener of this.launchListeners) {
       try {
         listener(notice);
-      } catch {
-        /* isolate a faulty listener — a launch is never failed by its observers */
+      } catch (err) {
+        if (failure === null) failure = { err };
       }
     }
+    if (failure !== null) throw failure.err instanceof Error ? failure.err : new Error(String(failure.err));
   }
 
   /**
    * Hand a launch to the engine with its notices: `handed` BEFORE the call (the pin is open before
    * any spawn can read the env), `rejected` when the call throws (nothing will spawn — the pin is
    * released). The result and the error pass through untouched.
+   *
+   * A listener that FAILS on `handed` fails the launch: the engine is never called (nothing spawns
+   * against a generation nobody pinned), the other listeners get `rejected` so whatever they did
+   * record is released, and the listener's error surfaces to the caller as the launch error —
+   * never swallowed (codex round 6). A listener failing on `rejected` cannot un-launch anything;
+   * the primary error keeps precedence and the secondary one is logged, not lost.
    */
   private async handedToEngine<T>(kind: LaunchNotice['kind'], id: string, call: () => Promise<T>): Promise<T> {
-    this.notifyLaunch({ kind, id, status: 'handed' });
+    try {
+      this.notifyLaunch({ kind, id, status: 'handed' });
+    } catch (err) {
+      this.releaseAfterFailure(kind, id, err);
+      throw err;
+    }
     try {
       return await call();
     } catch (err) {
-      this.notifyLaunch({ kind, id, status: 'rejected' });
+      this.releaseAfterFailure(kind, id, err);
       throw err;
+    }
+  }
+
+  /** Deliver `rejected` while a launch is already failing with `primary`: a secondary listener failure is logged, never masks the primary. */
+  private releaseAfterFailure(kind: LaunchNotice['kind'], id: string, primary: unknown): void {
+    try {
+      this.notifyLaunch({ kind, id, status: 'rejected' });
+    } catch (secondary) {
+      console.warn(
+        `[crew] launch ${kind}:${id} failed (${primary instanceof Error ? primary.message : String(primary)}) and a launch listener ALSO failed while releasing its pin: ${secondary instanceof Error ? secondary.message : String(secondary)} — the pin may be held until the run's terminal frame`,
+      );
     }
   }
 

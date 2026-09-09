@@ -208,8 +208,11 @@ export interface TreeListing {
  * hash). A link is never followed and never descended; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` still
  * prune real directories and files, but a LINK bearing one of those names is listed too (the
  * snapshot's `.venv` link is exactly that). A symlinked `root` is refused like `walkFiles`.
+ * `skipDir(rel)` prunes a real subtree the way `walkFiles` does (the bundle walk prunes the
+ * `scripts/` dev tooling with it — a link INSIDE a pruned subtree is never reached, and never
+ * copied either).
  */
-export function walkTree(root: string): TreeListing {
+export function walkTree(root: string, skipDir?: (rel: string) => boolean): TreeListing {
   const files: FileRecord[] = [];
   const links: LinkRecord[] = [];
   try {
@@ -226,6 +229,7 @@ export function walkTree(root: string): TreeListing {
         links.push({ rel, abs, target: readlinkSync(abs) });
       } else if (entry.isDirectory()) {
         if (SKIP_DIR_NAMES.has(entry.name)) continue;
+        if (skipDir !== undefined && skipDir(rel)) continue;
         visit(abs, rel);
       } else if (entry.isFile()) {
         if (SKIP_FILE_NAMES.has(entry.name)) continue;

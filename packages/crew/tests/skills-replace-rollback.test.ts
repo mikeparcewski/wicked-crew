@@ -5,9 +5,11 @@
 // order (remove, then write) destroyed the notes it could not replace. The preflight
 // (`containedDestinations`) catches every collision a lexical + lstat look can see BEFORE the swap
 // starts; this suite forces the failure PAST the preflight — a `renameSync` that fails on the
-// second placement — to prove the rollback itself, byte for byte and mode for mode.
+// second placement — to prove the rollback itself, byte for byte and mode for mode. `reset` and
+// `refresh-baseline` go through the SAME transaction (`swapStaged`, codex round 6): the suite forces
+// the same mid-swap failure on each and proves the original content intact and the revision unchanged.
 
-import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -99,5 +101,79 @@ describe('replace rolls back a swap that fails past the preflight', () => {
     expect(s.store.manifest().skills['wicked-garden-zeta']).toBeUndefined();
     expect(readdirSync(s.root).filter((e) => e.startsWith('.staging-'))).toEqual([]);
     expect(s.store.revision()).toBe(1);
+  });
+});
+
+describe('reset and refresh-baseline share the park-and-rollback transaction (codex round 6)', () => {
+  it('a RESET whose placement fails mid-swap restores the EDITED skill byte-for-byte (modes included), keeps the revision, leaves no staging, answers blocked path-invalid', () => {
+    const alpha = join(s.root, 'effective', 'skills', 'alpha');
+    // Edit alpha so the reset has two files to restore, then fail the SECOND placement — after
+    // SKILL.md was placed and every own file was parked: the worst moment.
+    const e1 = s.store.writeFile('wicked-garden-alpha', 'SKILL.md', '---\nname: wicked-garden-alpha\n---\n\nedited\n', 1);
+    const e2 = s.store.writeFile('wicked-garden-alpha', 'refs/notes.md', 'edited notes\n', e1.revision);
+    expect(e2.verdict).toBe('clear');
+    const before = digest(alpha);
+    const notesDest = join(alpha, 'refs', 'notes.md');
+    fault.failPlacement = (from, to) => from.includes(`${sep}new${sep}`) && (to === notesDest || to === join(realpathSync(s.root), 'effective', 'skills', 'alpha', 'refs', 'notes.md'));
+    const result = s.store.reset('wicked-garden-alpha', e2.revision);
+    expect(result).toMatchObject({ verdict: 'blocked', revision: e2.revision });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: 'path-invalid', severity: 'blocking', skill: 'wicked-garden-alpha', file: 'skills/alpha' });
+    expect(result.findings[0]?.evidence).toContain('ENOTDIR');
+    expect(result.findings[0]?.explanation).toContain('rolled back');
+    // The EDITED content is intact — nothing was restored halfway (the old reset had already removed it).
+    expect(digest(alpha)).toBe(before);
+    expect(readFileSync(join(alpha, 'SKILL.md'), 'utf8')).toContain('edited');
+    expect(readFileSync(notesDest, 'utf8')).toBe('edited notes\n');
+    expect(readdirSync(s.root).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+    expect(s.store.revision()).toBe(e2.revision);
+    expect(s.store.manifest().skills['wicked-garden-alpha']?.provenance).toBe('override');
+    // With the fault gone, the same reset lands whole.
+    fault.failPlacement = null;
+    const ok = s.store.reset('wicked-garden-alpha', e2.revision);
+    expect(ok.verdict).toBe('clear');
+    expect(readFileSync(join(alpha, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(s.upstream, 'skills', 'alpha', 'SKILL.md'), 'utf8'));
+    expect(readFileSync(notesDest, 'utf8')).toBe(readFileSync(join(s.upstream, 'skills', 'alpha', 'refs', 'notes.md'), 'utf8'));
+  });
+
+  it('a REFRESH whose placement fails mid-swap restores every effective file — a removal AND an overwritten take — commits nothing, and reaps the unreferenced new baseline', () => {
+    const effective = join(s.root, 'effective');
+    const before = digest(effective);
+    const manifestBefore = JSON.stringify(s.store.manifest());
+    const baselinesBefore = s.store.baselinesOnDisk();
+    // Upstream: overwrite beta's SKILL.md (a take over an EXISTING file), delete delta's SKILL.md (a
+    // removal), add gamma/refs/new.md (the placement that fails — it sorts after beta's take, so
+    // beta's new bytes are already in place and delta is already parked when it fails).
+    writeFileSync(join(s.upstream, 'skills', 'beta', 'SKILL.md'), '---\nname: wicked-garden-beta\n---\n\nupstream v2 — mentions wicked-garden-gamma\n');
+    rmSync(join(s.upstream, 'skills', 'delta', 'SKILL.md'));
+    mkdirSync(join(s.upstream, 'skills', 'gamma', 'refs'), { recursive: true });
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'refs', 'new.md'), 'new upstream file\n');
+    const newDest = join(effective, 'skills', 'gamma', 'refs', 'new.md');
+    fault.failPlacement = (from, to) => from.includes(`${sep}new${sep}`) && (to === newDest || to === join(realpathSync(s.root), 'effective', 'skills', 'gamma', 'refs', 'new.md'));
+    const r = s.store.refreshBaseline(1);
+    expect(r).toMatchObject({ verdict: 'blocked', revision: 1, taken: [], kept: [], added: [], removed: [], conflicts: [] });
+    expect(r.findings).toHaveLength(1);
+    expect(r.findings[0]).toMatchObject({ kind: 'path-invalid', severity: 'blocking' });
+    expect(r.findings[0]?.evidence).toContain('ENOTDIR');
+    expect(r.findings[0]?.explanation).toContain('rolled back');
+    // Byte for byte: beta's OLD SKILL.md is back, delta's SKILL.md is back, gamma/refs never appeared.
+    expect(digest(effective)).toBe(before);
+    expect(existsSync(join(effective, 'skills', 'delta', 'SKILL.md'))).toBe(true);
+    expect(readFileSync(join(effective, 'skills', 'beta', 'SKILL.md'), 'utf8')).not.toContain('upstream v2');
+    expect(existsSync(join(effective, 'skills', 'gamma', 'refs'))).toBe(false);
+    // Nothing committed, the new capture reaped, no staging.
+    expect(JSON.stringify(s.store.manifest())).toBe(manifestBefore);
+    expect(s.store.revision()).toBe(1);
+    expect(s.store.baselinesOnDisk()).toEqual(baselinesBefore);
+    expect(readdirSync(s.root).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+    // With the fault gone, the same refresh lands whole.
+    fault.failPlacement = null;
+    const ok = s.store.refreshBaseline(1);
+    expect(ok.verdict).toBe('clear');
+    expect(ok.revision).toBe(2);
+    expect(readFileSync(join(effective, 'skills', 'beta', 'SKILL.md'), 'utf8')).toContain('upstream v2');
+    expect(existsSync(join(effective, 'skills', 'delta', 'SKILL.md'))).toBe(false);
+    expect(readFileSync(newDest, 'utf8')).toBe('new upstream file\n');
+    expect(ok.removed).toEqual(['wicked-garden-delta']);
   });
 });

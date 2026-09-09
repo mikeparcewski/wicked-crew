@@ -8,7 +8,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -24,7 +24,7 @@ import type {
   SkillsManifestResponse,
   SystemSettings,
 } from '../src/core/types.js';
-import { canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { COPILOT_VIEW_SKILLS_REL } from '../src/skills/store.js';
 import type { VenvProvisioner } from '../src/skills/venv.js';
@@ -35,6 +35,8 @@ let s: Scaffold;
 let app: FastifyInstance;
 let logs: string[];
 const savedEnv = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+/** Whatever the process carried under the RETIRED engine-input name — crew must leave it untouched (v3.4 §2). */
+const stateHomeEnvBefore = process.env['WICKED_CREW_STATE_HOME'];
 
 function settingsAdapter(initial: Partial<SystemSettings> = {}): CoreAdapter {
   let store: SystemSettings = { graphNodeLimit: 150, ...initial };
@@ -286,7 +288,10 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect(body.snapshot).toMatchObject({ gen: 1, path: real, skills: 6 });
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real);
     expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined(); // withdrawn: crew hands the engine ONE skills input
-    expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome()); // …and the fenced state home beside it
+    expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore); // …and NOTHING beside it: retired as an engine input (v3.4 §2)
+    // The one input is a real generation directory, every component resolved — never the `current` link.
+    expect(realpathSync(real)).toBe(real);
+    expect(lstatSync(real).isDirectory()).toBe(true);
     // The copilot view (v3.2 §4) is INSIDE the snapshot: portable skills only, under their frontmatter names.
     const view = join(real, ...COPILOT_VIEW_SKILLS_REL.split('/'));
     expect(existsSync(join(view, 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
@@ -350,24 +355,65 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     }
   });
 
-  it('a blocked publish is a 200 with file:line findings, no snapshot, no env export', async () => {
+  it('a publish with a MISSING-target ref is a 200 `warnings` WITH a snapshot and the env export (design v3.4 §1); an ESCAPING ref is a 200 `blocked` with file:line findings, no snapshot, the env untouched', async () => {
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+    // Disabling alpha leaves alpha/nested's `../SKILL.md` pointing at a file the snapshot OMITS: inside the root, missing → a warning.
     const off = await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-alpha/disable', payload: { expectedRevision: 1 } });
     const rev = (off.json() as SkillMutationResult).revision;
     const res = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: rev } });
     expect(res.statusCode).toBe(200);
     const body = res.json() as SkillPublishResult;
-    expect(body.verdict).toBe('blocked');
-    expect(body.snapshot).toBeNull();
-    expect(body.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({ file: 'skills/alpha/nested/SKILL.md', line: 10 });
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBeUndefined();
-    // analyze is the same validation, PURE: same findings, nothing published, nothing persisted, CAS untouched.
+    expect(body.verdict).toBe('warnings');
+    expect(body.snapshot).toMatchObject({ gen: 1 });
+    expect(body.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({ severity: 'warning', file: 'skills/alpha/nested/SKILL.md', line: 10 });
+    const real = realpathSync(join(s.root, 'snapshots', '000001'));
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the snapshot is written AND handed over
+    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    // analyze mirrors it, PURE: the same warning, nothing persisted, the CAS untouched.
     const analyze = await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' });
     expect(analyze.statusCode).toBe(200);
-    expect((analyze.json() as SkillPublishResult).verdict).toBe('blocked');
-    expect((analyze.json() as SkillPublishResult).revision).toBe(rev);
-    expect((await manifest()).revision).toBe(rev);
-    expect((await manifest()).current).toBeNull();
+    expect((analyze.json() as SkillPublishResult).verdict).toBe('warnings');
+    expect((analyze.json() as SkillPublishResult).revision).toBe(body.revision);
+    expect((await manifest()).revision).toBe(body.revision);
+
+    // An ESCAPE — `${CLAUDE_PLUGIN_ROOT}/../x` climbs out of the plugin root — is a boundary claim: blocked, nothing written, the env unchanged.
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/wicked-garden-beta/files/refs/escape.md',
+      payload: { content: 'see `${CLAUDE_PLUGIN_ROOT}/../x`\n', expectedRevision: body.revision },
+    });
+    expect(put.statusCode).toBe(200);
+    const rev2 = (put.json() as SkillMutationResult).revision;
+    const blocked = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: rev2 } });
+    expect(blocked.statusCode).toBe(200);
+    const blockedBody = blocked.json() as SkillPublishResult;
+    expect(blockedBody.verdict).toBe('blocked');
+    expect(blockedBody.snapshot).toBeNull();
+    expect(blockedBody.findings.find((f) => f.kind === 'unresolved-ref' && f.severity === 'blocking')).toMatchObject({ file: 'skills/beta/refs/escape.md', line: 1 });
+    expect(blockedBody.revision).toBe(rev2);
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the last VERIFIED snapshot stays exported
+    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect(((await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' })).json() as SkillPublishResult).verdict).toBe('blocked');
+    expect((await manifest()).revision).toBe(rev2);
+  });
+
+  it('a support PUT outside the bundle closure (hooks/x, tests/x) is a 200 blocked `outside-closure` envelope — nothing written, the revision unchanged; a GET there is a 400 (codex round 6)', async () => {
+    const put = await app.inject({ method: 'PUT', url: '/api/v1/skills/support/hooks/hooks.json', payload: { content: '{}\n', expectedRevision: 1 } });
+    expect(put.statusCode).toBe(200);
+    const body = put.json() as SkillMutationResult;
+    expect(body).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(body.findings).toHaveLength(1);
+    expect(body.findings[0]).toMatchObject({ kind: 'outside-closure', severity: 'blocking', file: 'hooks/hooks.json' });
+    expect(body.findings[0]?.evidence).toContain('outside the bundle closure');
+    expect(existsSync(join(s.root, 'effective', 'hooks'))).toBe(false);
+    expect((await manifest()).revision).toBe(1);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/skills/support/hooks/hooks.json' })).statusCode).toBe(400);
+    const tests = await app.inject({ method: 'PUT', url: '/api/v1/skills/support/tests/x.py', payload: { content: 'x\n', expectedRevision: 1 } });
+    expect(tests.json()).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect((tests.json() as SkillMutationResult).findings[0]?.kind).toBe('outside-closure');
+    // Inside the closure the same PUT lands (with the usual support-file-edit warning).
+    const inside = await app.inject({ method: 'PUT', url: '/api/v1/skills/support/docs/examples/new.yml', payload: { content: 'a: 1\n', expectedRevision: 1 } });
+    expect(inside.json()).toMatchObject({ verdict: 'warnings', revision: 2 });
   });
 
   it('refresh-baseline over an unchanged upstream is a clear no-op through the route', async () => {
