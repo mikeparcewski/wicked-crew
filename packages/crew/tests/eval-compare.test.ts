@@ -8,15 +8,21 @@
 // present on one side only, ids whose kind changed and ids whose PAYLOAD identity changed (the
 // corpus changed under the name); treat a row without a `sample.payload_hash` as UNVERIFIED (never
 // comparable, never "different"); reconcile the two stored summaries to the per-sample accounting;
-// and diff `rule_coverage` when both carry it — gained/lost only over rules in BOTH rule sets,
-// rule additions/removals reported apart, never fabricating a delta from one side.
+// and diff `rule_coverage` when both carry it over what the records ENUMERATE (codex round 6):
+// `exercised` is a COUNT of every rule any claim fired, blocking or not, while `results[].fired` is
+// the blocking subset — so a record names only `unexercised ∪ fired`, and its rule set is fully
+// identified only when `exercised === |fired|`. `gained`/`lost` are asserted from listed ids on both
+// ends (always sound); `added_rules`/`removed_rules` only when the silent side's inventory is
+// complete, else WITHHELD by name (`inventory: 'partial'`, `transitions_withheld`); a count above
+// the fired ids is valid warn-only exercise, never a reconciliation error; a delta is never
+// fabricated from one side.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
-import { classifyFlip, compareEvalRuns, UNVERIFIED_NO_SAMPLE_IDENTITY } from '../src/api/eval-compare.js';
+import { classifyFlip, compareEvalRuns, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
 import { PAYLOAD_HASH_RE, samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSignals, GovernanceEvalSummary, SteeringType } from '../src/core/types.js';
@@ -198,13 +204,23 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.reconciles).toBe(true);
     expect(c.reconciliation_errors).toEqual([]);
 
-    // Coverage. Rule sets: A = {POL-1301, PAT-014, POL-007} ∪ {PAT-9, POL-1801};
+    // Coverage. Both sides: exercised 3 = 3 distinct blocking-fired ids ⇒ every exercised rule is
+    // named, the inventory is COMPLETE. Rule sets: A = {POL-1301, PAT-014, POL-007} ∪ {PAT-9, POL-1801};
     // B = {POL-1301, PAT-9, POL-007} ∪ {PAT-014, POL-1801, POL-2000}.
-    //   PAT-9    in both: unexercised in A, fired in B          → gained
-    //   PAT-014  in both: fired in A, unexercised in B          → lost
-    //   POL-2000 in B only (a rule the store grew)              → added_rules, NOT lost
-    //   POL-1801 unexercised on both sides                      → nothing
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: ['PAT-9'], lost: ['PAT-014'], added_rules: ['POL-2000'], removed_rules: [] });
+    //   PAT-9    unexercised in A, blocking-fired in B           → gained
+    //   PAT-014  blocking-fired in A, unexercised in B           → lost
+    //   POL-2000 enumerated by B only, A complete (the store grew) → added_rules, NOT lost
+    //   POL-1801 unexercised on both sides                       → nothing
+    expect(c.rule_coverage_delta).toEqual({
+      exercised_delta: 0,
+      inventory: 'complete',
+      unidentified: { a: 0, b: 0 },
+      gained: ['PAT-9'],
+      lost: ['PAT-014'],
+      added_rules: ['POL-2000'],
+      removed_rules: [],
+      transitions_withheld: [],
+    });
   });
 
   it('a comparable pair (same corpus, same ids, same kinds, same payload identities) with a non-zero delta reconciles to its flips', async () => {
@@ -362,42 +378,141 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
   });
 });
 
-describe('rule_coverage delta — exercise transitions vs. rule-set changes', () => {
+describe('rule_coverage delta — exercise transitions vs. rule-set changes, over what the records ENUMERATE', () => {
   const R = { rule_id: 'POL-9000', steering_type: 'security' as const };
+  const WARN = { rule_id: 'WARN-1', steering_type: 'development' as const };
   const quiet = [row(CREW_A, 'bad', 'development', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')];
+  const firing = [row(CREW_A, 'bad', 'development', 'caught', ['POL-9000']), row(GARDEN_A, 'good', 'development', 'caught')];
+  /** The delta of two COMPLETE inventories (every exercised rule named on both sides), nothing withheld. */
+  const complete = (over: Partial<EvalRuleCoverageDelta> = {}): EvalRuleCoverageDelta => ({
+    exercised_delta: 0,
+    inventory: 'complete',
+    unidentified: { a: 0, b: 0 },
+    gained: [],
+    lost: [],
+    added_rules: [],
+    removed_rules: [],
+    transitions_withheld: [],
+    ...over,
+  });
+  /** The reason `compareEvalRuns` gives for withholding a rule-set transition on a partial side. */
+  const withheld = (kind: 'added_rules' | 'removed_rules', id: string, listedAs: 'unexercised' | 'blocking-fired', side: 'a' | 'b', exercised: number, fired: number) =>
+    `${kind} ${id}: enumerated by ${side === 'a' ? 'b' : 'a'} (${listedAs}) and not by ${side}, whose exercised set is only partially identified — ${exercised - fired} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${exercised} vs ${fired} distinct blocking-fired id(s)) — so it may be one of those${kind === 'removed_rules' ? ' (exercised now, id unknown) or a rule removed from the store' : ' or a rule the store gained'}: not asserted`;
 
-  it('a rule that VANISHES from the unexercised list because it left the store is removed, never gained', async () => {
+  it('a rule that VANISHES from the unexercised list because it left the store is removed, never gained — asserted because B names every exercised rule (exercised 0 = 0 blocking-fired)', async () => {
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
     const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
     const c = compareEvalRuns(a, b);
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: [], lost: [], added_rules: [], removed_rules: ['POL-9000'] });
+    expect(c.rule_coverage_delta).toEqual(complete({ removed_rules: ['POL-9000'] }));
     expect(c.reconciles).toBe(true);
   });
 
-  it('a rule that APPEARS unexercised because the store grew it is added, never lost', async () => {
+  it('a rule that APPEARS unexercised because the store grew it is added, never lost — asserted because A names every exercised rule', async () => {
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
     const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
-    const c = compareEvalRuns(a, b);
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: [], lost: [], added_rules: ['POL-9000'], removed_rules: [] });
+    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual(complete({ added_rules: ['POL-9000'] }));
   });
 
-  it('a rule in BOTH sets that stops being unexercised because a sample now fires it is gained; the mirror image is lost', async () => {
-    const firing = [row(CREW_A, 'bad', 'development', 'caught', ['POL-9000']), row(GARDEN_A, 'good', 'development', 'caught')];
+  it('a rule that stops being unexercised because a sample now fires it BLOCKING is gained; the mirror image is lost — both ends listed, certain', async () => {
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
     const b = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [] } });
-    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual({ exercised_delta: 1, gained: ['POL-9000'], lost: [], added_rules: [], removed_rules: [] });
-    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual({ exercised_delta: -1, gained: [], lost: ['POL-9000'], added_rules: [], removed_rules: [] });
+    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual(complete({ exercised_delta: 1, gained: ['POL-9000'] }));
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual(complete({ exercised_delta: -1, lost: ['POL-9000'] }));
   });
 
-  it('an exercised count that does not match the distinct rule ids fired across the results is a reconciliation error — the exercised set cannot be reconstructed', async () => {
-    const a = await recorded({ results: quiet, rule_coverage: { exercised: 2, unexercised: [] } }); // nothing fired, yet 2 "exercised"
-    const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+  it("codex round 6: a rule that leaves A's unexercised list and is exercised in B by a NON-BLOCKING effect alone (counted in `exercised`, never in any row's `fired`) is NOT `removed_rules` — B's inventory is partial, the transition is withheld by name, the delta says exercised +1 with the id unknown, and two valid records reconcile; the mirror withholds `added_rules`", async () => {
+    // A: WARN-1 unexercised. B: WARN-1 fired with effect `warn` on some sample — evals.rs counts it
+    // exercised (rule_coverage 815-827 over every claim's policy_ids) but `fired` is deny-only
+    // (evaluate_sample 857-869), so NO row names it and it simply vanishes from the unexercised list.
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [WARN] } });
+    const b = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
     const c = compareEvalRuns(a, b);
+    expect(c.reconciles).toBe(true);
+    expect(c.reconciliation_errors).toEqual([]);
+    expect(c.rule_coverage_delta).toEqual({
+      exercised_delta: 1,
+      inventory: 'partial',
+      unidentified: { a: 0, b: 1 },
+      gained: [],
+      lost: [],
+      added_rules: [],
+      removed_rules: [], // the round-6 finding: this used to say ['WARN-1'] with reconciles false
+      transitions_withheld: [withheld('removed_rules', 'WARN-1', 'unexercised', 'b', 1, 0)],
+    });
+    // The mirror: exercised-by-warn in A (unnamed), unexercised in B — A is partial, so a rule that
+    // "appears" in B's unexercised list is neither `added_rules` nor `lost`: withheld.
+    const rev = compareEvalRuns(b, a);
+    expect(rev.reconciles).toBe(true);
+    expect(rev.rule_coverage_delta).toEqual({
+      exercised_delta: -1,
+      inventory: 'partial',
+      unidentified: { a: 1, b: 0 },
+      gained: [],
+      lost: [],
+      added_rules: [],
+      removed_rules: [],
+      transitions_withheld: [withheld('added_rules', 'WARN-1', 'unexercised', 'a', 1, 0)],
+    });
+  });
+
+  it('under a PARTIAL inventory the certain transitions are still asserted — gained/lost need only the listed ids on both ends — while a blocking-fired id the partial side never enumerated is withheld, and asserted as added once that side is complete', async () => {
+    // A: POL-9000 unexercised plus one warn-only exercised rule (unnamed). B: POL-9000 fired blocking.
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [R] } });
+    const b = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [] } });
+    const c = compareEvalRuns(a, b);
+    expect(c.reconciles).toBe(true);
+    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'partial', unidentified: { a: 1, b: 0 }, gained: ['POL-9000'], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'partial', unidentified: { a: 0, b: 1 }, gained: [], lost: ['POL-9000'], added_rules: [], removed_rules: [], transitions_withheld: [] });
+    // A names nothing but counts one exercised rule; B fires POL-9000 blocking: was POL-9000 A's
+    // unnamed warn-exercised rule, or did the store gain it? Withheld — until A is complete.
+    const unnamed = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
+    expect(compareEvalRuns(unnamed, b).rule_coverage_delta).toEqual({
+      exercised_delta: 0,
+      inventory: 'partial',
+      unidentified: { a: 1, b: 0 },
+      gained: [],
+      lost: [],
+      added_rules: [],
+      removed_rules: [],
+      transitions_withheld: [withheld('added_rules', 'POL-9000', 'blocking-fired', 'a', 1, 0)],
+    });
+    const none = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+    expect(compareEvalRuns(none, b).rule_coverage_delta).toEqual(complete({ exercised_delta: 1, added_rules: ['POL-9000'] }));
+    // Several withheld ids come back codepoint-sorted.
+    const two = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
+    const grew = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [{ rule_id: 'PAT-1', steering_type: 'testing' }] } });
+    expect(compareEvalRuns(two, grew).rule_coverage_delta?.transitions_withheld).toEqual([
+      withheld('added_rules', 'PAT-1', 'unexercised', 'a', 1, 0),
+      withheld('added_rules', 'POL-9000', 'blocking-fired', 'a', 1, 0),
+    ]);
+  });
+
+  it('a record that contradicts ITSELF is a reconciliation error naming the run — `exercised` BELOW its distinct blocking-fired ids, an id both fired and unexercised, a duplicate unexercised id — while a count ABOVE the fired ids is valid warn-only exercise (partial inventory, not an error)', async () => {
+    const ok = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+    const below = await recorded({ results: firing, rule_coverage: { exercised: 0, unexercised: [] } }); // POL-9000 fired blocking, yet 0 "exercised"
+    const c = compareEvalRuns(below, ok);
     expect(c.reconciles).toBe(false);
     expect(c.reconciliation_errors).toEqual([
-      `run a (${a.id}): rule_coverage.exercised 2 does not match the 0 distinct rule id(s) fired across its results — the exercised rule set cannot be reconstructed from the record`,
+      `run a (${below.id}): rule_coverage.exercised 0 is below the 1 distinct rule id(s) fired (blocking) across its results (POL-9000) — every blocking firing is an exercised rule`,
     ]);
-    expect(c.rule_coverage_delta?.exercised_delta).toBe(-2);
+    expect(c.rule_coverage_delta?.exercised_delta).toBe(0);
+    const both = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [R] } });
+    const c2 = compareEvalRuns(ok, both);
+    expect(c2.reconciles).toBe(false);
+    expect(c2.reconciliation_errors).toEqual([
+      `run b (${both.id}): rule_coverage.unexercised lists POL-9000, which fired (blocking) in its results — a rule that fired for any sample is exercised, never unexercised`,
+    ]);
+    const dup = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R, R] } });
+    const c3 = compareEvalRuns(ok, dup);
+    expect(c3.reconciles).toBe(false);
+    expect(c3.reconciliation_errors).toEqual([`run b (${dup.id}): rule_coverage.unexercised lists POL-9000 twice — a rule is unexercised once or not at all`]);
+    // ABOVE the fired ids: two rules exercised by a non-blocking effect alone — the wire's honest
+    // count, not a defect (the round-2 check called this "cannot be reconstructed" and failed it).
+    const above = await recorded({ results: quiet, rule_coverage: { exercised: 2, unexercised: [] } });
+    const c4 = compareEvalRuns(above, ok);
+    expect(c4.reconciles).toBe(true);
+    expect(c4.reconciliation_errors).toEqual([]);
+    expect(c4.rule_coverage_delta).toEqual({ exercised_delta: -2, inventory: 'partial', unidentified: { a: 2, b: 0 }, gained: [], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
   });
 });
 

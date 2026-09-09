@@ -78,12 +78,20 @@ in-progress marker (`.materialize.inprogress-<generation>`) is published and the
 beside NO receipt; every start inspects the root and repairs a torn swap (the `.prev` trees rolled
 back, staging / marker / previous receipt removed, nothing trusted until the run publishes),
 finishes a torn cleanup, sweeps stale staging; a consumer reads the receipt through
-`readMaterializeReceipt()`, which refuses a damaged root by name with `materialize <dir>` as the
-repair. `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
-the engine is probed, resolves the engine ONCE with exec's own search semantics (every `PATH`
-entry in order, an EMPTY entry being the cwd, `PATHEXT` on Windows, an executable regular file
-required) and spawns THAT absolute path for every call — the file hashed into the provenance is
-the file that ran — stages exactly those samples in a fresh private temp dir, verifies the
+`readMaterializeReceipt(dir, pin)`, which refuses a damaged root by name with `materialize <dir>`
+as the repair and trusts a receipt only as the materialization OF the selected pin: `pin_hash` and
+a well-formed `generation` present and the pin's, `repos[]` exactly the pinned repos at their tag
+and sha, and every `path` the real directory `<root>/<repo>@<tag>` — present, not a symlink, a
+directory, realpath-equal (a foreign path, a link, a plain file, a missing identity or an extra /
+missing repo is a named refusal, never "clean"). A `tar` that fails or cannot be spawned during
+extraction is a tool failure (exit 1), not a usage error. `run` verifies `samples.meta.json`
+against `samples.json` and the selected pin before the engine is probed, resolves the engine ONCE
+with exec's own search semantics (every `PATH` entry in order, an EMPTY entry being the cwd,
+`PATHEXT` on Windows, an executable regular file required — only true absence, ENOENT / ENOTDIR,
+is the exit-zero SKIP; a lookup that fails any other way, `stat` EACCES on a PATH directory or
+EIO, is a tool failure naming syscall, errno and candidate, because which file a spawn would run
+cannot be determined) and spawns THAT absolute path for every call — the file hashed into the
+provenance is the file that ran — stages exactly those samples in a fresh private temp dir, verifies the
 engine's report before publication (exactly one row per staged sample, engine verdicts, `fired`
 arrays, every row consistent with its sample's kind — `expected` deny/allow by kind, never `gap`
 on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking verdict fired —

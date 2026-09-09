@@ -91,7 +91,13 @@
  *     account for is DAMAGE: `materialize` repairs it (the `.prev` trees rolled back — a swapped-in
  *     tree replaced by its backup, a hole filled — staging, marker and previous receipt removed,
  *     nothing trusted until this run publishes) and then re-extracts; a reader
- *     (`readMaterializeReceipt`) refuses a damaged root by name with that repair as the hint. A
+ *     (`readMaterializeReceipt(dir, pin)`) refuses a damaged root by name with that repair as the
+ *     hint, and trusts a receipt ONLY as the materialization of the selected pin: its `pin_hash`
+ *     and `generation` must be there and be the pin's, its `repos[]` must be exactly the pinned
+ *     repos at their tag + sha, and every `path` must BE `<root>/<repo>@<tag>` — present, not a
+ *     symlink, a directory, realpath-equal (a foreign path, a link, a file or an extra/missing
+ *     repo is a named refusal, never "clean" — codex round 6). A `tar` that fails or cannot be
+ *     spawned during extraction is a `ToolError` (exit 1), not a usage error (Copilot). A
  *     marker beside a receipt of ITS generation is a torn CLEANUP (the publish landed) and is
  *     finished; stale `.staging-*` alone is debris of a torn extraction and is removed. A receipt
  *     that describes a tree which is no longer there is removed, so a receipt never outlives the
@@ -126,9 +132,12 @@
  *     required — and EVERY spawn (`--version`, `rules ingest`, `rules list`, `rules eval`) uses
  *     that absolute path, never the bare name: the file hashed into the provenance is the file
  *     that ran (and it is hashed again after the run — a binary replaced underneath is a tool
- *     failure, never a report attributed to either build). Nothing resolvable is the documented
- *     SKIP; a resolved file that will not execute (no execute bit, a missing interpreter) and any
- *     answer to `--version` but a clean one fail the run. The engine's report is VERIFIED before
+ *     failure, never a report attributed to either build). ONLY true absence — nothing on the
+ *     search path names the executable (ENOENT; ENOTDIR for a PATH entry that is a file) — is the
+ *     documented SKIP; a lookup that fails any other way (`stat` EACCES on a PATH directory, EIO,
+ *     a failing realpath) is a tool failure, because which file a spawn would run cannot be
+ *     determined (codex round 6); a resolved file that will not execute (no execute bit, a
+ *     missing interpreter) and any answer to `--version` but a clean one fail the run. The engine's report is VERIFIED before
  *     publication (`verifyEngineReport`): exactly one result per staged sample (the same id set —
  *     no duplicate, no extra, none missing), every row with a `sample.id`, a `verdict` from the
  *     engine's set (`ENGINE_VERDICTS`) and a `fired` array of rule ids, echoing its staged
@@ -351,6 +360,10 @@ export class UsageError extends Error {}
 export class RefusalError extends Error {}
 /** The source checkouts no longer match the pin (a moved or re-cut tag). Exit 1. */
 export class DriftError extends Error {}
+/** A tool this script drives (`tar`, the engine) could not be spawned or failed: an operational
+ *  fault the operator has to fix, not a usage error — exit 1 like drift and refusal (Copilot on
+ *  #475: a `tar` failure inside `materialize` surfaced as a plain Error, i.e. exit 2). */
+export class ToolError extends Error {}
 
 /** One safe path segment (see `SAFE_SEGMENT_RE`) — never `.` or `..`. */
 export function isSafeSegment(name) {
@@ -443,11 +456,31 @@ function gitRaw(cwd, args, opts = {}) {
  * everywhere else, so an operator's stray variable can never fault a real materialization.
  */
 function faultArmed(point) {
-  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') return false;
+  return armedFaults().includes(point);
+}
+
+/** The TEST-ONLY fault points `EVALS_CORPUS_FAULT` arms — always empty outside vitest / NODE_ENV=test. */
+function armedFaults() {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') return [];
   return (process.env[FAULT_ENV] ?? '')
     .split(',')
     .map((s) => s.trim())
-    .includes(point);
+    .filter((s) => s !== '');
+}
+
+/**
+ * The TEST-ONLY lookup fault (`armedFaults`): `lookup-<syscall>:<code>` makes `resolveExecutable`'s
+ * `<syscall>` (`stat` | `access`) fail with errno `<code>` (`EIO`, `EACCES`, …) — the filesystem
+ * faults codex round 6 injected, which the resolver used to swallow as "not installed" (the
+ * exit-zero SKIP). Inert outside the test env like every other point.
+ */
+function injectedLookupFault(syscall) {
+  const prefix = `lookup-${syscall}:`;
+  const armed = armedFaults().find((p) => p.startsWith(prefix));
+  if (armed !== undefined) {
+    const code = armed.slice(prefix.length);
+    throw Object.assign(new Error(`injected ${code} at ${syscall} (${FAULT_ENV}, test hook)`), { code, syscall });
+  }
 }
 
 /**
@@ -933,8 +966,13 @@ export function materialize(pin, pinPath, sourceRoot, outDir, note = () => {}) {
         });
         const untar = spawnSync('tar', ['-xf', tarPath, '-C', p.staging], { encoding: 'utf8' });
         unlinkSync(tarPath);
+        // A `tar` that cannot be spawned (not on PATH — ENOENT) or exits non-zero is a TOOL
+        // failure (exit 1), never a usage/IO error (exit 2) — Copilot on #475.
+        if (untar.error !== undefined) {
+          throw new ToolError(`tar could not be executed for ${p.name} (${untar.error.code ?? 'spawn error'}): ${untar.error.message} — materialize needs a working \`tar\` on PATH`);
+        }
         if (untar.status !== 0) {
-          throw new Error(`tar -xf failed for ${p.name}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
+          throw new ToolError(`tar -xf failed for ${p.name} (${untar.status === null ? `signal ${untar.signal}` : `exit ${untar.status}`}): ${(untar.stderr ?? '').trim() || '(no output)'}`);
         }
         p.tree = verifyExtractedTree(p.checkout, p.r.commit_sha, p.staging, p.name);
       }
@@ -1145,13 +1183,26 @@ function repairMaterializeRoot(root, inspection) {
 }
 
 /**
- * The materialize receipt a CONSUMER may trust, or a named refusal: a damaged root (a swap was
- * interrupted — `inspectMaterializeRoot`) is refused with the repair as the hint; a missing or
- * unreadable receipt is a usage error; a receipt describing a tree that is not there is refused.
- * Returns `{ receipt, root, debris }` — `debris` is the inspection state (`clean`, or the
- * harmless `torn-cleanup` / `stale-staging` the next `materialize` sweeps).
+ * The materialize receipt a CONSUMER may trust as the materialization OF `pin`, or a named refusal.
+ * A damaged root (a swap was interrupted — `inspectMaterializeRoot`) is refused with the repair as
+ * the hint; a missing or unreadable receipt is a usage error; and the receipt itself must pass, in
+ * this order (codex round 6: the reader used to take ANY `repos[].path` that `existsSync` accepted
+ * — a foreign directory, a symlink, a plain file — and a receipt without its pin/generation
+ * identity, as a clean materialization):
+ *   identity     `pin_hash` is the selected pin's; `generation` is a well-formed publication stamp;
+ *   membership   `repos[]` names exactly the pin's repos — same `repo`, `tag`, `commit_sha`, each
+ *                once — nothing extra, nothing missing;
+ *   containment  every `repos[].path` IS `<root>/<repo>@<tag>` under the root's REALPATH: it is
+ *                there, is not a symlink (`lstat`), is a directory, and its realpath is that very
+ *                entry — a path outside the root, a link pointing anywhere, or a file is refused
+ *                by name (never "clean").
+ * Returns `{ receipt, root, debris }` — `debris` is the inspection state (`clean`, or the harmless
+ * `torn-cleanup` / `stale-staging` the next `materialize` sweeps).
  */
-export function readMaterializeReceipt(outDir) {
+export function readMaterializeReceipt(outDir, pin) {
+  if (pin === null || typeof pin !== 'object' || typeof pin.pin_hash !== 'string' || !Array.isArray(pin.repos)) {
+    throw new UsageError('readMaterializeReceipt needs the selected pin ({ pin_hash, repos }) — a receipt is only ever trusted as the materialization OF a pin');
+  }
   const inspection = inspectMaterializeRoot(outDir);
   if (inspection.state === 'damaged') {
     throw new RefusalError(
@@ -1159,15 +1210,53 @@ export function readMaterializeReceipt(outDir) {
         `(it rolls the .prev-<generation> trees back, removes the staging and the marker, re-extracts every pinned tree and publishes a new receipt), or inspect those entries by hand first`,
     );
   }
-  if (inspection.receipt === null) throw new UsageError(`${join(inspection.root, MATERIALIZE_RECEIPT)} is missing or unreadable — run \`materialize ${outDir}\` first`);
-  const paths = Array.isArray(inspection.receipt.repos) ? inspection.receipt.repos.map((x) => x?.path) : null;
-  const missing = paths === null ? null : paths.filter((p) => typeof p !== 'string' || !existsSync(p));
-  if (missing === null || missing.length > 0) {
-    throw new RefusalError(
-      `${join(inspection.root, MATERIALIZE_RECEIPT)} describes ${missing === null ? 'no repos array' : `${missing.length} tree(s) that are not there (${listSome(missing.map(String))})`} — run \`materialize ${outDir}\` again`,
-    );
+  const receiptPath = join(inspection.root, MATERIALIZE_RECEIPT);
+  if (inspection.receipt === null) throw new UsageError(`${receiptPath} is missing or unreadable — run \`materialize ${outDir}\` first`);
+  const receipt = inspection.receipt;
+  const refuse = (what) => new RefusalError(`${receiptPath} ${what} — run \`materialize ${outDir}\` again`);
+  // Identity: THIS pin's materialization, from a publication that can be named.
+  if (typeof receipt.pin_hash !== 'string') throw refuse('carries no pin_hash — it is not the materialization of a pin');
+  if (receipt.pin_hash !== pin.pin_hash) throw refuse(`was materialized from pin ${receipt.pin_hash} but the selected pin is ${pin.pin_hash}`);
+  if (typeof receipt.generation !== 'string' || !GENERATION_RE.test(receipt.generation)) {
+    throw refuse(`carries no well-formed generation stamp (got ${JSON.stringify(receipt.generation)})`);
   }
-  return { receipt: inspection.receipt, root: inspection.root, debris: inspection.state };
+  // Membership: exactly the pin's repos, each described once at the pinned tag and sha.
+  if (!Array.isArray(receipt.repos)) throw refuse('describes no repos array');
+  const pinned = new Map(pin.repos.map((r) => [r.repo, r]));
+  const seen = new Set();
+  for (const [i, entry] of receipt.repos.entries()) {
+    if (entry === null || typeof entry !== 'object' || typeof entry.repo !== 'string') throw refuse(`repos[${i}] names no repo`);
+    const want = pinned.get(entry.repo);
+    if (want === undefined) throw refuse(`describes ${JSON.stringify(entry.repo)}, which the selected pin does not have`);
+    if (seen.has(entry.repo)) throw refuse(`describes ${entry.repo} twice`);
+    seen.add(entry.repo);
+    if (entry.tag !== want.tag || entry.commit_sha !== want.commit_sha) {
+      throw refuse(`describes ${entry.repo} at ${JSON.stringify(entry.tag)} ${JSON.stringify(entry.commit_sha)} but the pin has ${want.tag} ${want.commit_sha}`);
+    }
+  }
+  const missing = [...pinned.keys()].filter((r) => !seen.has(r)).sort();
+  if (missing.length > 0) throw refuse(`does not describe ${missing.length} pinned repo(s) (${listSome(missing)})`);
+  // Containment: each described tree is the real directory <root>/<repo>@<tag> — nothing else.
+  for (const entry of receipt.repos) {
+    const name = `${entry.repo}@${entry.tag}`;
+    const expected = join(inspection.root, name);
+    if (typeof entry.path !== 'string') throw refuse(`describes ${name} with no path`);
+    let st;
+    try {
+      st = lstatSync(entry.path);
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') throw refuse(`describes ${name} at ${entry.path}, which is not there`);
+      throw err;
+    }
+    if (st.isSymbolicLink()) throw refuse(`describes ${name} at ${entry.path}, which is a symlink — a tree reached through a link is not the materialized tree`);
+    if (!st.isDirectory()) throw refuse(`describes ${name} at ${entry.path}, which is not a directory`);
+    const real = realpathSync(entry.path);
+    if (real !== expected) {
+      const outside = !real.startsWith(`${inspection.root}${sep}`);
+      throw refuse(`describes ${name} at ${entry.path}${real === entry.path ? '' : ` (→ ${real})`}, which is not ${expected}${outside ? ' — outside the materialize root' : ''}`);
+    }
+  }
+  return { receipt, root: inspection.root, debris: inspection.state };
 }
 
 /**
@@ -1594,36 +1683,60 @@ export function executableCandidates(name, opts = {}) {
 
 /**
  * The executable `spawnSync(name)` WOULD run, resolved ONCE over `executableCandidates`: the first
- * candidate that is an executable REGULAR file, as its REALPATH — `{ path }`. A directory or a
- * non-executable file is passed over exactly as exec passes over it; when NO candidate is
- * executable but one was a regular file, `{ path: null, blocked }` names the first such file (what
- * exec reports as EACCES — the caller spawns it and lets the OS say so, never a SKIP); when nothing
- * on the search path names the executable, `{ path: null, blocked: null }` (exec's ENOENT — the
- * documented SKIP). `searched` lists every candidate tried, in order.
+ * candidate that is an executable REGULAR file, as its REALPATH — `{ path }`. A candidate that is
+ * NOT THERE (`ENOENT`; `ENOTDIR` — a PATH entry that is a file) is passed over exactly as exec
+ * passes over it, and so is a directory. A regular file the process may not execute (`access`
+ * `EACCES`) is passed over too but remembered: when NO candidate is executable, `{ path: null,
+ * blocked }` names the first such file (what exec reports as EACCES — the caller spawns it and lets
+ * the OS say so, never a SKIP). Nothing on the search path naming the executable is `{ path: null,
+ * blocked: null, error: null }` — exec's ENOENT, the documented SKIP. ANY OTHER lookup failure —
+ * `stat` refused (`EACCES` on a PATH directory the process may not search), an I/O fault (`EIO`),
+ * a stale mount, a `realpath` that fails — is `{ path: null, error: { syscall, code, candidate,
+ * message } }`: which file a spawn would run CANNOT BE DETERMINED, and that is a tool failure, never
+ * "not installed" (codex round 6: every lookup error used to fall through to the exit-zero SKIP;
+ * only true absence may). `searched` lists every candidate tried, in order.
  */
 export function resolveExecutable(name, opts = {}) {
   const searched = executableCandidates(name, opts);
   const platform = opts.platform ?? process.platform;
+  const absent = (err) => err?.code === 'ENOENT' || err?.code === 'ENOTDIR';
+  const fault = (syscall, candidate, err) => ({
+    path: null,
+    blocked: null,
+    error: { syscall, code: typeof err?.code === 'string' ? err.code : 'UNKNOWN', candidate, message: err instanceof Error ? err.message : String(err) },
+    searched,
+  });
   let blocked = null;
   for (const c of searched) {
     let st;
     try {
+      injectedLookupFault('stat');
       st = statSync(c);
-    } catch {
-      continue;
+    } catch (err) {
+      if (absent(err)) continue;
+      return fault('stat', c, err);
     }
     if (!st.isFile()) continue;
     if (platform !== 'win32') {
       try {
+        injectedLookupFault('access');
         accessSync(c, fsConstants.X_OK);
-      } catch {
-        if (blocked === null) blocked = c;
-        continue;
+      } catch (err) {
+        if (absent(err)) continue; // removed between stat and access — not there
+        if (err?.code === 'EACCES') {
+          if (blocked === null) blocked = c; // a regular file without execute permission: exec's EACCES
+          continue;
+        }
+        return fault('access', c, err);
       }
     }
-    return { path: realpathSync(c), blocked: null, searched };
+    try {
+      return { path: realpathSync(c), blocked: null, error: null, searched };
+    } catch (err) {
+      return fault('realpath', c, err);
+    }
   }
-  return { path: null, blocked, searched };
+  return { path: null, blocked, error: null, searched };
 }
 
 /**
@@ -1966,6 +2079,12 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   // The engine is resolved ONCE, with the OS's search semantics, and EVERY spawn below uses the
   // resolved absolute path — the file hashed into the provenance is the file that ran.
   const resolved = resolveExecutable(coreBin);
+  if (resolved.error !== null) {
+    // The LOOKUP failed (a PATH directory the process may not search, an I/O fault): which file a
+    // spawn would run cannot be determined — a tool failure, never "not installed" (codex round 6).
+    const e = resolved.error;
+    return { failure: `${coreBin} could not be looked up on PATH: ${e.syscall} ${e.candidate} failed (${e.code}) — ${e.message}; which executable a spawn would run cannot be determined, so nothing is run and nothing is skipped` };
+  }
   if (resolved.path === null && resolved.blocked === null) {
     return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
   }
@@ -2154,6 +2273,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`evals-internal-corpus: ${message}`);
-    process.exitCode = err instanceof DriftError || err instanceof RefusalError ? EXIT_DRIFT : EXIT_USAGE;
+    process.exitCode = err instanceof DriftError || err instanceof RefusalError || err instanceof ToolError ? EXIT_DRIFT : EXIT_USAGE;
   }
 }

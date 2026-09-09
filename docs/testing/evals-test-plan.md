@@ -398,3 +398,23 @@ row carries its `payload_hash`. The import receipt should likewise gain `payload
   `rule_coverage`'s shape but not its numbers — `fired: [R]` beside `exercised: 0` and R
   unexercised verified, and S14k's own fixture blessed exactly that; coverage is now reconciled
   with the rows per the engine's definition (S14m) and the fixture corrected.
+- Codex round 6 on #475 (1 HIGH / 2 MEDIUM, all fixed and proven; plus one Copilot thread):
+  `compareEvalRuns` reconstructed each run's rule inventory as `unexercised ∪ fired` and diffed it —
+  unsound, because `rule_coverage.exercised` counts every rule ANY claim fired (warn included;
+  evals.rs `rule_coverage` over `run_evals`' `triggered`) while `results[].fired` is deny-only
+  (`evaluate_sample`), so a rule that went from unexercised to exercised-by-warn vanished from the
+  reconstruction and was reported as `removed_rules` with `reconciles: false` over two valid records.
+  The delta now asserts only what the records enumerate: `gained`/`lost` from listed ids on both
+  ends; `added_rules`/`removed_rules` only when the silent side's inventory is complete
+  (`exercised === |fired|`), else `inventory: 'partial'` + `transitions_withheld` by name; the
+  exercised check is `≥ |fired|` (a count above is warn-only exercise, not a defect); the WARN-1
+  reproduction is a test (both directions). `readMaterializeReceipt` accepted any `repos[].path`
+  that `existsSync` liked and a receipt without identity; it now takes the selected pin and refuses
+  by name a wrong / missing `pin_hash` or `generation`, an extra / missing / duplicated / moved
+  repo, and any path that is not the real directory `<root>/<repo>@<tag>` (foreign directory,
+  symlink, plain file — S15q). `resolveExecutable` swallowed every `stat` / `access` error as "not
+  installed"; only ENOENT / ENOTDIR are absence now, `access` EACCES on a regular file stays
+  `blocked`, and any other lookup error is `{ path: null, error }` → `run` exits 1 naming syscall,
+  errno and candidate (a real EACCES on an unsearchable PATH dir ahead of a working engine, injected
+  EIO on stat / access — S14n). Copilot: a `tar` failure inside `materialize` is a `ToolError`
+  (exit 1), not a plain Error (exit 2) — a non-zero exit and a spawn ENOENT both tested.

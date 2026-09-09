@@ -37,17 +37,46 @@
  * `good` is a sample KIND, not a verdict — the draft plan's `good → false_positive` spelling was
  * corrected in revision 3; this module is the executable form of that correction.
  *
- * # Coverage transitions vs. rule-set changes
+ * # Coverage transitions vs. rule-set changes — and what a record CANNOT tell (codex round 6)
  *
- * A rule leaving B's `unexercised` list is NOT evidence it became exercised — it may have been
- * deleted or retired. So `gained` / `lost` are computed only over rules present in BOTH runs' rule
- * sets, where a run's rule set is reconstructed from its record as `unexercised ∪ (every rule id
- * in results[].fired)` (the wire contract: `exercised` counts the rules that fired on at least one
- * sample, `unexercised` lists the ones that fired on none); rules in one set only are reported as
- * `added_rules` / `removed_rules`. When a run's `rule_coverage.exercised` count disagrees with the
- * number of distinct rule ids that fired across its results, the exercised set cannot be
- * reconstructed from the record and that is a reconciliation error (the delta is still reported,
- * over what the record shows, and `reconciles` is false).
+ * The wire carries `rule_coverage.exercised` as a COUNT and `unexercised` as a LIST of ids
+ * (api-types `GovernanceEvalRuleCoverage`; wicked-core `crates/wicked-governance/src/evals.rs` at
+ * `1704d1a` — core #394, branch `feat/evals-effect-and-coverage` — `RuleCoverage` lines 323-328:
+ * `exercised: usize`, `unexercised: Vec<UnexercisedRule>`). A rule is EXERCISED when it appeared in
+ * ANY evaluated claim's `policy_ids`, whatever its effect (`RuleCoverage` docs lines 312-314;
+ * `rule_coverage()` lines 815-827 partitions the eligible rules by `triggered`, the union
+ * `run_evals` collects at lines 940-944 of every claim's `policy_ids`). A result row's `fired`,
+ * however, is the BLOCKING subset only: `evaluate_sample` lines 857-869 keep the ids whose effect
+ * is `Deny` (line 861) and hand the full `policy_ids` back separately (line 903). Hence
+ *
+ *   fired(run) ⊆ exercised(run), and `exercised − |fired|` rules were exercised by a non-blocking
+ *   (`warn`) effect ALONE — counted, but NEVER named anywhere in the record.
+ *
+ * So the rule identities a record enumerates are exactly `unexercised ∪ fired`, and a run's rule
+ * set is fully identified ("complete") only when `exercised === |fired|` — then the exercised set
+ * IS the fired set. When `exercised > |fired|` the record has `unidentified` exercised rules and
+ * its rule set is only partially known (`inventory: "partial"`). Reconstructing "the inventory"
+ * as `unexercised ∪ fired` and diffing it was therefore unsound (codex round 6: a rule that went
+ * from unexercised to exercised-by-warn vanished from the reconstruction and was reported as
+ * `removed_rules`, with `reconciles: false` over two valid records). The delta now asserts ONLY
+ * what the records prove:
+ *
+ *   gained         unexercised in A (listed) AND blocking-fired in B (listed): certain, always
+ *   lost           blocking-fired in A AND unexercised in B: certain, always
+ *   added_rules    enumerated by B, not by A — asserted only when A's inventory is complete (A's
+ *                  rule set is fully known, so "not enumerated by A" means "not in A")
+ *   removed_rules  enumerated by A, not by B — asserted only when B's inventory is complete
+ *   transitions_withheld
+ *                  every added/removed candidate the partial side cannot settle (the id may be
+ *                  one of that side's unidentified warn-exercised rules, or absent from its store),
+ *                  one reason per id — WITHHELD, never guessed; empty when the inventory is complete
+ *
+ * `exercised_delta` is always the difference of the two counts (a warn-only gain shows up there
+ * with `unidentified` saying how many exercised ids the record does not carry). Reconciliation
+ * errors on coverage are the record contradicting ITSELF: `exercised` BELOW the distinct
+ * blocking-fired ids (every blocking firing is an exercised rule), an id both blocking-fired and
+ * listed unexercised, or an id listed unexercised twice. A larger `exercised` is NOT an error —
+ * it is the wire's honest count of warn-only exercise. Two valid reports always `reconcile`.
  */
 
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSummary, SteeringType } from '../core/types.js';
@@ -78,17 +107,37 @@ export interface EvalVerdictFlip {
   reason: string;
 }
 
+/** Whether both records enumerate EVERY rule of their rule set (`exercised === |fired|` on each
+ *  side: no rule was exercised by a non-blocking effect alone) or at least one carries exercised
+ *  rules it does not name. See the module doc. */
+export type EvalRuleInventory = 'complete' | 'partial';
+
 /** Which rules gained or lost exercise between the runs (present only when BOTH carry coverage). */
 export interface EvalRuleCoverageDelta {
+  /** `b.rule_coverage.exercised − a.rule_coverage.exercised` — the counts, always. */
   exercised_delta: number;
-  /** In BOTH rule sets: unexercised in A, exercised in B — a sample now exercises the rule. */
+  /** `complete` when both sides identify every exercised rule (so `added_rules`/`removed_rules`
+   *  are asserted); `partial` when a side counts exercised rules it never names (then the
+   *  unsettled transitions are in `transitions_withheld`). */
+  inventory: EvalRuleInventory;
+  /** Per side, `rule_coverage.exercised − |distinct blocking-fired ids|`: how many exercised rules
+   *  the record counts but does not identify (exercised by a `warn` effect alone). 0/0 ⇔ complete. */
+  unidentified: { a: number; b: number };
+  /** Unexercised in A (listed) AND blocking-fired in B (listed) — a sample now exercises the rule.
+   *  Certain on both sides, whatever the inventory. */
   gained: string[];
-  /** In BOTH rule sets: exercised in A, unexercised in B — a rule nothing exercises any more. */
+  /** Blocking-fired in A AND unexercised in B (listed) — a rule nothing exercises any more. Certain. */
   lost: string[];
-  /** In B's rule set only — a rule the store gained between the runs (not a coverage change). */
+  /** Enumerated by B (unexercised or fired) and not by A, when A's inventory is COMPLETE — a rule
+   *  the store gained between the runs (not a coverage change). Empty when A is partial. */
   added_rules: string[];
-  /** In A's rule set only — a rule that vanished (deleted/retired) between the runs; NOT `gained`. */
+  /** Enumerated by A and not by B, when B's inventory is COMPLETE — a rule that vanished
+   *  (deleted/retired) between the runs; NOT `gained`. Empty when B is partial. */
   removed_rules: string[];
+  /** The added/removed candidates a PARTIAL side cannot settle — the id may be one of that side's
+   *  unidentified warn-exercised rules or absent from its store — one reason per id, codepoint-
+   *  sorted by id. Empty when `inventory` is `complete`. */
+  transitions_withheld: string[];
 }
 
 export interface EvalRunComparison {
@@ -126,8 +175,10 @@ export interface EvalRunComparison {
   /** `b.summary − a.summary`, field by field. */
   summary_delta: GovernanceEvalSummary;
   /** Each run's summary equals its own results' tally AND the delta equals the flip/add/remove
-   *  accounting AND each run's exercised count equals its distinct fired rule ids — a stored
-   *  record that disagrees with itself is a defect, not a flip. */
+   *  accounting AND each run's coverage does not contradict its rows (`exercised` at least its
+   *  distinct blocking-fired ids, no id both fired and unexercised, no duplicate unexercised id) —
+   *  a stored record that disagrees with ITSELF is a defect, not a flip. Two valid records always
+   *  reconcile; an exercised count ABOVE the fired ids is valid (warn-only exercise). */
   reconciles: boolean;
   reconciliation_errors: string[];
   rule_coverage_delta?: EvalRuleCoverageDelta;
@@ -266,29 +317,39 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
   // Coverage is OPTIONAL on a record (a pre-#394 engine emits none): the delta exists only when
   // both sides measured it — never fabricated from one side.
   if (a.rule_coverage !== undefined && b.rule_coverage !== undefined) {
-    const unexA = new Set(a.rule_coverage.unexercised.map((u) => u.rule_id));
-    const unexB = new Set(b.rule_coverage.unexercised.map((u) => u.rule_id));
-    const firedA = firedRules(a.results);
-    const firedB = firedRules(b.results);
-    for (const [label, run, fired] of [
-      ['a', a, firedA],
-      ['b', b, firedB],
-    ] as const) {
-      if (fired.size !== run.rule_coverage!.exercised) {
-        errors.push(
-          `run ${label} (${run.id}): rule_coverage.exercised ${run.rule_coverage!.exercised} does not match the ${fired.size} distinct rule id(s) fired across its results — the exercised rule set cannot be reconstructed from the record`,
-        );
-      }
+    const covA = coverageOf(a, 'a', errors);
+    const covB = coverageOf(b, 'b', errors);
+    // The identities each record ENUMERATES — its unexercised list plus its blocking-fired ids.
+    // Nothing else about a run's rule set is on the wire (module doc: `exercised` is a count).
+    const knownA = new Set([...covA.unexercised, ...covA.fired]);
+    const knownB = new Set([...covB.unexercised, ...covB.fired]);
+    const withheld: string[] = [];
+    // Certain transitions: both ends are LISTED identities (unexercised on one side, blocking-fired
+    // on the other) — sound whatever the inventory.
+    const gained = [...covA.unexercised].filter((id) => covB.fired.has(id)).sort(codepoint);
+    const lost = [...covA.fired].filter((id) => covB.unexercised.has(id)).sort(codepoint);
+    // Rule-set changes: an id one side enumerates and the other does not. Asserted ONLY when the
+    // silent side's inventory is complete (its rule set is fully known); a partial side may hold
+    // the id among its unidentified warn-exercised rules — withheld, never guessed.
+    const added_rules: string[] = [];
+    const removed_rules: string[] = [];
+    for (const id of [...knownB].filter((id) => !knownA.has(id)).sort(codepoint)) {
+      if (covA.unidentified === 0) added_rules.push(id);
+      else withheld.push(`added_rules ${id}: enumerated by b (${covB.unexercised.has(id) ? 'unexercised' : 'blocking-fired'}) and not by a, whose exercised set is only partially identified — ${covA.unidentified} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${a.rule_coverage.exercised} vs ${covA.fired.size} distinct blocking-fired id(s)) — so it may be one of those or a rule the store gained: not asserted`);
     }
-    const setA = new Set([...unexA, ...firedA]);
-    const setB = new Set([...unexB, ...firedB]);
-    const both = [...setA].filter((id) => setB.has(id));
+    for (const id of [...knownA].filter((id) => !knownB.has(id)).sort(codepoint)) {
+      if (covB.unidentified === 0) removed_rules.push(id);
+      else withheld.push(`removed_rules ${id}: enumerated by a (${covA.unexercised.has(id) ? 'unexercised' : 'blocking-fired'}) and not by b, whose exercised set is only partially identified — ${covB.unidentified} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${b.rule_coverage.exercised} vs ${covB.fired.size} distinct blocking-fired id(s)) — so it may be one of those (exercised now, id unknown) or a rule removed from the store: not asserted`);
+    }
     comparison.rule_coverage_delta = {
       exercised_delta: b.rule_coverage.exercised - a.rule_coverage.exercised,
-      gained: both.filter((id) => unexA.has(id) && !unexB.has(id)).sort(codepoint),
-      lost: both.filter((id) => !unexA.has(id) && unexB.has(id)).sort(codepoint),
-      added_rules: [...setB].filter((id) => !setA.has(id)).sort(codepoint),
-      removed_rules: [...setA].filter((id) => !setB.has(id)).sort(codepoint),
+      inventory: covA.unidentified === 0 && covB.unidentified === 0 ? 'complete' : 'partial',
+      unidentified: { a: covA.unidentified, b: covB.unidentified },
+      gained,
+      lost,
+      added_rules,
+      removed_rules,
+      transitions_withheld: withheld.sort(codepoint),
     };
   }
   comparison.reconciles = errors.length === 0;
@@ -327,11 +388,29 @@ function indexById(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): Map<
   return map;
 }
 
-/** Every distinct rule id that fired on at least one result row — the record's exercised set. */
-function firedRules(results: GovernanceEvalResult[]): Set<string> {
-  const s = new Set<string>();
-  for (const r of results) for (const id of r.fired) s.add(id);
-  return s;
+/** What one record's coverage lets us KNOW about its rule set, plus the ways it can contradict
+ *  itself (pushed to `errors`, naming the run). `fired` is every distinct rule id in
+ *  `results[].fired` — the BLOCKING firings (evals.rs `evaluate_sample`, `Effect::Deny` only), a
+ *  subset of the exercised rules; `unidentified` is how many exercised rules the record counts but
+ *  never names (`exercised − |fired|`, floored at 0 once the undercut is reported). */
+function coverageOf(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): { unexercised: Set<string>; fired: Set<string>; unidentified: number } {
+  const rc = run.rule_coverage!;
+  const fired = new Set<string>();
+  for (const r of run.results) for (const id of r.fired) fired.add(id);
+  const unexercised = new Set<string>();
+  for (const u of rc.unexercised) {
+    if (unexercised.has(u.rule_id)) errors.push(`run ${label} (${run.id}): rule_coverage.unexercised lists ${u.rule_id} twice — a rule is unexercised once or not at all`);
+    unexercised.add(u.rule_id);
+    if (fired.has(u.rule_id)) {
+      errors.push(`run ${label} (${run.id}): rule_coverage.unexercised lists ${u.rule_id}, which fired (blocking) in its results — a rule that fired for any sample is exercised, never unexercised`);
+    }
+  }
+  if (rc.exercised < fired.size) {
+    errors.push(
+      `run ${label} (${run.id}): rule_coverage.exercised ${rc.exercised} is below the ${fired.size} distinct rule id(s) fired (blocking) across its results (${[...fired].sort(codepoint).join(', ')}) — every blocking firing is an exercised rule`,
+    );
+  }
+  return { unexercised, fired, unidentified: Math.max(0, rc.exercised - fired.size) };
 }
 
 function field(v: EvalVerdict): 'caught' | 'gaps' | 'false_positives' {

@@ -33,8 +33,9 @@
 // extraction, never trimmed) and the steering-type inference sees the real paths; samples are
 // validated by the ROUTE's own zod schema (no mirror — what the route rejects, `samples`/`run`
 // reject before the engine is invoked); `samples` publishes atomically (tmp+rename under a lock,
-// one generation stamp); `run` skips ONLY on ENOENT (any other probe error or a non-zero
-// `--version` is a tool failure), fails loud when the tool fails, verifies samples.meta.json
+// one generation stamp); `run` skips ONLY on true absence (ENOENT / ENOTDIR — any other executable-
+// LOOKUP error such as EACCES or EIO is a tool failure, codex round 6; so is any other probe error
+// or a non-zero `--version`), fails loud when the tool fails, verifies samples.meta.json
 // against samples.json AND the pin before the engine is probed, stages EXACTLY the pinned samples
 // in a fresh private dir, VERIFIES the engine's report before publication (exactly one row per
 // staged sample — no duplicate, extra or missing id — engine verdicts, `fired` arrays, a summary
@@ -54,7 +55,7 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -153,12 +154,19 @@ interface ResolveOpts {
   platform?: string;
   pathext?: string;
 }
+/** A lookup that failed for any reason but absence — the tool failure `run` reports (codex round 6). */
+interface LookupError {
+  syscall: string;
+  code: string;
+  candidate: string;
+  message: string;
+}
 /** The script's exported pure functions (typed here — the file is plain JS). */
 interface CorpusModule {
-  resolveExecutable: (name: string, opts?: ResolveOpts) => { path: string | null; blocked: string | null; searched: string[] };
+  resolveExecutable: (name: string, opts?: ResolveOpts) => { path: string | null; blocked: string | null; error: LookupError | null; searched: string[] };
   executableCandidates: (name: string, opts?: ResolveOpts) => string[];
   inspectMaterializeRoot: (outDir: string) => RootInspection;
-  readMaterializeReceipt: (outDir: string) => { receipt: MaterializeReceipt; root: string; debris: RootInspection['state'] };
+  readMaterializeReceipt: (outDir: string, pin: Pin) => { receipt: MaterializeReceipt; root: string; debris: RootInspection['state'] };
   MATERIALIZE_INPROGRESS_PREFIX: string;
   GENERATION_RE: RegExp;
   pinHash: (repos: PinRepo[]) => string;
@@ -181,6 +189,7 @@ interface CorpusModule {
   FAULT_ENV: string;
   UsageError: new (message: string) => Error;
   RefusalError: new (message: string) => Error;
+  ToolError: new (message: string) => Error;
   RELEASE_TAG_RE: RegExp;
   SAFE_SEGMENT_RE: RegExp;
   GIT_LOG_CONFIG: readonly string[];
@@ -1214,7 +1223,7 @@ describe('materialize — git archive of each pinned tag', () => {
     expect(readdirSync(outDir).some((f) => f.startsWith('.beta@v0.2.0.prev-'))).toBe(true); // its backup is still there for the operator
     expect(readdirSync(outDir).some((f) => f.endsWith('.lock'))).toBe(false); // the lock is always released
     expect(m.inspectMaterializeRoot(outDir).state).toBe('damaged');
-    expect(() => m.readMaterializeReceipt(outDir)).toThrow(/is DAMAGED — in-progress marker .*beta@v0\.2\.0 MISSING.* — no receipt describes these trees; run `materialize /);
+    expect(() => m.readMaterializeReceipt(outDir, readPin())).toThrow(/is DAMAGED — in-progress marker .*beta@v0\.2\.0 MISSING.* — no receipt describes these trees; run `materialize /);
     // (e) The hook is INERT outside the test environment: the same variable with NODE_ENV not `test`
     // and VITEST not "true" ⇒ a normal, successful materialization that FIRST repairs the damaged
     // root (alpha's swapped-in tree replaced by its backup, beta's hole filled from its backup,
@@ -1231,7 +1240,7 @@ describe('materialize — git archive of each pinned tag', () => {
       expect(existsSync(r.path)).toBe(true);
       expect(r.tree_sha).toBe(git(join(sourceRoot, r.repo), 'rev-parse', `${pinOf(readPin(), r.repo).commit_sha}^{tree}`));
     }
-    expect(m.readMaterializeReceipt(outDir).debris).toBe('clean');
+    expect(m.readMaterializeReceipt(outDir, readPin()).debris).toBe('clean');
   }, 90_000); // 7 script spawns (~3-7 s each under full-suite load) — the same budget S15n/S15p carry
 
   it.skipIf(process.platform === 'win32')(
@@ -1288,8 +1297,8 @@ describe('materialize — git archive of each pinned tag', () => {
         `the previous receipt materialized.json.prev-${gen} moved aside`,
         '2 staging dir(s)',
       ]);
-      expect(() => m.readMaterializeReceipt(outDir)).toThrow(m.RefusalError);
-      expect(() => m.readMaterializeReceipt(outDir)).toThrow(
+      expect(() => m.readMaterializeReceipt(outDir, readPin())).toThrow(m.RefusalError);
+      expect(() => m.readMaterializeReceipt(outDir, readPin())).toThrow(
         /^.* is DAMAGED — in-progress marker \.materialize\.inprogress-\d{8}-\d{6}-[0-9a-f]{8} \(pid \d+\); \.alpha@v0\.3\.0\.prev-.* beside a swapped-in alpha@v0\.3\.0; \.beta@v0\.2\.0\.prev-.* with beta@v0\.2\.0 MISSING; the previous receipt materialized\.json\.prev-.* moved aside; 2 staging dir\(s\) — no receipt describes these trees; run `materialize .*` to repair \(it rolls the \.prev-<generation> trees back, removes the staging and the marker, re-extracts every pinned tree and publishes a new receipt\), or inspect those entries by hand first$/,
       );
       // The killed process left its lock (no finally ran): the next materialize refuses by name,
@@ -1307,7 +1316,7 @@ describe('materialize — git archive of each pinned tag', () => {
       );
       expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
       for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // re-extracted: the committed trees
-      const after = m.readMaterializeReceipt(outDir);
+      const after = m.readMaterializeReceipt(outDir, readPin());
       expect(after.debris).toBe('clean');
       expect(after.receipt.generation).not.toBe(gen);
       expect(after.receipt.repos.map((r) => r.repo)).toEqual(['alpha', 'beta', 'gamma']);
@@ -1326,7 +1335,7 @@ describe('materialize — git archive of each pinned tag', () => {
       expect(late.prevReceipts).toHaveLength(1);
       expect(late.markers).toHaveLength(1);
       expect(late.receipt!.generation).toBe(late.generations[0]);
-      const lateRead = m.readMaterializeReceipt(outDir);
+      const lateRead = m.readMaterializeReceipt(outDir, readPin());
       expect(lateRead.debris).toBe('torn-cleanup');
       expect(lateRead.receipt.generation).toBe(late.receipt!.generation);
       for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // the NEW trees are in place, described by the receipt
@@ -1338,20 +1347,20 @@ describe('materialize — git archive of each pinned tag', () => {
       // (d) Stale staging alone (an extraction interrupted before any tree moved) is debris, not damage.
       mkdirSync(join(outDir, '.alpha@v0.3.0.staging-20990101-000000-deadbeef'));
       expect(m.inspectMaterializeRoot(outDir).state).toBe('stale-staging');
-      expect(m.readMaterializeReceipt(outDir).debris).toBe('stale-staging');
+      expect(m.readMaterializeReceipt(outDir, readPin()).debris).toBe('stale-staging');
       const swept = run('materialize', outDir);
       expect(swept.status, swept.stderr).toBe(0);
       expect(swept.stdout).toMatch(/repaired\s+.*: removed 1 staging dir\(s\) an interrupted extraction left \(trees and receipt untouched\)/);
       expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
       // A receipt beside a tree removed by hand is refused by the reader too.
       rmSync(join(outDir, 'gamma@v0.3.0'), { recursive: true, force: true });
-      expect(() => m.readMaterializeReceipt(outDir)).toThrow(/materialized\.json describes 1 tree\(s\) that are not there \(".*gamma@v0\.3\.0"\) — run `materialize .*` again/);
+      expect(() => m.readMaterializeReceipt(outDir, readPin())).toThrow(/materialized\.json describes gamma@v0\.3\.0 at .*gamma@v0\.3\.0, which is not there — run `materialize .*` again/);
       // (e) The kill hook is inert outside the test env: a normal, successful materialization.
       const inert = runEnv({ [m.FAULT_ENV]: 'kill-between-swaps:1,kill-after-receipt', NODE_ENV: 'production', VITEST: '' }, 'materialize', outDir);
       expect(inert.status, inert.stderr).toBe(0);
       expect(inert.signal).toBeNull();
       expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
-      expect(m.readMaterializeReceipt(outDir).debris).toBe('clean');
+      expect(m.readMaterializeReceipt(outDir, readPin()).debris).toBe('clean');
     },
     90_000,
   );
@@ -1392,6 +1401,115 @@ describe('materialize — git archive of each pinned tag', () => {
     },
     30_000,
   );
+
+  it('a `tar` that exits non-zero or cannot be spawned during extraction is a TOOL failure — exit 1, never the usage/IO exit 2 — with nothing swapped in, no receipt and no debris (Copilot on #475)', () => {
+    const toolDir = join(fixture, 'tools');
+    mkdirSync(toolDir, { recursive: true });
+    // (a) A tar that fails: first on PATH, the real git and coreutils behind it.
+    writeFileSync(join(toolDir, 'tar'), '#!/bin/sh\necho "tar: injected extraction failure" >&2\nexit 1\n', 'utf8');
+    chmodSync(join(toolDir, 'tar'), 0o755);
+    const failing = runEnv({ PATH: `${toolDir}${delimiter}${process.env['PATH'] ?? ''}` }, 'materialize', outDir);
+    expect(failing.status).toBe(1);
+    expect(failing.stderr).toMatch(/^evals-internal-corpus: tar -xf failed for alpha@v0\.3\.0 \(exit 1\): tar: injected extraction failure$/m);
+    expect(existsSync(join(outDir, 'materialized.json'))).toBe(false);
+    expect(readdirSync(outDir)).toEqual([]); // staging removed, nothing swapped in, lock released
+    // (b) No tar on PATH at all (spawn ENOENT) — the same class, named; PATH holds only git.
+    rmSync(join(toolDir, 'tar'));
+    symlinkSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(), join(toolDir, 'git'));
+    const missing = runEnv({ PATH: toolDir }, 'materialize', outDir);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toMatch(/^evals-internal-corpus: tar could not be executed for alpha@v0\.3\.0 \(ENOENT\): spawnSync tar ENOENT — materialize needs a working `tar` on PATH$/m);
+    expect(existsSync(join(outDir, 'materialized.json'))).toBe(false);
+    expect(readdirSync(outDir)).toEqual([]);
+    // Control: the real tar materializes the same root.
+    const ok = run('materialize', outDir);
+    expect(ok.status, ok.stderr).toBe(0);
+  });
+
+  it('S15q: readMaterializeReceipt(dir, pin) trusts a receipt ONLY as the materialization OF the selected pin — identity (pin_hash + generation), membership (exactly the pinned repos at their tag + sha) and containment (every path IS <root>/<repo>@<tag>: present, not a symlink, a directory, realpath-equal) — a foreign directory, a symlinked tree, a plain file, a missing identity, another pin, an extra / missing / duplicated / moved repo are refused by name, never "clean" (codex round 6)', async () => {
+    const m = await mod();
+    expect(run('materialize', outDir).status).toBe(0);
+    const pin = readPin();
+    const root = realpathSync(outDir);
+    const receiptPath = join(root, 'materialized.json');
+    const pristine = readFileSync(receiptPath, 'utf8');
+    type ReceiptRepo = MaterializeReceipt['repos'][number];
+    const receipt = () => JSON.parse(pristine) as Record<string, unknown> & { repos: ReceiptRepo[] };
+    const write = (r: unknown) => writeFileSync(receiptPath, JSON.stringify(r), 'utf8');
+    const refused = (...expected: (string | RegExp)[]) => {
+      expect(() => m.readMaterializeReceipt(outDir, pin)).toThrow(m.RefusalError);
+      for (const e of expected) expect(() => m.readMaterializeReceipt(outDir, pin)).toThrow(e);
+    };
+    // The genuine receipt is clean; without a pin there is nothing to trust it AS (usage error).
+    expect(m.readMaterializeReceipt(outDir, pin).debris).toBe('clean');
+    expect(() => (m.readMaterializeReceipt as unknown as (d: string) => unknown)(outDir)).toThrow(m.UsageError);
+    // Identity.
+    let r = receipt();
+    delete r['pin_hash'];
+    write(r);
+    refused(/materialized\.json carries no pin_hash — it is not the materialization of a pin — run `materialize .*` again/);
+    r = receipt();
+    r['pin_hash'] = `sha256:${'0'.repeat(64)}`;
+    write(r);
+    refused(`was materialized from pin sha256:${'0'.repeat(64)} but the selected pin is ${pin.pin_hash}`);
+    r = receipt();
+    delete r['generation'];
+    write(r);
+    refused(/carries no well-formed generation stamp \(got undefined\)/);
+    // Codex's exact fixture — a bare foreign path, no identity: refused (at identity), not "clean".
+    write({ repos: [{ path: tmpdir() }] });
+    refused(/carries no pin_hash/);
+    // Membership.
+    r = receipt();
+    r.repos.push({ ...r.repos[0]!, repo: 'delta' });
+    write(r);
+    refused(/describes "delta", which the selected pin does not have/);
+    r = receipt();
+    r.repos = r.repos.filter((x) => x.repo !== 'beta');
+    write(r);
+    refused(/does not describe 1 pinned repo\(s\) \("beta"\)/);
+    r = receipt();
+    r.repos.push(r.repos[0]!);
+    write(r);
+    refused(/describes alpha twice/);
+    r = receipt();
+    r.repos[1]!.tag = 'v0.1.0';
+    write(r);
+    refused(/describes beta at "v0\.1\.0" "[0-9a-f]{40}" but the pin has v0\.2\.0 [0-9a-f]{40}/);
+    r = receipt();
+    r.repos[1]!.commit_sha = '0'.repeat(40);
+    write(r);
+    refused(/describes beta at "v0\.2\.0" "0{40}" but the pin has v0\.2\.0 [0-9a-f]{40}/);
+    // Containment: a FOREIGN directory — exists and IS a directory, so `existsSync` would have said yes.
+    r = receipt();
+    r.repos[0]!.path = fixture;
+    write(r);
+    refused(`describes alpha@v0.3.0 at ${fixture}`, `, which is not ${join(root, 'alpha@v0.3.0')} — outside the materialize root — run`);
+    // A directory INSIDE the root that is not the pinned entry (another repo's tree).
+    r = receipt();
+    r.repos[0]!.path = join(root, 'beta@v0.2.0');
+    write(r);
+    refused(`describes alpha@v0.3.0 at ${join(root, 'beta@v0.2.0')}, which is not ${join(root, 'alpha@v0.3.0')} — run`);
+    // A SYMLINK at the tree's name — even one pointing at the genuine tree moved aside.
+    writeFileSync(receiptPath, pristine, 'utf8'); // the genuine receipt bytes back (not re-encoded)
+    const aside = join(fixture, 'alpha-aside');
+    renameSync(join(root, 'alpha@v0.3.0'), aside);
+    symlinkSync(aside, join(root, 'alpha@v0.3.0'));
+    refused(`describes alpha@v0.3.0 at ${join(root, 'alpha@v0.3.0')}, which is a symlink — a tree reached through a link is not the materialized tree`);
+    rmSync(join(root, 'alpha@v0.3.0'));
+    renameSync(aside, join(root, 'alpha@v0.3.0'));
+    expect(m.readMaterializeReceipt(outDir, pin).debris).toBe('clean'); // the genuine tree back in place
+    // A regular FILE at the tree's name; then nothing at all.
+    rmSync(join(root, 'beta@v0.2.0'), { recursive: true, force: true });
+    writeFileSync(join(root, 'beta@v0.2.0'), 'not a tree', 'utf8');
+    refused(`describes beta@v0.2.0 at ${join(root, 'beta@v0.2.0')}, which is not a directory`);
+    rmSync(join(root, 'beta@v0.2.0'));
+    refused(`describes beta@v0.2.0 at ${join(root, 'beta@v0.2.0')}, which is not there`);
+    // A repeat materialization restores the pinned trees and publishes a receipt that IS clean.
+    const again = run('materialize', outDir);
+    expect(again.status, again.stderr).toBe(0);
+    expect(m.readMaterializeReceipt(outDir, readPin()).debris).toBe('clean');
+  });
 });
 
 describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI stands in)', () => {
@@ -1418,11 +1536,12 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     chmodSync(path, 0o755);
   }
 
-  /** `run` under an explicit PATH (and optionally a cwd — the empty-PATH-entry probe). */
-  function runWithEnv(over: { PATH: string; cwd?: string }, ...extra: string[]) {
+  /** `run` under an explicit PATH (and optionally a cwd — the empty-PATH-entry probe — and extra
+   *  env, e.g. the vitest-only fault hook). */
+  function runWithEnv(over: { PATH: string; cwd?: string; env?: NodeJS.ProcessEnv }, ...extra: string[]) {
     const args = [SCRIPT, 'run', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--rules', rulesDir, ...extra];
     // `env` already spreads process.env; re-stated so the harness-hygiene scan sees the arming here.
-    const res = spawnSync(process.execPath, args, { cwd: over.cwd, env: { ...process.env, ...env, PATH: over.PATH }, encoding: 'utf8' });
+    const res = spawnSync(process.execPath, args, { cwd: over.cwd, env: { ...process.env, ...env, ...over.env, PATH: over.PATH }, encoding: 'utf8' });
     return { status: res.status, stdout: res.stdout, stderr: res.stderr };
   }
 
@@ -1668,6 +1787,83 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(silent.status).toBe(1);
     expect(silent.stderr).toMatch(/wicked-core --version printed nothing/);
     expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('S14n: an executable LOOKUP that fails for any reason but absence is a TOOL FAILURE (exit 1), never the SKIP — a PATH directory the process may not search (real EACCES on stat, ahead of a working engine), an I/O fault (injected EIO on stat / access); `access` EACCES on a regular file stays `blocked`; ENOENT and ENOTDIR (a PATH entry that is a file) are absence and still SKIP; resolveExecutable() names syscall, errno and candidate; the hook is inert outside the test env (codex round 6)', async () => {
+    const m = await mod();
+    okEngine(); // a WORKING engine on the fake dir — a lookup fault ahead of it still fails the run: which file exec would pick cannot be determined
+    const fake = join(fakeBin, coreBin);
+    const fakeFirst = `${fakeBin}${delimiter}${process.env['PATH'] ?? ''}`;
+    const withFault = (points: string, fn: () => void) => {
+      const prev = process.env[m.FAULT_ENV];
+      process.env[m.FAULT_ENV] = points;
+      try {
+        fn();
+      } finally {
+        if (prev === undefined) delete process.env[m.FAULT_ENV];
+        else process.env[m.FAULT_ENV] = prev;
+      }
+    };
+    // (a) The resolver: an injected fault is reported, never swallowed into `{ path: null, blocked: null }`.
+    withFault('lookup-stat:EIO', () => {
+      expect(m.resolveExecutable(coreBin, { path: fakeBin })).toEqual({
+        path: null,
+        blocked: null,
+        error: { syscall: 'stat', code: 'EIO', candidate: fake, message: `injected EIO at stat (${m.FAULT_ENV}, test hook)` },
+        searched: [fake],
+      });
+    });
+    withFault('lookup-stat:EACCES', () => {
+      expect(m.resolveExecutable(coreBin, { path: fakeBin }).error).toMatchObject({ syscall: 'stat', code: 'EACCES', candidate: fake });
+    });
+    withFault('lookup-access:EIO', () => {
+      expect(m.resolveExecutable(coreBin, { path: fakeBin })).toMatchObject({ path: null, blocked: null, error: { syscall: 'access', code: 'EIO', candidate: fake } });
+    });
+    // `access` EACCES on a regular file is exec's "not executable": `blocked`, not an error.
+    withFault('lookup-access:EACCES', () => {
+      expect(m.resolveExecutable(coreBin, { path: fakeBin })).toEqual({ path: null, blocked: fake, error: null, searched: [fake] });
+    });
+    // Through the CLI: exit 1, TOOL FAILURE naming syscall + errno + candidate, nothing published, the engine never spawned.
+    const eio = runWithEnv({ PATH: fakeFirst, env: { [m.FAULT_ENV]: 'lookup-stat:EIO' } });
+    expect(eio.status).toBe(1);
+    expect(eio.stderr).toMatch(
+      new RegExp(
+        `run: TOOL FAILURE \\(engine version unknown\\) — ${coreBin} could not be looked up on PATH: stat .*${coreBin} failed \\(EIO\\) — injected EIO at stat \\(${m.FAULT_ENV}, test hook\\); which executable a spawn would run cannot be determined, so nothing is run and nothing is skipped`,
+      ),
+    );
+    expect(eio.stdout).not.toContain('SKIP');
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    const accessEio = runWithEnv({ PATH: fakeFirst, env: { [m.FAULT_ENV]: 'lookup-access:EIO' } });
+    expect(accessEio.status).toBe(1);
+    expect(accessEio.stderr).toMatch(new RegExp(`could not be looked up on PATH: access .*${coreBin} failed \\(EIO\\)`));
+    expect(existsSync(join(fixture, 'engine-invoked'))).toBe(false);
+    // (b) A REAL EACCES: a PATH directory without search permission, AHEAD of the working engine.
+    if (process.getuid?.() !== 0) {
+      const denied = join(fixture, 'denied-bin');
+      mkdirSync(denied);
+      chmodSync(denied, 0o000);
+      try {
+        expect(m.resolveExecutable(coreBin, { path: `${denied}${delimiter}${fakeBin}` })).toMatchObject({ path: null, blocked: null, error: { syscall: 'stat', code: 'EACCES', candidate: join(denied, coreBin) } });
+        const eacces = runWithEnv({ PATH: `${denied}${delimiter}${fakeFirst}` });
+        expect(eacces.status).toBe(1);
+        expect(eacces.stderr).toMatch(new RegExp(`run: TOOL FAILURE \\(engine version unknown\\) — ${coreBin} could not be looked up on PATH: stat .*denied-bin.*${coreBin} failed \\(EACCES\\)`));
+        expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+        expect(existsSync(join(fixture, 'engine-invoked'))).toBe(false); // the engine behind the unsearchable dir was never spawned
+      } finally {
+        chmodSync(denied, 0o755);
+      }
+    }
+    // (c) Absence stays the SKIP: a PATH entry that is a FILE (ENOTDIR) and a dir without the name (ENOENT).
+    const fileEntry = join(fixture, 'a-file-on-path');
+    writeFileSync(fileEntry, '', 'utf8');
+    expect(m.resolveExecutable(coreBin, { path: `${fileEntry}${delimiter}${fixture}` })).toEqual({ path: null, blocked: null, error: null, searched: [join(fileEntry, coreBin), join(fixture, coreBin)] });
+    const skip = runWithEnv({ PATH: `${fileEntry}${delimiter}${fixture}` });
+    expect(skip.status, skip.stderr).toBe(0);
+    expect(skip.stdout).toContain(`run: SKIP — ${coreBin} is not on PATH`);
+    // (d) The hook is inert outside the test env: the same variable, a normal run.
+    const inert = runWithEnv({ PATH: fakeFirst, env: { [m.FAULT_ENV]: 'lookup-stat:EIO', NODE_ENV: 'production', VITEST: '' } });
+    expect(inert.status, inert.stderr).toBe(0);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(true);
   });
 
   it('S14d: a published sample the ROUTE schema rejects (signals.phase/tool of the wrong type) is refused (exit 1) BEFORE the engine is probed — with samples_hash intact, so it is the schema, not the hash, that says no', async () => {
@@ -1950,7 +2146,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(existsSync(join(fixture, 'engine-invoked'))).toBe(true);
     expect(existsSync(join(fixture, 'shim-invoked'))).toBe(false);
     // (c) The resolver itself over fixture PATH strings: an empty entry is the cwd, in PATH order.
-    expect(m.resolveExecutable(coreBin, { path: `${delimiter}${fakeBin}`, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, searched: [shim, fake] });
+    expect(m.resolveExecutable(coreBin, { path: `${delimiter}${fakeBin}`, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, error: null, searched: [shim, fake] });
     expect(m.resolveExecutable(coreBin, { path: `${fakeBin}${delimiter}`, cwd: shimDir })).toMatchObject({ path: realpathSync(fake), searched: [fake, shim] }); // a TRAILING empty entry is the cwd too — after the dir
     expect(m.resolveExecutable(coreBin, { path: `${fakeBin}${delimiter}${delimiter}${fixture}`, cwd: shimDir }).searched).toEqual([fake, shim, join(fixture, coreBin)]); // a DOUBLED delimiter
     expect(m.resolveExecutable(coreBin, { path: fakeBin, cwd: shimDir }).path).toBe(realpathSync(fake)); // no empty entry ⇒ the cwd is never searched
@@ -1959,16 +2155,16 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     mkdirSync(join(dirNamed, coreBin), { recursive: true });
     expect(m.resolveExecutable(coreBin, { path: `${dirNamed}${delimiter}${fakeBin}`, cwd: fixture }).path).toBe(realpathSync(fake));
     // Nothing named so anywhere ⇒ ENOENT (the documented SKIP); an unset PATH searches nothing.
-    expect(m.resolveExecutable(coreBin, { path: dirNamed, cwd: fixture })).toEqual({ path: null, blocked: null, searched: [join(dirNamed, coreBin)] });
-    expect(m.resolveExecutable(coreBin, { path: undefined, cwd: shimDir })).toEqual({ path: null, blocked: null, searched: [] });
+    expect(m.resolveExecutable(coreBin, { path: dirNamed, cwd: fixture })).toEqual({ path: null, blocked: null, error: null, searched: [join(dirNamed, coreBin)] });
+    expect(m.resolveExecutable(coreBin, { path: undefined, cwd: shimDir })).toEqual({ path: null, blocked: null, error: null, searched: [] });
     // A present-but-not-executable file is `blocked` (exec's EACCES — spawned so the OS says so,
     // never a SKIP); with an executable later on the path it is passed over exactly as exec does.
     chmodSync(shim, 0o644);
-    expect(m.resolveExecutable(coreBin, { path: '', cwd: shimDir })).toEqual({ path: null, blocked: shim, searched: [shim] });
+    expect(m.resolveExecutable(coreBin, { path: '', cwd: shimDir })).toEqual({ path: null, blocked: shim, error: null, searched: [shim] });
     expect(m.resolveExecutable(coreBin, { path: `${delimiter}${fakeBin}`, cwd: shimDir }).path).toBe(realpathSync(fake));
     chmodSync(shim, 0o755);
     // (d) A name with a separator is a path against the cwd — PATH is not consulted.
-    expect(m.resolveExecutable(`.${sep}${coreBin}`, { path: fakeBin, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, searched: [shim] });
+    expect(m.resolveExecutable(`.${sep}${coreBin}`, { path: fakeBin, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, error: null, searched: [shim] });
     // (e) The win32 enumeration: cwd FIRST (libuv), then each entry (empty = cwd), bare then every
     // PATHEXT. (`coreBin`, never the spelled name — tests/core-checkout-policy.test.ts forbids it.)
     expect(m.executableCandidates(coreBin, { platform: 'win32', path: '/a;;/b', cwd: '/cwd', pathext: '.EXE;.CMD' })).toEqual([

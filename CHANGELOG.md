@@ -121,14 +121,34 @@ mentioned only where a daemon release depends on them.
   unexercised, `exercised` ≥ the distinct blocking-fired ids, no duplicate unexercised id,
   `recall_only` a non-negative integer when present — the round-4 fixture that blessed a fired rule
   as unexercised is corrected; the summary line prints the blocking-fired count beside `exercised`.
+  Codex round 6 (+ one Copilot thread): `readMaterializeReceipt(dir, pin)` trusts a receipt only as
+  the materialization OF the selected pin — `pin_hash` and a well-formed `generation` present and
+  the pin's, `repos[]` exactly the pinned repos at their tag + sha, and every `path` the real
+  directory `<root>/<repo>@<tag>` (present, not a symlink, a directory, realpath-equal) — a
+  foreign path, a link, a plain file, a missing identity or an extra / missing / duplicated repo is
+  a named refusal, never "clean" (the reader used to accept any `existsSync` path and an
+  identity-less receipt). `resolveExecutable` reserves the exit-zero SKIP for true absence
+  (ENOENT / ENOTDIR): any other lookup error — `stat` EACCES on a PATH directory, EIO, a failing
+  realpath — is `{ path: null, error }` and `run` reports a TOOL FAILURE naming syscall, errno and
+  candidate (every lookup error used to be swallowed as "not installed"); a regular file without
+  execute permission stays `blocked`. A `tar` that fails or cannot be spawned inside `materialize`
+  is a `ToolError` (exit 1), not a plain Error (exit 2) — Copilot.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
   side without WELL-FORMED hashes — `sha256:` + 64 lowercase hex, `PAYLOAD_HASH_RE`; a malformed
   persisted value is no identity, never "changed" — is `unverified: no sample identity`, never
-  comparable — `comparable_reason` says why), summary reconciliation, and a `rule_coverage` delta whose `gained`/`lost` cover only
-  rules present in BOTH runs' rule sets, with `added_rules`/`removed_rules` reported apart (a rule
-  that vanished is removed, never gained).
+  comparable — `comparable_reason` says why), summary reconciliation, and a `rule_coverage` delta
+  over what the records ENUMERATE (codex round 6): the wire's `exercised` is a COUNT of every rule
+  any claim fired, blocking or not, while `results[].fired` is the blocking subset (evals.rs
+  `rule_coverage` / `evaluate_sample`), so a record names only `unexercised ∪ fired` and its rule
+  set is fully identified only when `exercised === |fired|`. `gained`/`lost` are asserted from
+  listed ids on both ends; `added_rules`/`removed_rules` only when the silent side's inventory is
+  complete, else withheld by name (`inventory: 'partial'`, `unidentified`, `transitions_withheld`)
+  — a rule that leaves `unexercised` for a warn-only firing is no longer misreported as removed.
+  An `exercised` count above the fired ids is valid warn-only exercise; a count BELOW, an id both
+  fired and unexercised, or a duplicate unexercised id is the record contradicting itself — a
+  reconciliation error. Two valid records always reconcile.
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
   eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
