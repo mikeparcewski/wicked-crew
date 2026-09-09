@@ -186,7 +186,7 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
 
-// Eval-run history (api-types 0.26.0, the #394/#395 companion): what the EvalRunStore records and
+// Eval-run history (api-types 0.27.0, the #394/#395 companion): what the EvalRunStore records and
 // GET /testing/evals[/:id] serves must satisfy the published rows — INCLUDING `rule_coverage`
 // riding the summary row optionally (an engine predating core #394 emits none, and the row must
 // still validate without it), and the report's own optional `rule_coverage`. The `accepts` pins
@@ -262,7 +262,7 @@ accepts<
     rule_coverage: { exercised: number; unexercised: { rule_id: string; steering_type: Wire.SteeringType }[] };
   }
 >();
-// Steering `effect` (api-types 0.26.0): the operator-authorable `warn` band is a legal effect on
+// Steering `effect` (api-types 0.27.0): the operator-authorable `warn` band is a legal effect on
 // the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
 accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();
 

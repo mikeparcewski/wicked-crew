@@ -1160,7 +1160,7 @@ export interface ConformanceRule {
    * Enforcement half (from the retired policy model). Absent ⇒ the rule is RECALL-ONLY: it is
    * surfaced to workers but never enters decide()/select(), so it can neither block a gate nor
    * `catch` an eval sample — which is why a store of effect-less rules evals to "every bad
-   * sample is a gap" (api-types 0.26.0, the #394/#395 companion). `deny` blocks (the only effect
+   * sample is a gap" (api-types 0.27.0, the #394/#395 companion). `deny` blocks (the only effect
    * the evals credit as a catch); `warn` surfaces without blocking (the operator-authorable
    * middle band); `allow_with_conditions` permits with obligations; `allow` permits outright.
    */
