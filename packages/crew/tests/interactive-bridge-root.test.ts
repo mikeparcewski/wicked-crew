@@ -236,7 +236,7 @@ describe('the event seams resolve through the SAME containment, creating nothing
   const SYMLINKS = canSymlink();
   let home: string;
   let base: string;
-  const settings = { get: (_id: string): null => null };
+  const settings = { get: (): null => null };
   const interactiveDocsRoot = (projectId: string | undefined): string =>
     resolveProjectInteractiveRoot(projectId, projectId !== undefined ? settings.get(projectId) : null, NO_ENV, home);
   const manifest = JSON.stringify({ kind: 'demo', head: 0, versions: [{ version: 0, html_file: '_v0.html' }] });
