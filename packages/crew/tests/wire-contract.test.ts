@@ -423,8 +423,9 @@ respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
 respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();
 // snapshot.json is what the ENGINE reads — its skill rows reuse the contract's kind vocabulary.
 respondsWith<Wire.SkillKind, SnapshotManifest['skills'][number]['kind']>();
-// The finding kinds this branch adds (a blocked publish's reasons) are in the published union.
-respondsWith<Wire.SkillFindingKind, 'catalog-invalid' | 'venv-failed' | 'missing-plugin-manifest'>();
+// The finding kinds this branch adds (a blocked publish's reasons, and the 2xx-blocked refusals a
+// publish-in-flight / root-changed now answer instead of a 409 — codex round 3) are in the union.
+respondsWith<Wire.SkillFindingKind, 'catalog-invalid' | 'venv-failed' | 'missing-plugin-manifest' | 'publish-in-flight' | 'root-changed'>();
 // Request direction: every body the contract lets a client send parses.
 accepts<z.input<typeof SkillRevisionSchema>, Wire.SkillRevisionBody>();
 accepts<z.input<typeof PutSkillFileSchema>, Wire.PutSkillFileBody>();

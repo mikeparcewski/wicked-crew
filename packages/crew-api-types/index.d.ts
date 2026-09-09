@@ -1346,9 +1346,10 @@ export interface SteeringLandingResult {
 // a CLI without a lever (codex today) runs without wicked skills, and a unit on such a seat that
 // requires one is REFUSED at launch (no proceed-with-disclosure setting exists).
 // `/skills` is a file manager whose EVERY mutation is CAS-guarded (`expectedRevision`) and
-// answers 2xx `{verdict, findings[], revision}` — a `blocked` verdict is a normal response; 409
-// (`{error, revision}`) is a stale revision, a publish already in flight (one at a time), or a
-// skills root that changed under a running publish.
+// answers 2xx `{verdict, findings[], revision}` — a `blocked` verdict is a normal response,
+// including a publish refused because one is in flight (`publish-in-flight`) or aborted because the
+// root changed under it (`root-changed`), neither of which wrote anything. 409 (`{error, revision}`)
+// is EXCLUSIVELY a stale `expectedRevision` (a CAS conflict).
 
 /** What a skill IS, from its frontmatter — fork-first: `context: fork` → fork worker (a subagent
  *  body); else `user-invocable: true` → router (an operator-facing entry point); else module (a
@@ -1531,7 +1532,14 @@ export type SkillFindingKind =
    *  failed, or the env could not be locked) while the bundle carries a `pyproject.toml` — the env
    *  is REQUIRED, so the publish is blocked and nothing (the provisioning state included) is
    *  persisted (api-types 0.27.0). */
-  | 'venv-failed';
+  | 'venv-failed'
+  /** A publish was refused because one is already running (one at a time) — nothing was written, so
+   *  it is a 2xx `blocked` envelope, not a 409 (409 is only a stale `expectedRevision`; api-types
+   *  0.27.0). Re-read `GET /skills` and retry against the revision it answers. */
+  | 'publish-in-flight'
+  /** A publish was aborted because the skills root changed under it — nothing was written to either
+   *  root; a 2xx `blocked` envelope (api-types 0.27.0). Re-read `GET /skills` and retry. */
+  | 'root-changed';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
 
@@ -1576,7 +1584,8 @@ export interface SkillMutationResult extends SkillAnalyzeResult {
  *  baseline's provisioning state). `path` is the absolute REAL path of the locked, read-only
  *  generation; its `snapshot.json` carries the skill rows and the `views` block (`views.copilot`:
  *  the `views/copilot` dir + the portable skills laid out in it). One publish runs at a time — a
- *  concurrent one is the 409 `SkillRevisionConflict`. */
+ *  concurrent one wrote nothing and answers a 2xx `blocked` `publish-in-flight` envelope
+ *  (`snapshot: null`), not a 409. */
 export interface SkillPublishResult extends SkillAnalyzeResult {
   snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
 }
@@ -1602,8 +1611,10 @@ export interface SkillRefreshResult extends SkillAnalyzeResult {
   conflicts: string[];
 }
 
-/** The 409 body of every `/skills` mutation whose `expectedRevision` is stale — and of a publish
- *  refused because another publish is in flight, or because the skills root changed while it ran. */
+/** The 409 body of a `/skills` mutation whose `expectedRevision` is stale — a CAS conflict, the
+ *  ONLY thing that answers 409. A publish refused because another is in flight, or aborted because
+ *  the skills root changed under it, wrote nothing and instead answers a 2xx `blocked` findings
+ *  envelope (`publish-in-flight` / `root-changed`; api-types 0.27.0), never a 409. */
 export interface SkillRevisionConflict {
   error: string;
   /** The current revision — re-read `GET /skills` (or use this) and retry. */

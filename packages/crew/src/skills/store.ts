@@ -68,11 +68,13 @@
  *
  * # Publish (serialized, root-bound, crash-safe, idempotent on retry)
  *
- * ONE publish at a time (a second concurrent request is refused, `SkillsPublishInFlightError` →
- * 409). The operation binds the root's identity (path + realpath) at start and re-checks it after
- * every await: a `skills_root` change while the baseline env was provisioning aborts the publish
- * (`SkillsRootChangedError` → 409) — nothing is written to the new root by an operation that
- * validated the old one. Provisions the baseline's `.venv` (awaited; one provisioning per baseline
+ * ONE publish at a time (a second concurrent request is refused, `SkillsPublishInFlightError`; the
+ * route answers it as a 2xx `blocked` `publish-in-flight` envelope — nothing was written, so it is
+ * not a 409, codex round 3). The operation binds the root's identity (path + realpath) at start and
+ * re-checks it after every await: a `skills_root` change while the baseline env was provisioning
+ * aborts the publish (`SkillsRootChangedError` → the 2xx `blocked` `root-changed` envelope) —
+ * nothing is written to the new root by an operation that validated the old one. Provisions the
+ * baseline's `.venv` (awaited; one provisioning per baseline
  * hash — a concurrent caller awaits the in-flight one; a snapshot never links an env still being
  * written; a FAILED provisioning is BLOCKING, `venv-failed` — the shared env is required, not
  * best-effort), re-checks the CAS, validates the WHOLE tree — frontmatter (strict subset), name ==
@@ -173,6 +175,7 @@ import {
   resolveRelativeRef,
 } from './refs.js';
 import {
+  assertNoSymlinkComponents,
   copyFiles,
   hashFileSet,
   makeTreeReadOnly,
@@ -180,6 +183,7 @@ import {
   removeFiles,
   removeTreeForce,
   sha256Hex,
+  SymlinkComponentError,
   walkFiles,
   writeFileAtomic,
   type FileRecord,
@@ -285,7 +289,8 @@ export class SkillsPublishError extends Error {
   }
 }
 
-/** A publish is already in flight — one at a time; the 409 of a concurrent publish. */
+/** A publish is already in flight — one at a time. The route answers a 2xx `blocked`
+ *  `publish-in-flight` envelope (nothing was written), never a 409 (codex round 3). */
 export class SkillsPublishInFlightError extends Error {
   constructor(readonly revision: number) {
     super('publish refused: another publish is in flight — one publish runs at a time; wait for it and retry against the revision it answers');
@@ -293,7 +298,9 @@ export class SkillsPublishInFlightError extends Error {
   }
 }
 
-/** The skills root changed identity while a publish was awaiting its baseline env — the operation is aborted, nothing was written. */
+/** The skills root changed identity while a publish was awaiting its baseline env — the operation
+ *  is aborted, nothing was written. The route answers a 2xx `blocked` `root-changed` envelope, not
+ *  a 409 (codex round 3). */
 export class SkillsRootChangedError extends Error {
   constructor(
     readonly from: string,
@@ -451,6 +458,39 @@ export function generationDirName(gen: number): string {
 }
 const GENERATION_DIR_RE = /^\d{6}$/;
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
+/** POSIX write bits — a locked env / snapshot carries none (mirrors tree.ts). */
+const WRITE_BITS = 0o222;
+
+/** The structural storage directories under the root a symlink must never stand in for. */
+const STORAGE_CHILD_DIRS: ReadonlyArray<string> = [EFFECTIVE_DIRNAME, BASELINE_DIRNAME, SNAPSHOTS_DIRNAME];
+
+/**
+ * A safe relative `skills/<…>` dir: at least two segments, first `skills`, every segment a legal
+ * path component (no `..`, no absolute/separator/NUL) — the shape a persisted skill `dir` must
+ * have before the store ever joins it onto the root. Returns the reason it is unsafe, or `null`.
+ */
+function unsafeSkillDir(dir: unknown): string | null {
+  if (typeof dir !== 'string') return `dir ${JSON.stringify(dir)} is not a string`;
+  let segments: string[];
+  try {
+    segments = validateRelSegments(dir);
+  } catch (err) {
+    return err instanceof SkillPathError ? err.message : String(err);
+  }
+  if (segments.length < 2 || segments[0] !== SKILLS_SUBDIR) return `dir ${JSON.stringify(dir)} is not a nested skills/… path`;
+  return null;
+}
+
+/** A safe persisted file-record path (plugin-relative, no traversal), or the reason it is not. */
+function unsafeRecordPath(rel: unknown): string | null {
+  if (typeof rel !== 'string') return `file path ${JSON.stringify(rel)} is not a string`;
+  try {
+    validateRelSegments(rel);
+    return null;
+  } catch (err) {
+    return err instanceof SkillPathError ? err.message : String(err);
+  }
+}
 
 export class SkillsStore {
   private rootDir: string;
@@ -461,8 +501,6 @@ export class SkillsStore {
   private readonly warn: (message: string) => void;
   /** Generations live runs may still read — the reaper keeps them (fed by `observeEvent`). */
   readonly live = new LiveGenerations();
-  /** `currentSnapshot()?.gen` memoized for the per-event hot path; `undefined` = not yet read. */
-  private currentGenMemo: number | null | undefined = undefined;
   /** The one publish that may run at a time (module header) — `null` when none is in flight. */
   private publishInFlight: Promise<SkillPublishResult> | null = null;
   /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
@@ -489,7 +527,6 @@ export class SkillsStore {
    */
   reroot(root: string): void {
     this.rootDir = root;
-    this.currentGenMemo = undefined;
   }
 
   /** Whether a publish is running right now (diagnostics + tests). */
@@ -544,6 +581,21 @@ export class SkillsStore {
     this.containedEffective(dir.split('/'));
   }
 
+  /**
+   * The structural storage directories — the root itself and its `effective/`, `baseline/`,
+   * `snapshots/` children — must be REAL directories, never symlinks (codex round 3). The
+   * per-destination walk `copyFiles`/`writeFileAtomic` do starts BENEATH a staging dir, so a
+   * `snapshots -> /outside` (or `baseline -> …`) redirect would take a publish, a baseline
+   * capture, an env provisioning, a reap or a `current` verification outside the store before that
+   * walk ever ran. Refuses a symlink at the `skills` component and each child (the operator's
+   * state-home path ABOVE the root is theirs — only the store's own dirs are checked). Throws
+   * `SymlinkComponentError`; callers map it to their own refusal.
+   */
+  private assertStorageAncestorsClean(): void {
+    assertNoSymlinkComponents(dirname(this.rootDir), [basename(this.rootDir)]);
+    for (const child of STORAGE_CHILD_DIRS) assertNoSymlinkComponents(this.rootDir, [child]);
+  }
+
   // ── Manifest ──────────────────────────────────────────────────────────────────────────────
 
   isSeeded(): boolean {
@@ -575,10 +627,32 @@ export class SkillsStore {
     if (typeof m.baseline !== 'string' || typeof m.baselines !== 'object' || m.baselines === null) {
       throw new SkillsManifestCorruptError(path, 'no baseline record');
     }
+    // Every PERSISTED path is validated before the store ever joins it onto the root (codex round
+    // 3): a manifest is disk state an attacker (or a bad merge) can craft, so a skill `dir`, a
+    // baseline identifier or a file-record key that carries `..`, an absolute piece or a separator
+    // is a corrupt manifest refused loudly here — never a path the store follows out of the root.
+    this.assertManifestPathsSafe(path, m as SkillManifest);
     // The withdrawn v3.2 mirror ledger (pre-release manifests only): dropped on read, never
     // persisted again — it recorded absolute paths under the user's home.
     delete (m as Record<string, unknown>)['mirror'];
     return m as SkillManifest;
+  }
+
+  /** Refuse a manifest whose persisted `dir` / baseline hash / file-record path could escape the root. */
+  private assertManifestPathsSafe(path: string, m: SkillManifest): void {
+    for (const hash of [m.baseline, ...Object.keys(m.baselines)]) {
+      if (typeof hash !== 'string' || !CONTENT_HASH_RE.test(hash)) {
+        throw new SkillsManifestCorruptError(path, `baseline identifier ${JSON.stringify(hash)} is not a content hash`);
+      }
+    }
+    for (const [name, entry] of Object.entries(m.skills)) {
+      const bad = unsafeSkillDir((entry as Partial<SkillEntry>).dir);
+      if (bad !== null) throw new SkillsManifestCorruptError(path, `skill ${JSON.stringify(name)}: ${bad}`);
+    }
+    for (const rel of Object.keys(m.files)) {
+      const bad = unsafeRecordPath(rel);
+      if (bad !== null) throw new SkillsManifestCorruptError(path, `file record: ${bad}`);
+    }
   }
 
   revision(): number {
@@ -626,6 +700,15 @@ export class SkillsStore {
     const invalid = (detail: string): never => {
       throw new SkillsCurrentInvalidError(link, detail);
     };
+    // Containment is judged against the LSTAT-CLEAN `snapshots/` path, never the realpath of a
+    // redirected one (codex round 3): a `snapshots -> /outside` symlink would otherwise make the
+    // target's realpath fall inside the redirected boundary and verify. Refuse it up front.
+    try {
+      this.assertStorageAncestorsClean();
+    } catch (err) {
+      if (err instanceof SymlinkComponentError) return invalid(`a storage directory is a symlink (${err.message}) — the snapshots boundary is not trusted`);
+      throw err;
+    }
     const lexical = resolve(this.rootDir, target);
     let real: string;
     try {
@@ -696,31 +779,27 @@ export class SkillsStore {
     return parsed;
   }
 
-  /** `currentSnapshot()?.gen` without touching disk after the first read — publish keeps it current. */
-  private currentGen(): number | null {
-    if (this.currentGenMemo === undefined) {
-      try {
-        this.currentGenMemo = this.currentSnapshot()?.gen ?? null;
-      } catch (err) {
-        // The event listener must not die on a corrupt root; pin nothing and say so once.
-        this.warn(`[skills] current snapshot unverifiable, live runs pin no generation: ${err instanceof Error ? err.message : String(err)}`);
-        this.currentGenMemo = null;
-      }
-    }
-    return this.currentGenMemo;
-  }
-
   /**
    * Fold one CoreEvent into the live-generation ledger (v3 §1 reaping rule): a live session pins
-   * the generation `current` resolves to; its terminal frame releases the pins and reaps what no
-   * other live session holds. The daemon calls this from its one `adapter.onEvent` listener.
+   * the EXACT generation the engine reports it was handed (`skillsSnapshotHanded`), plus every
+   * generation published while it stays live and the launch pin crew recorded when it handed the
+   * env; its terminal frame releases the pins and reaps what no other live session holds. The
+   * daemon calls this from its one `adapter.onEvent` listener (live-generations.ts).
    */
   observeEvent(event: CoreEvent): void {
-    if (this.live.observe(event, this.currentGen()) === 'released') this.reapStale();
+    if (this.live.observe(event) === 'released') this.reapStale();
   }
 
   /** Reap generations beyond the newest `KEEP_GENERATIONS` that no live session pins (no-op before a publish). */
   reapStale(): void {
+    // A symlinked storage ancestor makes reaping unsafe (it would rm through the link): skip it,
+    // never throw — this runs from the event listener (codex round 3).
+    try {
+      this.assertStorageAncestorsClean();
+    } catch (err) {
+      this.warn(`[skills] reaping skipped, a storage directory is a symlink: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     let current: { gen: number; path: string } | null;
     try {
       current = this.currentSnapshot();
@@ -753,7 +832,6 @@ export class SkillsStore {
     copyFiles(bundle, effective);
     removeTreeForce(this.snapshotsDir()); // published generations are locked read-only
     rmSync(this.currentLink(), { force: true });
-    this.currentGenMemo = null;
 
     const files: Record<string, SkillFileRecord> = {};
     for (const f of this.scanEffective()) {
@@ -781,6 +859,13 @@ export class SkillsStore {
 
   /** Copy the bundle to `baseline/<hash>/` through a staging dir (a torn copy never bears the hash). */
   private captureBaseline(bundle: ReadonlyArray<FileRecord>, hash: string): void {
+    // A symlinked `baseline/` (or root) would redirect the capture outside the store (codex round 3).
+    try {
+      this.assertStorageAncestorsClean();
+    } catch (err) {
+      if (err instanceof SymlinkComponentError) throw new SkillsPublishError(`a storage directory is a symlink (${err.message}) — baseline capture refused`);
+      throw err;
+    }
     const dest = this.baselineDir(hash);
     if (existsSync(dest)) return;
     const parent = join(this.rootDir, BASELINE_DIRNAME);
@@ -824,23 +909,50 @@ export class SkillsStore {
   }
 
   /**
-   * Provision the baseline's `.venv` unless the on-disk ready marker says it is complete, and lock
-   * a synced env read-only (the marker is written first, so a locked env is always a complete
-   * one). PERSISTS NOTHING in the manifest — the publish that succeeds records the state in its
-   * commit (a blocked publish must persist nothing, provisioning state included; codex round 2).
-   * One provisioning per hash: a concurrent caller awaits the in-flight one. A `.venv` without the
-   * marker is a torn earlier sync and is removed before `uv sync` runs again — the manifest is
-   * never the authority on what exists on disk. AWAITED by publish.
+   * A baseline env is READY only when its on-disk marker is present AND the tree is actually
+   * read-only (codex round 3): the marker is written before the lock, so a marker whose lock never
+   * took is NOT trust — the fast path and the post-lock verification both demand both. On POSIX the
+   * marker's own mode bit and the venv root's prove the lock (a completed `makeTreeReadOnly` strips
+   * every write bit); on Windows (no POSIX modes) the marker alone is the signal.
+   */
+  private venvReady(venvDir: string): boolean {
+    let marker;
+    try {
+      marker = lstatSync(join(venvDir, VENV_READY_MARKER));
+    } catch {
+      return false;
+    }
+    if (!marker.isFile()) return false;
+    if (process.platform === 'win32') return true;
+    if ((marker.mode & WRITE_BITS) !== 0) return false;
+    try {
+      return (lstatSync(venvDir).mode & WRITE_BITS) === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Provision the baseline's `.venv` unless it is already READY (marker + read-only bits verify),
+   * and lock a synced env read-only. The marker is written, THEN the tree is locked, THEN both are
+   * re-verified — and a FAILED lock removes the whole env (marker included) so nothing partial is
+   * ever trusted and a retry re-provisions and re-locks from scratch (codex round 3: the marker
+   * used to survive a failed lock and admit the env unconditionally on retry). PERSISTS NOTHING in
+   * the manifest — the publish that succeeds records the state in its commit (a blocked publish
+   * persists nothing, provisioning state included). One provisioning per hash: a concurrent caller
+   * awaits the in-flight one. A `.venv` without a verified marker is a torn earlier sync and is
+   * removed before `uv sync` runs again — the manifest is never the authority on what exists on
+   * disk. AWAITED by publish.
    */
   private ensureVenv(hash: string): Promise<SkillVenvState> {
     const baselineDir = this.baselineDir(hash);
     const venvDir = baselineVenvDir(baselineDir);
-    if (existsSync(join(venvDir, VENV_READY_MARKER))) return Promise.resolve('synced');
+    if (this.venvReady(venvDir)) return Promise.resolve('synced');
     const inFlight = this.venvInFlight.get(hash);
     if (inFlight !== undefined) return inFlight;
     const run = (async (): Promise<SkillVenvState> => {
       if (this.entryExists(venvDir)) {
-        this.warn(`[skills] ${venvDir} exists without its ready marker (a torn earlier sync) — removed and re-provisioned`);
+        this.warn(`[skills] ${venvDir} exists without a verified ready marker (a torn earlier sync or an unlockable env) — removed and re-provisioned`);
         removeTreeForce(venvDir);
       }
       const state = await this.provisionVenv(baselineDir, { log: this.warn, cacheDir: this.uvCacheDir() });
@@ -850,12 +962,23 @@ export class SkillsStore {
         return 'failed';
       }
       try {
+        // Marker FIRST (it must land inside the tree before the lock seals it), THEN lock.
         writeFileAtomic(join(venvDir, VENV_READY_MARKER), `synced ${this.now()}\n`);
         makeTreeReadOnly(venvDir);
       } catch (err) {
         // An env this daemon cannot lock read-only is not the shared read-only env the contract
-        // requires (tree.ts surfaces the permission failure; codex round 2) — a failed provisioning.
-        this.warn(`[skills] could not lock ${venvDir} read-only: ${err instanceof Error ? err.message : String(err)} — recorded as failed`);
+        // requires (tree.ts surfaces the permission failure; codex round 2). A failed lock must
+        // leave NO marker — remove the whole partial env so a retry re-provisions and re-locks
+        // rather than trusting a marker whose lock never took (codex round 3).
+        this.warn(`[skills] could not lock ${venvDir} read-only: ${err instanceof Error ? err.message : String(err)} — removed and recorded as failed`);
+        removeTreeForce(venvDir);
+        return 'failed';
+      }
+      // The lock must actually be in place before we call the env ready — a partial lock that left
+      // the marker or the root writable is a failed provisioning, removed so a retry redoes it.
+      if (!this.venvReady(venvDir)) {
+        this.warn(`[skills] ${venvDir} did not verify read-only after locking — removed and recorded as failed`);
+        removeTreeForce(venvDir);
         return 'failed';
       }
       return 'synced';
@@ -1280,10 +1403,17 @@ export class SkillsStore {
 
   /**
    * Restore the skill's own files from the current baseline (mode bits ride the copy). `enabled`
-   * is untouched by design. BOTH sides are walked from the root: the effective skill dir and the
-   * baseline skill dir — every ancestor (`baseline/`, `<hash>/`, `skills/`, …) — so a symlinked
-   * baseline ancestor is refused, never imported from (codex round 2). Nested skills (registered or
-   * on disk) are never touched.
+   * is untouched by design. Both sides are walked from the root (a symlinked baseline ancestor is
+   * refused, never imported from; codex round 2).
+   *
+   * Restore candidates EXCLUDE every path a nested `SKILL.md` owns in the EFFECTIVE tree — not only
+   * one present in the baseline (codex round 3): a child created directly under the parent
+   * (`alpha/refs/SKILL.md`) owns its files even though the baseline has none, so a parent reset must
+   * not restore baseline bytes over the child's. And the reset PREFLIGHTS every destination
+   * (containment, no-follow) and STAGES the baseline bytes into a temp dir under the root BEFORE it
+   * removes a single effective file, so a blocked reset (a symlinked `alpha/refs`) mutates nothing
+   * — the `SymlinkComponentError` maps to the 2xx `blocked` envelope, never an escaped 500 that
+   * already deleted the parent's SKILL.md (codex round 3).
    */
   reset(name: string, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
@@ -1297,13 +1427,33 @@ export class SkillsStore {
     }
     const findings = compact([noBaselineGuard(name, !this.hasBaselineDir(m, entry.dir))]);
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
-    const base = this.baselineDir(m.baseline);
-    const baseDirs = skillDirsOf(walkFiles(base));
-    // `walkFiles` from the contained skill dir never follows a link below it; the ancestors were walked above.
-    const fresh = walkFiles(baseSkillDir, (rel) => baseDirs.has(`${entry.dir}/${rel}`)).map((f) => ({ rel: `${entry.dir}/${f.rel}`, abs: f.abs }));
     const effective = this.effectiveDir();
-    removeFiles(this.ownFilesIn(effective, entry.dir, this.ownershipDirs(m)), effective);
-    copyFiles(fresh, effective);
+    const owned = this.ownershipDirs(m); // effective + manifest ownership — a nested child is its own
+    // Restore candidates from the baseline, pruning every subtree a nested skill owns in EFFECTIVE.
+    const fresh = walkFiles(baseSkillDir, (rel) => owned.has(`${entry.dir}/${rel}`)).map((f) => ({ rel: `${entry.dir}/${f.rel}`, abs: f.abs }));
+    const own = this.ownFilesIn(effective, entry.dir, owned);
+    // Preflight: every destination path — the files to restore AND the files to remove — must be
+    // symlink-free from the root BEFORE anything is removed; a refusal is a blocked envelope.
+    try {
+      for (const f of own) this.containedEffective(f.rel.split('/'));
+      for (const f of fresh) this.containedEffective(f.rel.split('/'));
+    } catch (err) {
+      return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
+    }
+    // Stage the baseline bytes into a temp dir under the root, then remove + swap: a failure before
+    // the swap leaves effective/ untouched (the destinations were just verified symlink-free).
+    const staging = join(this.rootDir, `${STAGING_PREFIX}reset-${randomBytes(6).toString('hex')}`);
+    try {
+      copyFiles(fresh, staging);
+      removeFiles(own, effective);
+      for (const f of fresh) {
+        const dest = this.containedEffective(f.rel.split('/'));
+        mkdirSync(dirname(dest), { recursive: true });
+        renameSync(join(staging, ...f.rel.split('/')), dest);
+      }
+    } finally {
+      removeTreeForce(staging);
+    }
     for (const [rel, record] of this.ownRecords(m, entry.dir)) {
       if (record.baselineHash === null) delete m.files[rel];
       else {
@@ -1758,6 +1908,14 @@ export class SkillsStore {
    * revision stays valid. Everything after the one await is synchronous: no interleaving.
    */
   private async publishSerialized(expectedRevision: number): Promise<SkillPublishResult> {
+    // Refuse a symlinked storage ancestor BEFORE anything is provisioned, staged or copied (codex
+    // round 3): a `snapshots -> /outside` would take the first copy out of the store.
+    try {
+      this.assertStorageAncestorsClean();
+    } catch (err) {
+      if (err instanceof SymlinkComponentError) throw new SkillsPublishError(`a storage directory is a symlink (${err.message}) — publish refused before writing anything`);
+      throw err;
+    }
     const bound = this.bindRoot();
     const pre = this.manifest();
     this.assertRevision(pre, expectedRevision);
@@ -1904,7 +2062,6 @@ export class SkillsStore {
     const tmp = `${link}.tmp-${randomBytes(6).toString('hex')}`;
     this.symlink(posix.join(SNAPSHOTS_DIRNAME, generationDirName(gen)), tmp, this.snapshotDir(gen));
     renameSync(tmp, link);
-    this.currentGenMemo = gen;
   }
 
   /** A directory symlink: relative target on POSIX; Windows junctions need the absolute target (and it must exist). */

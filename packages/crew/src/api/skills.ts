@@ -16,12 +16,14 @@
  *
  * Guard results ALWAYS return 2xx `{verdict, findings[], revision}` — studio's `apiFetch` throws
  * on non-2xx, so a `blocked` verdict is a normal 200 with nothing written; that includes a
- * containment refusal on a WRITE (the store answers `path-invalid`). 409 (`{error, revision}`) is
- * "the world moved — re-read and retry": a stale `expectedRevision`, a publish already in flight
- * (one runs at a time), or a skills root that changed under a running publish; 404 an unknown skill
- * or file; 400 a body the schemas refuse or a READ path containment refuses (a read has no verdict
- * envelope); 503 an unseeded root or a `current` link that fails verification; 502 no plugin
- * source to refresh from. Thin by design: validation is zod (strict, unknown keys named);
+ * containment refusal on a WRITE (the store answers `path-invalid`), a publish refused because one
+ * is already in flight (`publish-in-flight`), and a publish aborted because the skills root changed
+ * under it (`root-changed`) — none of those wrote anything, so each is a normal `blocked` envelope
+ * (codex round 3). 409 (`{error, revision}`) is reserved for EXACTLY ONE thing: a stale
+ * `expectedRevision` (a CAS conflict — the revision the client holds no longer matches). 404 an
+ * unknown skill or file; 400 a body the schemas refuse or a READ path containment refuses (a read
+ * has no verdict envelope); 503 an unseeded root or a `current` link that fails verification; 502
+ * no plugin source to refresh from. Thin by design: validation is zod (strict, unknown keys named);
  * everything else is the store's. Nothing here (or anywhere in the store) writes outside the
  * skills root — the user's own CLI directories are never touched (design v3.2 §1).
  */
@@ -31,6 +33,7 @@ import { z } from 'zod';
 
 import type { Actor, SkillReadResult } from '../core/types.js';
 import { SkillPathError } from '../skills/contain.js';
+import { finding } from '../skills/guards.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
 import {
   RevisionMismatchError,
@@ -89,6 +92,21 @@ function invalidBody(reply: FastifyReply, err: z.ZodError): FastifyReply {
   return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
 }
 
+/**
+ * A publish refused without writing anything — one already in flight, or the skills root changed
+ * under it — is a normal 2xx `blocked` envelope, NOT a 409 (409 is reserved for a stale
+ * `expectedRevision`; codex round 3). Shaped as a publish result (`snapshot: null`) so it satisfies
+ * both the mutation and the publish response contracts.
+ */
+function blockedEnvelope(
+  kind: 'publish-in-flight' | 'root-changed',
+  explanation: string,
+  evidence: string,
+  revision: number,
+): { verdict: 'blocked'; findings: ReturnType<typeof finding>[]; revision: number; snapshot: null } {
+  return { verdict: 'blocked', findings: [finding(kind, 'blocking', explanation, evidence)], revision, snapshot: null };
+}
+
 /** Map the store's named errors onto the route's status codes; anything else is a 500. */
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof SkillsUnseededError) return reply.code(503).send({ error: err.message });
@@ -99,9 +117,19 @@ function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof UnknownSkillError) return reply.code(404).send({ error: err.message });
   if (err instanceof SkillPathError) return reply.code(400).send({ error: err.message });
   if (err instanceof NotARegularFileError) return reply.code(400).send({ error: err.message });
+  // 409 is EXCLUSIVELY a CAS conflict (a stale expectedRevision). A publish already in flight or a
+  // root that changed under a running publish wrote nothing → a 2xx `blocked` findings envelope.
   if (err instanceof RevisionMismatchError) return reply.code(409).send({ error: err.message, revision: err.actual });
-  if (err instanceof SkillsPublishInFlightError) return reply.code(409).send({ error: err.message, revision: err.revision });
-  if (err instanceof SkillsRootChangedError) return reply.code(409).send({ error: err.message, revision: err.revision });
+  if (err instanceof SkillsPublishInFlightError) {
+    return reply.code(200).send(
+      blockedEnvelope('publish-in-flight', 'a publish is already running (one at a time); nothing was written — re-read GET /skills and retry', err.message, err.revision),
+    );
+  }
+  if (err instanceof SkillsRootChangedError) {
+    return reply.code(200).send(
+      blockedEnvelope('root-changed', 'the skills root changed under the running publish; nothing was written to either root — re-read GET /skills and retry', err.message, err.revision),
+    );
+  }
   if ((err as NodeJS.ErrnoException).code === 'ENOENT') return reply.code(404).send({ error: 'no such file' });
   throw err;
 }

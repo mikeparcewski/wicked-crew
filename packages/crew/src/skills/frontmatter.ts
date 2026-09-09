@@ -1,23 +1,27 @@
 /**
- * SKILL.md frontmatter — the minimal, deterministic reader the skills store keys on.
+ * SKILL.md frontmatter — the reader the skills store keys on, parsed by a REAL YAML grammar.
  *
  * A skill's identity in the manifest is its frontmatter `name` (verified against the live garden
  * plugin: all 142 SKILL.md files carry `name: wicked-garden-<dir path joined by '-'>`, unique).
- * Everything the store derives is a flat scalar — `name`, `context: fork`, `user-invocable: true` —
- * so this reads top-level `key: value` lines (a block scalar `|`/`>` or an indented continuation
- * consumes its indented lines) and deliberately does NOT pull in a YAML library: the guard
- * "frontmatter parses" must answer the same on every platform and every daemon, and a full YAML
- * grammar admits shapes (anchors, flow mappings, multi-documents) no SKILL.md uses and no reviewer
- * expects a skill editor to accept.
+ * Everything the store derives is a flat scalar — `name`, `context: fork`, `user-invocable: true`.
  *
- * It is a STRICT subset, not a lenient one (codex reviews of #480): a scalar that opens a flow
- * sequence `[`, a flow mapping `{`, or a quote must close it — `tags: [a, b` is a parse failure
- * naming the line, not a string value of `[a, b`; a flow collection continued on indented lines
- * (`tags:` newline `  [a, b`) is joined and checked the same way; a PLAIN scalar may not contain
- * `: ` or open with `- ` (`description: hello: world` is a nested mapping to YAML, not the string
- * `hello: world` — quote it). The live catalog's 231 flow values are all single-line and
- * terminated, so nothing shipped is refused.
+ * Earlier passes hand-rolled a bracket-depth heuristic; it accepted invalid YAML a real parser
+ * rejects (`[a, {b: c]]`, `"bad\q"`, `"hello" "world"` — codex round 3). We now parse the block
+ * with the `yaml` library (the same grammar Claude Code loads a skill with) and refuse ANYTHING it
+ * rejects, then enforce a STRICT SUBSET on top:
+ *
+ *   - a single YAML document that is a top-level MAPPING (`key: value` pairs) — not a sequence,
+ *     not a bare scalar, not multiple documents;
+ *   - `name`, if present, is a SCALAR (a mapping/sequence is refused — the manifest is keyed by it);
+ *   - `mandates`, if present, is a LIST (a scalar/mapping is refused).
+ *
+ * `fields` flattens the top-level scalars to strings (`user-invocable: true` → `"true"`,
+ * `name: "x"` → `"x"`) — the only shapes the store reads. A non-scalar value (a nested mapping the
+ * strict checks above do not forbid for that key) is serialized to JSON so `fields` stays a flat
+ * `Record<string, string>`; the store never reads those.
  */
+
+import { parseDocument } from 'yaml';
 
 import type { SkillKind } from '../core/types.js';
 
@@ -26,64 +30,6 @@ export type FrontmatterResult =
   | { ok: false; reason: string };
 
 const OPEN_FENCE = '---\n';
-const KEY_LINE = /^([A-Za-z][A-Za-z0-9_-]*):(?:[ \t]+(.*))?$/;
-
-/** Strip one layer of matching single/double quotes — `name: "x"` and `name: x` are the same name. */
-function unquote(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0];
-    const last = value[value.length - 1];
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) return value.slice(1, -1);
-  }
-  return value;
-}
-
-/** A scalar that opens a flow collection or a quote — everything else is a PLAIN scalar. */
-function opensFlowOrQuote(value: string): boolean {
-  const first = value[0];
-  return first === '[' || first === '{' || first === '"' || first === "'";
-}
-
-/**
- * A scalar must be well-formed: an opened flow sequence / flow mapping / quoted scalar closes; a
- * plain scalar carries no `: ` (YAML reads `hello: world` as a nested mapping — "mapping values
- * are not allowed here") and does not open with `- ` (a block sequence entry). Returns the reason
- * it is malformed, or `null`.
- */
-function malformedScalar(value: string): string | null {
-  const first = value[0];
-  const last = value[value.length - 1];
-  if (!opensFlowOrQuote(value)) {
-    if (value.includes(': ') || value.endsWith(':')) {
-      return 'a plain scalar cannot contain `: ` (YAML reads it as a nested mapping) — quote the value';
-    }
-    if (value.startsWith('- ') || value === '-') return 'a plain scalar cannot open with `- ` (YAML reads it as a sequence entry) — quote the value';
-    return null;
-  }
-  if (first === '[' && last !== ']') return 'unterminated flow sequence (`[` without `]`)';
-  if (first === '{' && last !== '}') return 'unterminated flow mapping (`{` without `}`)';
-  if ((first === '"' || first === "'") && (value.length < 2 || last !== first)) {
-    return `unterminated quoted scalar (opening ${first} without a closing one)`;
-  }
-  if (first === '[' || first === '{') {
-    // Balanced brackets inside the flow collection — `[a, [b]` closes the outer with the inner's.
-    let depth = 0;
-    let quote: string | null = null;
-    for (const ch of value) {
-      if (quote !== null) {
-        if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'") quote = ch;
-      else if (ch === '[' || ch === '{') depth += 1;
-      else if (ch === ']' || ch === '}') depth -= 1;
-      if (depth < 0) return 'unbalanced flow collection (a closing bracket before its opening one)';
-    }
-    if (depth !== 0) return 'unbalanced flow collection (brackets do not pair up)';
-    if (quote !== null) return 'unterminated quoted scalar inside a flow collection';
-  }
-  return null;
-}
 
 /** Find the closing fence: a `---` line by itself after the opening fence, or -1. */
 function closingFence(src: string): number {
@@ -97,13 +43,19 @@ function closingFence(src: string): number {
   }
 }
 
+/** Flatten one top-level YAML value to the string `fields` carries (only scalars are ever read). */
+function fieldValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  return JSON.stringify(value);
+}
+
 /**
- * Parse the frontmatter block at the top of `text`. Top-level keys only; a block scalar or an
- * indented continuation (a nested mapping, a list) is folded into the key's string value — the
- * store never interprets those, it only needs the flat scalars and the fact that the block is
- * well-formed. An indented continuation that opens a flow collection or a quote is a multi-line
- * scalar and is checked like a single-line one (joined). Duplicate keys and non-`key: value` lines
- * are parse failures with a line number.
+ * Parse the frontmatter block at the top of `text` with a real YAML parser and enforce the strict
+ * subset (single-document mapping, scalar `name`, list `mandates`). Anything the parser rejects is
+ * a parse failure carrying the parser's own reason; a well-formed block yields the flat scalar
+ * `fields` the store keys on.
  */
 export function parseFrontmatter(text: string): FrontmatterResult {
   const src = text.replace(/\r\n/g, '\n');
@@ -112,50 +64,44 @@ export function parseFrontmatter(text: string): FrontmatterResult {
   }
   const close = closingFence(src);
   if (close < 0) return { ok: false, reason: 'missing closing `---` fence' };
-  const lines = src.slice(OPEN_FENCE.length, close).split('\n');
-  const fields: Record<string, string> = {};
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i] ?? '';
-    if (line.trim() === '' || line.trimStart().startsWith('#')) {
-      i += 1;
-      continue;
-    }
-    const m = KEY_LINE.exec(line);
-    if (m === null) {
-      // +2: line 1 is the fence, and `lines` is 0-based.
-      return { ok: false, reason: `line ${i + 2}: expected \`key: value\`, got ${JSON.stringify(line)}` };
-    }
-    const key = m[1] ?? '';
-    if (Object.hasOwn(fields, key)) return { ok: false, reason: `duplicate key \`${key}\`` };
-    let value = (m[2] ?? '').trim();
-    const keyLine = i + 2;
-    i += 1;
-    const literal = /^[|>][+-]?$/.test(value);
-    const isBlock = value === '' || literal;
-    if (!isBlock) {
-      const malformed = malformedScalar(value);
-      if (malformed !== null) return { ok: false, reason: `line ${keyLine}: \`${key}\`: ${malformed}` };
-    }
-    if (isBlock) {
-      const block: string[] = [];
-      while (i < lines.length) {
-        const next = lines[i] ?? '';
-        if (!(next.startsWith(' ') || next.startsWith('\t') || next.trim() === '')) break;
-        block.push(next.trim());
-        i += 1;
-      }
-      while (block.length > 0 && block[block.length - 1] === '') block.pop();
-      value = block.join(value.startsWith('>') ? ' ' : '\n');
-      // An indented continuation without a `|`/`>` indicator that opens a flow collection or a
-      // quote is one multi-line scalar — checked joined, never folded unchecked (codex round 2).
-      if (!literal && value !== '' && opensFlowOrQuote(value)) {
-        const malformed = malformedScalar(block.join(' '));
-        if (malformed !== null) return { ok: false, reason: `line ${keyLine}: \`${key}\`: ${malformed}` };
-      }
-    }
-    fields[key] = unquote(value);
+  const block = src.slice(OPEN_FENCE.length, close);
+
+  let doc: ReturnType<typeof parseDocument>;
+  try {
+    // `uniqueKeys` (default true) rejects duplicate keys; the block carries no internal `---`, so
+    // a single document is parsed. Any grammar error lands in `doc.errors` (parseDocument does not throw).
+    doc = parseDocument(block, { prettyErrors: false });
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
+  if (doc.errors.length > 0) {
+    return { ok: false, reason: doc.errors[0]?.message ?? 'invalid YAML' };
+  }
+
+  let js: unknown;
+  try {
+    js = doc.toJS();
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  // An empty block (only comments / blank lines) is a valid, name-less frontmatter — the caller's
+  // `name` guard reports the missing name; here it is simply an empty mapping.
+  if (js === null || js === undefined) return { ok: true, fields: {} };
+  if (typeof js !== 'object' || Array.isArray(js)) {
+    return { ok: false, reason: 'frontmatter must be a single YAML mapping (`key: value` pairs), not a sequence or a bare scalar' };
+  }
+  const obj = js as Record<string, unknown>;
+  if (Object.hasOwn(obj, 'name')) {
+    const name = obj['name'];
+    if (name !== null && typeof name === 'object') {
+      return { ok: false, reason: '`name` must be a scalar — the manifest is keyed by it' };
+    }
+  }
+  if (Object.hasOwn(obj, 'mandates') && !Array.isArray(obj['mandates'])) {
+    return { ok: false, reason: '`mandates` must be a YAML list' };
+  }
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(obj)) fields[key] = fieldValue(value);
   return { ok: true, fields };
 }
 

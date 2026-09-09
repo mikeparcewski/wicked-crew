@@ -72,6 +72,19 @@ export function validateRelSegments(rel: string): string[] {
  */
 export function containedPath(root: string, segments: ReadonlyArray<string>): string {
   if (segments.length === 0) throw new SkillPathError('root', 'the root itself is not a file');
+  // Re-check EVERY component lexically, independent of where it came from (codex round 3): a
+  // manifest-sourced skill `dir` or file record is not trusted to be a safe segment — a `..`,
+  // an absolute/drive-prefixed piece, a separator or a NUL would join OUT of the root before the
+  // symlink walk ever ran. The request's own path is validated by `validateRelSegments`; this is
+  // the same rule applied to the FINAL joined path so the trusted-`dir` half cannot escape either.
+  for (const seg of segments) {
+    if (seg === '' || seg === '.' || seg === '..') {
+      throw new SkillPathError('invalid', `unsafe path segment ${JSON.stringify(seg)} — the joined path must stay inside the skills root`);
+    }
+    if (seg.includes('/') || seg.includes('\\') || seg.includes('\0') || /^[A-Za-z]:/.test(seg)) {
+      throw new SkillPathError('invalid', `unsafe path segment ${JSON.stringify(seg)} — a component may not carry a separator, a drive prefix, or a NUL`);
+    }
+  }
   try {
     return assertNoSymlinkComponents(root, segments);
   } catch (err) {

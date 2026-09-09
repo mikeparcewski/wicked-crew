@@ -310,18 +310,42 @@ export function makeTreeReadOnly(root: string): void {
 
 /**
  * `rmSync(root, { recursive: true, force: true })` that also removes a tree `makeTreeReadOnly`
- * locked: the directories get their write bit back first (unlinking an entry needs a writable
- * parent, whatever the entry's own mode). A missing root is a no-op.
+ * locked — OR a partial env whose lock FAILED, which can leave an UNLISTABLE directory (a `uv sync`
+ * that produced a `0o000`/`0o111` dir the lock choked on; codex round 3). Each directory has its
+ * owner `rwx` restored TOP-DOWN, before it is enumerated, so an unlistable dir becomes traversable
+ * and removable (unlinking an entry needs a writable, listable parent, whatever the entry's own
+ * mode). A missing root is a no-op.
  */
 export function removeTreeForce(root: string): void {
-  for (const dir of directoriesUnder(root, false)) {
-    try {
-      chmodSync(dir, lstatSync(dir).mode & 0o777 | 0o700);
-    } catch {
-      /* gone already, or not ours to chmod — rmSync below reports what matters */
-    }
-  }
+  restoreDirPermsTopDown(root);
   rmSync(root, { recursive: true, force: true });
+}
+
+/** Give every directory under `dir` (`dir` included, symlinks never followed) owner `rwx` — restored
+ *  before the dir is read, so even a `0o000` directory can be enumerated and removed. Best-effort. */
+function restoreDirPermsTopDown(dir: string): void {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    return; // gone already
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return;
+  try {
+    chmodSync(dir, (st.mode & 0o777) | 0o700);
+  } catch {
+    /* not ours to chmod — rmSync below reports what matters */
+  }
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // still unreadable (not ours) — rmSync reports it
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+    restoreDirPermsTopDown(join(dir, entry.name));
+  }
 }
 
 /** Unlink one path without following it (a link is removed, its target untouched). */

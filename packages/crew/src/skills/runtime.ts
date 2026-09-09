@@ -213,6 +213,10 @@ export class SkillsRuntime {
     }
     if (current === null) return null;
     applySkillsSnapshotEnv(current.path);
+    // Record the generation crew just handed to launches: a run reading `WICKED_SKILLS_SNAPSHOT`
+    // may spawn a worker before the engine's `skillsSnapshotHanded` is observed, so reaping keeps
+    // this generation until that event confirms which one the launch used (live-generations.ts).
+    this.store.live.launched(current.gen);
     const stateHome = canonicalCrewStateHome();
     const findings: SkillsHealthFinding[] = [];
     const fencedSnapshots = join(stateHome, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + sep;

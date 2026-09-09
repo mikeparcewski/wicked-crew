@@ -1,8 +1,9 @@
 // The `/api/v1/skills*` file manager (design v3 §API) over a fixture store: every guard answers
-// 2xx `{verdict, findings[], revision}`; 409 is "the world moved" (a stale expectedRevision, a
-// publish already in flight); containment and strict bodies are 400; unknown skill/file 404; no
-// runtime 503. Publish exports the snapshot path for the engine (`WICKED_SKILLS_SNAPSHOT`) with the
-// copilot view inside the snapshot — nothing is written into any home directory (design v3.2 §1).
+// 2xx `{verdict, findings[], revision}` — a publish already in flight or a root that changed under
+// one included (`publish-in-flight` / `root-changed`, both wrote nothing). 409 is EXCLUSIVELY a
+// stale expectedRevision (a CAS conflict); containment and strict bodies are 400; unknown skill/file
+// 404; no runtime 503. Publish exports the snapshot path for the engine (`WICKED_SKILLS_SNAPSHOT`)
+// with the copilot view inside the snapshot — nothing is written into any home directory (v3.2 §1).
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -252,14 +253,22 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect((await manifest()).current).toEqual({ gen: 1, path: real });
   });
 
-  it('one publish at a time: a concurrent publish is a 409 naming the revision, the first one lands, the provisioner ran once', async () => {
-    let release: (() => void) | undefined;
+  it('one publish at a time: a concurrent publish is a 2xx blocked publish-in-flight envelope, the first one lands, the provisioner ran once (deterministic, codex round 3)', async () => {
+    // Deterministic synchronization — no sleeps, no wall-clock deadlines (codex round 3): the
+    // provisioner resolves `entered` the instant it is called (the first publish is parked at its
+    // await) and blocks on `release` (a gate the test opens); both are released in `finally`.
     let calls = 0;
+    let entered!: () => void;
+    const enteredP = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
     const provisioner: VenvProvisioner = async () => {
       calls += 1;
+      entered();
       await gate;
       return 'skipped';
     };
@@ -269,18 +278,18 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
       slow.store.seed();
       await slowApp.ready();
       const first = slowApp.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
-      // Let the first request travel Fastify's hook pipeline and park at its provisioning await.
-      const deadline = Date.now() + 5_000;
-      while (!slow.store.isPublishing()) {
-        if (Date.now() > deadline) throw new Error('the first publish never reached the store');
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
+      await enteredP; // the first publish has reached (and parked at) the provisioner — no polling
       expect(slow.store.isPublishing()).toBe(true);
+      // A publish already in flight wrote nothing → a 2xx `blocked` findings envelope, NOT a 409.
       const second = await slowApp.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
-      expect(second.statusCode).toBe(409);
-      expect(second.json() as SkillRevisionConflict).toMatchObject({ revision: 1 });
-      expect((second.json() as SkillRevisionConflict).error).toContain('in flight');
-      (release as () => void)();
+      expect(second.statusCode).toBe(200);
+      const body = second.json() as SkillPublishResult;
+      expect(body.verdict).toBe('blocked');
+      expect(body.snapshot).toBeNull();
+      expect(body.revision).toBe(1);
+      expect(body.findings[0]?.kind).toBe('publish-in-flight');
+      expect(body.findings[0]?.evidence).toContain('in flight');
+      release();
       const done = await first;
       expect(done.statusCode).toBe(200);
       expect((done.json() as SkillPublishResult).snapshot?.gen).toBe(1);
@@ -288,6 +297,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
       expect(slow.store.isPublishing()).toBe(false);
       expect(slow.store.generationsOnDisk()).toEqual([1]);
     } finally {
+      release(); // always open the gate, even on an assertion failure, so teardown never hangs
       await slowApp.close();
       removeScratch(slow.base);
     }

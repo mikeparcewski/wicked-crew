@@ -33,6 +33,29 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — codex round-3 hardening** (PR #480, on top of design v3.2). Nine fixes to the
+  crew-owned skills root: (1) every PERSISTED manifest path is validated at parse — a skill `dir`, a
+  baseline identifier or a file-record key carrying `..`/an absolute piece/a separator is a corrupt
+  manifest refused loudly, and `containedPath` re-checks the FINAL joined path lexically so a trusted
+  `dir` cannot escape the root either; (2) the structural storage dirs (root + `effective/`,
+  `baseline/`, `snapshots/`) are refused if a symlink stands in for one — before publish, baseline
+  capture, provisioning, reaping and `current` verification (which now judges containment against the
+  lstat-clean `snapshots/` path, not the realpath of a redirected one); (3) live-generation reaping
+  pins the EXACT generation the engine reports it handed each session (`skillsSnapshotHanded`), never
+  "current at event time", with a bounded launch pin bridging the spawn→event gap; (4) parent reset
+  excludes every path a nested `SKILL.md` owns in the EFFECTIVE tree (not only the baseline), so a
+  child added directly under a parent keeps its files; (5) reset preflights every destination and
+  STAGES the restore before removing anything, so a blocked reset (a symlinked child dir) mutates
+  nothing and answers the 2xx `blocked` envelope; (6) a baseline env whose read-only lock FAILS
+  leaves no ready marker (the partial env is removed) and a retry re-provisions and re-locks —
+  readiness is trusted only when the marker AND the read-only bits verify; (7) frontmatter is parsed
+  by a real YAML grammar (`yaml`) and anything it rejects blocks, with the strict subset
+  (single-document mapping, scalar `name`, list `mandates`) kept on top; (8) 409 is reserved for a
+  stale `expectedRevision` alone — a publish-in-flight or a root-changed refusal wrote nothing and
+  answers a 2xx `blocked` findings envelope (`publish-in-flight` / `root-changed`, new finding kinds
+  in api-types 0.27.0); (9) the route concurrency test is deterministic (provisioner-entered gates,
+  released in `finally`, no wall-clock deadlines). New dependency: `yaml` (the standard TS YAML
+  library).
 
 ### Added
 - **`GET /projects/:projectId/interactive/api/docs` stamps `projectId` on every row** (#472) — the

@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { pluginBundleFiles } from '../src/skills/bundle.js';
-import { SkillPathError } from '../src/skills/contain.js';
+import { containedPath, SkillPathError } from '../src/skills/contain.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import {
   COPILOT_VIEW_SKILLS_REL,
@@ -523,16 +523,94 @@ describe('publish (design v3 §1)', () => {
     expect(s.store.revision()).toBe(off.revision);
   });
 
-  it('malformed frontmatter YAML (an unterminated flow sequence / quoted scalar) is BLOCKING', async () => {
+  it('frontmatter is parsed by a REAL YAML grammar: what the parser rejects is BLOCKING (codex round 3)', async () => {
     s.store.seed();
-    const bad = s.store.writeFile('wicked-garden-gamma', 'SKILL.md', '---\nname: wicked-garden-gamma\ntags: [ranking, prose\n---\n\nx\n', 1);
+    // Cases the old bracket-depth heuristic accepted but a real YAML parser rejects.
+    const bad = s.store.writeFile('wicked-garden-gamma', 'SKILL.md', '---\nname: wicked-garden-gamma\ntags: [a, {b: c]]\n---\n\nx\n', 1);
     expect(bad.verdict).toBe('blocked');
     expect(bad.findings[0]?.kind).toBe('frontmatter-invalid');
-    expect(bad.findings[0]?.evidence).toContain('unterminated flow sequence');
-    writeFileSync(join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\ndescription: "open\n---\n\nx\n');
-    const r = await s.store.publish(1);
-    expect(r.verdict).toBe('blocked');
-    expect(r.findings.find((f) => f.kind === 'frontmatter-invalid')?.evidence).toContain('unterminated quoted scalar');
+    expect(bad.findings[0]?.evidence).toContain('skills/gamma/SKILL.md');
+    for (const value of ['"bad\\q"', '"hello" "world"', 'tags: [ranking, prose', 'description: "open']) {
+      writeFileSync(join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md'), `---\nname: wicked-garden-gamma\n${value.includes(':') ? value : `tags: ${value}`}\n---\n\nx\n`);
+      const r = await s.store.publish(1);
+      expect(r.verdict, value).toBe('blocked');
+      expect(r.findings.find((f) => f.kind === 'frontmatter-invalid'), value).toBeDefined();
+      expect(s.store.currentSnapshot(), value).toBeNull();
+    }
+    // A valid flow value (the live catalog's shape) still parses and publishes clear.
+    writeFileSync(join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\ntags: [ranking, prose]\n---\n\nx\n');
+    const ok = await s.store.publish(1);
+    expect(ok.findings.find((f) => f.kind === 'frontmatter-invalid')).toBeUndefined();
+    expect(ok.verdict).toBe('warnings'); // fs-drift of the direct edit only
+  });
+});
+
+describe('persisted manifest paths never escape the root (codex round 3)', () => {
+  it('a crafted manifest `dir` (../../outside) is refused at PARSE, and a crafted file record at RESOLVE', () => {
+    s.store.seed();
+    const manifestPath = join(s.root, 'manifest.json');
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as { skills: Record<string, { dir: string }>; files: Record<string, unknown> };
+    // A traversal in a skill `dir` is a corrupt manifest refused loudly — never a path the store joins onto the root.
+    const escaped = structuredClone(raw);
+    (escaped.skills['wicked-garden-gamma'] as { dir: string }).dir = '../../outside';
+    writeFileSync(manifestPath, JSON.stringify(escaped));
+    expect(() => storeOver(s).manifest()).toThrow(/not a skills manifest|dir/);
+    // A crafted file-record path is refused too.
+    const badFile = structuredClone(raw);
+    badFile.files['../../outside/victim.txt'] = { baselineHash: null, effectiveHash: 'x', lastPublishedHash: null, conflict: false };
+    writeFileSync(manifestPath, JSON.stringify(badFile));
+    expect(() => storeOver(s).manifest()).toThrow(/not a skills manifest|file record/);
+    // A crafted baseline identifier (not a content hash) is refused.
+    writeFileSync(manifestPath, JSON.stringify({ ...raw, baseline: '../../outside' }));
+    expect(() => storeOver(s).manifest()).toThrow(/not a skills manifest|content hash/);
+    // Restore a sane manifest so afterEach teardown is quiet.
+    writeFileSync(manifestPath, JSON.stringify(raw));
+  });
+
+  it('containedPath re-checks the FINAL joined path — a `..` in any component is refused, independent of manifest trust', () => {
+    s.store.seed();
+    const root = s.root;
+    // A safe joined path resolves; the resolve-side defense is separate from the manifest-parse one.
+    expect(() => containedPath(root, ['effective', 'skills', 'gamma', 'SKILL.md'])).not.toThrow();
+    // A `..` smuggled in via a "trusted" `dir` segment is refused LEXICALLY, before the join escapes —
+    // even with no symlink present (the lstat walk alone would follow `..` out of the root).
+    expect(() => containedPath(root, ['effective', '..', '..', 'outside', 'victim.txt'])).toThrow(SkillPathError);
+    try {
+      containedPath(root, ['effective', '..', 'x']);
+    } catch (err) {
+      expect((err as SkillPathError).reason).toBe('invalid');
+    }
+    // The request path is validated the same way through resolveSkillFile (the raw `..` never reaches disk).
+    expect(() => s.store.resolveSkillFile('wicked-garden-gamma', '../../outside/victim.txt')).toThrow(SkillPathError);
+  });
+});
+
+describe('symlinked storage ancestors are refused (codex round 3)', () => {
+  it('a `snapshots -> outside` symlink refuses publish before the first copy, and a redirected snapshots boundary does not verify', async () => {
+    s.store.seed();
+    await s.store.publish(1); // gen 1 exists (locked read-only)
+    const outside = join(s.base, 'outside-snapshots');
+    mkdirSync(outside, { recursive: true });
+    removeTreeForce(join(s.root, 'snapshots')); // the published generation is locked; force it
+    symlinkSync(outside, join(s.root, 'snapshots'));
+    // Publish is refused before writing anything (the redirected ancestor).
+    await expect(storeOver(s).publish(storeOver(s).revision())).rejects.toThrow(/storage directory is a symlink|snapshots/);
+    expect(readdirSync(outside)).toEqual([]); // nothing was copied into the redirect
+    // `current` verification refuses the redirected snapshots boundary instead of accepting its realpath.
+    expect(() => storeOver(s).currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    rmSync(join(s.root, 'snapshots'));
+  });
+
+  it('a `baseline -> outside` symlink refuses baseline capture (a refresh)', () => {
+    s.store.seed();
+    const outside = join(s.base, 'outside-baseline');
+    mkdirSync(outside, { recursive: true });
+    removeTreeForce(join(s.root, 'baseline'));
+    symlinkSync(outside, join(s.root, 'baseline'));
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\nv2\n');
+    expect(() => s.store.refreshBaseline(1)).toThrow(/storage directory is a symlink|baseline/);
+    expect(readdirSync(outside)).toEqual([]);
+    rmSync(join(s.root, 'baseline'));
   });
 });
 
@@ -707,24 +785,47 @@ describe('venv provisioning (design v3 §4)', () => {
     }
   });
 
-  it('a synced env the daemon cannot LOCK is a failed provisioning (the lock failure is surfaced, not swallowed)', async () => {
+  it('a synced env the daemon cannot LOCK is a FAILED provisioning that leaves NO marker; a retry re-provisions and re-locks — no silent synced (codex round 3)', async () => {
     if (isRoot) return; // root ignores permission bits
+    let call = 0;
     const provisioner: VenvProvisioner = async (baselineDir) => {
-      const sealed = join(baselineDir, '.venv', 'lib', 'sealed');
-      mkdirSync(sealed, { recursive: true });
-      writeFileSync(join(sealed, 'x.py'), 'x');
-      chmodSync(sealed, 0o000); // unlistable → makeTreeReadOnly cannot reach its files
+      call += 1;
+      mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+      writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+      if (call === 1) {
+        // First attempt: an env that cannot be locked read-only (an unlistable dir the lock chokes on).
+        const sealed = join(baselineDir, '.venv', 'lib', 'sealed');
+        mkdirSync(sealed, { recursive: true });
+        writeFileSync(join(sealed, 'x.py'), 'x');
+        chmodSync(sealed, 0o000);
+      }
       return 'synced';
     };
     const v = scaffold({ provisionVenv: provisioner });
     try {
       v.store.seed();
-      const r = await v.store.publish(1);
-      expect(r.verdict).toBe('blocked');
-      expect(r.findings.map((f) => f.kind)).toContain('venv-failed');
+      const hash = v.store.manifest().baseline;
+      const venvDir = join(v.root, 'baseline', hash, '.venv');
+      // First publish: the lock fails → a blocking `venv-failed`, and the whole partial env is
+      // removed so no ready marker survives (it must not be trusted on retry).
+      const r1 = await v.store.publish(1);
+      expect(r1.verdict).toBe('blocked');
+      expect(r1.findings.map((f) => f.kind)).toContain('venv-failed');
       expect(v.warnings.some((w) => w.includes('could not lock'))).toBe(true);
+      expect(existsSync(join(venvDir, VENV_READY_MARKER))).toBe(false);
+      expect(existsSync(venvDir)).toBe(false); // no partial env left behind
+      expect(v.store.currentSnapshot()).toBeNull();
+      expect(v.store.manifest().baselines[hash]?.venv).toBe('pending'); // never recorded synced
+
+      // Retry: the provisioner runs AGAIN (no silent synced off a stale marker) and this time the
+      // env locks — a clean publish.
+      const r2 = await v.store.publish(1);
+      expect(r2.verdict).toBe('clear');
+      expect(call).toBe(2);
+      expect(existsSync(join(venvDir, VENV_READY_MARKER))).toBe(true);
+      expect(lstatSync(venvDir).mode & 0o222).toBe(0); // actually read-only now
+      expect(v.store.manifest().baselines[hash]?.venv).toBe('synced');
     } finally {
-      chmodSync(join(v.root, 'baseline', v.store.manifest().baseline, '.venv', 'lib', 'sealed'), 0o700);
       removeTreeForce(v.base);
     }
   });
@@ -834,6 +935,48 @@ describe('enablement, reset, CAS (design v3 §7)', () => {
     expect(reset.skill?.provenance).toBe('shipped');
     expect(readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'nested', 'SKILL.md'), 'utf8')).toContain('child edit');
     expect(s.store.manifest().skills['wicked-garden-alpha-nested']?.provenance).toBe('override');
+  });
+
+  it('reset honours EFFECTIVE nested ownership: a child added under refs/ (absent from the baseline) keeps its notes byte-for-byte (codex round 3)', () => {
+    s.store.seed();
+    // Turn `alpha/refs` into a nested skill ON DISK (the baseline has no SKILL.md there) and modify
+    // its notes — those files are now owned by `alpha/refs`, not by alpha.
+    const refsDir = join(s.root, 'effective', 'skills', 'alpha', 'refs');
+    writeFileSync(join(refsDir, 'SKILL.md'), '---\nname: wicked-garden-alpha-refs\n---\n\nchild\n');
+    writeFileSync(join(refsDir, 'notes.md'), 'CHILD-OWNED notes\n');
+    const childNotes = readFileSync(join(refsDir, 'notes.md'), 'utf8');
+    const edit = s.store.writeFile('wicked-garden-alpha', 'SKILL.md', '---\nname: wicked-garden-alpha\nuser-invocable: true\n---\n\nmine\n', 1);
+    const reset = s.store.reset('wicked-garden-alpha', edit.revision);
+    expect(reset.verdict).toBe('clear');
+    // alpha's own SKILL.md is restored from the baseline…
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'), 'utf8')).toBe(
+      readFileSync(join(FIXTURE_PLUGIN, 'skills', 'alpha', 'SKILL.md'), 'utf8'),
+    );
+    // …but the nested child's notes are NOT overwritten with baseline content — kept byte-for-byte.
+    expect(readFileSync(join(refsDir, 'notes.md'), 'utf8')).toBe(childNotes);
+    expect(readFileSync(join(refsDir, 'SKILL.md'), 'utf8')).toContain('child');
+  });
+
+  it('reset preflights before mutating: a symlinked child dir blocks the reset with NOTHING removed and the revision unchanged (codex round 3)', () => {
+    s.store.seed();
+    const edit = s.store.writeFile('wicked-garden-alpha', 'SKILL.md', '---\nname: wicked-garden-alpha\nuser-invocable: true\n---\n\nmine\n', 1);
+    const before = readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'), 'utf8');
+    const rev = edit.revision;
+    // Replace `alpha/refs` with a symlink to outside — its baseline `notes.md` would restore THROUGH it.
+    const outside = join(s.base, 'outside-refs');
+    mkdirSync(outside, { recursive: true });
+    rmSync(join(s.root, 'effective', 'skills', 'alpha', 'refs'), { recursive: true });
+    symlinkSync(outside, join(s.root, 'effective', 'skills', 'alpha', 'refs'));
+    const reset = s.store.reset('wicked-garden-alpha', rev);
+    expect(reset).toMatchObject({ verdict: 'blocked', revision: rev });
+    expect(reset.findings[0]?.kind).toBe('path-invalid');
+    expect(reset.findings[0]?.evidence).toMatch(/crosses a symlink at refs/);
+    // NOTHING was removed: alpha's own SKILL.md is exactly what it was, the revision did not move,
+    // and nothing was written through the link.
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'), 'utf8')).toBe(before);
+    expect(s.store.revision()).toBe(rev);
+    expect(readdirSync(outside)).toEqual([]);
+    rmSync(join(s.root, 'effective', 'skills', 'alpha', 'refs'));
   });
 
   it('ownership follows the FILESYSTEM: a nested SKILL.md added directly on disk is nobody else\'s — the parent endpoint refuses its paths, parent reset/replace leave it intact (codex round 2)', () => {

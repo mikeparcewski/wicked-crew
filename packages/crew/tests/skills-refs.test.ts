@@ -103,57 +103,61 @@ describe('portabilityIssueOf', () => {
   });
 });
 
-describe('parseFrontmatter — a STRICT subset', () => {
+describe('parseFrontmatter — a real YAML grammar with a strict subset (codex round 3)', () => {
   const fm = (body: string): ReturnType<typeof parseFrontmatter> => parseFrontmatter(`---\n${body}\n---\n\nbody\n`);
+  const reasonOf = (r: ReturnType<typeof parseFrontmatter>): string => (r.ok ? '' : r.reason);
 
-  it('accepts terminated flow collections, quoted scalars and block scalars', () => {
-    expect(fm('name: x\ntags: [a, b]')).toEqual({ ok: true, fields: { name: 'x', tags: '[a, b]' } });
+  it('accepts well-formed YAML and flattens the top-level scalars the store reads', () => {
+    const parsed = fm('name: x\ncontext: fork\nuser-invocable: true');
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.fields).toMatchObject({ name: 'x', context: 'fork', 'user-invocable': 'true' });
+    expect(fm('name: "quoted name"')).toMatchObject({ ok: true, fields: { name: 'quoted name' } });
+    expect(fm('name: x\ntags: [a, b]').ok).toBe(true);
     expect(fm('name: x\nmeta: {k: v}').ok).toBe(true);
     expect(fm('name: x\nnested: [a, [b, c]]').ok).toBe(true);
-    expect(fm('name: "quoted name"')).toEqual({ ok: true, fields: { name: 'quoted name' } });
     expect(fm('description: |\n  [not a flow sequence\n  just prose').ok).toBe(true);
-  });
-
-  it('refuses unterminated flow sequences / mappings / quotes, naming the line and key', () => {
-    const seq = fm('name: x\ntags: [a, b');
-    expect(seq.ok).toBe(false);
-    if (!seq.ok) expect(seq.reason).toMatch(/line 3: `tags`: unterminated flow sequence/);
-    const map = fm('meta: {k: v');
-    if (!map.ok) expect(map.reason).toContain('unterminated flow mapping');
-    const quote = fm('name: "open');
-    expect(quote.ok).toBe(false);
-    if (!quote.ok) expect(quote.reason).toContain('unterminated quoted scalar');
-    const single = fm("name: 'open");
-    expect(single.ok).toBe(false);
-    const unbalanced = fm('tags: [a, b]]');
-    expect(unbalanced.ok).toBe(false);
-    if (!unbalanced.ok) expect(unbalanced.reason).toContain('unbalanced');
-  });
-
-  it('refuses a plain scalar that YAML would read as a nested mapping or a sequence entry (codex round 2); quoted / block forms are fine', () => {
-    const nested = fm('name: x\ndescription: hello: world');
-    expect(nested.ok).toBe(false);
-    if (!nested.ok) expect(nested.reason).toMatch(/line 3: `description`: a plain scalar cannot contain `: `/);
-    expect(fm('description: trailing:').ok).toBe(false);
-    expect(fm('description: - not a list').ok).toBe(false);
-    expect(fm('description: "hello: world"')).toEqual({ ok: true, fields: { description: 'hello: world' } });
     expect(fm("description: 'a: b'").ok).toBe(true);
-    expect(fm('description: |\n  hello: world\n  - item').ok).toBe(true);
+    expect(fm('description: "hello: world"')).toMatchObject({ ok: true, fields: { description: 'hello: world' } });
     expect(fm('description: a URL http://x/y is fine').ok).toBe(true); // `:` without a following space is not a mapping
-  });
-
-  it('checks an indented flow collection / quote continued on the next lines — joined, never folded unchecked (codex round 2)', () => {
-    const open = fm('name: x\ntags:\n  [a, b');
-    expect(open.ok).toBe(false);
-    if (!open.ok) expect(open.reason).toMatch(/line 3: `tags`: unterminated flow sequence/);
-    expect(fm('tags:\n  [a, b]').ok).toBe(true);
-    expect(fm('tags:\n  [a,\n  b]').ok).toBe(true);
-    expect(fm('tags:\n  {k: v').ok).toBe(false);
-    expect(fm('quote:\n  "open').ok).toBe(false);
-    // Nested mappings / lists / multi-line plain text under a key stay accepted (folded, not interpreted).
-    expect(fm('meta:\n  k: v\n  j: w').ok).toBe(true);
+    expect(fm('meta:\n  k: v\n  j: w').ok).toBe(true); // a nested mapping UNDER a key is fine
     expect(fm('items:\n  - a\n  - b').ok).toBe(true);
     expect(fm('description:\n  first line\n  second line').ok).toBe(true);
+  });
+
+  it('refuses ANYTHING the YAML parser rejects — including the cases the old bracket-depth heuristic accepted', () => {
+    for (const bad of [
+      'name: x\ntags: [a, {b: c]]', // codex: unbalanced flow — the heuristic missed it
+      'name: x\ntags: "bad\\q"', // codex: an invalid escape
+      'name: x\ntags: "hello" "world"', // codex: two scalars at one node
+      'name: x\ntags: [a, b', // unterminated flow sequence
+      'meta: {k: v', // unterminated flow mapping
+      'name: "open', // unterminated double quote
+      "name: 'open", // unterminated single quote
+      'tags: [a, b]]', // unbalanced
+      'name: x\ndescription: hello: world', // a plain scalar YAML reads as a nested mapping
+      'description: trailing:',
+      'description: - not a list',
+      'tags:\n  [a, b', // an indented flow collection left open
+      'quote:\n  "open',
+      'name: a\nname: b', // duplicate key
+    ]) {
+      expect(fm(bad).ok, bad).toBe(false);
+    }
+  });
+
+  it('enforces the strict subset on top: single-document mapping, scalar `name`, list `mandates`', () => {
+    // Top-level must be a MAPPING, not a sequence or a bare scalar.
+    expect(fm('- a\n- b').ok).toBe(false);
+    expect(fm('just a bare scalar').ok).toBe(false);
+    // `name`, if present, must be a scalar.
+    const badName = fm('name:\n  a: 1');
+    expect(badName.ok).toBe(false);
+    expect(reasonOf(badName)).toContain('scalar');
+    // `mandates`, if present, must be a LIST.
+    const badMandates = fm('mandates: not-a-list');
+    expect(badMandates.ok).toBe(false);
+    expect(reasonOf(badMandates)).toContain('list');
+    expect(fm('mandates:\n  - a\n  - b').ok).toBe(true);
   });
 });
 
