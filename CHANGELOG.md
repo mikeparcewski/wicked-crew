@@ -10,6 +10,37 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Interactive docs are no longer shared across projects (#472).** `/projects/:projectId/interactive/*`
+  honored `:projectId` only to look up a per-project root setting no project ever had, so every
+  project fell through to the one shared default root — one bridge, one registry, the same docs
+  under every project's URL. A project without an explicit `interactiveRoot` now resolves to its
+  own partition, `~/wicked-interactive/docs/projects/<projectId>` (created on first use by the
+  bridge pool); the synthesized `default` project keeps the legacy shared root, so every existing
+  document stays visible under Unfiled with no migration. Explicit per-project roots and
+  `WICKED_INTERACTIVE_ROOT` are honored exactly as before.
+- **The per-project partition is checked on REAL paths before anything is served from it (#474).**
+  `projects/<projectId>` was resolved lexically only, so a symbolic link already sitting there —
+  at another project's partition, or anywhere else — would have been followed by the bridge into
+  that directory. The partition is now `lstat`-walked and `realpath`-contained under `projects/`
+  and created without following links; a link, a file, or an escape answers 500 naming the
+  offending path (fail closed — never a fallback to another root). The interactive event seams
+  (edit / demo / chat) resolve a project's docs root through the SAME containment walk — a
+  symlinked partition is refused into the seam handler's `onError` and the event goes unanswered
+  instead of being followed into another project's docs; the seams only read under a root the
+  routes materialized, so nothing is created on that path (Copilot on #474). The attributed docs list also
+  answers 502 for a malformed list (`[null]`, non-object rows) or a non-JSON body from the
+  bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
+  retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
+  list's wire shape as the array it is, `InteractiveDocSummary[]`.
+
+### Added
+- **`GET /projects/:projectId/interactive/api/docs` stamps `projectId` on every row** (#472) — the
+  bridge's list relayed field-for-field plus the mount's project, so clients can attribute docs
+  across projects. One static segment more specific than the proxy wildcard; `POST /api/docs` and
+  everything else still stream through the pure-transport proxy. api-types **0.26.0** carries
+  `InteractiveDocSummary`.
+
 ## [0.7.25] — 2026-09-08
 
 ### Changed

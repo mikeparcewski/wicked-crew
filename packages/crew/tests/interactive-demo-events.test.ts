@@ -25,7 +25,7 @@
 //    business; THIS seam's business is everything around it.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -53,6 +53,12 @@ import { FEEDBACK_PROCESSED, EDIT_COMPLETED, startInteractiveEditSubscriber } fr
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
+import { canSymlink } from './setup/can-symlink.js';
+import {
+  ensureProjectInteractiveRoot,
+  partitionsBase,
+  resolveProjectInteractiveRoot,
+} from '../src/interactive/bridge-root.js';
 
 const DEMO_PAYLOAD = {
   document_id: 'checkout-demo',
@@ -928,5 +934,111 @@ describe('specSelfCheck — async run contract', () => {
   });
   it('still accepts the re-export form (asyncness lives at the declaration)', () => {
     expect(specSelfCheck(meta + 'async function run() {}\nexport { run };')).toBeNull();
+  });
+});
+
+// ── Copilot on #474: the seam's docs-root resolver is the CONTAINED one ──────────────────────────
+//
+// `server.ts` wires `resolveDocsRoot` to `resolveProjectInteractiveRoot`, which used to answer a
+// partition lexically: the routes refused a symlinked `projects/<id>` while this seam followed it
+// into another project's docs. Now both resolve through one containment walk. This case drives the
+// seam over a REAL bus with the resolver wired exactly as the server wires it.
+describe('startInteractiveDemoSubscriber — a symlinked partition is refused on the seam path (crew#474)', () => {
+  const SYMLINKS = canSymlink();
+  const NO_ENV: Record<string, string | undefined> = {};
+  let dir: string;
+  let home: string;
+  let busDb: string;
+  let subs: { stop(): Promise<void> | void }[];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-idm-seam-'));
+    home = join(dir, 'home');
+    mkdirSync(home);
+    busDb = join(dir, 'bus.db');
+    subs = [];
+  });
+  afterEach(async () => {
+    for (const s of subs) await s.stop();
+    removeScratch(dir);
+  });
+
+  /** A demo doc at version 3 with a current spec — what a step-feedback handoff re-authors. */
+  function demoWorkspace(root: string, name: string): void {
+    const docDir = join(root, name);
+    mkdirSync(docDir, { recursive: true });
+    writeFileSync(
+      join(docDir, 'versions.json'),
+      JSON.stringify({ kind: 'demo', head: 3, versions: [{ version: 3, html_file: '_v3.html' }] }),
+      'utf8',
+    );
+    writeFileSync(join(docDir, '_v3.html'), '<section class="wi-demo">placeholder</section>', 'utf8');
+    writeFileSync(join(docDir, DEMO_SPEC_FILE), VALID_SPEC, 'utf8');
+  }
+
+  it.skipIf(!SYMLINKS)("a handoff for project A, whose partition is a link to B's, is NOT answered — B's own handoff for the same doc is", async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    // B is a real, route-materialized partition holding the demo doc; A is a link planted at projects/A → B.
+    const b = ensureProjectInteractiveRoot('p-b', null, NO_ENV, home);
+    demoWorkspace(b, 'checkout-demo');
+    symlinkSync(b, join(partitionsBase(home), 'p-a'), 'dir');
+
+    const logs: string[] = [];
+    const sub = await startInteractiveDemoSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      // Wired as server.ts wires it: the project-aware resolver over the project's (null) setting.
+      resolveDocsRoot: (projectId) => resolveProjectInteractiveRoot(projectId, null, NO_ENV, home),
+      log: (m) => logs.push(m),
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+
+    const db = bus.openDb({ db_path: busDb });
+    const config = bus.loadConfig({ db_path: busDb });
+    const handoff = (projectId: string): void => {
+      bus.emit(db, config, {
+        event_type: FEEDBACK_PROCESSED,
+        domain: 'wicked-interactive',
+        subdomain: 'feedback',
+        payload: {
+          document_id: 'checkout-demo',
+          project_id: projectId,
+          version: 3,
+          applied: [],
+          rejected: [],
+          stale: [],
+          awaiting_structural: 1,
+          structural_items: [
+            {
+              selector: '[data-wid="w-step-3"]',
+              instruction: 'also show the coupon field before paying',
+              fragment: '<li data-wid="w-step-3">Checkout</li>',
+            },
+          ],
+          ts: new Date().toISOString(),
+        },
+        producer_id: 'wi-service',
+      });
+    };
+
+    // A's handoff: the resolver refuses the link INSIDE the handler → the subscription's onError
+    // logs the refusal (naming the link), nothing launches, no ledger row is written.
+    handoff('p-a');
+    await waitFor(() => logs.some((m) => /is a symbolic link/.test(m)));
+    expect(logs.find((m) => /is a symbolic link/.test(m))).toContain(join(partitionsBase(home), 'p-a'));
+    expect(engine.launches).toHaveLength(0);
+    expect(sub!.ledger.has('checkout-demo:v3')).toBe(false);
+
+    // B's handoff for the SAME doc launches — the refusal was the link, not the document.
+    handoff('p-b');
+    await waitFor(() => engine.launches.length === 1);
+    expect(engine.launches[0]!.projectId).toBe('p-b');
+    expect(engine.launches[0]!.workflow).toBe(INTERACTIVE_DEMO_REAUTHOR_WORKFLOW);
   });
 });

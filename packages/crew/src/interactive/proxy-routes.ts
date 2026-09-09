@@ -7,7 +7,8 @@
  * second origin, never needs CORS, and never carries a bridge port literal — ADR-0022's dynamic
  * port is honored rather than worked around, and the bridge stops being browser-reachable at all.
  *
- * The path encodes the project (§7.2) because the ROOT is a per-project setting: the same proxy
+ * The path encodes the project (§7.2) because the ROOT is per project — an explicit setting, or
+ * the project's own partition of the default root (crew#472, `bridge-root.ts`): the same proxy
  * mount serves N interactive instances, one bridge per resolved root.
  *
  * Two things are deliberately hand-rolled over `node:http` rather than delegated to `fetch`:
@@ -23,11 +24,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { ProjectsUnsupportedError } from '../core/adapter.js';
-import { DEFAULT_PROJECT_ID } from '../projects/routes.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
-import { resolveInteractiveRoot } from './bridge-root.js';
 import { BridgeUnavailableError, InteractiveBridgePool, type LiveBridge } from './bridge-pool.js';
+import { projectDocsRoot } from './project-root.js';
 
 /** Per-hop headers that must never be forwarded across a proxy (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
@@ -74,30 +73,18 @@ export interface InteractiveProxyDeps {
   settings: ProjectSettingsStore;
   pool: InteractiveBridgePool;
   env?: NodeJS.ProcessEnv;
+  /** The home the default root hangs off (tests point it at a scratch dir). */
+  home?: string;
   log?: (msg: string) => void;
 }
 
 export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdapter, deps: InteractiveProxyDeps): void {
   const { settings, pool } = deps;
-  const env = deps.env ?? process.env;
   // Strips exactly the mount prefix off the RAW url, leaving the remainder + query untouched.
   const prefixRe = new RegExp(`^${API_PREFIX}/projects/[^/?#]+/interactive`);
 
   /** The resolved docs root for a project, or null when no such project exists. */
-  async function rootFor(projectId: string): Promise<string | null> {
-    // `default` is SYNTHESIZED by the route layer (DES-PROJECT-001 §7) — the engine has no row
-    // for it, so an existence check there would 404 the one project every operator starts with.
-    if (projectId !== DEFAULT_PROJECT_ID) {
-      try {
-        if ((await adapter.projectGet(projectId)) === null) return null;
-      } catch (err) {
-        // A pre-0.6.0 engine has no project surface at all; the shared default root is still
-        // a truthful answer for the only project such a deployment can have.
-        if (!(err instanceof ProjectsUnsupportedError)) throw err;
-      }
-    }
-    return resolveInteractiveRoot(settings.get(projectId), env);
-  }
+  const rootFor = (projectId: string): Promise<string | null> => projectDocsRoot(adapter, settings, projectId, deps);
 
   // Encapsulated so the raw-body parser below applies to the PROXY ONLY. The root instance
   // installs a JSON parser that buffers and parses the body — correct for every other route,

@@ -47,14 +47,12 @@ import type { FastifyInstance } from 'fastify';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { AuditLog } from '../api/audit.js';
 import type { CoreAdapter } from '../core/adapter.js';
-import { ProjectsUnsupportedError } from '../core/adapter.js';
 import type { Actor } from '../core/types.js';
-import { DEFAULT_PROJECT_ID } from '../projects/routes.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
-import { resolveInteractiveRoot } from './bridge-root.js';
 import { BridgeUnavailableError, type InteractiveBridgePool, type LiveBridge } from './bridge-pool.js';
 import { DOC_NAME } from './draft-events.js';
 import type { DocLedgerSweep } from './doc-ledger-sweep.js';
+import { projectDocsRoot } from './project-root.js';
 
 const V = API_PREFIX;
 
@@ -73,6 +71,8 @@ export interface DocDeleteDeps {
    *  a directly-driven route set gets an inert default so unit tests never touch ~/.wicked-crew). */
   dropDocLedgerRows: (documentId: string) => DocLedgerSweep;
   env?: NodeJS.ProcessEnv;
+  /** The home the default root hangs off (tests point it at a scratch dir). */
+  home?: string;
   log?: (msg: string) => void;
   /** Budget for the bridge's retire call (tests shorten it). The tombstone write is local and
    *  fast; the default only has to outlast a busy event-loop, not a build. */
@@ -92,23 +92,12 @@ export function registerInteractiveDocDelete(
   deps: DocDeleteDeps,
 ): void {
   const { settings, pool, audit, actorOf, dropDocLedgerRows } = deps;
-  const env = deps.env ?? process.env;
   const log = deps.log ?? ((): void => undefined);
   const timeoutMs = deps.upstreamTimeoutMs ?? 30_000;
 
   /** The resolved docs root for a project, or null when no such project exists — the SAME
-   *  resolution the proxy uses (`default` is synthesized by the route layer; a pre-projects
-   *  engine still answers for the one project it can have). */
-  async function rootFor(projectId: string): Promise<string | null> {
-    if (projectId !== DEFAULT_PROJECT_ID) {
-      try {
-        if ((await adapter.projectGet(projectId)) === null) return null;
-      } catch (err) {
-        if (!(err instanceof ProjectsUnsupportedError)) throw err;
-      }
-    }
-    return resolveInteractiveRoot(settings.get(projectId), env);
-  }
+   *  resolution the proxy and the docs list use (`project-root.ts`). */
+  const rootFor = (projectId: string): Promise<string | null> => projectDocsRoot(adapter, settings, projectId, deps);
 
   /** One retire call to the bridge. Throws on transport failure (caller retries once). */
   async function retireUpstream(bridge: LiveBridge, doc: string): Promise<UpstreamRetire> {

@@ -48,6 +48,7 @@ import {
   projectUpdatedKey,
 } from './events.js';
 import type { MembershipIndex } from './membership-index.js';
+import { DEFAULT_PROJECT_ID } from './default-project.js';
 import { ProjectSettingsStore } from './settings.js';
 import { buildActivityPage } from './activity.js';
 import {
@@ -66,9 +67,6 @@ import { LOCAL_ACTOR } from '../api/auth.js';
 import type { Actor } from '../core/types.js';
 
 const V = API_PREFIX;
-
-/** The reserved, synthesized "Unfiled" project id (ADR §1.1/§7). */
-export const DEFAULT_PROJECT_ID = 'default';
 
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
 export const CreateProjectSchema = z

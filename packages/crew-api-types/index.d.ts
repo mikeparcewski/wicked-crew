@@ -2247,6 +2247,32 @@ export interface InteractiveDocDeleteResponse {
 }
 
 /**
+ * One row of `GET /projects/:projectId/interactive/api/docs` (crew#472) — the bridge's own
+ * `GET /api/docs` row (interactive's `listDocs` shape, relayed field-for-field) stamped with the
+ * project whose mount it was listed under. Docs roots are partitioned per project (the `default`
+ * project keeps the legacy shared root), so `projectId` is the attribution a client rendering
+ * docs from several projects at once cannot otherwise recover.
+ */
+export interface InteractiveDocSummary {
+  /** The doc name (slug). */
+  name: string;
+  /** Manifest `kind`; a manifest without one lists as `doc`. */
+  kind: 'doc' | 'html' | 'source' | 'demo';
+  /** Head version. */
+  head: number;
+  /** Lineage size. */
+  versions: number;
+  /** ISO-8601 timestamp of the head version, or null when the lineage is empty. */
+  updated_at: string | null;
+  /** Present only on a retired (tombstoned) row, which lists only with `?includeRetired=1`. */
+  retired?: true;
+  /** ISO-8601 retirement timestamp; present with `retired`. */
+  retired_at?: string;
+  /** The crew project this row was listed under — the mount's `:projectId`. */
+  projectId: string;
+}
+
+/**
  * One normalized entry of the merged project activity feed
  * (`GET /projects/:id/activity`, ADR §5.2): core events of member runs/chats
  * ∪ bus `wicked.interactive.*` events carrying this `project_id`.

@@ -33,7 +33,7 @@ import { startInteractiveDraftSubscriber } from '../interactive/draft-events.js'
 import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
-import { resolveInteractiveRoot } from '../interactive/bridge-root.js';
+import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -588,12 +588,18 @@ export async function createServer(
     );
   };
 
-  /** The docs root a project's interactive docs live under — the SAME per-project settings
-   *  resolution the project routes, the interactive proxy, and the chat seam share
-   *  (DES-MERGE-001 §7.1/§7.2). Shared by the edit seam (demo-kind gate, CREW-UX-9) and the
-   *  demo seam (spec install + manifest reads). */
+  /** The docs root a project's interactive docs live under — the SAME per-project resolution
+   *  the project routes and the interactive proxy use (DES-MERGE-001 §7.1/§7.2; partitioned
+   *  per project since crew#472, with an event that carries no `project_id` belonging to
+   *  Unfiled). Shared by the edit seam (demo-kind gate, CREW-UX-9), the demo seam (spec
+   *  install + manifest reads), and the chat seam. The partition is containment-checked on
+   *  REAL paths here exactly as the routes check it (crew#474 — one walk, `bridge-root.ts`):
+   *  a symlinked `projects/<id>` throws `InteractivePartitionRefusedError` into the seam's
+   *  handler (logged by its `onError`, the event unanswered — fail closed) instead of being
+   *  followed into another project's docs; the seams only READ under a root the routes
+   *  materialized, so a missing partition is returned as spelled and nothing is created. */
   const interactiveDocsRoot = (projectId: string | undefined): string =>
-    resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null);
+    resolveProjectInteractiveRoot(projectId, projectId !== undefined ? projectSettings.get(projectId) : null);
 
   // Arm the opt-in QE gate-event subscription (crew's bus seam). Failure to
   // arm is LOUD but non-fatal: the acceptance route never depends on the bus.
@@ -758,10 +764,7 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
-      resolveDocsRoot:
-        o.resolveDocsRoot ??
-        ((projectId) =>
-          resolveInteractiveRoot(projectId !== undefined ? projectSettings.get(projectId) : null)),
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       isDocBusy: (documentId) =>
         (draftSub?.inFlightDocs().includes(documentId) ?? false) ||
         (editSub?.inFlightDocs().includes(documentId) ?? false),
