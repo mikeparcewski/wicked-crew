@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
 import { classifyFlip, compareEvalRuns, UNVERIFIED_NO_SAMPLE_IDENTITY } from '../src/api/eval-compare.js';
-import { samplePayloadHash } from '../src/api/eval-sample.js';
+import { PAYLOAD_HASH_RE, samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSignals, GovernanceEvalSummary, SteeringType } from '../src/core/types.js';
 
@@ -290,7 +290,7 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.payload_changed).toEqual([]); // nothing can be said to have changed — or not
     expect(c.unverified_rows).toEqual({ a: 2, b: 2 });
     expect(c.comparable).toBe(false);
-    expect(c.comparable_reason).toMatch(new RegExp(`^${UNVERIFIED_NO_SAMPLE_IDENTITY} \\(2 result row\\(s\\) in a and 2 in b carry no sample\\.payload_hash\\)$`));
+    expect(c.comparable_reason).toMatch(new RegExp(`^${UNVERIFIED_NO_SAMPLE_IDENTITY} \\(2 result row\\(s\\) in a and 2 in b carry no well-formed sample\\.payload_hash\\)$`));
     // The verdict diff is still reported — as a flip — it is the COMPARABILITY claim that is withheld.
     expect(c.flips.map((f) => [f.sample_id, f.classification])).toEqual([[CREW_A, 'permitted']]);
     expect(c.unchanged).toBe(1);
@@ -301,6 +301,32 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(mixed.unverified_rows).toEqual({ a: 0, b: 2 });
     expect(mixed.comparable).toBe(false);
     expect(mixed.comparable_reason?.startsWith(UNVERIFIED_NO_SAMPLE_IDENTITY)).toBe(true);
+  });
+
+  it('a MALFORMED payload_hash (not `sha256:` + 64 lowercase hex) is UNVERIFIED — never an authoritative identity that marks a pair comparable or "changed" (Copilot)', async () => {
+    // The one well-formed spelling is what the producer stamps.
+    expect(PAYLOAD_HASH_RE.test(samplePayloadHash({ id: 'x@000000000000', description: 'd', kind: 'good', steering_type: 'development', signals: {} }))).toBe(true);
+    const a = await recorded({ results: [row(CREW_A, 'bad', 'development', 'gap'), row(GARDEN_A, 'good', 'development', 'caught'), row(ESTATE_A, 'good', 'development', 'caught')] });
+    const malformed = [row(CREW_A, 'bad', 'development', 'caught'), row(GARDEN_A, 'good', 'development', 'caught'), row(ESTATE_A, 'good', 'development', 'caught')];
+    malformed[0]!.sample.payload_hash = 'sha256:DEADBEEF'; // uppercase and truncated
+    malformed[1]!.sample.payload_hash = `md5:${'0'.repeat(32)}`; // another algorithm
+    malformed[2]!.sample.payload_hash = ' '; // non-empty, still no identity
+    const b = await recorded({ results: malformed });
+    const c = compareEvalRuns(a, b);
+    expect(c.payload_changed).toEqual([]); // a malformed hash is not "different from A's" — it is no identity at all
+    expect(c.unverified_rows).toEqual({ a: 0, b: 3 });
+    expect(c.comparable).toBe(false);
+    expect(c.comparable_reason).toBe(`${UNVERIFIED_NO_SAMPLE_IDENTITY} (0 result row(s) in a and 3 in b carry no well-formed sample.payload_hash)`);
+    // The verdict flip is still reported and classified by the S17 table (bad gap→caught permitted) — not flagged as a payload change.
+    expect(c.flips.map((f) => [f.sample_id, f.classification])).toEqual([[CREW_A, 'permitted']]);
+    expect(c.unchanged).toBe(2);
+    // Control: well-formed on BOTH sides and different — that IS a payload change, and verified.
+    const changed = await recorded({
+      results: [row(CREW_A, 'bad', 'development', 'gap', [], { description: 'edited' }), row(GARDEN_A, 'good', 'development', 'caught'), row(ESTATE_A, 'good', 'development', 'caught')],
+    });
+    const d = compareEvalRuns(a, changed);
+    expect(d.payload_changed).toEqual([CREW_A]);
+    expect(d.unverified_rows).toEqual({ a: 0, b: 0 });
   });
 
   it('a stored summary that disagrees with its own results is a reconciliation error naming the run, never a flip', async () => {

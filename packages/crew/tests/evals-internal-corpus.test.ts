@@ -3,8 +3,12 @@
 //
 // Proven over FIXTURE mini-repos with tags (never the sibling checkouts): the pin resolves shas
 // and windows by the rule (>= min_commits, capped at max_age_days before the tag's own date;
-// shortfall recorded, never widened); `check` fails closed on sha drift (a re-cut tag) and on a
-// hand-edited pin; `samples` derives one EvalSample per window commit that the REAL crew zod
+// shortfall recorded, never widened); `check` fails closed on sha drift (a re-cut tag), on a
+// hand-edited pin AND on a SHALLOW checkout (a depth-1 clone plus a depth-1 fetch of the from-tag
+// resolves both pinned tags while the window between them is missing — the codex round-3 finding:
+// fewer samples under the unchanged pin identity); `samples` compares each window's derived commit
+// and sample counts with the pin's `commits` (a hand-edited count is refused by name) and refuses a
+// `.git/shallow` graft inside the window; `samples` derives one EvalSample per window commit that the REAL crew zod
 // schema accepts, infers steering_type from the explicit path table (unsure ⇒ development),
 // honors the known-bad allowlist, fails closed on a stale entry AND on a missing / malformed
 // allowlist file (never an empty one), and derives byte-identical samples under two different
@@ -12,7 +16,11 @@
 // `materialize` refuses a pin whose sha no longer matches, a `repo` that is not one safe path
 // segment, and a symlinked destination (containment under the realpath of the root), pins the
 // operator's git attributes away and verifies the extracted tree against `ls-tree` (an
-// un-overridable `export-ignore` is a named refusal); filenames with leading/trailing spaces,
+// un-overridable `export-ignore` is a named refusal), extracts + verifies EVERY repo into a staging
+// dir beside its destination under `.materialize.lock` and swaps only after all verified (a failed
+// repeat leaves the previous trees and receipt byte-intact, a failed first run leaves no receipt,
+// a receipt beside a missing tree is removed, two concurrent materializations never interleave);
+// filenames with leading/trailing spaces,
 // tabs, quotes, backslashes and newlines round-trip EXACTLY into `signals.files` (NUL-delimited
 // extraction, never trimmed) and the steering-type inference sees the real paths; samples are
 // validated by the ROUTE's own zod schema (no mirror — what the route rejects, `samples`/`run`
@@ -20,7 +28,10 @@
 // one generation stamp); `run` skips ONLY on ENOENT (any other probe error or a non-zero
 // `--version` is a tool failure), fails loud when the tool fails, verifies samples.meta.json
 // against samples.json AND the pin before the engine is probed, stages EXACTLY the pinned samples
-// in a fresh private dir, stamps every result row with its sample's `payload_hash`, and publishes
+// in a fresh private dir, VERIFIES the engine's report before publication (exactly one row per
+// staged sample — no duplicate, extra or missing id — engine verdicts, `fired` arrays, a summary
+// that is the rows' tally; an EMPTY report is refused by name, a valid all-gap report passes),
+// stamps every result row with its sample's `payload_hash`, and publishes
 // report + meta as ONE verifiable generation carrying complete provenance (engine build identity,
 // rule-snapshot identity with its method, pin/samples hashes, the report's own sha256) — a torn
 // pair is refused on read (a fake binary stands in for the engine). Plus the committed pin's
@@ -113,6 +124,8 @@ interface CorpusModule {
   readPublishedReport: (outDir: string) => { report: Report; meta: ReportMeta };
   rulesSnapshotHash: (rules: unknown[]) => string;
   seedDirIdentity: (dir: string) => { dir: string; sha256: string; files: number };
+  shallowEvidence: (checkout: string) => string[];
+  verifyEngineReport: (report: unknown, samples: Sample[]) => string | null;
   UsageError: new (message: string) => Error;
   RefusalError: new (message: string) => Error;
   RELEASE_TAG_RE: RegExp;
@@ -120,6 +133,8 @@ interface CorpusModule {
   GIT_LOG_CONFIG: readonly string[];
   SAMPLES_LOCK: string;
   REPORT_LOCK: string;
+  MATERIALIZE_LOCK: string;
+  ENGINE_VERDICTS: readonly string[];
   STEERING_TYPES: readonly string[];
   CORE_BIN: string;
 }
@@ -361,7 +376,13 @@ function run(mode: string, ...extra: string[]) {
 /** `run` under the isolated env plus `override` (e.g. a different GIT_CONFIG_GLOBAL). `env` already
  *  spreads process.env (the hermetic arming); re-stated so the harness-hygiene scan sees it here. */
 function runEnv(override: NodeJS.ProcessEnv, mode: string, ...extra: string[]) {
-  const args = [SCRIPT, mode, ...extra, '--pin', pinPath, '--source-root', sourceRoot, '--known-bad', knownBadPath];
+  return runFrom(sourceRoot, override, mode, ...extra);
+}
+
+/** `run` against ANOTHER source root (a shallow or a full clone of the fixture repos). `env`
+ *  spreads process.env (the hermetic arming); re-stated so the harness-hygiene scan sees it here. */
+function runFrom(source: string, override: NodeJS.ProcessEnv, mode: string, ...extra: string[]) {
+  const args = [SCRIPT, mode, ...extra, '--pin', pinPath, '--source-root', source, '--known-bad', knownBadPath];
   const res = spawnSync(process.execPath, args, { env: { ...process.env, ...env, ...override }, encoding: 'utf8' });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -525,6 +546,49 @@ describe('check — the tags still resolve to the pinned shas', () => {
     expect(c.status).toBe(2);
     expect(c.stderr).toMatch(/pin_hash mismatch/);
     expect(c.stderr).toMatch(/moving a tag is a deliberate PR/);
+  });
+
+  it('S14i: a SHALLOW checkout is refused by name (exit 1) even when BOTH pinned tags resolve to the pinned shas — a depth-1 clone plus a depth-1 fetch of the from-tag; the same repo cloned in FULL passes and derives the pinned counts', () => {
+    const pinned = pinOf(readPin(), 'alpha');
+    expect(pinned.commits).toBe(4);
+    const shallowRoot = join(fixture, 'shallow-source');
+    mkdirSync(shallowRoot, { recursive: true });
+    // `--depth` is ignored on a plain local path (git says so); a file:// URL makes it a real shallow clone.
+    git(shallowRoot, 'clone', '-q', '--depth', '1', pathToFileURL(join(sourceRoot, 'alpha')).href, 'alpha');
+    git(join(shallowRoot, 'alpha'), 'fetch', '-q', '--depth', '1', 'origin', 'tag', 'v0.1.0');
+    for (const other of ['beta', 'gamma']) cpSync(join(sourceRoot, other), join(shallowRoot, other), { recursive: true });
+    // Both tags resolve to the PINNED shas — no sha comparison can see what is wrong…
+    expect(git(join(shallowRoot, 'alpha'), 'rev-parse', 'v0.3.0^{commit}')).toBe(pinned.commit_sha);
+    expect(git(join(shallowRoot, 'alpha'), 'rev-parse', 'v0.1.0^{commit}')).toBe(pinned.action_window_from_sha);
+    // …while the window between them holds 1 commit where the pin recorded 4 (codex round 3 on the
+    // real corpus: 240 samples instead of 293, one crew commit instead of 54, same pin identity).
+    expect(git(join(shallowRoot, 'alpha'), 'rev-list', '--count', 'v0.1.0..v0.3.0')).toBe('1');
+    const c = runFrom(shallowRoot, {}, 'check');
+    expect(c.status).toBe(1);
+    expect(c.stdout).toMatch(
+      /DRIFT\s+alpha — shallow: the checkout has INCOMPLETE history \(`git rev-parse --is-shallow-repository` says true; .+?[\\/]shallow exists\) — a pinned window cannot be walked over a shallow clone; unshallow it \(git fetch --unshallow\) or use a full clone/,
+    );
+    expect(c.stdout).toMatch(/ok\s+beta/);
+    expect(c.stderr).toMatch(/FAIL — 1 drifted repo\(s\): alpha$/m);
+    // The derivation refuses the same way, before a single sample is derived.
+    const s = runFrom(shallowRoot, {}, 'samples', outDir);
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/refusing to derive from the wrong history:\n\s+DRIFT\s+alpha — shallow: the checkout has INCOMPLETE history/);
+    expect(existsSync(join(outDir, 'samples.json'))).toBe(false);
+    // The SAME repo cloned in full: not shallow, `check` passes, and the derived counts are the pin's.
+    const fullRoot = join(fixture, 'full-source');
+    mkdirSync(fullRoot, { recursive: true });
+    git(fullRoot, 'clone', '-q', pathToFileURL(join(sourceRoot, 'alpha')).href, 'alpha');
+    for (const other of ['beta', 'gamma']) cpSync(join(sourceRoot, other), join(fullRoot, other), { recursive: true });
+    expect(git(join(fullRoot, 'alpha'), 'rev-parse', '--is-shallow-repository')).toBe('false');
+    const full = runFrom(fullRoot, {}, 'check');
+    expect(full.status, full.stderr).toBe(0);
+    expect(full.stdout).toMatch(/ok\s+alpha/);
+    const derived = runFrom(fullRoot, {}, 'samples', outDir);
+    expect(derived.status, derived.stderr).toBe(0);
+    const { meta } = readSamples();
+    expect(meta.windows.find((w) => w.repo === 'alpha')!.commits).toBe(pinned.commits);
+    expect(meta.total).toBe(6);
   });
 });
 
@@ -754,6 +818,44 @@ describe('samples — one EvalSample per window commit', () => {
     },
   );
 
+  it("S15l: each window's derived commit count is checked against the pin's `commits` — a count `pin_hash` does not cover, hand-edited, is refused by name; a `.git/shallow` graft INSIDE the window (both tags resolve, fewer commits) is refused as shallow before derivation", async () => {
+    const m = await mod();
+    const pin = readPin();
+    const alpha = pinOf(pin, 'alpha');
+    expect(alpha.commits).toBe(4);
+    alpha.commits = 99;
+    // The hash is over the (repo, tag, sha, from tag, from sha) tuples — the count is DERIVED, not identity, and git says what it really is.
+    expect(m.pinHash(pin.repos)).toBe(pin.pin_hash);
+    writeFileSync(pinPath, JSON.stringify(pin), 'utf8');
+    const edited = run('samples', outDir);
+    expect(edited.status).toBe(1);
+    expect(edited.stderr).toMatch(/alpha: the window v0\.1\.0\.\.v0\.3\.0 derived 4 commit\(s\) but the pin records 99 — the checkout does not hold the pinned history/);
+    expect(existsSync(join(outDir, 'samples.json'))).toBe(false);
+    // A pin without the count at all is a constants-only file: usage error, run `pin`.
+    delete (alpha as Partial<PinRepo>).commits;
+    writeFileSync(pinPath, JSON.stringify(pin), 'utf8');
+    const uncounted = run('samples', outDir);
+    expect(uncounted.status).toBe(2);
+    expect(uncounted.stderr).toMatch(/alpha records no window commit count \(`commits`\) — run `pin` first/);
+    // Restore the pin, then graft the history: `.git/shallow` naming v0.3.0~1 cuts the window to 2 of
+    // its 4 commits while both tags still resolve (codex's "in-memory shallow-boundary override", on disk).
+    expect(run('pin').status).toBe(0);
+    const alphaDir = join(sourceRoot, 'alpha');
+    writeFileSync(join(alphaDir, '.git', 'shallow'), `${git(alphaDir, 'rev-parse', 'v0.3.0~1')}\n`, 'utf8');
+    expect(git(alphaDir, 'rev-list', '--count', 'v0.1.0..v0.3.0')).toBe('2');
+    expect(git(alphaDir, 'rev-parse', 'v0.1.0^{commit}')).toBe(pinOf(readPin(), 'alpha').action_window_from_sha);
+    expect(m.shallowEvidence(alphaDir)).toEqual(['`git rev-parse --is-shallow-repository` says true', `${join(alphaDir, '.git', 'shallow')} exists`]);
+    const grafted = run('samples', outDir);
+    expect(grafted.status).toBe(1);
+    expect(grafted.stderr).toMatch(/DRIFT\s+alpha — shallow: the checkout has INCOMPLETE history/);
+    expect(existsSync(join(outDir, 'samples.json'))).toBe(false);
+    // Ungrafted: the full history derives exactly the pin's counts.
+    rmSync(join(alphaDir, '.git', 'shallow'));
+    expect(m.shallowEvidence(alphaDir)).toEqual([]);
+    expect(run('samples', outDir).status).toBe(0);
+    expect(readSamples().meta.windows.find((w) => w.repo === 'alpha')!.commits).toBe(4);
+  });
+
   it('S15k: validateSample IS the route schema — signals.phase/tool of the wrong type are refused exactly as POST /testing/corpora/import refuses them (no mirror)', async () => {
     const m = await mod();
     const bad = { id: 'x@000000000000', description: 'd', kind: 'good', steering_type: 'development', signals: { phase: 123, tool: [] } };
@@ -903,8 +1005,87 @@ describe('materialize — git archive of each pinned tag', () => {
     expect(m.stderr).toMatch(/refusing to accept the materialized beta@v0\.2\.0: the extracted tree is not the committed tree [0-9a-f]{40}\n\s+missing \(1\): "README\.md"/);
     expect(m.stderr).toMatch(/info\/attributes or in the commit's own \.gitattributes cannot be overridden/);
     expect(existsSync(join(outDir, 'materialized.json'))).toBe(false); // no receipt
-    expect(existsSync(join(outDir, 'alpha@v0.3.0', 'init.txt'))).toBe(true); // alpha (sorted first) had verified
+    // alpha (sorted first) HAD verified — into its staging dir, which the failure removed: nothing
+    // is swapped into place until EVERY repo verifies.
+    expect(existsSync(join(outDir, 'alpha@v0.3.0'))).toBe(false);
+    expect(readdirSync(outDir)).toEqual([]); // no staging, no .prev, no lock
   });
+
+  it('S15m: a FAILED repeat leaves the previous trees AND receipt byte-intact (every repo is extracted + verified into a staging dir beside its destination; the swap happens only after ALL verified); a failed FIRST run leaves no receipt and no debris; a receipt beside a missing tree is removed', () => {
+    const first = run('materialize', outDir);
+    expect(first.status, first.stderr).toBe(0);
+    const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
+    const before = Object.fromEntries(trees.map((t) => [t, treeIdentity(join(outDir, t))]));
+    const receiptBefore = readFileSync(join(outDir, 'materialized.json'), 'utf8');
+    const receipt = JSON.parse(receiptBefore) as { generation: string; repos: { path: string }[] };
+    expect(receipt.generation).toMatch(/^\d{8}-\d{6}-[0-9a-f]{8}$/);
+    expect(first.stdout).toContain(`generation ${receipt.generation}`);
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+    // Damage a source so the SECOND repo fails verification (beta sorts after alpha, so alpha has
+    // already been extracted + verified — into staging, never into place).
+    mkdirSync(join(sourceRoot, 'beta', '.git', 'info'), { recursive: true });
+    writeFileSync(join(sourceRoot, 'beta', '.git', 'info', 'attributes'), 'README.md export-ignore\n', 'utf8');
+    const failed = run('materialize', outDir);
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toMatch(/refusing to accept the materialized beta@v0\.2\.0/);
+    for (const t of trees) expect(treeIdentity(join(outDir, t)), t).toBe(before[t]);
+    expect(readFileSync(join(outDir, 'materialized.json'), 'utf8')).toBe(receiptBefore); // still describes exactly what is there
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']); // no .staging-*, no .prev-*, no lock
+    // A receipt beside a tree that is no longer there does not survive a failure — it described output that does not exist.
+    rmSync(join(outDir, 'alpha@v0.3.0'), { recursive: true, force: true });
+    expect(run('materialize', outDir).status).toBe(1);
+    expect(existsSync(join(outDir, 'materialized.json'))).toBe(false);
+    expect(readdirSync(outDir).sort()).toEqual(['beta@v0.2.0', 'gamma@v0.3.0']);
+    // A failed FIRST run: no receipt, no staging debris — an empty root.
+    const fresh = join(fixture, 'fresh');
+    expect(run('materialize', fresh).status).toBe(1);
+    expect(readdirSync(fresh)).toEqual([]);
+    // Repaired source ⇒ the repeat succeeds and swaps the trees in under a new generation.
+    rmSync(join(sourceRoot, 'beta', '.git', 'info', 'attributes'));
+    const repaired = run('materialize', outDir);
+    expect(repaired.status, repaired.stderr).toBe(0);
+    for (const t of trees) expect(treeIdentity(join(outDir, t)), t).toBe(before[t]);
+    const after = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as { generation: string };
+    expect(after.generation).not.toBe(receipt.generation);
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+  });
+
+  it(
+    'S15n: two CONCURRENT materializations into one root — each either publishes or is refused by `.materialize.lock` (never interleaved); the surviving trees are the committed trees, the receipt describes them, no staging/prev/lock debris',
+    async () => {
+      const spawnMaterialize = () =>
+        new Promise<{ status: number | null; stderr: string }>((resolveRun) => {
+          const args = [SCRIPT, 'materialize', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--known-bad', knownBadPath];
+          // `env` spreads process.env (the hermetic arming); re-stated for the harness-hygiene scan.
+          const child = spawn(process.execPath, args, { env: { ...process.env, ...env } });
+          let stderr = '';
+          child.stderr.on('data', (d: Buffer) => {
+            stderr += d.toString();
+          });
+          child.on('close', (status) => resolveRun({ status, stderr }));
+        });
+      const [x, y] = await Promise.all([spawnMaterialize(), spawnMaterialize()]);
+      for (const r of [x, y]) {
+        expect([0, 1]).toContain(r.status);
+        if (r.status === 1) expect(r.stderr).toMatch(/another `materialize` publication holds .*\.materialize\.lock \(pid \d+ generation \d{8}-\d{6}-[0-9a-f]{8}\) — refusing to interleave/);
+      }
+      expect([x.status, y.status]).toContain(0); // at least one published
+      const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
+      expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+      // A reference materialization into another root: the surviving trees are byte-identical to it.
+      const reference = join(fixture, 'reference');
+      expect(run('materialize', reference).status).toBe(0);
+      for (const t of trees) expect(treeIdentity(join(outDir, t)), t).toBe(treeIdentity(join(reference, t)));
+      const receipt = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as { pin_hash: string; generation: string; repos: { repo: string; tree_sha: string; path: string }[] };
+      expect(receipt.pin_hash).toBe(readPin().pin_hash);
+      expect(receipt.repos.map((r) => r.repo)).toEqual(['alpha', 'beta', 'gamma']);
+      for (const r of receipt.repos) {
+        expect(existsSync(r.path)).toBe(true);
+        expect(r.tree_sha).toBe(git(join(sourceRoot, r.repo), 'rev-parse', `${pinOf(readPin(), r.repo).commit_sha}^{tree}`));
+      }
+    },
+    30_000,
+  );
 });
 
 describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI stands in)', () => {
@@ -970,11 +1151,16 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
    *  answers `rules list --json` with FAKE_RULES, records the dir it received + its listing, and
    *  touches `engine-invoked` on every call. It also asserts the CONTRACT the real CLI has:
    *  `--corpus` is a directory (never a file); `--db` / `--knowledge-db` are TEMP paths (never the
-   *  output dir or the operator's home). `rowsJs` replaces the row synthesis (a misbehaving engine). */
-  function okEngine(opts: { rowsJs?: string } = {}): void {
+   *  output dir or the operator's home). `rowsJs` replaces the row synthesis (a misbehaving engine);
+   *  `summaryJs` the summary expression (a roll-up that is not the rows' tally); `ruleCoverage:
+   *  false` drops `rule_coverage` (a pre-#394 engine); `rulesList: 'usage'` answers `rules list`
+   *  with the usage banner (an engine without the command). */
+  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; rulesList?: 'json' | 'usage' } = {}): void {
     const rowsJs =
       opts.rowsJs ??
       'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: x.kind === "bad" ? "deny" : "allow", fired: [], verdict: x.kind === "bad" ? "gap" : "caught" }));';
+    const summaryJs = opts.summaryJs ?? '{ total: results.length, caught: count("caught"), gaps: count("gap"), false_positives: count("false_positive") }';
+    const coverageJs = opts.ruleCoverage === false ? '' : ', rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }] }';
     // The eval branch is node (the fake shells out to the test's own node): sh cannot parse JSON.
     // Double quotes only — the program rides inside the shell's single quotes.
     const evalJs = [
@@ -982,14 +1168,18 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       'const samples = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).flatMap((f) => JSON.parse(fs.readFileSync(p.join(dir, f), "utf8")));',
       rowsJs,
       'const count = (v) => results.filter((r) => r.verdict === v).length;',
-      'process.stdout.write(JSON.stringify({ results, summary: { total: results.length, caught: count("caught"), gaps: count("gap"), false_positives: count("false_positive") }, degraded: "facet-only", rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }] } }));',
+      `process.stdout.write(JSON.stringify({ results, summary: ${summaryJs}, degraded: "facet-only"${coverageJs} }));`,
     ].join(' ');
+    const rulesList =
+      opts.rulesList === 'usage'
+        ? '  "rules list") echo "usage: wicked-core <status | repos | run --problem ...> [--db <path>]"; exit 0;;'
+        : `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}'; exit 0;;`;
     fakeCore(
       [
         `touch "${join(fixture, 'engine-invoked')}"`,
         'case "$1 $2" in',
         '  "rules ingest") [ -d "$3" ] || { echo "no seed dir" >&2; exit 1; }; exit 0;;',
-        `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}'; exit 0;;`,
+        rulesList,
         '  "rules eval")',
         '    corpus=""; db=""; kdb="";',
         '    while [ $# -gt 0 ]; do case "$1" in --corpus) corpus="$2"; shift;; --db) db="$2"; shift;; --knowledge-db) kdb="$2"; shift;; esac; shift; done',
@@ -1101,12 +1291,25 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(existsSync(join(fixture, 'engine-invoked'))).toBe(true);
   });
 
-  it('a report without rule_coverage (pre-#394 engine) is said so, not invented; an engine WITHOUT `rules list` records the seed-dir identity method by name; missing samples is a usage error', async () => {
+  it('an EMPTY report over staged samples is refused by name (exit 1, nothing published) — never recorded as a clean run; a COMPLETE report without rule_coverage (pre-#394 engine) is said so, not invented; an engine WITHOUT `rules list` records the seed-dir identity method by name; missing samples is a usage error', async () => {
+    // What codex round 3 caught being published as a successful evaluation of the full corpus: an
+    // engine answering `results: []` for six staged samples.
     fakeCore(
       'case "$1 $2" in "rules eval") printf \'{"results":[],"summary":{"total":0,"caught":0,"gaps":0,"false_positives":0},"degraded":null}\'; exit 0;; "rules ingest") exit 0;; "rules list") echo "usage: wicked-core <status | repos | run --problem ...> [--db <path>]"; exit 0;; esac; echo "wicked-core 9.9.9-fake"',
     );
+    const empty = runWithPath();
+    expect(empty.status).toBe(1);
+    expect(empty.stderr).toMatch(
+      /run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — the engine report is incomplete: 0 result row\(s\) for 6 staged sample\(s\) — 6 staged sample\(s\) have no result \("alpha@[0-9a-f]{12}", (".+?", ){3}"beta@[0-9a-f]{12}", … \(6 total\)\); every staged sample must be judged exactly once/,
+    );
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json'))).toBe(false);
+    // A COMPLETE report (one row per staged sample) that simply carries no rule_coverage, from an
+    // engine whose `rules list` is the usage banner.
+    okEngine({ ruleCoverage: false, rulesList: 'usage' });
     const r = runWithPath();
     expect(r.status, r.stderr).toBe(0);
+    expect((JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report).summary).toEqual({ total: 6, caught: 6, gaps: 0, false_positives: 0 });
     expect(r.stdout).toContain('rule_coverage: not reported by this engine (predates core #394)');
     const rmeta = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as ReportMeta;
     const m = await mod();
@@ -1181,6 +1384,63 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(drifted.status).toBe(1);
     expect(drifted.stderr).toMatch(/results\[0\] \(alpha@[0-9a-f]{12}\) echoes description "not what was staged" but the staged sample has/);
     expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it("S14h: the engine's report is refused (exit 1, named, nothing published) unless it holds EXACTLY one row per staged sample — a duplicate id, an extra id, a missing row, a row without an engine verdict or a `fired` array, or a summary that is not the rows' tally; a VALID all-gap report passes (gaps are findings)", async () => {
+    const m = await mod();
+    expect([...m.ENGINE_VERDICTS]).toEqual(['caught', 'gap', 'false_positive']);
+    // One well-formed `caught` row for the staged sample `x` (double quotes only — it rides inside the fake's single quotes).
+    const rowOf = '({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: "allow", fired: [], verdict: "caught" })';
+    const refusals: [string, RegExp, { rowsJs?: string; summaryJs?: string }][] = [
+      ['duplicate id', /results\[6\] names sample alpha@[0-9a-f]{12} a second time — exactly one result per staged sample, never two/, { rowsJs: `const base = samples.map((x) => ${rowOf}); const results = [...base, base[0]];` }],
+      [
+        'extra id',
+        /results\[6\] names sample "extra@000000000000", which was not staged — the engine evaluated something other than the pinned samples/,
+        { rowsJs: `const results = samples.map((x) => ${rowOf}); results.push({ sample: { id: "extra@000000000000", description: "d", kind: "good", steering_type: "development" }, expected: "allow", fired: [], verdict: "caught" });` },
+      ],
+      [
+        'missing row',
+        /the engine report is incomplete: 5 result row\(s\) for 6 staged sample\(s\) — 1 staged sample\(s\) have no result \("alpha@[0-9a-f]{12}"\); every staged sample must be judged exactly once/,
+        { rowsJs: `const results = samples.slice(1).map((x) => ${rowOf});` },
+      ],
+      ['missing verdict', /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict undefined, not one of caught\|gap\|false_positive/, { rowsJs: `const results = samples.map((x) => { const r = ${rowOf}; delete r.verdict; return r; });` }],
+      ['unknown verdict', /results\[0\] \(alpha@[0-9a-f]{12}\) carries verdict "maybe", not one of caught\|gap\|false_positive/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, verdict: "maybe" }));` }],
+      ['fired not an array', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got "DOC-1"\)/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, fired: "DOC-1" }));` }],
+      ['fired of non-strings', /results\[0\] \(alpha@[0-9a-f]{12}\) carries no `fired` array of rule ids \(got \[1\]\)/, { rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, fired: [1] }));` }],
+      [
+        'summary mismatch',
+        /the engine report's summary does not reconcile with its rows: total 5 != 6, caught 7 != 6 \(the rows tally total 6 · caught 6 · gaps 0 · false_positives 0\)/,
+        { summaryJs: '{ total: 5, caught: 7, gaps: 0, false_positives: 0 }' },
+      ],
+      ['summary field missing', /the engine report's summary does not reconcile with its rows: gaps undefined != 0 \(the rows tally/, { summaryJs: '{ total: results.length, caught: results.length, false_positives: 0 }' }],
+    ];
+    for (const [label, re, opts] of refusals) {
+      okEngine(opts);
+      const r = runWithPath();
+      expect(r.status, label).toBe(1);
+      expect(r.stderr, label).toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
+      expect(r.stderr, label).toMatch(re);
+      expect(existsSync(join(outDir, 'report.json')), label).toBe(false);
+      expect(existsSync(join(outDir, 'report.meta.json')), label).toBe(false);
+    }
+    // The pure verifier, on the same shapes, for the summary the tally must equal.
+    const { samples } = readSamples();
+    const rows = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: 'allow', fired: [], verdict: 'gap' }));
+    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 0, gaps: 6, false_positives: 0 } }, samples)).toBeNull();
+    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 6, gaps: 0, false_positives: 0 } }, samples)).toMatch(/^the engine report's summary does not reconcile with its rows: caught 6 != 0, gaps 0 != 6/);
+    expect(m.verifyEngineReport({ results: rows }, samples)).toBe('the engine report carries no `summary` object');
+    expect(m.verifyEngineReport({ results: [null] }, samples)).toBe('results[0] is not a result object');
+    expect(m.verifyEngineReport([], samples)).toMatch(/not a report object with a `results` array/);
+    // A VALID all-gap report: every staged sample judged once, engine verdicts, `fired` arrays, summary = tally — exit 0, published, gaps printed as findings.
+    okEngine({ rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, expected: "deny", verdict: "gap", nearest_rules: [] }));` });
+    const gaps = runWithPath();
+    expect(gaps.status, gaps.stderr).toBe(0);
+    const report = JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report;
+    expect(report.summary).toEqual({ total: 6, caught: 0, gaps: 6, false_positives: 0 });
+    expect(report.results).toHaveLength(6);
+    expect(report.results.every((row) => row.verdict === 'gap' && typeof row.sample.payload_hash === 'string')).toBe(true);
+    expect(gaps.stdout).toContain('summary: total 6 · caught 0 · gaps 6 · false_positives 0');
+    expect(m.readPublishedReport(outDir).report.summary.gaps).toBe(6);
   });
 
   it('S14e: report.json + report.meta.json are ONE verifiable generation — an interruption between the two renames (report renamed, meta not) is refused on read by name, an edited meta generation too', async () => {

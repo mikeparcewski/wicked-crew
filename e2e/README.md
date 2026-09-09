@@ -48,7 +48,10 @@ node scripts/evals-internal-corpus.mjs run <dir>             # ingest the doctri
 
 Every mode reads the sibling checkouts (`--source-root <dir>`, default `$WICKED_SOURCE_ROOT` or
 this repo's parent) READ-ONLY and refuses to derive anything from a checkout whose shas do not
-match the pin. Samples are `good` by default (released commits); `corpus/known-bad.json` is the
+match the pin — or whose history is SHALLOW (`git rev-parse --is-shallow-repository`, a
+`$GIT_DIR/shallow` file): a depth-1 clone can resolve both pinned tags while the commits between
+them are missing, so `samples` also checks each window's derived commit and sample counts against
+the pin's `commits`. Samples are `good` by default (released commits); `corpus/known-bad.json` is the
 team's allowlist of commits that ARE bad behavior — `samples` fails closed on a stale entry AND
 on a missing or malformed allowlist file (`--known-bad` must name a file whose `samples` is the
 keyed map; `{"samples": {}}` is the empty allowlist). Every sample is validated by the route's
@@ -59,9 +62,14 @@ machine and a filename keeps its exact spelling; publication is atomic (tmp+rena
 one `generation` per publication). `materialize` only ever removes or writes direct, non-symlink
 children of its root's realpath, pins the operator's git attributes away for the archive and
 verifies the extracted tree against `git ls-tree` (an un-overridable `export-ignore` is a named
-refusal). `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
-the engine is probed, stages exactly those samples in a fresh private temp dir, stamps every
-result row with its sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as
+refusal); it holds `.materialize.lock` for the whole step, extracts + verifies every repo into a
+staging dir beside its destination and swaps the trees in only after ALL verified — a failed
+repeat leaves the previous trees and `materialized.json` intact, a failed first run leaves no
+receipt. `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
+the engine is probed, stages exactly those samples in a fresh private temp dir, verifies the
+engine's report before publication (exactly one row per staged sample, engine verdicts, `fired`
+arrays, a summary that is the rows' tally — an empty or partial report is a named tool failure),
+stamps every result row with its sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as
 one verifiable generation (`report_sha256` + shared `generation`) with complete provenance:
 engine version + build identity (realpath + sha256 of the binary), the rule-snapshot identity
 (`rules_identity.method` says how it was derived), `pin_hash`, `samples_hash`. The corpus

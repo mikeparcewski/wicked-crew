@@ -48,9 +48,26 @@
  *   - Every mode: a pinned `repo` that is not ONE safe path segment (`SAFE_SEGMENT_RE`, never `.`,
  *     `..`, a separator or an absolute path) is rejected at read time, before any fs operation —
  *     it is joined under the source root AND the materialize root.
+ *   - `check` (and every mode that derives): a checkout with INCOMPLETE history is refused by name
+ *     — `git rev-parse --is-shallow-repository` = true or a `$GIT_DIR/shallow` file
+ *     (`shallowEvidence`). A shallow clone can resolve BOTH pinned tags (a depth-1 clone plus a
+ *     depth-1 fetch of the from-tag) while the commits between them are simply not there: the
+ *     window would derive fewer samples under the unchanged pin identity. `samples` additionally
+ *     compares each repo's derived window commit count AND sample count with the `commits` the
+ *     pin recorded from `rev-list --count` (a field `pin_hash` deliberately does not cover: it is
+ *     derived, and the real count comes from git — a mismatch is a DriftError naming both numbers,
+ *     never a smaller sample set published as the pin's).
  *   - `materialize`: works only on direct children of the REALPATH of `<dir>`; an existing entry
  *     that is a symlink, or resolves outside that root, is refused before anything is removed or
  *     extracted; the transient archive lives in a private mkdtemp dir, never at a predictable name.
+ *     The whole step runs under `<dir>/.materialize.lock` (a held lock is a refusal — two
+ *     materializations never interleave). Every repo is extracted AND verified into a private
+ *     staging dir beside its destination (`.<repo>@<tag>.staging-<generation>`); only when EVERY
+ *     repo verified are the trees swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
+ *     staging → destination, `.prev` removed) and the receipt published. Any failure before the
+ *     swap removes the staging dirs and leaves the previous trees AND `materialized.json` exactly
+ *     as they were; a receipt that describes a tree which is no longer there is removed, so a
+ *     receipt never outlives the output it describes.
  *     The extracted tree must EQUAL the committed tree: the operator's global/system git
  *     attributes are pinned away for the archive (`-c core.attributesFile=<empty file>`,
  *     `GIT_ATTR_NOSYSTEM=1`, never `--worktree-attributes`), and every `git ls-tree -r -z` entry is
@@ -74,8 +91,15 @@
  *     (`pin_hash`) BEFORE probing the engine, then stages EXACTLY those samples in a fresh private
  *     temp corpus dir (the engine loads every *.json in the dir it is given — a shared dir could
  *     smuggle unpinned samples in). The engine probe (`--version`) fails the run on anything but
- *     a clean answer (ENOENT alone is the documented SKIP). Every result row is checked against
- *     the staged sample it names and stamped with that sample's `payload_hash`.
+ *     a clean answer (ENOENT alone is the documented SKIP). The engine's report is VERIFIED before
+ *     publication (`verifyEngineReport`): exactly one result per staged sample (the same id set —
+ *     no duplicate, no extra, none missing), every row with a `sample.id`, a `verdict` from the
+ *     engine's set (`ENGINE_VERDICTS`) and a `fired` array of rule ids, echoing its staged
+ *     sample's description/kind/steering_type, and a `summary` that IS the rows' tally (total =
+ *     rows; caught/gaps/false_positives = the verdict counts). Anything else is a named tool
+ *     failure and nothing is published — an empty or partial report is never recorded as an
+ *     evaluation of the full corpus. A valid all-gap report passes: gaps are findings.
+ *     Every row is then stamped with its staged sample's `payload_hash`.
  *   - `run` publishes report.json + report.meta.json as ONE verifiable generation under a
  *     `.report.lock`: both carry the `generation`, the meta carries `report_sha256` over the
  *     published report bytes, and `readPublishedReport()` refuses a pair that does not verify (a
@@ -147,6 +171,16 @@ export const SAFE_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 export const SAMPLES_LOCK = '.samples.lock';
 /** The publication lock `run` holds while it renames report.json + report.meta.json into place. */
 export const REPORT_LOCK = '.report.lock';
+/** The lock `materialize` holds for its WHOLE step (extract, verify, swap, receipt) — two
+ *  materializations into one root never interleave; the second is refused naming the holder. */
+export const MATERIALIZE_LOCK = '.materialize.lock';
+/** The materialize receipt, beside the trees it describes. */
+export const MATERIALIZE_RECEIPT = 'materialized.json';
+/** The engine's verdict vocabulary (evals.rs `Verdict`; api-types `GovernanceEvalResult.verdict`)
+ *  — a report row carrying anything else is refused, never published. */
+export const ENGINE_VERDICTS = Object.freeze(['caught', 'gap', 'false_positive']);
+/** verdict → the `summary` field that counts it (the engine's roll-up spelling). */
+const SUMMARY_FIELD_OF_VERDICT = Object.freeze({ caught: 'caught', gap: 'gaps', false_positive: 'false_positives' });
 /** What `materialize` pins for every `git archive` call (recorded in the receipt). */
 export const ARCHIVE_ATTRIBUTES_NOTE = Object.freeze({
   pinned: ['core.attributesFile=<empty file>', 'GIT_ATTR_NOSYSTEM=1', 'no --worktree-attributes'],
@@ -341,6 +375,11 @@ function sha256(text) {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
 }
 
+/** The first few of a list, JSON-quoted, with the total when it was cut — for refusal messages. */
+function listSome(xs, n = 5) {
+  return xs.slice(0, n).map((p) => JSON.stringify(p)).join(', ') + (xs.length > n ? `, … (${xs.length} total)` : '');
+}
+
 /** The pin's content identity: the sorted (repo, tag, sha, from tag, from sha) tuples. Dates,
  *  counts, notes and the description are for humans and excluded. */
 export function pinHash(repos) {
@@ -370,6 +409,22 @@ function sourceCheckout(sourceRoot, repo) {
     throw new UsageError(`no source checkout for ${repo} at ${dir} (expected <source-root>/<repo>/.git)`);
   }
   return dir;
+}
+
+/**
+ * Why `checkout` has INCOMPLETE history, as a list of evidence lines (empty = a full clone):
+ * `git rev-parse --is-shallow-repository` answering `true`, and/or a `shallow` file in the
+ * checkout's git dir (`rev-parse --git-dir`, so a worktree's or a gitfile's dir is the one looked
+ * at). Either alone is enough — a shallow clone resolves the pinned tags exactly like a full one
+ * (a depth-1 clone plus a depth-1 fetch of the from-tag) while the commits between them are
+ * missing, and `from..tag` would then walk a truncated window under the unchanged pin identity.
+ */
+export function shallowEvidence(checkout) {
+  const evidence = [];
+  if (git(checkout, ['rev-parse', '--is-shallow-repository']) === 'true') evidence.push('`git rev-parse --is-shallow-repository` says true');
+  const shallowFile = join(resolve(checkout, git(checkout, ['rev-parse', '--git-dir'])), 'shallow');
+  if (existsSync(shallowFile)) evidence.push(`${shallowFile} exists`);
+  return evidence;
 }
 
 /** Resolve a tag to its COMMIT sha (annotated tags peel), or null when the tag does not exist. */
@@ -489,7 +544,9 @@ function windowRuleOf(pin) {
   return rule;
 }
 
-/** A pin whose `pin_hash` no longer matches its own tuples was hand-edited — refuse to trust it. */
+/** A pin whose `pin_hash` no longer matches its own tuples was hand-edited — refuse to trust it.
+ *  A resolved pin also records each window's `commits` (what the derivation is checked against):
+ *  a repo without that count is a constants-only file — `pin` has not run. */
 function assertPinIntegrity(pin, pinPath) {
   if (typeof pin.pin_hash !== 'string') throw new UsageError(`${pinPath} carries no pin_hash — run \`pin\` first`);
   const expected = pinHash(pin.repos);
@@ -498,6 +555,11 @@ function assertPinIntegrity(pin, pinPath) {
       `pin_hash mismatch: ${pinPath} says ${pin.pin_hash} but its own repos hash to ${expected} — ` +
         'the pin was hand-edited; re-run `pin` (moving a tag is a deliberate PR)',
     );
+  }
+  for (const r of pin.repos) {
+    if (!Number.isInteger(r.commits) || r.commits < 0) {
+      throw new UsageError(`${pinPath}: ${r.repo} records no window commit count (\`commits\`) — run \`pin\` first`);
+    }
   }
 }
 
@@ -511,6 +573,12 @@ export function buildPin(pinPath, sourceRoot) {
   const rule = windowRuleOf(constants);
   const repos = [...constants.repos].sort(byRepo).map((c) => {
     const checkout = sourceCheckout(sourceRoot, c.repo);
+    // A pin resolved over a shallow checkout would record truncated windows and counts by
+    // construction (`rev-list --count` stops at the shallow boundary) — refuse before resolving.
+    const shallow = shallowEvidence(checkout);
+    if (shallow.length > 0) {
+      throw new UsageError(`${c.repo}: refusing to pin from a checkout with INCOMPLETE history (${shallow.join('; ')}) — unshallow it (git fetch --unshallow) or use a full clone`);
+    }
     const table = tagTable(checkout);
     if (!table.has(c.tag)) throw new UsageError(`${c.repo}: tag ${c.tag} does not exist in ${checkout}`);
     const { tagDate, from, notes } = resolveWindow(checkout, c.tag, rule, table);
@@ -537,10 +605,11 @@ export function buildPin(pinPath, sourceRoot) {
 }
 
 /**
- * `check`: does every pinned tag (and window-from tag) still resolve to its recorded sha? Pure
- * over the git facts — returns per-repo findings so the CLI prints and the tests assert.
- *   drift[] — { repo, reason: 'tag' | 'from' | 'missing', detail }
- *   ok[]    — repos whose two shas both match
+ * `check`: does every pinned tag (and window-from tag) still resolve to its recorded sha, over a
+ * COMPLETE history? Pure over the git facts — returns per-repo findings so the CLI prints and the
+ * tests assert.
+ *   drift[] — { repo, reason: 'tag' | 'from' | 'missing' | 'shallow', detail }
+ *   ok[]    — repos whose two shas both match and whose history is not shallow
  */
 export function checkPin(pin, sourceRoot) {
   const drift = [];
@@ -554,6 +623,17 @@ export function checkPin(pin, sourceRoot) {
       continue;
     }
     let clean = true;
+    // Shallow FIRST: both tags can resolve on a shallow clone — the history between them is what
+    // is missing, and no sha comparison can see that.
+    const shallow = shallowEvidence(checkout);
+    if (shallow.length > 0) {
+      clean = false;
+      drift.push({
+        repo: r.repo,
+        reason: 'shallow',
+        detail: `the checkout has INCOMPLETE history (${shallow.join('; ')}) — a pinned window cannot be walked over a shallow clone; unshallow it (git fetch --unshallow) or use a full clone`,
+      });
+    }
     const tagSha = resolveTag(checkout, r.tag);
     if (tagSha !== r.commit_sha) {
       clean = false;
@@ -625,9 +705,22 @@ function containedChild(root, name) {
  *
  * Containment: every entry removed or written is a direct, non-symlink child of the REALPATH of
  * `<dir>` (`containedChild`); `repo` was validated as one safe segment when the pin was read and
- * `tag` matches `RELEASE_TAG_RE` — both re-asserted here. The transient tar lives in a private
- * mkdtemp dir, never at a predictable name beside the destination that a planted symlink could
- * redirect. The receipt is published atomically.
+ * `tag` matches `RELEASE_TAG_RE` — both re-asserted here, for every name this step may touch
+ * (destination, staging, `.prev`), BEFORE anything is extracted. The transient tar lives in a
+ * private mkdtemp dir, never at a predictable name beside the destination that a planted symlink
+ * could redirect.
+ *
+ * Publication: the whole step holds `<dir>/.materialize.lock` (`withPublicationLock` — a held
+ * lock is a refusal naming the holder; two materializations never interleave). Every repo is
+ * extracted AND verified into a private staging dir beside its destination
+ * (`.<repo>@<tag>.staging-<generation>`); the previous trees are not touched until EVERY repo has
+ * verified. Then each tree is swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
+ * staging → destination, `.prev` removed) and the receipt is published atomically, stamped with the
+ * same `generation`. Any failure before the swap removes the staging dirs and leaves the previous
+ * trees AND `materialized.json` exactly as they were — an old success receipt never sits beside
+ * output the failure damaged, because the failure never reached the output. If a receipt describes
+ * a tree that is no longer there (a first run never had one; an operator removed one by hand), it
+ * is removed: a receipt never outlives the trees it describes.
  *
  * Fidelity: the extracted tree must EQUAL the committed tree. `git archive` honors
  * `export-ignore` / `export-subst` attributes from three sources. The operator's global/system
@@ -645,36 +738,83 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
   // A materialize root reached through a symlink is the operator's choice; everything below is
   // addressed from its RESOLVED path so containment is judged against the real directory.
   const root = realpathSync(outDir);
-  const receipt = { pin_hash: pin.pin_hash, materialized_at: new Date().toISOString(), attributes: ARCHIVE_ATTRIBUTES_NOTE, repos: [] };
-  const scratch = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-archive-'));
-  try {
-    const emptyAttributes = join(scratch, 'empty.gitattributes');
-    writeFileSync(emptyAttributes, '', 'utf8');
-    for (const r of [...pin.repos].sort(byRepo)) {
+  return withPublicationLock(join(root, MATERIALIZE_LOCK), 'materialize', (generation) => {
+    const receiptPath = containedChild(root, MATERIALIZE_RECEIPT);
+    // Phase 0 — every name this step may remove or write, contained and asserted up front.
+    const plan = [...pin.repos].sort(byRepo).map((r) => {
       if (!isSafeSegment(r.repo) || !RELEASE_TAG_RE.test(r.tag)) {
         throw new RefusalError(`refusing to materialize ${JSON.stringify(`${r.repo}@${r.tag}`)}: repo/tag are not safe path segments`);
       }
-      const checkout = sourceCheckout(sourceRoot, r.repo);
-      const dest = containedChild(root, `${r.repo}@${r.tag}`);
-      rmSync(dest, { recursive: true, force: true });
-      mkdirSync(dest);
-      const tarPath = join(scratch, `${r.repo}.tar`);
-      git(checkout, ['-c', `core.attributesFile=${emptyAttributes}`, 'archive', '--format=tar', '-o', tarPath, r.commit_sha], {
-        env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' },
-      });
-      const untar = spawnSync('tar', ['-xf', tarPath, '-C', dest], { encoding: 'utf8' });
-      unlinkSync(tarPath);
-      if (untar.status !== 0) {
-        throw new Error(`tar -xf failed for ${r.repo}@${r.tag}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
+      const name = `${r.repo}@${r.tag}`;
+      return {
+        r,
+        name,
+        checkout: sourceCheckout(sourceRoot, r.repo),
+        dest: containedChild(root, name),
+        staging: containedChild(root, `.${name}.staging-${generation}`),
+        prev: containedChild(root, `.${name}.prev-${generation}`),
+        tree: null,
+      };
+    });
+    // Phase 1 — extract + verify EVERY repo into its private staging dir; nothing published yet.
+    const staged = [];
+    const scratch = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-archive-'));
+    try {
+      const emptyAttributes = join(scratch, 'empty.gitattributes');
+      writeFileSync(emptyAttributes, '', 'utf8');
+      for (const p of plan) {
+        mkdirSync(p.staging);
+        staged.push(p.staging);
+        const tarPath = join(scratch, `${p.r.repo}.tar`);
+        git(p.checkout, ['-c', `core.attributesFile=${emptyAttributes}`, 'archive', '--format=tar', '-o', tarPath, p.r.commit_sha], {
+          env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' },
+        });
+        const untar = spawnSync('tar', ['-xf', tarPath, '-C', p.staging], { encoding: 'utf8' });
+        unlinkSync(tarPath);
+        if (untar.status !== 0) {
+          throw new Error(`tar -xf failed for ${p.name}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
+        }
+        p.tree = verifyExtractedTree(p.checkout, p.r.commit_sha, p.staging, p.name);
       }
-      const tree = verifyExtractedTree(checkout, r.commit_sha, dest, `${r.repo}@${r.tag}`);
-      receipt.repos.push({ repo: r.repo, tag: r.tag, commit_sha: r.commit_sha, tree_sha: tree.tree_sha, entries: tree.entries, path: dest });
+    } catch (err) {
+      // The failure never reached the destinations: drop the staging, keep the previous trees and
+      // their receipt as they were — unless the receipt describes a tree that is not there.
+      for (const s of staged) rmSync(s, { recursive: true, force: true });
+      dropReceiptWithoutTrees(receiptPath);
+      throw err;
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    // Phase 2 — every tree verified: swap each into place, then publish the receipt that
+    // describes exactly these trees.
+    const receipt = { pin_hash: pin.pin_hash, generation, materialized_at: new Date().toISOString(), attributes: ARCHIVE_ATTRIBUTES_NOTE, repos: [] };
+    for (const p of plan) {
+      if (existsSync(p.dest)) renameSync(p.dest, p.prev);
+      renameSync(p.staging, p.dest);
+      rmSync(p.prev, { recursive: true, force: true });
+      receipt.repos.push({ repo: p.r.repo, tag: p.r.tag, commit_sha: p.r.commit_sha, tree_sha: p.tree.tree_sha, entries: p.tree.entries, path: p.dest });
+    }
+    publishJson(receiptPath, receipt, generation);
+    return receipt;
+  });
+}
+
+/**
+ * After a FAILED materialization: the receipt may stay only while every tree it describes is still
+ * there (a failed repeat over intact previous trees). A receipt beside a missing tree — a failed
+ * first run that somehow found one, or trees an operator removed by hand — describes output that
+ * does not exist and is removed; an unreadable receipt is removed too.
+ */
+function dropReceiptWithoutTrees(receiptPath) {
+  if (!existsSync(receiptPath)) return;
+  let described = null;
+  try {
+    described = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  } catch {
+    described = null;
   }
-  publishJson(containedChild(root, 'materialized.json'), receipt);
-  return receipt;
+  const paths = Array.isArray(described?.repos) ? described.repos.map((x) => x?.path) : null;
+  if (paths === null || paths.some((p) => typeof p !== 'string' || !existsSync(p))) rmSync(receiptPath, { force: true });
 }
 
 /** git's blob object id of `bytes` — `sha1("blob <len>\0" + bytes)`; what `ls-tree` prints. */
@@ -740,12 +880,11 @@ function verifyExtractedTree(checkout, commitSha, dest, label) {
   const extra = [...actual.keys()].filter((p) => !entries.has(p)).sort();
   const differing = [...entries].filter(([p, e]) => actual.has(p) && actual.get(p) !== e.oid).map(([p]) => p).sort();
   if (missing.length > 0 || extra.length > 0 || differing.length > 0) {
-    const show = (xs) => xs.slice(0, 5).map((p) => JSON.stringify(p)).join(', ') + (xs.length > 5 ? `, … (${xs.length} total)` : '');
     throw new RefusalError(
       `refusing to accept the materialized ${label}: the extracted tree is not the committed tree ${tree_sha}` +
-        (missing.length > 0 ? `\n  missing (${missing.length}): ${show(missing)}` : '') +
-        (differing.length > 0 ? `\n  content differs (${differing.length}): ${show(differing)}` : '') +
-        (extra.length > 0 ? `\n  extra (${extra.length}): ${show(extra)}` : '') +
+        (missing.length > 0 ? `\n  missing (${missing.length}): ${listSome(missing)}` : '') +
+        (differing.length > 0 ? `\n  content differs (${differing.length}): ${listSome(differing)}` : '') +
+        (extra.length > 0 ? `\n  extra (${extra.length}): ${listSome(extra)}` : '') +
         `\n  the operator's global/system attributes were pinned away for the archive; an export-ignore/export-subst in ` +
         `${checkout}/.git/info/attributes or in the commit's own .gitattributes cannot be overridden — remove it, or pin a commit without it`,
     );
@@ -907,6 +1046,10 @@ export function validateSample(sample) {
  * `<repo>@<sha12>`, `steering_type` from the path table, `files` = touched paths, `content` =
  * subject + body, `kind` good unless the known-bad allowlist names the id. Every sample is
  * validated; a known-bad id absent from the window is a stale allowlist entry and fails closed.
+ * Each repo's derived window commit count AND sample count must equal the `commits` the pin
+ * recorded (from `rev-list --count` at pin time) — a truncated or grafted history that still
+ * resolves both tags, or a hand-edited count, is a DriftError naming both numbers; the total is
+ * checked the same way. Never a smaller sample set published under the pin's identity.
  */
 export function deriveSamples(pin, pinPath, sourceRoot, knownBad) {
   requirePinnedCheckouts(pin, pinPath, sourceRoot);
@@ -916,6 +1059,13 @@ export function deriveSamples(pin, pinPath, sourceRoot, knownBad) {
   for (const r of [...pin.repos].sort(byRepo)) {
     const checkout = sourceCheckout(sourceRoot, r.repo);
     const commits = windowCommits(checkout, r.action_window_from_sha, r.commit_sha);
+    if (commits.length !== r.commits) {
+      throw new DriftError(
+        `${r.repo}: the window ${r.action_window_from_tag}..${r.tag} derived ${commits.length} commit(s) but the pin records ${r.commits} — ` +
+          'the checkout does not hold the pinned history (incomplete or grafted history, or a hand-edited count); refusing to publish a sample set that is not the pin\'s',
+      );
+    }
+    const before = samples.length;
     for (const c of commits) {
       const id = `${r.repo}@${c.sha.slice(0, SHORT_SHA_LEN)}`;
       const bad = knownBad[id];
@@ -933,12 +1083,20 @@ export function deriveSamples(pin, pinPath, sourceRoot, knownBad) {
       if (problems.length > 0) throw new Error(`sample ${id} is invalid: ${problems.join('; ')}`);
       samples.push(sample);
     }
+    const derived = samples.length - before;
+    if (derived !== r.commits) {
+      throw new DriftError(`${r.repo}: derived ${derived} sample(s) for a window the pin records as ${r.commits} commits — one sample per window commit, no more, no fewer`);
+    }
     perRepo.push({ repo: r.repo, from: r.action_window_from_tag, tag: r.tag, commits: commits.length });
   }
   if (unusedKnownBad.size > 0) {
     throw new DriftError(
       `known-bad names ${unusedKnownBad.size} id(s) not in any pinned window (stale entry or a moved tag): ${[...unusedKnownBad].sort().join(', ')}`,
     );
+  }
+  const expectedTotal = pin.repos.reduce((n, r) => n + r.commits, 0);
+  if (samples.length !== expectedTotal) {
+    throw new DriftError(`derived ${samples.length} samples but the pin's windows record ${expectedTotal} commits in total`);
   }
   const ids = new Set(samples.map((s) => s.id));
   if (ids.size !== samples.length) throw new Error('duplicate sample ids across the pinned windows');
@@ -1142,27 +1300,65 @@ function rulesIdentityFrom(listed, coreBin, seed) {
 }
 
 /**
- * Every result row must name a STAGED sample and echo its description/kind/steering_type; each
- * then gets that sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over the full
- * payload incl. signals — what makes two runs comparable, `eval-compare.ts`). Returns the failure
- * text, or null when every row was stamped.
+ * The engine's report, VERIFIED before anything is published — a report is an evaluation of the
+ * full staged corpus or it is nothing:
+ *   - a report object with a `results` array and a `summary` object;
+ *   - EXACTLY one result per staged sample: every row names a staged `sample.id`, no id twice, no
+ *     id that was not staged, no staged sample without a row (an empty report over six staged
+ *     samples is the incomplete case, not a clean run);
+ *   - every row carries a `verdict` from the engine's set (`ENGINE_VERDICTS`) and a `fired` array
+ *     of rule ids, and echoes its staged sample's description/kind/steering_type;
+ *   - the summary IS the rows' tally: `total` = rows, `caught`/`gaps`/`false_positives` = the
+ *     verdict counts.
+ * Each row then gets its staged sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over
+ * the full payload incl. signals — what makes two runs comparable, `eval-compare.ts`). A valid
+ * all-gap report passes — gaps are findings. Returns the failure text (a named refusal), or null.
  */
-function stampPayloadHashes(report, samples) {
+export function verifyEngineReport(report, samples) {
   if (report === null || typeof report !== 'object' || Array.isArray(report) || !Array.isArray(report.results)) {
     return 'rules eval printed a JSON value that is not a report object with a `results` array';
   }
   const staged = new Map(samples.map((s) => [s.id, s]));
+  const seen = new Set();
+  const counts = { caught: 0, gaps: 0, false_positives: 0 };
   for (const [i, row] of report.results.entries()) {
-    const ref = row?.sample;
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) return `results[${i}] is not a result object`;
+    const ref = row.sample;
     if (ref === null || typeof ref !== 'object' || typeof ref.id !== 'string') return `results[${i}] carries no sample.id`;
     const s = staged.get(ref.id);
     if (s === undefined) {
       return `results[${i}] names sample ${JSON.stringify(ref.id)}, which was not staged — the engine evaluated something other than the pinned samples`;
     }
+    if (seen.has(ref.id)) return `results[${i}] names sample ${ref.id} a second time — exactly one result per staged sample, never two`;
+    seen.add(ref.id);
     for (const k of ['description', 'kind', 'steering_type']) {
       if (ref[k] !== s[k]) return `results[${i}] (${ref.id}) echoes ${k} ${JSON.stringify(ref[k])} but the staged sample has ${JSON.stringify(s[k])}`;
     }
+    if (!ENGINE_VERDICTS.includes(row.verdict)) {
+      return `results[${i}] (${ref.id}) carries verdict ${JSON.stringify(row.verdict)}, not one of ${ENGINE_VERDICTS.join('|')}`;
+    }
+    if (!Array.isArray(row.fired) || row.fired.some((f) => typeof f !== 'string')) {
+      return `results[${i}] (${ref.id}) carries no \`fired\` array of rule ids (got ${JSON.stringify(row.fired)})`;
+    }
+    counts[SUMMARY_FIELD_OF_VERDICT[row.verdict]] += 1;
     ref.payload_hash = samplePayloadHash(s);
+  }
+  if (seen.size !== staged.size) {
+    const missing = [...staged.keys()].filter((id) => !seen.has(id)).sort();
+    return (
+      `the engine report is incomplete: ${report.results.length} result row(s) for ${staged.size} staged sample(s) — ` +
+      `${missing.length} staged sample(s) have no result (${listSome(missing)}); every staged sample must be judged exactly once`
+    );
+  }
+  const summary = report.summary;
+  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) return 'the engine report carries no `summary` object';
+  const expected = { total: report.results.length, ...counts };
+  const off = Object.entries(expected).filter(([k, v]) => summary[k] !== v);
+  if (off.length > 0) {
+    return (
+      `the engine report's summary does not reconcile with its rows: ${off.map(([k, v]) => `${k} ${JSON.stringify(summary[k])} != ${v}`).join(', ')} ` +
+      `(the rows tally total ${expected.total} · caught ${expected.caught} · gaps ${expected.gaps} · false_positives ${expected.false_positives})`
+    );
   }
   return null;
 }
@@ -1173,14 +1369,17 @@ function stampPayloadHashes(report, samples) {
  * hashed into the meta (`report_sha256`) beside the same `generation` and the run provenance. A
  * reader that verifies (`readPublishedReport`) can never pair a report with a meta from another
  * generation: an interruption between the two renames, or two publishers racing, leaves a pair
- * that fails the hash or the generation check by construction. Returns the published meta.
+ * that fails the hash or the generation check by construction. The pair is read back VERIFIED
+ * while the lock is still held — a publisher that verified after releasing it could read a
+ * concurrent publisher's half-renamed pair (its report landed, its meta not yet) and refuse its
+ * own publication as torn. Returns what a reader sees: `{ report, meta }`.
  */
 export function publishReport(outDir, report, provenance) {
   return withPublicationLock(join(outDir, REPORT_LOCK), 'run', (generation) => {
     const text = publishJson(join(outDir, 'report.json'), { ...report, generation }, generation);
     const meta = { generation, report_sha256: sha256(text), ...provenance };
     publishJson(join(outDir, 'report.meta.json'), meta, generation);
-    return meta;
+    return readPublishedReport(outDir);
   });
 }
 
@@ -1225,11 +1424,14 @@ export function readPublishedReport(outDir) {
  * deleted, and `rules eval` EXACTLY the verified samples, staged as a one-file corpus DIR inside a
  * fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json files or an
  * `evals:` scope, never a file — and it loads EVERY *.json in the directory it is given, so the
- * staging dir is never shared or reused) with a TEMP knowledge db. Every result row is checked
- * against the staged sample it names and stamped with its `payload_hash`; report + meta then
- * publish as ONE generation (`publishReport`) and are read back verified (`readPublishedReport`)
- * — what is returned is what a reader would see. Non-zero only when the tool itself fails or the
- * published samples do not verify.
+ * staging dir is never shared or reused) with a TEMP knowledge db. The report is VERIFIED
+ * (`verifyEngineReport`: exactly one row per staged sample, engine verdicts, `fired` arrays, a
+ * summary that is the rows' tally — else a named tool failure, nothing published) and every row
+ * stamped with its `payload_hash`; report + meta then publish as ONE generation (`publishReport`)
+ * and are read back verified (`readPublishedReport`) while the publication lock is still held —
+ * what is returned is what a reader would see, and a concurrent publisher's half-renamed pair can
+ * never be mistaken for our own. Non-zero only when the tool itself fails, its report does not
+ * verify, or the published samples do not verify.
  */
 export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   assertPinIntegrity(pin, pinPath);
@@ -1283,9 +1485,10 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
     } catch (err) {
       return { failure: `rules eval printed no JSON report: ${err.message}\n${evalRun.stdout.slice(0, 400)}`, engine: engineVersion };
     }
-    const stamping = stampPayloadHashes(report, samples);
-    if (stamping !== null) return { failure: stamping, engine: engineVersion };
-    publishReport(outDir, report, {
+    const refused = verifyEngineReport(report, samples);
+    if (refused !== null) return { failure: refused, engine: engineVersion };
+    // Published AND read back verified under the one lock — what is returned is what a reader sees.
+    const published = publishReport(outDir, report, {
       pin_hash: meta.pin_hash,
       samples_hash: meta.samples_hash,
       corpus_name: meta.corpus_name,
@@ -1294,7 +1497,6 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
       rules_identity: rulesIdentity.identity,
       rules_seed: rulesSeed,
     });
-    const published = readPublishedReport(outDir);
     return { report: published.report, meta: published.meta, engine: engineVersion };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1374,7 +1576,7 @@ function main(argv) {
   if (mode === 'materialize') {
     const receipt = materialize(pin, pinPath, sourceRoot, dir);
     for (const r of receipt.repos) console.log(`  archived  ${r.repo}@${r.tag} (${r.commit_sha.slice(0, SHORT_SHA_LEN)}) → ${r.path}`);
-    console.log(`evals-internal-corpus: materialized ${receipt.repos.length} repos under ${dir} (pin_hash ${receipt.pin_hash})`);
+    console.log(`evals-internal-corpus: materialized ${receipt.repos.length} repos under ${dir} (pin_hash ${receipt.pin_hash}) · generation ${receipt.generation}`);
     return EXIT_OK;
   }
   if (mode === 'samples') {

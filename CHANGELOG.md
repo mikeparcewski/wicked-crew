@@ -80,11 +80,23 @@ mentioned only where a daemon release depends on them.
   build identity (realpath + sha256 of the binary), the rule-snapshot identity with its method
   (`engine-list` from `rules list --include-retired --json` read back before the temp store is
   deleted; `seed-dir` when the engine lacks the command — said so), `pin_hash`, `samples_hash`.
+  Codex round 3: `check` refuses a SHALLOW checkout by name (a depth-1 clone plus a depth-1 fetch
+  of the from-tag resolves BOTH pinned tags while the window between them is missing — fewer
+  samples under the unchanged pin identity) and `samples` checks each window's derived commit and
+  sample counts against the pin's `commits` (outside `pin_hash` by design; a mismatch is a
+  refusal); `materialize` holds `.materialize.lock`, extracts + verifies every tree into a staging
+  dir beside its destination and swaps only after ALL verified — a failed repeat leaves the
+  previous trees and receipt byte-intact, a failed first run leaves no receipt, concurrent
+  materializations never interleave; `run` verifies the engine's report before publication —
+  exactly one row per staged sample, engine verdicts, `fired` arrays, a summary that is the rows'
+  tally — so an empty or partial report is a named tool failure, never a recorded evaluation
+  (a valid all-gap report still passes).
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
-  side without hashes is `unverified: no sample identity`, never comparable — `comparable_reason`
-  says why), summary reconciliation, and a `rule_coverage` delta whose `gained`/`lost` cover only
+  side without WELL-FORMED hashes — `sha256:` + 64 lowercase hex, `PAYLOAD_HASH_RE`; a malformed
+  persisted value is no identity, never "changed" — is `unverified: no sample identity`, never
+  comparable — `comparable_reason` says why), summary reconciliation, and a `rule_coverage` delta whose `gained`/`lost` cover only
   rules present in BOTH runs' rule sets, with `added_rules`/`removed_rules` reported apart (a rule
   that vanished is removed, never gained).
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic

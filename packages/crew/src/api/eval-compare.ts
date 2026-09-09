@@ -51,6 +51,7 @@
  */
 
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSummary, SteeringType } from '../core/types.js';
+import { PAYLOAD_HASH_RE } from './eval-sample.js';
 
 export type EvalVerdict = GovernanceEvalResult['verdict'];
 export type EvalSampleKind = GovernanceEvalResult['sample']['kind'];
@@ -236,7 +237,7 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
   // below can be asserted about actions whose identity is unknown), then the content differences.
   const reasons: string[] = [];
   if (unverified_rows.a > 0 || unverified_rows.b > 0) {
-    reasons.push(`${UNVERIFIED_NO_SAMPLE_IDENTITY} (${unverified_rows.a} result row(s) in a and ${unverified_rows.b} in b carry no sample.payload_hash)`);
+    reasons.push(`${UNVERIFIED_NO_SAMPLE_IDENTITY} (${unverified_rows.a} result row(s) in a and ${unverified_rows.b} in b carry no well-formed sample.payload_hash)`);
   }
   if (!identity.corpus.same) reasons.push(`corpus name differs (${JSON.stringify(a.corpus)} vs ${JSON.stringify(b.corpus)})`);
   if (only_in_a.length > 0 || only_in_b.length > 0) {
@@ -305,10 +306,14 @@ function pair<T>(a: T, b: T): IdentityPair<T> {
   return { a, b, same: a === b };
 }
 
-/** The row's stamped payload identity, or null when the producer stamped none. */
+/** The row's stamped payload identity — only when it is WELL-FORMED (`PAYLOAD_HASH_RE`: `sha256:`
+ *  + 64 lowercase hex, the one spelling `samplePayloadHash` produces). Anything else — none, an
+ *  empty string, another algorithm, uppercase, a truncated digest — is null: the row is UNVERIFIED,
+ *  never treated as an authoritative identity that could mark a pair comparable or "changed"
+ *  (the value comes from persisted run data; Copilot on #475). */
 function identityOf(r: GovernanceEvalResult): string | null {
   const h = r.sample.payload_hash;
-  return typeof h === 'string' && h.length > 0 ? h : null;
+  return typeof h === 'string' && PAYLOAD_HASH_RE.test(h) ? h : null;
 }
 
 /** Results by sample id. A duplicate id inside ONE run (the engine rejects them at import — an
