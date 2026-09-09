@@ -57,7 +57,17 @@ mentioned only where a daemon release depends on them.
   steering type, unsure ⇒ development; `good` unless `known-bad.json` says otherwise) that the
   crew `EvalSampleSchema` accepts, and `run`s them through `wicked-core rules eval` when the
   engine is on PATH. Our doctrine rules apply to these repos; the 15-repo wicked-e2e OSS set
-  stays the E2E functional corpus and is NOT an eval corpus.
+  stays the E2E functional corpus and is NOT an eval corpus. Fail-closed throughout (the codex
+  review of #475): a pinned `repo` must be one safe path segment; `materialize` is contained to
+  the realpath of its root and refuses symlinked destinations; the derivation pins its complete
+  git configuration (byte-identical samples under any operator config — `samples_hash` is
+  `sha256:6e70752f…`); a missing/malformed `known-bad` file is an error, never an empty
+  allowlist; every artifact publishes tmp+rename (samples under a lock with one `generation`
+  stamp); `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
+  probing the engine and stages exactly those samples in a fresh private dir.
+- **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
+  eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids and kind
+  changes, summary reconciliation, `rule_coverage` delta.
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
   eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,

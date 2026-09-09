@@ -38,19 +38,39 @@
  *
  * Common flags: `--pin <file>` (default e2e/corpus/wicked-internal-corpus.json), `--source-root
  * <dir>` (where the sibling checkouts live — `<root>/<repo>`; default `$WICKED_SOURCE_ROOT`, else
- * this repo's parent dir), `--known-bad <file>` (samples), `--rules <dir>` (run). The source
- * checkouts are READ-ONLY to this script: only `git rev-parse` / `tag` / `log` / `rev-list` /
- * `archive` run against them — no fetch, no checkout, no worktree add.
+ * this repo's parent dir), `--known-bad <file>` (samples; MUST exist — an empty allowlist is
+ * `{"samples": {}}`, a missing or malformed file is an error, never "no bad commits"), `--rules
+ * <dir>` (run). The source checkouts are READ-ONLY to this script: only `git rev-parse` / `tag` /
+ * `log` / `rev-list` / `archive` run against them — no fetch, no checkout, no worktree add.
+ *
+ * # Fail-closed posture (what each mode refuses)
+ *
+ *   - Every mode: a pinned `repo` that is not ONE safe path segment (`SAFE_SEGMENT_RE`, never `.`,
+ *     `..`, a separator or an absolute path) is rejected at read time, before any fs operation —
+ *     it is joined under the source root AND the materialize root.
+ *   - `materialize`: works only on direct children of the REALPATH of `<dir>`; an existing entry
+ *     that is a symlink, or resolves outside that root, is refused before anything is removed or
+ *     extracted; the transient archive lives in a private mkdtemp dir, never at a predictable name.
+ *   - `samples`: `git log` runs with an explicit, complete configuration (`GIT_LOG_CONFIG` + the
+ *     command-line twins) so identical pins derive byte-identical samples regardless of the
+ *     operator's git config (rename detection, order file, quoting, output encoding, signatures).
+ *   - `samples` publication is atomic: samples.json then samples.meta.json via tmp+rename under a
+ *     `.samples.lock`, one `generation` stamped per publication; `pin`, `materialize` and `run`
+ *     publish their files the same way. A partial write is never readable as complete.
+ *   - `run`: verifies samples.meta.json against samples.json (`samples_hash`) AND the selected pin
+ *     (`pin_hash`) BEFORE probing the engine, then stages EXACTLY those samples in a fresh private
+ *     temp corpus dir (the engine loads every *.json in the dir it is given — a shared dir could
+ *     smuggle unpinned samples in).
  *
  * Exit codes: 0 ok / skipped-with-reason, 1 drift / refusal / tool failure, 2 usage or IO error.
  * Eval GAPS are findings, not failures — `run` exits 0 on a report full of gaps.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** This repo's root (the script lives in `<root>/scripts/`). */
@@ -67,6 +87,41 @@ export const DEFAULT_WINDOW_RULE = Object.freeze({ min_commits: 50, max_age_days
 /** Sample ids are `<repo>@<sha prefix>`: a fixed prefix length, never git's ambiguity-dependent
  *  `--short`, so the id of a commit is the same on every machine at every repo size. */
 export const SHORT_SHA_LEN = 12;
+/** A pinned `repo` is ONE path segment — it is joined under the source root and the materialize
+ *  root, so a separator, `.`/`..`, an absolute path or a NUL is rejected at READ time, before any
+ *  filesystem operation could act on the joined path. */
+export const SAFE_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
+/** The publication lock `samples` holds while it renames samples.json + samples.meta.json into
+ *  place — two concurrent derivations into one dir are refused, never interleaved. */
+export const SAMPLES_LOCK = '.samples.lock';
+/**
+ * The git configuration the sample derivation READS, pinned explicitly (`-c` outranks every config
+ * file: system, global, repo-local) so identical pins derive byte-identical samples on every
+ * machine. Each key changes `git log --name-only` output when left to the local config:
+ *   core.quotePath          true ⇒ non-ASCII paths come back quoted + octal-escaped
+ *   diff.renames            true (git's default since 2.9) ⇒ a rename shows ONLY its new path, by a
+ *                           content-similarity heuristic bounded by diff.renameLimit; pinned OFF: a
+ *                           rename touches BOTH paths, no heuristic
+ *   diff.relative           true ⇒ paths relative to the cwd instead of the tree root
+ *   diff.mnemonicPrefix /   patch-header knobs — no effect on --name-only; pinned so the enumerated
+ *   diff.noprefix           diff-output surface is complete
+ *   log.showSignature       true ⇒ signature-verification lines are printed into the record stream
+ *   log.follow              true ⇒ --follow semantics whenever a single path is given
+ *   i18n.logOutputEncoding  re-encodes subject/body bytes on output
+ * The command-line twins (`--no-renames`, `--no-show-signature`, `--no-ext-diff`, `-O/dev/null` —
+ * git's documented cancel for diff.orderFile, mapped to NUL by git on Windows — and
+ * `--ignore-submodules=none`, `--diff-merges=first-parent`) ride alongside in `windowCommits`.
+ */
+export const GIT_LOG_CONFIG = Object.freeze([
+  'core.quotePath=false',
+  'diff.renames=false',
+  'diff.relative=false',
+  'diff.mnemonicPrefix=false',
+  'diff.noprefix=false',
+  'log.showSignature=false',
+  'log.follow=false',
+  'i18n.logOutputEncoding=UTF-8',
+]);
 /** The seven steering types (wicked-governance STEERING_TYPES — the engine rejects any other). */
 export const STEERING_TYPES = Object.freeze([
   'architecture',
@@ -135,6 +190,30 @@ const MS_PER_DAY = 86_400_000;
 const GIT_MAX_BUFFER = 1024 * 1024 * 1024;
 
 class UsageError extends Error {}
+/** A fail-closed refusal that is not drift: a containment, lock or published-identity check said
+ *  no. Exit 1, like drift — the operator has something to fix before the mode may run. */
+class RefusalError extends Error {}
+
+/** One safe path segment (see `SAFE_SEGMENT_RE`) — never `.` or `..`. */
+export function isSafeSegment(name) {
+  return typeof name === 'string' && SAFE_SEGMENT_RE.test(name) && name !== '.' && name !== '..';
+}
+
+/** A publication stamp: `YYYYMMDD-HHMMSS-<8 hex>` — filename-safe on every platform. */
+function newGeneration() {
+  const t = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  return `${t}-${randomBytes(4).toString('hex')}`;
+}
+
+/** Publish a JSON file atomically: write `<path>.<generation>.tmp` beside it, then rename into
+ *  place (an atomic replace on POSIX and Windows). A reader sees the old file or the new one,
+ *  never a truncated one. */
+function publishJson(path, value, generation = newGeneration()) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${generation}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  renameSync(tmp, path);
+}
 
 function git(cwd, args, opts = {}) {
   return execFileSync('git', ['-C', cwd, ...args], {
@@ -274,6 +353,13 @@ export function readPin(pinPath) {
     for (const key of ['repo', 'remote', 'tag']) {
       if (typeof r[key] !== 'string' || r[key] === '') throw new UsageError(`${pinPath}: every repo needs a non-empty "${key}"`);
     }
+    // `repo` is joined under the source root and the materialize root: anything but one safe
+    // segment is rejected HERE, before any mode touches the filesystem with it.
+    if (!isSafeSegment(r.repo)) {
+      throw new UsageError(
+        `${pinPath}: repo ${JSON.stringify(r.repo)} is not a single safe path segment (${SAFE_SEGMENT_RE}, never . or ..) — it is joined under the source and materialize roots`,
+      );
+    }
     if (!RELEASE_TAG_RE.test(r.tag)) throw new UsageError(`${pinPath}: ${r.repo} tag ${r.tag} is not a release tag (${RELEASE_TAG_RE})`);
   }
   const names = new Set(pin.repos.map((r) => r.repo));
@@ -390,28 +476,77 @@ function requirePinnedCheckouts(pin, pinPath, sourceRoot) {
 class DriftError extends Error {}
 
 /**
+ * `<root>/<name>` — the ONLY shape `materialize` will remove or write: `root` is already a
+ * realpath, `name` is one safe segment (so the join is a direct child — asserted, not assumed),
+ * and an existing entry there is neither a symlink nor anything that resolves outside `root`.
+ * Refuses (exit 1) otherwise, BEFORE any removal or extraction.
+ */
+function containedChild(root, name) {
+  if (typeof name !== 'string' || name === '' || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
+    throw new RefusalError(`refusing to materialize ${JSON.stringify(name)}: not a single path segment`);
+  }
+  const path = join(root, name);
+  if (dirname(path) !== root || basename(path) !== name) {
+    throw new RefusalError(`refusing to materialize ${name}: ${path} is not a direct child of the materialize root ${root}`);
+  }
+  let entry = null;
+  try {
+    entry = lstatSync(path);
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  if (entry !== null) {
+    if (entry.isSymbolicLink()) {
+      throw new RefusalError(`refusing to materialize into ${path}: it is a symlink (removing or extracting there would act through it)`);
+    }
+    const real = realpathSync(path);
+    if (real !== path) {
+      throw new RefusalError(`refusing to materialize into ${path}: it resolves to ${real}, outside the materialize root ${root}`);
+    }
+  }
+  return path;
+}
+
+/**
  * `materialize <dir>`: `git archive` each pinned tag into `<dir>/<repo>@<tag>/` (a fresh tree —
  * an existing one is replaced). Refuses everything when ANY repo's sha does not match the pin.
+ *
+ * Containment: every entry removed or written is a direct, non-symlink child of the REALPATH of
+ * `<dir>` (`containedChild`); `repo` was validated as one safe segment when the pin was read and
+ * `tag` matches `RELEASE_TAG_RE` — both re-asserted here. The transient tar lives in a private
+ * mkdtemp dir, never at a predictable name beside the destination that a planted symlink could
+ * redirect. The receipt is published atomically.
  */
 export function materialize(pin, pinPath, sourceRoot, outDir) {
   requirePinnedCheckouts(pin, pinPath, sourceRoot);
   mkdirSync(outDir, { recursive: true });
+  // A materialize root reached through a symlink is the operator's choice; everything below is
+  // addressed from its RESOLVED path so containment is judged against the real directory.
+  const root = realpathSync(outDir);
   const receipt = { pin_hash: pin.pin_hash, materialized_at: new Date().toISOString(), repos: [] };
-  for (const r of [...pin.repos].sort(byRepo)) {
-    const checkout = sourceCheckout(sourceRoot, r.repo);
-    const dest = join(outDir, `${r.repo}@${r.tag}`);
-    rmSync(dest, { recursive: true, force: true });
-    mkdirSync(dest, { recursive: true });
-    const tarPath = `${dest}.tar`;
-    git(checkout, ['archive', '--format=tar', '-o', tarPath, r.commit_sha]);
-    const untar = spawnSync('tar', ['-xf', tarPath, '-C', dest], { encoding: 'utf8' });
-    unlinkSync(tarPath);
-    if (untar.status !== 0) {
-      throw new Error(`tar -xf failed for ${r.repo}@${r.tag}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
+  const scratch = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-archive-'));
+  try {
+    for (const r of [...pin.repos].sort(byRepo)) {
+      if (!isSafeSegment(r.repo) || !RELEASE_TAG_RE.test(r.tag)) {
+        throw new RefusalError(`refusing to materialize ${JSON.stringify(`${r.repo}@${r.tag}`)}: repo/tag are not safe path segments`);
+      }
+      const checkout = sourceCheckout(sourceRoot, r.repo);
+      const dest = containedChild(root, `${r.repo}@${r.tag}`);
+      rmSync(dest, { recursive: true, force: true });
+      mkdirSync(dest);
+      const tarPath = join(scratch, `${r.repo}.tar`);
+      git(checkout, ['archive', '--format=tar', '-o', tarPath, r.commit_sha]);
+      const untar = spawnSync('tar', ['-xf', tarPath, '-C', dest], { encoding: 'utf8' });
+      unlinkSync(tarPath);
+      if (untar.status !== 0) {
+        throw new Error(`tar -xf failed for ${r.repo}@${r.tag}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
+      }
+      receipt.repos.push({ repo: r.repo, tag: r.tag, commit_sha: r.commit_sha, path: dest });
     }
-    receipt.repos.push({ repo: r.repo, tag: r.tag, commit_sha: r.commit_sha, path: dest });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  writeFileSync(join(outDir, 'materialized.json'), `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+  publishJson(containedChild(root, 'materialized.json'), receipt);
   return receipt;
 }
 
@@ -445,15 +580,23 @@ export function inferSteeringType(files) {
 /**
  * The window's commits, newest first, from ONE `git log` (record separator \x1e, field separator
  * \x1f, then the touched paths one per line). `--diff-merges=first-parent` gives a merge commit
- * the files it landed on the mainline; `core.quotePath=false` keeps non-ASCII paths verbatim.
+ * the files it landed on the mainline. The extraction's git configuration is EXPLICIT and complete
+ * (`GIT_LOG_CONFIG` + the command-line twins): a rename is a delete + an add (both paths touched,
+ * no similarity heuristic), paths come in tree order and verbatim, messages in UTF-8, no signature
+ * lines — the same bytes under any operator's global/system/repo git config.
  */
 export function windowCommits(checkout, fromSha, tagSha) {
   const raw = git(checkout, [
-    '-c',
-    'core.quotePath=false',
+    '--no-pager',
+    ...GIT_LOG_CONFIG.flatMap((kv) => ['-c', kv]),
     'log',
     '--format=%x1e%H%x1f%s%x1f%b%x1f',
     '--name-only',
+    '--no-renames',
+    '--no-ext-diff',
+    '--no-show-signature',
+    '--ignore-submodules=none',
+    '-O/dev/null',
     '--diff-merges=first-parent',
     `${fromSha}..${tagSha}`,
   ]);
@@ -474,11 +617,35 @@ export function windowCommits(checkout, fromSha, tagSha) {
   return commits;
 }
 
-/** Read the known-bad allowlist: `{ samples: { "<repo>@<sha12>": { reason, steering_type? } } }`. */
+/**
+ * Read the known-bad allowlist: `{ samples: { "<repo>@<sha12>": { reason, steering_type? } } }`.
+ * FAIL-CLOSED: a missing, unreadable or malformed file, or a `samples` that is not the keyed map,
+ * is a usage error — never an empty allowlist. (A misspelled `--known-bad` path would otherwise
+ * silently relabel every bad commit `good`.) The empty allowlist is spelled `{"samples": {}}`.
+ */
 export function readKnownBad(path) {
-  if (!existsSync(path)) return {};
-  const parsed = JSON.parse(readFileSync(path, 'utf8'));
-  const entries = parsed.samples ?? {};
+  if (!existsSync(path)) {
+    throw new UsageError(`no known-bad file at ${path} (pass --known-bad <file>; an EMPTY allowlist is {"samples": {}} — a missing file is not one)`);
+  }
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new UsageError(`could not read known-bad file ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new UsageError(`${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new UsageError(`${path}: the known-bad file must be an object with a "samples" map`);
+  }
+  const entries = parsed.samples;
+  if (entries === null || entries === undefined || typeof entries !== 'object' || Array.isArray(entries)) {
+    throw new UsageError(`${path}: "samples" must be an object keyed by sample id (<repo>@<sha12>) — got ${entries === undefined ? 'no samples key' : Array.isArray(entries) ? 'an array' : JSON.stringify(entries)}`);
+  }
   for (const [id, entry] of Object.entries(entries)) {
     if (typeof entry?.reason !== 'string' || entry.reason.trim() === '') {
       throw new UsageError(`${path}: known-bad ${id} needs a non-empty "reason"`);
@@ -578,26 +745,111 @@ export function corpusName(pinHashValue) {
   return `evals:wicked-internal@${pinHashValue.replace(/^sha256:/, '').slice(0, 16)}`;
 }
 
-function writeSamples(outDir, samples, meta) {
+/**
+ * Publish the derived samples ATOMICALLY: take `<dir>/.samples.lock` (exclusive create — a held
+ * lock is a refusal, never an interleaving), write samples.json then samples.meta.json each via
+ * tmp+rename, both stamped with ONE `generation` (the tmp names carry it; the meta records it), and
+ * release the lock. samples.json stays the pure sample array (the engine's corpus format, byte-
+ * deterministic for a given pin + allowlist); the meta is published LAST and names the samples it
+ * describes by `samples_hash`, so a reader that verifies the hash (as `run` does) can never pair a
+ * complete-looking meta with samples it does not describe. Returns the stamped meta.
+ */
+export function publishSamples(outDir, samples, meta) {
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'samples.json'), `${JSON.stringify(samples, null, 2)}\n`, 'utf8');
-  writeFileSync(join(outDir, 'samples.meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+  const generation = newGeneration();
+  const lockPath = join(outDir, SAMPLES_LOCK);
+  let fd;
+  try {
+    fd = openSync(lockPath, 'wx');
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      let holder = '';
+      try {
+        holder = readFileSync(lockPath, 'utf8').trim();
+      } catch {
+        /* an unreadable lock is still a held lock */
+      }
+      throw new RefusalError(
+        `another \`samples\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no derivation is running, remove the lock and retry`,
+      );
+    }
+    throw err;
+  }
+  // From here the lock is OURS: release it however publication ends.
+  try {
+    writeFileSync(fd, `pid ${process.pid} generation ${generation}\n`, 'utf8');
+    closeSync(fd);
+    fd = undefined;
+    const stamped = { ...meta, generation };
+    publishJson(join(outDir, 'samples.json'), samples, generation);
+    publishJson(join(outDir, 'samples.meta.json'), stamped, generation);
+    return stamped;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(lockPath, { force: true });
+  }
 }
 
 /**
- * `run <dir>`: only when `wicked-core` is on PATH — ingest the doctrine seed into a TEMP rules
- * store, then `rules eval` the derived samples (staged as a one-file corpus DIR: the engine's
- * `--corpus` takes a directory of sample *.json files or an `evals:` scope, never a file) with a
- * TEMP knowledge db, and write the report. Non-zero only when the tool itself fails.
+ * The published pair, VERIFIED against the selected pin: both files present; samples.meta.json was
+ * derived from THIS pin (`pin_hash`) and describes THESE samples (`samples_hash` recomputed over
+ * samples.json, `total`); every sample valid and unique. A mismatch is a refusal that names the
+ * two values — a torn or foreign publication is never evaluated as if it were the pinned corpus.
  */
-export function runEvals(outDir, rulesDir, coreBin = CORE_BIN) {
+export function readPublishedSamples(outDir, pin) {
   const samplesPath = join(outDir, 'samples.json');
-  if (!existsSync(samplesPath)) throw new UsageError(`${samplesPath} is missing — run \`samples ${outDir}\` first`);
+  const metaPath = join(outDir, 'samples.meta.json');
+  for (const p of [samplesPath, metaPath]) {
+    if (!existsSync(p)) throw new UsageError(`${p} is missing — run \`samples ${outDir}\` first`);
+  }
+  const samples = JSON.parse(readFileSync(samplesPath, 'utf8'));
+  const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+  if (!Array.isArray(samples)) throw new RefusalError(`${samplesPath} is not an array of samples`);
+  if (meta === null || typeof meta !== 'object') throw new RefusalError(`${metaPath} is not a samples meta object`);
+  if (meta.pin_hash !== pin.pin_hash) {
+    throw new RefusalError(
+      `pin_hash mismatch: ${metaPath} was derived from ${meta.pin_hash} but the selected pin is ${pin.pin_hash} — re-run \`samples ${outDir}\` against this pin`,
+    );
+  }
+  const actual = samplesHash(samples);
+  if (meta.samples_hash !== actual) {
+    throw new RefusalError(
+      `samples_hash mismatch: ${metaPath} describes ${meta.samples_hash} but ${samplesPath} hashes to ${actual} — a torn or foreign publication; re-run \`samples ${outDir}\``,
+    );
+  }
+  if (meta.total !== samples.length) {
+    throw new RefusalError(`total mismatch: ${metaPath} says ${meta.total} samples but ${samplesPath} holds ${samples.length}`);
+  }
+  const ids = new Set();
+  for (const s of samples) {
+    const problems = validateSample(s);
+    if (problems.length > 0) throw new RefusalError(`${samplesPath}: sample ${JSON.stringify(s?.id)} is invalid: ${problems.join('; ')}`);
+    if (ids.has(s.id)) throw new RefusalError(`${samplesPath}: duplicate sample id ${s.id}`);
+    ids.add(s.id);
+  }
+  return { samples, meta };
+}
+
+/**
+ * `run <dir>`: verify the published samples against the selected pin (`readPublishedSamples`) —
+ * BEFORE the engine is even probed — then, only when `wicked-core` is on PATH, ingest the doctrine
+ * seed into a TEMP rules store and `rules eval` EXACTLY those samples, staged as a one-file corpus
+ * DIR inside a fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json
+ * files or an `evals:` scope, never a file — and it loads EVERY *.json in the directory it is
+ * given, so the staging dir is never shared or reused) with a TEMP knowledge db, and publish the
+ * report (+ `report.meta.json`: the identities the report was produced under). Non-zero only when
+ * the tool itself fails or the published samples do not verify.
+ */
+export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
+  assertPinIntegrity(pin, pinPath);
+  const { samples, meta } = readPublishedSamples(outDir, pin);
   const probe = spawnSync(coreBin, ['--version'], { encoding: 'utf8' });
   if (probe.error?.code === 'ENOENT') {
     return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
   }
   if (!existsSync(rulesDir)) throw new UsageError(`rules seed dir ${rulesDir} does not exist (pass --rules <dir>)`);
+  // mkdtemp is private (0700) and fresh: the rules db, the knowledge db and the staged corpus
+  // live here and nowhere else; the whole tree is removed however the run ends.
   const tmp = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-'));
   try {
     const rulesDb = join(tmp, 'rules.db');
@@ -606,9 +858,9 @@ export function runEvals(outDir, rulesDir, coreBin = CORE_BIN) {
     if (ingest.status !== 0) {
       return { failure: `rules ingest failed (exit ${ingest.status}): ${(ingest.stderr || ingest.stdout).trim()}`, engine: probe.stdout.trim() };
     }
-    const corpusDir = join(outDir, 'corpus');
-    mkdirSync(corpusDir, { recursive: true });
-    copyFileSync(samplesPath, join(corpusDir, 'samples.json'));
+    const corpusDir = join(tmp, 'corpus');
+    mkdirSync(corpusDir);
+    writeFileSync(join(corpusDir, 'samples.json'), `${JSON.stringify(samples, null, 2)}\n`, 'utf8');
     const evalRun = spawnSync(coreBin, ['rules', 'eval', '--db', rulesDb, '--knowledge-db', knowledgeDb, '--corpus', corpusDir, '--json'], {
       encoding: 'utf8',
       maxBuffer: GIT_MAX_BUFFER,
@@ -622,7 +874,21 @@ export function runEvals(outDir, rulesDir, coreBin = CORE_BIN) {
     } catch (err) {
       return { failure: `rules eval printed no JSON report: ${err.message}\n${evalRun.stdout.slice(0, 400)}`, engine: probe.stdout.trim() };
     }
-    writeFileSync(join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    const generation = newGeneration();
+    publishJson(join(outDir, 'report.json'), report, generation);
+    publishJson(
+      join(outDir, 'report.meta.json'),
+      {
+        pin_hash: meta.pin_hash,
+        samples_hash: meta.samples_hash,
+        corpus_name: meta.corpus_name,
+        samples_generation: meta.generation,
+        engine: probe.stdout.trim(),
+        rules_dir: rulesDir,
+        generation,
+      },
+      generation,
+    );
     return { report, engine: probe.stdout.trim() };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -676,8 +942,7 @@ function main(argv) {
   const { mode, dir, pinPath, sourceRoot, knownBadPath, rulesDir } = parseArgs(argv);
   if (mode === 'pin') {
     const pin = buildPin(pinPath, sourceRoot);
-    mkdirSync(dirname(pinPath), { recursive: true });
-    writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}\n`, 'utf8');
+    publishJson(pinPath, pin);
     console.log(`evals-internal-corpus pin — ${pin.repos.length} repos re-resolved from ${sourceRoot} into ${pinPath}`);
     for (const r of pin.repos) {
       console.log(`  pinned    ${r.repo} ${r.tag} @ ${r.commit_sha.slice(0, SHORT_SHA_LEN)} · window ${r.action_window_from_tag}..${r.tag} = ${r.commits} commits${r.notes.startsWith('SHORTFALL') ? ' (SHORTFALL — see notes)' : ''}`);
@@ -708,14 +973,16 @@ function main(argv) {
   }
   if (mode === 'samples') {
     const { samples, meta } = deriveSamples(pin, pinPath, sourceRoot, readKnownBad(knownBadPath));
-    writeSamples(dir, samples, meta);
+    const published = publishSamples(dir, samples, meta);
     for (const w of meta.windows) console.log(`  derived   ${w.repo} ${w.from}..${w.tag} = ${w.commits} samples`);
     console.log(`  steering  ${Object.entries(meta.steering_types).map(([t, n]) => `${t} ${n}`).join(' · ')}`);
-    console.log(`evals-internal-corpus: ${meta.total} samples (${meta.bad} bad) → ${join(dir, 'samples.json')} · samples_hash ${meta.samples_hash} · corpus ${meta.corpus_name}`);
+    console.log(
+      `evals-internal-corpus: ${meta.total} samples (${meta.bad} bad) → ${join(dir, 'samples.json')} · samples_hash ${meta.samples_hash} · corpus ${meta.corpus_name} · generation ${published.generation}`,
+    );
     return EXIT_OK;
   }
   // run
-  const result = runEvals(dir, rulesDir ?? join(sourceRoot, DEFAULT_RULES_SEED_REL));
+  const result = runEvals(dir, rulesDir ?? join(sourceRoot, DEFAULT_RULES_SEED_REL), pin, pinPath);
   if (result.skipped !== undefined) {
     console.log(`evals-internal-corpus run: SKIP — ${result.skipped}`);
     return EXIT_OK;
@@ -735,6 +1002,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`evals-internal-corpus: ${message}`);
-    process.exitCode = err instanceof DriftError ? EXIT_DRIFT : EXIT_USAGE;
+    process.exitCode = err instanceof DriftError || err instanceof RefusalError ? EXIT_DRIFT : EXIT_USAGE;
   }
 }
