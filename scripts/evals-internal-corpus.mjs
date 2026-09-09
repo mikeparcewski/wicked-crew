@@ -74,16 +74,30 @@
  *     staging dir beside its destination (`.<repo>@<tag>.staging-<generation>`); only when EVERY
  *     repo verified are the trees swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
  *     staging → destination) and the receipt published; ONLY THEN are the `.prev` backups removed
- *     — every backup is kept until the receipt is on disk. Any failure before the swap removes the
- *     staging dirs and leaves the previous trees AND `materialized.json` exactly as they were. Any
- *     failure DURING the swap or the receipt write rolls the swap back (`rollbackSwap`: each
- *     `.prev` restored to its destination, partial destinations and staging removed, a torn
- *     receipt tmp removed) so the destinations are the previous trees again, byte for byte, and
- *     the previous receipt still describes them; if the rollback itself fails, the receipt is
- *     REMOVED (no receipt may describe a damaged tree) and the error names both faults. A receipt
+ *     — every backup is kept until the receipt is on disk. The receipt is INVALIDATED BEFORE the
+ *     first tree moves: an in-progress marker (`.materialize.inprogress-<generation>`) is
+ *     published and the previous `materialized.json` is moved aside to
+ *     `materialized.json.prev-<generation>`, so between any two renames there is NO receipt at
+ *     `materialized.json` — a process killed mid-swap leaves incomplete trees beside no receipt,
+ *     never beside a stale success receipt. Any failure before the swap removes the staging dirs
+ *     and leaves the previous trees AND `materialized.json` exactly as they were. Any failure
+ *     DURING the swap or the receipt write rolls the swap back (`rollbackSwap`: each `.prev`
+ *     restored to its destination, partial destinations and staging removed, a torn receipt tmp
+ *     removed) so the destinations are the previous trees again, byte for byte, and the previous
+ *     receipt is restored — it comes back ONLY after a complete rollback; if the rollback itself
+ *     fails, every receipt is REMOVED (no receipt may describe a damaged tree), the marker stays
+ *     and the error names both faults. On EVERY start (`inspectMaterializeRoot`, under the lock)
+ *     a surviving marker, a `.prev-*` tree or a moved-aside receipt the current receipt does not
+ *     account for is DAMAGE: `materialize` repairs it (the `.prev` trees rolled back — a swapped-in
+ *     tree replaced by its backup, a hole filled — staging, marker and previous receipt removed,
+ *     nothing trusted until this run publishes) and then re-extracts; a reader
+ *     (`readMaterializeReceipt`) refuses a damaged root by name with that repair as the hint. A
+ *     marker beside a receipt of ITS generation is a torn CLEANUP (the publish landed) and is
+ *     finished; stale `.staging-*` alone is debris of a torn extraction and is removed. A receipt
  *     that describes a tree which is no longer there is removed, so a receipt never outlives the
  *     output it describes. Test-only fault points (`EVALS_CORPUS_FAULT`, honoured under vitest /
- *     NODE_ENV=test only) prove the rollback at the n-th swap, the receipt write and the rollback.
+ *     NODE_ENV=test only) prove the rollback at the n-th swap, the receipt write and the rollback,
+ *     and SIGKILL the process between the n-th repo's two renames or right after the receipt landed.
  *     The extracted tree must EQUAL the committed tree: the operator's global/system git
  *     attributes are pinned away for the archive (`-c core.attributesFile=<empty file>`,
  *     `GIT_ATTR_NOSYSTEM=1`, never `--worktree-attributes`), and every `git ls-tree -r -z` entry is
@@ -106,8 +120,15 @@
  *   - `run`: verifies samples.meta.json against samples.json (`samples_hash`) AND the selected pin
  *     (`pin_hash`) BEFORE probing the engine, then stages EXACTLY those samples in a fresh private
  *     temp corpus dir (the engine loads every *.json in the dir it is given — a shared dir could
- *     smuggle unpinned samples in). The engine probe (`--version`) fails the run on anything but
- *     a clean answer (ENOENT alone is the documented SKIP). The engine's report is VERIFIED before
+ *     smuggle unpinned samples in). The engine is resolved ONCE (`resolveExecutable`) with the
+ *     OS's own search semantics — every `PATH` entry in order, an EMPTY entry being the current
+ *     directory exactly as execvp reads it, `PATHEXT` on Windows, an executable REGULAR file
+ *     required — and EVERY spawn (`--version`, `rules ingest`, `rules list`, `rules eval`) uses
+ *     that absolute path, never the bare name: the file hashed into the provenance is the file
+ *     that ran (and it is hashed again after the run — a binary replaced underneath is a tool
+ *     failure, never a report attributed to either build). Nothing resolvable is the documented
+ *     SKIP; a resolved file that will not execute (no execute bit, a missing interpreter) and any
+ *     answer to `--version` but a clean one fail the run. The engine's report is VERIFIED before
  *     publication (`verifyEngineReport`): exactly one result per staged sample (the same id set —
  *     no duplicate, no extra, none missing), every row with a `sample.id`, a `verdict` from the
  *     engine's set (`ENGINE_VERDICTS`) and a `fired` array of rule ids, echoing its staged
@@ -120,7 +141,12 @@
  *     false_positive-on-good) — deny-dominates, the verdict and the fired set agree. The report's
  *     `degraded` must be PRESENT (null, or `facet-only`); `rule_coverage` is either ABSENT (an
  *     engine predating core #394 — printed as such) or a well-formed `{ exercised, unexercised[]
- *     }` — `null` is malformed and refused before publication. Anything else is a named tool
+ *     }` — `null` is malformed and refused before publication — that RECONCILES with the rows
+ *     (evals.rs `rule_coverage`: a rule is exercised when ANY evaluated claim fired it, blocking
+ *     or not, while a row's `fired` is the blocking subset): no id may be both fired and
+ *     `unexercised`, `exercised` is at least the number of distinct ids the rows' `fired` name
+ *     (more only when a non-blocking effect fired), `unexercised` holds no duplicate, and
+ *     `recall_only`, when present, is a non-negative integer. Anything else is a named tool
  *     failure and nothing is published — an empty, partial or impossible report is never recorded
  *     as an evaluation of the full corpus. A valid all-gap report (BAD samples nothing caught)
  *     passes: gaps are findings. Every row is then stamped with its staged sample's `payload_hash`.
@@ -128,7 +154,7 @@
  *     `.report.lock`: both carry the `generation`, the meta carries `report_sha256` over the
  *     published report bytes, and `readPublishedReport()` refuses a pair that does not verify (a
  *     torn publication or a foreign report) with a named error. The meta is complete provenance:
- *     engine version + build identity (realpath + sha256 of the binary resolved from PATH), the
+ *     engine version + build identity (realpath + sha256 of the executable that was spawned), the
  *     rule-snapshot identity (`rules_identity.method` says how: `engine-list` = the canonical hash
  *     of every rule `rules list --include-retired --json` read back from the temp rules db before
  *     it is deleted; `seed-dir` = the canonical hash of the seed directory's file contents, used
@@ -164,7 +190,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // The route's OWN sample validator + the sample payload-identity hash — imported from crew's
@@ -200,6 +226,14 @@ export const REPORT_LOCK = '.report.lock';
 export const MATERIALIZE_LOCK = '.materialize.lock';
 /** The materialize receipt, beside the trees it describes. */
 export const MATERIALIZE_RECEIPT = 'materialized.json';
+/** The marker `materialize` publishes beside the receipt BEFORE the first tree moves
+ *  (`.materialize.inprogress-<generation>`) and removes LAST, after the backups are gone: while it
+ *  exists a swap is in flight or was torn — no receipt at `materialized.json` may be trusted unless
+ *  it carries the marker's own generation (then only the cleanup was torn). See
+ *  `inspectMaterializeRoot`. */
+export const MATERIALIZE_INPROGRESS_PREFIX = '.materialize.inprogress-';
+/** A publication stamp (`newGeneration`): `YYYYMMDD-HHMMSS-<8 hex>`. */
+export const GENERATION_RE = /^\d{8}-\d{6}-[0-9a-f]{8}$/;
 /** The engine's verdict vocabulary (evals.rs `Verdict`; api-types `GovernanceEvalResult.verdict`)
  *  — a report row carrying anything else is refused, never published. */
 export const ENGINE_VERDICTS = Object.freeze(['caught', 'gap', 'false_positive']);
@@ -404,17 +438,36 @@ function gitRaw(cwd, args, opts = {}) {
 }
 
 /**
- * The TEST-ONLY fault hook: `EVALS_CORPUS_FAULT=<point>[,<point>…]` names points at which the
- * named step throws — `swap:<n>` (the n-th repo's staging → destination rename, after its
- * destination was moved to `.prev`), `receipt` (the receipt write, after every swap), `rollback`
- * (the rollback itself — the double fault). Honoured ONLY under vitest / NODE_ENV=test
- * (`process.env.VITEST` = "true" or NODE_ENV = "test"); inert everywhere else, so an operator's
- * stray variable can never fault a real materialization.
+ * Is the TEST-ONLY fault `point` armed? `EVALS_CORPUS_FAULT=<point>[,<point>…]`, honoured ONLY
+ * under vitest / NODE_ENV=test (`process.env.VITEST` = "true" or NODE_ENV = "test"); inert
+ * everywhere else, so an operator's stray variable can never fault a real materialization.
+ */
+function faultArmed(point) {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') return false;
+  return (process.env[FAULT_ENV] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .includes(point);
+}
+
+/**
+ * The TEST-ONLY fault hook (`faultArmed`): the named step THROWS — `swap:<n>` (the n-th repo's
+ * staging → destination rename, after its destination was moved to `.prev`), `receipt` (the
+ * receipt write, after every swap), `rollback` (the rollback itself — the double fault).
  */
 function injectedFault(point) {
-  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') return;
-  const armed = (process.env[FAULT_ENV] ?? '').split(',').map((s) => s.trim());
-  if (armed.includes(point)) throw new Error(`injected fault at ${point} (${FAULT_ENV}, test hook)`);
+  if (faultArmed(point)) throw new Error(`injected fault at ${point} (${FAULT_ENV}, test hook)`);
+}
+
+/**
+ * The TEST-ONLY termination hook (`faultArmed`): SIGKILL THIS process — no `catch`, no `finally`,
+ * the lock stays, exactly like a real crash. `kill-between-swaps:<n>` fires between the n-th
+ * repo's two renames (its destination already moved to `.prev`, its staging not yet in place — the
+ * torn swap codex round 5 described); `kill-after-receipt` right after the receipt landed and
+ * before the backups are removed (a torn cleanup).
+ */
+function injectedKill(point) {
+  if (faultArmed(point)) process.kill(process.pid, 'SIGKILL');
 }
 
 function sha256Hex(bytes) {
@@ -798,23 +851,32 @@ function containedChild(root, name) {
  * could redirect.
  *
  * Publication: the whole step holds `<dir>/.materialize.lock` (`withPublicationLock` — a held
- * lock is a refusal naming the holder; two materializations never interleave). Every repo is
- * extracted AND verified into a private staging dir beside its destination
- * (`.<repo>@<tag>.staging-<generation>`); the previous trees are not touched until EVERY repo has
- * verified. Then each tree is swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
- * staging → destination) and the receipt is published atomically, stamped with the same
- * `generation`; ONLY THEN are the `.prev` backups removed — every backup lives until the receipt is
- * on disk. Any failure before the swap removes the staging dirs and leaves the previous trees AND
- * `materialized.json` exactly as they were — an old success receipt never sits beside output the
- * failure damaged, because the failure never reached the output. Any failure DURING the swap or
- * the receipt write is rolled back (`rollbackSwap`, in reverse order: a swapped-in tree is removed
- * and its `.prev` restored, a moved-away destination is restored, staging and a torn receipt tmp
- * are removed) — the destinations are the previous trees again, byte for byte, and the previous
- * receipt still describes exactly them; the original error is rethrown. If the rollback itself
- * fails, the receipt is REMOVED — no receipt may describe a damaged tree — and a RefusalError names
- * BOTH faults and the `.staging-`/`.prev-<generation>` entries left for the operator. If a receipt
- * describes a tree that is no longer there (a first run never had one; an operator removed one by
- * hand), it is removed: a receipt never outlives the trees it describes.
+ * lock is a refusal naming the holder; two materializations never interleave). FIRST what a
+ * previous materialization left behind is repaired (`inspectMaterializeRoot` / `repairMaterializeRoot`
+ * — a torn swap rolled back, a torn cleanup finished, stale staging removed; every `repaired` line
+ * goes to `note`). Every repo is then extracted AND verified into a private staging dir beside its
+ * destination (`.<repo>@<tag>.staging-<generation>`); the previous trees are not touched until
+ * EVERY repo has verified. Then the receipt is INVALIDATED — the in-progress marker
+ * (`.materialize.inprogress-<generation>`) is published and the previous `materialized.json` is
+ * moved aside to `materialized.json.prev-<generation>` — BEFORE the first tree moves; each tree is
+ * swapped into place (old → `.<repo>@<tag>.prev-<generation>`, staging → destination); the receipt
+ * that describes exactly these trees is published atomically, stamped with the same `generation`;
+ * ONLY THEN are the `.prev` backups and the previous receipt removed, and the marker LAST. So a
+ * process killed between any two renames leaves incomplete trees beside NO receipt (the previous
+ * one is aside, the new one not yet written) and a marker that names the torn generation; the next
+ * start sees DAMAGE, never a stale success receipt. Any failure before the swap removes the staging
+ * dirs and leaves the previous trees AND `materialized.json` exactly as they were — an old success
+ * receipt never sits beside output the failure damaged, because the failure never reached the
+ * output. Any failure DURING the swap or the receipt write is rolled back (`rollbackSwap`, in
+ * reverse order: a swapped-in tree is removed and its `.prev` restored, a moved-away destination is
+ * restored, staging and a torn receipt tmp are removed) and ONLY THEN is the previous receipt moved
+ * back — the destinations are the previous trees again, byte for byte, and the restored receipt
+ * describes exactly them; the original error is rethrown. If the rollback itself fails, every
+ * receipt is REMOVED — no receipt may describe a damaged tree — the marker stays (the next
+ * `materialize` repairs), and a RefusalError names BOTH faults and the `.staging-`/`.prev-<generation>`
+ * entries left for the operator. If a receipt describes a tree that is no longer there (a first
+ * run never had one; an operator removed one by hand), it is removed: a receipt never outlives the
+ * trees it describes.
  *
  * Fidelity: the extracted tree must EQUAL the committed tree. `git archive` honors
  * `export-ignore` / `export-subst` attributes from three sources. The operator's global/system
@@ -826,7 +888,7 @@ function containedChild(root, name) {
  * nothing else may be there — a dropped, substituted or extra file is a named refusal, never a
  * different tree recorded as the pin. Each repo's `tree_sha` rides in the receipt.
  */
-export function materialize(pin, pinPath, sourceRoot, outDir) {
+export function materialize(pin, pinPath, sourceRoot, outDir, note = () => {}) {
   requirePinnedCheckouts(pin, pinPath, sourceRoot);
   mkdirSync(outDir, { recursive: true });
   // A materialize root reached through a symlink is the operator's choice; everything below is
@@ -834,7 +896,13 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
   const root = realpathSync(outDir);
   return withPublicationLock(join(root, MATERIALIZE_LOCK), 'materialize', (generation) => {
     const receiptPath = containedChild(root, MATERIALIZE_RECEIPT);
-    // Phase 0 — every name this step may remove or write, contained and asserted up front.
+    // Phase 0a — what a PREVIOUS materialization left behind, under the lock and before any
+    // extraction: a torn swap is rolled back (nothing trusted until this run publishes), a torn
+    // cleanup finished, stale staging removed — this run starts from a known root.
+    for (const line of repairMaterializeRoot(root, inspectMaterializeRoot(root))) note(line);
+    // Phase 0b — every name this step may remove or write, contained and asserted up front.
+    const marker = containedChild(root, `${MATERIALIZE_INPROGRESS_PREFIX}${generation}`);
+    const receiptPrev = containedChild(root, `${MATERIALIZE_RECEIPT}.prev-${generation}`);
     const plan = [...pin.repos].sort(byRepo).map((r) => {
       if (!isSafeSegment(r.repo) || !RELEASE_TAG_RE.test(r.tag)) {
         throw new RefusalError(`refusing to materialize ${JSON.stringify(`${r.repo}@${r.tag}`)}: repo/tag are not safe path segments`);
@@ -879,27 +947,38 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
-    // Phase 2 — every tree verified: swap each into place, keeping EVERY previous tree as
-    // `.prev-<generation>` until the receipt is published; then publish the receipt that describes
-    // exactly these trees; only then drop the backups. Any failure in here rolls the swap back —
-    // and if the rollback itself fails, no receipt may describe what is left.
+    // Phase 2 — every tree verified. FIRST the receipt is invalidated: the in-progress marker is
+    // published (it names the generation, so a torn swap is recognisable on the next start) and
+    // the previous receipt is moved aside — from here until the new receipt lands there is NO
+    // receipt at `materialized.json`, so a process killed between any two renames leaves
+    // incomplete trees beside no receipt, never beside a stale success receipt. Then each tree is
+    // swapped into place, keeping EVERY previous tree as `.prev-<generation>`; then the receipt
+    // that describes exactly these trees is published; only then go the backups, the previous
+    // receipt and (last) the marker. Any failure in here rolls the swap back and restores the
+    // previous receipt — a COMPLETE rollback is the only way it comes back; if the rollback itself
+    // fails, no receipt may describe what is left and the marker stays for the next repair.
     const receipt = { pin_hash: pin.pin_hash, generation, materialized_at: new Date().toISOString(), attributes: ARCHIVE_ATTRIBUTES_NOTE, repos: [] };
     /** Per repo, how far its swap got — what `rollbackSwap` undoes:
      *  `{ hadPrev, step }` with step 0 = nothing moved · 1 = dest moved to .prev · 2 = staging moved to dest. */
     const progress = new Map();
+    const hadReceipt = existsSync(receiptPath);
     try {
+      publishJson(marker, { generation, pid: process.pid, started_at: receipt.materialized_at, previous_receipt: hadReceipt ? receiptPrev : null, repos: plan.map((p) => p.name) }, generation);
+      if (hadReceipt) renameSync(receiptPath, receiptPrev);
       for (const [i, p] of plan.entries()) {
         const state = { hadPrev: existsSync(p.dest), step: 0 };
         progress.set(p, state);
         if (state.hadPrev) renameSync(p.dest, p.prev);
         state.step = 1;
         injectedFault(`swap:${i + 1}`);
+        injectedKill(`kill-between-swaps:${i + 1}`);
         renameSync(p.staging, p.dest);
         state.step = 2;
         receipt.repos.push({ repo: p.r.repo, tag: p.r.tag, commit_sha: p.r.commit_sha, tree_sha: p.tree.tree_sha, entries: p.tree.entries, path: p.dest });
       }
       injectedFault('receipt');
       publishJson(receiptPath, receipt, generation);
+      injectedKill('kill-after-receipt');
     } catch (err) {
       const why = (e) => (e instanceof Error ? e.message : String(e));
       try {
@@ -907,22 +986,188 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
         rollbackSwap(plan, progress);
         // A receipt write that tore between its tmp write and its rename left the tmp beside it.
         rmSync(`${receiptPath}.${generation}.tmp`, { force: true });
-        // The destinations are the previous trees again; the previous receipt (if any) describes
-        // them — unless it describes a tree that was never there.
+        // The destinations are the previous trees again, byte for byte — so the previous receipt
+        // describes them again: it comes back ONLY here, after a complete rollback (unless it
+        // describes a tree that was never there).
+        if (existsSync(receiptPrev)) renameSync(receiptPrev, receiptPath);
+        rmSync(marker, { force: true });
         dropReceiptWithoutTrees(receiptPath);
       } catch (rollbackErr) {
         rmSync(receiptPath, { force: true });
+        rmSync(receiptPrev, { force: true });
         throw new RefusalError(
           `materialize failed while swapping the verified trees into ${root} (${why(err)}) AND the rollback failed (${why(rollbackErr)}) — ` +
-            `the trees there may be damaged: the receipt was removed so nothing describes them; inspect the .staging-${generation} / .prev-${generation} entries by hand before re-running`,
+            `the trees there may be damaged: every receipt was removed so nothing describes them, and the ${basename(marker)} marker stays so the next \`materialize\` repairs the root ` +
+            `(rolls the .prev-${generation} trees back, removes the staging, re-extracts); inspect the .staging-${generation} / .prev-${generation} entries by hand first if you need the partial state`,
         );
       }
       throw err;
     }
-    // Published: the receipt describes the trees now in place — the backups may go.
+    // Published: the receipt describes the trees now in place — the backups and the previous
+    // receipt may go; the marker goes LAST (a kill in here is a torn CLEANUP: the receipt is valid
+    // and the next start finishes the cleanup).
     for (const p of plan) rmSync(p.prev, { recursive: true, force: true });
+    rmSync(receiptPrev, { force: true });
+    rmSync(marker, { force: true });
     return receipt;
   });
+}
+
+/** `s` as a literal inside a RegExp source. */
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const GENERATION_GROUP = `(${GENERATION_RE.source.slice(1, -1)})`;
+const MARKER_RE = new RegExp(`^${escapeRe(MATERIALIZE_INPROGRESS_PREFIX)}${GENERATION_GROUP}$`);
+const PREV_RECEIPT_RE = new RegExp(`^${escapeRe(MATERIALIZE_RECEIPT)}\\.prev-${GENERATION_GROUP}$`);
+const PREV_TREE_RE = new RegExp(`^\\.(.+)\\.prev-${GENERATION_GROUP}$`);
+const STAGING_TREE_RE = new RegExp(`^\\.(.+)\\.staging-${GENERATION_GROUP}$`);
+
+/**
+ * What a materialize root holds BEYOND its trees and receipt, classified — what a reader must
+ * know before trusting `materialized.json`, and what `materialize` repairs before it starts:
+ *   clean          nothing of ours but the trees and (maybe) the receipt
+ *   torn-cleanup   a receipt of generation g beside ONLY g's marker / `.prev-g` entries: g's swap
+ *                  completed and its receipt landed, the cleanup after it did not finish — the
+ *                  receipt is valid, the leftovers are removable
+ *   stale-staging  `.staging-*` dirs and nothing else of ours: an extraction was interrupted
+ *                  before any tree moved — trees and receipt are untouched, the staging is debris
+ *   damaged        an in-progress marker, a `.prev-*` tree or a moved-aside receipt the receipt
+ *                  does not account for: a swap was interrupted (a kill between two renames) — NO
+ *                  receipt at `materialized.json` may be trusted (the swap moved it aside before
+ *                  the first tree moved; one there anyway is not this root's), and
+ *                  `materialize <dir>` is the repair
+ * Every entry is a direct child of the root's realpath; a symlink among them is refused
+ * (`containedChild`). `receipt` is the parsed `materialized.json`, or null when absent/unreadable.
+ */
+export function inspectMaterializeRoot(outDir) {
+  if (!existsSync(outDir)) throw new UsageError(`no materialize root at ${outDir}`);
+  const root = realpathSync(outDir);
+  const receiptPath = join(root, MATERIALIZE_RECEIPT);
+  let receipt = null;
+  if (existsSync(receiptPath)) {
+    try {
+      receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+    } catch {
+      receipt = null;
+    }
+    if (receipt === null || typeof receipt !== 'object' || Array.isArray(receipt)) receipt = null;
+  }
+  const markers = [];
+  const prevTrees = [];
+  const prevReceipts = [];
+  const staging = [];
+  for (const name of readdirSync(root).sort()) {
+    let m;
+    if ((m = MARKER_RE.exec(name)) !== null) markers.push({ name, path: containedChild(root, name), generation: m[1] });
+    else if ((m = PREV_RECEIPT_RE.exec(name)) !== null) prevReceipts.push({ name, path: containedChild(root, name), generation: m[1] });
+    else if ((m = PREV_TREE_RE.exec(name)) !== null) prevTrees.push({ name, path: containedChild(root, name), tree: m[1], generation: m[2] });
+    else if ((m = STAGING_TREE_RE.exec(name)) !== null) staging.push({ name, path: containedChild(root, name), tree: m[1], generation: m[2] });
+  }
+  const debris = [...markers, ...prevTrees, ...prevReceipts];
+  const generations = [...new Set([...debris, ...staging].map((d) => d.generation))].sort();
+  let state = 'clean';
+  const reasons = [];
+  if (debris.length > 0) {
+    const receiptGen = typeof receipt?.generation === 'string' ? receipt.generation : null;
+    const accounted = receiptGen !== null && debris.every((d) => d.generation === receiptGen) && staging.every((s) => s.generation !== receiptGen);
+    state = accounted ? 'torn-cleanup' : 'damaged';
+    for (const mk of markers) {
+      let started = null;
+      try {
+        started = JSON.parse(readFileSync(mk.path, 'utf8'));
+      } catch {
+        started = null;
+      }
+      reasons.push(`in-progress marker ${mk.name}${Number.isInteger(started?.pid) ? ` (pid ${started.pid})` : ''}`);
+    }
+    for (const t of prevTrees) reasons.push(existsSync(join(root, t.tree)) ? `${t.name} beside a swapped-in ${t.tree}` : `${t.name} with ${t.tree} MISSING`);
+    for (const r of prevReceipts) reasons.push(`the previous receipt ${r.name} moved aside`);
+    if (staging.length > 0) reasons.push(`${staging.length} staging dir(s)`);
+  } else if (staging.length > 0) {
+    state = 'stale-staging';
+    reasons.push(`${staging.length} staging dir(s) an interrupted extraction left`);
+  }
+  return { root, state, receipt, reasons, generations, markers, prevTrees, prevReceipts, staging };
+}
+
+/**
+ * Put a materialize root into a known state before a materialization starts (under the lock),
+ * from `inspectMaterializeRoot`'s reading. Returns the `repaired …` lines for the operator.
+ *   damaged        whatever sits at `materialized.json` is removed (untrusted); every `.prev-*` tree
+ *                  is rolled back — a swapped-in tree at its destination is replaced by the backup,
+ *                  a missing destination is filled from it (rename: byte-identical to before the
+ *                  torn swap); staging dirs, moved-aside receipts and markers are removed. The old
+ *                  receipt is NOT restored: a crash-rolled-back root is unverified until the next
+ *                  successful publication describes it.
+ *   torn-cleanup   the backups, the moved-aside receipt and the marker of the published generation
+ *                  are removed — the receipt already describes the trees in place.
+ *   stale-staging  the staging dirs are removed; trees and receipt were never touched.
+ */
+function repairMaterializeRoot(root, inspection) {
+  const lines = [];
+  const rmAll = (entries, opts) => {
+    for (const e of entries) rmSync(e.path, { force: true, ...opts });
+  };
+  if (inspection.state === 'damaged') {
+    rmSync(join(root, MATERIALIZE_RECEIPT), { force: true });
+    let restored = 0;
+    let replaced = 0;
+    for (const t of inspection.prevTrees) {
+      const dest = containedChild(root, t.tree);
+      if (existsSync(dest)) {
+        rmSync(dest, { recursive: true, force: true });
+        replaced += 1;
+      }
+      renameSync(t.path, dest);
+      restored += 1;
+    }
+    rmAll(inspection.staging, { recursive: true });
+    rmAll(inspection.prevReceipts);
+    rmAll(inspection.markers);
+    lines.push(
+      `repaired  ${root}: a materialization (generation ${inspection.generations.join(', ')}) was interrupted during its swap — ${inspection.reasons.join('; ')}; ` +
+        `restored ${restored} previous tree(s) from their .prev backups (${replaced} swapped-in tree(s) replaced), removed ${inspection.staging.length} staging dir(s), ` +
+        `the previous receipt and the marker; no receipt describes this root until this run publishes one`,
+    );
+  } else if (inspection.state === 'torn-cleanup') {
+    rmAll(inspection.prevTrees, { recursive: true });
+    rmAll(inspection.staging, { recursive: true });
+    rmAll(inspection.prevReceipts);
+    rmAll(inspection.markers);
+    lines.push(`repaired  ${root}: finished the interrupted cleanup of generation ${inspection.generations.join(', ')} (${inspection.prevTrees.length} backup(s), the previous receipt and the marker removed; the receipt was already valid)`);
+  } else if (inspection.state === 'stale-staging') {
+    rmAll(inspection.staging, { recursive: true });
+    lines.push(`repaired  ${root}: removed ${inspection.staging.length} staging dir(s) an interrupted extraction left (trees and receipt untouched)`);
+  }
+  return lines;
+}
+
+/**
+ * The materialize receipt a CONSUMER may trust, or a named refusal: a damaged root (a swap was
+ * interrupted — `inspectMaterializeRoot`) is refused with the repair as the hint; a missing or
+ * unreadable receipt is a usage error; a receipt describing a tree that is not there is refused.
+ * Returns `{ receipt, root, debris }` — `debris` is the inspection state (`clean`, or the
+ * harmless `torn-cleanup` / `stale-staging` the next `materialize` sweeps).
+ */
+export function readMaterializeReceipt(outDir) {
+  const inspection = inspectMaterializeRoot(outDir);
+  if (inspection.state === 'damaged') {
+    throw new RefusalError(
+      `${inspection.root} is DAMAGED — ${inspection.reasons.join('; ')} — no receipt describes these trees; run \`materialize ${outDir}\` to repair ` +
+        `(it rolls the .prev-<generation> trees back, removes the staging and the marker, re-extracts every pinned tree and publishes a new receipt), or inspect those entries by hand first`,
+    );
+  }
+  if (inspection.receipt === null) throw new UsageError(`${join(inspection.root, MATERIALIZE_RECEIPT)} is missing or unreadable — run \`materialize ${outDir}\` first`);
+  const paths = Array.isArray(inspection.receipt.repos) ? inspection.receipt.repos.map((x) => x?.path) : null;
+  const missing = paths === null ? null : paths.filter((p) => typeof p !== 'string' || !existsSync(p));
+  if (missing === null || missing.length > 0) {
+    throw new RefusalError(
+      `${join(inspection.root, MATERIALIZE_RECEIPT)} describes ${missing === null ? 'no repos array' : `${missing.length} tree(s) that are not there (${listSome(missing.map(String))})`} — run \`materialize ${outDir}\` again`,
+    );
+  }
+  return { receipt: inspection.receipt, root: inspection.root, debris: inspection.state };
 }
 
 /**
@@ -1321,31 +1566,64 @@ export function readPublishedSamples(outDir, pin) {
 }
 
 /**
- * The executable `spawnSync(name)` would run, as a REALPATH: `name` with a separator is a path;
- * otherwise the first PATH entry holding an executable regular file of that name (Windows: with
- * each `PATHEXT` extension). Null when nothing on PATH names it.
+ * The candidate files `spawnSync(name)` would try, IN ORDER, with the OS's own search semantics —
+ * so the executable this script hashes is the executable it spawns (both use the winner):
+ *   - `name` with a separator is a path: one candidate, resolved against `cwd`;
+ *   - otherwise every entry of `path` (`PATH`) in order, each resolved against `cwd` — an EMPTY
+ *     entry (a leading, trailing or doubled delimiter) is the CURRENT DIRECTORY, exactly as
+ *     execvp reads it (codex round 5: skipping it identified another build than the one the spawn
+ *     ran); on Windows (libuv) the cwd is searched FIRST, and every candidate is tried bare and
+ *     with each `PATHEXT` extension.
+ * An unset `path` searches nothing: nothing is spawned by bare name any more, so libc's default
+ * search path is not something a spawn could disagree with.
  */
-export function resolveExecutable(name) {
-  const candidates = [];
-  if (/[\\/]/.test(name)) {
-    candidates.push(resolve(name));
-  } else {
-    const exts = process.platform === 'win32' ? ['', ...(process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e !== '')] : [''];
-    for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
-      if (dir === '') continue;
-      for (const ext of exts) candidates.push(join(dir, `${name}${ext}`));
-    }
-  }
-  for (const c of candidates) {
+export function executableCandidates(name, opts = {}) {
+  // `Object.hasOwn`, not parameter defaults: an EXPLICIT `path: undefined` means "PATH is unset"
+  // (a default would silently substitute the process's PATH for it).
+  const path = Object.hasOwn(opts, 'path') ? opts.path : process.env['PATH'];
+  const cwd = opts.cwd ?? process.cwd();
+  const platform = opts.platform ?? process.platform;
+  const pathext = Object.hasOwn(opts, 'pathext') ? opts.pathext : process.env['PATHEXT'];
+  const win = platform === 'win32';
+  const exts = win ? ['', ...(pathext ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e !== '')] : [''];
+  if (/[\\/]/.test(name)) return exts.map((ext) => resolve(cwd, `${name}${ext}`));
+  const dirs = path === undefined ? [] : path.split(win ? ';' : ':');
+  if (win) dirs.unshift('');
+  return dirs.flatMap((dir) => exts.map((ext) => resolve(cwd, dir === '' ? '.' : dir, `${name}${ext}`)));
+}
+
+/**
+ * The executable `spawnSync(name)` WOULD run, resolved ONCE over `executableCandidates`: the first
+ * candidate that is an executable REGULAR file, as its REALPATH — `{ path }`. A directory or a
+ * non-executable file is passed over exactly as exec passes over it; when NO candidate is
+ * executable but one was a regular file, `{ path: null, blocked }` names the first such file (what
+ * exec reports as EACCES — the caller spawns it and lets the OS say so, never a SKIP); when nothing
+ * on the search path names the executable, `{ path: null, blocked: null }` (exec's ENOENT — the
+ * documented SKIP). `searched` lists every candidate tried, in order.
+ */
+export function resolveExecutable(name, opts = {}) {
+  const searched = executableCandidates(name, opts);
+  const platform = opts.platform ?? process.platform;
+  let blocked = null;
+  for (const c of searched) {
+    let st;
     try {
-      if (!statSync(c).isFile()) continue;
-      if (process.platform !== 'win32') accessSync(c, fsConstants.X_OK);
-      return realpathSync(c);
+      st = statSync(c);
     } catch {
-      /* not here — next candidate */
+      continue;
     }
+    if (!st.isFile()) continue;
+    if (platform !== 'win32') {
+      try {
+        accessSync(c, fsConstants.X_OK);
+      } catch {
+        if (blocked === null) blocked = c;
+        continue;
+      }
+    }
+    return { path: realpathSync(c), blocked: null, searched };
   }
-  return null;
+  return { path: null, blocked, searched };
 }
 
 /**
@@ -1462,7 +1740,10 @@ function rulesIdentityFrom(listed, coreBin, seed) {
  *   - `degraded` is PRESENT (the engine always serializes it: null, or one of
  *     `ENGINE_DEGRADED_MODES`); `rule_coverage` is either ABSENT (an engine predating core #394,
  *     printed as such) or a well-formed `{ exercised: int ≥ 0, unexercised: [{ rule_id,
- *     steering_type }] }` — `null` (what crashed the summary print after publication) is malformed.
+ *     steering_type }] }` — `null` (what crashed the summary print after publication) is malformed
+ *     — that RECONCILES with the rows (`ruleCoverageProblem`): no id both fired and unexercised,
+ *     `exercised` ≥ the distinct ids the rows' `fired` name, no duplicate unexercised id,
+ *     `recall_only` a non-negative integer when present.
  * Each row then gets its staged sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over
  * the full payload incl. signals — what makes two runs comparable, `eval-compare.ts`). A valid
  * all-gap report — BAD samples nothing caught — passes: gaps are findings. Returns the failure text
@@ -1475,6 +1756,8 @@ export function verifyEngineReport(report, samples) {
   const staged = new Map(samples.map((s) => [s.id, s]));
   const seen = new Set();
   const counts = { caught: 0, gaps: 0, false_positives: 0 };
+  /** rule id → the rows whose `fired` (blocking) named it — what `rule_coverage` must reconcile with. */
+  const fired = new Map();
   for (const [i, row] of report.results.entries()) {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) return `results[${i}] is not a result object`;
     const ref = row.sample;
@@ -1513,6 +1796,7 @@ export function verifyEngineReport(report, samples) {
         : `results[${i}] (${ref.id}) says nothing blocking fired (${s.kind} ⇒ ${row.verdict}) but \`fired\` names ${JSON.stringify(row.fired)} — deny-dominates: the verdict and the fired set must agree`;
     }
     counts[SUMMARY_FIELD_OF_VERDICT[row.verdict]] += 1;
+    for (const id of new Set(row.fired)) fired.set(id, (fired.get(id) ?? 0) + 1);
     ref.payload_hash = samplePayloadHash(s);
   }
   if (seen.size !== staged.size) {
@@ -1542,28 +1826,63 @@ export function verifyEngineReport(report, samples) {
     return `the engine report's \`degraded\` is ${JSON.stringify(report.degraded)}, not null or one of ${ENGINE_DEGRADED_MODES.join('|')}`;
   }
   if (report.rule_coverage !== undefined) {
-    const problem = ruleCoverageProblem(report.rule_coverage);
-    if (problem !== null) {
-      return `the engine report's \`rule_coverage\` is malformed: ${problem} — an engine predating core #394 omits the field (recorded as such); a present field must be a well-formed { exercised, unexercised[] }, never null`;
+    const problem = ruleCoverageProblem(report.rule_coverage, fired);
+    if (problem?.malformed !== undefined) {
+      return `the engine report's \`rule_coverage\` is malformed: ${problem.malformed} — an engine predating core #394 omits the field (recorded as such); a present field must be a well-formed { exercised, unexercised[] }, never null`;
+    }
+    if (problem?.inconsistent !== undefined) {
+      return (
+        `the engine report's \`rule_coverage\` does not reconcile with its rows: ${problem.inconsistent} — ` +
+        'evals.rs `rule_coverage` partitions the eligible rules by whether ANY evaluated claim fired them, and a row\'s `fired` is the blocking subset of that'
+      );
     }
   }
   return null;
 }
 
-/** Why `rc` is not a well-formed `rule_coverage` (api-types `GovernanceEvalRuleCoverage`:
- *  `exercised` a non-negative integer, `unexercised` an array of `{ rule_id, steering_type }` with
- *  a known steering type), or null when it is. */
-function ruleCoverageProblem(rc) {
-  if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) return `expected an object { exercised, unexercised[] }, got ${JSON.stringify(rc)}`;
-  if (!Number.isInteger(rc.exercised) || rc.exercised < 0) return `exercised ${JSON.stringify(rc.exercised)} is not a non-negative integer`;
-  if (!Array.isArray(rc.unexercised)) return `unexercised ${JSON.stringify(rc.unexercised)} is not an array`;
+/**
+ * Why `rc` is not a `rule_coverage` of THESE rows, or null when it is. Two kinds, kept apart:
+ *   `{ malformed }`    — not the wire shape (api-types `GovernanceEvalRuleCoverage`): `exercised` a
+ *                        non-negative integer, `unexercised` an array of `{ rule_id, steering_type }`
+ *                        with a known steering type, `recall_only` (the engine's third field, outside
+ *                        the api-types shape — optional here) a non-negative integer when present;
+ *   `{ inconsistent }` — the shape is fine but the numbers contradict the rows. The engine's
+ *                        definition (wicked-governance `evals.rs`, `rule_coverage` + `run_evals`): a
+ *                        rule is EXERCISED when ANY evaluated claim fired it — blocking or not (a
+ *                        `warn`-effect firing counts) — and UNEXERCISED otherwise; a row's `fired`
+ *                        is the BLOCKING (deny) subset of the same firings. Hence, exactly: no id in
+ *                        any row's `fired` may be `unexercised`; `exercised` ≥ the number of distinct
+ *                        ids the rows' `fired` name (equal only when nothing non-blocking fired);
+ *                        `unexercised` names a rule at most once. `fired` is `rule id → rows`.
+ */
+function ruleCoverageProblem(rc, fired) {
+  const malformed = (m) => ({ malformed: m });
+  const inconsistent = (m) => ({ inconsistent: m });
+  if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) return malformed(`expected an object { exercised, unexercised[] }, got ${JSON.stringify(rc)}`);
+  if (!Number.isInteger(rc.exercised) || rc.exercised < 0) return malformed(`exercised ${JSON.stringify(rc.exercised)} is not a non-negative integer`);
+  if (!Array.isArray(rc.unexercised)) return malformed(`unexercised ${JSON.stringify(rc.unexercised)} is not an array`);
+  if (rc.recall_only !== undefined && (!Number.isInteger(rc.recall_only) || rc.recall_only < 0)) {
+    return malformed(`recall_only ${JSON.stringify(rc.recall_only)} is not a non-negative integer`);
+  }
+  const seen = new Set();
   for (const [i, u] of rc.unexercised.entries()) {
     if (u === null || typeof u !== 'object' || Array.isArray(u) || typeof u.rule_id !== 'string' || u.rule_id === '') {
-      return `unexercised[${i}] carries no string rule_id (got ${JSON.stringify(u)})`;
+      return malformed(`unexercised[${i}] carries no string rule_id (got ${JSON.stringify(u)})`);
     }
     if (!STEERING_TYPES.includes(u.steering_type)) {
-      return `unexercised[${i}] (${u.rule_id}) steering_type ${JSON.stringify(u.steering_type)} is not one of ${STEERING_TYPES.join('|')}`;
+      return malformed(`unexercised[${i}] (${u.rule_id}) steering_type ${JSON.stringify(u.steering_type)} is not one of ${STEERING_TYPES.join('|')}`);
     }
+    if (seen.has(u.rule_id)) return inconsistent(`unexercised[${i}] repeats ${u.rule_id} — a rule is unexercised once or not at all`);
+    seen.add(u.rule_id);
+    if (fired.has(u.rule_id)) {
+      return inconsistent(`unexercised[${i}] names ${u.rule_id}, which \`fired\` for ${fired.get(u.rule_id)} row(s) — a rule that fired for any sample is exercised, never unexercised`);
+    }
+  }
+  if (rc.exercised < fired.size) {
+    return inconsistent(
+      `exercised ${rc.exercised} is below the ${fired.size} distinct rule id(s) the rows' \`fired\` name (${listSome([...fired.keys()].sort())}) — ` +
+        'every blocking firing is an exercised rule, so exercised ≥ distinct fired (equality only when no non-blocking effect fired)',
+    );
   }
   return null;
 }
@@ -1621,10 +1940,13 @@ export function readPublishedReport(outDir) {
 
 /**
  * `run <dir>`: verify the published samples against the selected pin (`readPublishedSamples`) —
- * BEFORE the engine is even probed — then, only when `wicked-core` answers `--version` cleanly
- * (ENOENT = SKIP; any other spawn error or a non-zero exit = a tool FAILURE, never a run recorded
- * under an unknown engine), resolve the engine's build identity (realpath + sha256 of the binary
- * on PATH), ingest the doctrine seed into a TEMP rules store, read the ingested rules back
+ * BEFORE the engine is even probed — then resolve the engine ONCE (`resolveExecutable`: the OS's
+ * own search, an empty PATH entry being the cwd, an executable regular file required; nothing
+ * resolvable = SKIP) and spawn THAT absolute path for everything that follows — the file hashed
+ * into the provenance (realpath + sha256, checked again after the run) is the file that ran. Only
+ * when it answers `--version` cleanly (a resolved file that will not execute, any other spawn
+ * error or a non-zero exit = a tool FAILURE, never a run recorded under an unknown engine),
+ * ingest the doctrine seed into a TEMP rules store, read the ingested rules back
  * (`rules list --include-retired --json`) for the rule-snapshot identity BEFORE that store is
  * deleted, and `rules eval` EXACTLY the verified samples, staged as a one-file corpus DIR inside a
  * fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json files or an
@@ -1641,12 +1963,20 @@ export function readPublishedReport(outDir) {
 export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   assertPinIntegrity(pin, pinPath);
   const { samples, meta } = readPublishedSamples(outDir, pin);
-  const probe = spawnSync(coreBin, ['--version'], { encoding: 'utf8' });
+  // The engine is resolved ONCE, with the OS's search semantics, and EVERY spawn below uses the
+  // resolved absolute path — the file hashed into the provenance is the file that ran.
+  const resolved = resolveExecutable(coreBin);
+  if (resolved.path === null && resolved.blocked === null) {
+    return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
+  }
+  // `blocked`: a regular file of that name on the search path that is not executable — exec's
+  // EACCES. Spawned anyway so the OS names the fault itself; never a SKIP.
+  const binary = resolved.path ?? resolved.blocked;
+  const probe = spawnSync(binary, ['--version'], { encoding: 'utf8' });
   if (probe.error !== undefined) {
-    if (probe.error.code === 'ENOENT') {
-      return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
-    }
-    return { failure: `${coreBin} --version could not be executed (${probe.error.code ?? 'spawn error'}): ${probe.error.message}` };
+    // A RESOLVED file that cannot be executed is a tool failure, never "not installed": no execute
+    // bit (EACCES), a script whose interpreter is missing (ENOENT), a file removed under us.
+    return { failure: `${coreBin} --version could not be executed (${probe.error.code ?? 'spawn error'}) — ${binary}: ${probe.error.message}` };
   }
   if (probe.status !== 0) {
     return { failure: `${coreBin} --version exited ${probe.status}: ${(probe.stderr || probe.stdout).trim() || '(no output)'}` };
@@ -1654,11 +1984,8 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   const engineVersion = probe.stdout.trim();
   if (engineVersion === '') return { failure: `${coreBin} --version printed nothing — refusing to record a run under an unknown engine version` };
   if (!existsSync(rulesDir)) throw new UsageError(`rules seed dir ${rulesDir} does not exist (pass --rules <dir>)`);
-  const binary = resolveExecutable(coreBin);
-  if (binary === null) {
-    return { failure: `could not resolve ${coreBin} on PATH to hash the engine build (the probe ran it, but no PATH entry names an executable file of that name)`, engine: engineVersion };
-  }
-  const engine = { version: engineVersion, build: { path: binary, sha256: `sha256:${sha256Hex(readFileSync(binary))}` } };
+  const buildHash = () => `sha256:${sha256Hex(readFileSync(binary))}`;
+  const engine = { version: engineVersion, build: { path: binary, sha256: buildHash() } };
   const rulesSeed = seedDirIdentity(rulesDir);
   // mkdtemp is private (0700) and fresh: the rules db, the knowledge db and the staged corpus
   // live here and nowhere else; the whole tree is removed however the run ends.
@@ -1666,18 +1993,18 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   try {
     const rulesDb = join(tmp, 'rules.db');
     const knowledgeDb = join(tmp, 'knowledge.db');
-    const ingest = spawnSync(coreBin, ['rules', 'ingest', rulesDir, '--db', rulesDb], { encoding: 'utf8' });
+    const ingest = spawnSync(binary, ['rules', 'ingest', rulesDir, '--db', rulesDb], { encoding: 'utf8' });
     if (ingest.status !== 0) {
       return { failure: `rules ingest failed (exit ${ingest.status}): ${(ingest.stderr || ingest.stdout).trim()}`, engine: engineVersion };
     }
     // The rule snapshot the run is judged by — read back from the store BEFORE it is deleted.
-    const listed = spawnSync(coreBin, ['rules', 'list', '--db', rulesDb, '--include-retired', '--json'], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
+    const listed = spawnSync(binary, ['rules', 'list', '--db', rulesDb, '--include-retired', '--json'], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
     const rulesIdentity = rulesIdentityFrom(listed, coreBin, rulesSeed);
     if (rulesIdentity.failure !== undefined) return { failure: rulesIdentity.failure, engine: engineVersion };
     const corpusDir = join(tmp, 'corpus');
     mkdirSync(corpusDir);
     writeFileSync(join(corpusDir, 'samples.json'), `${JSON.stringify(samples, null, 2)}\n`, 'utf8');
-    const evalRun = spawnSync(coreBin, ['rules', 'eval', '--db', rulesDb, '--knowledge-db', knowledgeDb, '--corpus', corpusDir, '--json'], {
+    const evalRun = spawnSync(binary, ['rules', 'eval', '--db', rulesDb, '--knowledge-db', knowledgeDb, '--corpus', corpusDir, '--json'], {
       encoding: 'utf8',
       maxBuffer: GIT_MAX_BUFFER,
     });
@@ -1692,6 +2019,12 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
     }
     const refused = verifyEngineReport(report, samples);
     if (refused !== null) return { failure: refused, engine: engineVersion };
+    // The build hashed before the run must be the build that ran it: a binary replaced under the
+    // run (an upgrade racing the eval) is a tool failure, never a report attributed to either.
+    const after = buildHash();
+    if (after !== engine.build.sha256) {
+      return { failure: `the engine binary ${binary} changed during the run (${engine.build.sha256} before, ${after} after) — refusing to attribute the report to either build; re-run`, engine: engineVersion };
+    }
     // Published AND read back verified under the one lock — what is returned is what a reader sees.
     const published = publishReport(outDir, report, {
       pin_hash: meta.pin_hash,
@@ -1747,7 +2080,12 @@ function printSummary(report) {
     return;
   }
   const rc = report.rule_coverage;
-  console.log(`rule_coverage: exercised ${rc.exercised} · unexercised ${rc.unexercised.length}`);
+  // `exercised` counts every rule any claim fired, blocking or not; the rows' `fired` is the
+  // blocking subset — the difference is what fired by a non-blocking effect (`warn`) alone.
+  const blocking = new Set((report.results ?? []).flatMap((row) => row.fired ?? [])).size;
+  const nonBlocking = rc.exercised > blocking ? `; ${rc.exercised - blocking} exercised by a non-blocking effect only` : '';
+  const recallOnly = Number.isInteger(rc.recall_only) ? ` · recall_only ${rc.recall_only}` : '';
+  console.log(`rule_coverage: exercised ${rc.exercised} (${blocking} distinct rule id(s) fired blocking across the rows${nonBlocking}) · unexercised ${rc.unexercised.length}${recallOnly}`);
   for (const u of rc.unexercised) console.log(`  unexercised ${u.rule_id} (${u.steering_type})`);
 }
 
@@ -1779,7 +2117,7 @@ function main(argv) {
     return EXIT_OK;
   }
   if (mode === 'materialize') {
-    const receipt = materialize(pin, pinPath, sourceRoot, dir);
+    const receipt = materialize(pin, pinPath, sourceRoot, dir, (line) => console.log(`  ${line}`));
     for (const r of receipt.repos) console.log(`  archived  ${r.repo}@${r.tag} (${r.commit_sha.slice(0, SHORT_SHA_LEN)}) → ${r.path}`);
     console.log(`evals-internal-corpus: materialized ${receipt.repos.length} repos under ${dir} (pin_hash ${receipt.pin_hash}) · generation ${receipt.generation}`);
     return EXIT_OK;

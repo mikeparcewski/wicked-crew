@@ -22,7 +22,10 @@
 // a receipt beside a missing tree is removed, two concurrent materializations never interleave;
 // every `.prev` backup is kept until the receipt is published and a fault DURING the swap or the
 // receipt write is rolled back — destinations byte-identical, receipt intact-or-absent, never a
-// receipt over a damaged tree — via a vitest-only fault hook, codex round 4); `check` refuses a
+// receipt over a damaged tree — via a vitest-only fault hook, codex round 4; the receipt is
+// INVALIDATED before the first tree moves — moved aside behind an in-progress marker — so a
+// process SIGKILLed between two renames leaves incomplete trees beside NO receipt, the reader
+// refuses the root as damaged and the next `materialize` repairs it, codex round 5); `check` refuses a
 // checkout carrying git REPLACEMENT refs (`refs/replace/*` — a window commit rewritten with the
 // same parents, tag shas and counts but another message + tree, codex round 4) and every git the
 // script runs is replacement-blind; filenames with leading/trailing spaces,
@@ -37,20 +40,23 @@
 // staged sample — no duplicate, extra or missing id — engine verdicts, `fired` arrays, a summary
 // that is the rows' tally, every row CONSISTENT with its sample's kind — `expected` by kind, never
 // `gap` on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking
-// verdict fired — `degraded` present, `rule_coverage` absent or well-formed; an EMPTY report, an
-// impossible row and `rule_coverage: null` are refused by name, a valid all-gap report over BAD
-// samples passes),
+// verdict fired — `degraded` present, `rule_coverage` absent or well-formed AND reconciled with
+// the rows (no id both fired and unexercised, `exercised` ≥ the distinct blocking-fired ids, no
+// duplicate unexercised id, `recall_only` a non-negative integer — codex round 5); an EMPTY
+// report, an impossible row, `rule_coverage: null` and a contradictory coverage are refused by
+// name, a valid all-gap report over BAD samples passes),
 // stamps every result row with its sample's `payload_hash`, and publishes
-// report + meta as ONE verifiable generation carrying complete provenance (engine build identity,
-// rule-snapshot identity with its method, pin/samples hashes, the report's own sha256) — a torn
-// pair is refused on read (a fake binary stands in for the engine). Plus the committed pin's
-// structural facts.
+// report + meta as ONE verifiable generation carrying complete provenance (engine build identity
+// = the realpath + sha256 of the executable ACTUALLY spawned — resolved once with exec's search
+// semantics, an empty PATH entry being the cwd, codex round 5 — rule-snapshot identity with its
+// method, pin/samples hashes, the report's own sha256) — a torn pair is refused on read (a fake
+// binary stands in for the engine). Plus the committed pin's structural facts.
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ImportEvalCorpusSchema } from '../src/api/testing.js';
@@ -121,10 +127,40 @@ interface Report {
   summary: { total: number; caught: number; gaps: number; false_positives: number };
   /** ALWAYS present on the wire (the engine serializes the Option) — null, or `facet-only`. */
   degraded: 'facet-only' | null;
-  rule_coverage?: { exercised: number; unexercised: unknown[] };
+  rule_coverage?: { exercised: number; unexercised: unknown[]; recall_only?: number };
+}
+/** `materialized.json` as `readMaterializeReceipt` / `inspectMaterializeRoot` hand it back. */
+interface MaterializeReceipt {
+  pin_hash: string;
+  generation: string;
+  repos: { repo: string; tag: string; commit_sha: string; tree_sha: string; entries: number; path: string }[];
+}
+interface RootInspection {
+  root: string;
+  state: 'clean' | 'torn-cleanup' | 'stale-staging' | 'damaged';
+  receipt: MaterializeReceipt | null;
+  reasons: string[];
+  generations: string[];
+  markers: { name: string; path: string; generation: string }[];
+  prevTrees: { name: string; path: string; tree: string; generation: string }[];
+  prevReceipts: { name: string; path: string; generation: string }[];
+  staging: { name: string; path: string; tree: string; generation: string }[];
+}
+interface ResolveOpts {
+  /** `undefined` is meaningful: an UNSET PATH searches nothing. */
+  path?: string | undefined;
+  cwd?: string;
+  platform?: string;
+  pathext?: string;
 }
 /** The script's exported pure functions (typed here — the file is plain JS). */
 interface CorpusModule {
+  resolveExecutable: (name: string, opts?: ResolveOpts) => { path: string | null; blocked: string | null; searched: string[] };
+  executableCandidates: (name: string, opts?: ResolveOpts) => string[];
+  inspectMaterializeRoot: (outDir: string) => RootInspection;
+  readMaterializeReceipt: (outDir: string) => { receipt: MaterializeReceipt; root: string; debris: RootInspection['state'] };
+  MATERIALIZE_INPROGRESS_PREFIX: string;
+  GENERATION_RE: RegExp;
   pinHash: (repos: PinRepo[]) => string;
   samplesHash: (samples: Sample[]) => string;
   classifyPath: (path: string) => string | null;
@@ -401,7 +437,7 @@ function runEnv(override: NodeJS.ProcessEnv, mode: string, ...extra: string[]) {
 function runFrom(source: string, override: NodeJS.ProcessEnv, mode: string, ...extra: string[]) {
   const args = [SCRIPT, mode, ...extra, '--pin', pinPath, '--source-root', source, '--known-bad', knownBadPath];
   const res = spawnSync(process.execPath, args, { env: { ...process.env, ...env, ...override }, encoding: 'utf8' });
-  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+  return { status: res.status, signal: res.signal, stdout: res.stdout, stderr: res.stderr };
 }
 
 function readPin(path: string = pinPath): Pin {
@@ -606,7 +642,7 @@ describe('check — the tags still resolve to the pinned shas', () => {
     const { meta } = readSamples();
     expect(meta.windows.find((w) => w.repo === 'alpha')!.commits).toBe(pinned.commits);
     expect(meta.total).toBe(6);
-  });
+  }, 90_000); // 2 clones + 4 script spawns — blew the 30 s default under full-suite load
 
   it("S14j: a git REPLACEMENT ref (a window commit `git replace`d by one with the SAME parents but another message + tree) leaves both tag shas and `rev-list --count` exactly the pin's while an unpinned `git log` reads the replacement — refused by name (exit 1) by `check` and `samples`, exit 2 by `pin`; every git the script runs is replacement-blind; with the ref deleted the derived samples are byte-identical to the pre-replace run", async () => {
     const m = await mod();
@@ -659,7 +695,7 @@ describe('check — the tags still resolve to the pinned shas', () => {
     expect(clean.status, clean.stderr).toBe(0);
     expect(run('samples', outDir).status).toBe(0);
     expect(readFileSync(join(outDir, 'samples.json'), 'utf8')).toBe(before);
-  });
+  }, 90_000); // 5 script spawns — blew the 30 s default under full-suite load
 });
 
 describe('samples — one EvalSample per window commit', () => {
@@ -1118,7 +1154,7 @@ describe('materialize — git archive of each pinned tag', () => {
     const after = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as { generation: string };
     expect(after.generation).not.toBe(receipt.generation);
     expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
-  });
+  }, 90_000); // 6 script spawns — ran 23 s of the 30 s default under full-suite load
 
   it('S15o: every `.prev` backup is kept until the receipt is published — a fault at the SECOND staging rename or at the receipt write is rolled back (every destination byte-identical to before, the previous receipt untouched, no debris); on a fresh root the same faults leave an empty root; a fault in the rollback itself removes the receipt and names BOTH faults; the hook is inert outside the test env', async () => {
     const m = await mod();
@@ -1163,21 +1199,31 @@ describe('materialize — git archive of each pinned tag', () => {
       expect(r.status, point).toBe(2);
       expect(readdirSync(fresh), point).toEqual([]);
     }
-    // (d) The DOUBLE fault: the swap fails AND the rollback fails — the receipt is removed (nothing
-    // may describe a damaged tree), exit 1, and the error names both faults + the debris left behind.
+    // (d) The DOUBLE fault: the swap fails AND the rollback fails — every receipt is removed (nothing
+    // may describe a damaged tree), the in-progress marker STAYS (the next materialize repairs), exit
+    // 1, and the error names both faults + the debris left behind.
     const double = faultAt('swap:2,rollback');
     expect(double.status).toBe(1);
     expect(double.stderr).toMatch(
-      /materialize failed while swapping the verified trees into .* \(injected fault at swap:2 \(EVALS_CORPUS_FAULT, test hook\)\) AND the rollback failed \(injected fault at rollback \(EVALS_CORPUS_FAULT, test hook\)\) — the trees there may be damaged: the receipt was removed so nothing describes them; inspect the \.staging-\d{8}-\d{6}-[0-9a-f]{8} \/ \.prev-\d{8}-\d{6}-[0-9a-f]{8} entries by hand before re-running/,
+      /materialize failed while swapping the verified trees into .* \(injected fault at swap:2 \(EVALS_CORPUS_FAULT, test hook\)\) AND the rollback failed \(injected fault at rollback \(EVALS_CORPUS_FAULT, test hook\)\) — the trees there may be damaged: every receipt was removed so nothing describes them, and the \.materialize\.inprogress-\d{8}-\d{6}-[0-9a-f]{8} marker stays so the next `materialize` repairs the root \(rolls the \.prev-\d{8}-\d{6}-[0-9a-f]{8} trees back, removes the staging, re-extracts\); inspect the \.staging-\d{8}-\d{6}-[0-9a-f]{8} \/ \.prev-\d{8}-\d{6}-[0-9a-f]{8} entries by hand first if you need the partial state/,
     );
     expect(existsSync(join(outDir, 'materialized.json'))).toBe(false);
+    expect(readdirSync(outDir).some((f) => f.startsWith('materialized.json.prev-'))).toBe(false); // the moved-aside receipt is gone too
+    expect(readdirSync(outDir).some((f) => f.startsWith(m.MATERIALIZE_INPROGRESS_PREFIX))).toBe(true); // the marker names the torn generation
     expect(existsSync(join(outDir, 'beta@v0.2.0'))).toBe(false); // the damage the rollback would have undone
     expect(readdirSync(outDir).some((f) => f.startsWith('.beta@v0.2.0.prev-'))).toBe(true); // its backup is still there for the operator
     expect(readdirSync(outDir).some((f) => f.endsWith('.lock'))).toBe(false); // the lock is always released
+    expect(m.inspectMaterializeRoot(outDir).state).toBe('damaged');
+    expect(() => m.readMaterializeReceipt(outDir)).toThrow(/is DAMAGED — in-progress marker .*beta@v0\.2\.0 MISSING.* — no receipt describes these trees; run `materialize /);
     // (e) The hook is INERT outside the test environment: the same variable with NODE_ENV not `test`
-    // and VITEST not "true" ⇒ a normal, successful materialization that also repairs the root.
+    // and VITEST not "true" ⇒ a normal, successful materialization that FIRST repairs the damaged
+    // root (alpha's swapped-in tree replaced by its backup, beta's hole filled from its backup,
+    // gamma's staging removed, marker gone) and then re-extracts the committed trees.
     const inert = runEnv({ [m.FAULT_ENV]: 'swap:1', NODE_ENV: 'production', VITEST: '' }, 'materialize', outDir);
     expect(inert.status, inert.stderr).toBe(0);
+    // (alpha's staging had already become its destination; beta's and gamma's remained ⇒ 2 removed.)
+    expect(inert.stdout).toMatch(/repaired\s+.*: a materialization \(generation \d{8}-\d{6}-[0-9a-f]{8}\) was interrupted during its swap — in-progress marker .*\.alpha@v0\.3\.0\.prev-.* beside a swapped-in alpha@v0\.3\.0; \.beta@v0\.2\.0\.prev-.* with beta@v0\.2\.0 MISSING; 2 staging dir\(s\); restored 2 previous tree\(s\) from their \.prev backups \(1 swapped-in tree\(s\) replaced\), removed 2 staging dir\(s\), the previous receipt and the marker; no receipt describes this root until this run publishes one/);
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']); // marker, prev, staging all gone
     for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // NEW trees — the committed ones
     const published = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as { repos: { repo: string; path: string; tree_sha: string }[] };
     expect(published.repos.map((r) => r.repo)).toEqual(['alpha', 'beta', 'gamma']);
@@ -1185,7 +1231,130 @@ describe('materialize — git archive of each pinned tag', () => {
       expect(existsSync(r.path)).toBe(true);
       expect(r.tree_sha).toBe(git(join(sourceRoot, r.repo), 'rev-parse', `${pinOf(readPin(), r.repo).commit_sha}^{tree}`));
     }
-  });
+    expect(m.readMaterializeReceipt(outDir).debris).toBe('clean');
+  }, 90_000); // 7 script spawns (~3-7 s each under full-suite load) — the same budget S15n/S15p carry
+
+  it.skipIf(process.platform === 'win32')(
+    'S15p: process TERMINATION between the two renames of a swap — SIGKILL from the vitest-only `kill-between-swaps:<n>` hook, no finally runs — leaves incomplete trees beside NO receipt (the previous receipt was moved aside and the `.materialize.inprogress-<gen>` marker published BEFORE the first tree moved); `readMaterializeReceipt()` refuses the root as DAMAGED naming the repair; the next `materialize` repairs it (previous trees restored from `.prev`, the swapped-in tree replaced, staging / marker / previous receipt removed, then re-extracts and publishes) — a receipt returns only then; a kill AFTER the receipt landed is a torn CLEANUP (the receipt stays valid, the next start finishes it); stale staging alone is debris; the kill hook is inert outside the test env',
+    async () => {
+      const m = await mod();
+      expect(m.MATERIALIZE_INPROGRESS_PREFIX).toBe('.materialize.inprogress-');
+      const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
+      const first = run('materialize', outDir);
+      expect(first.status, first.stderr).toBe(0);
+      expect(m.inspectMaterializeRoot(outDir).state).toBe('clean');
+      for (const t of trees) writeFileSync(join(outDir, t, 'previous-marker.txt'), t, 'utf8');
+      const receiptBefore = readFileSync(join(outDir, 'materialized.json'), 'utf8');
+      // (a) SIGKILL between beta's two renames: alpha already swapped in (its .prev kept), beta's
+      // destination moved to .prev and its staging NOT yet in place, gamma untouched beside its staging.
+      const killed = runEnv({ [m.FAULT_ENV]: 'kill-between-swaps:2' }, 'materialize', outDir);
+      expect(killed.status).toBeNull();
+      expect(killed.signal).toBe('SIGKILL');
+      const entries = readdirSync(outDir);
+      const gen = entries.find((f) => f.startsWith(m.MATERIALIZE_INPROGRESS_PREFIX))!.slice(m.MATERIALIZE_INPROGRESS_PREFIX.length);
+      expect(gen).toMatch(m.GENERATION_RE);
+      expect([...entries].sort()).toEqual(
+        [
+          `.alpha@v0.3.0.prev-${gen}`,
+          `.beta@v0.2.0.prev-${gen}`,
+          `.beta@v0.2.0.staging-${gen}`,
+          `.gamma@v0.3.0.staging-${gen}`,
+          m.MATERIALIZE_LOCK,
+          `${m.MATERIALIZE_INPROGRESS_PREFIX}${gen}`,
+          'alpha@v0.3.0',
+          'gamma@v0.3.0',
+          `materialized.json.prev-${gen}`,
+        ].sort(),
+      );
+      expect(existsSync(join(outDir, 'materialized.json'))).toBe(false); // NO receipt beside the incomplete trees — the round-5 finding
+      expect(existsSync(join(outDir, 'beta@v0.2.0'))).toBe(false); // the hole a torn swap leaves
+      expect(existsSync(join(outDir, 'alpha@v0.3.0', 'previous-marker.txt'))).toBe(false); // the swapped-in NEW tree
+      expect(readFileSync(join(outDir, `.alpha@v0.3.0.prev-${gen}`, 'previous-marker.txt'), 'utf8')).toBe('alpha@v0.3.0'); // its backup, kept
+      expect(readFileSync(join(outDir, 'gamma@v0.3.0', 'previous-marker.txt'), 'utf8')).toBe('gamma@v0.3.0'); // untouched
+      expect(readFileSync(join(outDir, `materialized.json.prev-${gen}`), 'utf8')).toBe(receiptBefore); // the previous receipt — aside, not at materialized.json
+      const marker = JSON.parse(readFileSync(join(outDir, `${m.MATERIALIZE_INPROGRESS_PREFIX}${gen}`), 'utf8')) as { generation: string; pid: number; repos: string[]; previous_receipt: string };
+      expect(marker.generation).toBe(gen);
+      expect(marker.repos).toEqual(trees);
+      expect(marker.previous_receipt).toBe(join(realpathSync(outDir), `materialized.json.prev-${gen}`));
+      // The root is DAMAGED: no receipt may be trusted; the reader refuses with the repair named.
+      const inspection = m.inspectMaterializeRoot(outDir);
+      expect(inspection.state).toBe('damaged');
+      expect(inspection.receipt).toBeNull();
+      expect(inspection.generations).toEqual([gen]);
+      expect(inspection.reasons).toEqual([
+        `in-progress marker ${m.MATERIALIZE_INPROGRESS_PREFIX}${gen} (pid ${marker.pid})`,
+        `.alpha@v0.3.0.prev-${gen} beside a swapped-in alpha@v0.3.0`,
+        `.beta@v0.2.0.prev-${gen} with beta@v0.2.0 MISSING`,
+        `the previous receipt materialized.json.prev-${gen} moved aside`,
+        '2 staging dir(s)',
+      ]);
+      expect(() => m.readMaterializeReceipt(outDir)).toThrow(m.RefusalError);
+      expect(() => m.readMaterializeReceipt(outDir)).toThrow(
+        /^.* is DAMAGED — in-progress marker \.materialize\.inprogress-\d{8}-\d{6}-[0-9a-f]{8} \(pid \d+\); \.alpha@v0\.3\.0\.prev-.* beside a swapped-in alpha@v0\.3\.0; \.beta@v0\.2\.0\.prev-.* with beta@v0\.2\.0 MISSING; the previous receipt materialized\.json\.prev-.* moved aside; 2 staging dir\(s\) — no receipt describes these trees; run `materialize .*` to repair \(it rolls the \.prev-<generation> trees back, removes the staging and the marker, re-extracts every pinned tree and publishes a new receipt\), or inspect those entries by hand first$/,
+      );
+      // The killed process left its lock (no finally ran): the next materialize refuses by name,
+      // as for any holder — the documented operator step is to remove a lock whose pid is gone.
+      const locked = run('materialize', outDir);
+      expect(locked.status).toBe(1);
+      expect(locked.stderr).toMatch(new RegExp(`another \`materialize\` publication holds .*\\.materialize\\.lock \\(pid \\d+ generation ${gen}\\) — refusing to interleave; if no materialize is running, remove the lock and retry`));
+      expect(existsSync(join(outDir, 'materialized.json'))).toBe(false); // still no receipt
+      rmSync(join(outDir, m.MATERIALIZE_LOCK));
+      // (b) The repair: the next materialize rolls the torn generation back, then re-extracts.
+      const repaired = run('materialize', outDir);
+      expect(repaired.status, repaired.stderr).toBe(0);
+      expect(repaired.stdout).toMatch(
+        new RegExp(`repaired\\s+.*: a materialization \\(generation ${gen}\\) was interrupted during its swap — in-progress marker .*; restored 2 previous tree\\(s\\) from their \\.prev backups \\(1 swapped-in tree\\(s\\) replaced\\), removed 2 staging dir\\(s\\), the previous receipt and the marker; no receipt describes this root until this run publishes one`),
+      );
+      expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+      for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // re-extracted: the committed trees
+      const after = m.readMaterializeReceipt(outDir);
+      expect(after.debris).toBe('clean');
+      expect(after.receipt.generation).not.toBe(gen);
+      expect(after.receipt.repos.map((r) => r.repo)).toEqual(['alpha', 'beta', 'gamma']);
+      for (const r of after.receipt.repos) {
+        expect(existsSync(r.path)).toBe(true);
+        expect(r.tree_sha).toBe(git(join(sourceRoot, r.repo), 'rev-parse', `${pinOf(readPin(), r.repo).commit_sha}^{tree}`));
+      }
+      // (c) A kill AFTER the receipt landed (before the backups went): a torn CLEANUP, not damage —
+      // the receipt is valid and describes the NEW trees; the next start finishes the cleanup.
+      for (const t of trees) writeFileSync(join(outDir, t, 'previous-marker.txt'), t, 'utf8');
+      const killedLate = runEnv({ [m.FAULT_ENV]: 'kill-after-receipt' }, 'materialize', outDir);
+      expect(killedLate.signal).toBe('SIGKILL');
+      const late = m.inspectMaterializeRoot(outDir);
+      expect(late.state).toBe('torn-cleanup');
+      expect(late.prevTrees.map((p) => p.tree)).toEqual(trees);
+      expect(late.prevReceipts).toHaveLength(1);
+      expect(late.markers).toHaveLength(1);
+      expect(late.receipt!.generation).toBe(late.generations[0]);
+      const lateRead = m.readMaterializeReceipt(outDir);
+      expect(lateRead.debris).toBe('torn-cleanup');
+      expect(lateRead.receipt.generation).toBe(late.receipt!.generation);
+      for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // the NEW trees are in place, described by the receipt
+      rmSync(join(outDir, m.MATERIALIZE_LOCK));
+      const finished = run('materialize', outDir);
+      expect(finished.status, finished.stderr).toBe(0);
+      expect(finished.stdout).toMatch(new RegExp(`repaired\\s+.*: finished the interrupted cleanup of generation ${late.generations[0]} \\(3 backup\\(s\\), the previous receipt and the marker removed; the receipt was already valid\\)`));
+      expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+      // (d) Stale staging alone (an extraction interrupted before any tree moved) is debris, not damage.
+      mkdirSync(join(outDir, '.alpha@v0.3.0.staging-20990101-000000-deadbeef'));
+      expect(m.inspectMaterializeRoot(outDir).state).toBe('stale-staging');
+      expect(m.readMaterializeReceipt(outDir).debris).toBe('stale-staging');
+      const swept = run('materialize', outDir);
+      expect(swept.status, swept.stderr).toBe(0);
+      expect(swept.stdout).toMatch(/repaired\s+.*: removed 1 staging dir\(s\) an interrupted extraction left \(trees and receipt untouched\)/);
+      expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+      // A receipt beside a tree removed by hand is refused by the reader too.
+      rmSync(join(outDir, 'gamma@v0.3.0'), { recursive: true, force: true });
+      expect(() => m.readMaterializeReceipt(outDir)).toThrow(/materialized\.json describes 1 tree\(s\) that are not there \(".*gamma@v0\.3\.0"\) — run `materialize .*` again/);
+      // (e) The kill hook is inert outside the test env: a normal, successful materialization.
+      const inert = runEnv({ [m.FAULT_ENV]: 'kill-between-swaps:1,kill-after-receipt', NODE_ENV: 'production', VITEST: '' }, 'materialize', outDir);
+      expect(inert.status, inert.stderr).toBe(0);
+      expect(inert.signal).toBeNull();
+      expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+      expect(m.readMaterializeReceipt(outDir).debris).toBe('clean');
+    },
+    90_000,
+  );
 
   it(
     'S15n: two CONCURRENT materializations into one root — each either publishes or is refused by `.materialize.lock` (never interleaved); the surviving trees are the committed trees, the receipt describes them, no staging/prev/lock debris',
@@ -1242,22 +1411,26 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     coreBin = (await mod()).CORE_BIN;
   }, HOOK_TIMEOUT);
 
-  /** An engine CLI on PATH that behaves per `script` (sh) — exercises the seams without the engine. */
-  function fakeCore(script: string): void {
-    const path = join(fakeBin, coreBin);
+  /** An engine CLI at `path` (default: on the fake PATH dir) that behaves per `script` (sh) —
+   *  exercises the seams without the engine. */
+  function fakeCore(script: string, path: string = join(fakeBin, coreBin)): void {
     writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8');
     chmodSync(path, 0o755);
+  }
+
+  /** `run` under an explicit PATH (and optionally a cwd — the empty-PATH-entry probe). */
+  function runWithEnv(over: { PATH: string; cwd?: string }, ...extra: string[]) {
+    const args = [SCRIPT, 'run', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--rules', rulesDir, ...extra];
+    // `env` already spreads process.env; re-stated so the harness-hygiene scan sees the arming here.
+    const res = spawnSync(process.execPath, args, { cwd: over.cwd, env: { ...process.env, ...env, PATH: over.PATH }, encoding: 'utf8' });
+    return { status: res.status, stdout: res.stdout, stderr: res.stderr };
   }
 
   /** `run` with the fake bin dir FIRST on PATH (so the fake shadows any installed wicked-core; the
    *  fake's own `grep`/`printf` still resolve), or with PATH = the fake dir ALONE for the
    *  not-on-PATH case. */
   function runWithPath(path: 'fake-first' | 'fake-only' = 'fake-first', ...extra: string[]) {
-    const args = [SCRIPT, 'run', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--rules', rulesDir, ...extra];
-    const PATH = path === 'fake-only' ? fakeBin : `${fakeBin}:${process.env['PATH'] ?? ''}`;
-    // `env` already spreads process.env; re-stated so the harness-hygiene scan sees the arming here.
-    const res = spawnSync(process.execPath, args, { env: { ...process.env, ...env, PATH }, encoding: 'utf8' });
-    return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+    return runWithEnv({ PATH: path === 'fake-only' ? fakeBin : `${fakeBin}${delimiter}${process.env['PATH'] ?? ''}` }, ...extra);
   }
 
   it('SKIPs (exit 0, said so) when the engine CLI is not on PATH — nothing to run is not a failure', () => {
@@ -1293,8 +1466,9 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
    *  false` drops `rule_coverage` (a pre-#394 engine); `coverageJs` / `degradedJs` replace the
    *  `, rule_coverage: …` / `, degraded: …` fragments verbatim (`''` omits the key — a malformed
    *  wire shape); `rulesList: 'usage'` answers `rules list` with the usage banner (an engine
-   *  without the command). */
-  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; coverageJs?: string; degradedJs?: string; rulesList?: 'json' | 'usage' } = {}): void {
+   *  without the command); `at` / `version` / `invoked` place a SECOND such engine elsewhere (the
+   *  cwd shim of S14l) with its own version string and invocation marker. */
+  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; coverageJs?: string; degradedJs?: string; rulesList?: 'json' | 'usage'; at?: string; version?: string; invoked?: string } = {}): void {
     const rowsJs =
       opts.rowsJs ??
       'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: x.kind === "bad" ? "deny" : "allow", fired: [], verdict: x.kind === "bad" ? "gap" : "caught" }));';
@@ -1316,7 +1490,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         : `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}'; exit 0;;`;
     fakeCore(
       [
-        `touch "${join(fixture, 'engine-invoked')}"`,
+        `touch "${join(fixture, opts.invoked ?? 'engine-invoked')}"`,
         'case "$1 $2" in',
         '  "rules ingest") [ -d "$3" ] || { echo "no seed dir" >&2; exit 1; }; exit 0;;',
         rulesList,
@@ -1332,8 +1506,9 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         `    "${process.execPath}" -e '${evalJs}' "$corpus"`,
         '    exit $?;;',
         'esac',
-        'echo "wicked-core 9.9.9-fake"',
+        `echo "${opts.version ?? 'wicked-core 9.9.9-fake'}"`,
       ].join('\n'),
+      opts.at === undefined ? undefined : join(opts.at, coreBin),
     );
   }
 
@@ -1356,7 +1531,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(readFileSync(join(fixture, 'corpus-listing.txt'), 'utf8').trim().split('\n')).toEqual(['samples.json']); // exactly one file
     expect(existsSync(join(outDir, 'corpus', 'samples.json'))).toBe(false); // the shared location is no longer written
     expect(r.stdout).toContain('summary: total 6 · caught 6 · gaps 0 · false_positives 0 · degraded "facet-only"');
-    expect(r.stdout).toContain('rule_coverage: exercised 0 · unexercised 1');
+    expect(r.stdout).toContain('rule_coverage: exercised 0 (0 distinct rule id(s) fired blocking across the rows) · unexercised 1');
     expect(r.stdout).toContain('unexercised DOC-1 (architecture)');
 
     // Every result row names a staged sample and carries THAT sample's payload identity — the hash
@@ -1635,9 +1810,11 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     for (const wrong of [true, false, 'yes', 0, {}]) {
       expect(m.verifyEngineReport(report(okRows, { degraded: wrong }), staged), JSON.stringify(wrong)).toBe(`the engine report's \`degraded\` is ${JSON.stringify(wrong)}, not null or one of facet-only`);
     }
-    // `rule_coverage`: absent passes (an older engine); present must be well-formed — null is malformed.
+    // `rule_coverage`: absent passes (an older engine); present must be well-formed — null is malformed
+    // — and reconciled with the rows (S14m): badCaught fired DOC-1, so DOC-1 is exercised and only
+    // ANOTHER rule may be unexercised (the round-4 fixture here blessed DOC-1 as both — codex round 5).
     expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 1, unexercised: [] } }), staged)).toBeNull();
-    expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 0, unexercised: [{ rule_id: 'DOC-1', steering_type: 'architecture' }] } }), staged)).toBeNull();
+    expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 1, unexercised: [{ rule_id: 'DOC-0', steering_type: 'development' }] } }), staged)).toBeNull();
     const coverageRefusals: [unknown, RegExp][] = [
       [null, /^the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null — an engine predating core #394 omits the field \(recorded as such\); a present field must be a well-formed \{ exercised, unexercised\[\] \}, never null$/],
       [[], /malformed: expected an object \{ exercised, unexercised\[\] \}, got \[\]/],
@@ -1680,6 +1857,136 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(r.stdout).toContain('summary: total 6 · caught 6 · gaps 0 · false_positives 0 · degraded null');
     expect(r.stdout).toContain('rule_coverage: not reported by this engine (predates core #394)');
     expect((JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report).degraded).toBeNull();
+  });
+
+  it("S14m: `rule_coverage` must RECONCILE with the rows — codex round 5's exact shape (`fired: [R]` beside `exercised: 0` and R unexercised) verified as valid — no id both fired and unexercised, `exercised` ≥ the distinct ids the rows' `fired` name (evals.rs counts every rule ANY claim fired, blocking or not, so it may exceed but never undercut the blocking set), `unexercised` free of duplicates, `recall_only` a non-negative integer when present; refused before publication, pure and through the CLI; a report without coverage (older engine) still passes", async () => {
+    const m = await mod();
+    const { samples } = readSamples(); // all good
+    const good = samples[0]!;
+    const bad = { ...samples[1]!, kind: 'bad' as const };
+    const good2 = samples[2]!;
+    const staged = [good, bad, good2];
+    const ref = (x: Sample) => ({ id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type });
+    // Distinct BLOCKING-fired ids across the rows: R (2 rows) and S (1 row).
+    const rows = [
+      { sample: ref(good), expected: 'allow', fired: [], verdict: 'caught' },
+      { sample: ref(bad), expected: 'deny', fired: ['R'], verdict: 'caught' },
+      { sample: ref(good2), expected: 'allow', fired: ['R', 'S'], verdict: 'false_positive' },
+    ];
+    const report = (rc?: unknown): Record<string, unknown> => ({ results: rows, summary: { total: 3, caught: 2, gaps: 0, false_positives: 1 }, degraded: null, ...(rc === undefined ? {} : { rule_coverage: rc }) });
+    // Consistent: exercised = the 2 blocking-fired ids; or MORE (a warn-effect rule fired — exercised
+    // per evals.rs `rule_coverage`, yet never in a row's deny-only `fired`); unexercised names OTHER
+    // rules only; recall_only rides along; absent coverage is an older engine.
+    expect(m.verifyEngineReport(report({ exercised: 2, unexercised: [] }), staged)).toBeNull();
+    expect(m.verifyEngineReport(report({ exercised: 3, unexercised: [{ rule_id: 'T', steering_type: 'testing' }], recall_only: 0 }), staged)).toBeNull();
+    expect(m.verifyEngineReport(report({ exercised: 2, unexercised: [{ rule_id: 'T', steering_type: 'testing' }, { rule_id: 'U', steering_type: 'security' }], recall_only: 4 }), staged)).toBeNull();
+    expect(m.verifyEngineReport(report(), staged)).toBeNull();
+    // Codex round 5's exact shape: R fired, `exercised: 0`, R listed unexercised — was `null` (valid).
+    expect(m.verifyEngineReport(report({ exercised: 0, unexercised: [{ rule_id: 'R', steering_type: 'architecture' }] }), staged)).toMatch(
+      /^the engine report's `rule_coverage` does not reconcile with its rows: unexercised\[0\] names R, which `fired` for 2 row\(s\) — a rule that fired for any sample is exercised, never unexercised — evals\.rs `rule_coverage` partitions the eligible rules by whether ANY evaluated claim fired them, and a row's `fired` is the blocking subset of that$/,
+    );
+    const refusals: [unknown, RegExp][] = [
+      [{ exercised: 0, unexercised: [] }, /does not reconcile with its rows: exercised 0 is below the 2 distinct rule id\(s\) the rows' `fired` name \("R", "S"\) — every blocking firing is an exercised rule, so exercised ≥ distinct fired \(equality only when no non-blocking effect fired\)/],
+      [{ exercised: 1, unexercised: [] }, /does not reconcile with its rows: exercised 1 is below the 2 distinct rule id\(s\)/],
+      [{ exercised: 2, unexercised: [{ rule_id: 'S', steering_type: 'security' }] }, /does not reconcile with its rows: unexercised\[0\] names S, which `fired` for 1 row\(s\)/],
+      [{ exercised: 2, unexercised: [{ rule_id: 'T', steering_type: 'testing' }, { rule_id: 'T', steering_type: 'testing' }] }, /does not reconcile with its rows: unexercised\[1\] repeats T — a rule is unexercised once or not at all/],
+      [{ exercised: 2, unexercised: [], recall_only: -1 }, /is malformed: recall_only -1 is not a non-negative integer/],
+      [{ exercised: 2, unexercised: [], recall_only: '0' }, /is malformed: recall_only "0" is not a non-negative integer/],
+      [{ exercised: 2, unexercised: [], recall_only: 1.5 }, /is malformed: recall_only 1\.5 is not a non-negative integer/],
+      [{ exercised: 2, unexercised: [], recall_only: null }, /is malformed: recall_only null is not a non-negative integer/],
+    ];
+    for (const [rc, re] of refusals) expect(m.verifyEngineReport(report(rc), staged), JSON.stringify(rc)).toMatch(re);
+    // Through the CLI: one good sample judged false_positive with DOC-1 fired, against the fake's
+    // default coverage (exercised 0, DOC-1 unexercised) ⇒ TOOL FAILURE, nothing published; a
+    // coverage that reconciles publishes, and the summary line shows the blocking-fired count beside
+    // `exercised` (the excess being non-blocking firings) plus `recall_only`.
+    const firing =
+      'const results = samples.map((x, i) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: "allow", fired: i === 0 ? ["DOC-1"] : [], verdict: i === 0 ? "false_positive" : "caught" }));';
+    okEngine({ rowsJs: firing });
+    const contradictory = runWithPath();
+    expect(contradictory.status).toBe(1);
+    expect(contradictory.stderr).toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — the engine report's `rule_coverage` does not reconcile with its rows: unexercised\[0\] names DOC-1, which `fired` for 1 row\(s\) — a rule that fired for any sample is exercised, never unexercised/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json'))).toBe(false);
+    okEngine({ rowsJs: firing, coverageJs: ', rule_coverage: { exercised: 0, unexercised: [] }' });
+    const undercut = runWithPath();
+    expect(undercut.status).toBe(1);
+    expect(undercut.stderr).toMatch(/does not reconcile with its rows: exercised 0 is below the 1 distinct rule id\(s\) the rows' `fired` name \("DOC-1"\)/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    okEngine({ rowsJs: firing, coverageJs: ', rule_coverage: { exercised: 2, unexercised: [{ rule_id: "DOC-0", steering_type: "development" }], recall_only: 1 }' });
+    const reconciled = runWithPath();
+    expect(reconciled.status, reconciled.stderr).toBe(0);
+    expect(reconciled.stdout).toContain('summary: total 6 · caught 5 · gaps 0 · false_positives 1');
+    expect(reconciled.stdout).toContain('rule_coverage: exercised 2 (1 distinct rule id(s) fired blocking across the rows; 1 exercised by a non-blocking effect only) · unexercised 1 · recall_only 1');
+    expect(reconciled.stdout).toContain('unexercised DOC-0 (development)');
+    expect((JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report).rule_coverage).toEqual({ exercised: 2, unexercised: [{ rule_id: 'DOC-0', steering_type: 'development' }], recall_only: 1 });
+  });
+
+  it("S14l: the engine hashed IS the engine spawned — an EMPTY PATH entry is the cwd, as exec reads it: with `<empty>:<fake dir>:…` and a shadowing wicked-core shim in the cwd every spawn (--version, ingest, list, eval) hits the shim, the provenance names the shim's realpath + sha256 and the PATH-dir engine is never invoked (codex round 5: the old resolver skipped the empty entry and hashed the PATH-dir build while the spawn ran the shim); without the empty entry the PATH-dir engine wins and the shim never runs; resolveExecutable() walks empty entries as the cwd, passes over a directory, tells a present-but-not-executable file (exec's EACCES) apart from nothing found (ENOENT — the SKIP), and the win32 enumeration searches the cwd first with every PATHEXT", async () => {
+    const m = await mod();
+    okEngine(); // the PATH-dir engine: version 9.9.9-fake, touches engine-invoked
+    const shimDir = join(fixture, 'cwd-shim');
+    mkdirSync(shimDir, { recursive: true });
+    okEngine({ at: shimDir, version: 'wicked-core 9.9.9-shim', invoked: 'shim-invoked' });
+    const shim = join(shimDir, coreBin);
+    const fake = join(fakeBin, coreBin);
+    expect(readFileSync(shim, 'utf8')).not.toBe(readFileSync(fake, 'utf8')); // two distinct builds — the hashes tell them apart
+    // (a) A LEADING empty entry: the cwd shadows the PATH dir for every spawn.
+    const shadowed = runWithEnv({ PATH: `${delimiter}${fakeBin}${delimiter}${process.env['PATH'] ?? ''}`, cwd: shimDir });
+    expect(shadowed.status, shadowed.stderr).toBe(0);
+    const viaShim = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as ReportMeta;
+    expect(viaShim.engine).toEqual({ version: 'wicked-core 9.9.9-shim', build: { path: realpathSync(shim), sha256: sha256(readFileSync(shim)) } });
+    expect(shadowed.stdout).toContain(`evals-internal-corpus run (wicked-core 9.9.9-shim)`);
+    expect(shadowed.stdout).toContain(`engine build ${viaShim.engine.build.sha256} (${realpathSync(shim)})`);
+    expect(existsSync(join(fixture, 'shim-invoked'))).toBe(true);
+    expect(existsSync(join(fixture, 'engine-invoked'))).toBe(false); // the PATH-dir engine ran for NONE of the four spawns
+    // (b) Control: no empty entry ⇒ the PATH dir wins; the shim in the cwd is never spawned.
+    rmSync(join(fixture, 'shim-invoked'));
+    const plain = runWithEnv({ PATH: `${fakeBin}${delimiter}${process.env['PATH'] ?? ''}`, cwd: shimDir });
+    expect(plain.status, plain.stderr).toBe(0);
+    const viaPath = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as ReportMeta;
+    expect(viaPath.engine).toEqual({ version: 'wicked-core 9.9.9-fake', build: { path: realpathSync(fake), sha256: sha256(readFileSync(fake)) } });
+    expect(viaPath.engine.build.sha256).not.toBe(viaShim.engine.build.sha256);
+    expect(existsSync(join(fixture, 'engine-invoked'))).toBe(true);
+    expect(existsSync(join(fixture, 'shim-invoked'))).toBe(false);
+    // (c) The resolver itself over fixture PATH strings: an empty entry is the cwd, in PATH order.
+    expect(m.resolveExecutable(coreBin, { path: `${delimiter}${fakeBin}`, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, searched: [shim, fake] });
+    expect(m.resolveExecutable(coreBin, { path: `${fakeBin}${delimiter}`, cwd: shimDir })).toMatchObject({ path: realpathSync(fake), searched: [fake, shim] }); // a TRAILING empty entry is the cwd too — after the dir
+    expect(m.resolveExecutable(coreBin, { path: `${fakeBin}${delimiter}${delimiter}${fixture}`, cwd: shimDir }).searched).toEqual([fake, shim, join(fixture, coreBin)]); // a DOUBLED delimiter
+    expect(m.resolveExecutable(coreBin, { path: fakeBin, cwd: shimDir }).path).toBe(realpathSync(fake)); // no empty entry ⇒ the cwd is never searched
+    // A directory of that name on PATH is passed over (exec does the same) — the next entry wins.
+    const dirNamed = join(fixture, 'dir-named');
+    mkdirSync(join(dirNamed, coreBin), { recursive: true });
+    expect(m.resolveExecutable(coreBin, { path: `${dirNamed}${delimiter}${fakeBin}`, cwd: fixture }).path).toBe(realpathSync(fake));
+    // Nothing named so anywhere ⇒ ENOENT (the documented SKIP); an unset PATH searches nothing.
+    expect(m.resolveExecutable(coreBin, { path: dirNamed, cwd: fixture })).toEqual({ path: null, blocked: null, searched: [join(dirNamed, coreBin)] });
+    expect(m.resolveExecutable(coreBin, { path: undefined, cwd: shimDir })).toEqual({ path: null, blocked: null, searched: [] });
+    // A present-but-not-executable file is `blocked` (exec's EACCES — spawned so the OS says so,
+    // never a SKIP); with an executable later on the path it is passed over exactly as exec does.
+    chmodSync(shim, 0o644);
+    expect(m.resolveExecutable(coreBin, { path: '', cwd: shimDir })).toEqual({ path: null, blocked: shim, searched: [shim] });
+    expect(m.resolveExecutable(coreBin, { path: `${delimiter}${fakeBin}`, cwd: shimDir }).path).toBe(realpathSync(fake));
+    chmodSync(shim, 0o755);
+    // (d) A name with a separator is a path against the cwd — PATH is not consulted.
+    expect(m.resolveExecutable(`.${sep}${coreBin}`, { path: fakeBin, cwd: shimDir })).toEqual({ path: realpathSync(shim), blocked: null, searched: [shim] });
+    // (e) The win32 enumeration: cwd FIRST (libuv), then each entry (empty = cwd), bare then every
+    // PATHEXT. (`coreBin`, never the spelled name — tests/core-checkout-policy.test.ts forbids it.)
+    expect(m.executableCandidates(coreBin, { platform: 'win32', path: '/a;;/b', cwd: '/cwd', pathext: '.EXE;.CMD' })).toEqual([
+      `/cwd/${coreBin}`,
+      `/cwd/${coreBin}.EXE`,
+      `/cwd/${coreBin}.CMD`,
+      `/a/${coreBin}`,
+      `/a/${coreBin}.EXE`,
+      `/a/${coreBin}.CMD`,
+      `/cwd/${coreBin}`,
+      `/cwd/${coreBin}.EXE`,
+      `/cwd/${coreBin}.CMD`,
+      `/b/${coreBin}`,
+      `/b/${coreBin}.EXE`,
+      `/b/${coreBin}.CMD`,
+    ]);
+    expect(m.executableCandidates(coreBin, { platform: 'linux', path: ':/a:', cwd: '/cwd' })).toEqual([`/cwd/${coreBin}`, `/a/${coreBin}`, `/cwd/${coreBin}`]);
+    expect(m.executableCandidates(coreBin, { platform: 'linux', path: 'rel:/a', cwd: '/cwd' })).toEqual([`/cwd/rel/${coreBin}`, `/a/${coreBin}`]); // a relative entry resolves against the cwd, as exec does
   });
 
   it('S14e: report.json + report.meta.json are ONE verifiable generation — an interruption between the two renames (report renamed, meta not) is refused on read by name, an edited meta generation too', async () => {

@@ -71,17 +71,31 @@ staging dir beside its destination and swaps the trees in only after ALL verifie
 `.prev` backup until the receipt is published — a failed repeat leaves the previous trees and
 `materialized.json` intact, a failed first run leaves no receipt, and a failure DURING the swap or
 the receipt write is rolled back (every destination restored byte-identical, the previous receipt
-untouched; if the rollback itself fails the receipt is removed and the error names both faults).
-`run` verifies `samples.meta.json` against `samples.json` and the selected pin before
-the engine is probed, stages exactly those samples in a fresh private temp dir, verifies the
+restored only after that complete rollback; if the rollback itself fails every receipt is removed
+and the error names both faults). The receipt is INVALIDATED before the first tree moves — an
+in-progress marker (`.materialize.inprogress-<generation>`) is published and the previous
+`materialized.json` moved aside — so a process killed between two renames leaves incomplete trees
+beside NO receipt; every start inspects the root and repairs a torn swap (the `.prev` trees rolled
+back, staging / marker / previous receipt removed, nothing trusted until the run publishes),
+finishes a torn cleanup, sweeps stale staging; a consumer reads the receipt through
+`readMaterializeReceipt()`, which refuses a damaged root by name with `materialize <dir>` as the
+repair. `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
+the engine is probed, resolves the engine ONCE with exec's own search semantics (every `PATH`
+entry in order, an EMPTY entry being the cwd, `PATHEXT` on Windows, an executable regular file
+required) and spawns THAT absolute path for every call — the file hashed into the provenance is
+the file that ran — stages exactly those samples in a fresh private temp dir, verifies the
 engine's report before publication (exactly one row per staged sample, engine verdicts, `fired`
 arrays, every row consistent with its sample's kind — `expected` deny/allow by kind, never `gap`
 on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking verdict fired —
-a summary that is the rows' tally, `degraded` present, `rule_coverage` absent or well-formed — an
-empty, partial or impossible report is a named tool failure),
+a summary that is the rows' tally, `degraded` present, `rule_coverage` absent or well-formed AND
+reconciled with the rows: no id both fired and unexercised, `exercised` at least the distinct ids
+the rows' `fired` name (the engine counts every rule any claim fired, blocking or not, so it may
+exceed but never undercut), no duplicate unexercised id, `recall_only` a non-negative integer when
+present — an empty, partial, impossible or contradictory report is a named tool failure),
 stamps every result row with its sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as
 one verifiable generation (`report_sha256` + shared `generation`) with complete provenance:
-engine version + build identity (realpath + sha256 of the binary), the rule-snapshot identity
+engine version + build identity (realpath + sha256 of the executable actually spawned, hashed
+again after the run), the rule-snapshot identity
 (`rules_identity.method` says how it was derived), `pin_hash`, `samples_hash`. The corpus
 identity a run carries is `evals:wicked-internal@<pin_hash>` + the `samples_hash` written to
 `samples.meta.json`; the full plan is `docs/testing/evals-test-plan.md`.

@@ -103,6 +103,24 @@ mentioned only where a daemon release depends on them.
   `fired` disagreeing with the verdict) and malformed report fields (`degraded` absent or not
   null / `facet-only`, `rule_coverage: null` — what crashed the summary print after publication);
   the valid all-gap fixture is now built from BAD samples.
+  Codex round 5: `run` resolves the engine ONCE with exec's own search semantics (every `PATH`
+  entry in order, an EMPTY entry being the cwd — the old resolver skipped it and could hash
+  another build than the one the spawn ran — `PATHEXT` on Windows, an executable regular file
+  required) and spawns THAT absolute path for `--version` / `rules ingest` / `rules list` /
+  `rules eval`, never the bare name: the file hashed into the provenance is the file that ran
+  (hashed again after the run; a binary replaced underneath is a tool failure). `materialize`
+  invalidates the receipt BEFORE the first tree moves — an in-progress marker is published and the
+  previous `materialized.json` moved aside — so a process killed between two renames leaves
+  incomplete trees beside NO receipt; every start inspects the root (`inspectMaterializeRoot`) and
+  repairs a torn swap (`.prev` trees rolled back, staging / marker / previous receipt removed,
+  nothing trusted until the run publishes), finishes a torn cleanup, sweeps stale staging;
+  `readMaterializeReceipt()` refuses a damaged root by name with that repair as the hint (proven by
+  a deterministic SIGKILL between the two renames and after the receipt write). `verifyEngineReport`
+  reconciles `rule_coverage` with the rows per the engine's definition (a rule is exercised when
+  ANY claim fired it, blocking or not; a row's `fired` is the blocking subset): no id both fired and
+  unexercised, `exercised` ≥ the distinct blocking-fired ids, no duplicate unexercised id,
+  `recall_only` a non-negative integer when present — the round-4 fixture that blessed a fired rule
+  as unexercised is corrected; the summary line prints the blocking-fired count beside `exercised`.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
