@@ -144,9 +144,38 @@ function lstatOrNull(path: string): Stats | null {
  * from the resolution seam.
  */
 export function preparePartitionedInteractiveRoot(projectId: string, home: string = homedir()): string {
+  return containPartitionedInteractiveRoot(projectId, home, true);
+}
+
+/**
+ * The SAME containment check WITHOUT materialization (crew#474, Copilot) — for a caller that only
+ * reads what is already there: the interactive event seams (`server.ts` `interactiveDocsRoot`),
+ * which `readDocHead` a manifest under a root the routes materialized, or install a demo spec
+ * into a doc workspace that must already exist. Every component that EXISTS under the base is
+ * judged exactly as `preparePartitionedInteractiveRoot` judges it — a symbolic link or a
+ * non-directory refuses, an existing partition must realpath-resolve inside the base — and a
+ * component that does not exist ends the walk: nothing sits there to be followed, and a reader
+ * creates nothing (an event naming a project that never had a partition must not mint one).
+ * Returns the lexical path either way.
+ */
+export function checkPartitionedInteractiveRoot(projectId: string, home: string = homedir()): string {
+  return containPartitionedInteractiveRoot(projectId, home, false);
+}
+
+/**
+ * The ONE containment walk both entry points above run — `materialize` is the only difference
+ * (create a missing component vs. stop at it). Kept single on purpose: the routes and the event
+ * seams must agree on what `projects/<id>` may be, or a link the routes refuse is still followed
+ * through the seam path (the gap Copilot found on #474).
+ */
+function containPartitionedInteractiveRoot(projectId: string, home: string, materialize: boolean): string {
   const partition = partitionedInteractiveRoot(projectId, home);
   const base = partitionsBase(home);
-  mkdirSync(base, { recursive: true });
+  if (materialize) {
+    mkdirSync(base, { recursive: true });
+  } else if (lstatOrNull(base) === null) {
+    return partition; // no base yet ⇒ no partition ⇒ nothing on disk a link could redirect
+  }
   const refuse = (path: string, reason: string): never => {
     throw new InteractivePartitionRefusedError(projectId, path, reason, base);
   };
@@ -158,6 +187,7 @@ export function preparePartitionedInteractiveRoot(projectId: string, home: strin
     cursor = resolve(cursor, segment);
     let st = lstatOrNull(cursor);
     if (st === null) {
+      if (!materialize) return partition; // absent: nothing to follow, and a reader mints nothing
       try {
         mkdirSync(cursor);
       } catch (err) {
@@ -228,6 +258,14 @@ export function resolveInteractiveRoot(
  * `interactiveRoot` › `WICKED_INTERACTIVE_ROOT` › the project's default — the legacy shared root
  * for `default` (and for an unknown project identity, `undefined`: an event that carries no
  * `project_id` belongs to Unfiled), the `projects/<projectId>` partition for everything else.
+ *
+ * The partition is containment-checked on REAL paths (crew#474): whatever already sits at
+ * `projects/<projectId>` — or on the way to it — must be a real directory whose real path is
+ * inside `projects/`, else `InteractivePartitionRefusedError`; a partition that does not exist
+ * yet is returned as its lexical path and NOTHING is created (`checkPartitionedInteractiveRoot`).
+ * This is the event seams' resolver (`server.ts` `interactiveDocsRoot`): they read manifests
+ * under a root the routes materialized, and a lexical-only answer here was the one path left on
+ * which a symlinked partition would still have been followed (Copilot on #474).
  */
 export function resolveProjectInteractiveRoot(
   projectId: string | undefined,
@@ -235,17 +273,16 @@ export function resolveProjectInteractiveRoot(
   env: Record<string, string | undefined> = process.env,
   home: string = homedir(),
 ): string {
-  return resolveProjectRootWith(partitionedInteractiveRoot, projectId, setting, env, home);
+  return resolveProjectRootWith(checkPartitionedInteractiveRoot, projectId, setting, env, home);
 }
 
 /**
- * `resolveProjectInteractiveRoot` for a caller about to USE the root — the routes, through
- * `project-root.ts`. Same precedence; the difference is that a partition is materialized and
- * containment-checked on real paths (`preparePartitionedInteractiveRoot`) instead of merely
- * spelled, so a symlinked `projects/<id>` throws `InteractivePartitionRefusedError` here rather
- * than being followed by the bridge. An explicit root and the `default` project's legacy root are
- * returned untouched — an operator's own directory is theirs to place, behind a link or not
- * (§7.2) — so those two never cost a disk access.
+ * `resolveProjectInteractiveRoot` for a caller about to USE the root and entitled to create it —
+ * the routes, through `project-root.ts`. Same precedence, the SAME containment walk; the one
+ * difference is that a missing partition is materialized (`preparePartitionedInteractiveRoot`)
+ * instead of merely spelled. An explicit root and the `default` project's legacy root are
+ * returned untouched by both resolvers — an operator's own directory is theirs to place, behind
+ * a link or not (§7.2) — so those two never cost a disk access.
  */
 export function ensureProjectInteractiveRoot(
   projectId: string | undefined,

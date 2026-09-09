@@ -592,7 +592,12 @@ export async function createServer(
    *  the project routes and the interactive proxy use (DES-MERGE-001 §7.1/§7.2; partitioned
    *  per project since crew#472, with an event that carries no `project_id` belonging to
    *  Unfiled). Shared by the edit seam (demo-kind gate, CREW-UX-9), the demo seam (spec
-   *  install + manifest reads), and the chat seam. */
+   *  install + manifest reads), and the chat seam. The partition is containment-checked on
+   *  REAL paths here exactly as the routes check it (crew#474 — one walk, `bridge-root.ts`):
+   *  a symlinked `projects/<id>` throws `InteractivePartitionRefusedError` into the seam's
+   *  handler (logged by its `onError`, the event unanswered — fail closed) instead of being
+   *  followed into another project's docs; the seams only READ under a root the routes
+   *  materialized, so a missing partition is returned as spelled and nothing is created. */
   const interactiveDocsRoot = (projectId: string | undefined): string =>
     resolveProjectInteractiveRoot(projectId, projectId !== undefined ? projectSettings.get(projectId) : null);
 

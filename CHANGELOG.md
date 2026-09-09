@@ -24,7 +24,11 @@ mentioned only where a daemon release depends on them.
   at another project's partition, or anywhere else — would have been followed by the bridge into
   that directory. The partition is now `lstat`-walked and `realpath`-contained under `projects/`
   and created without following links; a link, a file, or an escape answers 500 naming the
-  offending path (fail closed — never a fallback to another root). The attributed docs list also
+  offending path (fail closed — never a fallback to another root). The interactive event seams
+  (edit / demo / chat) resolve a project's docs root through the SAME containment walk — a
+  symlinked partition is refused into the seam handler's `onError` and the event goes unanswered
+  instead of being followed into another project's docs; the seams only read under a root the
+  routes materialized, so nothing is created on that path (Copilot on #474). The attributed docs list also
   answers 502 for a malformed list (`[null]`, non-object rows) or a non-JSON body from the
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
