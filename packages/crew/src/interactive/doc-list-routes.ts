@@ -16,8 +16,13 @@
  * through the proxy verbatim. The query string (`?includeRetired=1`) is forwarded untouched.
  *
  * Non-list answers are relayed rather than reshaped: a bridge that fails its own listing answers
- * with its status and body; a bridge that answers 200 with something other than a JSON array is a
- * 502 that says so, never an empty list pretending nothing exists.
+ * with its status and body; a bridge that answers 200 with something other than a JSON array of
+ * doc summaries — a non-JSON body, a JSON object, a list holding `null` or a string where a row
+ * should be — is a 502 that says which, never an empty list pretending nothing exists and never
+ * `[{ projectId }]` minted from nothing. And a body that is malformed is told apart from a body
+ * that never fully ARRIVED: the first is the bridge's answer (no retry would change it), the
+ * second is a transport failure that takes the same invalidate → retry-once → diagnostic path a
+ * refused connect does.
  */
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -29,10 +34,34 @@ import { projectDocsRoot } from './project-root.js';
 
 const V = API_PREFIX;
 
-/** The bridge's answer to `GET /api/docs`, before crew parses the body. */
+/** The bridge's answer to `GET /api/docs`, fully read. `json` is false when the COMPLETE body
+ *  did not parse (then `body` is null). */
 interface UpstreamList {
   status: number;
   body: unknown;
+  json: boolean;
+}
+
+/**
+ * The shape of a bridge row this route will vouch for: a plain object naming the doc and its
+ * kind (`InteractiveDocSummary` minus the `projectId` this route adds). Everything else on the
+ * row is relayed field-for-field — the bridge's DTO, not a crew re-spelling of it.
+ */
+type DocSummaryRow = Record<string, unknown> & { name: string; kind: string };
+
+function isDocSummaryRow(row: unknown): row is DocSummaryRow {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>;
+  return typeof r['name'] === 'string' && typeof r['kind'] === 'string';
+}
+
+/** A short, safe rendering of an offending row for the 502 detail — its type and a bounded preview. */
+function describeRow(row: unknown): string {
+  if (row === null) return 'null';
+  if (Array.isArray(row)) return 'an array';
+  if (typeof row !== 'object') return `a ${typeof row} (${String(JSON.stringify(row) ?? row).slice(0, 80)})`;
+  const keys = Object.keys(row).slice(0, 8).join(', ');
+  return `an object without string name/kind (keys: ${keys === '' ? 'none' : keys})`;
 }
 
 export interface DocListDeps {
@@ -51,20 +80,23 @@ export function registerInteractiveDocList(app: FastifyInstance, adapter: CoreAd
   const log = deps.log ?? ((): void => undefined);
   const timeoutMs = deps.upstreamTimeoutMs ?? 30_000;
 
-  /** One list call to the bridge. Throws on transport failure (caller retries once). */
+  /**
+   * One list call to the bridge. Throws on transport failure — a refused connect, the timeout, a
+   * connection torn down while the body was still arriving — and the caller retries once. Only a
+   * COMPLETE body reaches the parser, so a parse failure is exactly what it looks like: the
+   * bridge answered with something other than JSON (its default not-found page, say). No retry
+   * would change that, so it is reported as the bridge's answer, never as unreachability.
+   */
   async function listUpstream(bridge: LiveBridge, query: string): Promise<UpstreamList> {
     const res = await fetch(`http://${bridge.host}:${bridge.port}/api/docs${query}`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    let body: unknown = null;
+    const text = await res.text();
     try {
-      body = await res.json();
+      return { status: res.status, body: JSON.parse(text) as unknown, json: true };
     } catch {
-      // A non-JSON body on a JSON-always wire (a bridge's default not-found page) — keep the
-      // status (it is the truth that matters); the null body fails the list-shape check below
-      // rather than being invented into rows.
+      return { status: res.status, body: null, json: false };
     }
-    return { status: res.status, body };
   }
 
   function unavailable(reply: FastifyReply, err: unknown): FastifyReply {
@@ -78,8 +110,11 @@ export function registerInteractiveDocList(app: FastifyInstance, adapter: CoreAd
     {
       config: {
         manifest: {
-          responseType: 'InteractiveDocSummary',
-          statusCodes: [200, 404, 502, 503],
+          // The wire is a JSON ARRAY of rows, spelled in the manifest's TypeScript-inline form
+          // (`{ runs: SessionView[] }` is the wrapped-list precedent). 500 is the refused
+          // partition (`InteractivePartitionRefusedError`, bridge-root.ts).
+          responseType: 'InteractiveDocSummary[]',
+          statusCodes: [200, 404, 500, 502, 503],
         },
       },
     },
@@ -124,17 +159,42 @@ export function registerInteractiveDocList(app: FastifyInstance, adapter: CoreAd
         }
       }
 
-      // The bridge's own failure, relayed with its status: never reshaped into an empty list.
+      // The bridge's own failure, relayed with its status: never reshaped into an empty list. A
+      // non-JSON failure body (a bridge's default not-found page) gets a JSON error in its place.
       if (upstream.status !== 200) {
         return reply
           .code(upstream.status)
-          .send(upstream.body ?? { error: `wicked-interactive answered GET /api/docs with HTTP ${upstream.status}` });
+          .send(
+            upstream.json && upstream.body !== null
+              ? upstream.body
+              : { error: `wicked-interactive answered GET /api/docs with HTTP ${upstream.status}` },
+          );
+      }
+      if (!upstream.json) {
+        log(`[doc-list] the bridge answered GET /api/docs for project ${projectId} with a body that is not JSON`);
+        return reply
+          .code(502)
+          .send({ error: 'wicked-interactive answered GET /api/docs with a malformed body (not JSON)' });
       }
       if (!Array.isArray(upstream.body)) {
         log(`[doc-list] the bridge answered GET /api/docs for project ${projectId} with a non-list body`);
         return reply.code(502).send({ error: 'wicked-interactive answered GET /api/docs with a non-list body' });
       }
-      return reply.send(upstream.body.map((row: unknown) => ({ ...(row as Record<string, unknown>), projectId })));
+      // Every row must be a doc summary before it is vouched for: `[null]` would otherwise become
+      // `[{ projectId }]` with a 200, and a string row would spread into char-indexed keys.
+      const rows: unknown[] = upstream.body;
+      const summaries: DocSummaryRow[] = [];
+      for (const [index, row] of rows.entries()) {
+        if (!isDocSummaryRow(row)) {
+          const detail = `row ${index} is not a doc summary: ${describeRow(row)}`;
+          log(`[doc-list] the bridge answered GET /api/docs for project ${projectId} with a malformed list — ${detail}`);
+          return reply
+            .code(502)
+            .send({ error: 'wicked-interactive answered GET /api/docs with a malformed list', detail });
+        }
+        summaries.push(row);
+      }
+      return reply.send(summaries.map((row) => ({ ...row, projectId })));
     },
   );
 }

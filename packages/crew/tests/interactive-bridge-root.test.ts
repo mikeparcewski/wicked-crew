@@ -7,19 +7,24 @@
 // exercised without a child process.
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import type { ChildProcess } from 'node:child_process';
 import {
   defaultInteractiveRoot,
+  ensureProjectInteractiveRoot,
+  InteractivePartitionRefusedError,
   partitionedInteractiveRoot,
+  partitionsBase,
+  preparePartitionedInteractiveRoot,
   PROJECTS_DIR,
   resolveInteractiveRoot,
   resolveProjectInteractiveRoot,
   ROOT_ENV,
 } from '../src/interactive/bridge-root.js';
+import { canSymlink } from './setup/can-symlink.js';
 import {
   BridgeUnavailableError,
   InteractiveBridgePool,
@@ -124,6 +129,99 @@ describe('resolveProjectInteractiveRoot (crew#472 — the default root is partit
     }
     // The partition never escapes the projects dir.
     expect(partitionedInteractiveRoot('a..', HOME)).toBe(join(LEGACY, PROJECTS_DIR, 'a..'));
+  });
+});
+
+describe('partition containment on REAL paths (a symlinked projects/<id> is refused, never followed)', () => {
+  // The lexical check above proves an ID cannot spell its way out of `projects/`. It says nothing
+  // about what is already sitting at `projects/<id>`: a symlink there would be followed by the
+  // bridge into whatever it points at — another project's partition included. These cases run on
+  // a real scratch home because the guard is about the disk, not the string.
+  const SYMLINKS = canSymlink();
+  let home: string;
+  let base: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'wi-partition-'));
+    base = partitionsBase(home);
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('materializes a missing partition as a REAL directory and returns the lexical path (the pool key)', () => {
+    const root = preparePartitionedInteractiveRoot('p-a', home);
+    expect(root).toBe(partitionedInteractiveRoot('p-a', home));
+    expect(root).toBe(join(base, 'p-a'));
+    const st = lstatSync(root);
+    expect(st.isDirectory()).toBe(true);
+    expect(st.isSymbolicLink()).toBe(false);
+    // Idempotent: a second resolution finds the directory and keeps what is in it.
+    writeFileSync(join(root, 'marker'), '');
+    expect(preparePartitionedInteractiveRoot('p-a', home)).toBe(root);
+    expect(existsSync(join(root, 'marker'))).toBe(true);
+    // The guarded project-level resolver gives the same answer for an unbound non-default project.
+    expect(ensureProjectInteractiveRoot('p-a', null, NO_ENV, home)).toBe(root);
+  });
+
+  it.skipIf(!SYMLINKS)("refuses a symlink planted at projects/A that points at ANOTHER project's partition", () => {
+    // B exists and holds a doc — the thing a link at A would expose to A's URL.
+    const b = preparePartitionedInteractiveRoot('p-b', home);
+    mkdirSync(join(b, 'b-secret'), { recursive: true });
+    writeFileSync(join(b, 'b-secret', 'versions.json'), '{}');
+    symlinkSync(b, join(base, 'p-a'), 'dir');
+
+    const attempt = (): string => preparePartitionedInteractiveRoot('p-a', home);
+    expect(attempt).toThrow(InteractivePartitionRefusedError);
+    expect(attempt).toThrow(/is a symbolic link/);
+    expect(attempt).toThrow(join(base, 'p-a'));
+    expect(() => ensureProjectInteractiveRoot('p-a', null, NO_ENV, home)).toThrow(InteractivePartitionRefusedError);
+    // The lexical resolver is unchanged — it never claimed containment; the guard sits where the
+    // root is about to be USED (`project-root.ts`).
+    expect(resolveProjectInteractiveRoot('p-a', null, NO_ENV, home)).toBe(join(base, 'p-a'));
+    // B is untouched, and the refusal is a server-side 500 that names the path — not a client error.
+    expect(existsSync(join(b, 'b-secret', 'versions.json'))).toBe(true);
+    let err: unknown;
+    try {
+      attempt();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(InteractivePartitionRefusedError);
+    expect((err as InteractivePartitionRefusedError).statusCode).toBe(500);
+    expect((err as InteractivePartitionRefusedError).path).toBe(join(base, 'p-a'));
+    expect((err as InteractivePartitionRefusedError).projectId).toBe('p-a');
+  });
+
+  it.skipIf(!SYMLINKS)('refuses a symlink that leaves the projects base entirely', () => {
+    const elsewhere = join(home, 'elsewhere');
+    mkdirSync(elsewhere, { recursive: true });
+    mkdirSync(base, { recursive: true });
+    symlinkSync(elsewhere, join(base, 'p-a'), 'dir');
+    expect(() => preparePartitionedInteractiveRoot('p-a', home)).toThrow(/is a symbolic link/);
+  });
+
+  it.skipIf(!SYMLINKS)('refuses a DANGLING symlink too — nothing is ever created through it', () => {
+    mkdirSync(base, { recursive: true });
+    symlinkSync(join(home, 'never-there'), join(base, 'p-a'), 'dir');
+    expect(() => preparePartitionedInteractiveRoot('p-a', home)).toThrow(/is a symbolic link/);
+    expect(existsSync(join(home, 'never-there'))).toBe(false);
+  });
+
+  it('refuses a regular file squatting on the partition path', () => {
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, 'p-a'), 'not a directory');
+    expect(() => preparePartitionedInteractiveRoot('p-a', home)).toThrow(/is not a directory/);
+  });
+
+  it("never touches the disk for `default` or an explicit root — those are the operator's to place", () => {
+    // A home that does not exist: any fs work on these paths would throw or create it.
+    const ghost = join(home, 'ghost-home');
+    expect(ensureProjectInteractiveRoot('default', null, NO_ENV, ghost)).toBe(defaultInteractiveRoot(ghost));
+    expect(ensureProjectInteractiveRoot(undefined, null, NO_ENV, ghost)).toBe(defaultInteractiveRoot(ghost));
+    expect(ensureProjectInteractiveRoot('p-a', { interactiveRoot: '/srv/decks' }, NO_ENV, ghost)).toBe('/srv/decks');
+    expect(ensureProjectInteractiveRoot('p-a', null, { [ROOT_ENV]: '/scratch/docs' }, ghost)).toBe('/scratch/docs');
+    expect(existsSync(ghost)).toBe(false);
   });
 });
 

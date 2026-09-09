@@ -7,6 +7,9 @@
 // bridge, one registry, the identical doc list under every project's URL. The live recon that
 // found it asked for exactly one check the client-side tests could not give — create a doc under
 // project A, list under project B, assert absence — and that check is the spine of this file.
+// The review of the fix (crew#474) added its sibling: a symlink planted at A's partition pointing
+// at B's must be REFUSED, not followed — the id check alone said nothing about what was already
+// sitting on disk at `projects/<id>`.
 //
 // # The shape under test
 //
@@ -14,15 +17,20 @@
 // attributed docs list, over ONE shared pool — against a REAL child-process bridge that lists and
 // creates docs ON DISK under the root it was started for (interactive's `listDocs` contract: a
 // slug-named child directory carrying a `versions.json`). Only the spawn is substituted, so root
-// resolution, pool keying, directory creation, and the static-over-wildcard routing all run on
-// the production code paths. `home` is injected so the "default root" is a scratch dir and nothing
-// touches the developer's `~/wicked-interactive`; `env` is an explicit empty object so a shell's
-// `WICKED_INTERACTIVE_ROOT` can neither leak in nor mask the partition.
+// resolution, partition containment, pool keying, directory creation, and the static-over-wildcard
+// routing all run on the production code paths.
+//
+// Every case gets a FRESH rig (`startRig`): its own scratch home (so the "default root" is a
+// scratch dir and nothing touches the developer's `~/wicked-interactive`), settings file, pool,
+// and server. Cases share nothing — no seeded doc, no cached bridge, no partition an earlier case
+// created — so each states its whole precondition and can run alone or reordered. `env` is an
+// explicit empty object so a shell's `WICKED_INTERACTIVE_ROOT` can neither leak in nor mask the
+// partition.
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import Fastify, { type FastifyInstance } from 'fastify';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import Fastify from 'fastify';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool } from '../../src/interactive/bridge-pool.js';
@@ -32,6 +40,7 @@ import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js'
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project } from '../../src/core/types.js';
+import { canSymlink } from '../setup/can-symlink.js';
 import { removeScratch } from '../setup/scratch.js';
 
 /**
@@ -89,6 +98,13 @@ server.listen(0, '127.0.0.1', () => {
 });
 `;
 
+/** The fake bridge as a child process — a genuine separate pid. No `env:` option on purpose: the
+ *  child inherits the parent env, which is how the hermetic arming (tests/setup/hermetic-home.ts)
+ *  carries through; harness-hygiene.test.ts scans for the alternative. */
+function spawnFake(root: string): ChildProcess {
+  return spawn(process.execPath, ['-e', FAKE_BRIDGE, root], { stdio: 'ignore' });
+}
+
 /** A doc on disk exactly the way interactive leaves one: `<root>/<name>/versions.json`. */
 function seedDoc(root: string, name: string, extra: Record<string, unknown> = {}): void {
   mkdirSync(join(root, name), { recursive: true });
@@ -108,148 +124,233 @@ function stubAdapter(known: Set<string>): CoreAdapter {
   } as unknown as CoreAdapter;
 }
 
-let dir: string;
-let home: string;
-let legacyRoot: string;
-let boundRoot: string;
-let app: FastifyInstance;
-let base: string;
-let pool: InteractiveBridgePool;
-const children: ChildProcess[] = [];
+const KNOWN_PROJECTS = ['p-a', 'p-b', 'p-bound'];
+const SYMLINKS = canSymlink();
 
-function spawnFake(root: string): ChildProcess {
-  const child = spawn(process.execPath, ['-e', FAKE_BRIDGE, root], { stdio: 'ignore' });
-  children.push(child);
-  return child;
+interface Listed {
+  status: number;
+  /** The parsed body, whatever its status. */
+  body: unknown;
+  /** The rows on a 200; empty otherwise. */
+  rows: Record<string, unknown>[];
 }
 
-const partitionOf = (projectId: string): string => join(legacyRoot, PROJECTS_DIR, projectId);
-
-async function listDocs(projectId: string, query = ''): Promise<{ status: number; rows: Record<string, unknown>[] }> {
-  const res = await fetch(`${base}/api/v1/projects/${projectId}/interactive/api/docs${query}`);
-  return { status: res.status, rows: res.status === 200 ? ((await res.json()) as Record<string, unknown>[]) : [] };
+interface Rig {
+  /** The legacy shared root — `default`'s, and the parent of `projects/`. */
+  legacyRoot: string;
+  /** The explicit root `p-bound` is bound to through its settings row. */
+  boundRoot: string;
+  pool: InteractiveBridgePool;
+  partitionOf(projectId: string): string;
+  listDocs(projectId: string, query?: string): Promise<Listed>;
+  /** `POST /api/docs` — streams through the pure-transport proxy, not the listed GET. */
+  createDoc(projectId: string, name: string): Promise<Response>;
+  close(): Promise<void>;
 }
 
-beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'wi-doc-list-'));
-  home = join(dir, 'home');
-  legacyRoot = defaultInteractiveRoot(home);
-  boundRoot = join(dir, 'bound-docs');
-
-  // The pre-partition world: the legacy shared root already holds documents — the "31 docs" of
-  // the live recon — including a retired one that lists only on request.
-  seedDoc(legacyRoot, 'legacy-brief');
-  seedDoc(legacyRoot, 'legacy-deck', { kind: 'demo' });
-  seedDoc(legacyRoot, 'legacy-retired', { retired_at: '2026-09-03T00:00:00Z' });
-  // A project bound to its OWN root, with a doc of its own.
-  seedDoc(boundRoot, 'bound-brief');
-
+async function startRig(): Promise<Rig> {
+  const dir = mkdtempSync(join(tmpdir(), 'wi-doc-list-'));
+  const home = join(dir, 'home');
+  const legacyRoot = defaultInteractiveRoot(home);
+  const boundRoot = join(dir, 'bound-docs');
   const settingsPath = join(dir, 'project-settings.json');
   writeFileSync(settingsPath, JSON.stringify({ projects: { 'p-bound': { interactiveRoot: boundRoot } } }));
 
-  pool = new InteractiveBridgePool({ spawn: spawnFake, startTimeoutMs: 15_000, healthTimeoutMs: 1_000 });
-  app = Fastify({ logger: false });
-  const adapter = stubAdapter(new Set(['p-a', 'p-b', 'p-bound']));
-  const settings = new ProjectSettingsStore(settingsPath);
-  const deps = { settings, pool, env: {}, home };
+  const children: ChildProcess[] = [];
+  const pool = new InteractiveBridgePool({
+    spawn: (root) => {
+      const child = spawnFake(root);
+      children.push(child);
+      return child;
+    },
+    startTimeoutMs: 15_000,
+    healthTimeoutMs: 1_000,
+  });
+  const app = Fastify({ logger: false });
+  const adapter = stubAdapter(new Set(KNOWN_PROJECTS));
+  const deps = { settings: new ProjectSettingsStore(settingsPath), pool, env: {}, home };
   registerInteractiveProxy(app, adapter, deps);
   registerInteractiveDocList(app, adapter, deps);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
-  base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  const base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+
+  return {
+    legacyRoot,
+    boundRoot,
+    pool,
+    partitionOf: (projectId) => join(legacyRoot, PROJECTS_DIR, projectId),
+    async listDocs(projectId, query = '') {
+      const res = await fetch(`${base}/api/v1/projects/${projectId}/interactive/api/docs${query}`);
+      const body: unknown = await res.json();
+      return { status: res.status, body, rows: res.status === 200 ? (body as Record<string, unknown>[]) : [] };
+    },
+    createDoc: (projectId, name) =>
+      fetch(`${base}/api/v1/projects/${projectId}/interactive/api/docs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }),
+    async close() {
+      await app.close();
+      for (const c of children) {
+        try {
+          c.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      removeScratch(dir);
+    },
+  };
+}
+
+let rig: Rig;
+
+beforeEach(async () => {
+  rig = await startRig();
 }, 30_000);
 
-afterAll(async () => {
-  await app.close();
-  for (const c of children) {
-    try {
-      c.kill('SIGKILL');
-    } catch {
-      /* already gone */
-    }
-  }
-  removeScratch(dir);
+afterEach(async () => {
+  await rig.close();
 });
 
 describe('project-partitioned default roots (crew#472)', () => {
   it('`default` lists the LEGACY set from the legacy shared root — every row attributed to it', async () => {
-    const { status, rows } = await listDocs('default');
+    // The pre-partition world: the legacy shared root already holds documents — the "31 docs" of
+    // the live recon — including a retired one that lists only on request.
+    seedDoc(rig.legacyRoot, 'legacy-brief');
+    seedDoc(rig.legacyRoot, 'legacy-deck', { kind: 'demo' });
+    seedDoc(rig.legacyRoot, 'legacy-retired', { retired_at: '2026-09-03T00:00:00Z' });
+
+    const { status, rows } = await rig.listDocs('default');
     expect(status).toBe(200);
     expect(rows.map((r) => r['name'])).toEqual(['legacy-brief', 'legacy-deck']);
     expect(rows.every((r) => r['projectId'] === 'default')).toBe(true);
     // The bridge serving Unfiled is keyed by the legacy root — byte-identical to interactive's own default.
-    expect(pool.keys()).toEqual([legacyRoot]);
+    expect(rig.pool.keys()).toEqual([rig.legacyRoot]);
   }, 30_000);
 
   it('the DTO is the bridge row field-for-field plus `projectId`', async () => {
-    const { rows } = await listDocs('default');
-    const deck = rows.find((r) => r['name'] === 'legacy-deck');
-    expect(deck).toEqual({
-      name: 'legacy-deck',
-      kind: 'demo',
-      head: 2,
-      versions: 2,
-      updated_at: '2026-09-02T00:00:00Z',
-      projectId: 'default',
-    });
-  });
+    seedDoc(rig.legacyRoot, 'legacy-deck', { kind: 'demo' });
+    const { rows } = await rig.listDocs('default');
+    expect(rows).toEqual([
+      {
+        name: 'legacy-deck',
+        kind: 'demo',
+        head: 2,
+        versions: 2,
+        updated_at: '2026-09-02T00:00:00Z',
+        projectId: 'default',
+      },
+    ]);
+  }, 30_000);
 
   it('an unbound NON-default project resolves to its own partition, created on first use, and starts empty', async () => {
-    expect(existsSync(partitionOf('p-a'))).toBe(false);
-    const { status, rows } = await listDocs('p-a');
+    expect(existsSync(rig.partitionOf('p-a'))).toBe(false);
+    const { status, rows } = await rig.listDocs('p-a');
     expect(status).toBe(200);
     expect(rows).toEqual([]);
-    expect(existsSync(partitionOf('p-a'))).toBe(true);
-    // Its OWN bridge, on its own root — not the legacy bridge answering under a different URL.
-    expect(new Set(pool.keys())).toEqual(new Set([legacyRoot, partitionOf('p-a')]));
+    expect(existsSync(rig.partitionOf('p-a'))).toBe(true);
+    // Its OWN bridge on its own root — the legacy root was never even asked for a bridge.
+    expect(rig.pool.keys()).toEqual([rig.partitionOf('p-a')]);
   }, 30_000);
 
   it('create under A, list under B → absent; A lists it attributed; `default` is untouched', async () => {
-    // The create still streams through the pure-transport proxy (POST is not the listed GET).
-    const created = await fetch(`${base}/api/v1/projects/p-a/interactive/api/docs`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'a-only' }),
-    });
-    expect(created.status).toBe(201);
-    expect(existsSync(join(partitionOf('p-a'), 'a-only', 'versions.json'))).toBe(true);
+    seedDoc(rig.legacyRoot, 'legacy-brief');
 
-    const a = await listDocs('p-a');
+    const created = await rig.createDoc('p-a', 'a-only');
+    expect(created.status).toBe(201);
+    expect(existsSync(join(rig.partitionOf('p-a'), 'a-only', 'versions.json'))).toBe(true);
+
+    const a = await rig.listDocs('p-a');
     expect(a.rows.map((r) => r['name'])).toEqual(['a-only']);
     expect(a.rows[0]?.['projectId']).toBe('p-a');
 
-    const b = await listDocs('p-b');
+    const b = await rig.listDocs('p-b');
     expect(b.status).toBe(200);
     expect(b.rows).toEqual([]);
-    expect(existsSync(partitionOf('p-b'))).toBe(true);
+    expect(existsSync(rig.partitionOf('p-b'))).toBe(true);
 
     // The partitions nest under the legacy root, and the legacy bridge's list does not see them:
     // `projects/` is neither slug-named nor a doc (no `versions.json`).
-    const unfiled = await listDocs('default');
-    expect(unfiled.rows.map((r) => r['name'])).toEqual(['legacy-brief', 'legacy-deck']);
-    expect(new Set(pool.keys())).toEqual(new Set([legacyRoot, partitionOf('p-a'), partitionOf('p-b')]));
-  }, 30_000);
+    const unfiled = await rig.listDocs('default');
+    expect(unfiled.rows.map((r) => r['name'])).toEqual(['legacy-brief']);
+    expect(new Set(rig.pool.keys())).toEqual(new Set([rig.legacyRoot, rig.partitionOf('p-a'), rig.partitionOf('p-b')]));
+  }, 45_000);
 
   it('an explicit own root is honored exactly as before — no partition for a bound project', async () => {
-    const { rows } = await listDocs('p-bound');
+    seedDoc(rig.boundRoot, 'bound-brief');
+    const { rows } = await rig.listDocs('p-bound');
     expect(rows.map((r) => r['name'])).toEqual(['bound-brief']);
     expect(rows[0]?.['projectId']).toBe('p-bound');
-    expect(existsSync(partitionOf('p-bound'))).toBe(false);
-    expect(pool.keys()).toContain(boundRoot);
+    expect(existsSync(rig.partitionOf('p-bound'))).toBe(false);
+    expect(rig.pool.keys()).toEqual([rig.boundRoot]);
   }, 30_000);
 
   it('forwards the query string verbatim (`?includeRetired=1` surfaces the tombstoned row)', async () => {
-    const { rows } = await listDocs('default', '?includeRetired=1');
-    expect(rows.map((r) => r['name'])).toEqual(['legacy-brief', 'legacy-deck', 'legacy-retired']);
+    seedDoc(rig.legacyRoot, 'legacy-brief');
+    seedDoc(rig.legacyRoot, 'legacy-retired', { retired_at: '2026-09-03T00:00:00Z' });
+
+    const plain = await rig.listDocs('default');
+    expect(plain.rows.map((r) => r['name'])).toEqual(['legacy-brief']);
+
+    const { rows } = await rig.listDocs('default', '?includeRetired=1');
+    expect(rows.map((r) => r['name'])).toEqual(['legacy-brief', 'legacy-retired']);
     const retired = rows.find((r) => r['name'] === 'legacy-retired');
     expect(retired?.['retired']).toBe(true);
     expect(retired?.['retired_at']).toBe('2026-09-03T00:00:00Z');
     expect(retired?.['projectId']).toBe('default');
-  });
+  }, 30_000);
 
   it('404s an unknown project instead of manufacturing a partition for it', async () => {
-    const { status } = await listDocs('p-nope');
+    const { status } = await rig.listDocs('p-nope');
     expect(status).toBe(404);
-    expect(existsSync(partitionOf('p-nope'))).toBe(false);
+    expect(existsSync(rig.partitionOf('p-nope'))).toBe(false);
+    expect(rig.pool.keys()).toEqual([]);
   });
+});
+
+describe('partition containment (crew#474 — a symlinked projects/<id> is refused, never followed)', () => {
+  it.skipIf(!SYMLINKS)(
+    "a symlink planted at projects/A → B's partition: A is refused with a 500 naming the link; B's docs stay B's",
+    async () => {
+      // B exists and holds a doc — the thing a link at A would expose under A's URL.
+      const first = await rig.listDocs('p-b');
+      expect(first.status).toBe(200);
+      seedDoc(rig.partitionOf('p-b'), 'b-secret');
+      symlinkSync(rig.partitionOf('p-b'), rig.partitionOf('p-a'), 'dir');
+
+      const a = await rig.listDocs('p-a');
+      expect(a.status).toBe(500);
+      const message = String((a.body as { message?: unknown }).message);
+      expect(message).toMatch(/is a symbolic link/);
+      expect(message).toContain(rig.partitionOf('p-a'));
+      expect(message).toContain('"p-a"');
+      // No bridge was ever started on the link: the pool knows B's real partition only.
+      expect(rig.pool.keys()).toEqual([rig.partitionOf('p-b')]);
+
+      // The proxy shares the resolution, so a create under A is refused the same way — nothing
+      // lands in B through A's URL.
+      const created = await rig.createDoc('p-a', 'a-into-b');
+      expect(created.status).toBe(500);
+      expect(existsSync(join(rig.partitionOf('p-b'), 'a-into-b'))).toBe(false);
+
+      // B itself is unaffected.
+      const again = await rig.listDocs('p-b');
+      expect(again.rows.map((r) => r['name'])).toEqual(['b-secret']);
+      expect(again.rows[0]?.['projectId']).toBe('p-b');
+    },
+    30_000,
+  );
+
+  it('a REAL directory already at projects/<id> is served as before — the guard costs a normal project nothing', async () => {
+    mkdirSync(rig.partitionOf('p-a'), { recursive: true });
+    seedDoc(rig.partitionOf('p-a'), 'a-brief');
+    const a = await rig.listDocs('p-a');
+    expect(a.status).toBe(200);
+    expect(a.rows.map((r) => r['name'])).toEqual(['a-brief']);
+    expect(a.rows[0]?.['projectId']).toBe('p-a');
+    expect(rig.pool.keys()).toEqual([rig.partitionOf('p-a')]);
+  }, 30_000);
 });

@@ -459,10 +459,11 @@
       "method": "GET",
       "path": "/api/v1/projects/:projectId/interactive/api/docs",
       "requestType": null,
-      "responseType": "InteractiveDocSummary",
+      "responseType": "InteractiveDocSummary[]",
       "statusCodes": [
         200,
         404,
+        500,
         502,
         503
       ]
