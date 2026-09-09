@@ -10,20 +10,31 @@
 // allowlist file (never an empty one), and derives byte-identical samples under two different
 // operator git configurations (rename detection, order file, quoting, output encoding pinned);
 // `materialize` refuses a pin whose sha no longer matches, a `repo` that is not one safe path
-// segment, and a symlinked destination (containment under the realpath of the root); `samples`
-// publishes atomically (tmp+rename under a lock, one generation stamp); `run` skips without
-// wicked-core, fails loud when the tool fails, verifies samples.meta.json against samples.json
-// AND the pin before the engine is probed, stages EXACTLY the pinned samples in a fresh private
-// dir, and writes the report when it succeeds (a fake binary stands in for the engine). Plus the
-// committed pin's structural facts.
+// segment, and a symlinked destination (containment under the realpath of the root), pins the
+// operator's git attributes away and verifies the extracted tree against `ls-tree` (an
+// un-overridable `export-ignore` is a named refusal); filenames with leading/trailing spaces,
+// tabs, quotes, backslashes and newlines round-trip EXACTLY into `signals.files` (NUL-delimited
+// extraction, never trimmed) and the steering-type inference sees the real paths; samples are
+// validated by the ROUTE's own zod schema (no mirror — what the route rejects, `samples`/`run`
+// reject before the engine is invoked); `samples` publishes atomically (tmp+rename under a lock,
+// one generation stamp); `run` skips ONLY on ENOENT (any other probe error or a non-zero
+// `--version` is a tool failure), fails loud when the tool fails, verifies samples.meta.json
+// against samples.json AND the pin before the engine is probed, stages EXACTLY the pinned samples
+// in a fresh private dir, stamps every result row with its sample's `payload_hash`, and publishes
+// report + meta as ONE verifiable generation carrying complete provenance (engine build identity,
+// rule-snapshot identity with its method, pin/samples hashes, the report's own sha256) — a torn
+// pair is refused on read (a fake binary stands in for the engine). Plus the committed pin's
+// structural facts.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ImportEvalCorpusSchema } from '../src/api/testing.js';
+import { samplePayloadHash } from '../src/api/eval-sample.js';
 
 const SCRIPT = fileURLToPath(new URL('../../../scripts/evals-internal-corpus.mjs', import.meta.url));
 const COMMITTED_PIN = fileURLToPath(new URL('../../../e2e/corpus/wicked-internal-corpus.json', import.meta.url));
@@ -66,6 +77,28 @@ interface SamplesMeta {
   /** The publication stamp — shared by the samples/meta tmp files of ONE publication. */
   generation: string;
 }
+/** `report.meta.json` — the run's complete provenance (what S17 keys a comparison on). */
+interface ReportMeta {
+  generation: string;
+  report_sha256: string;
+  pin_hash: string;
+  samples_hash: string;
+  corpus_name: string;
+  samples_generation: string;
+  engine: { version: string; build: { path: string; sha256: string } };
+  rules_identity: { method: 'engine-list' | 'seed-dir'; sha256: string; rule_count: number | null; command?: string; reason?: string };
+  rules_seed: { dir: string; sha256: string; files: number };
+}
+interface ReportRow {
+  sample: { id: string; description: string; kind: 'good' | 'bad'; steering_type: string; payload_hash?: string };
+  verdict: string;
+}
+interface Report {
+  generation: string;
+  results: ReportRow[];
+  summary: { total: number; caught: number; gaps: number; false_positives: number };
+  rule_coverage?: { exercised: number; unexercised: unknown[] };
+}
 /** The script's exported pure functions (typed here — the file is plain JS). */
 interface CorpusModule {
   pinHash: (repos: PinRepo[]) => string;
@@ -74,12 +107,41 @@ interface CorpusModule {
   inferSteeringType: (files: string[]) => string;
   corpusName: (pinHash: string) => string;
   isSafeSegment: (name: string) => boolean;
+  validateSample: (sample: unknown) => string[];
+  parseNulPaths: (tail: string, checkout: string, sha: string) => string[];
+  resolveWindow: (checkout: string, tag: string, rule: { min_commits: number; max_age_days: number }, table?: Map<string, { sha: string; date: string }>) => unknown;
+  readPublishedReport: (outDir: string) => { report: Report; meta: ReportMeta };
+  rulesSnapshotHash: (rules: unknown[]) => string;
+  seedDirIdentity: (dir: string) => { dir: string; sha256: string; files: number };
+  UsageError: new (message: string) => Error;
+  RefusalError: new (message: string) => Error;
   RELEASE_TAG_RE: RegExp;
   SAFE_SEGMENT_RE: RegExp;
   GIT_LOG_CONFIG: readonly string[];
   SAMPLES_LOCK: string;
+  REPORT_LOCK: string;
   STEERING_TYPES: readonly string[];
   CORE_BIN: string;
+}
+
+function sha256(bytes: Buffer | string): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+/** A content identity of a directory tree: sorted `[relative path, sha256]` pairs, hashed. */
+function treeIdentity(root: string): string {
+  const acc: [string, string][] = [];
+  const walk = (d: string, rel: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      const r = rel === '' ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) walk(p, r);
+      else acc.push([r, sha256(readFileSync(p))]);
+    }
+  };
+  walk(root, '');
+  acc.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return sha256(JSON.stringify(acc));
 }
 
 /** Per-FILE scratch: the isolated gitconfig and the pristine fixture repos, built ONCE. */
@@ -96,6 +158,9 @@ let outDir: string;
 let env: NodeJS.ProcessEnv;
 /** A hostile-but-legal operator gitconfig: every knob the derivation must be independent of. */
 let adversarialGitconfig: string;
+/** An operator gitconfig whose `core.attributesFile` export-ignores README.md — what an unpinned
+ *  `git archive` silently honors (materialization must not). */
+let attributesGitconfig: string;
 
 /** A fixed clock for the fixture commits: dates are what the age cap reasons over. */
 const T0 = Date.UTC(2026, 0, 1, 12, 0, 0);
@@ -162,6 +227,29 @@ beforeAll(() => {
   commitStaged(delta, 'feat: two files', 2);
   commitFile(delta, 'docs/ünïcode.md', 'docs: naïve ünïcode', 3);
   tag(delta, 'v0.2.0');
+  // epsilon: the exact-filename probe. v0.1.0 → a commit touching ONE file in a directory whose
+  // name has a LEADING SPACE (` tests/lead.ts`: the real path is not under `tests/`, so the honest
+  // steering type is development — a trimmed path would read `tests/lead.ts` and say testing) → a
+  // commit touching names with a trailing space, a tab, a backslash, a double quote and a NEWLINE
+  // (git C-quotes every one of these under `--name-only` unless `-z` is given; `core.quotePath=
+  // false` only stops the non-ASCII escaping) → v0.2.0. Names Windows cannot hold: the test that
+  // pins them is skipped there.
+  if (process.platform !== 'win32') {
+    const epsilon = initRepo(template, 'epsilon', 0);
+    tag(epsilon, 'v0.1.0');
+    commitFile(epsilon, ' tests/lead.ts', 'feat: leading-space dir', 1);
+    for (const name of ['trail.txt ', 'tab\there.txt', 'back\\slash.txt', '"quoted".txt', 'new\nline.txt']) {
+      writeFileSync(join(epsilon, name), `${name}\n`, 'utf8');
+    }
+    git(epsilon, 'add', '-A');
+    commitStaged(epsilon, 'feat: adversarial names', 2);
+    commitFile(epsilon, 'plain.txt', 'feat: plain', 3);
+    tag(epsilon, 'v0.2.0');
+  }
+  const exportIgnore = join(root, 'attributes-export-ignore');
+  writeFileSync(exportIgnore, 'README.md export-ignore\n', 'utf8');
+  attributesGitconfig = join(root, 'gitconfig-attributes');
+  writeFileSync(attributesGitconfig, `[core]\n\tattributesFile = ${exportIgnore}\n`, 'utf8');
   const orderFile = join(root, 'orderfile');
   writeFileSync(orderFile, 'zeta*\n', 'utf8');
   adversarialGitconfig = join(root, 'gitconfig-adversarial');
@@ -228,7 +316,7 @@ function initRepo(base: string, name: string, dayOffset: number): string {
 }
 
 function commitFile(dir: string, path: string, message: string, dayOffset: number): string {
-  mkdirSync(join(dir, path, '..'), { recursive: true });
+  mkdirSync(dirname(join(dir, path)), { recursive: true });
   writeFileSync(join(dir, path), `${message}\n`, 'utf8');
   git(dir, 'add', path);
   return commitStaged(dir, message, dayOffset);
@@ -366,6 +454,30 @@ describe('pin — the constant resolved once', () => {
     const notRelease = run('pin');
     expect(notRelease.status).toBe(2);
     expect(notRelease.stderr).toMatch(/beta tag api-types-v9\.9\.9 is not a release tag/);
+  });
+
+  it('resolveWindow() refuses a tag missing from the tag table as a UsageError naming the tag and the checkout — before any destructuring, never a TypeError (Copilot)', async () => {
+    const m = await mod();
+    const checkout = join(sourceRoot, 'alpha');
+    const rule = { min_commits: 3, max_age_days: 180 };
+    // A caller-supplied table without the tag.
+    let fromEmpty: unknown;
+    try {
+      m.resolveWindow(checkout, 'v9.9.9', rule, new Map());
+    } catch (e) {
+      fromEmpty = e;
+    }
+    expect(fromEmpty).toBeInstanceOf(m.UsageError);
+    expect((fromEmpty as Error).message).toBe(`v9.9.9: tag does not exist in ${checkout} (not in its tag table) — a window can only open from an existing release tag`);
+    // The checkout's REAL table, a tag that does not exist: the same UsageError, same wording.
+    let fromReal: unknown;
+    try {
+      m.resolveWindow(checkout, 'v9.9.9', rule);
+    } catch (e) {
+      fromReal = e;
+    }
+    expect(fromReal).toBeInstanceOf(m.UsageError);
+    expect((fromReal as Error).message).toMatch(/^v9\.9\.9: tag does not exist in /);
   });
 });
 
@@ -602,6 +714,62 @@ describe('samples — one EvalSample per window commit', () => {
       'i18n.logOutputEncoding=UTF-8',
     ]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'S15h: filenames with leading/trailing spaces, a tab, a backslash, a quote and a newline round-trip EXACTLY into signals.files (NUL-delimited, never trimmed) — and the steering-type inference sees the real path',
+    async () => {
+      writeConstants({ epsilon: 'v0.2.0' });
+      expect(run('pin').status).toBe(0);
+      const s = run('samples', outDir);
+      expect(s.status, s.stderr).toBe(0);
+      const { samples } = readSamples();
+      const byDesc = (d: string) => samples.find((x) => x.description === d)!;
+      // Tree order, every byte verbatim.
+      expect(byDesc('feat: adversarial names').signals.files).toEqual(['"quoted".txt', 'back\\slash.txt', 'new\nline.txt', 'tab\there.txt', 'trail.txt ']);
+      const lead = byDesc('feat: leading-space dir');
+      expect(lead.signals.files).toEqual([' tests/lead.ts']);
+      // The REAL directory is " tests", not "tests": development. A trimmed path would say testing.
+      expect(lead.steering_type).toBe('development');
+      const m = await mod();
+      expect(m.inferSteeringType(['tests/lead.ts'])).toBe('testing'); // what trimming would have produced
+      expect(m.inferSteeringType([' tests/lead.ts'])).toBe('development');
+      // The real route schema accepts them — they are plain strings.
+      expect(ImportEvalCorpusSchema.safeParse({ name: 'fixture', samples }).success).toBe(true);
+      // Control: WITHOUT -z, git C-quotes these names even under core.quotePath=false — the escapes
+      // the old newline-split extraction kept as literal filenames.
+      const quoted = execFileSync('git', ['-c', 'core.quotePath=false', 'log', '--format=%s', '--name-only', 'v0.1.0..v0.2.0'], {
+        cwd: join(sourceRoot, 'epsilon'),
+        env: { ...process.env, ...env },
+        encoding: 'utf8',
+      });
+      expect(quoted).toContain('"tab\\there.txt"');
+      expect(quoted).toContain('"new\\nline.txt"');
+      expect(quoted).toContain('"back\\\\slash.txt"');
+      // The `-z` grammar is asserted, never assumed.
+      expect(m.parseNulPaths('\0', 'c', 's')).toEqual([]);
+      expect(m.parseNulPaths('\0\n a\0b \0', 'c', 's')).toEqual([' a', 'b ']);
+      expect(() => m.parseNulPaths('\n a\0', 'c', 's')).toThrow(/expected a NUL after the header/);
+      expect(() => m.parseNulPaths('\0\na', 'c', 's')).toThrow(/NUL-terminated/);
+      expect(() => m.parseNulPaths('\0a\0', 'c', 's')).toThrow(/expected a newline before the path list/);
+    },
+  );
+
+  it('S15k: validateSample IS the route schema — signals.phase/tool of the wrong type are refused exactly as POST /testing/corpora/import refuses them (no mirror)', async () => {
+    const m = await mod();
+    const bad = { id: 'x@000000000000', description: 'd', kind: 'good', steering_type: 'development', signals: { phase: 123, tool: [] } };
+    expect(m.validateSample(bad)).toEqual(['signals.phase: Expected string, received number', 'signals.tool: Expected string, received array']);
+    const route = ImportEvalCorpusSchema.safeParse({ name: 'x', samples: [bad] });
+    expect(route.success).toBe(false);
+    expect(route.success ? [] : route.error.issues.map((i) => i.path.slice(2).join('.'))).toEqual(['signals.phase', 'signals.tool']);
+    expect(m.validateSample({ ...bad, signals: { phase: 'build', tool: 'Bash' } })).toEqual([]);
+    expect(m.validateSample({ ...bad, signals: {}, extra: 1 })).toEqual(["(sample): Unrecognized key(s) in object: 'extra'"]);
+    expect(m.validateSample({ ...bad, signals: { bogus: 1 } })).toEqual(["signals: Unrecognized key(s) in object: 'bogus'"]);
+    // The engine's vocabulary rides on top of the route schema (which leaves steering_type open).
+    expect(m.validateSample({ ...bad, signals: {}, steering_type: 'vibes' })).toEqual([
+      'steering_type: "vibes" is not one of architecture|development|security|testing|operations|compliance|design-ux',
+    ]);
+    expect(m.validateSample(null)).toEqual(['(sample): Expected object, received null']);
+  });
 });
 
 describe('materialize — git archive of each pinned tag', () => {
@@ -697,6 +865,46 @@ describe('materialize — git archive of each pinned tag', () => {
     for (const r of receipt.repos) expect(r.path.startsWith(`${realpathSync(real)}/`)).toBe(true);
     expect(readdirSync(real).filter((f) => f.endsWith('.tmp') || f.endsWith('.tar'))).toEqual([]);
   });
+
+  it("S15i: the extracted tree is independent of the operator's git attributes — a core.attributesFile export-ignore changes an unpinned archive but not the materialization; the receipt carries each tree sha", () => {
+    const plain = runEnv({ GIT_CONFIG_GLOBAL: join(root, 'gitconfig') }, 'materialize', outDir);
+    expect(plain.status, plain.stderr).toBe(0);
+    const hostile = runEnv({ GIT_CONFIG_GLOBAL: attributesGitconfig }, 'materialize', join(fixture, 'out-attrs'));
+    expect(hostile.status, hostile.stderr).toBe(0);
+    for (const repo of ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0']) {
+      expect(treeIdentity(join(fixture, 'out-attrs', repo)), repo).toBe(treeIdentity(join(outDir, repo)));
+    }
+    expect(existsSync(join(fixture, 'out-attrs', 'beta@v0.2.0', 'README.md'))).toBe(true); // the export-ignored file survived
+    const receipt = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as {
+      attributes: { pinned: string[]; verified: string };
+      repos: { repo: string; tree_sha: string; entries: number }[];
+    };
+    const beta = receipt.repos.find((r) => r.repo === 'beta')!;
+    expect(beta.tree_sha).toBe(git(join(sourceRoot, 'beta'), 'rev-parse', 'v0.2.0^{tree}'));
+    expect(beta.entries).toBe(2); // init.txt + README.md
+    expect(receipt.attributes.pinned).toEqual(['core.attributesFile=<empty file>', 'GIT_ATTR_NOSYSTEM=1', 'no --worktree-attributes']);
+    expect(receipt.attributes.verified).toContain('ls-tree');
+    // Control: an UNPINNED archive under the same config DROPS README.md (else this proves nothing).
+    // `env` spreads process.env (the hermetic arming); re-stated so the harness-hygiene scan sees it.
+    const unpinned = execFileSync('sh', ['-c', 'git archive --format=tar v0.2.0 | tar -t'], {
+      cwd: join(sourceRoot, 'beta'),
+      env: { ...process.env, ...env, GIT_CONFIG_GLOBAL: attributesGitconfig },
+      encoding: 'utf8',
+    });
+    expect(unpinned).toContain('init.txt');
+    expect(unpinned).not.toContain('README.md');
+  });
+
+  it('S15j: an export-ignore from a source git offers NO override for ($GIT_DIR/info/attributes) is a named refusal (exit 1) — never a different tree recorded as the pin', () => {
+    mkdirSync(join(sourceRoot, 'beta', '.git', 'info'), { recursive: true });
+    writeFileSync(join(sourceRoot, 'beta', '.git', 'info', 'attributes'), 'README.md export-ignore\n', 'utf8');
+    const m = run('materialize', outDir);
+    expect(m.status).toBe(1);
+    expect(m.stderr).toMatch(/refusing to accept the materialized beta@v0\.2\.0: the extracted tree is not the committed tree [0-9a-f]{40}\n\s+missing \(1\): "README\.md"/);
+    expect(m.stderr).toMatch(/info\/attributes or in the commit's own \.gitattributes cannot be overridden/);
+    expect(existsSync(join(outDir, 'materialized.json'))).toBe(false); // no receipt
+    expect(existsSync(join(outDir, 'alpha@v0.3.0', 'init.txt'))).toBe(true); // alpha (sorted first) had verified
+  });
 });
 
 describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI stands in)', () => {
@@ -749,17 +957,39 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(existsSync(join(outDir, 'report.json'))).toBe(false);
   });
 
+  /** The rules the fake engine "ingested" — what its `rules list --include-retired --json` lists
+   *  back (the FULL rule, retired row included: plan §3's snapshot identity). */
+  const FAKE_RULES = [
+    { id: 'DOC-1', steering_type: 'architecture', effect: 'deny', trigger: { contains: ['force-push'] }, retired: false },
+    { id: 'DOC-0', steering_type: 'development', effect: 'warn', retired: true },
+  ];
+
   /** A fake engine that SUCCEEDS and behaves like the real loader: it evaluates EVERY *.json in the
    *  corpus dir it is handed (evals.rs `load_corpus` — the smuggling surface a shared dir opens),
-   *  records the dir it received + its listing, and touches `engine-invoked` on every call. It also
-   *  asserts the CONTRACT the real CLI has: `--corpus` is a directory (never a file); `--db` /
-   *  `--knowledge-db` are TEMP paths (never the output dir or the operator's home). */
-  function okEngine(): void {
+   *  echoing one result row per sample as evals.rs would (a good sample `caught`, a bad one `gap`),
+   *  answers `rules list --json` with FAKE_RULES, records the dir it received + its listing, and
+   *  touches `engine-invoked` on every call. It also asserts the CONTRACT the real CLI has:
+   *  `--corpus` is a directory (never a file); `--db` / `--knowledge-db` are TEMP paths (never the
+   *  output dir or the operator's home). `rowsJs` replaces the row synthesis (a misbehaving engine). */
+  function okEngine(opts: { rowsJs?: string } = {}): void {
+    const rowsJs =
+      opts.rowsJs ??
+      'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: x.kind === "bad" ? "deny" : "allow", fired: [], verdict: x.kind === "bad" ? "gap" : "caught" }));';
+    // The eval branch is node (the fake shells out to the test's own node): sh cannot parse JSON.
+    // Double quotes only — the program rides inside the shell's single quotes.
+    const evalJs = [
+      'const fs = require("fs"); const p = require("path"); const dir = process.argv[1];',
+      'const samples = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).flatMap((f) => JSON.parse(fs.readFileSync(p.join(dir, f), "utf8")));',
+      rowsJs,
+      'const count = (v) => results.filter((r) => r.verdict === v).length;',
+      'process.stdout.write(JSON.stringify({ results, summary: { total: results.length, caught: count("caught"), gaps: count("gap"), false_positives: count("false_positive") }, degraded: "facet-only", rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }] } }));',
+    ].join(' ');
     fakeCore(
       [
         `touch "${join(fixture, 'engine-invoked')}"`,
         'case "$1 $2" in',
         '  "rules ingest") [ -d "$3" ] || { echo "no seed dir" >&2; exit 1; }; exit 0;;',
+        `  "rules list") printf '%s' '${JSON.stringify({ count: FAKE_RULES.length, include_retired: true, rules: FAKE_RULES })}'; exit 0;;`,
         '  "rules eval")',
         '    corpus=""; db=""; kdb="";',
         '    while [ $# -gt 0 ]; do case "$1" in --corpus) corpus="$2"; shift;; --db) db="$2"; shift;; --knowledge-db) kdb="$2"; shift;; esac; shift; done',
@@ -769,16 +999,15 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         '    [ -n "$kdb" ] || { echo "no --knowledge-db" >&2; exit 1; }',
         `    printf '%s\\n' "$corpus" > "${join(fixture, 'corpus-dir.txt')}"`,
         `    ls -A "$corpus" > "${join(fixture, 'corpus-listing.txt')}"`,
-        '    n=$(cat "$corpus"/*.json | grep -c \'"id":\')',
-        '    printf \'{"results":[],"summary":{"total":%s,"caught":0,"gaps":%s,"false_positives":0},"degraded":"facet-only","rule_coverage":{"exercised":0,"unexercised":[{"rule_id":"DOC-1","steering_type":"architecture"}]}}\' "$n" "$n"',
-        '    exit 0;;',
+        `    "${process.execPath}" -e '${evalJs}' "$corpus"`,
+        '    exit $?;;',
         'esac',
         'echo "wicked-core 9.9.9-fake"',
       ].join('\n'),
     );
   }
 
-  it('writes <dir>/report.json from the engine\'s JSON, stages EXACTLY the pinned samples in a fresh private corpus dir, prints summary + rule_coverage, exits 0 on gaps', () => {
+  it("writes <dir>/report.json from the engine's JSON, stages EXACTLY the pinned samples in a fresh private corpus dir, stamps every row's payload_hash, publishes COMPLETE provenance bound to the report by content, prints summary + rule_coverage, exits 0 on gaps", async () => {
     okEngine();
     // The smuggling attempt the old shared `<dir>/corpus` allowed: an extra sample file already
     // sitting where the runner used to stage. The engine loads every *.json it is given — so the
@@ -787,27 +1016,51 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     writeFileSync(join(outDir, 'corpus', 'extra.json'), JSON.stringify([{ id: 'smuggled@000000000000', description: 'not pinned', kind: 'bad', steering_type: 'security', signals: {} }]), 'utf8');
     const r = runWithPath();
     expect(r.status, r.stderr).toBe(0);
-    const report = JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as { summary: { total: number; gaps: number }; rule_coverage: { unexercised: unknown[] } };
-    expect(report.summary).toEqual({ total: 6, caught: 0, gaps: 6, false_positives: 0 }); // 6 pinned — the smuggled one was never seen
-    expect(report.rule_coverage.unexercised).toEqual([{ rule_id: 'DOC-1', steering_type: 'architecture' }]);
+    const reportText = readFileSync(join(outDir, 'report.json'), 'utf8');
+    const report = JSON.parse(reportText) as Report;
+    expect(report.summary).toEqual({ total: 6, caught: 6, gaps: 0, false_positives: 0 }); // 6 pinned, all good ⇒ caught — the smuggled one was never seen
+    expect(report.rule_coverage!.unexercised).toEqual([{ rule_id: 'DOC-1', steering_type: 'architecture' }]);
     const corpusDir = readFileSync(join(fixture, 'corpus-dir.txt'), 'utf8').trim();
     expect(corpusDir.startsWith(outDir)).toBe(false); // a fresh private temp dir, not <dir>/corpus
     expect(existsSync(corpusDir)).toBe(false); // removed when the run ended
     expect(readFileSync(join(fixture, 'corpus-listing.txt'), 'utf8').trim().split('\n')).toEqual(['samples.json']); // exactly one file
     expect(existsSync(join(outDir, 'corpus', 'samples.json'))).toBe(false); // the shared location is no longer written
-    expect(r.stdout).toContain('summary: total 6 · caught 0 · gaps 6 · false_positives 0 · degraded "facet-only"');
+    expect(r.stdout).toContain('summary: total 6 · caught 6 · gaps 0 · false_positives 0 · degraded "facet-only"');
     expect(r.stdout).toContain('rule_coverage: exercised 0 · unexercised 1');
     expect(r.stdout).toContain('unexercised DOC-1 (architecture)');
-    // The report's provenance sidecar names the identities it was produced under.
-    const { meta } = readSamples();
-    const rmeta = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as Record<string, string>;
-    expect(rmeta['pin_hash']).toBe(meta.pin_hash);
-    expect(rmeta['samples_hash']).toBe(meta.samples_hash);
-    expect(rmeta['corpus_name']).toBe(meta.corpus_name);
-    expect(rmeta['samples_generation']).toBe(meta.generation);
-    expect(rmeta['engine']).toBe('wicked-core 9.9.9-fake');
-    expect(rmeta['rules_dir']).toBe(rulesDir);
-    expect(readdirSync(outDir).filter((f) => f.endsWith('.tmp'))).toEqual([]); // tmp+rename left nothing behind
+
+    // Every result row names a staged sample and carries THAT sample's payload identity — the hash
+    // `compareEvalRuns` keys comparability on (the engine echoes no signals; the runner held them).
+    const { samples, meta } = readSamples();
+    const byId = new Map(samples.map((s) => [s.id, s]));
+    expect(report.results.map((row) => row.sample.id).sort()).toEqual(samples.map((s) => s.id).sort());
+    for (const row of report.results) expect(row.sample.payload_hash, row.sample.id).toBe(samplePayloadHash(byId.get(row.sample.id)!));
+
+    // The provenance sidecar: complete, and bound to THIS report by content (one generation).
+    const rmeta = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as ReportMeta;
+    expect(rmeta.generation).toMatch(/^\d{8}-\d{6}-[0-9a-f]{8}$/);
+    expect(report.generation).toBe(rmeta.generation);
+    expect(rmeta.report_sha256).toBe(sha256(reportText));
+    expect(rmeta.pin_hash).toBe(meta.pin_hash);
+    expect(rmeta.samples_hash).toBe(meta.samples_hash);
+    expect(rmeta.corpus_name).toBe(meta.corpus_name);
+    expect(rmeta.samples_generation).toBe(meta.generation);
+    // Engine: the version string AND the build identity — realpath + sha256 of the binary on PATH.
+    const fake = join(fakeBin, coreBin);
+    expect(rmeta.engine).toEqual({ version: 'wicked-core 9.9.9-fake', build: { path: realpathSync(fake), sha256: sha256(readFileSync(fake)) } });
+    // Rule snapshot: the canonical hash of every rule the engine listed back from the temp store
+    // (order-independent, content-bearing), with the method named; plus the seed dir's identity.
+    const m = await mod();
+    expect(rmeta.rules_identity).toEqual({ method: 'engine-list', command: expect.stringContaining('rules list'), sha256: m.rulesSnapshotHash(FAKE_RULES), rule_count: 2 });
+    expect(m.rulesSnapshotHash([...FAKE_RULES].reverse())).toBe(rmeta.rules_identity.sha256);
+    expect(m.rulesSnapshotHash([FAKE_RULES[0]!])).not.toBe(rmeta.rules_identity.sha256);
+    expect(rmeta.rules_seed).toEqual(m.seedDirIdentity(rulesDir));
+    expect(rmeta.rules_seed.files).toBe(1);
+    expect(r.stdout).toContain(`generation ${rmeta.generation} · report_sha256 ${rmeta.report_sha256}`);
+    expect(r.stdout).toContain(`engine build ${rmeta.engine.build.sha256} (${rmeta.engine.build.path}) · rules identity engine-list ${rmeta.rules_identity.sha256}`);
+    // The published pair verifies on read; tmp+rename and the lock left nothing behind.
+    expect(m.readPublishedReport(outDir).meta).toEqual(rmeta);
+    expect(readdirSync(outDir).filter((f) => f.endsWith('.tmp') || f.endsWith('.lock'))).toEqual([]);
   });
 
   it('S14c: refuses (exit 1, named mismatch, engine NEVER invoked) when samples.meta.json does not describe samples.json or came from another pin; a missing meta is exit 2', () => {
@@ -848,16 +1101,155 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(existsSync(join(fixture, 'engine-invoked'))).toBe(true);
   });
 
-  it('a report without rule_coverage (pre-#394 engine) is said so, not invented; missing samples is a usage error', () => {
-    fakeCore('case "$1 $2" in "rules eval") printf \'{"results":[],"summary":{"total":0,"caught":0,"gaps":0,"false_positives":0},"degraded":null}\'; exit 0;; "rules ingest") exit 0;; esac; echo "wicked-core 9.9.9-fake"');
+  it('a report without rule_coverage (pre-#394 engine) is said so, not invented; an engine WITHOUT `rules list` records the seed-dir identity method by name; missing samples is a usage error', async () => {
+    fakeCore(
+      'case "$1 $2" in "rules eval") printf \'{"results":[],"summary":{"total":0,"caught":0,"gaps":0,"false_positives":0},"degraded":null}\'; exit 0;; "rules ingest") exit 0;; "rules list") echo "usage: wicked-core <status | repos | run --problem ...> [--db <path>]"; exit 0;; esac; echo "wicked-core 9.9.9-fake"',
+    );
     const r = runWithPath();
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain('rule_coverage: not reported by this engine (predates core #394)');
+    const rmeta = JSON.parse(readFileSync(join(outDir, 'report.meta.json'), 'utf8')) as ReportMeta;
+    const m = await mod();
+    expect(rmeta.rules_identity).toEqual({
+      method: 'seed-dir',
+      sha256: m.seedDirIdentity(rulesDir).sha256,
+      rule_count: null,
+      reason: expect.stringContaining('this engine has no `rules list` command'),
+    });
+    expect(r.stdout).toContain(`rules identity seed-dir ${rmeta.rules_identity.sha256}`);
     rmSync(join(outDir, 'samples.json'));
     const missing = runWithPath();
     expect(missing.status).toBe(2);
     expect(missing.stderr).toMatch(/samples\.json is missing — run `samples/);
   });
+
+  it('an engine whose `rules list` exists but answers garbage (neither the JSON envelope nor a usage banner) is a TOOL FAILURE — the identity is never guessed', () => {
+    fakeCore('case "$1 $2" in "rules ingest") exit 0;; "rules list") echo "rules list: 2 steering rule(s)"; exit 0;; esac; echo "wicked-core 9.9.9-fake"');
+    const r = runWithPath();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — rules list failed \(exit 0\): rules list: 2 steering rule\(s\)/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('the --version probe: ENOENT is the documented SKIP; any other spawn error, a non-zero exit or an empty answer is a TOOL FAILURE (exit 1) — never a run under an unknown engine (Copilot)', () => {
+    // Present but not executable ⇒ EACCES (PATH = the fake dir ALONE, so nothing else can answer).
+    fakeCore('echo "wicked-core 9.9.9-fake"');
+    chmodSync(join(fakeBin, coreBin), 0o644);
+    const eacces = runWithPath('fake-only');
+    expect(eacces.status).toBe(1);
+    expect(eacces.stderr).toMatch(/run: TOOL FAILURE \(engine version unknown\) — wicked-core --version could not be executed \(EACCES\)/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    // Executable, but --version exits non-zero.
+    fakeCore('case "$1" in --version) echo "unknown flag --version" >&2; exit 3;; esac; exit 0');
+    const nonzero = runWithPath();
+    expect(nonzero.status).toBe(1);
+    expect(nonzero.stderr).toMatch(/TOOL FAILURE \(engine version unknown\) — wicked-core --version exited 3: unknown flag --version/);
+    // Executable, exit 0, prints nothing — no version to record a run under.
+    fakeCore('exit 0');
+    const silent = runWithPath();
+    expect(silent.status).toBe(1);
+    expect(silent.stderr).toMatch(/wicked-core --version printed nothing/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('S14d: a published sample the ROUTE schema rejects (signals.phase/tool of the wrong type) is refused (exit 1) BEFORE the engine is probed — with samples_hash intact, so it is the schema, not the hash, that says no', async () => {
+    okEngine();
+    const m = await mod();
+    const samples = JSON.parse(readFileSync(join(outDir, 'samples.json'), 'utf8')) as Record<string, unknown>[];
+    samples[0]!['signals'] = { phase: 123, tool: [] };
+    writeFileSync(join(outDir, 'samples.json'), JSON.stringify(samples), 'utf8');
+    const { meta } = readSamples();
+    writeFileSync(join(outDir, 'samples.meta.json'), JSON.stringify({ ...meta, samples_hash: m.samplesHash(samples as unknown as Sample[]) }), 'utf8');
+    expect(ImportEvalCorpusSchema.safeParse({ name: 'x', samples }).success).toBe(false); // the route would 400 this
+    const r = runWithPath();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/samples\.json: sample "alpha@[0-9a-f]{12}" is invalid: signals\.phase: Expected string, received number; signals\.tool: Expected string, received array/);
+    expect(existsSync(join(fixture, 'engine-invoked'))).toBe(false);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('a result row naming a sample that was not staged, or echoing a different description, is a TOOL FAILURE — no report is published', () => {
+    okEngine({ rowsJs: 'const results = [{ sample: { id: "smuggled@000000000000", description: "x", kind: "bad", steering_type: "security" }, expected: "deny", fired: [], verdict: "gap" }];' });
+    const foreign = runWithPath();
+    expect(foreign.status).toBe(1);
+    expect(foreign.stderr).toMatch(/TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — results\[0\] names sample "smuggled@000000000000", which was not staged/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    okEngine({
+      rowsJs: 'const results = samples.map((x) => ({ sample: { id: x.id, description: "not what was staged", kind: x.kind, steering_type: x.steering_type }, expected: "allow", fired: [], verdict: "caught" }));',
+    });
+    const drifted = runWithPath();
+    expect(drifted.status).toBe(1);
+    expect(drifted.stderr).toMatch(/results\[0\] \(alpha@[0-9a-f]{12}\) echoes description "not what was staged" but the staged sample has/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+  });
+
+  it('S14e: report.json + report.meta.json are ONE verifiable generation — an interruption between the two renames (report renamed, meta not) is refused on read by name, an edited meta generation too', async () => {
+    okEngine();
+    expect(runWithPath().status).toBe(0);
+    const m = await mod();
+    const good = m.readPublishedReport(outDir);
+    expect(good.report.generation).toBe(good.meta.generation);
+    // The interruption, simulated: a NEW report landed, the meta rename never happened.
+    const before = readFileSync(join(outDir, 'report.json'), 'utf8');
+    writeFileSync(join(outDir, 'report.json'), JSON.stringify({ ...good.report, generation: '20991231-235959-deadbeef' }), 'utf8');
+    expect(() => m.readPublishedReport(outDir)).toThrow(m.RefusalError);
+    expect(() => m.readPublishedReport(outDir)).toThrow(
+      /^report_sha256 mismatch: .*report\.meta\.json describes sha256:[0-9a-f]{64} but .*report\.json hashes to sha256:[0-9a-f]{64} — a torn publication \(report and meta from different generations\) or a foreign report/,
+    );
+    writeFileSync(join(outDir, 'report.json'), before, 'utf8');
+    expect(m.readPublishedReport(outDir).meta).toEqual(good.meta);
+    // A meta whose generation was edited (its hash still matches the report bytes).
+    writeFileSync(join(outDir, 'report.meta.json'), JSON.stringify({ ...good.meta, generation: '20991231-235959-deadbeef' }), 'utf8');
+    expect(() => m.readPublishedReport(outDir)).toThrow(/^generation mismatch: .*report\.json is generation "\d{8}-\d{6}-[0-9a-f]{8}" but .*report\.meta\.json says "20991231-235959-deadbeef"/);
+    // A missing half is a usage error.
+    rmSync(join(outDir, 'report.meta.json'));
+    expect(() => m.readPublishedReport(outDir)).toThrow(m.UsageError);
+    expect(() => m.readPublishedReport(outDir)).toThrow(/report\.meta\.json is missing — run `run/);
+  });
+
+  it('S14f: a held .report.lock refuses the publication (exit 1, names the holder, nothing published, the lock untouched)', async () => {
+    okEngine();
+    const lock = join(outDir, (await mod()).REPORT_LOCK);
+    writeFileSync(lock, 'pid 4242 generation 20260909-000000-deadbeef\n', 'utf8');
+    const r = runWithPath();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/another `run` publication holds .*\.report\.lock \(pid 4242 generation 20260909-000000-deadbeef\) — refusing to interleave/);
+    expect(existsSync(join(outDir, 'report.json'))).toBe(false);
+    expect(existsSync(join(outDir, 'report.meta.json'))).toBe(false);
+    expect(readFileSync(lock, 'utf8')).toBe('pid 4242 generation 20260909-000000-deadbeef\n');
+    rmSync(lock);
+    expect(runWithPath().status).toBe(0);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it(
+    'S14g: two CONCURRENT publishers into one dir — each either publishes or is refused by the lock; the surviving pair verifies as one generation',
+    async () => {
+      okEngine();
+      const spawnRun = () =>
+        new Promise<{ status: number | null; stderr: string }>((resolveRun) => {
+          const args = [SCRIPT, 'run', outDir, '--pin', pinPath, '--source-root', sourceRoot, '--rules', rulesDir];
+          // `env` spreads process.env (the hermetic arming); re-stated for the harness-hygiene scan.
+          const child = spawn(process.execPath, args, { env: { ...process.env, ...env, PATH: `${fakeBin}:${process.env['PATH'] ?? ''}` } });
+          let stderr = '';
+          child.stderr.on('data', (d: Buffer) => {
+            stderr += d.toString();
+          });
+          child.on('close', (status) => resolveRun({ status, stderr }));
+        });
+      const [x, y] = await Promise.all([spawnRun(), spawnRun()]);
+      for (const r of [x, y]) {
+        expect([0, 1]).toContain(r.status);
+        if (r.status === 1) expect(r.stderr).toMatch(/another `run` publication holds .*\.report\.lock/);
+      }
+      expect([x.status, y.status]).toContain(0); // at least one published
+      const m = await mod();
+      const { report, meta } = m.readPublishedReport(outDir); // verifies report_sha256 + generation
+      expect(report.generation).toBe(meta.generation);
+      expect(readdirSync(outDir).filter((f) => f.endsWith('.tmp') || f.endsWith('.lock'))).toEqual([]);
+    },
+    30_000,
+  );
 });
 
 describe('publication — atomic (tmp+rename), locked, one generation per publication', () => {

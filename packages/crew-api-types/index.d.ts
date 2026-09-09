@@ -1472,7 +1472,17 @@ export interface GovernanceEvalNearestRule {
  * remediation pointer for "which rule needs sharpening".
  */
 export interface GovernanceEvalResult {
-  sample: Pick<GovernanceEvalSample, 'id' | 'description' | 'kind' | 'steering_type'>;
+  sample: Pick<GovernanceEvalSample, 'id' | 'description' | 'kind' | 'steering_type'> & {
+    /**
+     * The sample's PAYLOAD identity — `sha256:` over the canonical JSON of its full payload (id,
+     * description, kind, steering_type, signals). The engine echoes only the four fields above
+     * (input `signals` never ride a result row), so this is stamped by a PRODUCER that held the
+     * samples it staged (the internal-corpus `run`); a row without it cannot be proven to be the
+     * same action as a row with the same id in another run, and the offline comparison reports
+     * such a pair as unverified rather than comparable.
+     */
+    payload_hash?: string;
+  };
   expected: 'deny' | 'allow';
   fired: string[];
   verdict: 'caught' | 'gap' | 'false_positive';

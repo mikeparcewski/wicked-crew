@@ -51,16 +51,44 @@
  *   - `materialize`: works only on direct children of the REALPATH of `<dir>`; an existing entry
  *     that is a symlink, or resolves outside that root, is refused before anything is removed or
  *     extracted; the transient archive lives in a private mkdtemp dir, never at a predictable name.
+ *     The extracted tree must EQUAL the committed tree: the operator's global/system git
+ *     attributes are pinned away for the archive (`-c core.attributesFile=<empty file>`,
+ *     `GIT_ATTR_NOSYSTEM=1`, never `--worktree-attributes`), and every `git ls-tree -r -z` entry is
+ *     verified present with its blob id after extraction (nothing missing, substituted or extra) —
+ *     an `export-ignore`/`export-subst` from a source git offers no override for
+ *     (`$GIT_DIR/info/attributes`, the commit's own `.gitattributes`) is a named refusal, never a
+ *     different tree recorded as the pin. The receipt carries each repo's `tree_sha`.
  *   - `samples`: `git log` runs with an explicit, complete configuration (`GIT_LOG_CONFIG` + the
  *     command-line twins) so identical pins derive byte-identical samples regardless of the
- *     operator's git config (rename detection, order file, quoting, output encoding, signatures).
+ *     operator's git config (rename detection, order file, quoting, output encoding, signatures);
+ *     paths are read NUL-delimited (`-z`) and never trimmed — a leading/trailing space, a tab, a
+ *     quote, a backslash or a newline in a filename is the real name, and the steering-type
+ *     inference sees the real path.
  *   - `samples` publication is atomic: samples.json then samples.meta.json via tmp+rename under a
- *     `.samples.lock`, one `generation` stamped per publication; `pin`, `materialize` and `run`
- *     publish their files the same way. A partial write is never readable as complete.
+ *     `.samples.lock`, one `generation` stamped per publication; `pin` and `materialize` publish
+ *     their files the same way. A partial write is never readable as complete.
+ *   - every sample is validated by the ROUTE's own validator (`packages/crew/src/api/eval-sample.js`
+ *     `EvalSampleSchema` — the module `POST /testing/corpora/import` parses with; there is no
+ *     hand mirror in this script) plus the engine's steering-type vocabulary.
  *   - `run`: verifies samples.meta.json against samples.json (`samples_hash`) AND the selected pin
  *     (`pin_hash`) BEFORE probing the engine, then stages EXACTLY those samples in a fresh private
  *     temp corpus dir (the engine loads every *.json in the dir it is given — a shared dir could
- *     smuggle unpinned samples in).
+ *     smuggle unpinned samples in). The engine probe (`--version`) fails the run on anything but
+ *     a clean answer (ENOENT alone is the documented SKIP). Every result row is checked against
+ *     the staged sample it names and stamped with that sample's `payload_hash`.
+ *   - `run` publishes report.json + report.meta.json as ONE verifiable generation under a
+ *     `.report.lock`: both carry the `generation`, the meta carries `report_sha256` over the
+ *     published report bytes, and `readPublishedReport()` refuses a pair that does not verify (a
+ *     torn publication or a foreign report) with a named error. The meta is complete provenance:
+ *     engine version + build identity (realpath + sha256 of the binary resolved from PATH), the
+ *     rule-snapshot identity (`rules_identity.method` says how: `engine-list` = the canonical hash
+ *     of every rule `rules list --include-retired --json` read back from the temp rules db before
+ *     it is deleted; `seed-dir` = the canonical hash of the seed directory's file contents, used
+ *     only when the engine has no such command — recorded, never silent), `pin_hash`,
+ *     `samples_hash`, `corpus_name`.
+ *
+ * Runs on plain node. Its one import beyond node's builtins is crew's shared eval-sample module
+ * (zod) — the route's own validator and the sample payload-identity hash, ONE spelling.
  *
  * Exit codes: 0 ok / skipped-with-reason, 1 drift / refusal / tool failure, 2 usage or IO error.
  * Eval GAPS are findings, not failures — `run` exits 0 on a report full of gaps.
@@ -68,10 +96,33 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// The route's OWN sample validator + the sample payload-identity hash — imported from crew's
+// source tree (plain ESM JS by design, so this script needs no build step): one spelling for the
+// route, the offline comparison and this derivation.
+import { EvalSampleSchema, samplePayloadHash } from '../packages/crew/src/api/eval-sample.js';
 
 /** This repo's root (the script lives in `<root>/scripts/`). */
 export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -94,6 +145,13 @@ export const SAFE_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 /** The publication lock `samples` holds while it renames samples.json + samples.meta.json into
  *  place — two concurrent derivations into one dir are refused, never interleaved. */
 export const SAMPLES_LOCK = '.samples.lock';
+/** The publication lock `run` holds while it renames report.json + report.meta.json into place. */
+export const REPORT_LOCK = '.report.lock';
+/** What `materialize` pins for every `git archive` call (recorded in the receipt). */
+export const ARCHIVE_ATTRIBUTES_NOTE = Object.freeze({
+  pinned: ['core.attributesFile=<empty file>', 'GIT_ATTR_NOSYSTEM=1', 'no --worktree-attributes'],
+  verified: 'every `git ls-tree -r -z <commit>` entry present with its blob id after extraction; nothing extra',
+});
 /**
  * The git configuration the sample derivation READS, pinned explicitly (`-c` outranks every config
  * file: system, global, repo-local) so identical pins derive byte-identical samples on every
@@ -189,10 +247,12 @@ const MS_PER_DAY = 86_400_000;
 /** `git archive` of the largest pinned repo is tens of MB; give the tar a generous ceiling. */
 const GIT_MAX_BUFFER = 1024 * 1024 * 1024;
 
-class UsageError extends Error {}
+export class UsageError extends Error {}
 /** A fail-closed refusal that is not drift: a containment, lock or published-identity check said
  *  no. Exit 1, like drift — the operator has something to fix before the mode may run. */
-class RefusalError extends Error {}
+export class RefusalError extends Error {}
+/** The source checkouts no longer match the pin (a moved or re-cut tag). Exit 1. */
+export class DriftError extends Error {}
 
 /** One safe path segment (see `SAFE_SEGMENT_RE`) — never `.` or `..`. */
 export function isSafeSegment(name) {
@@ -207,21 +267,69 @@ function newGeneration() {
 
 /** Publish a JSON file atomically: write `<path>.<generation>.tmp` beside it, then rename into
  *  place (an atomic replace on POSIX and Windows). A reader sees the old file or the new one,
- *  never a truncated one. */
+ *  never a truncated one. Returns the exact text written (what a content hash must cover). */
 function publishJson(path, value, generation = newGeneration()) {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${generation}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  writeFileSync(tmp, text, 'utf8');
   renameSync(tmp, path);
+  return text;
+}
+
+/**
+ * Run `fn(generation)` holding `lockPath` (exclusive create — a held lock is a refusal naming the
+ * holder, never an interleaving), then release the lock however `fn` ends. One `generation` per
+ * publication; the lock file records `pid` + generation for the operator who finds it stale.
+ */
+function withPublicationLock(lockPath, what, fn) {
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const generation = newGeneration();
+  let fd;
+  try {
+    fd = openSync(lockPath, 'wx');
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      let holder = '';
+      try {
+        holder = readFileSync(lockPath, 'utf8').trim();
+      } catch {
+        /* an unreadable lock is still a held lock */
+      }
+      throw new RefusalError(
+        `another \`${what}\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no ${what} is running, remove the lock and retry`,
+      );
+    }
+    throw err;
+  }
+  // From here the lock is OURS: release it however publication ends.
+  try {
+    writeFileSync(fd, `pid ${process.pid} generation ${generation}\n`, 'utf8');
+    closeSync(fd);
+    fd = undefined;
+    return fn(generation);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(lockPath, { force: true });
+  }
 }
 
 function git(cwd, args, opts = {}) {
+  return gitRaw(cwd, args, opts).trimEnd();
+}
+
+/** `git` output VERBATIM — for NUL-delimited listings, where a trailing byte is data, never noise. */
+function gitRaw(cwd, args, opts = {}) {
   return execFileSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: GIT_MAX_BUFFER,
     ...opts,
-  }).trimEnd();
+  });
+}
+
+function sha256Hex(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /** Codepoint order on `repo` — deterministic on every machine (`localeCompare` is locale-bound). */
@@ -312,7 +420,13 @@ export function releaseTagsBefore(table, tag, checkout) {
  * `from` (tag, sha, date, commit count) and the note that explains the choice.
  */
 export function resolveWindow(checkout, tag, rule, table = tagTable(checkout)) {
-  const { sha: tagSha, date: tagDate } = table.get(tag);
+  // Guard BEFORE destructuring: a tag missing from the table (a caller's table, or a tag that
+  // does not exist) must be a UsageError naming both, never a TypeError on `undefined`.
+  const pinned = table.get(tag);
+  if (pinned === undefined) {
+    throw new UsageError(`${tag}: tag does not exist in ${checkout} (not in its tag table) — a window can only open from an existing release tag`);
+  }
+  const { sha: tagSha, date: tagDate } = pinned;
   const oldestAllowed = Date.parse(tagDate) - rule.max_age_days * MS_PER_DAY;
   let chosen = null;
   let walked = 0;
@@ -473,8 +587,6 @@ function requirePinnedCheckouts(pin, pinPath, sourceRoot) {
   }
 }
 
-class DriftError extends Error {}
-
 /**
  * `<root>/<name>` — the ONLY shape `materialize` will remove or write: `root` is already a
  * realpath, `name` is one safe segment (so the join is a direct child — asserted, not assumed),
@@ -516,6 +628,16 @@ function containedChild(root, name) {
  * `tag` matches `RELEASE_TAG_RE` — both re-asserted here. The transient tar lives in a private
  * mkdtemp dir, never at a predictable name beside the destination that a planted symlink could
  * redirect. The receipt is published atomically.
+ *
+ * Fidelity: the extracted tree must EQUAL the committed tree. `git archive` honors
+ * `export-ignore` / `export-subst` attributes from three sources. The operator's global/system
+ * attributes are pinned away for the call (`-c core.attributesFile=<empty file>` — a real empty
+ * file, since `/dev/null` is not one on Windows — plus `GIT_ATTR_NOSYSTEM=1`; `--worktree-
+ * attributes` is never given). The two sources git offers NO override for, `$GIT_DIR/info/
+ * attributes` and the commit's own `.gitattributes`, are caught AFTER extraction by
+ * `verifyExtractedTree`: every `git ls-tree -r -z` entry must be present with the same blob id and
+ * nothing else may be there — a dropped, substituted or extra file is a named refusal, never a
+ * different tree recorded as the pin. Each repo's `tree_sha` rides in the receipt.
  */
 export function materialize(pin, pinPath, sourceRoot, outDir) {
   requirePinnedCheckouts(pin, pinPath, sourceRoot);
@@ -523,9 +645,11 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
   // A materialize root reached through a symlink is the operator's choice; everything below is
   // addressed from its RESOLVED path so containment is judged against the real directory.
   const root = realpathSync(outDir);
-  const receipt = { pin_hash: pin.pin_hash, materialized_at: new Date().toISOString(), repos: [] };
+  const receipt = { pin_hash: pin.pin_hash, materialized_at: new Date().toISOString(), attributes: ARCHIVE_ATTRIBUTES_NOTE, repos: [] };
   const scratch = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-archive-'));
   try {
+    const emptyAttributes = join(scratch, 'empty.gitattributes');
+    writeFileSync(emptyAttributes, '', 'utf8');
     for (const r of [...pin.repos].sort(byRepo)) {
       if (!isSafeSegment(r.repo) || !RELEASE_TAG_RE.test(r.tag)) {
         throw new RefusalError(`refusing to materialize ${JSON.stringify(`${r.repo}@${r.tag}`)}: repo/tag are not safe path segments`);
@@ -535,19 +659,98 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
       rmSync(dest, { recursive: true, force: true });
       mkdirSync(dest);
       const tarPath = join(scratch, `${r.repo}.tar`);
-      git(checkout, ['archive', '--format=tar', '-o', tarPath, r.commit_sha]);
+      git(checkout, ['-c', `core.attributesFile=${emptyAttributes}`, 'archive', '--format=tar', '-o', tarPath, r.commit_sha], {
+        env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' },
+      });
       const untar = spawnSync('tar', ['-xf', tarPath, '-C', dest], { encoding: 'utf8' });
       unlinkSync(tarPath);
       if (untar.status !== 0) {
         throw new Error(`tar -xf failed for ${r.repo}@${r.tag}: ${untar.stderr || untar.error?.message || `exit ${untar.status}`}`);
       }
-      receipt.repos.push({ repo: r.repo, tag: r.tag, commit_sha: r.commit_sha, path: dest });
+      const tree = verifyExtractedTree(checkout, r.commit_sha, dest, `${r.repo}@${r.tag}`);
+      receipt.repos.push({ repo: r.repo, tag: r.tag, commit_sha: r.commit_sha, tree_sha: tree.tree_sha, entries: tree.entries, path: dest });
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
   publishJson(containedChild(root, 'materialized.json'), receipt);
   return receipt;
+}
+
+/** git's blob object id of `bytes` — `sha1("blob <len>\0" + bytes)`; what `ls-tree` prints. */
+function blobOid(bytes) {
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+}
+
+/** `ls-tree -r -z <commit>`: `path → { mode, oid }` for every blob/symlink; gitlinks counted, not
+ *  listed (`git archive` writes nothing for a submodule). Paths verbatim — the first TAB ends the
+ *  metadata, everything after it is the name, tabs and newlines included. */
+function committedTree(checkout, commitSha) {
+  const entries = new Map();
+  let gitlinks = 0;
+  for (const entry of gitRaw(checkout, ['ls-tree', '-r', '-z', commitSha]).split('\0')) {
+    if (entry === '') continue;
+    const tab = entry.indexOf('\t');
+    if (tab === -1) throw new Error(`unparseable ls-tree -z entry in ${checkout}: ${JSON.stringify(entry.slice(0, 80))}`);
+    const [mode, , oid] = entry.slice(0, tab).split(' ');
+    const path = entry.slice(tab + 1);
+    if (mode === '160000') {
+      gitlinks += 1;
+      continue;
+    }
+    entries.set(path, { mode, oid });
+  }
+  return { entries, gitlinks };
+}
+
+/** Every regular file and symlink under `root`, as `relative/posix/path → blob oid`. */
+function extractedTree(root) {
+  const found = new Map();
+  const walk = (dir) => {
+    for (const d of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, d.name);
+      const rel = relative(root, full).split(sep).join('/');
+      if (d.isDirectory()) walk(full);
+      else if (d.isSymbolicLink()) found.set(rel, blobOid(Buffer.from(readlinkSync(full))));
+      else if (d.isFile()) found.set(rel, blobOid(readFileSync(full)));
+      else throw new RefusalError(`refusing to accept ${full}: neither a file, a directory nor a symlink`);
+    }
+  };
+  walk(root);
+  return found;
+}
+
+/**
+ * The extracted `dest` must be the committed tree of `commitSha`, entry for entry: every
+ * `ls-tree` path present with the same blob id, nothing missing, nothing substituted
+ * (`export-subst`), nothing extra. Refuses (exit 1) naming the paths and the attribute sources
+ * git honors that this script cannot override. Returns the tree id + entry count for the receipt.
+ */
+function verifyExtractedTree(checkout, commitSha, dest, label) {
+  const tree_sha = git(checkout, ['rev-parse', `${commitSha}^{tree}`]);
+  const { entries, gitlinks } = committedTree(checkout, commitSha);
+  const actual = extractedTree(dest);
+  // Some tar implementations extract git's pax global header (the commit id) as a top-level
+  // file of that name; it is not part of any tree — remove it before judging extras.
+  if (actual.has('pax_global_header') && !entries.has('pax_global_header')) {
+    unlinkSync(join(dest, 'pax_global_header'));
+    actual.delete('pax_global_header');
+  }
+  const missing = [...entries.keys()].filter((p) => !actual.has(p)).sort();
+  const extra = [...actual.keys()].filter((p) => !entries.has(p)).sort();
+  const differing = [...entries].filter(([p, e]) => actual.has(p) && actual.get(p) !== e.oid).map(([p]) => p).sort();
+  if (missing.length > 0 || extra.length > 0 || differing.length > 0) {
+    const show = (xs) => xs.slice(0, 5).map((p) => JSON.stringify(p)).join(', ') + (xs.length > 5 ? `, … (${xs.length} total)` : '');
+    throw new RefusalError(
+      `refusing to accept the materialized ${label}: the extracted tree is not the committed tree ${tree_sha}` +
+        (missing.length > 0 ? `\n  missing (${missing.length}): ${show(missing)}` : '') +
+        (differing.length > 0 ? `\n  content differs (${differing.length}): ${show(differing)}` : '') +
+        (extra.length > 0 ? `\n  extra (${extra.length}): ${show(extra)}` : '') +
+        `\n  the operator's global/system attributes were pinned away for the archive; an export-ignore/export-subst in ` +
+        `${checkout}/.git/info/attributes or in the commit's own .gitattributes cannot be overridden — remove it, or pin a commit without it`,
+    );
+  }
+  return { tree_sha, entries: entries.size, gitlinks };
 }
 
 /** Classify ONE touched path by the explicit table (first matching row wins), or null. */
@@ -578,18 +781,21 @@ export function inferSteeringType(files) {
 }
 
 /**
- * The window's commits, newest first, from ONE `git log` (record separator \x1e, field separator
- * \x1f, then the touched paths one per line). `--diff-merges=first-parent` gives a merge commit
- * the files it landed on the mainline. The extraction's git configuration is EXPLICIT and complete
- * (`GIT_LOG_CONFIG` + the command-line twins): a rename is a delete + an add (both paths touched,
- * no similarity heuristic), paths come in tree order and verbatim, messages in UTF-8, no signature
- * lines — the same bytes under any operator's global/system/repo git config.
+ * The window's commits, newest first, from ONE `git log -z` (record separator \x1e, field
+ * separator \x1f, then the touched paths NUL-delimited). `--diff-merges=first-parent` gives a
+ * merge commit the files it landed on the mainline. The extraction's git configuration is EXPLICIT
+ * and complete (`GIT_LOG_CONFIG` + the command-line twins): a rename is a delete + an add (both
+ * paths touched, no similarity heuristic), paths come in tree order and VERBATIM (`-z` is git's
+ * "do not munge pathnames": no C-quoting of tabs, quotes, backslashes or newlines, which
+ * `core.quotePath=false` alone leaves in place), messages in UTF-8, no signature lines — the same
+ * bytes under any operator's global/system/repo git config. Paths are never trimmed.
  */
 export function windowCommits(checkout, fromSha, tagSha) {
-  const raw = git(checkout, [
+  const raw = gitRaw(checkout, [
     '--no-pager',
     ...GIT_LOG_CONFIG.flatMap((kv) => ['-c', kv]),
     'log',
+    '-z',
     '--format=%x1e%H%x1f%s%x1f%b%x1f',
     '--name-only',
     '--no-renames',
@@ -608,20 +814,39 @@ export function windowCommits(checkout, fromSha, tagSha) {
       throw new Error(`unparseable git log record in ${checkout} (a commit message carries a field separator?): ${record.slice(0, 80)}`);
     }
     const [sha, subject, body, tail] = fields;
-    const files = tail
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l !== '');
-    commits.push({ sha, subject: subject.trim(), body: body.trim(), files });
+    commits.push({ sha, subject: subject.trim(), body: body.trim(), files: parseNulPaths(tail, checkout, sha) });
   }
   return commits;
 }
 
 /**
- * Read the known-bad allowlist: `{ samples: { "<repo>@<sha12>": { reason, steering_type? } } }`.
- * FAIL-CLOSED: a missing, unreadable or malformed file, or a `samples` that is not the keyed map,
- * is a usage error — never an empty allowlist. (A misspelled `--known-bad` path would otherwise
- * silently relabel every bad commit `good`.) The empty allowlist is spelled `{"samples": {}}`.
+ * The `--name-only -z` tail of ONE record. git terminates the format with a NUL; when the commit
+ * touched files, exactly one `\n` follows and then each path NUL-TERMINATED, verbatim. So the
+ * grammar is `\0` | `\0\n(<path>\0)+`. Asserted, never assumed — any other shape is a parse error
+ * naming the commit — and a path is NEVER trimmed: leading/trailing spaces, tabs, quotes,
+ * backslashes and newlines are the real name (a path cannot be empty or contain NUL, so the split
+ * is exact).
+ */
+export function parseNulPaths(tail, checkout, sha) {
+  const bad = (why) => new Error(`unparseable --name-only -z tail for ${sha} in ${checkout}: ${why} (${JSON.stringify(tail.slice(0, 40))})`);
+  if (!tail.startsWith('\0')) throw bad('expected a NUL after the header');
+  const rest = tail.slice(1);
+  if (rest === '') return [];
+  if (!rest.startsWith('\n')) throw bad('expected a newline before the path list');
+  if (!rest.endsWith('\0')) throw bad('expected the last path to be NUL-terminated');
+  const files = rest.slice(1, -1).split('\0');
+  if (files.some((f) => f === '')) throw bad('an empty path');
+  return files;
+}
+
+/**
+ * Read the known-bad allowlist file `{ samples: { "<repo>@<sha12>": { reason, steering_type? } } }`
+ * and RETURN its validated `samples` map alone — `id → { reason, steering_type? }` (the object the
+ * derivation indexes by sample id; the file's other keys, e.g. `description`, are for humans and
+ * are not returned). FAIL-CLOSED: a missing, unreadable or malformed file, or a `samples` that is
+ * not the keyed map, is a usage error — never an empty allowlist. (A misspelled `--known-bad` path
+ * would otherwise silently relabel every bad commit `good`.) The empty allowlist is spelled
+ * `{"samples": {}}` and returns `{}`.
  */
 export function readKnownBad(path) {
   if (!existsSync(path)) {
@@ -658,32 +883,23 @@ export function readKnownBad(path) {
 }
 
 /**
- * Mirror of crew's `EvalSampleSchema` (packages/crew/src/api/testing.ts — strict object, closed
- * `kind`, non-empty strings, strict `signals`) PLUS the engine's `EvalSample::validate` (a known
- * steering type). Zero-dep so the script stands alone; the vitest suite ALSO parses the written
- * file with the real zod schema. Returns the list of violations (empty = valid).
+ * The ROUTE's own validator — `EvalSampleSchema` from `packages/crew/src/api/eval-sample.js`, the
+ * very module `POST /testing/corpora/import` parses with (strict object, closed `kind`, non-empty
+ * strings, strict `signals` with string `phase`/`tool`, string[] `files`, string `content`) —
+ * PLUS the engine's `EvalSample::validate` (a known steering type; the schema leaves
+ * `steering_type` open on purpose, the engine owns that vocabulary). No hand mirror: whatever the
+ * route rejects, this rejects, by construction. Returns the list of violations as
+ * `<path>: <message>` (empty = valid).
  */
 export function validateSample(sample) {
-  const problems = [];
-  const keys = Object.keys(sample).sort();
-  const expected = ['description', 'id', 'kind', 'signals', 'steering_type'];
-  if (JSON.stringify(keys) !== JSON.stringify(expected)) problems.push(`keys ${keys.join(',')} != ${expected.join(',')}`);
-  for (const k of ['id', 'description', 'steering_type']) {
-    if (typeof sample[k] !== 'string' || sample[k].length === 0) problems.push(`${k} must be a non-empty string`);
+  const parsed = EvalSampleSchema.safeParse(sample);
+  if (!parsed.success) {
+    return parsed.error.issues.map((i) => `${i.path.length === 0 ? '(sample)' : i.path.join('.')}: ${i.message}`);
   }
-  if (sample.kind !== 'good' && sample.kind !== 'bad') problems.push(`kind ${JSON.stringify(sample.kind)} not good|bad`);
-  if (!STEERING_TYPES.includes(sample.steering_type)) problems.push(`steering_type ${JSON.stringify(sample.steering_type)} unknown`);
-  const s = sample.signals;
-  if (s === null || typeof s !== 'object' || Array.isArray(s)) {
-    problems.push('signals must be an object');
-  } else {
-    for (const k of Object.keys(s)) {
-      if (!['phase', 'tool', 'files', 'content'].includes(k)) problems.push(`signals.${k} is not a known signal`);
-    }
-    if (s.files !== undefined && !(Array.isArray(s.files) && s.files.every((f) => typeof f === 'string'))) problems.push('signals.files must be string[]');
-    if (s.content !== undefined && typeof s.content !== 'string') problems.push('signals.content must be a string');
+  if (!STEERING_TYPES.includes(parsed.data.steering_type)) {
+    return [`steering_type: ${JSON.stringify(parsed.data.steering_type)} is not one of ${STEERING_TYPES.join('|')}`];
   }
-  return problems;
+  return [];
 }
 
 /**
@@ -755,39 +971,12 @@ export function corpusName(pinHashValue) {
  * complete-looking meta with samples it does not describe. Returns the stamped meta.
  */
 export function publishSamples(outDir, samples, meta) {
-  mkdirSync(outDir, { recursive: true });
-  const generation = newGeneration();
-  const lockPath = join(outDir, SAMPLES_LOCK);
-  let fd;
-  try {
-    fd = openSync(lockPath, 'wx');
-  } catch (err) {
-    if (err?.code === 'EEXIST') {
-      let holder = '';
-      try {
-        holder = readFileSync(lockPath, 'utf8').trim();
-      } catch {
-        /* an unreadable lock is still a held lock */
-      }
-      throw new RefusalError(
-        `another \`samples\` publication holds ${lockPath}${holder === '' ? '' : ` (${holder})`} — refusing to interleave; if no derivation is running, remove the lock and retry`,
-      );
-    }
-    throw err;
-  }
-  // From here the lock is OURS: release it however publication ends.
-  try {
-    writeFileSync(fd, `pid ${process.pid} generation ${generation}\n`, 'utf8');
-    closeSync(fd);
-    fd = undefined;
+  return withPublicationLock(join(outDir, SAMPLES_LOCK), 'samples', (generation) => {
     const stamped = { ...meta, generation };
     publishJson(join(outDir, 'samples.json'), samples, generation);
     publishJson(join(outDir, 'samples.meta.json'), stamped, generation);
     return stamped;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-    rmSync(lockPath, { force: true });
-  }
+  });
 }
 
 /**
@@ -831,23 +1020,239 @@ export function readPublishedSamples(outDir, pin) {
 }
 
 /**
+ * The executable `spawnSync(name)` would run, as a REALPATH: `name` with a separator is a path;
+ * otherwise the first PATH entry holding an executable regular file of that name (Windows: with
+ * each `PATHEXT` extension). Null when nothing on PATH names it.
+ */
+export function resolveExecutable(name) {
+  const candidates = [];
+  if (/[\\/]/.test(name)) {
+    candidates.push(resolve(name));
+  } else {
+    const exts = process.platform === 'win32' ? ['', ...(process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((e) => e !== '')] : [''];
+    for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+      if (dir === '') continue;
+      for (const ext of exts) candidates.push(join(dir, `${name}${ext}`));
+    }
+  }
+  for (const c of candidates) {
+    try {
+      if (!statSync(c).isFile()) continue;
+      if (process.platform !== 'win32') accessSync(c, fsConstants.X_OK);
+      return realpathSync(c);
+    } catch {
+      /* not here — next candidate */
+    }
+  }
+  return null;
+}
+
+/**
+ * The content identity of a directory of rule sources: sha256 over the canonical JSON of
+ * `[[relative/posix/path, sha256hex(bytes)], …]`, codepoint-sorted by path, every regular file
+ * (symlinks read through). What `rules ingest <dir>` was handed, byte for byte.
+ */
+export function seedDirIdentity(dir) {
+  const files = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else files.push([relative(dir, full).split(sep).join('/'), sha256Hex(readFileSync(full))]);
+    }
+  };
+  walk(dir);
+  files.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { dir, sha256: `sha256:${sha256Hex(canonicalJsonLocal(files))}`, files: files.length };
+}
+
+/** Canonical JSON (keys codepoint-sorted at every depth, compact) — the same serialization
+ *  `eval-sample.js` uses for the payload hash, restated for values that are not samples. */
+function canonicalJsonLocal(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJsonLocal(v === undefined ? null : v)).join(',')}]`;
+  return `{${Object.entries(value)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJsonLocal(v)}`)
+    .join(',')}}`;
+}
+
+/**
+ * The rule-snapshot identity over the rules an engine LISTED back from the store it evaluated:
+ * sha256 over the canonical JSON of the FULL rules (every field, retired included — plan §3),
+ * codepoint-sorted by `id` (ties by their canonical text). A rule without a string `id` is an
+ * error — the identity cannot be anchored.
+ */
+export function rulesSnapshotHash(rules) {
+  const keyed = rules.map((r, i) => {
+    if (r === null || typeof r !== 'object' || typeof r.id !== 'string') {
+      throw new Error(`rules list returned rules[${i}] without a string id: ${JSON.stringify(r).slice(0, 120)}`);
+    }
+    return [r.id, canonicalJsonLocal(r)];
+  });
+  keyed.sort(([ia, ta], [ib, tb]) => (ia < ib ? -1 : ia > ib ? 1 : ta < tb ? -1 : ta > tb ? 1 : 0));
+  return `sha256:${sha256Hex(`[${keyed.map(([, t]) => t).join(',')}]`)}`;
+}
+
+/**
+ * Classify the engine's answer to `rules list --db <tmp> --include-retired --json`:
+ *   - a JSON envelope with a `rules` array ⇒ `{ method: 'engine-list', sha256, rule_count }`
+ *   - the engine's usage banner (an engine that predates `rules list`) ⇒ `{ method: 'seed-dir',
+ *     sha256: <the seed dir's>, reason }` — recorded, never silent
+ *   - anything else ⇒ a tool failure (the command exists and did not answer)
+ */
+function rulesIdentityFrom(listed, coreBin, seed) {
+  const out = listed.stdout ?? '';
+  const err = listed.stderr ?? '';
+  if (listed.error !== undefined) return { failure: `${coreBin} rules list could not be executed: ${listed.error.message}` };
+  if (listed.status === 0) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(out);
+    } catch {
+      parsed = null;
+    }
+    if (parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.rules)) {
+      try {
+        return {
+          identity: {
+            method: 'engine-list',
+            command: 'rules list --db <tmp rules.db> --include-retired --json (read back before the temp db is deleted)',
+            sha256: rulesSnapshotHash(parsed.rules),
+            rule_count: parsed.rules.length,
+          },
+        };
+      } catch (e) {
+        return { failure: e instanceof Error ? e.message : String(e) };
+      }
+    }
+  }
+  if (/^usage:/m.test(out) || /^usage:/m.test(err)) {
+    return {
+      identity: {
+        method: 'seed-dir',
+        sha256: seed.sha256,
+        rule_count: null,
+        reason: `this engine has no \`rules list\` command (it answered with its usage banner) — the identity is the canonical hash of the ingested seed directory's ${seed.files} file(s)`,
+      },
+    };
+  }
+  return { failure: `rules list failed (exit ${listed.status}): ${(err || out).trim().slice(0, 400) || '(no output)'}` };
+}
+
+/**
+ * Every result row must name a STAGED sample and echo its description/kind/steering_type; each
+ * then gets that sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over the full
+ * payload incl. signals — what makes two runs comparable, `eval-compare.ts`). Returns the failure
+ * text, or null when every row was stamped.
+ */
+function stampPayloadHashes(report, samples) {
+  if (report === null || typeof report !== 'object' || Array.isArray(report) || !Array.isArray(report.results)) {
+    return 'rules eval printed a JSON value that is not a report object with a `results` array';
+  }
+  const staged = new Map(samples.map((s) => [s.id, s]));
+  for (const [i, row] of report.results.entries()) {
+    const ref = row?.sample;
+    if (ref === null || typeof ref !== 'object' || typeof ref.id !== 'string') return `results[${i}] carries no sample.id`;
+    const s = staged.get(ref.id);
+    if (s === undefined) {
+      return `results[${i}] names sample ${JSON.stringify(ref.id)}, which was not staged — the engine evaluated something other than the pinned samples`;
+    }
+    for (const k of ['description', 'kind', 'steering_type']) {
+      if (ref[k] !== s[k]) return `results[${i}] (${ref.id}) echoes ${k} ${JSON.stringify(ref[k])} but the staged sample has ${JSON.stringify(s[k])}`;
+    }
+    ref.payload_hash = samplePayloadHash(s);
+  }
+  return null;
+}
+
+/**
+ * Publish report.json + report.meta.json as ONE verifiable generation under `<dir>/.report.lock`:
+ * the report gets the `generation` stamped in, is written first, and its exact published bytes are
+ * hashed into the meta (`report_sha256`) beside the same `generation` and the run provenance. A
+ * reader that verifies (`readPublishedReport`) can never pair a report with a meta from another
+ * generation: an interruption between the two renames, or two publishers racing, leaves a pair
+ * that fails the hash or the generation check by construction. Returns the published meta.
+ */
+export function publishReport(outDir, report, provenance) {
+  return withPublicationLock(join(outDir, REPORT_LOCK), 'run', (generation) => {
+    const text = publishJson(join(outDir, 'report.json'), { ...report, generation }, generation);
+    const meta = { generation, report_sha256: sha256(text), ...provenance };
+    publishJson(join(outDir, 'report.meta.json'), meta, generation);
+    return meta;
+  });
+}
+
+/**
+ * The published report pair, VERIFIED: `meta.report_sha256` must equal the sha256 of the report
+ * bytes on disk, and both files must carry the same `generation`. A mismatch is a named refusal
+ * (a torn publication — report and meta from different generations — or a foreign report), never
+ * a report read as if its meta described it. Missing files are a usage error.
+ */
+export function readPublishedReport(outDir) {
+  const reportPath = join(outDir, 'report.json');
+  const metaPath = join(outDir, 'report.meta.json');
+  for (const p of [reportPath, metaPath]) {
+    if (!existsSync(p)) throw new UsageError(`${p} is missing — run \`run ${outDir}\` first`);
+  }
+  const text = readFileSync(reportPath, 'utf8');
+  const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) throw new RefusalError(`${metaPath} is not a report meta object`);
+  const actual = sha256(text);
+  if (meta.report_sha256 !== actual) {
+    throw new RefusalError(
+      `report_sha256 mismatch: ${metaPath} describes ${meta.report_sha256} but ${reportPath} hashes to ${actual} — a torn publication (report and meta from different generations) or a foreign report; re-run \`run ${outDir}\``,
+    );
+  }
+  const report = JSON.parse(text);
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) throw new RefusalError(`${reportPath} is not a report object`);
+  if (report.generation !== meta.generation) {
+    throw new RefusalError(
+      `generation mismatch: ${reportPath} is generation ${JSON.stringify(report.generation)} but ${metaPath} says ${JSON.stringify(meta.generation)} — the meta was edited or does not belong to this report; re-run \`run ${outDir}\``,
+    );
+  }
+  return { report, meta };
+}
+
+/**
  * `run <dir>`: verify the published samples against the selected pin (`readPublishedSamples`) —
- * BEFORE the engine is even probed — then, only when `wicked-core` is on PATH, ingest the doctrine
- * seed into a TEMP rules store and `rules eval` EXACTLY those samples, staged as a one-file corpus
- * DIR inside a fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json
- * files or an `evals:` scope, never a file — and it loads EVERY *.json in the directory it is
- * given, so the staging dir is never shared or reused) with a TEMP knowledge db, and publish the
- * report (+ `report.meta.json`: the identities the report was produced under). Non-zero only when
- * the tool itself fails or the published samples do not verify.
+ * BEFORE the engine is even probed — then, only when `wicked-core` answers `--version` cleanly
+ * (ENOENT = SKIP; any other spawn error or a non-zero exit = a tool FAILURE, never a run recorded
+ * under an unknown engine), resolve the engine's build identity (realpath + sha256 of the binary
+ * on PATH), ingest the doctrine seed into a TEMP rules store, read the ingested rules back
+ * (`rules list --include-retired --json`) for the rule-snapshot identity BEFORE that store is
+ * deleted, and `rules eval` EXACTLY the verified samples, staged as a one-file corpus DIR inside a
+ * fresh private mkdtemp (the engine's `--corpus` takes a directory of sample *.json files or an
+ * `evals:` scope, never a file — and it loads EVERY *.json in the directory it is given, so the
+ * staging dir is never shared or reused) with a TEMP knowledge db. Every result row is checked
+ * against the staged sample it names and stamped with its `payload_hash`; report + meta then
+ * publish as ONE generation (`publishReport`) and are read back verified (`readPublishedReport`)
+ * — what is returned is what a reader would see. Non-zero only when the tool itself fails or the
+ * published samples do not verify.
  */
 export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
   assertPinIntegrity(pin, pinPath);
   const { samples, meta } = readPublishedSamples(outDir, pin);
   const probe = spawnSync(coreBin, ['--version'], { encoding: 'utf8' });
-  if (probe.error?.code === 'ENOENT') {
-    return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
+  if (probe.error !== undefined) {
+    if (probe.error.code === 'ENOENT') {
+      return { skipped: `${coreBin} is not on PATH — nothing to run (install wicked-core to eval the corpus)` };
+    }
+    return { failure: `${coreBin} --version could not be executed (${probe.error.code ?? 'spawn error'}): ${probe.error.message}` };
   }
+  if (probe.status !== 0) {
+    return { failure: `${coreBin} --version exited ${probe.status}: ${(probe.stderr || probe.stdout).trim() || '(no output)'}` };
+  }
+  const engineVersion = probe.stdout.trim();
+  if (engineVersion === '') return { failure: `${coreBin} --version printed nothing — refusing to record a run under an unknown engine version` };
   if (!existsSync(rulesDir)) throw new UsageError(`rules seed dir ${rulesDir} does not exist (pass --rules <dir>)`);
+  const binary = resolveExecutable(coreBin);
+  if (binary === null) {
+    return { failure: `could not resolve ${coreBin} on PATH to hash the engine build (the probe ran it, but no PATH entry names an executable file of that name)`, engine: engineVersion };
+  }
+  const engine = { version: engineVersion, build: { path: binary, sha256: `sha256:${sha256Hex(readFileSync(binary))}` } };
+  const rulesSeed = seedDirIdentity(rulesDir);
   // mkdtemp is private (0700) and fresh: the rules db, the knowledge db and the staged corpus
   // live here and nowhere else; the whole tree is removed however the run ends.
   const tmp = mkdtempSync(join(tmpdir(), 'evals-internal-corpus-'));
@@ -856,8 +1261,12 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
     const knowledgeDb = join(tmp, 'knowledge.db');
     const ingest = spawnSync(coreBin, ['rules', 'ingest', rulesDir, '--db', rulesDb], { encoding: 'utf8' });
     if (ingest.status !== 0) {
-      return { failure: `rules ingest failed (exit ${ingest.status}): ${(ingest.stderr || ingest.stdout).trim()}`, engine: probe.stdout.trim() };
+      return { failure: `rules ingest failed (exit ${ingest.status}): ${(ingest.stderr || ingest.stdout).trim()}`, engine: engineVersion };
     }
+    // The rule snapshot the run is judged by — read back from the store BEFORE it is deleted.
+    const listed = spawnSync(coreBin, ['rules', 'list', '--db', rulesDb, '--include-retired', '--json'], { encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
+    const rulesIdentity = rulesIdentityFrom(listed, coreBin, rulesSeed);
+    if (rulesIdentity.failure !== undefined) return { failure: rulesIdentity.failure, engine: engineVersion };
     const corpusDir = join(tmp, 'corpus');
     mkdirSync(corpusDir);
     writeFileSync(join(corpusDir, 'samples.json'), `${JSON.stringify(samples, null, 2)}\n`, 'utf8');
@@ -866,30 +1275,27 @@ export function runEvals(outDir, rulesDir, pin, pinPath, coreBin = CORE_BIN) {
       maxBuffer: GIT_MAX_BUFFER,
     });
     if (evalRun.status !== 0) {
-      return { failure: `rules eval failed (exit ${evalRun.status}): ${(evalRun.stderr || evalRun.stdout).trim()}`, engine: probe.stdout.trim() };
+      return { failure: `rules eval failed (exit ${evalRun.status}): ${(evalRun.stderr || evalRun.stdout).trim()}`, engine: engineVersion };
     }
     let report;
     try {
       report = JSON.parse(evalRun.stdout);
     } catch (err) {
-      return { failure: `rules eval printed no JSON report: ${err.message}\n${evalRun.stdout.slice(0, 400)}`, engine: probe.stdout.trim() };
+      return { failure: `rules eval printed no JSON report: ${err.message}\n${evalRun.stdout.slice(0, 400)}`, engine: engineVersion };
     }
-    const generation = newGeneration();
-    publishJson(join(outDir, 'report.json'), report, generation);
-    publishJson(
-      join(outDir, 'report.meta.json'),
-      {
-        pin_hash: meta.pin_hash,
-        samples_hash: meta.samples_hash,
-        corpus_name: meta.corpus_name,
-        samples_generation: meta.generation,
-        engine: probe.stdout.trim(),
-        rules_dir: rulesDir,
-        generation,
-      },
-      generation,
-    );
-    return { report, engine: probe.stdout.trim() };
+    const stamping = stampPayloadHashes(report, samples);
+    if (stamping !== null) return { failure: stamping, engine: engineVersion };
+    publishReport(outDir, report, {
+      pin_hash: meta.pin_hash,
+      samples_hash: meta.samples_hash,
+      corpus_name: meta.corpus_name,
+      samples_generation: meta.generation,
+      engine,
+      rules_identity: rulesIdentity.identity,
+      rules_seed: rulesSeed,
+    });
+    const published = readPublishedReport(outDir);
+    return { report: published.report, meta: published.meta, engine: engineVersion };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -988,10 +1394,11 @@ function main(argv) {
     return EXIT_OK;
   }
   if (result.failure !== undefined) {
-    console.error(`evals-internal-corpus run: TOOL FAILURE (${result.engine}) — ${result.failure}`);
+    console.error(`evals-internal-corpus run: TOOL FAILURE (${result.engine ?? 'engine version unknown'}) — ${result.failure}`);
     return EXIT_DRIFT;
   }
-  console.log(`evals-internal-corpus run (${result.engine}) → ${join(dir, 'report.json')}`);
+  console.log(`evals-internal-corpus run (${result.engine}) → ${join(dir, 'report.json')} · generation ${result.meta.generation} · report_sha256 ${result.meta.report_sha256}`);
+  console.log(`provenance: engine build ${result.meta.engine.build.sha256} (${result.meta.engine.build.path}) · rules identity ${result.meta.rules_identity.method} ${result.meta.rules_identity.sha256}`);
   printSummary(result.report);
   return EXIT_OK;
 }

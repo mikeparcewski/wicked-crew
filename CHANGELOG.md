@@ -46,28 +46,47 @@ mentioned only where a daemon release depends on them.
   exercised — the blind spot a bare gap count hides; absent, never fabricated, on a report from a
   pre-#394 engine), and `ConformanceRule.effect` admits the operator-authorable `warn` band. The
   run route persists `rule_coverage` verbatim (like `degraded`) so `GET /testing/evals[/:id]`
-  serves it untouched.
+  serves it untouched. `GovernanceEvalResult.sample` gains an OPTIONAL `payload_hash` — the
+  sha256 of the sample's full payload (id, description, kind, steering_type, signals), stamped by
+  a producer that held the samples (the engine echoes no signals); the offline comparison keys
+  comparability on it.
 - **The INTERNAL evals corpus** — `e2e/corpus/wicked-internal-corpus.json` pins five wicked
   repos (estate v0.16.6 · garden v12.31.0 · crew v0.7.24 · studio v0.5.0 · interactive v0.8.1) to
   the commit each tag resolved to plus an ACTION window of ≥ 50 real commits behind it (walk
   release tags back, capped at 180 days; a shortfall is recorded, never widened); the pin is the
-  constant and moving a tag is a deliberate PR. `scripts/evals-internal-corpus.mjs` (node, zero
-  deps) `pin`s / `check`s it (fail closed on a re-cut tag or a hand-edited pin), `materialize`s
+  constant and moving a tag is a deliberate PR. `scripts/evals-internal-corpus.mjs` (plain node;
+  its one import beyond the builtins is crew's shared `src/api/eval-sample.js` — the ROUTE's own
+  zod sample schema, so the script can never accept a sample `POST /testing/corpora/import`
+  rejects) `pin`s / `check`s it (fail closed on a re-cut tag or a hand-edited pin), `materialize`s
   each tag by `git archive`, derives `samples` (one `EvalSample` per window commit — path-table
-  steering type, unsure ⇒ development; `good` unless `known-bad.json` says otherwise) that the
-  crew `EvalSampleSchema` accepts, and `run`s them through `wicked-core rules eval` when the
-  engine is on PATH. Our doctrine rules apply to these repos; the 15-repo wicked-e2e OSS set
-  stays the E2E functional corpus and is NOT an eval corpus. Fail-closed throughout (the codex
-  review of #475): a pinned `repo` must be one safe path segment; `materialize` is contained to
-  the realpath of its root and refuses symlinked destinations; the derivation pins its complete
-  git configuration (byte-identical samples under any operator config — `samples_hash` is
-  `sha256:6e70752f…`); a missing/malformed `known-bad` file is an error, never an empty
-  allowlist; every artifact publishes tmp+rename (samples under a lock with one `generation`
-  stamp); `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
-  probing the engine and stages exactly those samples in a fresh private dir.
+  steering type, unsure ⇒ development; `good` unless `known-bad.json` says otherwise), and `run`s
+  them through `wicked-core rules eval` when the engine is on PATH. Our doctrine rules apply to
+  these repos; the 15-repo wicked-e2e OSS set stays the E2E functional corpus and is NOT an eval
+  corpus. Fail-closed throughout (the two codex rounds on #475): a pinned `repo` must be one safe
+  path segment; `materialize` is contained to the realpath of its root, refuses symlinked
+  destinations, pins the operator's git attributes away for the archive and verifies the extracted
+  tree entry-for-entry against `git ls-tree` (an un-overridable `export-ignore` is a named
+  refusal; the receipt carries each `tree_sha`); the derivation pins its complete git
+  configuration and reads paths NUL-delimited, never trimmed (byte-identical samples under any
+  operator config, exact filenames — `samples_hash` is `sha256:6e70752f…`); a missing/malformed
+  `known-bad` file is an error, never an empty allowlist; every artifact publishes tmp+rename
+  (samples under a lock with one `generation` stamp); `run` verifies `samples.meta.json` against
+  `samples.json` and the selected pin before probing the engine (ENOENT is SKIP; any other probe
+  error, a non-zero `--version` or an empty answer is a tool failure), stages exactly those
+  samples in a fresh private dir, checks every result row against its staged sample and stamps it
+  with the sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as ONE
+  verifiable generation (`.report.lock`; `generation` in both, `report_sha256` in the meta;
+  `readPublishedReport()` refuses a torn pair) carrying complete provenance — engine version +
+  build identity (realpath + sha256 of the binary), the rule-snapshot identity with its method
+  (`engine-list` from `rules list --include-retired --json` read back before the temp store is
+  deleted; `seed-dir` when the engine lacks the command — said so), `pin_hash`, `samples_hash`.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
-  eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids and kind
-  changes, summary reconciliation, `rule_coverage` delta.
+  eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
+  payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
+  side without hashes is `unverified: no sample identity`, never comparable — `comparable_reason`
+  says why), summary reconciliation, and a `rule_coverage` delta whose `gained`/`lost` cover only
+  rules present in BOTH runs' rule sets, with `added_rules`/`removed_rules` reported apart (a rule
+  that vanished is removed, never gained).
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
   eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,

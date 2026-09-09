@@ -51,12 +51,19 @@ this repo's parent) READ-ONLY and refuses to derive anything from a checkout who
 match the pin. Samples are `good` by default (released commits); `corpus/known-bad.json` is the
 team's allowlist of commits that ARE bad behavior — `samples` fails closed on a stale entry AND
 on a missing or malformed allowlist file (`--known-bad` must name a file whose `samples` is the
-keyed map; `{"samples": {}}` is the empty allowlist). The derivation pins its complete git
-configuration (no rename detection, tree order, verbatim paths, UTF-8, no signature lines), so
-the same pin yields the same bytes on every machine; publication is atomic (tmp+rename under a
-lock, one `generation` per publication). `materialize` only ever removes or writes direct,
-non-symlink children of its root's realpath. `run` verifies `samples.meta.json` against
-`samples.json` and the selected pin before the engine is probed, then stages exactly those
-samples in a fresh private temp dir. The corpus identity a run carries is
-`evals:wicked-internal@<pin_hash>` + the `samples_hash` written to `samples.meta.json`; the full
-plan is `docs/testing/evals-test-plan.md`.
+keyed map; `{"samples": {}}` is the empty allowlist). Every sample is validated by the route's
+own zod schema (`packages/crew/src/api/eval-sample.js` — shared, no mirror). The derivation pins
+its complete git configuration (no rename detection, tree order, UTF-8, no signature lines) and
+reads touched paths NUL-delimited, never trimmed, so the same pin yields the same bytes on every
+machine and a filename keeps its exact spelling; publication is atomic (tmp+rename under a lock,
+one `generation` per publication). `materialize` only ever removes or writes direct, non-symlink
+children of its root's realpath, pins the operator's git attributes away for the archive and
+verifies the extracted tree against `git ls-tree` (an un-overridable `export-ignore` is a named
+refusal). `run` verifies `samples.meta.json` against `samples.json` and the selected pin before
+the engine is probed, stages exactly those samples in a fresh private temp dir, stamps every
+result row with its sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as
+one verifiable generation (`report_sha256` + shared `generation`) with complete provenance:
+engine version + build identity (realpath + sha256 of the binary), the rule-snapshot identity
+(`rules_identity.method` says how it was derived), `pin_hash`, `samples_hash`. The corpus
+identity a run carries is `evals:wicked-internal@<pin_hash>` + the `samples_hash` written to
+`samples.meta.json`; the full plan is `docs/testing/evals-test-plan.md`.

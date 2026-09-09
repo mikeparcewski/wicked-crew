@@ -5,18 +5,21 @@
 // (release N vs N+1). `compareEvalRuns` must: diff `results[].sample.id → verdict`; classify every
 // flip by the S17 table (gap→caught and false_positive→caught permitted; caught→gap and
 // caught→false_positive flagged; anything a kind cannot take flagged as inconsistent); report ids
-// present on one side only and ids whose kind changed (the corpus changed under the name); reconcile
-// the two stored summaries to the per-sample accounting; and diff `rule_coverage` when both carry
-// it — never fabricating a delta from one side.
+// present on one side only, ids whose kind changed and ids whose PAYLOAD identity changed (the
+// corpus changed under the name); treat a row without a `sample.payload_hash` as UNVERIFIED (never
+// comparable, never "different"); reconcile the two stored summaries to the per-sample accounting;
+// and diff `rule_coverage` when both carry it — gained/lost only over rules in BOTH rule sets,
+// rule additions/removals reported apart, never fabricating a delta from one side.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
-import { classifyFlip, compareEvalRuns } from '../src/api/eval-compare.js';
+import { classifyFlip, compareEvalRuns, UNVERIFIED_NO_SAMPLE_IDENTITY } from '../src/api/eval-compare.js';
+import { samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
-import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSummary, SteeringType } from '../src/core/types.js';
+import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSignals, GovernanceEvalSummary, SteeringType } from '../src/core/types.js';
 
 let dir: string;
 let store: EvalRunStore;
@@ -34,20 +37,38 @@ afterEach(() => {
 /** The pinned internal corpus name (plan §3 convention) — the SAME on both sides of a series. */
 const CORPUS = 'evals:wicked-internal@aaf2dd56367978ec';
 
-/** One result row. `nearest_rules` rides gaps only (evals.rs `SampleResult`). */
+/** The signals every fixture sample carries unless a test varies them — part of the payload identity. */
+const SIGNALS: GovernanceEvalSignals = { files: ['src/index.ts'], content: 'feat: fixture' };
+
+interface RowOptions {
+  /** The sample's description (defaults to `sample <id>`) — part of the payload identity. */
+  description?: string;
+  /** The sample's signals — part of the payload identity (the engine never echoes them; the
+   *  PRODUCER hashes them into `payload_hash`). */
+  signals?: GovernanceEvalSignals;
+  /** `false` ⇒ the row carries NO payload_hash (what the engine alone emits) — unverified. */
+  identity?: boolean;
+}
+
+/** One result row, as a producer that held the samples would stamp it (`payload_hash` over the
+ *  full payload). `nearest_rules` rides gaps only (evals.rs `SampleResult`). */
 function row(
   id: string,
   kind: 'good' | 'bad',
   steering_type: SteeringType,
   verdict: GovernanceEvalResult['verdict'],
   fired: string[] = [],
+  opts: RowOptions = {},
 ): GovernanceEvalResult {
+  const description = opts.description ?? `sample ${id}`;
+  const signals = opts.signals ?? SIGNALS;
   const r: GovernanceEvalResult = {
-    sample: { id, description: `sample ${id}`, kind, steering_type },
+    sample: { id, description, kind, steering_type },
     expected: kind === 'bad' ? 'deny' : 'allow',
     fired,
     verdict,
   };
+  if (opts.identity !== false) r.sample.payload_hash = samplePayloadHash({ id, description, kind, steering_type, signals });
   if (verdict === 'gap') r.nearest_rules = [];
   return r;
 }
@@ -89,7 +110,7 @@ const CREW_B = 'wicked-crew@7f363c9c02d5';
 const ESTATE_B = 'wicked-estate@bf6cebf5829d';
 const GARDEN_B = 'wicked-garden@452d3c557567';
 
-/** Release N: an effect-less-leaning store — most bad samples gap. */
+/** Release N: an effect-less-leaning store — most bad samples gap. Distinct fired rules: 3. */
 const RELEASE_N: GovernanceEvalResult[] = [
   row(CREW_A, 'bad', 'development', 'gap'), // → caught in N+1: permitted
   row(ESTATE_A, 'bad', 'architecture', 'caught', ['POL-1301']), // → gap in N+1: flagged
@@ -100,9 +121,10 @@ const RELEASE_N: GovernanceEvalResult[] = [
   row(ESTATE_B, 'bad', 'security', 'caught', ['POL-007']), // only in N
 ];
 
-/** Release N+1: a tightened store — and a corpus that drifted under the same name. */
+/** Release N+1: a tightened store — and a corpus that drifted under the same name. Distinct fired
+ *  rules: 3 (POL-1301, PAT-9, POL-007). */
 const RELEASE_N1: GovernanceEvalResult[] = [
-  row(CREW_A, 'bad', 'development', 'caught', ['POL-1301']),
+  row(CREW_A, 'bad', 'development', 'caught', ['POL-1301', 'PAT-9']),
   row(ESTATE_A, 'bad', 'architecture', 'gap'),
   row(GARDEN_A, 'good', 'development', 'false_positive', ['POL-1301']),
   row(INTERACTIVE_A, 'good', 'testing', 'caught'),
@@ -112,12 +134,12 @@ const RELEASE_N1: GovernanceEvalResult[] = [
 ];
 
 describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
-  it('diffs per-sample verdicts, classifies every flip, reports one-sided ids + kind changes, and reconciles the summaries', async () => {
+  it('diffs per-sample verdicts, classifies every flip, reports one-sided ids + kind/payload changes, reconciles the summaries, and separates coverage transitions from rule-set changes', async () => {
     const a = await recorded({
       results: RELEASE_N,
       degraded: 'facet-only',
       rule_coverage: {
-        exercised: 2,
+        exercised: 3, // POL-1301, PAT-014, POL-007 fired
         unexercised: [
           { rule_id: 'PAT-9', steering_type: 'architecture' },
           { rule_id: 'POL-1801', steering_type: 'development' },
@@ -128,8 +150,9 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
       results: RELEASE_N1,
       rule_store: '/tmp/release-n+1/core.db',
       rule_coverage: {
-        exercised: 3,
+        exercised: 3, // POL-1301, PAT-9, POL-007 fired
         unexercised: [
+          { rule_id: 'PAT-014', steering_type: 'testing' },
           { rule_id: 'POL-1801', steering_type: 'development' },
           { rule_id: 'POL-2000', steering_type: 'security' },
         ],
@@ -156,9 +179,15 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.only_in_a).toEqual([ESTATE_B]);
     expect(c.only_in_b).toEqual([GARDEN_B]);
     expect(c.kind_changed).toEqual([CREW_B]);
+    // A kind change IS a payload change (kind is part of the payload) — reported in both lists.
+    expect(c.payload_changed).toEqual([CREW_B]);
+    expect(c.unverified_rows).toEqual({ a: 0, b: 0 }); // every row stamped
     // The corpus changed under the name ⇒ NOT comparable release over release, even though the
-    // corpus name matches on both sides.
+    // corpus name matches on both sides — and the reason says exactly what changed.
     expect(c.comparable).toBe(false);
+    expect(c.comparable_reason).toBe(
+      'sample set differs (1 id(s) only in a, 1 only in b); kind changed for 1 shared sample(s); payload changed for 1 shared sample(s) (description, steering_type or signals)',
+    );
 
     // Summaries: both stores hold 4/2/1 of 7, so every delta is 0 — and the per-sample accounting
     // (+2 to caught, −2 from caught, +1 caught only-in-B, −1 caught only-in-A; ±1 gaps; ±1 fps)
@@ -169,11 +198,16 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.reconciles).toBe(true);
     expect(c.reconciliation_errors).toEqual([]);
 
-    // Coverage: PAT-9 gained exercise, POL-2000 lost it, POL-1801 still unexercised on both sides.
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 1, gained: ['PAT-9'], lost: ['POL-2000'] });
+    // Coverage. Rule sets: A = {POL-1301, PAT-014, POL-007} ∪ {PAT-9, POL-1801};
+    // B = {POL-1301, PAT-9, POL-007} ∪ {PAT-014, POL-1801, POL-2000}.
+    //   PAT-9    in both: unexercised in A, fired in B          → gained
+    //   PAT-014  in both: fired in A, unexercised in B          → lost
+    //   POL-2000 in B only (a rule the store grew)              → added_rules, NOT lost
+    //   POL-1801 unexercised on both sides                      → nothing
+    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: ['PAT-9'], lost: ['PAT-014'], added_rules: ['POL-2000'], removed_rules: [] });
   });
 
-  it('a comparable pair (same corpus, same ids, same kinds) with a non-zero delta reconciles to its flips', async () => {
+  it('a comparable pair (same corpus, same ids, same kinds, same payload identities) with a non-zero delta reconciles to its flips', async () => {
     const baseline = [row(CREW_A, 'bad', 'development', 'gap'), row(ESTATE_A, 'bad', 'architecture', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')];
     const tightened = [
       row(CREW_A, 'bad', 'development', 'caught', ['POL-1301']),
@@ -182,9 +216,11 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     ];
     const c = compareEvalRuns(await recorded({ results: baseline }), await recorded({ results: tightened }));
     expect(c.comparable).toBe(true);
+    expect(c.comparable_reason).toBeNull();
     expect(c.only_in_a).toEqual([]);
     expect(c.only_in_b).toEqual([]);
     expect(c.kind_changed).toEqual([]);
+    expect(c.payload_changed).toEqual([]);
     expect(c.flips.map((f) => [f.sample_id, f.classification])).toEqual([
       [CREW_A, 'permitted'],
       [ESTATE_A, 'permitted'],
@@ -203,8 +239,68 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.flips).toEqual([]);
     expect(c.unchanged).toBe(RELEASE_N.length);
     expect(c.comparable).toBe(true);
+    expect(c.comparable_reason).toBeNull();
     expect(c.summary_delta).toEqual({ total: 0, caught: 0, gaps: 0, false_positives: 0 });
     expect(c.reconciles).toBe(true);
+  });
+
+  it('a shared sample whose description, steering type or signals changed under the SAME id and kind is payload_changed — not comparable, its flip flagged, never "unchanged"', async () => {
+    const a = await recorded({
+      results: [row(CREW_A, 'bad', 'development', 'gap'), row(ESTATE_A, 'bad', 'architecture', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')],
+    });
+    const b = await recorded({
+      results: [
+        // description changed AND verdict flipped: the flip is flagged with the payload reason, not
+        // classified as a permitted tightening.
+        row(CREW_A, 'bad', 'development', 'caught', ['POL-1301'], { description: 'a different action' }),
+        // steering type changed, verdict same: not comparable, and NOT counted as unchanged.
+        row(ESTATE_A, 'bad', 'security', 'gap'),
+        // signals changed, verdict same.
+        row(GARDEN_A, 'good', 'development', 'caught', [], { signals: { files: ['src/other.ts'] } }),
+      ],
+    });
+    const c = compareEvalRuns(a, b);
+    expect(c.payload_changed).toEqual([CREW_A, ESTATE_A, GARDEN_A]);
+    expect(c.kind_changed).toEqual([]);
+    expect(c.comparable).toBe(false);
+    expect(c.comparable_reason).toBe('payload changed for 3 shared sample(s) (description, steering_type or signals)');
+    expect(c.flips).toEqual([
+      {
+        sample_id: CREW_A,
+        kind: 'bad',
+        from: 'gap',
+        to: 'caught',
+        classification: 'flagged',
+        reason: "the sample's payload changed between runs (description, steering_type or signals): the corpus changed under this name",
+      },
+    ]);
+    expect(c.unchanged).toBe(0);
+    expect(c.reconciles).toBe(true);
+  });
+
+  it('rows without a payload_hash (what the engine alone emits) are UNVERIFIED: not comparable even when ids and kinds agree, with the exact reason prefix', async () => {
+    const bare = (verdicts: [string, 'good' | 'bad', GovernanceEvalResult['verdict']][]) =>
+      verdicts.map(([id, kind, v]) => row(id, kind, 'development', v, [], { identity: false }));
+    const a = await recorded({ results: bare([[CREW_A, 'bad', 'gap'], [GARDEN_A, 'good', 'caught']]) });
+    const b = await recorded({ results: bare([[CREW_A, 'bad', 'caught'], [GARDEN_A, 'good', 'caught']]) });
+    const c = compareEvalRuns(a, b);
+    expect(c.only_in_a).toEqual([]);
+    expect(c.only_in_b).toEqual([]);
+    expect(c.kind_changed).toEqual([]);
+    expect(c.payload_changed).toEqual([]); // nothing can be said to have changed — or not
+    expect(c.unverified_rows).toEqual({ a: 2, b: 2 });
+    expect(c.comparable).toBe(false);
+    expect(c.comparable_reason).toMatch(new RegExp(`^${UNVERIFIED_NO_SAMPLE_IDENTITY} \\(2 result row\\(s\\) in a and 2 in b carry no sample\\.payload_hash\\)$`));
+    // The verdict diff is still reported — as a flip — it is the COMPARABILITY claim that is withheld.
+    expect(c.flips.map((f) => [f.sample_id, f.classification])).toEqual([[CREW_A, 'permitted']]);
+    expect(c.unchanged).toBe(1);
+
+    // One unverified side is enough: a stamped A against a bare B.
+    const stamped = await recorded({ results: [row(CREW_A, 'bad', 'development', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')] });
+    const mixed = compareEvalRuns(stamped, b);
+    expect(mixed.unverified_rows).toEqual({ a: 0, b: 2 });
+    expect(mixed.comparable).toBe(false);
+    expect(mixed.comparable_reason?.startsWith(UNVERIFIED_NO_SAMPLE_IDENTITY)).toBe(true);
   });
 
   it('a stored summary that disagrees with its own results is a reconciliation error naming the run, never a flip', async () => {
@@ -220,11 +316,12 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
   });
 
   it('a different corpus name is not comparable even when the sample sets agree; coverage on ONE side yields no delta', async () => {
-    const a = await recorded({ results: RELEASE_N, rule_coverage: { exercised: 1, unexercised: [] } });
+    const a = await recorded({ results: RELEASE_N, rule_coverage: { exercised: 3, unexercised: [] } });
     const b = await recorded({ results: RELEASE_N, corpus: 'evals:wicked-internal@0000000000000000' });
     const c = compareEvalRuns(a, b);
     expect(c.identity.corpus.same).toBe(false);
     expect(c.comparable).toBe(false);
+    expect(c.comparable_reason).toBe(`corpus name differs ("${CORPUS}" vs "evals:wicked-internal@0000000000000000")`);
     expect(c.flips).toEqual([]);
     expect(c.rule_coverage_delta).toBeUndefined();
   });
@@ -236,6 +333,45 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     const c = compareEvalRuns(a, b);
     expect(c.reconciles).toBe(false);
     expect(c.reconciliation_errors.some((e) => e.includes(`duplicate sample id ${CREW_A}`))).toBe(true);
+  });
+});
+
+describe('rule_coverage delta — exercise transitions vs. rule-set changes', () => {
+  const R = { rule_id: 'POL-9000', steering_type: 'security' as const };
+  const quiet = [row(CREW_A, 'bad', 'development', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')];
+
+  it('a rule that VANISHES from the unexercised list because it left the store is removed, never gained', async () => {
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
+    const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+    const c = compareEvalRuns(a, b);
+    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: [], lost: [], added_rules: [], removed_rules: ['POL-9000'] });
+    expect(c.reconciles).toBe(true);
+  });
+
+  it('a rule that APPEARS unexercised because the store grew it is added, never lost', async () => {
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+    const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
+    const c = compareEvalRuns(a, b);
+    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, gained: [], lost: [], added_rules: ['POL-9000'], removed_rules: [] });
+  });
+
+  it('a rule in BOTH sets that stops being unexercised because a sample now fires it is gained; the mirror image is lost', async () => {
+    const firing = [row(CREW_A, 'bad', 'development', 'caught', ['POL-9000']), row(GARDEN_A, 'good', 'development', 'caught')];
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
+    const b = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [] } });
+    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual({ exercised_delta: 1, gained: ['POL-9000'], lost: [], added_rules: [], removed_rules: [] });
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual({ exercised_delta: -1, gained: [], lost: ['POL-9000'], added_rules: [], removed_rules: [] });
+  });
+
+  it('an exercised count that does not match the distinct rule ids fired across the results is a reconciliation error — the exercised set cannot be reconstructed', async () => {
+    const a = await recorded({ results: quiet, rule_coverage: { exercised: 2, unexercised: [] } }); // nothing fired, yet 2 "exercised"
+    const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
+    const c = compareEvalRuns(a, b);
+    expect(c.reconciles).toBe(false);
+    expect(c.reconciliation_errors).toEqual([
+      `run a (${a.id}): rule_coverage.exercised 2 does not match the 0 distinct rule id(s) fired across its results — the exercised rule set cannot be reconstructed from the record`,
+    ]);
+    expect(c.rule_coverage_delta?.exercised_delta).toBe(-2);
   });
 });
 
@@ -257,6 +393,27 @@ describe('classifyFlip — the S17 rule table', () => {
       const verdict = classifyFlip(kind, from, to);
       expect(verdict.classification, `${kind} ${from}→${to}`).toBe('flagged');
       expect(verdict.reason).toMatch(/^inconsistent: /);
+    }
+  });
+});
+
+describe('samplePayloadHash — the identity the comparison keys on', () => {
+  it('covers exactly the five payload fields, is key-order independent, and changes with any of them', () => {
+    const base = { id: 'x@000000000000', description: 'd', kind: 'good' as const, steering_type: 'development', signals: { files: ['a.ts'], content: 'c' } };
+    const h = samplePayloadHash(base);
+    expect(h).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // Same payload, keys in another order (and an already-stamped hash riding along) ⇒ same identity.
+    expect(samplePayloadHash({ signals: { content: 'c', files: ['a.ts'] }, steering_type: 'development', kind: 'good', description: 'd', id: base.id })).toBe(h);
+    expect(samplePayloadHash({ ...base, payload_hash: h } as typeof base)).toBe(h);
+    for (const variant of [
+      { ...base, id: 'y@000000000000' },
+      { ...base, description: 'e' },
+      { ...base, kind: 'bad' as const },
+      { ...base, steering_type: 'security' },
+      { ...base, signals: { files: ['b.ts'], content: 'c' } },
+      { ...base, signals: { files: ['a.ts'], content: 'c', phase: 'build' } },
+    ]) {
+      expect(samplePayloadHash(variant)).not.toBe(h);
     }
   });
 });
