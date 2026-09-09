@@ -17,7 +17,14 @@
  *   4. the root itself is not a file — an empty remainder is refused.
  *
  * Atomic tmp+rename writes are the store's job (`tree.ts` `writeFileAtomic`); this module only
- * decides WHERE.
+ * decides WHERE. And the walk is necessary, not sufficient (design v3.5 §3; codex round 8): the
+ * path it answers is then OPENED with `O_NOFOLLOW` where the platform has it, and the lstat-then-open
+ * gap is closed everywhere with a post-open identity check (`fstat` dev/ino against the lstat result
+ * — `tree.ts` `openRegularNoFollow`); copies read their source through such an open, never by
+ * path; a staged tree is re-walked and re-hashed after the copy and before the rename into place.
+ * Residual, documented: a directory component swapped between the walk and the rename by another
+ * writer with access to the crew-owned state home — mitigated by the single-writer daemon and the
+ * post-operation verification, not eliminated.
  */
 
 import { assertNoSymlinkComponents, assertSafeRelSegments, SymlinkComponentError, unsafeSegmentReason, UnsafePathSegmentError } from './tree.js';

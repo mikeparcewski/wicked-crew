@@ -123,9 +123,14 @@ describe('state-home-subtrees.json — the registry itself', () => {
     for (const child of [BASELINE_DIRNAME, EFFECTIVE_DIRNAME, MANIFEST_FILENAME, CURRENT_LINKNAME, UV_CACHE_DIRNAME]) {
       expect(deniedBy(denied, child), `${child} must be a denied child of skills/`).toBe(true);
     }
-    // Torn staging under the slot is denied too (a half-written generation is never a read root).
+    // Torn staging under the slot is denied too (a half-written generation is never a read root), and
+    // so is every TRANSIENT name a mutation creates for the width of one rename (design v3.5 §2):
+    // the park-and-place staging, the manifest commit's temp file, the transient current link.
     expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/.staging-abc123`)).toBe(true);
-    expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/.tmp-abc123`)).toBe(true);
+    expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/.tmp-current-abc123`)).toBe(true);
+    expect(deniedBy(denied, '.staging-swap-abc123')).toBe(true);
+    expect(deniedBy(denied, `${MANIFEST_FILENAME}.tmp-abc123`)).toBe(true);
+    expect(deniedBy(denied, 'refused')).toBe(true);
     // …while a generation directory under the slot is NOT denied — it is what the worker reads.
     expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/000001`)).toBe(false);
     // No other entry claims a read slot: the snapshot is the ONLY non-denied path under the state home.

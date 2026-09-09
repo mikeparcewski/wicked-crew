@@ -74,7 +74,8 @@ afterEach(() => {
 describe('the `current` flip (core#399 round 4)', () => {
   it('creates the transient link INSIDE snapshots/ as .tmp-current-<hex> and renames it over skills/current — the only children of skills/ during a publish are the registered names', async () => {
     const registered = registeredSkillsChildren();
-    expect(registered).toEqual(new Set(['snapshots', 'baseline', 'effective', 'manifest.json', 'current', '.uv-cache']));
+    // Settled names plus the transient patterns design v3.5 §2 registers (tests/skills-fence-names.test.ts observes them mid-mutation).
+    expect(registered).toEqual(new Set(['snapshots', 'baseline', 'effective', 'manifest.json', 'manifest.json.tmp-*', 'current', '.uv-cache', '.staging-*', 'refused']));
     // Two publishes: the first creates `current`, the second flips over an existing one.
     expect((await s.store.publish(1)).verdict).toBe('clear');
     expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');

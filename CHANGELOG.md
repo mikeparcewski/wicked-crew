@@ -33,6 +33,37 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — codex round-8 REJECT (3 HIGH, 2 MEDIUM, 1 LOW), design amendment v3.5**
+  (PR #480). (H1, v3.5 §2) EVERY name the store can create under `<state home>/skills/` is registered
+  in the shared fence fixture `tests/fixtures/state-home-subtrees.json` — settled (`baseline/`,
+  `effective/`, `manifest.json`, `snapshots/`, `current`, `.uv-cache/`, the never-created `refused/`
+  sentinel) AND transient (`.staging-*` park-and-place directories, `manifest.json.tmp-*` commit
+  files, `snapshots/.staging-*` generations being written, `snapshots/.tmp-current-*` links before
+  their rename), each with its kind in an additive `denied_children_kinds` block (core mirrors the
+  file byte-for-byte); `src/skills/root-names.ts` `SKILLS_ROOT_NAMES` is the store's own table (its
+  constants bind to it), a static audit asserts fixture ≡ table and that every root join in the
+  store's source resolves to a row, and a paused-operation test observes the transient names at the
+  moment they exist and requires each to classify — a transient name missing from the registry is a
+  live race with a worker launch, refused by core. (H2, v3.5 §3) TOCTOU discipline: every open inside
+  the root is `O_NOFOLLOW` where the platform has it and the lstat-then-open gap is closed everywhere
+  with a post-open `fstat` dev/ino identity check (`tree.ts` `openRegularNoFollow` /
+  `readFileNoFollow`; typed reads too); copies read their SOURCE through such an open, never
+  `copyFileSync(path)` (`copyFileNoFollow`, `O_EXCL | O_NOFOLLOW` destinations); a staged tree is
+  re-walked and re-hashed AFTER the copy and BEFORE the rename/swap (baseline capture, publish, reset,
+  refresh, replace/add, the single-file write) — a mismatch refuses with nothing written; the
+  residual (a directory component swapped by another writer with access to the crew-owned state home
+  — mitigated by the single-writer daemon and the post-operation verification, not eliminated) is
+  documented in the module headers. (H3, v3.5 §4) an explicitly EMPTY `WICKED_SKILLS_SNAPSHOT` boot
+  value is preserved on the engine handoff (core refuses it) and reported as `config-error`
+  (`skills.config`, `engineInput: ""`) — never widened into the live-cache fallback; only an ABSENT
+  variable reaches that rung. (M1, v3.5 §5) a directly registered `skill_ref` keeps `core: true`
+  when its `SKILL.md` is missing or symlink-refused, so `disable` blocks (`core-disable`) and publish
+  reports the missing content; the closure's `missing` set stays reported. (M2, v3.5 §1) the
+  `.claude-plugin` closure is the five runtime catalogs by name (no behaviour change; the design
+  amendment is cited where the closure is spelled). (L1) `DiagnosticsSkills.stateHome` is documented
+  as diagnostics-only — `WICKED_CREW_STATE_HOME` is not exported; `engineInput` documents `""`.
+  Copilot: `tests/skills-plugin-source.test.ts` no longer reassigns `home` (the first temp dir leaked
+  past `afterEach`); a second home is tracked and removed.
 - **Skills keystone — codex round-7 REVISE (3 HIGH, 2 MEDIUM)** (PR #480). (H1) content-addressed
   baselines are VERIFIED before every reuse and locked: an existing `baseline/<hash>` is reused only
   if its tree (links enumerated, `.venv` excluded) re-hashes to its name — a mismatch is

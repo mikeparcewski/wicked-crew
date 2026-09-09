@@ -3381,14 +3381,16 @@ export interface DiagnosticsSkills {
   /** The VERIFIED published snapshot (`current` realpath-contained, `snapshot.json` + content hash
    *  checked), or `null`. `path` is the absolute REAL path of `snapshots/<gen>`. */
   current: { gen: number; path: string } | null;
-  /** What `WICKED_SKILLS_SNAPSHOT` — the engine's ONE skills input (v3.1 §2; `WICKED_SKILLS_CURRENT`
-   *  is never set) — is exported as right now: the real snapshot path, a `<root>/refused/…` refusal
-   *  path, or `null` = unset / the boot value. */
+  /** What `WICKED_SKILLS_SNAPSHOT` — the engine's ONE skills input (v3.1 §2, v3.4 §2;
+   *  `WICKED_SKILLS_CURRENT` is never set, `WICKED_CREW_STATE_HOME` is not exported) — is exported as
+   *  right now: the real snapshot path, a `<root>/refused/…` refusal path, `""` when the process
+   *  booted with an explicitly EMPTY value (preserved — a configuration error core refuses, state
+   *  `config-error`; design v3.5 §4), or `null` = unset. */
   engineInput: string | null;
-  /** What `WICKED_CREW_STATE_HOME` is exported as: the canonical realpath of the daemon state home
-   *  core derives the worker Read fence from and cross-checks the snapshot path against
-   *  (`<state home>/skills/snapshots/<gen>`; core#399). Exported on every apply, whatever the skills
-   *  outcome; `null` only when `disabled`. */
+  /** DIAGNOSTICS-ONLY: the canonical realpath of the daemon state home, reported for humans. It is
+   *  NOT an engine input — `WICKED_CREW_STATE_HOME` is retired (v3.4 §2): core reads only
+   *  `WICKED_SKILLS_SNAPSHOT` and derives the state home from its `<state home>/skills/snapshots/<gen>`
+   *  layout. `null` only when `disabled`. */
   stateHome: string | null;
   findings: DiagnosticsSkillsFinding[];
 }

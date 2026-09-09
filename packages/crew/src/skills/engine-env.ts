@@ -53,9 +53,12 @@ export function canonicalCrewStateHome(): string {
 
 /**
  * Point the engine at `snapshotPath`, or — when the daemon has no published snapshot — restore
- * the booted value, deleting the variable when there was none. `fallback` exists for the unit
- * test of the booted-without-one branch; pass `''` for "none". Nothing else is exported: the
- * snapshot path is the engine's ONE skills input (v3.4 §2).
+ * the booted value EXACTLY: deleted when the process booted without one, and PRESERVED when it
+ * booted with an explicitly empty one (design v3.5 §4, v3.1 restated: set-but-empty is a
+ * configuration error core refuses loudly; only an ABSENT variable reaches the live-cache fallback
+ * rung — converting `""` to "unset" would have opened that rung by accident). `fallback` is the
+ * boot value; tests pass it explicitly. Nothing else is exported: the snapshot path is the engine's
+ * ONE skills input (v3.4 §2).
  */
 export function applySkillsSnapshotEnv(
   snapshotPath: string | null | undefined,
@@ -63,9 +66,9 @@ export function applySkillsSnapshotEnv(
 ): void {
   if (typeof snapshotPath === 'string' && snapshotPath !== '') {
     process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = snapshotPath;
-  } else if (typeof fallback === 'string' && fallback !== '') {
-    process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = fallback;
-  } else {
+  } else if (fallback === undefined) {
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+  } else {
+    process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = fallback; // `''` included — preserved, never widened into "unset"
   }
 }

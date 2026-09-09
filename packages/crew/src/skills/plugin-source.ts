@@ -26,12 +26,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 
 import type { SkillSourceKind } from '../core/types.js';
 import { PLUGIN_NAME } from './frontmatter.js';
+import { readFileNoFollow } from './tree.js';
 
 /** Explicit plugin-source override — the seam tests and proof scripts aim at a fixture plugin. */
 export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
@@ -120,7 +121,7 @@ export function pluginVersionAt(dir: string): string | null {
   if (root === null) return null;
   const manifest = noFollowEntry(root, PLUGIN_MANIFEST_REL.split(sep), dir);
   if (manifest === null || !lstatSync(manifest).isFile()) return null;
-  const parsed: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
+  const parsed: unknown = JSON.parse(readFileNoFollow(manifest).toString('utf8')); // the entry the walk judged is the one read (v3.5 §3)
   if (typeof parsed !== 'object' || parsed === null) return null;
   const version = (parsed as { version?: unknown }).version;
   return typeof version === 'string' && version !== '' ? version : null;

@@ -19,16 +19,31 @@
  *     `../…` name would have joined out of the staging dir). A refused record writes NOTHING —
  *     not the records ahead of it either;
  *   - `writeFileAtomic` refuses a symlink at the target, opens its temp file with `O_EXCL`
- *     (`'wx'` — fails on ANY pre-existing entry, a pre-planted symlink included) under an
+ *     (fails on ANY pre-existing entry, a pre-planted symlink included) and `O_NOFOLLOW` under an
  *     unpredictable name, and preserves the target's mode bits (an executable support script
  *     stays executable across an in-place edit or a replace).
+ *
+ * # TOCTOU discipline inside the skills root (design v3.5 §3; codex round 8)
+ *
+ * The lstat walk is necessary, not sufficient: every file open inside the root uses `O_NOFOLLOW`
+ * where the platform has it (`readFileNoFollow`, `copyFileNoFollow`, `writeFileAtomic`'s temp
+ * file), and the lstat-then-open pattern is closed EVERYWHERE — Windows has no `O_NOFOLLOW` — with a
+ * post-open identity check (`fstat` dev/ino against the lstat result: the entry opened IS the entry
+ * the walk judged); copies read their SOURCE through such an open, never by path
+ * (`copyFileSync(path)` follows a source swapped for a link between enumeration and copy); a staged
+ * tree is re-walked (lstat) and re-hashed AFTER the copy and BEFORE the rename into place
+ * (store.ts `stagedTreeProblem`, `captureBaseline`, `publishSerialized`). Residual, documented: a
+ * directory component swapped between the walk and the rename by another writer with access to the
+ * crew-owned state home — mitigated by the single-writer daemon and the post-operation verification,
+ * not eliminated.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
-  copyFileSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -40,8 +55,14 @@ import {
   rmSync,
   unlinkSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
+
+import { ATOMIC_TMP_INFIX } from './root-names.js';
+
+/** `O_NOFOLLOW` where the platform has it (POSIX); `0` on Windows, where the post-open identity check alone closes the gap. */
+const O_NOFOLLOW: number = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 
 /** One regular file: `rel` is POSIX-relative to the walk root, `abs` its on-disk path. */
 export interface FileRecord {
@@ -248,6 +269,84 @@ export function sha256Hex(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+/** The leaf changed identity between the lstat and the open (a link swapped in, a file replaced) — refused, never read or copied (v3.5 §3). */
+export class EntrySwappedError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} is not the entry the walk judged — it changed between lstat and open (a symlink swapped in, or the file replaced); refused`);
+    this.name = 'EntrySwappedError';
+  }
+}
+
+/**
+ * Open the REGULAR FILE at `path` for reading without following a symlink at the leaf (`O_NOFOLLOW`
+ * where available), and prove the opened descriptor IS the entry lstat saw (dev/ino equal, a regular
+ * file) — the Windows close of the lstat-then-open gap, applied everywhere (v3.5 §3). Throws
+ * `SymlinkComponentError` for a link at the leaf, `EntrySwappedError` when the identity moved, and
+ * the filesystem's own error otherwise (ENOENT propagates). Answers the descriptor and its stats.
+ */
+export function openRegularNoFollow(path: string): { fd: number; stat: Stats } {
+  const before = lstatSync(path);
+  if (before.isSymbolicLink()) throw new SymlinkComponentError(path, path);
+  if (!before.isFile()) throw new EntrySwappedError(path);
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
+  } catch (err) {
+    // ELOOP: a link stood there by the time we opened — the swap this discipline exists for.
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') throw new EntrySwappedError(path);
+    throw err;
+  }
+  let stat: Stats;
+  try {
+    stat = fstatSync(fd);
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+  if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) {
+    closeSync(fd);
+    throw new EntrySwappedError(path);
+  }
+  return { fd, stat };
+}
+
+/** The bytes of the regular file at `path`, read through an `O_NOFOLLOW` open with the identity check (`openRegularNoFollow`). */
+export function readFileNoFollow(path: string): Buffer {
+  const { fd } = openRegularNoFollow(path);
+  try {
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Copy one regular file `src` → `dest`: the source is read through `openRegularNoFollow` (never by
+ * path — a source swapped for a link between enumeration and copy is refused), the destination is
+ * created `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` with the source's mode bits (an executable
+ * baseline script lands executable), so a pre-planted destination entry — a link included — fails
+ * the open instead of being written through.
+ */
+export function copyFileNoFollow(src: string, dest: string): void {
+  const { fd: inFd, stat } = openRegularNoFollow(src);
+  let buf: Buffer;
+  try {
+    buf = readFileSync(inFd);
+  } finally {
+    closeSync(inFd);
+  }
+  const outFd = openSync(dest, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, stat.mode & 0o777);
+  try {
+    let off = 0;
+    while (off < buf.length) off += writeSync(outFd, buf, off, buf.length - off);
+  } catch (err) {
+    closeSync(outFd);
+    rmSync(dest, { force: true });
+    throw err;
+  }
+  closeSync(outFd);
+}
+
 /**
  * One hash over a file set: sorted relative paths + content digests (`rel \0 sha256(content) \n`
  * per file). Two trees with the same relative layout and bytes hash equal wherever they live —
@@ -270,7 +369,7 @@ export function hashTree(files: ReadonlyArray<FileRecord>, links: ReadonlyArray<
   for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
     h.update(f.rel);
     h.update('\0');
-    h.update(sha256Hex(readFileSync(f.abs)));
+    h.update(sha256Hex(readFileNoFollow(f.abs)));
     h.update('\n');
   }
   for (const l of [...links].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
@@ -289,8 +388,10 @@ export function hashTree(files: ReadonlyArray<FileRecord>, links: ReadonlyArray<
  * (`assertNoSymlinkComponents`: a pre-planted link under the destination would redirect the
  * copy) — and only then does the first byte move, so a refused record leaves NOTHING written
  * (codex round 4: the per-record check used to run only when the record was reached, after the
- * ones ahead of it had landed). `copyFileSync` carries the source mode bits (libuv `copyfile`),
- * so an executable baseline script lands executable.
+ * ones ahead of it had landed). Each file goes through `copyFileNoFollow` (v3.5 §3): the source is
+ * read through an `O_NOFOLLOW` open with the identity check — a source swapped for a symlink between
+ * enumeration and copy is refused — and the destination is created `O_EXCL | O_NOFOLLOW` with the
+ * source's mode bits, so an executable baseline script lands executable.
  */
 export function copyFiles(files: ReadonlyArray<FileRecord>, destRoot: string): void {
   const plan: Array<{ src: string; dest: string }> = [];
@@ -300,7 +401,7 @@ export function copyFiles(files: ReadonlyArray<FileRecord>, destRoot: string): v
   }
   for (const { src, dest } of plan) {
     mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
+    copyFileNoFollow(src, dest);
   }
 }
 
@@ -315,7 +416,7 @@ export interface AtomicWriteOptions {
  *   - the target is lstat'ed: a symlink there is refused (the rename would replace the link,
  *     but the caller's containment already forbids links, and a write "over" one is never what
  *     the file manager meant);
- *   - the temp file is opened `'wx'` (`O_CREAT | O_EXCL`): POSIX fails that open on ANY existing
+ *   - the temp file is opened `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`: POSIX fails that open on ANY existing
  *     entry — a symlink included, regardless of where it points — so a pre-planted temp symlink
  *     cannot redirect the bytes; the name carries 64 random bits so it cannot be pre-planted by
  *     guessing either;
@@ -332,8 +433,9 @@ export function writeFileAtomic(path: string, content: string | Buffer, opts: At
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  const tmp = `${path}.tmp-${randomBytes(8).toString('hex')}`;
-  const fd = mode === undefined ? openSync(tmp, 'wx') : openSync(tmp, 'wx', mode);
+  const tmp = `${path}${ATOMIC_TMP_INFIX}${randomBytes(8).toString('hex')}`;
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
+  const fd = mode === undefined ? openSync(tmp, flags) : openSync(tmp, flags, mode);
   try {
     const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
     let off = 0;

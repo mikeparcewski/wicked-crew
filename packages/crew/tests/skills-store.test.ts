@@ -30,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { inBundleClosure, pluginBundleFiles } from '../src/skills/bundle.js';
 import { containedPath, SkillPathError } from '../src/skills/contain.js';
+import { applySkillsSnapshotEnv } from '../src/skills/engine-env.js';
 import { PluginSourceSymlinkError, pluginSourceAt } from '../src/skills/plugin-source.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import {
@@ -2383,6 +2384,79 @@ describe('manifest.json is validated by a COMPLETE fail-closed schema (codex rou
     }
     writeFileSync(join(s.root, 'manifest.json'), pristine);
     expect(s.store.revision()).toBe(1);
+  });
+});
+
+describe('a directly registered reference stays core when its content is unreadable (design v3.5 §5, codex round 8)', () => {
+  it("delete the core skill's SKILL.md ⇒ core stays true, disable is blocked core-disable, publish reports it; replace its dir with a symlink ⇒ disable is blocked too (core-disable + the path-invalid warning)", async () => {
+    s.store.seed();
+    expect(s.store.manifest().skills['wicked-garden-beta']?.core).toBe(true); // the ONE registered skill_ref
+    rmSync(join(s.root, 'effective', 'skills', 'beta', 'SKILL.md'));
+    const off = s.store.disable('wicked-garden-beta', 1);
+    expect(off).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(off.findings.find((f) => f.kind === 'core-disable')).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-beta' });
+    expect(s.store.manifest().skills['wicked-garden-beta']?.enabled).toBe(true); // nothing committed
+    // A mutation on ANOTHER skill recomputes and keeps beta core (the closure alone would have dropped it).
+    const other = s.store.writeFile('wicked-garden-gamma', 'SKILL.md', '---\nname: wicked-garden-gamma\n---\n\nedited wicked-garden-beta\n', 1);
+    expect(other.verdict).toBe('clear');
+    expect(s.store.manifest().skills['wicked-garden-beta']?.core).toBe(true);
+    // Publish reports the missing SKILL.md (blocking) — it never silently drops beta from the closure.
+    const blocked = await s.store.publish(other.revision);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.findings.find((f) => f.kind === 'missing-skill-md')).toMatchObject({ skill: 'wicked-garden-beta' });
+    // Symlink-refused: beta's dir replaced by a link to an outside dir — still core, disable still blocked.
+    const outside = join(s.base, 'outside-beta');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'SKILL.md'), '---\nname: wicked-garden-beta\n---\n\nOUTSIDE\n');
+    rmSync(join(s.root, 'effective', 'skills', 'beta'), { recursive: true });
+    symlinkSync(outside, join(s.root, 'effective', 'skills', 'beta'));
+    const off2 = s.store.disable('wicked-garden-beta', other.revision);
+    expect(off2).toMatchObject({ verdict: 'blocked', revision: other.revision });
+    expect(off2.findings.find((f) => f.kind === 'core-disable')).toBeDefined();
+    expect(off2.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ severity: 'warning', skill: 'wicked-garden-beta' });
+    expect(s.store.manifest().skills['wicked-garden-beta']).toMatchObject({ core: true, enabled: true });
+  });
+});
+
+describe('an explicitly EMPTY WICKED_SKILLS_SNAPSHOT is preserved — a configuration error core refuses, never the fallback (design v3.5 §4, codex round 8)', () => {
+  const savedEnv = process.env['WICKED_SKILLS_SNAPSHOT'];
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env['WICKED_SKILLS_SNAPSHOT'];
+    else process.env['WICKED_SKILLS_SNAPSHOT'] = savedEnv;
+  });
+
+  it('applySkillsSnapshotEnv restores the boot value EXACTLY: a path, an empty string (kept), or nothing (deleted)', () => {
+    applySkillsSnapshotEnv(null, '/boot/path');
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBe('/boot/path');
+    applySkillsSnapshotEnv(null, '');
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBe(''); // set-but-empty stays set-but-empty
+    applySkillsSnapshotEnv(null, undefined);
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBeUndefined();
+    applySkillsSnapshotEnv('/a/snapshot', '');
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBe('/a/snapshot');
+  });
+
+  it('a daemon that booted with WICKED_SKILLS_SNAPSHOT="" and has no plugin to seed from reports config-error (skills.config), engineInput "", the variable still ""', async () => {
+    const runtime = new SkillsRuntime({
+      store: new SkillsStore({ root: join(s.base, 'no-plugin-root'), registeredSkillRefs: () => REGISTERED_REFS, provisionVenv: noVenv, source: () => null, now: () => CLOCK, warn: () => undefined }),
+      log: () => undefined,
+      bootSnapshot: '',
+    });
+    const health = await runtime.apply();
+    expect(health.state).toBe('config-error');
+    expect(health.engineInput).toBe('');
+    expect(health.findings.map((f) => f.kind)).toEqual(['skills.config']);
+    expect(health.findings[0]?.message).toContain('set but EMPTY');
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBe('');
+    // The ABSENT boot value is the fallback rung — unchanged.
+    const fallback = await new SkillsRuntime({
+      store: new SkillsStore({ root: join(s.base, 'no-plugin-root-2'), registeredSkillRefs: () => REGISTERED_REFS, provisionVenv: noVenv, source: () => null, now: () => CLOCK, warn: () => undefined }),
+      log: () => undefined,
+      bootSnapshot: undefined,
+    }).apply();
+    expect(fallback.state).toBe('fallback');
+    expect(fallback.engineInput).toBeNull();
+    expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBeUndefined();
   });
 });
 

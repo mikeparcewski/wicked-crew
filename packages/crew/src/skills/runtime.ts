@@ -55,8 +55,12 @@ import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
-import { applySkillsSnapshotEnv, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
+import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
+import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type SkillsStore } from './store.js';
+
+/** The refusal sentinel directory name — from the ONE table of root names (design v3.5 §2); re-exported for the tests. */
+export { REFUSED_DIRNAME };
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
@@ -89,9 +93,6 @@ export function disabledSkillsHealth(): SkillsHealth {
   return { state: 'disabled', root: null, current: null, engineInput: null, stateHome: null, findings: [] };
 }
 
-/** The directory name under the root whose (non-existent) children are the refusal sentinels. */
-export const REFUSED_DIRNAME = 'refused';
-
 /**
  * The path the engine input is pointed at when the daemon has NO valid snapshot to offer and must
  * not fall back: it does not exist, so the engine's "explicit path invalid → launch fails loudly"
@@ -104,16 +105,20 @@ export function refusalPath(root: string, kind: 'skills.blocked' | 'skills.confi
 export interface SkillsRuntimeOptions {
   store: SkillsStore;
   log: (message: string) => void;
+  /** The `WICKED_SKILLS_SNAPSHOT` this process BOOTED with (default: the real one, `BOOT_SKILLS_SNAPSHOT`); tests inject `''` / `undefined`. */
+  bootSnapshot?: string | undefined;
 }
 
 export class SkillsRuntime {
   readonly store: SkillsStore;
   private readonly log: (message: string) => void;
+  private readonly bootSnapshot: string | undefined;
   private lastHealth: SkillsHealth = disabledSkillsHealth();
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
     this.log = opts.log;
+    this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
   }
 
   /** The seam's last outcome (diagnostics). */
@@ -131,10 +136,24 @@ export class SkillsRuntime {
       const message = err instanceof Error ? err.message : String(err);
       this.store.live.exported(null); // no published generation is handed to launches from here on
       if (err instanceof SkillsSourceUnavailableError) {
-        applySkillsSnapshotEnv(null);
-        // Say what actually happened to the variable: `applySkillsSnapshotEnv(null)` restores the
-        // boot value when this process had one, and deletes it only when it had none.
+        applySkillsSnapshotEnv(null, this.bootSnapshot);
+        // Say what actually happened to the variable: the boot value is restored EXACTLY — a path,
+        // an explicitly EMPTY value, or nothing (deleted). Set-but-empty is a configuration error
+        // core refuses (design v3.5 §4): it is preserved, reported as `skills.config`, and never
+        // widened into the live-cache fallback rung — only an ABSENT variable reaches that rung.
         const restored = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+        if (restored === '') {
+          const detail = `${SKILLS_SNAPSHOT_ENGINE_ENV} is set but EMPTY — a configuration error core refuses at every launch (export a snapshot path, or unset it to reach the live-plugin fallback); and there is no plugin to publish from: ${message}`;
+          this.log(`[skills] skills.config: ${detail}`);
+          return this.record({
+            state: 'config-error',
+            root,
+            current: null,
+            engineInput: '',
+            stateHome: canonicalCrewStateHome(),
+            findings: [{ kind: 'skills.config', severity: 'error', message: detail }],
+          });
+        }
         this.log(
           restored === undefined
             ? `[skills] skills.fallback: ${message}; ${SKILLS_SNAPSHOT_ENGINE_ENV} left unset (this process booted without one) — the engine resolves the live installed plugin itself`

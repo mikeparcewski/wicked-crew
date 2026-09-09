@@ -19,6 +19,8 @@ import { removeScratch } from './setup/scratch.js';
 
 let home: string;
 let cfg: string;
+/** Extra temp homes a test creates beside `home` — removed with it (Copilot on #480: reassigning `home` leaked the first one). */
+const extraHomes: string[] = [];
 
 function plugin(dir: string, version: string): void {
   mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
@@ -32,6 +34,7 @@ beforeEach(() => {
 
 afterEach(() => {
   removeScratch(home);
+  for (const extra of extraHomes.splice(0)) removeScratch(extra);
 });
 
 describe('discoverLivePlugin', () => {
@@ -73,11 +76,13 @@ describe('discoverLivePlugin', () => {
     plugin(join(livePluginCacheDir(cfg), '12.32.0-alpha'), '12.32.0-alpha');
     plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
     expect(discoverLivePlugin({ env: {}, home })?.plugin_version).toBe('12.32.0');
-    // Only prereleases installed: the highest one, by the total order, whatever the listing order.
-    home = mkdtempSync(join(tmpdir(), 'skills-source-pre-'));
-    cfg = join(home, '.claude');
-    for (const v of ['12.0.0-beta', '12.0.0-alpha', '12.0.0-beta.1', '12.0.0-rc.1']) plugin(join(livePluginCacheDir(cfg), v), v);
-    expect(discoverLivePlugin({ env: {}, home })?.plugin_version).toBe('12.0.0-rc.1');
+    // Only prereleases installed: the highest one, by the total order, whatever the listing order —
+    // in a SECOND home (tracked for cleanup; the first stays `home` so afterEach removes both).
+    const preHome = mkdtempSync(join(tmpdir(), 'skills-source-pre-'));
+    extraHomes.push(preHome);
+    const preCfg = join(preHome, '.claude');
+    for (const v of ['12.0.0-beta', '12.0.0-alpha', '12.0.0-beta.1', '12.0.0-rc.1']) plugin(join(livePluginCacheDir(preCfg), v), v);
+    expect(discoverLivePlugin({ env: {}, home: preHome })?.plugin_version).toBe('12.0.0-rc.1');
   });
 
   it('reads plugin.json NO-FOLLOW below a once-resolved root (codex round 6): a symlinked source ROOT is accepted; a symlinked `.claude-plugin/` or `plugin.json` throws PluginSourceSymlinkError naming it — in the live cache too, never a silent skip to another version', () => {

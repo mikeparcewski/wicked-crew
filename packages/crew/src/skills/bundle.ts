@@ -26,11 +26,13 @@
  * file API (`store.resolveSupportFile` refuses a path outside it with an `outside-closure` blocked
  * envelope) and publish/analyze (a file found under `effective/` outside it — a direct filesystem
  * edit — is a BLOCKING `outside-closure` finding naming the path). What the seed would not copy,
- * the API cannot add and a snapshot never ships. The `.claude-plugin` half is an allowlist BY NAME,
- * adjudicated against the live 12.32.0 layout (six files there; five are runtime catalogs garden's
- * scripts read — `specialist.json` by `scripts/crew/specialist_discovery.py`, `stack-registry.json`
- * by the pack/capability registries); `scripts/wg/` IS a directory in the live plugin, so it is
- * excluded as a directory alongside `ci/`, and the `wg-…` prefix exclusion stays.
+ * the API cannot add and a snapshot never ships. The `.claude-plugin` half is an allowlist BY NAME —
+ * design amendment v3.5 §1, adjudicated against the live 12.32.0 layout (six files there; five are
+ * runtime catalogs garden's scripts read — `specialist.json` by `scripts/crew/specialist_discovery.py`,
+ * `stack-registry.json` by the pack/capability registries; `marketplace.json` is a publish-time
+ * listing), superseding the v3 "three files" spelling that predated the catalog audit; `scripts/wg/`
+ * IS a directory in the live plugin, so it is excluded as a directory alongside `ci/`, and the
+ * `wg-…` prefix exclusion stays.
  *
  * # No-follow BELOW the source root (codex round 6)
  *

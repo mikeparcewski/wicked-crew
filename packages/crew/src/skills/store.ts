@@ -127,7 +127,6 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -138,7 +137,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, posix, resolve } from 'node:path';
 
-import { readFileCapped } from '../api/run-files.js';
+import { NotARegularFileError, readFileCapped } from '../api/run-files.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type {
   CoreEvent,
@@ -195,13 +194,16 @@ import {
   resolvePluginRootRef,
   resolveRelativeRef,
 } from './refs.js';
+import { CURRENT_TMP_PREFIX, STAGING_PREFIX } from './root-names.js';
 import {
   assertNoSymlinkComponents,
   copyFiles,
+  EntrySwappedError,
   hashFileSet,
   hashTree,
   makeTreeReadOnly,
   pruneEmptyDirs,
+  readFileNoFollow,
   removeTreeForce,
   sha256Hex,
   SymlinkComponentError,
@@ -212,6 +214,9 @@ import {
   type LinkRecord,
   type TreeListing,
 } from './tree.js';
+
+/** The root-level names the store creates live in ONE table (`root-names.ts`, design v3.5 §2) — re-exported for the tests that observe the flip. */
+export { CURRENT_TMP_PREFIX } from './root-names.js';
 import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvProvisioner } from './venv.js';
 
 /** The root's name under the daemon state home — a top-level entry `tests/fixtures/state-home-subtrees.json` registers. */
@@ -249,14 +254,10 @@ export const KEEP_GENERATIONS = 3;
 const PLUGIN_JSON_REL = '.claude-plugin/plugin.json';
 /** Drift findings name at most this many paths — the count carries the rest. */
 const DRIFT_LIST_CAP = 12;
-/** Prefix of a half-written directory (a torn publish / seed / refresh) — swept at the next pass. */
-const STAGING_PREFIX = '.staging-';
-/**
- * Prefix of the transient `current` link while it is being flipped — created INSIDE `snapshots/`
- * (a `.tmp-*` entry core's fence classifies; core#399 round 4), renamed over `skills/current`.
- * Exported for the test that pins "no unclassified child under skills/ during a publish".
- */
-export const CURRENT_TMP_PREFIX = '.tmp-current-';
+// `STAGING_PREFIX` (a half-written directory — a torn publish / seed / refresh — swept at the next
+// pass) and `CURRENT_TMP_PREFIX` (the transient `current` link while it is being flipped — created
+// INSIDE `snapshots/`, a name core's fence classifies, renamed over `skills/current`) come from
+// `root-names.ts`: the ONE table of every name the store creates under the root (design v3.5 §2).
 
 /**
  * Where the root lives: `<state home>/skills` — full stop (design v3.1 §1: the same storage root as
@@ -751,7 +752,7 @@ export class SkillsStore {
       throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is a symlink (-> ${readlinkSync(path)}) — the store never reads its state through a link`);
     }
     if (!st.isFile()) throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is not a regular file`);
-    const raw = readFileSync(path, 'utf8');
+    const raw = readFileNoFollow(path).toString('utf8'); // O_NOFOLLOW + identity: the entry lstat judged is the one read (v3.5 §3)
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -1011,7 +1012,7 @@ export class SkillsStore {
     for (const row of parsed.skills) {
       const skillMd = byRel.get(`${row.dir}/SKILL.md`);
       if (skillMd === undefined) return `skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`;
-      const fm = parseFrontmatter(readFileSync(skillMd.abs, 'utf8'));
+      const fm = parseFrontmatter(readFileNoFollow(skillMd.abs).toString('utf8'));
       if (!fm.ok) return `${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`;
       const kind = skillKindOf(fm.fields);
       if (kind !== row.kind) return `skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`;
@@ -1019,7 +1020,7 @@ export class SkillsStore {
       const prefix = `${row.dir}/`;
       for (const f of files) {
         if (!f.rel.startsWith(prefix) || owningSkillDir(f.rel, dirs) !== row.dir) continue;
-        const buf = readFileSync(f.abs);
+        const buf = readFileNoFollow(f.abs);
         if (looksBinary(buf)) continue;
         if (portabilityIssueOf(buf.toString('utf8')) !== null) {
           portable = false;
@@ -1135,9 +1136,9 @@ export class SkillsStore {
     if (!st.isFile()) return `${SNAPSHOT_MANIFEST_FILENAME} in ${dir} is not a regular file`;
     let raw: string;
     try {
-      raw = readFileSync(path, 'utf8');
+      raw = readFileNoFollow(path).toString('utf8'); // O_NOFOLLOW + identity (v3.5 §3)
     } catch (err) {
-      return `no readable ${SNAPSHOT_MANIFEST_FILENAME} in ${dir} (${errnoCode(err) ?? 'error'})`;
+      return `no readable ${SNAPSHOT_MANIFEST_FILENAME} in ${dir} (${err instanceof EntrySwappedError || err instanceof SymlinkComponentError ? err.message : (errnoCode(err) ?? 'error')})`;
     }
     let parsed: unknown;
     try {
@@ -1290,6 +1291,19 @@ export class SkillsStore {
     this.sweepStaging(parent);
     const staging = join(parent, `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`);
     copyFiles(bundle, staging);
+    // Re-walk (lstat) and re-hash the staged capture AFTER the copy and BEFORE the rename (design
+    // v3.5 §3): links enumerated (none allowed), every file's digest — a staged tree that is not the
+    // bundle its hash names never becomes `baseline/<hash>`.
+    const staged = walkTree(staging);
+    const stagedHash = hashFileSet(staged.files);
+    if (staged.links.length > 0 || stagedHash !== hash) {
+      removeTreeForce(staging);
+      const link = staged.links[0];
+      throw new SkillsBaselineCorruptError(
+        staging,
+        link !== undefined ? `the staged capture carries a symlink at ${link.rel} -> ${link.target}` : `the staged capture hashes to ${stagedHash}, not to ${hash} — modified between copy and rename`,
+      );
+    }
     if (this.entryExists(dest)) {
       removeTreeForce(staging); // raced by another capture of the same bytes — theirs is as good, and verified on its next reuse
       return;
@@ -1346,6 +1360,38 @@ export class SkillsStore {
       const st = lstatOrNull(p);
       if (st !== null && st.isFile()) chmodSync(p, (st.mode & 0o777) | 0o200);
     }
+  }
+
+  /**
+   * Re-walk (lstat) and re-hash a staged tree AFTER the copy and BEFORE the swap/rename (design v3.5
+   * §3; codex round 8): every expected file present with its expected digest, nothing else, no
+   * symlink. Answers why the staged tree is not what the copy was meant to produce, or `null`.
+   */
+  private stagedTreeProblem(stagedDir: string, expected: ReadonlyMap<string, string>): string | null {
+    const tree = walkTree(stagedDir);
+    const link = tree.links[0];
+    if (link !== undefined) return `the staged tree carries a symlink at ${link.rel} -> ${link.target}`;
+    const seen = new Set<string>();
+    for (const f of tree.files) {
+      const want = expected.get(f.rel);
+      if (want === undefined) return `the staged tree carries ${f.rel}, which was not staged`;
+      const got = sha256Hex(readFileNoFollow(f.abs));
+      if (got !== want) return `staged ${f.rel} hashes to ${got}, expected ${want} — modified between copy and swap`;
+      seen.add(f.rel);
+    }
+    if (seen.size !== expected.size) return `the staged tree is missing ${[...expected.keys()].filter((k) => !seen.has(k)).join(', ')}`;
+    return null;
+  }
+
+  /** The blocking finding for a staged tree (or a copy source) that changed under the operation — nothing swapped, nothing written (v3.5 §3). */
+  private stagedTreeFinding(skill: string | null, file: string, evidence: string): SkillConflictFinding {
+    return finding(
+      'path-invalid',
+      'blocking',
+      'the staged tree was re-walked and re-hashed before the swap and was not what the copy produced — a file modified, added, removed or swapped for a symlink between copy and rename (design v3.5 §3: the lstat walk is necessary, not sufficient); nothing was swapped or written',
+      evidence,
+      { skill, file },
+    );
   }
 
   /** The blocking `baseline-corrupt` finding (codex round 7). */
@@ -1583,7 +1629,7 @@ export class SkillsStore {
   /** Every managed file under `effective/`, hashed. */
   private scanEffective(): ScannedFile[] {
     this.assertRootIdentity();
-    return walkFiles(this.effectiveDir()).map((f) => ({ rel: f.rel, abs: f.abs, sha: sha256Hex(readFileSync(f.abs)) }));
+    return walkFiles(this.effectiveDir()).map((f) => ({ rel: f.rel, abs: f.abs, sha: sha256Hex(readFileNoFollow(f.abs)) }));
   }
 
   /** Every manifest `dir` — the registered skills. */
@@ -1629,7 +1675,7 @@ export class SkillsStore {
   /** `sha256` of the baseline copy of `rel`, or `null` when the baseline has none. */
   private baselineHashOf(m: SkillManifest, rel: string): string | null {
     const abs = this.baselineFile(m, rel);
-    return abs === null ? null : sha256Hex(readFileSync(abs));
+    return abs === null ? null : sha256Hex(readFileNoFollow(abs));
   }
 
   private catalogView(m: SkillManifest): CatalogView {
@@ -1786,8 +1832,14 @@ export class SkillsStore {
       }
       entry.portable = portable;
     }
-    const closure = coreClosure(this.registeredRefs(), catalogMd);
-    for (const [name, entry] of Object.entries(m.skills)) entry.core = closure.core.has(name);
+    // A DIRECTLY registered reference is core regardless of its readability (design v3.5 §5; codex
+    // round 8): a skill a workflow names by `skill_ref` keeps `core: true` when its `SKILL.md` is
+    // missing or symlink-refused — it is absent from `catalogMd`, so the closure alone would have
+    // dropped it and `disable` would have committed against the downgraded flag. The closure's
+    // `missing` set (a ref naming NO catalog entry) is reported by `validate` as `core-missing`.
+    const registered = this.registeredRefs();
+    const closure = coreClosure(registered, catalogMd);
+    for (const [name, entry] of Object.entries(m.skills)) entry.core = closure.core.has(name) || registered.has(name);
     return refused;
   }
 
@@ -1817,7 +1869,7 @@ export class SkillsStore {
       if (errnoCode(err) === 'ENOENT') return null;
       throw err;
     }
-    return readFileSync(abs);
+    return readFileNoFollow(abs); // the entry lstat judged is the one read (v3.5 §3)
   }
 
   /** Whether the current baseline ships a skill at `dir` (a user-added skill has no baseline dir). */
@@ -1841,7 +1893,7 @@ export class SkillsStore {
     const files = this.ownFilesIn(this.effectiveDir(), entry.dir, this.ownershipDirs(m)).map((f) => ({
       path: f.rel.slice(entry.dir.length + 1),
       size: statSync(f.abs).size,
-      sha256: sha256Hex(readFileSync(f.abs)),
+      sha256: sha256Hex(readFileNoFollow(f.abs)),
       record: m.files[f.rel] ?? null,
     }));
     return { name, dir: entry.dir, enabled: entry.enabled, files };
@@ -1921,9 +1973,16 @@ export class SkillsStore {
     return this.typedRead(target.rel, abs);
   }
 
-  /** The capped read as the wire spells it: `content` is `null` — not `""` — when the file is binary. */
+  /**
+   * The capped read as the wire spells it: `content` is `null` — not `""` — when the file is binary.
+   * The leaf the containment walk judged is lstat'ed here and the read opens it `O_NOFOLLOW` with a
+   * dev/ino identity check against that lstat (v3.5 §3): a link swapped in between the walk and the
+   * open is refused, never served.
+   */
   private async typedRead(path: string, abs: string): Promise<SkillReadResult> {
-    const read = await readFileCapped(abs);
+    const before = lstatSync(abs);
+    if (!before.isFile()) throw new NotARegularFileError(abs);
+    const read = await readFileCapped(abs, { noFollow: true, identity: { dev: before.dev, ino: before.ino } });
     return { path, content: read.binary ? null : read.content, size: read.size, truncated: read.truncated, binary: read.binary };
   }
 
@@ -1976,14 +2035,14 @@ export class SkillsStore {
         if (record.baselineHash === null) delete m.files[rel];
         else record.effectiveHash = null;
       } else {
-        record.effectiveHash = sha256Hex(readFileSync(abs));
+        record.effectiveHash = sha256Hex(readFileNoFollow(abs));
         onDisk.delete(rel);
       }
     }
     for (const [rel, abs] of onDisk) {
       m.files[rel] = {
         baselineHash: this.baselineHashOf(m, rel),
-        effectiveHash: sha256Hex(readFileSync(abs)),
+        effectiveHash: sha256Hex(readFileNoFollow(abs)),
         lastPublishedHash: null,
         conflict: false,
       };
@@ -2016,7 +2075,7 @@ export class SkillsStore {
       return this.blocked(m, [this.pathFinding(err, name, skillMdRel)]);
     }
     // The walk above ended at the leaf without crossing a link: an existing entry here is the real file.
-    const skillMd = this.entryExists(skillMdAbs) && lstatSync(skillMdAbs).isFile() ? readFileSync(skillMdAbs, 'utf8') : undefined;
+    const skillMd = this.entryExists(skillMdAbs) && lstatSync(skillMdAbs).isFile() ? readFileNoFollow(skillMdAbs).toString('utf8') : undefined;
     const recompute = this.recomputeWarnings(m); // `core` from the live registered refs, never the cached entry
     const findings = [...frontmatterGuard(skillMd, name, { isCore: entry.core, file: skillMdRel }), ...recompute];
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
@@ -2080,7 +2139,7 @@ export class SkillsStore {
     const freshRels = new Set(fresh.map((f) => f.rel));
     for (const f of fresh) {
       const record = records.get(f.rel);
-      const actual = sha256Hex(readFileSync(f.abs));
+      const actual = sha256Hex(readFileNoFollow(f.abs));
       if (record === undefined || record.baselineHash === null) {
         return this.blocked(m, [this.baselineCorruptFinding(name, f.rel, `${BASELINE_DIRNAME}/${m.baseline}/${f.rel} is not a recorded baseline file of ${name} — planted`)]);
       }
@@ -2114,9 +2173,17 @@ export class SkillsStore {
     try {
       copyFiles(fresh, stagedDir);
       this.restoreOwnerWrite(place.map((p) => p.src));
+      // Re-walked and re-hashed against the records the sources were verified with (v3.5 §3).
+      const stagedProblem = this.stagedTreeProblem(stagedDir, new Map(fresh.map((f) => [f.rel, records.get(f.rel)?.baselineHash ?? ''])));
+      if (stagedProblem !== null) {
+        removeTreeForce(staging);
+        return this.blocked(m, [this.stagedTreeFinding(name, entry.dir, stagedProblem)]);
+      }
       swap = this.swapStaged(name, entry.dir, staging, own, place);
     } catch (err) {
       removeTreeForce(staging);
+      // A source swapped for a link between the walk and the copy is refused, never copied (v3.5 §3).
+      if (err instanceof EntrySwappedError || err instanceof SymlinkComponentError) return this.blocked(m, [this.stagedTreeFinding(name, entry.dir, err.message)]);
       throw err;
     }
     if ('finding' in swap) return this.blocked(m, [swap.finding]);
@@ -2174,6 +2241,11 @@ export class SkillsStore {
     } catch (err) {
       removeTreeForce(staging);
       throw err;
+    }
+    const stagedProblem = this.stagedTreeProblem(join(staging, 'new'), new Map([[rel, sha256Hex(Buffer.from(content, 'utf8'))]]));
+    if (stagedProblem !== null) {
+      removeTreeForce(staging);
+      return { finding: this.stagedTreeFinding(skill, rel, stagedProblem) };
     }
     return this.swapStaged(skill, rel, staging, current === null ? [] : [{ rel, abs: dest }], [{ src, dest }]);
   }
@@ -2320,6 +2392,12 @@ export class SkillsStore {
     } catch (err) {
       removeTreeForce(staging);
       throw err;
+    }
+    // Re-walked and re-hashed against the texts just written (v3.5 §3) before a single rename.
+    const stagedProblem = this.stagedTreeProblem(stagedDir, new Map(targets.map((t) => [t.rel, sha256Hex(Buffer.from(t.text, 'utf8'))])));
+    if (stagedProblem !== null) {
+      removeTreeForce(staging);
+      return { finding: this.stagedTreeFinding(name, dir, stagedProblem) };
     }
     return this.swapStaged(name, dir, staging, own, place);
   }
@@ -2636,7 +2714,7 @@ export class SkillsStore {
     if (newHash === previous) return base(); // byte-identical upstream: nothing to merge
 
     // ── Decide (in memory — nothing on disk moves until the preflight below has passed) ─────
-    const newFiles = new Map(bundle.map((f) => [f.rel, sha256Hex(readFileSync(f.abs))]));
+    const newFiles = new Map(bundle.map((f) => [f.rel, sha256Hex(readFileNoFollow(f.abs))])); // the source entries the bundle walk judged, read no-follow
     const effective = new Map(this.scanEffective().map((f) => [f.rel, f.sha]));
     const oldFiles = new Map(
       Object.entries(m.files).filter(([, r]) => r.baselineHash !== null).map(([rel, r]) => [rel, r.baselineHash as string]),
@@ -2785,10 +2863,22 @@ export class SkillsStore {
     try {
       copyFiles(sources, stagedDir);
       this.restoreOwnerWrite(place.map((p) => p.src)); // the new baseline is locked; the operator's copies are theirs to edit
+      // Re-walked and re-hashed against the new bundle's digests (v3.5 §3).
+      const stagedProblem = this.stagedTreeProblem(stagedDir, new Map(takes.map((rel) => [rel, newFiles.get(rel) ?? ''])));
+      if (stagedProblem !== null) {
+        removeTreeForce(staging);
+        const blocked = base({ verdict: 'blocked', findings: [this.stagedTreeFinding(null, `${BASELINE_DIRNAME}/${newHash}`, stagedProblem)] });
+        this.reapBaselines();
+        return blocked;
+      }
       swap = this.swapStaged(null, `${BASELINE_DIRNAME}/${newHash}`, staging, park, place);
     } catch (err) {
       removeTreeForce(staging);
       this.reapBaselines();
+      // A source swapped for a link between the walk and the copy is refused, never copied (v3.5 §3).
+      if (err instanceof EntrySwappedError || err instanceof SymlinkComponentError) {
+        return base({ verdict: 'blocked', findings: [this.stagedTreeFinding(null, `${BASELINE_DIRNAME}/${newHash}`, err.message)] });
+      }
       throw err;
     }
     if ('finding' in swap) {
@@ -3009,6 +3099,13 @@ export class SkillsStore {
     const snapshotText = `${JSON.stringify(snapshot, null, 2)}\n`;
     writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), snapshotText);
     if (venvLink !== null) this.symlink(venvLink.text, join(staging, VENV_LINKNAME), venvLink.absTarget);
+    // Re-walk (lstat) and re-hash the staged generation AFTER the copy and BEFORE the rename (design
+    // v3.5 §3): files and the one permitted link must hash to the content it was copied from.
+    const stagedHash = this.snapshotHash(walkTree(staging));
+    if (stagedHash !== contentHash) {
+      removeTreeForce(staging);
+      throw new SkillsPublishError(`the staged generation hashes to ${stagedHash}, not to the content it was copied from (${contentHash}) — modified between copy and rename; nothing published`);
+    }
     const dest = this.snapshotDir(gen);
     if (this.entryExists(dest)) {
       removeTreeForce(staging);
@@ -3278,7 +3375,7 @@ export class SkillsStore {
     for (const [name, entry] of Object.entries(m.skills)) {
       const rel = `${entry.dir}/SKILL.md`;
       const f = onDisk.get(rel);
-      if (f !== undefined) catalogMd.set(name, readFileSync(f.abs, 'utf8'));
+      if (f !== undefined) catalogMd.set(name, readFileNoFollow(f.abs).toString('utf8'));
     }
 
     // The core closure must be COMPLETE: a registered ref or a mandate naming no catalog skill is
@@ -3419,7 +3516,7 @@ export class SkillsStore {
     };
     for (const { name, entry } of enabledSkills) {
       for (const f of filesByOwner.get(entry.dir) ?? []) {
-        const buf = readFileSync(f.abs);
+        const buf = readFileNoFollow(f.abs);
         if (looksBinary(buf)) continue;
         const text = buf.toString('utf8');
         // Severity follows the TARGET (design v3.4 §1): a reference that ESCAPES the plugin root is a
@@ -3478,7 +3575,7 @@ export class SkillsStore {
     const parseJsonObject = (rel: string, f: ScannedFile): Record<string, unknown> | null => {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(readFileSync(f.abs, 'utf8'));
+        parsed = JSON.parse(readFileNoFollow(f.abs).toString('utf8'));
       } catch (err) {
         findings.push(finding('catalog-invalid', 'blocking', "Claude Code loads the plugin from its manifest and garden's runtime reads the catalogs beside it as JSON; one that does not parse loads nothing", `${rel}: ${err instanceof Error ? err.message : String(err)}`, { file: rel }));
         return null;
