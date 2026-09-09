@@ -33,6 +33,39 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — codex round-7 REVISE (3 HIGH, 2 MEDIUM)** (PR #480). (H1) content-addressed
+  baselines are VERIFIED before every reuse and locked: an existing `baseline/<hash>` is reused only
+  if its tree (links enumerated, `.venv` excluded) re-hashes to its name — a mismatch is
+  `baseline-corrupt` (a new finding kind, api-types 0.27.0): the seed re-captures over it, a refresh
+  refuses to reuse it (2xx `blocked`, nothing copied), reset verifies every file it would restore
+  against the hash the manifest recorded for it (modified / planted / removed ⇒ `blocked`, nothing
+  written), publish/analyze report it blocking BEFORE the env is provisioned in it and AFTER the
+  provisioner ran; bundle files and subdirectories are made read-only after capture (the top dir
+  keeps owner write for `.venv` — mode bits are a guard, the hash is the integrity boundary), the
+  provisioner may write only under `.venv` (a `uv.lock` uv resolves for a lock-less bundle is removed
+  again), and effective copies restored by reset/refresh get their owner-write bit back. (H2)
+  `manifest.json` is validated by a COMPLETE fail-closed schema on every load and before every write
+  — every field typed strictly (booleans are booleans, hashes 64-hex or `null` where allowed,
+  `revision` a non-negative integer, enums for kind / provenance / source.kind / venv, exact key
+  sets, `published {gen, contentHash, at, snapshotHash}`) — so `"enabled": "false"` now refuses to
+  load (`manifest-invalid`; the daemon reports `skills.config`) instead of being published;
+  pre-release manifests without `published.snapshotHash` refuse to load — remove the skills root to
+  reseed. (H3) every content mutation commits ATOMICALLY with the manifest: park originals → stage →
+  swap → records/derived fields → validated `manifest.json.tmp-…` → rename → unpark; if the manifest
+  commit fails the content swap is rolled back from the parked originals (the single-file write and
+  the support write now go through the same transaction as replace/add/reset/refresh; a publish whose
+  manifest commit fails removes the generation it never came to own). (M1) the `.claude-plugin` half
+  of the bundle closure is an allowlist BY NAME — `plugin.json`, `archetypes.json`, `components.json`,
+  `specialist.json`, `stack-registry.json` (the runtime catalogs garden's scripts read, adjudicated on
+  the live 12.32.0 layout); `marketplace.json` and anything else are `outside-closure`; `scripts/`
+  excludes the `ci/` and `wg/` directories and `wg-*` tooling (spelling fixed everywhere). (M2)
+  `snapshot.json` is AUTHENTICATED and re-derived: publish records `published.snapshotHash` (sha256 of
+  the exact bytes it wrote); `current` verifies only the published generation with that metadata,
+  re-derives every row's `kind` (from its frontmatter) and `portable` (from its own files) inside the
+  generation, requires `nested` to be what the dir spells, rows sorted and unique, the copilot view to
+  name AND lay out EXACTLY the sorted portable set (no subset, no extra directory) and nothing else
+  under `views/`; a torn `current` (behind `published`) is finished by `ensureReady` from the
+  authenticated generation, never verified on trust.
 - **Skills keystone — design v3.4 (from the integrated functional test) + codex round-6 REJECT**
   (PR #480). The trio's first publish against the LIVE wicked-garden 12.32.0 plugin was BLOCKED by
   18 `unresolved-ref` findings in 7 skills (one of them core), so the skills seam shipped unusable
@@ -64,8 +97,8 @@ mentioned only where a daemon release depends on them.
   reaches it): a symlinked `plugin.json`, catalog, root file, `skills/<x>` dir or any link inside a
   bundle dir refuses the seed (`skills.config`, nothing created) or the refresh (a 2xx `blocked`
   `path-invalid` naming the entry, nothing copied); (M1) the bundle closure is ONE allowlist
-  (`bundle.ts` `inBundleClosure`: `.claude-plugin/*`, `skills/**`, `scripts/**` minus `ci/` + `wg*/`,
-  `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) shared by the seed, the support API
+  (`bundle.ts` `inBundleClosure`: the `.claude-plugin` catalogs, `skills/**`, `scripts/**` minus `ci/`,
+  `wg/` and `wg-*`, `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) shared by the seed, the support API
   (a PUT outside it is a 2xx `blocked` `outside-closure` envelope — a new finding kind, api-types
   0.27.0 — and a GET a 400) and publish/analyze (a file found under `effective/` outside it is
   BLOCKING by path); (M2) the core-closure drift check is NON-skippable: the vendored

@@ -1436,6 +1436,10 @@ export interface SkillPublishedRecord {
   contentHash: string;
   /** ISO-8601 instant. */
   at: string;
+  /** sha256 of the exact `snapshot.json` bytes publish wrote. `snapshot.json` is excluded from the
+   *  content hash, so the crew-owned manifest AUTHENTICATES it: `current` verifies only the
+   *  generation this record names, with metadata hashing to this value (api-types 0.27.0). */
+  snapshotHash: string;
 }
 
 /** `<skills root>/manifest.json` — the state of the daemon-owned root. (The v3 mirror ledger is
@@ -1549,13 +1553,23 @@ export type SkillFindingKind =
    *  root; a 2xx `blocked` envelope (api-types 0.27.0). Re-read `GET /skills` and retry. */
   | 'root-changed'
   /** A path outside the bundle closure — the ONE allowlist of what the seed copies, what the support
-   *  API may address, and what a snapshot may carry: the files directly under `.claude-plugin`,
-   *  everything under `skills`, `schemas` and `docs/examples`, everything under `scripts` except the
-   *  `ci` and `wg`-prefixed dev tooling, plus `pyproject.toml` and `uv.lock`. A support add/PUT there
-   *  is a 2xx `blocked` envelope (nothing written); a file found there under `effective/` at
-   *  publish/analyze (a direct filesystem edit) is a BLOCKING finding naming the path — a snapshot
-   *  never ships it (api-types 0.27.0). */
-  | 'outside-closure';
+   *  API may address, and what a snapshot may carry: the five runtime catalogs under `.claude-plugin`
+   *  BY NAME (`plugin.json`, `archetypes.json`, `components.json`, `specialist.json`,
+   *  `stack-registry.json` — `marketplace.json`, a publish-time listing, is outside), everything under
+   *  `skills`, `schemas` and `docs/examples`, everything under `scripts` except the `ci` and `wg`
+   *  directories and any `wg-`-prefixed dev tooling, plus `pyproject.toml` and `uv.lock`. A support
+   *  add/PUT there is a 2xx `blocked` envelope (nothing written); a file found there under
+   *  `effective/` at publish/analyze (a direct filesystem edit) is a BLOCKING finding naming the path
+   *  — a snapshot never ships it (api-types 0.27.0). */
+  | 'outside-closure'
+  /** A content-addressed `baseline/<hash>` whose tree does not hash to its name (a bundle file
+   *  modified, planted or removed, or a symlink inside), or a baseline file whose bytes do not match
+   *  the hash the manifest recorded for it. Baselines are re-verified before EVERY reuse: a refresh
+   *  refuses to reuse it (2xx `blocked`, nothing copied), reset refuses to restore from it (nothing
+   *  written), publish/analyze report it blocking (before AND after the env was provisioned in it).
+   *  Read-only mode bits on the baseline are a guard, never the integrity boundary — the hash is
+   *  (api-types 0.27.0). */
+  | 'baseline-corrupt';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
 

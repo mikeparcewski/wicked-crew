@@ -13,7 +13,7 @@
  * daemon's one child-process chokepoint.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { execCapped } from '../core/exec.js';
@@ -50,14 +50,22 @@ export function baselineVenvDir(baselineDir: string): string {
  */
 export const VENV_READY_MARKER = '.wicked-synced';
 
-/** The real provisioner: `uv sync --no-dev [--frozen]` in the baseline dir. */
+/**
+ * The real provisioner: `uv sync --no-dev [--frozen]` in the baseline dir. The provisioner may write
+ * ONLY under `.venv` (codex round 7): the baseline is content-addressed, its bundle files are locked
+ * read-only after capture, and publish re-hashes the bundle after this ran (`baseline-corrupt`
+ * blocks if anything else changed). A bundle WITHOUT `uv.lock` makes `uv sync` resolve and WRITE a
+ * lock beside `pyproject.toml` — a resolution artifact, not bundle content — so it is removed again.
+ */
 export const uvSyncBaseline: VenvProvisioner = async (baselineDir, { log, cacheDir }) => {
   if (!existsSync(join(baselineDir, 'pyproject.toml'))) {
     log(`[skills] ${baselineDir} carries no pyproject.toml; venv provisioning skipped (nothing to provision)`);
     return 'skipped';
   }
+  const lock = join(baselineDir, 'uv.lock');
+  const hadLock = existsSync(lock);
   const args = ['sync', '--no-dev'];
-  if (existsSync(join(baselineDir, 'uv.lock'))) args.push('--frozen');
+  if (hadLock) args.push('--frozen');
   try {
     await execCapped('uv', args, {
       cwd: baselineDir,
@@ -69,6 +77,10 @@ export const uvSyncBaseline: VenvProvisioner = async (baselineDir, { log, cacheD
       },
       maxBuffer: 4 * 1024 * 1024,
     });
+    if (!hadLock && existsSync(lock)) {
+      rmSync(lock, { force: true });
+      log(`[skills] uv sync wrote ${lock} (the bundle ships no lock); removed — the baseline stays the bundle its hash names`);
+    }
     return 'synced';
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {

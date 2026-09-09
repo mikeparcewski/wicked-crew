@@ -16,17 +16,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
-/** The placement to fail: set by the test, matched against the rename SOURCE (a staged file) and DESTINATION (hoisted with the mock). */
-const fault = vi.hoisted(() => ({ failPlacement: null as ((from: string, to: string) => boolean) | null }));
+/**
+ * The failure to inject (hoisted with the mock): `failPlacement` matches a placement's rename SOURCE
+ * (a staged file) and DESTINATION; `failManifestCommit` fails the rename that lands `manifest.json`
+ * (the last step of every commit — codex round 7's post-swap failure).
+ */
+const fault = vi.hoisted(() => ({ failPlacement: null as ((from: string, to: string) => boolean) | null, failManifestCommit: false }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
+  const { basename: base } = await import('node:path');
   return {
     ...actual,
     renameSync: (from: string, to: string): void => {
       if (fault.failPlacement !== null && fault.failPlacement(from, to)) {
         const err = new Error(`ENOTDIR: not a directory, rename '${from}' -> '${to}'`) as NodeJS.ErrnoException;
         err.code = 'ENOTDIR';
+        throw err;
+      }
+      if (fault.failManifestCommit && base(to) === 'manifest.json') {
+        const err = new Error(`EIO: i/o error, rename '${from}' -> '${to}'`) as NodeJS.ErrnoException;
+        err.code = 'EIO';
         throw err;
       }
       actual.renameSync(from, to);
@@ -43,6 +53,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fault.failPlacement = null;
+  fault.failManifestCommit = false;
   removeScratch(s.base);
 });
 
@@ -175,5 +186,81 @@ describe('reset and refresh-baseline share the park-and-rollback transaction (co
     expect(existsSync(join(effective, 'skills', 'delta', 'SKILL.md'))).toBe(false);
     expect(readFileSync(newDest, 'utf8')).toBe('new upstream file\n');
     expect(ok.removed).toEqual(['wicked-garden-delta']);
+  });
+});
+
+describe('the manifest commit is part of the transaction (codex round 7): a failed manifest rename rolls the CONTENT swap back — content and revision move together or not at all', () => {
+  const effectiveDigest = (): string => digest(join(s.root, 'effective'));
+  const manifestBytes = (): string => readFileSync(join(s.root, 'manifest.json'), 'utf8');
+  const noStaging = (): void => expect(readdirSync(s.root).filter((e) => e.startsWith('.staging-'))).toEqual([]);
+  const edited = '---\nname: wicked-garden-alpha\n---\n\nedited by the operator\n';
+
+  it('single-file write and support write: the error surfaces, effective/ is byte-for-byte unchanged, manifest.json unchanged, no staging; the same write lands once the disk behaves', () => {
+    const before = effectiveDigest();
+    const manifest = manifestBytes();
+    fault.failManifestCommit = true;
+    expect(() => s.store.writeFile('wicked-garden-alpha', 'SKILL.md', edited, 1)).toThrow(/EIO/);
+    expect(effectiveDigest()).toBe(before);
+    expect(manifestBytes()).toBe(manifest);
+    noStaging();
+    expect(() => s.store.writeSupport('scripts/_python.sh', '#!/bin/sh\necho edited\n', 1)).toThrow(/EIO/);
+    expect(effectiveDigest()).toBe(before);
+    expect(manifestBytes()).toBe(manifest);
+    noStaging();
+    expect(s.store.revision()).toBe(1);
+    fault.failManifestCommit = false;
+    expect(s.store.writeFile('wicked-garden-alpha', 'SKILL.md', edited, 1).revision).toBe(2);
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'alpha', 'SKILL.md'), 'utf8')).toBe(edited);
+  });
+
+  it('replace: rolled back byte-for-byte (modes included), revision unchanged', () => {
+    const alpha = join(s.root, 'effective', 'skills', 'alpha');
+    const before = digest(alpha);
+    const manifest = manifestBytes();
+    fault.failManifestCommit = true;
+    expect(() => s.store.replace('wicked-garden-alpha', { 'SKILL.md': edited, 'refs/notes.md': 'replaced notes\n' }, 1)).toThrow(/EIO/);
+    expect(digest(alpha)).toBe(before);
+    expect(manifestBytes()).toBe(manifest);
+    noStaging();
+    expect(s.store.revision()).toBe(1);
+  });
+
+  it('reset: the EDITED content stays, revision unchanged', () => {
+    const e = s.store.writeFile('wicked-garden-alpha', 'SKILL.md', edited, 1);
+    expect(e.revision).toBe(2);
+    const alpha = join(s.root, 'effective', 'skills', 'alpha');
+    const before = digest(alpha);
+    const manifest = manifestBytes();
+    fault.failManifestCommit = true;
+    expect(() => s.store.reset('wicked-garden-alpha', 2)).toThrow(/EIO/);
+    expect(digest(alpha)).toBe(before);
+    expect(readFileSync(join(alpha, 'SKILL.md'), 'utf8')).toBe(edited);
+    expect(manifestBytes()).toBe(manifest);
+    noStaging();
+    expect(s.store.revision()).toBe(2);
+    fault.failManifestCommit = false;
+    expect(s.store.reset('wicked-garden-alpha', 2).verdict).toBe('clear');
+    expect(readFileSync(join(alpha, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(s.upstream, 'skills', 'alpha', 'SKILL.md'), 'utf8'));
+  });
+
+  it('refresh-baseline: effective/ and manifest.json unchanged, the new capture reaped, no staging; the same refresh lands afterwards', () => {
+    const before = effectiveDigest();
+    const manifest = manifestBytes();
+    const baselines = s.store.baselinesOnDisk();
+    writeFileSync(join(s.upstream, 'skills', 'beta', 'SKILL.md'), '---\nname: wicked-garden-beta\n---\n\nupstream v2 — mentions wicked-garden-gamma\n');
+    rmSync(join(s.upstream, 'skills', 'delta', 'SKILL.md'));
+    fault.failManifestCommit = true;
+    expect(() => s.store.refreshBaseline(1)).toThrow(/EIO/);
+    expect(effectiveDigest()).toBe(before);
+    expect(manifestBytes()).toBe(manifest);
+    expect(s.store.baselinesOnDisk()).toEqual(baselines);
+    noStaging();
+    expect(s.store.revision()).toBe(1);
+    fault.failManifestCommit = false;
+    const ok = s.store.refreshBaseline(1);
+    expect(ok.verdict).toBe('clear');
+    expect(ok.revision).toBe(2);
+    expect(ok.removed).toEqual(['wicked-garden-delta']);
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'beta', 'SKILL.md'), 'utf8')).toContain('upstream v2');
   });
 });

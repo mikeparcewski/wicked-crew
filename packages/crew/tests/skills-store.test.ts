@@ -31,12 +31,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { inBundleClosure, pluginBundleFiles } from '../src/skills/bundle.js';
 import { containedPath, SkillPathError } from '../src/skills/contain.js';
 import { PluginSourceSymlinkError, pluginSourceAt } from '../src/skills/plugin-source.js';
+import { SkillsRuntime } from '../src/skills/runtime.js';
 import {
   COPILOT_VIEW_SKILLS_REL,
   RevisionMismatchError,
   SkillsCurrentInvalidError,
   SkillsManifestCorruptError,
-  SkillsPublishError,
   SkillsPublishInFlightError,
   SkillsRootChangedError,
   SkillsRootInvalidError,
@@ -97,6 +97,21 @@ const storeOver = (sc: Scaffold): SkillsStore =>
     now: () => CLOCK,
     warn: () => undefined,
   });
+/**
+ * Re-stamp `manifest.published` from the snapshot.json currently on disk (codex round 7): the manifest
+ * AUTHENTICATES the metadata, so an edited snapshot.json alone is refused by the metadata hash. The
+ * probes below that exercise the DEEPER checks (link text, symlink enumeration, baseline cross-check,
+ * row re-derivation) model an attacker who also holds manifest.json — those checks stay defense in depth.
+ */
+const stampPublished = (root: string, snapshotJson: string): void => {
+  const raw = readFileSync(snapshotJson, 'utf8');
+  const parsed = JSON.parse(raw) as { contentHash: string };
+  const manifestPath = join(root, 'manifest.json');
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as { published: { contentHash: string; snapshotHash: string } };
+  m.published.contentHash = parsed.contentHash;
+  m.published.snapshotHash = sha256Hex(raw);
+  writeFileSync(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
+};
 const editedOnDisk = (sc: Scaffold, skill: string, body: string): void =>
   writeFileSync(join(sc.root, 'effective', 'skills', skill, 'SKILL.md'), `---\nname: wicked-garden-${skill}\n---\n\n${body}\n`);
 
@@ -395,7 +410,10 @@ describe('publish (design v3 §1)', () => {
     rmSync(join(s.root, 'current'));
     symlinkSync(join('snapshots', '000001'), join(s.root, 'current'));
     const fresh = storeOver(s);
-    expect(fresh.currentSnapshot()?.gen).toBe(1);
+    // Only the PUBLISHED generation's metadata is authenticated (codex round 7): a torn `current` behind
+    // it is refused loudly, never served on trust — and ensureReady finishes the flip from the
+    // authenticated published generation BEFORE it verifies `current`.
+    expect(() => fresh.currentSnapshot()).toThrow(/not the generation manifest\.json published/);
     const ready = await fresh.ensureReady();
     expect(ready).toEqual({ seeded: false, published: null }); // finished, not re-published
     expect(fresh.currentSnapshot()?.gen).toBe(2);
@@ -742,9 +760,13 @@ describe('provisioning paths are validated before ANY filesystem operation (code
       const modeBefore = lstatSync(outside).mode;
       rmSync(hashDir, { recursive: true });
       symlinkSync(outside, hashDir);
-      await expect(v.store.publish(1)).rejects.toBeInstanceOf(SkillsPublishError);
-      await expect(v.store.publish(1)).rejects.toThrow(/before any filesystem operation/);
-      await expect(v.store.publish(1)).rejects.toThrow(/crosses a symlink/);
+      // A symlinked `baseline/<hash>` is `baseline-corrupt` BEFORE the provisioner runs (codex round 7: a
+      // baseline is re-verified before every reuse) — the 2xx blocked envelope, nothing provisioned or written.
+      const corrupt = await v.store.publish(1);
+      expect(corrupt.verdict).toBe('blocked');
+      expect(corrupt.snapshot).toBeNull();
+      expect(corrupt.findings[0]).toMatchObject({ kind: 'baseline-corrupt', severity: 'blocking', file: `baseline/${hash}` });
+      expect(corrupt.findings[0]?.evidence).toContain('is a symlink');
       expect(calls).toBe(0); // uv never ran
       expect(existsSync(join(outside, '.venv', 'bin', 'half'))).toBe(true); // nothing removed through the link
       expect(existsSync(join(outside, '.venv', VENV_READY_MARKER))).toBe(false); // no marker written
@@ -760,9 +782,12 @@ describe('provisioning paths are validated before ANY filesystem operation (code
       await expect(v.store.publish(1)).rejects.toThrow(/\.uv-cache/);
       expect(calls).toBe(0);
       rmSync(join(v.root, '.uv-cache'));
-      // A manifest naming a baseline that is NOT on disk is refused, never provisioned into a void.
+      // A manifest naming a baseline that is NOT on disk is `baseline-corrupt`, never provisioned into a void.
       rmSync(hashDir, { recursive: true });
-      await expect(v.store.publish(1)).rejects.toThrow(/does not exist/);
+      const missing = await v.store.publish(1);
+      expect(missing.verdict).toBe('blocked');
+      expect(missing.findings[0]).toMatchObject({ kind: 'baseline-corrupt' });
+      expect(missing.findings[0]?.evidence).toContain('does not exist');
       expect(calls).toBe(0);
       // With the baseline back, the same publish provisions and lands.
       cpSync(outside, hashDir, { recursive: true });
@@ -1563,6 +1588,8 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
       unlock(join(snap.path, 'snapshot.json'));
       writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+      expect(() => v.store.currentSnapshot()).toThrow(/not the metadata this root published/); // the manifest authenticates the metadata (codex round 7)
+      stampPublished(v.root, join(snap.path, 'snapshot.json')); // …and with the manifest forged too, the link is refused by name
       expect(() => v.store.currentSnapshot()).toThrow(/unexpected symlink evil -> /);
       rmSync(join(snap.path, 'evil'));
     } finally {
@@ -1582,6 +1609,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
         forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
         unlock(join(snap.path, 'snapshot.json'));
         writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+        stampPublished(v.root, join(snap.path, 'snapshot.json')); // the attacker-with-manifest model: the deeper link checks stay defense in depth
       };
       chmodSync(snap.path, 0o755);
       // Re-pointed at an outside env (the hash forged to match): refused for its link text.
@@ -1620,6 +1648,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
     forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
     unlock(join(snap.path, 'snapshot.json'));
     writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
+    stampPublished(s.root, join(snap.path, 'snapshot.json'));
     expect(() => s.store.currentSnapshot()).toThrow(/is present although snapshot\.json records the env as skipped/);
   });
 
@@ -1636,6 +1665,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       unlock(metadata);
       const withBaseline = (baseline: string): void => {
         writeFileSync(metadata, `${JSON.stringify({ ...pristine, gardenSource: { ...pristine.gardenSource, baseline } }, null, 2)}\n`);
+        stampPublished(v.root, metadata); // the attacker-with-manifest model (codex round 7): the checks below stay defense in depth
       };
       // snapshot.json is not part of the content hash, so these edits alone would have verified under
       // the old code, which JOINED the baseline string straight into the expected link target.
@@ -2117,7 +2147,7 @@ describe('the plugin SOURCE is ingested no-follow below its root (codex round 6)
 describe('the bundle closure is the ONE allowlist (codex round 6)', () => {
   it('a support add/PUT outside the closure is a blocked `outside-closure` envelope (nothing written); inside it lands', () => {
     s.store.seed();
-    for (const rel of ['hooks/hooks.json', 'tests/x.py', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'site/index.html', 'README.md']) {
+    for (const rel of ['hooks/hooks.json', 'tests/x.py', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'site/index.html', 'README.md', '.claude-plugin/marketplace.json', '.claude-plugin/extra.json']) {
       const r = s.store.writeSupport(rel, 'x\n', 1);
       expect(r, rel).toMatchObject({ verdict: 'blocked', revision: 1 });
       expect(r.findings, rel).toHaveLength(1);
@@ -2129,8 +2159,10 @@ describe('the bundle closure is the ONE allowlist (codex round 6)', () => {
     const ok = s.store.writeSupport('docs/examples/new.yml', 'a: 1\n', 1);
     expect(ok.verdict).toBe('warnings'); // the usual support-file-edit warning, nothing more
     expect(ok.findings.map((f) => f.kind)).toEqual(['support-file-edit']);
-    expect(s.store.writeSupport('.claude-plugin/extra.json', '{}\n', ok.revision).verdict).toBe('warnings');
-    expect(s.store.writeSupport('uv.lock', 'version = 1\n', ok.revision + 1).verdict).toBe('warnings');
+    // The `.claude-plugin` half is an allowlist BY NAME (codex round 7): the five runtime catalogs land, nothing else.
+    expect(s.store.writeSupport('.claude-plugin/specialist.json', '{}\n', ok.revision).verdict).toBe('warnings');
+    expect(s.store.writeSupport('.claude-plugin/stack-registry.json', '{}\n', ok.revision + 1).verdict).toBe('warnings');
+    expect(s.store.writeSupport('uv.lock', 'version = 1\n', ok.revision + 2).verdict).toBe('warnings');
   });
 
   it('a file found under effective/ outside the closure (a direct filesystem edit) BLOCKS publish and analyze by path — hooks/x and tests/x — and a snapshot never ships it', async () => {
@@ -2163,11 +2195,248 @@ describe('the bundle closure is the ONE allowlist (codex round 6)', () => {
     const seeded = pluginBundleFiles(s.upstream).map((f) => f.rel);
     expect(seeded.length).toBeGreaterThan(0);
     expect(seeded.every(inBundleClosure)).toBe(true);
-    for (const rel of ['hooks/hooks.json', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'scripts/wg-dev/x.py', 'tests/x', 'README.md', '.claude-plugin/nested/x.json', 'snapshot.json', 'manifest.json']) {
+    for (const rel of ['hooks/hooks.json', 'docs/other.md', 'scripts/ci/release.sh', 'scripts/wg/tool.py', 'scripts/wg-dev/x.py', 'tests/x', 'README.md', '.claude-plugin/nested/x.json', '.claude-plugin/marketplace.json', '.claude-plugin/extra.json', 'snapshot.json', 'manifest.json']) {
       expect(inBundleClosure(rel), rel).toBe(false);
     }
-    for (const rel of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'skills/x/SKILL.md', 'scripts/_python.sh', 'scripts/wgx/y.py', 'schemas/evidence.json', 'docs/examples/campaign.yml', 'pyproject.toml', 'uv.lock']) {
+    // The five `.claude-plugin` runtime catalogs BY NAME (codex round 7, the live 12.32.0 layout), the trees, the root files.
+    for (const rel of ['.claude-plugin/plugin.json', '.claude-plugin/archetypes.json', '.claude-plugin/components.json', '.claude-plugin/specialist.json', '.claude-plugin/stack-registry.json', 'skills/x/SKILL.md', 'scripts/_python.sh', 'scripts/wgx/y.py', 'schemas/evidence.json', 'docs/examples/campaign.yml', 'pyproject.toml', 'uv.lock']) {
       expect(inBundleClosure(rel), rel).toBe(true);
     }
+  });
+});
+
+describe('baselines are content-addressed: verified before EVERY reuse, locked read-only (codex round 7)', () => {
+  it('after the seed every bundle FILE is read-only (directories stay writable: .venv lands in the top dir) — mode bits are a guard, the hash is the boundary; the operator\'s effective copies stay writable', () => {
+    s.store.seed();
+    const hash = s.store.manifest().baseline;
+    const dir = join(s.root, 'baseline', hash);
+    const files = walkFiles(dir);
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) expect(lstatSync(f.abs).mode & 0o222, f.rel).toBe(0);
+    expect(lstatSync(dir).mode & 0o200).not.toBe(0);
+    expect(lstatSync(join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md')).mode & 0o200).not.toBe(0);
+  });
+
+  it('a MODIFIED baseline file: reset is blocked `baseline-corrupt` naming the file (nothing written); analyze and publish are blocked naming the dir; restored, everything is clear and the reset copy is owner-writable again', async () => {
+    s.store.seed();
+    const hash = s.store.manifest().baseline;
+    const file = join(s.root, 'baseline', hash, 'skills', 'gamma', 'SKILL.md');
+    const effectiveFile = join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md');
+    const original = readFileSync(file, 'utf8');
+    const effectiveBefore = readFileSync(effectiveFile, 'utf8');
+    chmodSync(file, 0o644); // the lock is a guard against accidents — defeating it must not defeat the verification
+    writeFileSync(file, `${original}tampered\n`);
+    const reset = s.store.reset('wicked-garden-gamma', 1);
+    expect(reset).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(reset.findings[0]).toMatchObject({ kind: 'baseline-corrupt', severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/SKILL.md' });
+    expect(reset.findings[0]?.evidence).toContain('modified');
+    expect(readFileSync(effectiveFile, 'utf8')).toBe(effectiveBefore);
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    expect(analyzed.findings.find((f) => f.kind === 'baseline-corrupt')).toMatchObject({ file: `baseline/${hash}` });
+    expect(analyzed.findings.find((f) => f.kind === 'baseline-corrupt')?.evidence).toContain('hashes to');
+    const published = await s.store.publish(1);
+    expect(published.verdict).toBe('blocked');
+    expect(published.snapshot).toBeNull();
+    expect(published.findings[0]?.kind).toBe('baseline-corrupt');
+    expect(existsSync(join(s.root, 'snapshots'))).toBe(false);
+    expect(s.store.revision()).toBe(1);
+    writeFileSync(file, original);
+    expect(s.store.analyze().verdict).toBe('clear');
+    expect(s.store.reset('wicked-garden-gamma', 1).verdict).toBe('clear');
+    expect(lstatSync(effectiveFile).mode & 0o200).not.toBe(0);
+    expect(readFileSync(effectiveFile, 'utf8')).toBe(original);
+  });
+
+  it('a PLANTED baseline file and a REMOVED one block reset by name; a pre-planted baseline/<hash> with wrong content is re-captured by the SEED and refused by a REFRESH (nothing changed)', () => {
+    // Pre-planted before the seed: wrong content under the right name — the seed owns the root's first state and re-captures.
+    const hash = hashFileSet(pluginBundleFiles(s.upstream));
+    mkdirSync(join(s.root, 'baseline', hash), { recursive: true });
+    writeFileSync(join(s.root, 'baseline', hash, 'junk.txt'), 'planted before the seed\n');
+    expect(s.store.seed().seeded).toBe(true);
+    expect(s.warnings.some((w) => w.includes('re-captured from the source'))).toBe(true);
+    expect(existsSync(join(s.root, 'baseline', hash, 'junk.txt'))).toBe(false);
+    expect(s.store.analyze().verdict).toBe('clear');
+    // Planted after the seed (the top dir is writable for .venv; a subdir is unlocked here on purpose): reset names it.
+    const gammaDir = join(s.root, 'baseline', hash, 'skills', 'gamma');
+    chmodSync(gammaDir, 0o755);
+    const planted = join(gammaDir, 'planted.md');
+    writeFileSync(planted, 'planted\n');
+    const r1 = s.store.reset('wicked-garden-gamma', 1);
+    expect(r1).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(r1.findings[0]).toMatchObject({ kind: 'baseline-corrupt', skill: 'wicked-garden-gamma', file: 'skills/gamma/planted.md' });
+    expect(r1.findings[0]?.evidence).toContain('planted');
+    rmSync(planted);
+    // Removed: reset names the record the baseline no longer backs.
+    const removedFile = join(gammaDir, 'SKILL.md');
+    const bytes = readFileSync(removedFile);
+    rmSync(removedFile);
+    const r2 = s.store.reset('wicked-garden-gamma', 1);
+    expect(r2).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect(r2.findings[0]).toMatchObject({ kind: 'baseline-corrupt', file: 'skills/gamma/SKILL.md' });
+    expect(r2.findings[0]?.evidence).toContain('removed');
+    writeFileSync(removedFile, bytes);
+    expect(s.store.analyze().verdict).toBe('clear');
+    // A REFRESH never reuses a pre-planted dir under the NEW hash: blocked `baseline-corrupt`, nothing changed.
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\ngamma v2\n');
+    const newHash = hashFileSet(pluginBundleFiles(s.upstream));
+    mkdirSync(join(s.root, 'baseline', newHash), { recursive: true });
+    writeFileSync(join(s.root, 'baseline', newHash, 'junk.txt'), 'planted before the refresh\n');
+    const before = JSON.stringify(s.store.manifest());
+    const ref = s.store.refreshBaseline(1);
+    expect(ref).toMatchObject({ verdict: 'blocked', revision: 1, taken: [], added: [], removed: [] });
+    expect(ref.findings[0]).toMatchObject({ kind: 'baseline-corrupt', file: `baseline/${newHash}` });
+    expect(ref.findings[0]?.evidence).toContain('hashes to');
+    expect(JSON.stringify(s.store.manifest())).toBe(before);
+    expect(readFileSync(join(s.root, 'effective', 'skills', 'gamma', 'SKILL.md'), 'utf8')).not.toContain('gamma v2');
+  });
+
+  it('a provisioner that writes OUTSIDE .venv corrupts the baseline: publish is blocked `baseline-corrupt` after provisioning, no snapshot, nothing persisted', async () => {
+    const v = scaffold({
+      provisionVenv: async (baselineDir) => {
+        mkdirSync(join(baselineDir, '.venv', 'bin'), { recursive: true });
+        writeFileSync(join(baselineDir, '.venv', 'bin', 'python'), '#!/bin/sh\n');
+        writeFileSync(join(baselineDir, 'stray.lock'), 'written beside the bundle\n'); // the top dir is writable for .venv — nothing else may land there
+        return 'synced';
+      },
+    });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1);
+      expect(r.verdict).toBe('blocked');
+      expect(r.snapshot).toBeNull();
+      expect(r.findings.find((f) => f.kind === 'baseline-corrupt')?.evidence).toContain('hashes to');
+      expect(v.store.revision()).toBe(1);
+      expect(existsSync(join(v.root, 'snapshots'))).toBe(false);
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+});
+
+describe('manifest.json is validated by a COMPLETE fail-closed schema (codex round 7)', () => {
+  interface LooseManifest {
+    revision: unknown;
+    baseline: unknown;
+    baselines: Record<string, Record<string, unknown>>;
+    skills: Record<string, Record<string, unknown>>;
+    files: Record<string, Record<string, unknown>>;
+    published: unknown;
+    [key: string]: unknown;
+  }
+  const rewrite = (mutate: (m: LooseManifest) => void): void => {
+    const path = join(s.root, 'manifest.json');
+    const m = JSON.parse(readFileSync(path, 'utf8')) as LooseManifest;
+    mutate(m);
+    writeFileSync(path, `${JSON.stringify(m, null, 2)}\n`);
+  };
+
+  it('`"enabled": "false"` (a string where a boolean belongs) REFUSES to load — manifest-invalid, skills.config at boot — and is never published', async () => {
+    const savedEnv = process.env['WICKED_SKILLS_SNAPSHOT'];
+    try {
+      s.store.seed();
+      const pristine = readFileSync(join(s.root, 'manifest.json'), 'utf8');
+      rewrite((m) => {
+        (m.skills['wicked-garden-alpha'] as Record<string, unknown>)['enabled'] = 'false';
+      });
+      expect(() => s.store.manifest()).toThrow(SkillsManifestCorruptError);
+      expect(() => s.store.manifest()).toThrow(/manifest-invalid: skills\[wicked-garden-alpha\]\.enabled is "false", not a boolean/);
+      await expect(s.store.publish(1)).rejects.toThrow(/manifest-invalid/);
+      await expect(storeOver(s).ensureReady()).rejects.toThrow(/manifest-invalid/);
+      const health = await new SkillsRuntime({ store: storeOver(s), log: () => undefined }).apply();
+      expect(health.state).toBe('config-error');
+      expect(health.findings[0]).toMatchObject({ kind: 'skills.config', severity: 'error' });
+      expect(health.findings[0]?.message).toContain('manifest-invalid');
+      expect(existsSync(join(s.root, 'snapshots'))).toBe(false); // nothing published — as enabled OR as disabled
+      writeFileSync(join(s.root, 'manifest.json'), pristine);
+      expect(s.store.manifest().skills['wicked-garden-alpha']?.enabled).toBe(true);
+    } finally {
+      if (savedEnv === undefined) delete process.env['WICKED_SKILLS_SNAPSHOT'];
+      else process.env['WICKED_SKILLS_SNAPSHOT'] = savedEnv;
+    }
+  });
+
+  it('every malformed field is refused by name — never a truthiness fallback: revision, hashes, enums, missing and unknown keys, the published record', () => {
+    s.store.seed();
+    const pristine = readFileSync(join(s.root, 'manifest.json'), 'utf8');
+    const hash = s.store.manifest().baseline;
+    const cases: Array<[string, (m: LooseManifest) => void, RegExp]> = [
+      ['revision -1', (m) => { m.revision = -1; }, /revision is -1, not an integer/],
+      ['revision 1.5', (m) => { m.revision = 1.5; }, /revision is 1\.5, not an integer/],
+      ['baseline not a hash', (m) => { m.baseline = 'zz'; }, /baseline is "zz", not a sha256 content hash/],
+      ['file record hash', (m) => { (m.files['skills/gamma/SKILL.md'] as Record<string, unknown>)['effectiveHash'] = 'nothex'; }, /files\[skills\/gamma\/SKILL\.md\]\.effectiveHash is "nothex"/],
+      ['unknown top-level key', (m) => { m['mirror'] = {}; }, /the manifest carries an unknown key "mirror"/],
+      ['skill kind', (m) => { (m.skills['wicked-garden-gamma'] as Record<string, unknown>)['kind'] = 'weird'; }, /kind is "weird", not one of router\|fork-worker\|module/],
+      ['skill core as a string', (m) => { (m.skills['wicked-garden-gamma'] as Record<string, unknown>)['core'] = 'true'; }, /core is "true", not a boolean/],
+      ['provenance', (m) => { (m.skills['wicked-garden-gamma'] as Record<string, unknown>)['provenance'] = 'vendored'; }, /provenance is "vendored", not one of/],
+      ['baseline venv', (m) => { (m.baselines[hash] as Record<string, unknown>)['venv'] = 'sync'; }, /venv is "sync", not one of/],
+      ['missing skill key', (m) => { delete (m.skills['wicked-garden-gamma'] as Record<string, unknown>)['portable']; }, /skills\[wicked-garden-gamma\] lacks "portable"/],
+      ['published without snapshotHash', (m) => { m.published = { gen: 1, contentHash: hash, at: 'now' }; }, /published lacks "snapshotHash"/],
+      ['published gen 0', (m) => { m.published = { gen: 0, contentHash: hash, at: 'now', snapshotHash: hash }; }, /published\.gen is 0, not an integer/],
+      ['baseline without its record', (m) => { delete m.baselines[hash]; }, /has no record under baselines/],
+    ];
+    for (const [label, mutate, re] of cases) {
+      writeFileSync(join(s.root, 'manifest.json'), pristine);
+      rewrite(mutate);
+      expect(() => s.store.manifest(), label).toThrow(SkillsManifestCorruptError);
+      expect(() => s.store.manifest(), label).toThrow(re);
+    }
+    writeFileSync(join(s.root, 'manifest.json'), pristine);
+    expect(s.store.revision()).toBe(1);
+  });
+});
+
+describe('snapshot.json is AUTHENTICATED by the manifest and RE-DERIVED from the generation (codex round 7)', () => {
+  it('publish records the sha256 of the exact snapshot.json bytes; a row with `core` flipped is refused as not the published metadata; restored byte-for-byte, it verifies', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const metadata = join(snap.path, 'snapshot.json');
+    expect(s.store.manifest().published?.snapshotHash).toBe(sha256Hex(readFileSync(metadata)));
+    const pristine = snapshotManifest(snap.path);
+    unlock(metadata);
+    const flipped = { ...pristine, skills: pristine.skills.map((row) => (row.name === 'wicked-garden-gamma' ? { ...row, core: !row.core } : row)) };
+    writeFileSync(metadata, `${JSON.stringify(flipped, null, 2)}\n`);
+    expect(() => s.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    expect(() => s.store.currentSnapshot()).toThrow(/not the metadata this root published/);
+    writeFileSync(metadata, `${JSON.stringify(pristine, null, 2)}\n`);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+  });
+
+  it('with the manifest re-stamped (an attacker holding manifest.json), every row claim is still re-derived from the generation — kind, portable, nested — and the copilot view must be EXACTLY the portable set: a missing skill or an extra directory refuses', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const metadata = join(snap.path, 'snapshot.json');
+    const pristine = snapshotManifest(snap.path);
+    unlock(metadata);
+    const stamp = (obj: unknown): void => {
+      writeFileSync(metadata, `${JSON.stringify(obj, null, 2)}\n`);
+      stampPublished(s.root, metadata);
+    };
+    const withRow = (name: string, patch: Record<string, unknown>): SnapshotManifest =>
+      ({ ...pristine, skills: pristine.skills.map((row) => (row.name === name ? { ...row, ...patch } : row)) }) as SnapshotManifest;
+    stamp(withRow('wicked-garden-gamma', { kind: 'router' }));
+    expect(() => s.store.currentSnapshot()).toThrow(/claims kind router, but its SKILL\.md derives module/);
+    stamp(withRow('wicked-garden-alpha-nested', { nested: false }));
+    expect(() => s.store.currentSnapshot()).toThrow(/nested: what the dir spells/);
+    // alpha is NOT portable; claiming it is — with the view list made consistent — is caught by its own files.
+    const alphaPortable = withRow('wicked-garden-alpha', { portable: true });
+    stamp({ ...alphaPortable, views: { copilot: { dir: 'views/copilot', skills: [...pristine.views.copilot.skills, 'wicked-garden-alpha'].sort() } } });
+    expect(() => s.store.currentSnapshot()).toThrow(/claims portable: true, but its files derive false/);
+    // The view block must name EXACTLY the portable rows: one dropped ⇒ refused at parse.
+    stamp({ ...pristine, views: { copilot: { dir: 'views/copilot', skills: pristine.views.copilot.skills.filter((n) => n !== 'wicked-garden-gamma') } } });
+    expect(() => s.store.currentSnapshot()).toThrow(/EXACTLY the sorted portable names/);
+    stamp(pristine);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    // An EXTRA directory in the on-disk view (content hash forged, manifest re-stamped) ⇒ refused by name.
+    const extra = viewPath(snap.path, 'wicked-garden-zzz');
+    chmodSync(dirname(extra), 0o755);
+    mkdirSync(extra);
+    writeFileSync(join(extra, 'SKILL.md'), '---\nname: wicked-garden-zzz\n---\n');
+    const tree = walkTree(snap.path);
+    stamp({ ...pristine, contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links) });
+    expect(() => s.store.currentSnapshot()).toThrow(/copilot view lays out \[.*wicked-garden-zzz.*\] but the enabled portable skills are exactly \[/);
+    expect(() => s.store.currentSnapshot()).toThrow(/missing or extra/);
   });
 });

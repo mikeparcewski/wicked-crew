@@ -122,6 +122,7 @@
 
 import { randomBytes } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -150,6 +151,7 @@ import type {
   SkillKind,
   SkillManifest,
   SkillMutationResult,
+  SkillProvenance,
   SkillPublishResult,
   SkillReadResult,
   SkillRefreshResult,
@@ -208,6 +210,7 @@ import {
   writeFileAtomic,
   type FileRecord,
   type LinkRecord,
+  type TreeListing,
 } from './tree.js';
 import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvProvisioner } from './venv.js';
 
@@ -352,6 +355,32 @@ export class SkillsRootInvalidError extends Error {
   }
 }
 
+/**
+ * A `baseline/<hash>` on disk does not hash to `<hash>` (a bundle file modified, planted or removed,
+ * a symlink inside) — content-addressed baselines are verified before EVERY reuse (codex round 7):
+ * a refresh refuses to reuse it (its 2xx `blocked` `baseline-corrupt` envelope, nothing copied),
+ * reset refuses to restore from it, publish/analyze report it blocking; only the seed re-captures.
+ */
+export class SkillsBaselineCorruptError extends Error {
+  constructor(
+    readonly dir: string,
+    detail: string,
+  ) {
+    super(`baseline ${dir} is corrupt: ${detail} — its content does not hash to its name; nothing was copied from it`);
+    this.name = 'SkillsBaselineCorruptError';
+  }
+}
+
+/**
+ * A content swap that LANDED under `effective/` with its parked originals still under staging:
+ * `rollback` puts everything back byte for byte, `dispose` removes the staging. `commitSwap` drives
+ * it — the content and the manifest move together or not at all (codex round 7).
+ */
+interface SwapHandle {
+  rollback: () => void;
+  dispose: () => void;
+}
+
 export class UnknownSkillError extends Error {
   constructor(readonly skillName: string) {
     super(`unknown skill: ${skillName}`);
@@ -416,6 +445,11 @@ function isSnapshotSkillRow(row: unknown): boolean {
   const r = row as Partial<SnapshotSkillRow>;
   if (typeof r.name !== 'string' || !SKILL_NAME_RE.test(r.name) || !r.name.startsWith(SKILL_NAME_PREFIX)) return false;
   if (typeof r.dir !== 'string' || typeof r.portable !== 'boolean') return false;
+  // EVERY field is typed (codex round 7): `kind` an enum, `core` / `nested` real booleans — and
+  // `nested` IS the fact the dir spells, a row cannot claim otherwise. `kind` and `portable` are
+  // re-derived from the generation's own files at verify (`snapshotRowsProblem`); `core` is
+  // authenticated by the manifest's metadata hash.
+  if (!SKILL_KINDS.has(String(r.kind)) || typeof r.core !== 'boolean' || typeof r.nested !== 'boolean') return false;
   let segments: string[];
   try {
     segments = validateRelSegments(r.dir);
@@ -423,17 +457,30 @@ function isSnapshotSkillRow(row: unknown): boolean {
     return false;
   }
   if (segments.length < 2 || segments[0] !== SKILLS_SUBDIR) return false;
+  if (r.nested !== isNestedSkillDir(r.dir)) return false;
   return derivedSkillName(segments.slice(1).join('/')) === r.name;
 }
 
-/** The `views` block: exactly the copilot view at its fixed dir, naming a sorted subset of the rows' names. */
+/** Rows sorted by name and unique — the order publish writes; a reordered or duplicated row is not publish's metadata. */
+function isSortedUniqueRows(rows: ReadonlyArray<SnapshotSkillRow>): boolean {
+  for (let i = 1; i < rows.length; i += 1) {
+    if (!((rows[i - 1] as SnapshotSkillRow).name < (rows[i] as SnapshotSkillRow).name)) return false;
+  }
+  return true;
+}
+
+/**
+ * The `views` block: exactly the copilot view at its fixed dir, naming EXACTLY the sorted set of the
+ * portable rows — no subset, no extra (codex round 7: a subset used to pass, so a view that dropped
+ * a portable skill or claimed one verified).
+ */
 function isSnapshotViews(views: unknown, rows: ReadonlyArray<SnapshotSkillRow>): boolean {
   if (typeof views !== 'object' || views === null) return false;
   const copilot = (views as { copilot?: Partial<SnapshotView> }).copilot;
   if (typeof copilot !== 'object' || copilot === null) return false;
   if (copilot.dir !== COPILOT_VIEW_REL || !Array.isArray(copilot.skills)) return false;
-  const portable = new Set(rows.filter((r) => r.portable).map((r) => r.name));
-  return copilot.skills.every((n) => typeof n === 'string' && portable.has(n));
+  const portable = rows.filter((r) => r.portable).map((r) => r.name).sort();
+  return copilot.skills.length === portable.length && copilot.skills.every((n, i) => n === portable[i]);
 }
 
 /** Whether a skill dir is nested: anything deeper than `skills/<dir>`. */
@@ -512,6 +559,9 @@ const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 /** The persisted enums `snapshot.json` may carry — validated on read, never trusted as free text (codex round 6). */
 const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'checkout', 'directory']);
 const VENV_STATES: ReadonlySet<string> = new Set<SkillVenvState>(['pending', 'synced', 'failed', 'skipped']);
+/** The persisted enums `manifest.json` may carry — the schema validator refuses anything else (codex round 7). */
+const SKILL_KINDS: ReadonlySet<string> = new Set<SkillKind>(['router', 'fork-worker', 'module']);
+const PROVENANCES: ReadonlySet<string> = new Set<SkillProvenance>(['shipped', 'override', 'user-added']);
 /** POSIX write bits — a locked env / snapshot carries none (mirrors tree.ts). */
 const WRITE_BITS = 0o222;
 
@@ -708,54 +758,119 @@ export class SkillsStore {
     } catch (err) {
       throw new SkillsManifestCorruptError(path, err instanceof Error ? err.message : String(err));
     }
-    if (typeof parsed !== 'object' || parsed === null) throw new SkillsManifestCorruptError(path, 'not an object');
-    const m = parsed as Partial<SkillManifest>;
-    if (m.version !== MANIFEST_VERSION) throw new SkillsManifestCorruptError(path, `version ${String(m.version)}`);
-    if (typeof m.revision !== 'number') throw new SkillsManifestCorruptError(path, 'no revision');
-    if (typeof m.skills !== 'object' || m.skills === null) throw new SkillsManifestCorruptError(path, 'no skills map');
-    if (typeof m.files !== 'object' || m.files === null) throw new SkillsManifestCorruptError(path, 'no files map');
-    if (typeof m.baseline !== 'string' || typeof m.baselines !== 'object' || m.baselines === null) {
-      throw new SkillsManifestCorruptError(path, 'no baseline record');
-    }
-    // Every PERSISTED path is validated before the store ever joins it onto the root (codex round
-    // 3): a manifest is disk state an attacker (or a bad merge) can craft, so a skill `dir`, a
-    // baseline identifier or a file-record key that carries `..`, an absolute piece or a separator
-    // is a corrupt manifest refused loudly here — never a path the store follows out of the root.
-    this.assertManifestPathsSafe(path, m as SkillManifest);
-    // The withdrawn v3.2 mirror ledger (pre-release manifests only): dropped on read, never
-    // persisted again — it recorded absolute paths under the user's home.
-    delete (m as Record<string, unknown>)['mirror'];
-    return m as SkillManifest;
+    return this.validateManifest(path, parsed);
   }
 
-  /** Refuse a manifest whose persisted skill KEY / `dir` / baseline hash / file-record path could escape the root. */
-  private assertManifestPathsSafe(path: string, m: SkillManifest): void {
-    for (const hash of [m.baseline, ...Object.keys(m.baselines)]) {
-      if (typeof hash !== 'string' || !CONTENT_HASH_RE.test(hash)) {
-        throw new SkillsManifestCorruptError(path, `baseline identifier ${JSON.stringify(hash)} is not a content hash`);
-      }
+  /**
+   * The COMPLETE runtime schema of `manifest.json` (codex round 7): every field is typed strictly
+   * and ONE malformed field refuses the whole manifest — `manifest-invalid` →
+   * `SkillsManifestCorruptError`, the routes' 503 and the daemon's `skills.config` — never a
+   * truthiness fallback (`"enabled": "false"` used to load, and a `!== true` check read it as
+   * disabled while `=== false` read it as enabled). Enums (`kind`, `provenance`, `source.kind`,
+   * `venv`), hashes (64-hex, or `null` where allowed), integers (`revision` ≥ 0, `published.gen`
+   * ≥ 1), strings, unknown or missing keys — all refused by name. Every PERSISTED path is validated
+   * here too (codex rounds 3/4): a skill `dir`, a baseline identifier, a file-record key and the
+   * skill KEY itself (a safe single segment that IS the path-derived name of its `dir` — the copilot
+   * view lays a skill out under `views/copilot/.github/skills/<name>/`; the manifest key, the
+   * directory and the invocation identity are one thing) — a manifest is disk state an attacker (or
+   * a bad merge) can craft, never a path the store follows out of the root. The same validator runs
+   * on every manifest the store is about to WRITE (`writeManifest`). The answer is a fresh object
+   * holding exactly the validated fields.
+   */
+  private validateManifest(path: string, parsed: unknown): SkillManifest {
+    const fail = (detail: string): never => {
+      throw new SkillsManifestCorruptError(path, `manifest-invalid: ${detail}`);
+    };
+    const record = (value: unknown, where: string): Record<string, unknown> =>
+      typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : fail(`${where} is not an object`);
+    const exactKeys = (obj: Record<string, unknown>, keys: ReadonlyArray<string>, where: string): void => {
+      for (const k of keys) if (!(k in obj)) fail(`${where} lacks ${JSON.stringify(k)}`);
+      for (const k of Object.keys(obj)) if (!keys.includes(k)) fail(`${where} carries an unknown key ${JSON.stringify(k)}`);
+    };
+    const bool = (value: unknown, where: string): boolean => (typeof value === 'boolean' ? value : fail(`${where} is ${JSON.stringify(value)}, not a boolean`));
+    const str = (value: unknown, where: string): string => (typeof value === 'string' ? value : fail(`${where} is ${JSON.stringify(value)}, not a string`));
+    const strOrNull = (value: unknown, where: string): string | null => (value === null ? null : str(value, where));
+    const hash = (value: unknown, where: string): string =>
+      typeof value === 'string' && CONTENT_HASH_RE.test(value) ? value : fail(`${where} is ${JSON.stringify(value)}, not a sha256 content hash`);
+    const hashOrNull = (value: unknown, where: string): string | null => (value === null ? null : hash(value, where));
+    const oneOf = <T extends string>(value: unknown, set: ReadonlySet<string>, where: string): T =>
+      typeof value === 'string' && set.has(value) ? (value as T) : fail(`${where} is ${JSON.stringify(value)}, not one of ${[...set].join('|')}`);
+    const integerAtLeast = (value: unknown, min: number, where: string): number =>
+      typeof value === 'number' && Number.isInteger(value) && value >= min ? value : fail(`${where} is ${JSON.stringify(value)}, not an integer ≥ ${min}`);
+
+    const top = record(parsed, 'the manifest');
+    exactKeys(top, ['version', 'revision', 'baseline', 'baselines', 'skills', 'files', 'published'], 'the manifest');
+    if (top['version'] !== MANIFEST_VERSION) fail(`version ${JSON.stringify(top['version'])} (expected ${MANIFEST_VERSION})`);
+    const revision = integerAtLeast(top['revision'], 0, 'revision');
+    const baseline = hash(top['baseline'], 'baseline');
+    const baselines: Record<string, SkillBaselineRecord> = {};
+    for (const [key, value] of Object.entries(record(top['baselines'], 'baselines'))) {
+      hash(key, 'a baselines key');
+      const where = `baselines[${key}]`;
+      const r = record(value, where);
+      exactKeys(r, ['plugin_version', 'source', 'git_sha', 'captured_at', 'venv'], where);
+      const source = record(r['source'], `${where}.source`);
+      exactKeys(source, ['kind', 'path'], `${where}.source`);
+      baselines[key] = {
+        plugin_version: str(r['plugin_version'], `${where}.plugin_version`),
+        source: { kind: oneOf<SkillSourceKind>(source['kind'], SOURCE_KINDS, `${where}.source.kind`), path: str(source['path'], `${where}.source.path`) },
+        git_sha: strOrNull(r['git_sha'], `${where}.git_sha`),
+        captured_at: str(r['captured_at'], `${where}.captured_at`),
+        venv: oneOf<SkillVenvState>(r['venv'], VENV_STATES, `${where}.venv`),
+      };
     }
-    for (const [name, entry] of Object.entries(m.skills)) {
-      // The KEY is joined as a path segment too — the copilot view lays a skill out under
-      // `views/copilot/.github/skills/<name>/` — so it must be a safe single segment (the skill-name
-      // charset), and it must BE the path-derived name of its `dir` (v3 §5: the manifest key, the
-      // directory and the invocation identity are one thing): a crafted key could otherwise carry
-      // `..` into the view, or address one skill's files under another's name (codex round 4).
+    if (baselines[baseline] === undefined) fail(`baseline ${baseline} has no record under baselines`);
+    const skills: Record<string, SkillEntry> = {};
+    for (const [name, value] of Object.entries(record(top['skills'], 'skills'))) {
       if (!SKILL_NAME_RE.test(name) || !name.startsWith(SKILL_NAME_PREFIX) || name.length === SKILL_NAME_PREFIX.length) {
-        throw new SkillsManifestCorruptError(path, `skill key ${JSON.stringify(name)} is not a skill name (${SKILL_NAME_RE.source} with the ${SKILL_NAME_PREFIX} prefix and a non-empty remainder)`);
+        fail(`skill key ${JSON.stringify(name)} is not a skill name (${SKILL_NAME_RE.source} with the ${SKILL_NAME_PREFIX} prefix and a non-empty remainder)`);
       }
-      const dir = (entry as Partial<SkillEntry>).dir;
+      const where = `skills[${name}]`;
+      const e = record(value, where);
+      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict'], where);
+      const dir = str(e['dir'], `${where}.dir`);
       const bad = unsafeSkillDir(dir);
-      if (bad !== null) throw new SkillsManifestCorruptError(path, `skill ${JSON.stringify(name)}: ${bad}`);
-      const derived = derivedSkillName((dir as string).slice(`${SKILLS_SUBDIR}/`.length));
-      if (derived !== name) {
-        throw new SkillsManifestCorruptError(path, `skill ${JSON.stringify(name)} sits at ${dir}, which derives ${JSON.stringify(derived)} — the key must be the path-derived name of its dir`);
-      }
+      if (bad !== null) fail(`${where}: ${bad}`);
+      const derived = derivedSkillName(dir.slice(`${SKILLS_SUBDIR}/`.length));
+      if (derived !== name) fail(`${where} sits at ${dir}, which derives ${JSON.stringify(derived)} — the key must be the path-derived name of its dir`);
+      skills[name] = {
+        dir,
+        kind: oneOf<SkillKind>(e['kind'], SKILL_KINDS, `${where}.kind`),
+        core: bool(e['core'], `${where}.core`),
+        portable: bool(e['portable'], `${where}.portable`),
+        enabled: bool(e['enabled'], `${where}.enabled`),
+        provenance: oneOf<SkillProvenance>(e['provenance'], PROVENANCES, `${where}.provenance`),
+        editedAt: strOrNull(e['editedAt'], `${where}.editedAt`),
+        upgradeAvailable: bool(e['upgradeAvailable'], `${where}.upgradeAvailable`),
+        conflict: bool(e['conflict'], `${where}.conflict`),
+      };
     }
-    for (const rel of Object.keys(m.files)) {
+    const files: Record<string, SkillFileRecord> = {};
+    for (const [rel, value] of Object.entries(record(top['files'], 'files'))) {
       const bad = unsafeRecordPath(rel);
-      if (bad !== null) throw new SkillsManifestCorruptError(path, `file record: ${bad}`);
+      if (bad !== null) fail(`file record: ${bad}`);
+      const where = `files[${rel}]`;
+      const r = record(value, where);
+      exactKeys(r, ['baselineHash', 'effectiveHash', 'lastPublishedHash', 'conflict'], where);
+      files[rel] = {
+        baselineHash: hashOrNull(r['baselineHash'], `${where}.baselineHash`),
+        effectiveHash: hashOrNull(r['effectiveHash'], `${where}.effectiveHash`),
+        lastPublishedHash: hashOrNull(r['lastPublishedHash'], `${where}.lastPublishedHash`),
+        conflict: bool(r['conflict'], `${where}.conflict`),
+      };
     }
+    let published: SkillManifest['published'] = null;
+    if (top['published'] !== null) {
+      const p = record(top['published'], 'published');
+      exactKeys(p, ['gen', 'contentHash', 'at', 'snapshotHash'], 'published');
+      published = {
+        gen: integerAtLeast(p['gen'], 1, 'published.gen'),
+        contentHash: hash(p['contentHash'], 'published.contentHash'),
+        at: str(p['at'], 'published.at'),
+        snapshotHash: hash(p['snapshotHash'], 'published.snapshotHash'),
+      };
+    }
+    return { version: MANIFEST_VERSION, revision, baseline, baselines, skills, files, published };
   }
 
   revision(): number {
@@ -770,7 +885,11 @@ export class SkillsStore {
 
   private writeManifest(m: SkillManifest): void {
     this.assertRootIdentity(); // a commit never lands through a root that changed identity
-    writeFileAtomic(this.manifestPath(), `${JSON.stringify(m, null, 2)}\n`);
+    // Validated on the way OUT too (codex round 7): a manifest the store is about to write must pass
+    // the schema it demands on load — a bug producing a malformed field never lands on disk.
+    const text = `${JSON.stringify(m, null, 2)}\n`;
+    this.validateManifest(this.manifestPath(), JSON.parse(text));
+    writeFileAtomic(this.manifestPath(), text);
   }
 
   private assertRevision(m: SkillManifest, expected: number): void {
@@ -833,18 +952,29 @@ export class SkillsStore {
     const dirName = basename(real);
     if (!GENERATION_DIR_RE.test(dirName)) return invalid(`its target ${dirName} is not a generation directory`);
     if (!lstatSync(real).isDirectory()) return invalid(`its target ${dirName} is not a directory`);
-    const parsed = this.parseSnapshotManifest(lexical);
-    if (typeof parsed === 'string') return invalid(parsed);
+    const meta = this.readSnapshotMetadata(lexical);
+    if (typeof meta === 'string') return invalid(meta);
+    const parsed = meta.parsed;
     if (parsed.gen !== Number(dirName)) return invalid(`snapshot.json says gen ${parsed.gen} but the directory is ${dirName}`);
-    // The recorded baseline AUTHORIZES the `.venv` link below, so it is never trusted as free text
-    // (codex round 6): `parseSnapshotManifest` demanded the content-hash charset (no traversal fits
-    // in a 64-hex segment), and here it must also be a baseline THIS root's `manifest.json` knows —
-    // the metadata of a copied or crafted snapshot cannot name an env the store never captured.
+    // `snapshot.json` is AUTHENTICATED by the crew-owned manifest (codex round 7): it is excluded from
+    // the content hash, so its claims — kind, core, portable, nested, the view membership — used to
+    // be trusted as written. Publish records the sha256 of the exact bytes it wrote
+    // (`manifest.published.snapshotHash`); `current` must be THAT generation with THAT metadata. A
+    // torn flip (`current` behind `published`) is finished by `ensureReady` before verification —
+    // an older generation is never verified on trust. The recorded baseline (codex round 6) must
+    // also be one THIS root's manifest knows — it authorizes the `.venv` link below.
     let known: SkillManifest;
     try {
       known = this.manifest();
     } catch (err) {
-      return invalid(`the recorded baseline ${parsed.gardenSource.baseline} cannot be cross-checked against ${MANIFEST_FILENAME} (${err instanceof Error ? err.message : String(err)})`);
+      return invalid(`the snapshot cannot be cross-checked against ${MANIFEST_FILENAME} (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (known.published === null) return invalid(`${MANIFEST_FILENAME} records no publish — a generation the manifest does not own`);
+    if (known.published.gen !== parsed.gen) {
+      return invalid(`current names generation ${parsed.gen} but ${MANIFEST_FILENAME} published generation ${known.published.gen} — not the generation manifest.json published`);
+    }
+    if (known.published.contentHash !== parsed.contentHash || known.published.snapshotHash !== meta.rawSha) {
+      return invalid(`snapshot.json is not the metadata this root published for generation ${parsed.gen} (recorded content hash ${known.published.contentHash} / metadata hash ${known.published.snapshotHash}; found ${parsed.contentHash} / ${meta.rawSha}) — the metadata was modified`);
     }
     if (known.baselines[parsed.gardenSource.baseline] === undefined) {
       return invalid(`snapshot.json records baseline ${parsed.gardenSource.baseline}, which ${MANIFEST_FILENAME} does not know — the metadata is not this root's`);
@@ -857,9 +987,61 @@ export class SkillsStore {
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
+    const rowProblem = this.snapshotRowsProblem(parsed, tree.files);
+    if (rowProblem !== null) return invalid(rowProblem);
     const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
     if (linkProblem !== null) return invalid(linkProblem);
     return { gen: parsed.gen, path: real };
+  }
+
+  /**
+   * Re-derive every claim of a skill row from the generation's OWN files (codex round 7; the
+   * metadata hash authenticates the rest): `dir/SKILL.md` must be in the tree, `kind` must be what
+   * its frontmatter derives, `portable` what the skill's own files (nested subtrees excluded)
+   * derive, `nested` what the dir spells (checked at parse); the copilot view ON DISK must lay out
+   * EXACTLY the sorted set of portable rows — no skill missing, no extra directory — and nothing
+   * else may sit under `views/`. `core` is the registered-reference closure AT PUBLISH (the
+   * registered set may legitimately move afterwards), so it is authenticated by the metadata hash
+   * rather than re-derived. Read-only mode bits are re-checked by nobody: they are a guard against
+   * accidents, never the integrity boundary — the hashes are.
+   */
+  private snapshotRowsProblem(parsed: SnapshotManifest, files: ReadonlyArray<FileRecord>): string | null {
+    const byRel = new Map(files.map((f) => [f.rel, f]));
+    const dirs = new Set(parsed.skills.map((r) => r.dir));
+    for (const row of parsed.skills) {
+      const skillMd = byRel.get(`${row.dir}/SKILL.md`);
+      if (skillMd === undefined) return `skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`;
+      const fm = parseFrontmatter(readFileSync(skillMd.abs, 'utf8'));
+      if (!fm.ok) return `${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`;
+      const kind = skillKindOf(fm.fields);
+      if (kind !== row.kind) return `skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`;
+      let portable = true;
+      const prefix = `${row.dir}/`;
+      for (const f of files) {
+        if (!f.rel.startsWith(prefix) || owningSkillDir(f.rel, dirs) !== row.dir) continue;
+        const buf = readFileSync(f.abs);
+        if (looksBinary(buf)) continue;
+        if (portabilityIssueOf(buf.toString('utf8')) !== null) {
+          portable = false;
+          break;
+        }
+      }
+      if (portable !== row.portable) return `skill row ${row.name} claims portable: ${String(row.portable)}, but its files derive ${String(portable)}`;
+    }
+    const expectedView = parsed.skills.filter((r) => r.portable).map((r) => r.name).sort();
+    const onDisk = new Set<string>();
+    const viewPrefix = `${COPILOT_VIEW_SKILLS_REL}/`;
+    for (const f of files) {
+      if (f.rel.startsWith(`${VIEWS_DIRNAME}/`) && !f.rel.startsWith(viewPrefix)) {
+        return `unexpected view file ${f.rel} — a generation carries only the copilot view under ${COPILOT_VIEW_SKILLS_REL}/`;
+      }
+      if (f.rel.startsWith(viewPrefix)) onDisk.add(f.rel.slice(viewPrefix.length).split('/')[0] ?? '');
+    }
+    const found = [...onDisk].sort();
+    if (found.length !== expectedView.length || found.some((n, i) => n !== expectedView[i])) {
+      return `the copilot view lays out [${found.join(', ')}] but the enabled portable skills are exactly [${expectedView.join(', ')}] — a view entry is missing or extra`;
+    }
+    return null;
   }
 
   /** Hash over a snapshot tree — files (`snapshot.json` excluded) AND link entries (path + link text). */
@@ -930,14 +1112,22 @@ export class SkillsStore {
     return null;
   }
 
-  /**
-   * `snapshot.json` at `dir`, read NO-FOLLOW and structurally validated — or the reason it is not
-   * one. Every field a decision consumes is regex- or enum-validated here (codex round 6):
-   * `gardenSource.baseline` must be a sha256 content hash (it authorizes the `.venv` link — a free
-   * string could carry `..`), `venv` one of the four states, `gardenSource.kind` a known source kind,
-   * every skill row a safe relative `skills/…` dir deriving its name.
-   */
+  /** `snapshot.json` at `dir`, structurally validated (`readSnapshotMetadata`) — for readers that need no authentication (baseline retention). */
   private parseSnapshotManifest(dir: string): SnapshotManifest | string {
+    const meta = this.readSnapshotMetadata(dir);
+    return typeof meta === 'string' ? meta : meta.parsed;
+  }
+
+  /**
+   * `snapshot.json` at `dir`, read NO-FOLLOW and structurally validated — with the sha256 of its
+   * exact bytes (`rawSha`, what `manifest.published.snapshotHash` authenticates; codex round 7) — or
+   * the reason it is not one. Every field a decision consumes is regex- or enum-validated here
+   * (codex round 6): `gardenSource.baseline` must be a sha256 content hash (it authorizes the `.venv`
+   * link — a free string could carry `..`), `venv` one of the four states, `gardenSource.kind` a
+   * known source kind, every skill row fully typed (`isSnapshotSkillRow`), rows sorted and unique,
+   * the view block naming EXACTLY the portable rows.
+   */
+  private readSnapshotMetadata(dir: string): { parsed: SnapshotManifest; rawSha: string } | string {
     const path = join(dir, SNAPSHOT_MANIFEST_FILENAME);
     const st = lstatOrNull(path);
     if (st === null) return `no ${SNAPSHOT_MANIFEST_FILENAME} in ${dir}`;
@@ -961,8 +1151,9 @@ export class SkillsStore {
     if (typeof s.contentHash !== 'string' || !CONTENT_HASH_RE.test(s.contentHash)) return `${SNAPSHOT_MANIFEST_FILENAME} has no sha256 contentHash`;
     if (!Array.isArray(s.skills)) return `${SNAPSHOT_MANIFEST_FILENAME} has no skills array`;
     if (!s.skills.every(isSnapshotSkillRow)) {
-      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, portable: boolean} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
+      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, kind: ${[...SKILL_KINDS].join('|')}, core: boolean, portable: boolean, nested: what the dir spells} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
     }
+    if (!isSortedUniqueRows(s.skills as SnapshotSkillRow[])) return `${SNAPSHOT_MANIFEST_FILENAME} skill rows are not sorted by unique name — not what publish writes`;
     const gs = s.gardenSource as Partial<SnapshotManifest['gardenSource']> | null | undefined;
     if (typeof gs !== 'object' || gs === null || typeof gs.baseline !== 'string' || !CONTENT_HASH_RE.test(gs.baseline)) {
       return `${SNAPSHOT_MANIFEST_FILENAME} has no gardenSource.baseline that is a sha256 content hash — the recorded baseline authorizes the ${VENV_LINKNAME} link and is never trusted as free text`;
@@ -972,9 +1163,9 @@ export class SkillsStore {
     }
     if (!VENV_STATES.has(String(s.venv))) return `${SNAPSHOT_MANIFEST_FILENAME} has no venv state (${[...VENV_STATES].join('|')})`;
     if (!isSnapshotViews(s.views, s.skills as SnapshotSkillRow[])) {
-      return `${SNAPSHOT_MANIFEST_FILENAME} has no well-formed views block ({copilot: {dir: "${COPILOT_VIEW_REL}", skills: [portable names]}})`;
+      return `${SNAPSHOT_MANIFEST_FILENAME} has no well-formed views block ({copilot: {dir: "${COPILOT_VIEW_REL}", skills: EXACTLY the sorted portable names}})`;
     }
-    return s as SnapshotManifest;
+    return { parsed: s as SnapshotManifest, rawSha: sha256Hex(raw) };
   }
 
   /** The verified `snapshot.json` of a published generation. */
@@ -1037,7 +1228,7 @@ export class SkillsStore {
     const hash = hashFileSet(bundle);
     mkdirSync(this.rootDir, { recursive: true });
     this.assertRootIdentity(); // bind the identity of the directory just created — or refuse a link that stood there
-    this.captureBaseline(bundle, hash);
+    this.captureBaseline(bundle, hash, 'recapture');
     const effective = this.effectiveDir();
     rmSync(effective, { recursive: true, force: true });
     copyFiles(bundle, effective);
@@ -1068,8 +1259,16 @@ export class SkillsStore {
     return source;
   }
 
-  /** Copy the bundle to `baseline/<hash>/` through a staging dir (a torn copy never bears the hash). */
-  private captureBaseline(bundle: ReadonlyArray<FileRecord>, hash: string): void {
+  /**
+   * Copy the bundle to `baseline/<hash>/` through a staging dir (a torn copy never bears the hash),
+   * LOCKED read-only before it lands. An EXISTING `baseline/<hash>` is reused only after its tree
+   * re-hashes to `<hash>` (codex round 7): a dir that merely exists proved nothing — modified,
+   * planted or pre-planted content would have been restored by reset and published as ordinary
+   * drift. On a mismatch the seed RE-CAPTURES over it (`recapture`: the seed is creating the root's
+   * first state and says so); a refresh REFUSES (`SkillsBaselineCorruptError` → its 2xx `blocked`
+   * `baseline-corrupt` envelope, nothing copied).
+   */
+  private captureBaseline(bundle: ReadonlyArray<FileRecord>, hash: string, onCorrupt: 'recapture' | 'refuse'): void {
     // A symlinked `baseline/` (or root) would redirect the capture outside the store (codex round 3).
     this.assertRootIdentity();
     try {
@@ -1079,17 +1278,85 @@ export class SkillsStore {
       throw err;
     }
     const dest = this.baselineDir(hash);
-    if (existsSync(dest)) return;
+    if (this.entryExists(dest)) {
+      const problem = this.baselineProblem(hash);
+      if (problem === null) return;
+      if (onCorrupt === 'refuse') throw new SkillsBaselineCorruptError(dest, problem);
+      this.warn(`[skills] ${problem} — re-captured from the source (the seed owns the root's first state)`);
+      removeTreeForce(dest);
+    }
     const parent = join(this.rootDir, BASELINE_DIRNAME);
     mkdirSync(parent, { recursive: true });
     this.sweepStaging(parent);
     const staging = join(parent, `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`);
     copyFiles(bundle, staging);
-    if (existsSync(dest)) {
-      removeTreeForce(staging); // raced by another capture of the same bytes — theirs is as good
+    if (this.entryExists(dest)) {
+      removeTreeForce(staging); // raced by another capture of the same bytes — theirs is as good, and verified on its next reuse
       return;
     }
+    this.lockBaseline(staging);
     renameSync(staging, dest);
+  }
+
+  /**
+   * Why `baseline/<hash>` is not the bundle its name claims, or `null`: a real directory whose tree
+   * — links ENUMERATED (a link inside is a corruption, never followed), the per-baseline `.venv`
+   * excluded (it is provisioned INTO the dir after capture; `SKIP_DIR_NAMES`) — hashes to `<hash>`
+   * (`hashFileSet`, the identity the seed computed). Re-derived on EVERY reuse (codex round 7):
+   * before a refresh reuses it, before publish provisions in it and after the provisioner ran
+   * (`validate`), and per file before reset restores from it. Read-only mode bits are a guard
+   * against accidents, never the integrity boundary — this hash is.
+   */
+  private baselineProblem(hash: string): string | null {
+    const dir = this.baselineDir(hash);
+    const st = lstatOrNull(dir);
+    if (st === null) return `${dir} does not exist`;
+    if (st.isSymbolicLink()) return `${dir} is a symlink`;
+    if (!st.isDirectory()) return `${dir} is not a directory`;
+    let tree: TreeListing;
+    try {
+      tree = walkTree(dir);
+    } catch (err) {
+      return `${dir} cannot be walked (${err instanceof Error ? err.message : String(err)})`;
+    }
+    const link = tree.links[0];
+    if (link !== undefined) return `${dir} carries a symlink at ${link.rel} -> ${link.target}`;
+    const actual = hashFileSet(tree.files);
+    if (actual !== hash) return `${dir} hashes to ${actual}, not to its name — a bundle file was modified, added or removed`;
+    return null;
+  }
+
+  /**
+   * Lock a captured bundle's FILES read-only — every bundle file loses its write bits. Directories
+   * stay writable: `.venv` is provisioned into the top dir afterwards (venv.ts — the provisioner may
+   * write only there, and publish re-hashes the bundle after it ran), and the store's own reap and
+   * re-capture unlink through them. Mode bits are a guard against accidental edits, NOT the
+   * integrity boundary: `baselineProblem` re-hashes the tree on every reuse regardless of what the
+   * bits say, and `reset` re-hashes every file it restores against the manifest's record.
+   */
+  private lockBaseline(dir: string): void {
+    if (process.platform === 'win32') return;
+    for (const f of walkFiles(dir)) chmodSync(f.abs, lstatSync(f.abs).mode & 0o777 & ~0o222);
+  }
+
+  /** Give the operator's copies their owner-write bit back: a baseline file is locked read-only, an `effective/` file is theirs to edit. */
+  private restoreOwnerWrite(paths: ReadonlyArray<string>): void {
+    if (process.platform === 'win32') return;
+    for (const p of paths) {
+      const st = lstatOrNull(p);
+      if (st !== null && st.isFile()) chmodSync(p, (st.mode & 0o777) | 0o200);
+    }
+  }
+
+  /** The blocking `baseline-corrupt` finding (codex round 7). */
+  private baselineCorruptFinding(skill: string | null, file: string, evidence: string): SkillConflictFinding {
+    return finding(
+      'baseline-corrupt',
+      'blocking',
+      'a content-addressed baseline must hash to its name before anything is copied from it or provisioned in it — a bundle file that was modified, planted or removed (or a symlink inside) would otherwise be restored by reset and published as ordinary drift; nothing was copied or written. Remove the directory (POST /skills/refresh-baseline re-captures it) and retry',
+      evidence,
+      { skill, file },
+    );
   }
 
   /** Remove torn `.staging-*` (and legacy `.tmp-*`) dirs under `parent` — the idempotent-retry sweep. */
@@ -1266,23 +1533,49 @@ export class SkillsStore {
     }
     const seeded = this.seed().seeded;
     const m = this.manifest();
-    const current = this.currentSnapshot();
-    if (m.published !== null && (current === null || current.gen < m.published.gen)) {
+    // A crash between the manifest commit and the `current` flip leaves `current` ABSENT or naming an
+    // OLDER generation. Finish the flip FIRST — from the published generation the manifest
+    // AUTHENTICATES (gen, content hash, metadata hash, the tree re-hashed) — because `current` is then
+    // verified as THE published generation (codex round 7: only that metadata is authenticated), never
+    // as an older one taken on trust. ONLY those two shapes are repaired: a `current` that names
+    // anything else (a non-generation target, a generation ahead of the manifest) is not a torn flip
+    // but a corruption, left for the verification below to refuse loudly; so is a published
+    // generation that does not verify.
+    const named = this.currentLinkGen();
+    if (m.published !== null && (named === null || (typeof named === 'number' && named < m.published.gen))) {
       const dir = this.snapshotDir(m.published.gen);
-      const parsed = this.parseSnapshotManifest(dir);
+      const meta = this.readSnapshotMetadata(dir);
       if (
-        typeof parsed !== 'string' &&
-        parsed.gen === m.published.gen &&
-        parsed.contentHash === m.published.contentHash &&
-        this.snapshotHash(walkTree(dir)) === parsed.contentHash
+        typeof meta !== 'string' &&
+        meta.parsed.gen === m.published.gen &&
+        meta.parsed.contentHash === m.published.contentHash &&
+        meta.rawSha === m.published.snapshotHash &&
+        this.snapshotHash(walkTree(dir)) === meta.parsed.contentHash
       ) {
-        this.warn(`[skills] finishing an interrupted publish: current -> ${generationDirName(parsed.gen)}`);
-        this.flipCurrent(parsed.gen);
-        return { seeded, published: null };
+        this.warn(`[skills] finishing an interrupted publish: current -> ${generationDirName(meta.parsed.gen)}`);
+        this.flipCurrent(meta.parsed.gen);
       }
     }
+    const current = this.currentSnapshot();
     if (current !== null) return { seeded, published: null };
     return { seeded, published: await this.publish(m.revision) };
+  }
+
+  /**
+   * What `current` LEXICALLY names (its link text) — a hint for the torn-flip recovery, never a
+   * verified answer: `null` when there is no entry at all, the generation number when the text names
+   * a generation directory, `'other'` for anything else (a non-link entry, a target that is not a
+   * generation dir) — which is never repaired, only refused by `verifyCurrent`.
+   */
+  private currentLinkGen(): number | null | 'other' {
+    let target: string;
+    try {
+      target = readlinkSync(this.currentLink());
+    } catch (err) {
+      return errnoCode(err) === 'ENOENT' ? null : 'other';
+    }
+    const name = basename(target);
+    return GENERATION_DIR_RE.test(name) ? Number(name) : 'other';
   }
 
   // ── Scanning ──────────────────────────────────────────────────────────────────────────────
@@ -1770,13 +2063,36 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
-    const findings = compact([noBaselineGuard(name, !this.hasBaselineDir(m, entry.dir))]);
+    // "User-added" is what the MANIFEST says (no record of the skill carries a baseline hash), never
+    // what happens to be on disk (codex round 7): a baseline dir that vanished under a recorded skill
+    // is a corrupt baseline, reported below by name — not a skill without a baseline.
+    const records = new Map(this.ownRecords(m, entry.dir));
+    const findings = compact([noBaselineGuard(name, [...records.values()].every((r) => r.baselineHash === null))]);
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     const effective = this.effectiveDir();
     const owned = this.ownershipDirs(m); // effective + manifest ownership — a nested child is its own
     // Restore candidates from the baseline, pruning every subtree a nested skill owns in EFFECTIVE.
     const fresh = walkFiles(baseSkillDir, (rel) => owned.has(`${entry.dir}/${rel}`)).map((f) => ({ rel: `${entry.dir}/${f.rel}`, abs: f.abs }));
     const own = this.ownFilesIn(effective, entry.dir, owned);
+    // The baseline is content-addressed (codex round 7): every file about to be restored must hash
+    // to the record the manifest holds for it, and every recorded baseline file of the skill must be
+    // there — a modified, planted or removed baseline file is `baseline-corrupt`, nothing written.
+    const freshRels = new Set(fresh.map((f) => f.rel));
+    for (const f of fresh) {
+      const record = records.get(f.rel);
+      const actual = sha256Hex(readFileSync(f.abs));
+      if (record === undefined || record.baselineHash === null) {
+        return this.blocked(m, [this.baselineCorruptFinding(name, f.rel, `${BASELINE_DIRNAME}/${m.baseline}/${f.rel} is not a recorded baseline file of ${name} — planted`)]);
+      }
+      if (record.baselineHash !== actual) {
+        return this.blocked(m, [this.baselineCorruptFinding(name, f.rel, `${BASELINE_DIRNAME}/${m.baseline}/${f.rel} hashes to ${actual}, the manifest recorded ${record.baselineHash} — modified`)]);
+      }
+    }
+    for (const [rel, record] of records) {
+      if (record.baselineHash !== null && !freshRels.has(rel)) {
+        return this.blocked(m, [this.baselineCorruptFinding(name, rel, `${BASELINE_DIRNAME}/${m.baseline}/${rel} is recorded in the manifest but missing from the baseline — removed`)]);
+      }
+    }
     // Preflight: every destination path — the files to restore AND the files to remove — must be
     // symlink-free from the root BEFORE anything is removed; a refusal is a blocked envelope.
     const staging = join(this.rootDir, `${STAGING_PREFIX}reset-${randomBytes(6).toString('hex')}`);
@@ -1788,29 +2104,34 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
-    // Stage the baseline bytes under the root, then the park-and-place transaction (`swapStaged`,
-    // codex round 6): the own files are PARKED by rename — never removed outright — the staged files
-    // placed, and any failure in between rolls back, so the skill is byte-for-byte what it was and
-    // the revision unchanged. The old order removed the own files first, so a mid-swap failure left
-    // a torn skill behind a 500 with the manifest still claiming the previous content.
+    // Stage the baseline bytes under the root (owner-write restored: the baseline is locked, the
+    // operator's copies are theirs to edit), then the park-and-place transaction (`swapStaged`, codex
+    // round 6) and the manifest half under `commitSwap` (codex round 7): a failure anywhere after the
+    // swap — the records, the validated manifest write, the rename into place — rolls the content
+    // back from the parked originals, so the skill is byte-for-byte what it was and the revision
+    // unchanged.
+    let swap: { handle: SwapHandle } | { finding: SkillConflictFinding };
     try {
       copyFiles(fresh, stagedDir);
-      const swap = this.swapStaged(name, entry.dir, staging, own, place);
-      if (swap !== null) return this.blocked(m, [swap]);
-    } finally {
+      this.restoreOwnerWrite(place.map((p) => p.src));
+      swap = this.swapStaged(name, entry.dir, staging, own, place);
+    } catch (err) {
       removeTreeForce(staging);
+      throw err;
     }
-    for (const [rel, record] of this.ownRecords(m, entry.dir)) {
-      if (record.baselineHash === null) delete m.files[rel];
-      else {
-        record.effectiveHash = record.baselineHash;
-        record.conflict = false;
+    if ('finding' in swap) return this.blocked(m, [swap.finding]);
+    this.commitSwap(swap.handle, m, () => {
+      for (const [rel, record] of this.ownRecords(m, entry.dir)) {
+        if (record.baselineHash === null) delete m.files[rel];
+        else {
+          record.effectiveHash = record.baselineHash;
+          record.conflict = false;
+        }
       }
-    }
-    entry.editedAt = null;
-    entry.conflict = false;
-    findings.push(...this.recomputeWarnings(m));
-    this.commit(m);
+      entry.editedAt = null;
+      entry.conflict = false;
+      findings.push(...this.recomputeWarnings(m));
+    });
     return this.result(m, name, findings);
   }
 
@@ -1826,12 +2147,35 @@ export class SkillsStore {
     }
     const findings = this.putGuards(name, entry, target.rel, content);
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
-    writeFileAtomic(target.abs, content);
-    entry.editedAt = this.now();
-    this.refreshRecords(m, entry.dir);
-    findings.push(...this.recomputeWarnings(m));
-    this.commit(m);
+    // One file, the same transaction as every multi-file swap (codex round 7): staged, the existing
+    // file parked, placed, and committed WITH the manifest — a failed manifest commit rolls it back.
+    const swap = this.stageSingleFile(name, target.pluginRel, target.abs, content);
+    if ('finding' in swap) return this.blocked(m, [swap.finding]);
+    this.commitSwap(swap.handle, m, () => {
+      entry.editedAt = this.now();
+      this.refreshRecords(m, entry.dir);
+      findings.push(...this.recomputeWarnings(m));
+    });
     return this.result(m, name, findings);
+  }
+
+  /**
+   * Stage ONE file for the park-and-place transaction (codex round 7): the content is written under
+   * `staging/new` (an existing regular file's mode bits carried over), the existing file — if any —
+   * is parked, the staged file placed. `commitSwap` then commits the manifest or rolls this back.
+   */
+  private stageSingleFile(skill: string | null, rel: string, dest: string, content: string): { handle: SwapHandle } | { finding: SkillConflictFinding } {
+    const staging = join(this.rootDir, `${STAGING_PREFIX}write-${randomBytes(6).toString('hex')}`);
+    const src = join(staging, 'new', ...rel.split('/'));
+    const existing = lstatOrNull(dest);
+    const current = existing !== null && existing.isFile() ? existing : null;
+    try {
+      writeFileAtomic(src, content, current === null ? {} : { mode: current.mode & 0o777 });
+    } catch (err) {
+      removeTreeForce(staging);
+      throw err;
+    }
+    return this.swapStaged(skill, rel, staging, current === null ? [] : [{ rel, abs: dest }], [{ src, dest }]);
   }
 
   /** Write one root support file (`scripts/`, `schemas/`, `.claude-plugin/`, …) — always a warning. */
@@ -1853,20 +2197,22 @@ export class SkillsStore {
         { file: target.rel },
       ),
     ];
-    writeFileAtomic(target.abs, content);
-    const sha = sha256Hex(Buffer.from(content, 'utf8'));
-    const record = m.files[target.rel];
-    if (record === undefined) {
-      m.files[target.rel] = {
-        baselineHash: this.baselineHashOf(m, target.rel),
-        effectiveHash: sha,
-        lastPublishedHash: null,
-        conflict: false,
-      };
-    } else {
-      record.effectiveHash = sha;
-    }
-    this.commit(m);
+    const swap = this.stageSingleFile(null, target.rel, target.abs, content);
+    if ('finding' in swap) return this.blocked(m, [swap.finding]);
+    this.commitSwap(swap.handle, m, () => {
+      const sha = sha256Hex(Buffer.from(content, 'utf8'));
+      const record = m.files[target.rel];
+      if (record === undefined) {
+        m.files[target.rel] = {
+          baselineHash: this.baselineHashOf(m, target.rel),
+          effectiveHash: sha,
+          lastPublishedHash: null,
+          conflict: false,
+        };
+      } else {
+        record.effectiveHash = sha;
+      }
+    });
     return this.result(m, null, findings);
   }
 
@@ -1959,40 +2305,42 @@ export class SkillsStore {
     own: ReadonlyArray<FileRecord>,
     targets: ReadonlyArray<{ rel: string; abs: string; text: string }>,
     modes: ReadonlyMap<string, number>,
-  ): SkillConflictFinding | null {
+  ): { handle: SwapHandle } | { finding: SkillConflictFinding } {
     const staging = join(this.rootDir, `${STAGING_PREFIX}swap-${randomBytes(6).toString('hex')}`);
     const stagedDir = join(staging, 'new');
+    let place: Array<{ src: string; dest: string }>;
     try {
       // The whole replacement lands in staging first — a write failure here touches nothing live.
-      const place = targets.map((t) => {
+      place = targets.map((t) => {
         const src = join(stagedDir, ...t.rel.split('/'));
         const mode = modes.get(`${dir}/${t.rel}`);
         writeFileAtomic(src, t.text, mode === undefined ? {} : { mode });
         return { src, dest: t.abs };
       });
-      return this.swapStaged(name, dir, staging, own, place);
-    } finally {
+    } catch (err) {
       removeTreeForce(staging);
+      throw err;
     }
+    return this.swapStaged(name, dir, staging, own, place);
   }
 
   /**
-   * The park-and-place transaction EVERY multi-file swap goes through — replace/add (codex round 5),
-   * reset and refresh-baseline (codex round 6: both used to remove or overwrite effective files in
-   * place, so a filesystem error mid-swap left partial content behind a 500 while the manifest
-   * revision stayed where it was). `park` is every existing file the swap removes OR overwrites;
-   * `place` every staged source (already written under `staging/new`) and its destination.
+   * The park-and-place transaction EVERY content mutation goes through — replace/add (codex round
+   * 5), reset and refresh-baseline (codex round 6), the single-file write (codex round 7). `park` is
+   * every existing file the swap removes OR overwrites; `place` every staged source (already written
+   * under `staging/new`) and its destination.
    *
    *   1. park: every `park` file is RENAMED into `staging/old` (never deleted), then the directories
    *      it left empty are pruned up to `effective/`;
    *   2. place: every staged file is renamed into its destination (a destination that is now an
    *      empty directory tree is removed first, parents are created).
    *
-   * Every step is a same-filesystem rename. Any failure ROLLS BACK — what was placed is removed and
-   * its parents pruned, what was parked is renamed back (mode bits ride the rename) — and answers a
-   * blocking `path-invalid` finding: the tree is byte-for-byte what it was, and the caller commits
-   * nothing, so the revision is unchanged iff nothing changed. The caller owns `staging` and removes
-   * it afterwards.
+   * Every step is a same-filesystem rename. A failure INSIDE the swap rolls back — what was placed
+   * is removed and its parents pruned, what was parked is renamed back (mode bits ride the rename)
+   * — removes the staging and answers a blocking `path-invalid` finding: the tree is byte-for-byte
+   * what it was. A swap that LANDED answers a `SwapHandle` whose parked originals stay under the
+   * staging until `commitSwap` either committed the manifest or rolled the content back (codex round
+   * 7): content and revision move together or not at all.
    */
   private swapStaged(
     skill: string | null,
@@ -2000,11 +2348,21 @@ export class SkillsStore {
     staging: string,
     park: ReadonlyArray<FileRecord>,
     place: ReadonlyArray<{ src: string; dest: string }>,
-  ): SkillConflictFinding | null {
+  ): { handle: SwapHandle } | { finding: SkillConflictFinding } {
     const effective = this.effectiveDir();
     const parkedDir = join(staging, 'old');
     const parked: Array<{ from: string; to: string }> = [];
     const placed: string[] = [];
+    const rollback = (): void => {
+      for (const d of placed) rmSync(d, { force: true });
+      // Prune the parents of EVERY destination, not only the placed ones: a failing placement had
+      // already created its parent directories before its rename failed.
+      for (const p of place) pruneEmptyDirs(dirname(p.dest), effective);
+      for (const { from, to } of parked) {
+        mkdirSync(dirname(from), { recursive: true });
+        renameSync(to, from);
+      }
+    };
     try {
       for (const f of park) {
         const to = join(parkedDir, ...f.rel.split('/'));
@@ -2019,24 +2377,45 @@ export class SkillsStore {
         renameSync(p.src, p.dest);
         placed.push(p.dest);
       }
-      return null;
+      return { handle: { rollback, dispose: () => removeTreeForce(staging) } };
     } catch (err) {
-      for (const d of placed) rmSync(d, { force: true });
-      // Prune the parents of EVERY destination, not only the placed ones: the failing placement had
-      // already created its parent directories before its rename failed.
-      for (const p of place) pruneEmptyDirs(dirname(p.dest), effective);
-      for (const { from, to } of parked) {
-        mkdirSync(dirname(from), { recursive: true });
-        renameSync(to, from);
-      }
+      rollback();
+      removeTreeForce(staging);
       const code = errnoCode(err);
-      return finding(
-        'path-invalid',
-        'blocking',
-        'the files could not be laid out on disk (a path collided with an entry of the other kind, or the filesystem refused a rename mid-swap); the swap was rolled back — every parked file is back byte-for-byte, nothing was written, the revision is unchanged',
-        `${code === undefined ? 'error' : code}: ${err instanceof Error ? err.message : String(err)}`,
-        { skill, file: label },
-      );
+      return {
+        finding: finding(
+          'path-invalid',
+          'blocking',
+          'the files could not be laid out on disk (a path collided with an entry of the other kind, or the filesystem refused a rename mid-swap); the swap was rolled back — every parked file is back byte-for-byte, nothing was written, the revision is unchanged',
+          `${code === undefined ? 'error' : code}: ${err instanceof Error ? err.message : String(err)}`,
+          { skill, file: label },
+        ),
+      };
+    }
+  }
+
+  /**
+   * The manifest half of a mutation whose content swap already LANDED (codex round 7): `finish`
+   * updates the in-memory manifest (records re-hashed from the placed bytes, derived fields
+   * recomputed from them — which is why it runs after the swap), then the manifest is validated and
+   * written (`commit`: `manifest.json.tmp-…` + rename). If ANY of that fails — a record refresh, the
+   * schema, the temp write, the rename into place — the content swap is rolled back from the parked
+   * originals, so `effective/` and `manifest.json` move together or not at all: the request fails
+   * with the error, the content is byte-for-byte what it was, and the persisted revision is
+   * unchanged (it was never reusable against changed content). The parked originals are released
+   * only after the commit landed or the rollback ran.
+   */
+  private commitSwap(handle: SwapHandle, m: SkillManifest, finish: () => void): void {
+    const revision = m.revision;
+    try {
+      finish();
+      this.commit(m);
+    } catch (err) {
+      handle.rollback();
+      m.revision = revision;
+      throw err;
+    } finally {
+      handle.dispose();
     }
   }
 
@@ -2066,21 +2445,22 @@ export class SkillsStore {
     const destinations = this.containedDestinations(name, dir, files, []);
     if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
     const swap = this.swapOwnFiles(name, dir, [], destinations.targets, new Map());
-    if (swap !== null) return this.blocked(m, [swap]);
-    m.skills[name] = {
-      dir,
-      kind: 'module',
-      core: false,
-      portable: true,
-      enabled: true,
-      provenance: 'user-added',
-      editedAt: this.now(),
-      upgradeAvailable: false,
-      conflict: false,
-    };
-    this.refreshRecords(m, dir);
-    findings.push(...this.recomputeWarnings(m));
-    this.commit(m);
+    if ('finding' in swap) return this.blocked(m, [swap.finding]);
+    this.commitSwap(swap.handle, m, () => {
+      m.skills[name] = {
+        dir,
+        kind: 'module',
+        core: false,
+        portable: true,
+        enabled: true,
+        provenance: 'user-added',
+        editedAt: this.now(),
+        upgradeAvailable: false,
+        conflict: false,
+      };
+      this.refreshRecords(m, dir);
+      findings.push(...this.recomputeWarnings(m));
+    });
     return this.result(m, name, findings);
   }
 
@@ -2106,11 +2486,12 @@ export class SkillsStore {
     if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
     const modes = new Map(own.map((f) => [f.rel, lstatSync(f.abs).mode & 0o777]));
     const swap = this.swapOwnFiles(name, entry.dir, own, destinations.targets, modes);
-    if (swap !== null) return this.blocked(m, [swap]);
-    entry.editedAt = this.now();
-    this.refreshRecords(m, entry.dir);
-    findings.push(...this.recomputeWarnings(m));
-    this.commit(m);
+    if ('finding' in swap) return this.blocked(m, [swap.finding]);
+    this.commitSwap(swap.handle, m, () => {
+      entry.editedAt = this.now();
+      this.refreshRecords(m, entry.dir);
+      findings.push(...this.recomputeWarnings(m));
+    });
     return this.result(m, name, findings);
   }
 
@@ -2366,7 +2747,14 @@ export class SkillsStore {
     }
 
     // ── Capture the new baseline (staging + rename; refused through a symlinked `baseline/`) ──
-    this.captureBaseline(bundle, newHash);
+    // An existing `baseline/<newHash>` is reused only if it re-hashes to its name (codex round 7):
+    // a corrupt one is the 2xx `blocked` `baseline-corrupt` envelope — nothing copied, nothing changed.
+    try {
+      this.captureBaseline(bundle, newHash, 'refuse');
+    } catch (err) {
+      if (!(err instanceof SkillsBaselineCorruptError)) throw err;
+      return base({ verdict: 'blocked', findings: [this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${newHash}`, err.message)] });
+    }
 
     // ── Stage every take under the root, then swap: removals, then renames into place ─────────
     // Sources are walked from the root through `baseline/<newHash>/…` (a link inside the freshly
@@ -2374,89 +2762,102 @@ export class SkillsStore {
     // the manifest untouched and reaps the unreferenced capture.
     const staging = join(this.rootDir, `${STAGING_PREFIX}refresh-${randomBytes(6).toString('hex')}`);
     const stagedDir = join(staging, 'new');
+    let sources: FileRecord[];
     try {
-      let sources: FileRecord[];
-      try {
-        sources = takes.map((rel) => ({ rel, abs: this.containedBaseline(newHash, rel.split('/')) }));
-      } catch (err) {
-        const blocked = base({ verdict: 'blocked', findings: [this.pathFinding(err, null, `${BASELINE_DIRNAME}/${newHash}`)] });
-        this.reapBaselines();
-        return blocked;
-      }
+      sources = takes.map((rel) => ({ rel, abs: this.containedBaseline(newHash, rel.split('/')) }));
+    } catch (err) {
+      const blocked = base({ verdict: 'blocked', findings: [this.pathFinding(err, null, `${BASELINE_DIRNAME}/${newHash}`)] });
+      this.reapBaselines();
+      return blocked;
+    }
+    // The park-and-place transaction (`swapStaged`, codex round 6): what the merge REMOVES and what
+    // a take OVERWRITES are both parked by rename before a single placement, so a failure mid-swap
+    // restores every effective file byte-for-byte, the manifest is never committed (the revision
+    // is unchanged) and the unreferenced new baseline is reaped — the old code removed and
+    // overwrote in place, leaving partial content behind a 500.
+    const park: FileRecord[] = removals.map((rel) => ({ rel, abs: destinations.get(rel) as string }));
+    for (const rel of takes) {
+      const dest = destinations.get(rel) as string;
+      if (lstatOrNull(dest)?.isFile() === true) park.push({ rel, abs: dest });
+    }
+    const place = takes.map((rel) => ({ src: join(stagedDir, ...rel.split('/')), dest: destinations.get(rel) as string }));
+    let swap: { handle: SwapHandle } | { finding: SkillConflictFinding };
+    try {
       copyFiles(sources, stagedDir);
-      // The park-and-place transaction (`swapStaged`, codex round 6): what the merge REMOVES and what
-      // a take OVERWRITES are both parked by rename before a single placement, so a failure mid-swap
-      // restores every effective file byte-for-byte, the manifest is never committed (the revision
-      // is unchanged) and the unreferenced new baseline is reaped — the old code removed and
-      // overwrote in place, leaving partial content behind a 500.
-      const park: FileRecord[] = removals.map((rel) => ({ rel, abs: destinations.get(rel) as string }));
-      for (const rel of takes) {
-        const dest = destinations.get(rel) as string;
-        if (lstatOrNull(dest)?.isFile() === true) park.push({ rel, abs: dest });
-      }
-      const place = takes.map((rel) => ({ src: join(stagedDir, ...rel.split('/')), dest: destinations.get(rel) as string }));
-      const swap = this.swapStaged(null, `${BASELINE_DIRNAME}/${newHash}`, staging, park, place);
-      if (swap !== null) {
-        const blocked = base({ verdict: 'blocked', findings: [swap] });
-        this.reapBaselines();
-        return blocked;
-      }
-    } finally {
+      this.restoreOwnerWrite(place.map((p) => p.src)); // the new baseline is locked; the operator's copies are theirs to edit
+      swap = this.swapStaged(null, `${BASELINE_DIRNAME}/${newHash}`, staging, park, place);
+    } catch (err) {
       removeTreeForce(staging);
+      this.reapBaselines();
+      throw err;
+    }
+    if ('finding' in swap) {
+      const blocked = base({ verdict: 'blocked', findings: [swap.finding] });
+      this.reapBaselines();
+      return blocked;
     }
 
     // Catalog: register upstream-new dirs, drop skills with NO records left (upstream removed them
     // and the operator never touched them — a skill the operator deleted files from keeps its
     // baseline-backed records, stays in the catalog as an override, and blocks publish until reset
-    // or disabled), recompute the rest.
-    const before = new Set(Object.keys(m.skills));
-    for (const [name, entry] of Object.entries(m.skills)) {
-      if (existsSync(this.pluginPath(`${entry.dir}/SKILL.md`))) continue;
-      if (this.ownRecords(m, entry.dir).length > 0) continue;
-      delete m.skills[name];
-    }
-    // The new baseline is the one `recomputeDerived` / `hasBaselineDir` read from now on.
-    m.baselines[newHash] = this.baselineRecord(source);
-    m.baseline = newHash;
-    findings.push(...this.rebuildCatalog(m).map((f) => ({ ...f, severity: 'warning' as const })));
-    for (const [name, entry] of Object.entries(m.skills)) {
-      if (conflicts.has(name)) entry.conflict = true;
-      else if (entry.upgradeAvailable) conflicts.add(name);
-    }
-    const after = new Set(Object.keys(m.skills));
-    const added = [...after].filter((n) => !before.has(n)).sort();
-    const removed = [...before].filter((n) => !after.has(n)).sort();
-    const dirOf = new Map(Object.entries(m.skills).map(([name, e]) => [e.dir, name]));
-    const skillOfRel = (rel: string): string | null => {
-      const owner = owningSkillDir(rel, new Set(dirOf.keys()));
-      return owner === null ? null : (dirOf.get(owner) ?? null);
-    };
+    // or disabled), recompute the rest — all of it the manifest half of the transaction
+    // (`commitSwap`, codex round 7): a failure anywhere up to and including the manifest rename rolls
+    // the content swap back, and the unreferenced new baseline is reaped with it.
+    let added: string[] = [];
+    let removed: string[] = [];
     const taken = new Set<string>();
     const kept = new Set<string>();
-    for (const rel of touched) {
-      const name = skillOfRel(rel);
-      if (name === null || added.includes(name)) continue;
-      if (m.files[rel]?.conflict === true) kept.add(name);
-      else taken.add(name);
+    try {
+      this.commitSwap(swap.handle, m, () => {
+        const before = new Set(Object.keys(m.skills));
+        for (const [name, entry] of Object.entries(m.skills)) {
+          if (existsSync(this.pluginPath(`${entry.dir}/SKILL.md`))) continue;
+          if (this.ownRecords(m, entry.dir).length > 0) continue;
+          delete m.skills[name];
+        }
+        // The new baseline is the one `recomputeDerived` / `hasBaselineDir` read from now on.
+        m.baselines[newHash] = this.baselineRecord(source);
+        m.baseline = newHash;
+        findings.push(...this.rebuildCatalog(m).map((f) => ({ ...f, severity: 'warning' as const })));
+        for (const [name, entry] of Object.entries(m.skills)) {
+          if (conflicts.has(name)) entry.conflict = true;
+          else if (entry.upgradeAvailable) conflicts.add(name);
+        }
+        const after = new Set(Object.keys(m.skills));
+        added = [...after].filter((n) => !before.has(n)).sort();
+        removed = [...before].filter((n) => !after.has(n)).sort();
+        const dirOf = new Map(Object.entries(m.skills).map(([name, e]) => [e.dir, name]));
+        const skillOfRel = (rel: string): string | null => {
+          const owner = owningSkillDir(rel, new Set(dirOf.keys()));
+          return owner === null ? null : (dirOf.get(owner) ?? null);
+        };
+        for (const rel of touched) {
+          const name = skillOfRel(rel);
+          if (name === null || added.includes(name)) continue;
+          if (m.files[rel]?.conflict === true) kept.add(name);
+          else taken.add(name);
+        }
+        for (const [name, entry] of Object.entries(m.skills)) {
+          if (entry.provenance !== 'shipped' && !added.includes(name) && !taken.has(name)) kept.add(name);
+        }
+        for (const name of conflicts) {
+          const entry = m.skills[name];
+          if (entry === undefined) continue;
+          findings.push(
+            finding(
+              'refresh-conflict',
+              'warning',
+              "both the operator and upstream changed this skill (a deletion by the operator counts); the operator's content is kept and the upstream side is readable as ?side=baseline — reset takes upstream wholesale",
+              `${name} (${entry.dir}) has conflicting files`,
+              { skill: name },
+            ),
+          );
+        }
+      });
+    } catch (err) {
+      this.reapBaselines(); // the content is back; the new capture nothing references goes with the failed commit
+      throw err;
     }
-    for (const [name, entry] of Object.entries(m.skills)) {
-      if (entry.provenance !== 'shipped' && !added.includes(name) && !taken.has(name)) kept.add(name);
-    }
-    for (const name of conflicts) {
-      const entry = m.skills[name];
-      if (entry === undefined) continue;
-      findings.push(
-        finding(
-          'refresh-conflict',
-          'warning',
-          'both the operator and upstream changed this skill (a deletion by the operator counts); the operator\'s content is kept and the upstream side is readable as ?side=baseline — reset takes upstream wholesale',
-          `${name} (${entry.dir}) has conflicting files`,
-          { skill: name },
-        ),
-      );
-    }
-
-    this.commit(m);
     // The previous baseline goes only when no snapshot on disk still links its `.venv` / records it.
     this.reapBaselines();
     return base({
@@ -2535,6 +2936,13 @@ export class SkillsStore {
     const bound = this.bindRoot();
     const pre = this.manifest();
     this.assertRevision(pre, expectedRevision);
+    // The baseline must be the bundle its name claims BEFORE anything is provisioned in it (codex
+    // round 7): a corrupt baseline is `baseline-corrupt`, blocking — nothing provisioned, nothing
+    // written. `validate` re-derives the same hash AFTER the provisioner ran.
+    const preProblem = this.baselineProblem(pre.baseline);
+    if (preProblem !== null) {
+      return { verdict: 'blocked', findings: [this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${pre.baseline}`, preProblem)], revision: pre.revision, snapshot: null };
+    }
     // Provisioning FIRST (it may take minutes): a snapshot never links an env still being written.
     const venv = await this.ensureVenv(pre.baseline);
     // The world may have moved while uv ran: the root must be the same directory, the CAS re-checked.
@@ -2595,7 +3003,11 @@ export class SkillsStore {
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
       views: { copilot: { dir: COPILOT_VIEW_REL, skills: views.copilotSkills } },
     };
-    writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);
+    // The exact bytes of `snapshot.json` are what `manifest.published.snapshotHash` authenticates
+    // (codex round 7): the metadata is excluded from the content hash, so the crew-owned manifest is
+    // what makes its claims (kind, core, portable, nested, the view membership) trustworthy at verify.
+    const snapshotText = `${JSON.stringify(snapshot, null, 2)}\n`;
+    writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), snapshotText);
     if (venvLink !== null) this.symlink(venvLink.text, join(staging, VENV_LINKNAME), venvLink.absTarget);
     const dest = this.snapshotDir(gen);
     if (this.entryExists(dest)) {
@@ -2619,8 +3031,15 @@ export class SkillsStore {
       if (included.has(rel)) r.lastPublishedHash = r.effectiveHash;
     }
     if (record !== undefined) record.venv = venv; // provisioning state rides the SUCCESSFUL publish only
-    m.published = { gen, contentHash, at: this.now() };
-    this.commit(m);
+    m.published = { gen, contentHash, at: this.now(), snapshotHash: sha256Hex(snapshotText) };
+    try {
+      this.commit(m);
+    } catch (err) {
+      // No manifest, no generation (codex round 7): a generation the manifest never came to own is
+      // removed rather than left for later publishes to skip over.
+      removeTreeForce(dest);
+      throw err;
+    }
     this.flipCurrent(gen);
     this.live.published(gen);
     this.reapGenerations(gen);
@@ -2793,6 +3212,11 @@ export class SkillsStore {
    */
   private validate(m: SkillManifest): Validation {
     const findings: SkillConflictFinding[] = [];
+    // The baseline the records point at must be the bundle its name claims (codex round 7): reset
+    // restores from it, `?side=baseline` reads it, the env is provisioned in it — and publish calls
+    // this AFTER the provisioner ran, so a provisioner that wrote outside `.venv` is caught here.
+    const baselineProblem = this.baselineProblem(m.baseline);
+    if (baselineProblem !== null) findings.push(this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${m.baseline}`, baselineProblem));
     const scanned = this.scanEffective();
     const onDisk = new Map(scanned.map((f) => [f.rel, f]));
 
