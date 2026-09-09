@@ -213,6 +213,10 @@ export function registerTestingRoutes(
         // Record the run in the eval history (best-effort, LOUD-NON-FATAL): the report is the
         // contract and must answer even if persistence fails, so a store miss is warned and
         // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged.
+        // `degraded` and `rule_coverage` are the ENGINE's readings persisted verbatim — the
+        // daemon recomputes neither; `rule_coverage` is spread conditionally because an engine
+        // predating core #394 emits none, and an absent key (never a fabricated one) is how a
+        // history row says "this run did not measure rule coverage".
         if (deps.evalStore !== undefined) {
           try {
             await deps.evalStore.record({
@@ -223,6 +227,7 @@ export function registerTestingRoutes(
               summary: report.summary,
               per_type: perTypeRollup(report.results),
               degraded: report.degraded,
+              ...(report.rule_coverage !== undefined ? { rule_coverage: report.rule_coverage } : {}),
               results: report.results,
             });
           } catch (persistErr) {

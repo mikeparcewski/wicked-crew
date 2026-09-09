@@ -1156,8 +1156,15 @@ export interface ConformanceRule {
   excludes?: string[];
   /** Ordering within a severity band + gate priority. Engine default: 1.0. */
   weight?: number;
-  /** Enforcement half (from the retired policy model). Absent ⇒ the rule is recall-only. */
-  effect?: 'deny' | 'allow_with_conditions' | 'allow';
+  /**
+   * Enforcement half (from the retired policy model). Absent ⇒ the rule is RECALL-ONLY: it is
+   * surfaced to workers but never enters decide()/select(), so it can neither block a gate nor
+   * `catch` an eval sample — which is why a store of effect-less rules evals to "every bad
+   * sample is a gap" (api-types 0.26.0, the #394/#395 companion). `deny` blocks (the only effect
+   * the evals credit as a catch); `warn` surfaces without blocking (the operator-authorable
+   * middle band); `allow_with_conditions` permits with obligations; `allow` permits outright.
+   */
+  effect?: 'deny' | 'warn' | 'allow_with_conditions' | 'allow';
   trigger?: { contains?: string };
   obligations?: string[];
   /** The frozen acceptance-criteria text (becomes a claim's `criteria` when the rule decides a gate). */
@@ -1481,14 +1488,42 @@ export interface GovernanceEvalSummary {
 }
 
 /**
+ * One steering rule in the judged store that NO sample of the run exercised — the inverse blind
+ * spot of `summary.gaps` (core #394): a gap is a sample nothing caught, but a rule with zero
+ * exercising samples produces no result row at all and so is invisible to the summary. Each
+ * entry names the rule and the Steering sub-page it belongs to, so the corpus can grow a sample
+ * for it (or the rule can be retired as untestable).
+ */
+export interface GovernanceEvalUnexercisedRule {
+  rule_id: string;
+  steering_type: SteeringType;
+}
+
+/**
+ * Rule-side coverage of an eval run (core #394): how many rules of the judged store fired on at
+ * least one sample (`exercised`), and which fired on none (`unexercised`). Together with
+ * `summary` it separates "the corpus lacks a behavior" from "the store lacks a rule" — the two
+ * readings a bare gap count conflates.
+ */
+export interface GovernanceEvalRuleCoverage {
+  exercised: number;
+  unexercised: GovernanceEvalUnexercisedRule[];
+}
+
+/**
  * The `POST /testing/evals/run` 200 body — the engine's serde report passed through VERBATIM
  * (snake_case field names, `degraded` spelled `null` when the run was full-fidelity;
- * `'facet-only'` when the embedding side was unavailable and only facet matching ran).
+ * `'facet-only'` when the gap-hint embedder was unavailable and hints fell back to lexical
+ * matching — the verdicts are the same either way, only `nearest_rules` degrades).
+ *
+ * `rule_coverage` is OPTIONAL on purpose: an engine that predates core #394 emits a report
+ * without it, and that report still validates — the daemon never fabricates the field.
  */
 export interface GovernanceEvalReport {
   results: GovernanceEvalResult[];
   summary: GovernanceEvalSummary;
   degraded: 'facet-only' | null;
+  rule_coverage?: GovernanceEvalRuleCoverage;
 }
 
 /** The `POST /testing/corpora/import` request body — a named eval corpus for later runs. */
@@ -1553,6 +1588,12 @@ export interface EvalRunSummary {
   per_type: Partial<Record<SteeringType, EvalRunPerTypeCount>>;
   /** `'facet-only'` when the run degraded to facet matching; null when it ran full-fidelity. */
   degraded: 'facet-only' | null;
+  /**
+   * The report's {@link GovernanceEvalReport.rule_coverage}, persisted VERBATIM (like `degraded`,
+   * never recomputed daemon-side). ABSENT — not null — when the engine that ran the eval predates
+   * core #394 and emitted no coverage, so a history row honestly shows which runs measured it.
+   */
+  rule_coverage?: GovernanceEvalRuleCoverage;
 }
 
 /**

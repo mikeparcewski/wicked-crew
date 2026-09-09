@@ -40,6 +40,29 @@ mentioned only where a daemon release depends on them.
   across projects. One static segment more specific than the proxy wildcard; `POST /api/docs` and
   everything else still stream through the pure-transport proxy. api-types **0.26.0** carries
   `InteractiveDocSummary`.
+- **`rule_coverage` + `effect: 'warn'` on the wire** (the core #394/#395 companion) — api-types
+  **0.26.0**: `GovernanceEvalReport`, `EvalRunSummary` and `EvalRunDetail` carry an OPTIONAL
+  `rule_coverage { exercised, unexercised: [{ rule_id, steering_type }] }` (the rules NO sample
+  exercised — the blind spot a bare gap count hides; absent, never fabricated, on a report from a
+  pre-#394 engine), and `ConformanceRule.effect` admits the operator-authorable `warn` band. The
+  run route persists `rule_coverage` verbatim (like `degraded`) so `GET /testing/evals[/:id]`
+  serves it untouched.
+- **The INTERNAL evals corpus** — `e2e/corpus/wicked-internal-corpus.json` pins five wicked
+  repos (estate v0.16.6 · garden v12.31.0 · crew v0.7.24 · studio v0.5.0 · interactive v0.8.1) to
+  the commit each tag resolved to plus an ACTION window of ≥ 50 real commits behind it (walk
+  release tags back, capped at 180 days; a shortfall is recorded, never widened); the pin is the
+  constant and moving a tag is a deliberate PR. `scripts/evals-internal-corpus.mjs` (node, zero
+  deps) `pin`s / `check`s it (fail closed on a re-cut tag or a hand-edited pin), `materialize`s
+  each tag by `git archive`, derives `samples` (one `EvalSample` per window commit — path-table
+  steering type, unsure ⇒ development; `good` unless `known-bad.json` says otherwise) that the
+  crew `EvalSampleSchema` accepts, and `run`s them through `wicked-core rules eval` when the
+  engine is on PATH. Our doctrine rules apply to these repos; the 15-repo wicked-e2e OSS set
+  stays the E2E functional corpus and is NOT an eval corpus.
+- **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
+  eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
+  fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
+  `facet-only` + `rule_coverage` passthrough, the parsed snake_case guard, 501 parity, and the
+  internal-corpus pin / samples / materialize / run semantics over a git fixture).
 
 ## [0.7.25] — 2026-09-08
 

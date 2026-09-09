@@ -186,6 +186,32 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
 
+// Eval-run history (api-types 0.26.0, the #394/#395 companion): what the EvalRunStore records and
+// GET /testing/evals[/:id] serves must satisfy the published rows — INCLUDING `rule_coverage`
+// riding the summary row optionally (an engine predating core #394 emits none, and the row must
+// still validate without it), and the report's own optional `rule_coverage`. The two `accepts`
+// pins say the OPPOSITE direction holds too: a report WITH coverage and a report WITHOUT it are
+// both legal engine outputs the store's record input must take verbatim.
+respondsWith<Wire.EvalRunSummary, Awaited<ReturnType<import('../src/api/eval-store.js').EvalRunStore['record']>>>();
+respondsWith<Wire.EvalRunDetail, NonNullable<Awaited<ReturnType<import('../src/api/eval-store.js').EvalRunStore['get']>>>>();
+respondsWith<Wire.ListEvalRunsResponse, { runs: Wire.EvalRunSummary[] }>();
+accepts<
+  Wire.GovernanceEvalReport,
+  { results: Wire.GovernanceEvalResult[]; summary: Wire.GovernanceEvalSummary; degraded: 'facet-only' | null }
+>();
+accepts<
+  Wire.GovernanceEvalReport,
+  {
+    results: Wire.GovernanceEvalResult[];
+    summary: Wire.GovernanceEvalSummary;
+    degraded: null;
+    rule_coverage: { exercised: number; unexercised: { rule_id: string; steering_type: Wire.SteeringType }[] };
+  }
+>();
+// Steering `effect` (api-types 0.26.0): the operator-authorable `warn` band is a legal effect on
+// the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
+accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();
+
 // Multiscope responses (api-types 0.15.0; 0.17.0 grew `campaignRegistered` + the optional
 // `projectAttachError`) — the recon trigger's fan receipt and the campaign launch's additive
 // `runIds`: what the routes construct must satisfy the published shapes.

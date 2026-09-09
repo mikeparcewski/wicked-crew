@@ -26,3 +26,29 @@ Screenshots land in `e2e/shots/` (gitignored); each script prints a JSON report
 to stdout. `STUDIO_URL` / `CREW_API` env vars override the default endpoints.
 
 These are operator-run smoke tools, not CI suites — they spend real tokens.
+
+## `corpus/` — the INTERNAL evals corpus (five wicked repos at pinned tags)
+
+`corpus/wicked-internal-corpus.json` is a **constant**: five wicked repos (estate, garden, crew,
+studio, interactive), each at a pinned prior release tag with the commit it resolved to and an
+ACTION window (`action_window_from_tag..tag`, ≥ 50 commits, capped at 180 days) of real dev
+actions behind it. Our doctrine rules (plane boundaries, event grammar, storage doctrine) apply
+to these repos — the point of the corpus; third-party repos structurally cannot exercise them.
+For testing the evals machinery and our own doctrine only — never shipped in the product (a
+user evals their OWN policies and memories against their OWN actions). Moving a tag is a
+deliberate PR: edit `tag`, re-pin, commit. `scripts/evals-internal-corpus.mjs` owns it:
+
+```
+npm run evals:corpus:check                                   # tags still resolve to the pinned shas (fail closed)
+npm run evals:corpus:pin                                     # re-resolve shas + windows after a deliberate tag move
+node scripts/evals-internal-corpus.mjs materialize <dir>     # git archive each tag → <dir>/<repo>@<tag>/
+node scripts/evals-internal-corpus.mjs samples <dir>         # one EvalSample per window commit → <dir>/samples.json
+node scripts/evals-internal-corpus.mjs run <dir>             # ingest the doctrine seed + rules eval (needs wicked-core)
+```
+
+Every mode reads the sibling checkouts (`--source-root <dir>`, default `$WICKED_SOURCE_ROOT` or
+this repo's parent) READ-ONLY and refuses to derive anything from a checkout whose shas do not
+match the pin. Samples are `good` by default (released commits); `corpus/known-bad.json` is the
+team's allowlist of commits that ARE bad behavior — `samples` fails closed on a stale entry. The
+corpus identity a run carries is `evals:wicked-internal@<pin_hash>` + the `samples_hash` written
+to `samples.meta.json`; the full plan is `docs/testing/evals-test-plan.md`.

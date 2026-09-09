@@ -18,12 +18,18 @@
 //    `governanceEvals` binding, so the un-stubbed adapter must refuse with
 //    GovernanceEvalsUnsupportedError — the routes must serve 501, never crash (the binding
 //    ships with the unreleased 0.7.5).
+//  - The evals test plan's route scenarios (docs/testing/evals-test-plan.md): S13 the degraded
+//    `facet-only` + `rule_coverage` readings pass through the run AND the history untouched; S18
+//    the snake_case guard asserts PLACEMENT and OMISSION rules over the parsed body (not raw
+//    substrings — `nearest_rules` rides gaps only, so `rule_id` need not occur at all); S19 the
+//    two 501s carry the SAME upgrade pointer; S2 traversal ids over the real HTTP route; and the
+//    persist-failure path (`testing.ts` LOUD-NON-FATAL) still answers the report.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, GovernanceEvalsUnsupportedError } from '../src/core/adapter.js';
@@ -32,6 +38,7 @@ import { perTypeRollup } from '../src/api/testing.js';
 import { removeScratch } from './setup/scratch.js';
 import type {
   GovernanceEvalReport,
+  GovernanceEvalResult,
   GovernanceEvalSample,
   ImportEvalCorpusResponse,
 } from '../src/core/types.js';
@@ -46,6 +53,8 @@ let evalsSupported = false;
 /** What the stubbed evals seam captured, and what it answers / throws. */
 let evalsCaptured: { type?: string; corpus?: string } | null = null;
 let evalsThrows: Error | null = null;
+/** The report the stubbed engine answers — REPORT by default, reassigned per case (S13). */
+let evalsAnswer: GovernanceEvalReport;
 /** What the stubbed corpus-import seam captured, and what it answers / throws. */
 let importCaptured: { name: string; samples: GovernanceEvalSample[] } | null = null;
 let importThrows: Error | null = null;
@@ -58,7 +67,9 @@ let realImportCorpus: (
   samples: GovernanceEvalSample[],
 ) => Promise<ImportEvalCorpusResponse>;
 
-/** The engine's serde report, snake_case — the exact shape the wire must carry. */
+/** The engine's serde report, snake_case — the exact shape the wire must carry. `nearest_rules`
+ *  rides the GAP only: the engine omits it on every other verdict (evals.rs `SampleResult`,
+ *  `skip_serializing_if = Option::is_none`), so the fixture must not invent it elsewhere. */
 const REPORT: GovernanceEvalReport = {
   results: [
     {
@@ -94,11 +105,28 @@ const REPORT: GovernanceEvalReport = {
       expected: 'allow',
       fired: ['POL-002'],
       verdict: 'false_positive',
-      nearest_rules: [],
     },
   ],
   summary: { total: 3, caught: 1, gaps: 1, false_positives: 1 },
   degraded: null,
+};
+
+/**
+ * The same run as REPORT, but from an engine whose gap-hint embedder was unavailable
+ * (`degraded: 'facet-only'` — verdicts identical, hints lexical) and which carries the core #394
+ * rule-side coverage. The wire fixture the S12/S13 passthrough pins; the stub's `REPORT` always
+ * said `degraded: null`, so this path had no crew-side test before.
+ */
+const REPORT_DEGRADED: GovernanceEvalReport = {
+  ...REPORT,
+  degraded: 'facet-only',
+  rule_coverage: {
+    exercised: 2,
+    unexercised: [
+      { rule_id: 'PAT-014', steering_type: 'development' },
+      { rule_id: 'POL-1301', steering_type: 'architecture' },
+    ],
+  },
 };
 
 const IMPORT_ANSWER: ImportEvalCorpusResponse = {
@@ -142,7 +170,7 @@ beforeAll(async () => {
     if (!evalsSupported) throw new GovernanceEvalsUnsupportedError('Running governance evals');
     if (evalsThrows) throw evalsThrows;
     evalsCaptured = args;
-    return REPORT;
+    return evalsAnswer;
   };
   adapter.importGovernanceCorpus = async (name, samples) => {
     if (!evalsSupported) throw new GovernanceEvalsUnsupportedError('Importing an eval corpus');
@@ -174,9 +202,22 @@ beforeEach(() => {
   evalsSupported = false;
   evalsCaptured = null;
   evalsThrows = null;
+  evalsAnswer = REPORT;
   importCaptured = null;
   importThrows = null;
 });
+
+/** Every key at every depth of a parsed wire body — the S18 spelling guard walks these. */
+function allKeys(value: unknown, path = ''): string[] {
+  if (Array.isArray(value)) return value.flatMap((v, i) => allKeys(v, `${path}[${i}]`));
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [
+      `${path}.${k}`,
+      ...allKeys(v, `${path}.${k}`),
+    ]);
+  }
+  return [];
+}
 
 // Engine-generation probe (the SC-005 pattern): the evals bindings ship with wicked-core-ts
 // 0.7.5. Against an older installed addon the routes MUST 501; against 0.7.5+ (what crew's CI
@@ -328,17 +369,73 @@ describe('POST /api/v1/testing/evals/run', () => {
     expect(res.status).toBe(200);
     // The whole report, structurally identical to the engine's serde output.
     expect(res.body).toEqual(REPORT);
-    // The pinned spellings, on the RAW wire text: no camelCasing, no reshaping.
-    expect(res.text).toContain('"false_positives"');
-    expect(res.text).toContain('"steering_type"');
-    expect(res.text).toContain('"nearest_rules"');
-    expect(res.text).toContain('"rule_id"');
     expect(res.text).not.toContain('"falsePositives"');
     // `degraded: null` stays IN-BAND (the honesty marker), never stripped.
     expect('degraded' in res.body).toBe(true);
     expect(res.body['degraded']).toBeNull();
     // The args reached the adapter as sent.
     expect(evalsCaptured).toEqual({ type: 'development', corpus: 'evals:dev-behaviors' });
+  });
+
+  it('S18: the snake_case guard — PLACEMENT and OMISSION over the parsed body, not raw substrings', async () => {
+    // Why not `text.toContain('"rule_id"')`: `nearest_rules` is omitted on non-gap results and a
+    // gap may carry an EMPTY hint array, so a perfectly valid engine report need not contain
+    // `rule_id` anywhere. The guard therefore asserts WHERE each spelling sits and WHEN it is
+    // absent — the contract the studio's report view actually relies on.
+    evalsSupported = true;
+    const res = await post('/api/v1/testing/evals/run', {});
+    expect(res.status).toBe(200);
+    const body = res.body as unknown as GovernanceEvalReport;
+    // 1. Every key at every depth is snake_case (or a bare lowercase word): no camelCase anywhere.
+    const keys = allKeys(body).map((p) => p.slice(p.lastIndexOf('.') + 1));
+    for (const k of keys) expect(k, `key ${k}`).toMatch(/^[a-z][a-z0-9_]*$/);
+    // 2. Placement: the rollup's spelling and types.
+    expect(typeof body.summary.false_positives).toBe('number');
+    expect(body.summary.total).toBe(body.summary.caught + body.summary.gaps + body.summary.false_positives);
+    // 3. Per result: the sample slice is the pinned 4-field echo; `expected` derives from `kind`;
+    //    `nearest_rules` is present iff the verdict is `gap` (an array — possibly empty — of
+    //    {rule_id, similarity}); absent — not null, not [] — on caught / false_positive.
+    for (const r of body.results) {
+      expect(Object.keys(r.sample).sort()).toEqual(['description', 'id', 'kind', 'steering_type']);
+      expect(r.expected).toBe(r.sample.kind === 'bad' ? 'deny' : 'allow');
+      expect(Array.isArray(r.fired)).toBe(true);
+      if (r.verdict === 'gap') {
+        expect(Array.isArray(r.nearest_rules), `${r.sample.id} gap carries nearest_rules`).toBe(true);
+        for (const hint of r.nearest_rules!) {
+          expect(Object.keys(hint).sort()).toEqual(['rule_id', 'similarity']);
+          expect(typeof hint.rule_id).toBe('string');
+          expect(typeof hint.similarity).toBe('number');
+        }
+      } else {
+        expect('nearest_rules' in r, `${r.sample.id} (${r.verdict}) must OMIT nearest_rules`).toBe(false);
+      }
+    }
+    // 4. The fixture's known gap carries a known non-empty hint — so the placement assertions above
+    //    actually ran over a hint, not vacuously over an empty array.
+    const gap = body.results.find((r) => r.sample.id === 'S-002') as GovernanceEvalResult;
+    expect(gap.nearest_rules).toEqual([{ rule_id: 'PAT-014', similarity: 0.62 }]);
+    // 5. `degraded` is in-band even when null; `rule_coverage` is ABSENT (not null) on a report
+    //    from an engine that emitted none.
+    expect('degraded' in body).toBe(true);
+    expect('rule_coverage' in body).toBe(false);
+  });
+
+  it('S13: `degraded: "facet-only"` and `rule_coverage` pass through the run route untouched', async () => {
+    evalsSupported = true;
+    evalsAnswer = REPORT_DEGRADED;
+    const res = await post('/api/v1/testing/evals/run', {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(REPORT_DEGRADED);
+    expect(res.body['degraded']).toBe('facet-only');
+    const coverage = res.body['rule_coverage'] as { exercised: number; unexercised: unknown[] };
+    expect(coverage.exercised).toBe(2);
+    expect(coverage.unexercised).toEqual([
+      { rule_id: 'PAT-014', steering_type: 'development' },
+      { rule_id: 'POL-1301', steering_type: 'architecture' },
+    ]);
+    // Verdicts are the SAME as the full-fidelity run — degradation is about hints, not judgments.
+    expect(res.body['summary']).toEqual(REPORT.summary);
+    expect(res.text).not.toContain('"ruleCoverage"');
   });
 
   it('200 on `{}` — both fields optional: default corpus, every steering type', async () => {
@@ -381,10 +478,23 @@ describe('POST /api/v1/testing/evals/run', () => {
 describe('POST /api/v1/testing/corpora/import', () => {
   const VALID = { name: 'dev-behaviors', samples: SAMPLES };
 
-  it('501 with the same honest upgrade pointer — the bindings ship together', async () => {
-    const res = await post('/api/v1/testing/corpora/import', VALID);
-    expect(res.status).toBe(501);
-    expect(res.body['error']).toMatch(/governanceEvals binding/);
+  it('S19: 501 with the SAME honest upgrade pointer as the run route — the bindings ship together', async () => {
+    const imp = await post('/api/v1/testing/corpora/import', VALID);
+    expect(imp.status).toBe(501);
+    const run = await post('/api/v1/testing/evals/run', {});
+    expect(run.status).toBe(501);
+    const impErr = imp.body['error'] as string;
+    const runErr = run.body['error'] as string;
+    // Both name the missing binding and the release that carries it …
+    for (const err of [impErr, runErr]) {
+      expect(err).toMatch(/governanceEvals binding/);
+      expect(err).toMatch(/>= 0\.7\.5/);
+    }
+    // … and differ ONLY in the action prefix: strip it and the pointer text is byte-identical,
+    // so an operator sees one upgrade instruction, not two that could drift apart.
+    expect(impErr.startsWith('Importing an eval corpus ')).toBe(true);
+    expect(runErr.startsWith('Running governance evals ')).toBe(true);
+    expect(impErr.slice('Importing an eval corpus'.length)).toBe(runErr.slice('Running governance evals'.length));
   });
 
   it('200: happy path — samples reach the adapter as sent, answer passes through', async () => {
@@ -490,6 +600,74 @@ describe('the eval RUN history — GET /api/v1/testing/evals[/:id]', () => {
   it('an unknown run id → 404, not a crash', async () => {
     const res = await get('/api/v1/testing/evals/does-not-exist');
     expect(res.status).toBe(404);
+  });
+
+  it('S2 over HTTP: encoded / embedded-slash traversal ids → 404, the planted file is never read', async () => {
+    // A sentinel OUTSIDE the results dir but inside the store root — the file a traversal id
+    // that survived decoding would resolve. If any shape below reached it, the route would
+    // answer 200 with THIS body instead of 404.
+    writeFileSync(join(dir, 'evals', 'secret.json'), JSON.stringify({ id: 'secret', results: [] }), 'utf8');
+    for (const raw of ['..%2Fsecret', '%2e%2e%2fsecret', '..%5Csecret', 'results%2F..%2Fsecret', 'x%2Fy', 'a.b', '.%2Esecret']) {
+      const res = await get(`/api/v1/testing/evals/${raw}`);
+      expect(res.status, raw).toBe(404);
+      expect(res.body['id'], raw).toBeUndefined();
+    }
+  });
+
+  it('S13: the degraded + rule_coverage readings are RECORDED verbatim and served by the list and the drilldown', async () => {
+    evalsSupported = true;
+    evalsAnswer = REPORT_DEGRADED;
+    expect((await post('/api/v1/testing/evals/run', { corpus: 'evals:hist-degraded' })).status).toBe(200);
+    const list = await get(`/api/v1/testing/evals?corpus=${encodeURIComponent('evals:hist-degraded')}`);
+    const row = (list.body['runs'] as Array<Record<string, unknown>>)[0]!;
+    expect(row['degraded']).toBe('facet-only');
+    expect(row['rule_coverage']).toEqual(REPORT_DEGRADED.rule_coverage);
+    const detail = await get(`/api/v1/testing/evals/${row['id'] as string}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body['degraded']).toBe('facet-only');
+    expect(detail.body['rule_coverage']).toEqual(REPORT_DEGRADED.rule_coverage);
+    expect(detail.body['results']).toEqual(REPORT_DEGRADED.results);
+    // And a run from an engine WITHOUT coverage is recorded without the key — the row says so
+    // by absence, never by a fabricated `null`/`{}`.
+    evalsAnswer = REPORT;
+    expect((await post('/api/v1/testing/evals/run', { corpus: 'evals:hist-plain' })).status).toBe(200);
+    const plain = await get(`/api/v1/testing/evals?corpus=${encodeURIComponent('evals:hist-plain')}`);
+    const plainRow = (plain.body['runs'] as Array<Record<string, unknown>>)[0]!;
+    expect('rule_coverage' in plainRow).toBe(false);
+    expect(plainRow['degraded']).toBeNull();
+  });
+
+  it('a history-persist failure is LOUD-NON-FATAL: the report still answers 200, the history reads empty', async () => {
+    // A fresh daemon whose eval store root has `results` pre-created as a FILE, so the store's
+    // detail write fails on every record — the report is the contract and must answer anyway
+    // (testing.ts: warned, swallowed, never a 500); the history honestly lists nothing.
+    const dir3 = mkdtempSync(join(tmpdir(), 'testing-persist-fail-'));
+    const storeRoot = join(dir3, 'evals');
+    mkdirSync(storeRoot, { recursive: true });
+    writeFileSync(join(storeRoot, 'results'), 'not a directory', 'utf8');
+    const faulty = new CoreAdapter({ dbPath: join(dir3, 'core.db'), stub: true });
+    faulty.governanceEvalsSupported = () => true;
+    faulty.runGovernanceEvals = async () => REPORT;
+    const app3 = await createServer(faulty, { auditPath: join(dir3, 'audit.log'), evalStoreRoot: storeRoot });
+    try {
+      await app3.listen({ port: 0, host: '127.0.0.1' });
+      const addr = app3.server.address();
+      const base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+      const run = await fetch(`${base}/api/v1/testing/evals/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(run.status).toBe(200);
+      expect(await run.json()).toEqual(REPORT);
+      const list = await fetch(`${base}/api/v1/testing/evals`);
+      expect(list.status).toBe(200);
+      expect(await list.json()).toEqual({ runs: [] });
+    } finally {
+      await app3.close();
+      faulty.close();
+      removeScratch(dir3);
+    }
   });
 
   it('?type= narrows the history to comparable runs (the request type, not the sample types)', async () => {
