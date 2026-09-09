@@ -1326,21 +1326,29 @@ export interface SteeringLandingResult {
   error?: string;
 }
 
-// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.26.0) ──
+// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.27.0) ──
 //
-// Skills are files (skills keystone, design v3). The daemon owns ONE effective `wicked-garden`-shaped
-// plugin root — `<state home>/skills/effective/`, the dependency closure of the installed plugin:
-// `.claude-plugin/{plugin.json,archetypes.json,components.json}`, `skills/**` (nested layout
-// verbatim), `scripts/**` minus CI + dev tools, `schemas/`, `docs/examples/`, `pyproject.toml`,
-// `uv.lock` — seeded from the LIVE installed plugin into a content-addressed
-// `baseline/<contentHash>/`. The operator edits files in place, replaces a skill, adds one,
-// disables one (manifest state — the files stay), resets one (content from the baseline; never
-// enablement). Nothing a worker runs is read from `effective/`: PUBLISHING validates the whole
-// tree and writes an IMMUTABLE `snapshots/<gen>/` (enabled skills only, closure included,
-// `snapshot.json`), then flips `current -> snapshots/<gen>`; the engine receives the resolved
-// snapshot path as `WICKED_SKILLS_SNAPSHOT`. `/skills` is a file manager whose EVERY mutation is
-// CAS-guarded (`expectedRevision`) and answers 2xx `{verdict, findings[], revision}` — a
-// `blocked` verdict is a normal response, a stale revision is the one 409.
+// Skills are files (skills keystone, design v3 + amendments v3.1/v3.2). The daemon owns ONE
+// effective `wicked-garden`-shaped plugin root — `<state home>/skills/effective/`, the dependency
+// closure of the installed plugin: `.claude-plugin/{plugin.json,archetypes.json,components.json}`,
+// `skills/**` (nested layout verbatim), `scripts/**` minus CI + dev tools, `schemas/`,
+// `docs/examples/`, `pyproject.toml`, `uv.lock` — seeded from the LIVE installed plugin into a
+// content-addressed `baseline/<contentHash>/`. The operator edits files in place, replaces a
+// skill, adds one, disables one (manifest state — the files stay), resets one (content from the
+// baseline; never enablement). Nothing a worker runs is read from `effective/`: PUBLISHING
+// validates the whole tree and writes an IMMUTABLE, read-only `snapshots/<gen>/` (enabled skills
+// only, closure included, `snapshot.json`, and the generated delivery views —
+// `views/copilot/.github/skills/<name>/` holding the enabled PORTABLE skills, part of the content
+// hash), then flips `current -> snapshots/<gen>`; the engine receives the resolved snapshot path
+// as `WICKED_SKILLS_SNAPSHOT`. The daemon NEVER writes into the user's own CLI directories
+// (`~/.codex`, `~/.pi`, `~/.copilot`, `~/.config/opencode`, `~/.claude`): skills reach non-Claude
+// workers only through per-launch, wicked-owned delivery core performs from the snapshot (v3.2) —
+// a CLI without a lever (codex today) runs without wicked skills, and a unit on such a seat that
+// requires one is REFUSED at launch (no proceed-with-disclosure setting exists).
+// `/skills` is a file manager whose EVERY mutation is CAS-guarded (`expectedRevision`) and
+// answers 2xx `{verdict, findings[], revision}` — a `blocked` verdict is a normal response; 409
+// (`{error, revision}`) is a stale revision, a publish already in flight (one at a time), or a
+// skills root that changed under a running publish.
 
 /** What a skill IS, from its frontmatter — fork-first: `context: fork` → fork worker (a subagent
  *  body); else `user-invocable: true` → router (an operator-facing entry point); else module (a
@@ -1359,9 +1367,11 @@ export type SkillSourceKind = 'claude-plugin-cache' | 'checkout' | 'directory';
 
 /** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash — the
  *  publish that needs it AWAITS it — and shared read-only by every snapshot that links it):
- *  `pending` until a publish provisions it, `synced` on success (the snapshot carries a `.venv`
- *  link), `failed` (logged) when uv errored, `skipped` when uv is not installed or the bundle
- *  carries no `pyproject.toml` (no link either way; a later publish retries). */
+ *  `pending` until a successful publish records it, `synced` on success (the snapshot carries a
+ *  `.venv` link), `skipped` when the bundle carries no `pyproject.toml` (nothing to provision; no
+ *  link). `failed` (uv missing or a sync error) is BLOCKING for the publish (`venv-failed`) and is
+ *  therefore never the recorded state of a published baseline — the record keeps its previous
+ *  value; a later publish retries. */
 export type SkillVenvState = 'pending' | 'synced' | 'failed' | 'skipped';
 
 /** One captured baseline — keyed in `SkillManifest.baselines` by the content hash of its bundle
@@ -1387,8 +1397,10 @@ export interface SkillEntry {
    *  daemon knows (core drop-ins, crew-generated, user-registered) or a skill one of those names in
    *  its SKILL.md (repo-learn → search, mem). Disabling or renaming it is blocking. */
   core: boolean;
-  /** `false` when the skill's files resolve `${CLAUDE_PLUGIN_ROOT}`, invoke `scripts/…` relative
-   *  to the cwd, or link `../` — Claude-only by nature; excluded from the non-Claude CLI mirror. */
+  /** `false` when the skill's files resolve `${CLAUDE_PLUGIN_ROOT}`, invoke a script relative to
+   *  the cwd (`python3 -u scripts/x.py`, `./scripts/x`, …), or link `../` — Claude-only by nature:
+   *  excluded from the snapshot's `views/copilot/` and from the per-launch skill lists core builds
+   *  for the other CLIs. `portable` is the admission key for every non-Claude view (design v3.2). */
   portable: boolean;
   /** Manifest state, orthogonal to content: a disabled skill's files stay in `effective/` and are
    *  excluded from the next published snapshot. Reset never flips it. */
@@ -1425,31 +1437,8 @@ export interface SkillPublishedRecord {
   at: string;
 }
 
-export interface SkillMirrorLedgerEntry {
-  /** TREE hash of the mirrored skill dir (sorted relative paths + sha256 digests of every file —
-   *  a portable skill's whole own tree is mirrored, not only `SKILL.md`) as the daemon last saw
-   *  it: what it wrote, or what it adopted (api-types 0.27.0; was the `SKILL.md` digest). */
-  hash: string;
-  /** `written` = the daemon placed it (rewritten while unmodified, removed when no longer
-   *  eligible); `adopted` = a garden-named entry that pre-existed at first run — tracked, NEVER
-   *  overwritten (a differing tree is `foreign_modified`) and never deleted. */
-  origin: 'written' | 'adopted';
-}
-
-/** The non-Claude CLI mirror's state (design v3 §8): what the daemon wrote/adopted where, so it
- *  never overwrites an entry whose on-disk hash differs from its ledger and never deletes an entry
- *  it did not write. Ledger keys are absolute target dirs (`~/.codex/skills`, …). */
-export interface SkillMirrorState {
-  ledger: Record<string, Record<string, SkillMirrorLedgerEntry>>;
-  /** Enabled skills the last pass skipped for being non-portable. */
-  skipped_non_portable: string[];
-  /** Per target: entries whose on-disk hash differs from the ledger — left alone, named here. */
-  foreign_modified: Record<string, string[]>;
-  /** ISO-8601 instant of the last mirror pass; `null` before the first. */
-  last_run: string | null;
-}
-
-/** `<skills root>/manifest.json` — the state of the daemon-owned root. */
+/** `<skills root>/manifest.json` — the state of the daemon-owned root. (The v3 mirror ledger is
+ *  withdrawn with the mirror — design v3.2 §1: the daemon never writes into the user's CLI dirs.) */
 export interface SkillManifest {
   version: 2;
   /** Monotonic; bumped by EVERY mutation. Every mutating request carries it as `expectedRevision`. */
@@ -1462,7 +1451,6 @@ export interface SkillManifest {
   /** Every managed file under `effective/`, plugin-relative. */
   files: Record<string, SkillFileRecord>;
   published: SkillPublishedRecord | null;
-  mirror: SkillMirrorState;
 }
 
 /** `GET /skills` 200 body. 503 when the root is not seeded (no installed plugin was found) or when
@@ -1533,7 +1521,17 @@ export type SkillFindingKind =
   /** `.claude-plugin/plugin.json`, `archetypes.json` or `components.json` is absent from `effective/`
    *  — the plugin manifest + the runtime catalogs are REQUIRED snapshot members (blocking at
    *  publish; api-types 0.27.0). */
-  | 'missing-plugin-manifest';
+  | 'missing-plugin-manifest'
+  /** The plugin manifest or a runtime catalog is present but not what its reader expects — does
+   *  not parse as JSON, is not a JSON object, or `archetypes.json` lacks its `archetypes`
+   *  collection (blocking at publish; api-types 0.27.0). A manifest without `name` is
+   *  `name-mismatch`. */
+  | 'catalog-invalid'
+  /** The baseline's shared read-only Python env could not be provisioned (uv missing, `uv sync`
+   *  failed, or the env could not be locked) while the bundle carries a `pyproject.toml` — the env
+   *  is REQUIRED, so the publish is blocked and nothing (the provisioning state included) is
+   *  persisted (api-types 0.27.0). */
+  | 'venv-failed';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
 
@@ -1574,7 +1572,11 @@ export interface SkillMutationResult extends SkillAnalyzeResult {
 }
 
 /** `POST /skills/publish` 200 body. `snapshot` is `null` when the verdict is `blocked` — and then
- *  `revision` is unchanged (a blocked publish persists nothing). */
+ *  `revision` is unchanged (a blocked publish persists nothing — not the drift it observed, not the
+ *  baseline's provisioning state). `path` is the absolute REAL path of the locked, read-only
+ *  generation; its `snapshot.json` carries the skill rows and the `views` block (`views.copilot`:
+ *  the `views/copilot` dir + the portable skills laid out in it). One publish runs at a time — a
+ *  concurrent one is the 409 `SkillRevisionConflict`. */
 export interface SkillPublishResult extends SkillAnalyzeResult {
   snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
 }
@@ -1600,7 +1602,8 @@ export interface SkillRefreshResult extends SkillAnalyzeResult {
   conflicts: string[];
 }
 
-/** The 409 body of every `/skills` mutation whose `expectedRevision` is stale. */
+/** The 409 body of every `/skills` mutation whose `expectedRevision` is stale — and of a publish
+ *  refused because another publish is in flight, or because the skills root changed while it ran. */
 export interface SkillRevisionConflict {
   error: string;
   /** The current revision — re-read `GET /skills` (or use this) and retry. */
@@ -2353,24 +2356,17 @@ export interface SystemSettings {
    */
   worker_config_root?: string;
   /**
-   * The daemon-owned SKILLS root (skills keystone; api-types 0.26.0, additive) — the directory
+   * The daemon-owned SKILLS root (skills keystone; api-types 0.27.0, additive) — the directory
    * holding `manifest.json`, `baseline/<hash>/`, `effective/`, `snapshots/<gen>/` and the
    * `current` symlink. Modeled on `worker_config_root`: absolute path when set; `""` or absent =
    * the default `<state home>/skills`. Applied at boot and on every settings change: the daemon
    * re-roots its store, seeds it from the live installed plugin when it is empty, publishes a
    * first snapshot when none exists, and exports `WICKED_SKILLS_SNAPSHOT=<resolved current
-   * snapshot>` for the engine's next worker spawn — no restart.
+   * snapshot>` for the engine's next worker spawn — no restart. This is the ONLY skills setting:
+   * the daemon never writes into the user's own CLI directories (design v3.2 §1), so there is no
+   * mirror knob.
    */
   skills_root?: string;
-  /**
-   * Mirror the published snapshot's enabled, PORTABLE skills as `<name>/SKILL.md` into the
-   * non-Claude CLIs' skill dirs (`~/.codex/skills` always; `~/.pi/agent/skills`,
-   * `~/.config/opencode/skills`, `~/.copilot/skills` when those dirs exist) after every publish
-   * (api-types 0.26.0). ON by default (absent reads as `true`). Additive, never exclusive: the
-   * daemon adopts pre-existing garden-named entries into its ledger, never overwrites an entry
-   * whose hash differs from the ledger, and never deletes an entry it did not write.
-   */
-  skills_mirror?: boolean;
   /**
    * The repo-scoped launch delivery DEFAULT (crew#393; api-types 0.18.0, additive). What a
    * `POST /runs` with `repoRef` + a CODE-WORK `workflow` (a def with at least one
@@ -3324,10 +3320,12 @@ export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'con
 
 /** One finding the skills degradation ladder produced (design v3 §3). */
 export interface DiagnosticsSkillsFinding {
-  /** `skills.fallback` = no wicked-garden installed (engine input left unset — the engine resolves
-   *  the live cache itself); `skills.blocked` = the first publish is blocked (engine input points
-   *  at a non-existent refusal path — launches fail loudly until the catalog is fixed);
-   *  `skills.config` = the configured root is corrupt/unusable (same refusal). */
+  /** `skills.fallback` = no wicked-garden installed (engine input left unset / restored to the boot
+   *  value — the engine resolves the live cache itself); `skills.blocked` = the first publish is
+   *  blocked (engine input points at a non-existent refusal path — launches fail loudly until the
+   *  catalog is fixed); `skills.config` = the configured root is corrupt/unusable (same refusal;
+   *  `error`), or — as a `warning` on the `published` state — the root lies OUTSIDE the daemon
+   *  state home, so core's fence cross-check (`WICKED_CREW_STATE_HOME`) refuses every launch. */
   kind: 'skills.fallback' | 'skills.blocked' | 'skills.config';
   severity: 'warning' | 'error';
   message: string;
@@ -3349,6 +3347,11 @@ export interface DiagnosticsSkills {
    *  is never set) — is exported as right now: the real snapshot path, a `<root>/refused/…` refusal
    *  path, or `null` = unset / the boot value. */
   engineInput: string | null;
+  /** What `WICKED_CREW_STATE_HOME` is exported as: the canonical realpath of the daemon state home
+   *  core derives the worker Read fence from and cross-checks the snapshot path against
+   *  (`<state home>/skills/snapshots/<gen>`; core#399). Exported on every apply, whatever the skills
+   *  outcome; `null` only when `disabled`. */
+  stateHome: string | null;
   findings: DiagnosticsSkillsFinding[];
 }
 

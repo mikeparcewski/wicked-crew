@@ -1,10 +1,11 @@
-// skills_root / skills_mirror — the settings half of the skills seam, modeled on worker_config_root:
-// validated at the PUT boundary (absolute path or ""; strict boolean), allowlisted (an unknown key
-// is dropped and NAMED in the audit entry), re-applied on every change (the store re-roots, seeds,
-// publishes, exports WICKED_SKILLS_SNAPSHOT), and restored at daemon boot (createServer) — with the
-// degradation ladder: no garden → fallback (engine input unset); a blocked first publish or a
-// corrupt root → a refusal path the engine fails loudly on, surfaced on GET /diagnostics. Boot tests
-// are HERMETIC: the provisioner is injected (`noVenv`) — no host `uv`, no downloads.
+// skills_root — the settings half of the skills seam, modeled on worker_config_root: validated at
+// the PUT boundary (absolute path or ""), allowlisted (an unknown key is dropped and NAMED in the
+// audit entry — the withdrawn `skills_mirror` knob included), re-applied on every change (the store
+// re-roots, seeds, publishes, exports WICKED_SKILLS_SNAPSHOT), and restored at daemon boot
+// (createServer) — with the degradation ladder: no garden → fallback (engine input restored to the
+// boot value / unset); a blocked first publish or a corrupt root → a refusal path the engine fails
+// loudly on, surfaced on GET /diagnostics. Boot tests are HERMETIC: the provisioner is injected
+// (`noVenv`) — no host `uv`, no downloads.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -20,10 +21,10 @@ import { registerRoutes } from '../src/api/routes.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
-import { BOOT_SKILLS_SNAPSHOT, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
-import { SKILLS_ROOT_ENV } from '../src/skills/store.js';
+import { COPILOT_VIEW_SKILLS_REL, SKILLS_ROOT_ENV } from '../src/skills/store.js';
 import { noVenv } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -51,7 +52,7 @@ function memoryAdapter(initial?: Partial<SystemSettings>): CoreAdapter {
   } as unknown as CoreAdapter;
 }
 
-describe('PUT/GET /settings skills_root + skills_mirror', () => {
+describe('PUT/GET /settings skills_root', () => {
   let s: Scaffold;
   let app: FastifyInstance | undefined;
   let runtime: SkillsRuntime;
@@ -60,7 +61,7 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     s = scaffold();
     // The harness arms WICKED_CREW_SKILLS_ROOT per process; the setting must win here, so unset it.
     delete process.env[SKILLS_ROOT_ENV];
-    runtime = new SkillsRuntime({ store: s.store, mirrorHome: s.home, log: () => undefined });
+    runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
   });
 
   afterEach(async () => {
@@ -76,11 +77,16 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     return fastify;
   };
 
-  it('GET reports skills_mirror ON by default', async () => {
+  it('skills_mirror is NOT a setting (design v3.2 §1): a client sending it has it dropped, not honored, and GET never shows it', async () => {
     app = build(memoryAdapter());
     await app.ready();
+    const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_mirror: true } });
+    expect(put.statusCode).toBe(200);
+    const settings = (put.json() as { settings: Record<string, unknown> }).settings;
+    expect(Object.hasOwn(settings, 'skills_mirror')).toBe(false);
     const get = await app.inject({ method: 'GET', url: '/api/v1/settings' });
-    expect((get.json() as { settings: SystemSettings }).settings.skills_mirror).toBe(true);
+    expect(Object.hasOwn((get.json() as { settings: Record<string, unknown> }).settings, 'skills_mirror')).toBe(false);
+    expect(Object.hasOwn(DEFAULT_SETTINGS, 'skills_mirror')).toBe(false);
   });
 
   it('round-trips an absolute skills_root, re-roots the store, seeds + publishes there, and exports the snapshot env', async () => {
@@ -88,36 +94,40 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     await app.ready();
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
     const newRoot = join(s.base, 'elsewhere');
-    const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_root: newRoot, skills_mirror: false } });
+    const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_root: newRoot } });
     expect(put.statusCode).toBe(200);
     const settings = (put.json() as { settings: SystemSettings }).settings;
     expect(settings.skills_root).toBe(newRoot);
-    expect(settings.skills_mirror).toBe(false);
     expect(s.store.root).toBe(newRoot);
     expect(existsSync(join(newRoot, 'manifest.json'))).toBe(true);
-    // The engine input is the absolute REAL path of the generation (v3.1 §2), and the only input.
+    // The engine input is the absolute REAL path of the generation (v3.1 §2), and the only skills input;
+    // the fenced state home rides beside it (core#399 round 3).
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(realpathSync(join(newRoot, 'snapshots', '000001')));
     expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined();
-    expect(runtime.health()).toMatchObject({ state: 'published', root: newRoot, current: { gen: 1 }, findings: [] });
-    // skills_mirror: false → nothing written into the home.
+    expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome());
+    // Published — but this root is OUTSIDE the state home, so core's cross-check will refuse launches:
+    // reported as a skills.config WARNING, not hidden behind a clean `published`.
+    const health = runtime.health();
+    expect(health).toMatchObject({ state: 'published', root: newRoot, current: { gen: 1 }, stateHome: canonicalCrewStateHome() });
+    expect(health.findings).toHaveLength(1);
+    expect(health.findings[0]).toMatchObject({ kind: 'skills.config', severity: 'warning' });
+    expect(health.findings[0]?.message).toContain('outside the daemon state home');
+    // Nothing lands outside the root: the temp base holds the root, the upstream copy, the fixture home — nothing else.
     expect(existsSync(join(s.home, '.codex'))).toBe(false);
   });
 
-  it('400s a relative skills_root and a non-boolean skills_mirror, touching nothing', async () => {
+  it('400s a relative skills_root, touching nothing', async () => {
     app = build(memoryAdapter());
     await app.ready();
     const rel = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_root: 'relative/skills' } });
     expect(rel.statusCode).toBe(400);
     expect((rel.json() as { error: string }).error).toContain('skills_root');
-    const flag = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { skills_mirror: 'yes' } });
-    expect(flag.statusCode).toBe(400);
-    expect((flag.json() as { error: string }).error).toContain('skills_mirror');
     expect(s.store.isSeeded()).toBe(false);
   });
 
-  it('a patch that does not name the skills keys RE-APPLIES the persisted root (no clobber)', async () => {
+  it('a patch that does not name the skills key RE-APPLIES the persisted root (no clobber)', async () => {
     const root = join(s.base, 'persisted');
-    app = build(memoryAdapter({ skills_root: root, skills_mirror: false }));
+    app = build(memoryAdapter({ skills_root: root }));
     await app.ready();
     const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { graphNodeLimit: 100 } });
     expect(put.statusCode).toBe(200);
@@ -149,13 +159,15 @@ describe('adapter getSettings read-validation', () => {
 
   const read = (): Promise<SystemSettings> => CoreAdapter.prototype.getSettings.call({} as CoreAdapter);
 
-  it('drops a hand-edited relative skills_root and a non-boolean skills_mirror; keeps valid values and the empty default', async () => {
+  it('drops a hand-edited relative skills_root and the withdrawn skills_mirror knob (any value); keeps valid values and the empty default', async () => {
     writeSettings({ graphNodeLimit: 150, skills_root: 'relative/nope', skills_mirror: 'on' });
     const dropped = await read();
     expect(dropped.skills_root).toBeUndefined();
-    expect(dropped.skills_mirror).toBe(true); // the shipped default, not the garbage
+    expect(Object.hasOwn(dropped, 'skills_mirror')).toBe(false);
     writeSettings({ graphNodeLimit: 150, skills_root: '/srv/skills', skills_mirror: false });
-    expect(await read()).toMatchObject({ skills_root: '/srv/skills', skills_mirror: false });
+    const kept = await read();
+    expect(kept).toMatchObject({ skills_root: '/srv/skills' });
+    expect(Object.hasOwn(kept, 'skills_mirror')).toBe(false); // withdrawn: never read, whatever the value
     writeSettings({ graphNodeLimit: 150, skills_root: '' });
     expect((await read()).skills_root).toBe('');
   });
@@ -186,13 +198,13 @@ describe('daemon boot applies the skills settings (createServer) — the degrada
     auditPath: join(dir, 'audit.log'),
     studioRoot: join(dir, 'no-studio'),
     // HERMETIC: the provisioner is injected — a boot test never runs the host's `uv`.
-    skills: { ...skills, mirrorHome: join(dir, 'home'), provisionVenv: noVenv },
+    skills: { ...skills, provisionVenv: noVenv },
   });
 
   const diagnostics = async (app: FastifyInstance): Promise<DiagnosticsResponse['skills']> =>
     ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
 
-  it('seeds the persisted skills_root from the plugin source, publishes, exports WICKED_SKILLS_SNAPSHOT, mirrors into the given home', async () => {
+  it('seeds the persisted skills_root from the plugin source, publishes (copilot view included), exports WICKED_SKILLS_SNAPSHOT', async () => {
     const root = join(dir, 'skills-root');
     adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, skills_root: root });
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
@@ -203,11 +215,17 @@ describe('daemon boot applies the skills settings (createServer) — the degrada
       const real = realpathSync(join(root, 'snapshots', '000001'));
       expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real);
       expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined();
-      expect(existsSync(join(dir, 'home', '.codex', 'skills', 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
+      // The copilot view rides the snapshot (v3.2 §4) — inside the root, never in a home directory.
+      expect(existsSync(join(real, ...COPILOT_VIEW_SKILLS_REL.split('/'), 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
       expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: real });
-      expect(await diagnostics(app)).toMatchObject({ state: 'published', root, current: { gen: 1, path: real }, engineInput: real, findings: [] });
+      // The fenced state home is exported beside the snapshot; this test's root is a temp dir OUTSIDE
+      // it, which diagnostics say plainly (core's cross-check would refuse launches from here).
+      expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome());
+      const skills = await diagnostics(app);
+      expect(skills).toMatchObject({ state: 'published', root, current: { gen: 1, path: real }, engineInput: real, stateHome: canonicalCrewStateHome() });
+      expect(skills.findings.map((f) => [f.kind, f.severity])).toEqual([['skills.config', 'warning']]);
     } finally {
       await app.close();
     }
@@ -222,6 +240,9 @@ describe('daemon boot applies the skills settings (createServer) — the degrada
       expect((await app.inject({ method: 'GET', url: '/api/v1/skills' })).statusCode).toBe(503);
       const skills = await diagnostics(app);
       expect(skills.state).toBe('fallback');
+      expect(skills.engineInput).toBe(BOOT_SKILLS_SNAPSHOT ?? null); // diagnostics say what the env actually holds
+      expect(skills.stateHome).toBe(canonicalCrewStateHome()); // the fence is exported whatever the skills outcome
+      expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome());
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
       expect(skills.findings[0]?.message).toContain('install wicked-garden first');
     } finally {

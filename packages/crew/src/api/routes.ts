@@ -602,8 +602,8 @@ export interface RuntimeDeps {
    *  nothing under `~/.wicked-crew`. */
   evalStore?: EvalRunStore;
   /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
-   *  (seeded from the installed plugin, published, mirrored); a directly-driven route set gets
-   *  none and `/skills*` answers 503 unless a test injects one over a fixture root. */
+   *  (seeded from the installed plugin, published); a directly-driven route set gets none and
+   *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
 }
 
@@ -3049,9 +3049,9 @@ export function registerRoutes(
         });
       }
     }
-    // skills_root / skills_mirror (skills keystone): the worker_config_root rule for the root; a
-    // strict boolean for the mirror — it writes into other CLIs' homes, so a typo must be a 400,
-    // never a silently-dropped key that leaves the operator believing they turned it off.
+    // skills_root (skills keystone): the worker_config_root rule. (The v3 `skills_mirror` knob is
+    // withdrawn — design v3.2 §1: wicked never writes into the user's CLI directories; a client
+    // still sending it is an unknown key, dropped and NAMED in the audit entry like any other.)
     if (Object.hasOwn(patch, 'skills_root')) {
       const root = patch.skills_root;
       if (typeof root !== 'string' || (root !== '' && !isAbsolute(root))) {
@@ -3059,9 +3059,6 @@ export function registerRoutes(
           error: 'skills_root must be an absolute path, or "" for the default (<state home>/skills)',
         });
       }
-    }
-    if (Object.hasOwn(patch, 'skills_mirror') && typeof patch.skills_mirror !== 'boolean') {
-      return reply.code(400).send({ error: 'skills_mirror must be a boolean' });
     }
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
@@ -3147,7 +3144,6 @@ export function registerRoutes(
       'graphNodeLimit',
       'worker_config_root',
       'skills_root',
-      'skills_mirror',
       'workerStallMinutes',
       'workerStallEscalateMinutes',
       'workerStallEscalateAction',
@@ -3179,7 +3175,7 @@ export function registerRoutes(
     applyWorkerConfigRoot(settings.worker_config_root);
     // Re-apply the skills settings the same way (skills keystone): re-root the store, seed/publish
     // when needed (awaited — a publish provisions the baseline env first), export
-    // WICKED_SKILLS_SNAPSHOT for the engine's next spawn, mirror per the flag.
+    // WICKED_SKILLS_SNAPSHOT for the engine's next spawn.
     await runtime.skills?.apply(settings);
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
@@ -3589,13 +3585,12 @@ export function registerRoutes(
 
   // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────
   // Manifest + typed reads, guarded CAS writes, refresh/publish/analyze. `createServer` injects the
-  // runtime it booted (store seeded from the installed plugin, snapshot published, mirror applied);
-  // a directly-driven route set answers 503 unless a test injects one over a fixture root.
+  // runtime it booted (store seeded from the installed plugin, snapshot published); a
+  // directly-driven route set answers 503 unless a test injects one over a fixture root.
   registerSkillsRoutes(app, {
     ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
     audit,
     actorOf,
-    getSettings: () => adapter.getSettings(),
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

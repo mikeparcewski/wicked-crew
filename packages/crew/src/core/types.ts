@@ -170,17 +170,8 @@ export interface CrewSystemSettings extends SystemSettings {
   [key: `studio.${string}`]: unknown;
 }
 
-/**
- * Default `skills_mirror` (skills keystone): the published snapshot's enabled, portable skills are
- * mirrored into the non-Claude CLIs' skill dirs — additive, ledger-guarded, never deleting what the
- * daemon did not write (design v3 §8). ON so the roster's codex/pi/opencode/copilot seats see the
- * same skill set the Claude seats get from the snapshot.
- */
-export const DEFAULT_SKILLS_MIRROR = true;
-
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
-  skills_mirror: DEFAULT_SKILLS_MIRROR,
   workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
   // perf#4 — the escalation ladder is armed by default: 30 silent minutes → reassign the wedged
   // cursor unit to a different seat. An explicit 0 (via PUT /settings or settings.json) disarms.

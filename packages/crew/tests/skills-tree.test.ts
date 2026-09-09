@@ -116,4 +116,20 @@ describe('makeTreeReadOnly / removeTreeForce', () => {
     removeTreeForce(venv);
     expect(existsSync(venv)).toBe(false);
   });
+
+  it('surfaces a permission failure instead of claiming the tree is locked (codex round 2)', () => {
+    if (process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)) return; // modes are advisory there
+    const venv = join(base, 'venv');
+    const sealed = join(venv, 'lib', 'sealed');
+    mkdirSync(sealed, { recursive: true });
+    writeFileSync(join(sealed, 'x.py'), 'x');
+    chmodSync(sealed, 0o000); // cannot be listed → the lock cannot reach its files
+    try {
+      expect(() => makeTreeReadOnly(venv)).toThrow(/EACCES|EPERM/);
+    } finally {
+      chmodSync(sealed, 0o700);
+    }
+    // A vanished entry is the one tolerated case: locking a tree that is gone is a no-op, not an error.
+    expect(() => makeTreeReadOnly(join(base, 'never-existed'))).not.toThrow();
+  });
 });

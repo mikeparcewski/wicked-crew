@@ -54,7 +54,7 @@ import type {
   RefreshProjectGraphSchema,
   UpdateProjectSchema,
 } from '../src/projects/routes.js';
-import type { DEFAULT_SETTINGS, DEFAULT_SKILLS_MIRROR } from '../src/core/types.js';
+import type { DEFAULT_SETTINGS } from '../src/core/types.js';
 
 /** Compile-time: what the daemon PRODUCES must satisfy what the contract PUBLISHES. */
 function respondsWith<Contract, Produced extends Contract>(): Produced | void {
@@ -407,7 +407,8 @@ respondsWith<
 respondsWith<Wire.RetireMemoryResponse, { erased: number }>();
 accepts<z.input<typeof RetireMemorySchema>, Wire.RetireMemoryBody>();
 
-// Skills keystone (api-types 0.26.0) — the daemon-owned garden plugin root's file manager.
+// Skills keystone (api-types 0.27.0 — the version this branch mints; Copilot on #480 caught the
+// stale 0.26.0 label) — the daemon-owned garden plugin root's file manager.
 // Response direction: every store answer the routes hand through must satisfy the contract.
 respondsWith<Wire.SkillManifest, ReturnType<SkillsStore['manifest']>>();
 respondsWith<Wire.SkillFileTree, ReturnType<SkillsStore['listFiles']>>();
@@ -422,16 +423,18 @@ respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
 respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();
 // snapshot.json is what the ENGINE reads — its skill rows reuse the contract's kind vocabulary.
 respondsWith<Wire.SkillKind, SnapshotManifest['skills'][number]['kind']>();
+// The finding kinds this branch adds (a blocked publish's reasons) are in the published union.
+respondsWith<Wire.SkillFindingKind, 'catalog-invalid' | 'venv-failed' | 'missing-plugin-manifest'>();
 // Request direction: every body the contract lets a client send parses.
 accepts<z.input<typeof SkillRevisionSchema>, Wire.SkillRevisionBody>();
 accepts<z.input<typeof PutSkillFileSchema>, Wire.PutSkillFileBody>();
 accepts<z.input<typeof AddSkillSchema>, Wire.AddSkillBody>();
 accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
-// The settings additions: both keys are optional on the wire and validated at the PUT boundary;
-// the shipped default the daemon fills in for `skills_mirror` is a boolean the wire admits.
+// The ONE settings addition: optional on the wire, validated at the PUT boundary. (`skills_mirror`
+// is withdrawn — design v3.2 §1 — and must NOT be on the wire: the daemon never writes into the
+// user's CLI directories, so a knob for it would be a lie.)
 respondsWith<Wire.SystemSettings['skills_root'], string | undefined>();
-respondsWith<Wire.SystemSettings['skills_mirror'], boolean | undefined>();
-respondsWith<NonNullable<Wire.SystemSettings['skills_mirror']>, typeof DEFAULT_SKILLS_MIRROR>();
+respondsWith<'skills_mirror' extends keyof Wire.SystemSettings ? never : true, true>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {

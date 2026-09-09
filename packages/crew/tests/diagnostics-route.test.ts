@@ -149,6 +149,9 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(body.skills.engineInput).toBe(process.env['WICKED_SKILLS_SNAPSHOT'] ?? null);
     expect(body.skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
     expect(typeof body.skills.root).toBe('string');
+    // The fenced state home is exported (and reported) whatever the skills outcome (core#399 round 3).
+    expect(typeof body.skills.stateHome).toBe('string');
+    expect(body.skills.stateHome).toBe(process.env['WICKED_CREW_STATE_HOME']);
   });
 
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {

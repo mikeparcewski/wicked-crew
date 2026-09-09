@@ -35,6 +35,12 @@ describe('extractPluginRootRefs', () => {
     expect(extractPluginRootRefs('up: ${CLAUDE_PLUGIN_ROOT}/../etc.')).toEqual([{ line: 1, path: '../etc', kind: 'plugin-root' }]);
     expect(extractPluginRootRefs('file: ${CLAUDE_PLUGIN_ROOT}/scripts/x.py.')).toEqual([{ line: 1, path: 'scripts/x.py', kind: 'plugin-root' }]);
   });
+
+  it('keeps every legal filename character — a reference is never truncated into a PREFIX of the file it names (codex round 2)', () => {
+    const text = 'run `${CLAUDE_PLUGIN_ROOT}/scripts/a+b@2.py` then ${CLAUDE_PLUGIN_ROOT}/scripts/x%20y=1,z.sh; and (${CLAUDE_PLUGIN_ROOT}/docs/e~f) "${CLAUDE_PLUGIN_ROOT}/q:r".';
+    expect(extractPluginRootRefs(text).map((r) => r.path)).toEqual(['scripts/a+b@2.py', 'scripts/x%20y=1,z.sh', 'docs/e~f', 'q:r']);
+    expect(extractRelativeRefs('see ../s+p@ce/f,g.md and [x](../a=b/c~d.md), done.').map((r) => r.path)).toEqual(['../s+p@ce/f,g.md', '../a=b/c~d.md']);
+  });
 });
 
 describe('resolvePluginRootRef', () => {
@@ -79,6 +85,22 @@ describe('portabilityIssueOf', () => {
     // A path that merely CONTAINS `scripts/` after a slash is not an invocation.
     expect(portabilityIssueOf('the file lives at plugin/scripts/x.py')).toBeNull();
   });
+
+  it('treats ANY cwd-relative script invocation as non-portable — flags between, `./`, other dirs — not only `<cmd> scripts/` (codex round 2)', () => {
+    expect(portabilityIssueOf('run `python3 -u scripts/alpha/run.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `./scripts/x` now')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `bash scripts/x` now')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `uv run --frozen scripts/x.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `python3 tool.py`')).toBe('cwd-script');
+    expect(portabilityIssueOf('run `node lib/x`')).toBe('cwd-script');
+    // Not cwd-relative: absolute, `$`-expanded, home-relative, a module, an inline program, a bare word.
+    expect(portabilityIssueOf('run `python3 /abs/scripts/x.py`')).toBeNull();
+    expect(portabilityIssueOf('run `node ~/bin/x.js`')).toBeNull();
+    expect(portabilityIssueOf('run `python3 -m pytest`')).toBeNull();
+    expect(portabilityIssueOf('run `python3 -c "print(1)"`')).toBeNull();
+    expect(portabilityIssueOf('run `bash -lc echo`')).toBeNull();
+    expect(portabilityIssueOf('use sh to run it')).toBeNull();
+  });
 });
 
 describe('parseFrontmatter — a STRICT subset', () => {
@@ -106,6 +128,32 @@ describe('parseFrontmatter — a STRICT subset', () => {
     const unbalanced = fm('tags: [a, b]]');
     expect(unbalanced.ok).toBe(false);
     if (!unbalanced.ok) expect(unbalanced.reason).toContain('unbalanced');
+  });
+
+  it('refuses a plain scalar that YAML would read as a nested mapping or a sequence entry (codex round 2); quoted / block forms are fine', () => {
+    const nested = fm('name: x\ndescription: hello: world');
+    expect(nested.ok).toBe(false);
+    if (!nested.ok) expect(nested.reason).toMatch(/line 3: `description`: a plain scalar cannot contain `: `/);
+    expect(fm('description: trailing:').ok).toBe(false);
+    expect(fm('description: - not a list').ok).toBe(false);
+    expect(fm('description: "hello: world"')).toEqual({ ok: true, fields: { description: 'hello: world' } });
+    expect(fm("description: 'a: b'").ok).toBe(true);
+    expect(fm('description: |\n  hello: world\n  - item').ok).toBe(true);
+    expect(fm('description: a URL http://x/y is fine').ok).toBe(true); // `:` without a following space is not a mapping
+  });
+
+  it('checks an indented flow collection / quote continued on the next lines — joined, never folded unchecked (codex round 2)', () => {
+    const open = fm('name: x\ntags:\n  [a, b');
+    expect(open.ok).toBe(false);
+    if (!open.ok) expect(open.reason).toMatch(/line 3: `tags`: unterminated flow sequence/);
+    expect(fm('tags:\n  [a, b]').ok).toBe(true);
+    expect(fm('tags:\n  [a,\n  b]').ok).toBe(true);
+    expect(fm('tags:\n  {k: v').ok).toBe(false);
+    expect(fm('quote:\n  "open').ok).toBe(false);
+    // Nested mappings / lists / multi-line plain text under a key stay accepted (folded, not interpreted).
+    expect(fm('meta:\n  k: v\n  j: w').ok).toBe(true);
+    expect(fm('items:\n  - a\n  - b').ok).toBe(true);
+    expect(fm('description:\n  first line\n  second line').ok).toBe(true);
   });
 });
 

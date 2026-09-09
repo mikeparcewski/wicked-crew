@@ -16,57 +16,90 @@
  *                              a baseline lives as long as ANY snapshot on disk references it
  *   effective/                 the same shape, holding what the operator edits: EVERY skill, enabled
  *                              or not (enablement is manifest state, orthogonal to content)
- *   snapshots/<gen>/           immutable published trees: enabled skills only, nested layout
- *                              verbatim, support closure, `snapshot.json`, `.venv -> baseline venv`
- *                              (only when that env exists)
+ *   snapshots/<gen>/           immutable published trees, LOCKED read-only at publish: enabled
+ *                              skills only, nested layout verbatim, support closure, `snapshot.json`,
+ *                              `.venv -> baseline venv` (only when that env exists), and the
+ *                              generated delivery VIEWS (below)
+ *   snapshots/<gen>/views/copilot/.github/skills/<name>/
+ *                              the copilot view (design v3.2 §2/§4): a copy of every enabled
+ *                              PORTABLE skill's own files under its frontmatter name — what core
+ *                              hands a copilot seat as `--add-dir <snapshot>/views/copilot`.
+ *                              Generated at publish, part of the content hash, never edited. The
+ *                              ONLY view today; `portable` is the admission key for every one.
  *   current -> snapshots/<gen> flipped atomically after each publish; the engine receives the
  *                              absolute REAL path of the generation as `WICKED_SKILLS_SNAPSHOT`
  *                              (engine-env.ts) — the ONLY input core reads (v3.1 §2)
  *   .uv-cache/                 the daemon's own uv cache (`UV_CACHE_DIR`), never the operator's
+ *
+ * NOTHING under this root is ever written into the user's own CLI directories — `~/.codex`,
+ * `~/.pi`, `~/.copilot`, `~/.config/opencode`, `~/.claude` are never touched (design v3.2 §1; the
+ * v3 additive mirror is withdrawn). Skills reach workers only through per-launch, wicked-owned
+ * delivery core performs from the snapshot (Claude: the plugin root; pi: `--skill` per portable
+ * skill; copilot: `--add-dir <snapshot>/views/copilot`). A CLI without a lever (codex today) runs
+ * WITHOUT wicked skills, and a unit on such a seat that requires one (`skill_ref` / mandate) is
+ * REFUSED at launch by core — there is no proceed-with-disclosure setting and never a side channel.
  *
  * # Identity, ownership, hashes
  *
  * A skill is a directory holding `SKILL.md`, keyed by the PATH-DERIVED name
  * `wicked-garden-<dir segments joined by '-'>` — which the live plugin's frontmatter `name` equals
  * for all 142 (unique). A declared name that differs is a `name-mismatch` finding, blocking at
- * publish: the manifest key, the directory, and the invocation identity are one thing. A skill's
- * OWN files are everything under its dir except a nested skill's subtree — the deepest `SKILL.md`
- * ancestor owns a path (v3 §6), so disabling/resetting/replacing a parent never touches a child,
- * and the file API refuses a child's path through the parent's endpoint. Every managed file
- * carries `{baselineHash, effectiveHash, lastPublishedHash}`; provenance is derived from them,
- * never asserted. Every mutation takes `expectedRevision` (CAS) and bumps `revision`; direct
- * filesystem edits are detected by hash at publish and REPORTED (`fs-drift`), never silently
- * trusted.
+ * publish; a declared name that is ANOTHER catalog skill's key is a `name-collision`, blocking
+ * whether or not the declaring skill is enabled: the manifest key, the directory, and the
+ * invocation identity are one thing. A skill's OWN files are everything under its dir except a
+ * nested skill's subtree — the deepest `SKILL.md` ancestor ON DISK owns a path (v3 §6; codex round
+ * 2: ownership follows the filesystem, not the manifest, so a child created by a direct edit is
+ * still nobody else's), so disabling/resetting/replacing a parent never touches a child, and the
+ * file API refuses a child's path through the parent's endpoint. Every managed file carries
+ * `{baselineHash, effectiveHash, lastPublishedHash}`; provenance is derived from them, never
+ * asserted. Every mutation takes `expectedRevision` (CAS) and bumps `revision`; direct filesystem
+ * edits are detected by hash at publish and REPORTED (`fs-drift`), never silently trusted.
  *
  * # Containment (no-follow everywhere)
  *
- * Every path the store reads or writes is lstat-walked FROM THE SKILLS ROOT (`effective/…`,
- * `baseline/<hash>/…`), so a skill directory replaced by a symlink — not only a link inside it —
- * is refused (contain.ts / tree.ts). A path-guard failure on a WRITE answers the normal 2xx
- * `{verdict: 'blocked', findings: [path-invalid]}` envelope, never a 400.
+ * Every path the store reads or writes — a write's DESTINATION (replace/add descendants included),
+ * a baseline READ (reset, the `?side=baseline` copy, every baseline hash lookup) — is lstat-walked
+ * FROM THE SKILLS ROOT (`effective/…`, `baseline/<hash>/…`), so a skill directory replaced by a
+ * symlink, a symlinked child inside it, or a symlinked baseline ancestor is refused, never
+ * followed (contain.ts / tree.ts). A path-guard failure on a WRITE answers the normal 2xx
+ * `{verdict: 'blocked', findings: [path-invalid]}` envelope, never a 400. Names the store itself
+ * owns at the snapshot/root level (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`)
+ * are refused as support paths.
  *
- * # Publish (crash-safe, idempotent on retry)
+ * # Publish (serialized, root-bound, crash-safe, idempotent on retry)
  *
- * Provisions the baseline's `.venv` (awaited — a snapshot never links an env still being written),
- * re-checks the CAS, validates the WHOLE tree — frontmatter, name == path, the core closure
- * COMPLETE (a missing registered ref or an absent transitive mandate is BLOCKING), every
- * `${CLAUDE_PLUGIN_ROOT}/<p>` and `../<p>` reference of an enabled skill resolving INSIDE the
- * would-be snapshot (never out of it), the required `.claude-plugin/*` catalogs present, no
- * unregistered `SKILL.md` — then: allocates the generation from the FILESYSTEM (max existing + 1),
- * writes `snapshots/.staging-<random>/`, renames it to `snapshots/<gen>/` (never over an existing
- * generation), commits the manifest, and only THEN flips `current`. A crash between the commit and
- * the flip is finished at the next boot (`ensureReady`); a torn staging dir is swept by the next
- * publish. Generations beyond the newest three that no LIVE run may still be reading are reaped
- * (`live`, fed from the CoreEvent stream — live-generations.ts), and a baseline is removed only once
- * no generation on disk references it. `analyze` is the same validation as a PURE dry run: it
- * persists nothing and moves no revision; a `blocked` publish persists nothing either.
+ * ONE publish at a time (a second concurrent request is refused, `SkillsPublishInFlightError` →
+ * 409). The operation binds the root's identity (path + realpath) at start and re-checks it after
+ * every await: a `skills_root` change while the baseline env was provisioning aborts the publish
+ * (`SkillsRootChangedError` → 409) — nothing is written to the new root by an operation that
+ * validated the old one. Provisions the baseline's `.venv` (awaited; one provisioning per baseline
+ * hash — a concurrent caller awaits the in-flight one; a snapshot never links an env still being
+ * written; a FAILED provisioning is BLOCKING, `venv-failed` — the shared env is required, not
+ * best-effort), re-checks the CAS, validates the WHOLE tree — frontmatter (strict subset), name ==
+ * path, no cross-catalog name collision, the core closure COMPLETE (a missing registered ref or an
+ * absent transitive mandate is BLOCKING), every `${CLAUDE_PLUGIN_ROOT}/<p>` and `../<p>` reference
+ * of an enabled skill resolving INSIDE the would-be snapshot (never out of it), the plugin manifest
+ * naming the plugin and the `.claude-plugin/*` catalogs present AND well-formed, no unregistered
+ * `SKILL.md` — then: allocates the generation from the FILESYSTEM (max existing + 1), writes
+ * `snapshots/.staging-<random>/` (the snapshot files + the generated views), renames it to
+ * `snapshots/<gen>/` (never over an existing generation), LOCKS it read-only, commits the manifest
+ * (the venv state included — nothing is persisted before validation passes), and only THEN flips
+ * `current`. A crash between the commit and the flip is finished at the next boot (`ensureReady`);
+ * a torn staging dir is swept by the next publish. Generations beyond the newest three that no
+ * LIVE run may still be reading are reaped (`live`, fed from the CoreEvent stream —
+ * live-generations.ts), and a baseline is removed only once no generation on disk references it.
+ * `analyze` is the same validation as a PURE dry run: it persists nothing and moves no revision; a
+ * `blocked` publish persists nothing either — not the drift it observed, not the provisioning state.
  *
- * # `current` is never trusted
+ * # `current` is never trusted — for the daemon's whole lifetime
  *
  * `currentSnapshot()` realpaths the link, requires the target to be a generation directory directly
- * under `snapshots/`, requires a well-formed `snapshot.json` whose `gen` matches the directory, and
- * re-hashes the tree against `contentHash` before it exports the path or reads the metadata. Any
- * failure is `SkillsCurrentInvalidError` — a loud config error, never a silent "not published".
+ * under `snapshots/`, requires a well-formed `snapshot.json` whose `gen` matches the directory and
+ * whose skill rows are safe relative `skills/…` dirs with the path-derived name, and re-hashes the
+ * tree against `contentHash` before it exports the path or reads the metadata — on EVERY call
+ * (codex round 2: a verification cached by link text was ineffective after its first success; a
+ * snapshot modified under a running daemon is refused by the same store instance). Any failure is
+ * `SkillsCurrentInvalidError` — a loud config error, never a silent "not published".
  */
 
 import { randomBytes } from 'node:crypto';
@@ -97,7 +130,6 @@ import type {
   SkillFileTree,
   SkillKind,
   SkillManifest,
-  SkillMirrorState,
   SkillMutationResult,
   SkillPublishResult,
   SkillReadResult,
@@ -125,6 +157,7 @@ import {
   nestedSkillCreateGuard,
   noBaselineGuard,
   nonPortableGuard,
+  SKILL_NAME_RE,
   supportFileGuard,
   verdictOf,
   type CatalogView,
@@ -151,7 +184,7 @@ import {
   writeFileAtomic,
   type FileRecord,
 } from './tree.js';
-import { baselineVenvDir, UV_CACHE_DIRNAME, type VenvProvisioner } from './venv.js';
+import { baselineVenvDir, UV_CACHE_DIRNAME, VENV_READY_MARKER, type VenvProvisioner } from './venv.js';
 
 /** Explicit root override — the more specific instruction, and what the hermetic test harness arms. */
 export const SKILLS_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
@@ -163,6 +196,26 @@ export const BASELINE_DIRNAME = 'baseline';
 export const SNAPSHOTS_DIRNAME = 'snapshots';
 export const CURRENT_LINKNAME = 'current';
 export const SNAPSHOT_MANIFEST_FILENAME = 'snapshot.json';
+/** The generated delivery views inside a snapshot (design v3.2 §4). */
+export const VIEWS_DIRNAME = 'views';
+/** The copilot view root inside a snapshot — what core passes as `--add-dir`. */
+export const COPILOT_VIEW_REL = `${VIEWS_DIRNAME}/copilot`;
+/** Where the copilot view lays its skills out: copilot loads `.github/skills/<name>/SKILL.md` from an added dir. */
+export const COPILOT_VIEW_SKILLS_REL = `${COPILOT_VIEW_REL}/.github/skills`;
+/** The `.venv` link name inside a snapshot (the shared per-baseline env). */
+const VENV_LINKNAME = '.venv';
+/**
+ * Root-level names the store itself owns — refused as support paths (codex round 2: a support
+ * file named `snapshot.json` published `clear` and then failed `current` verification because
+ * publish overwrote it with the generated metadata).
+ */
+export const RESERVED_SUPPORT_NAMES: ReadonlySet<string> = new Set([
+  SNAPSHOT_MANIFEST_FILENAME,
+  MANIFEST_FILENAME,
+  CURRENT_LINKNAME,
+  VIEWS_DIRNAME,
+  VENV_LINKNAME,
+]);
 export const MANIFEST_VERSION = 2;
 /** Generations kept after a publish (the newest `current` included) — older ones are reaped. */
 export const KEEP_GENERATIONS = 3;
@@ -224,11 +277,31 @@ export class SkillsCurrentInvalidError extends Error {
   }
 }
 
-/** A publish could not land its generation directory without destroying an existing one. */
+/** A publish could not land its generation directory without destroying an existing one, or could not lock it. */
 export class SkillsPublishError extends Error {
   constructor(detail: string) {
     super(`publish refused: ${detail}`);
     this.name = 'SkillsPublishError';
+  }
+}
+
+/** A publish is already in flight — one at a time; the 409 of a concurrent publish. */
+export class SkillsPublishInFlightError extends Error {
+  constructor(readonly revision: number) {
+    super('publish refused: another publish is in flight — one publish runs at a time; wait for it and retry against the revision it answers');
+    this.name = 'SkillsPublishInFlightError';
+  }
+}
+
+/** The skills root changed identity while a publish was awaiting its baseline env — the operation is aborted, nothing was written. */
+export class SkillsRootChangedError extends Error {
+  constructor(
+    readonly from: string,
+    readonly to: string,
+    readonly revision: number,
+  ) {
+    super(`publish aborted: the skills root changed from ${from} to ${to} while the baseline environment was being provisioned — nothing was published; re-read GET /skills and publish against the new root`);
+    this.name = 'SkillsRootChangedError';
   }
 }
 
@@ -264,21 +337,56 @@ export interface SnapshotSkillRow {
   nested: boolean;
 }
 
+/** One generated delivery view inside a snapshot: its root (snapshot-relative) and the skills it carries. */
+export interface SnapshotView {
+  /** Snapshot-relative dir core hands the CLI (`views/copilot` → `--add-dir <snapshot>/views/copilot`). */
+  dir: string;
+  /** Frontmatter names of the enabled, PORTABLE skills laid out in the view, sorted. */
+  skills: string[];
+}
+
 /** `snapshot.json` inside every published generation — what the engine reads (never a parent dir). */
 export interface SnapshotManifest {
   gen: number;
   contentHash: string;
   gardenSource: { kind: SkillSourceKind; path: string; plugin_version: string; baseline: string };
-  /** The baseline env's state at publish: `synced` ⇒ `.venv` links it; anything else ⇒ no link. */
+  /** The baseline env's state at publish: `synced` ⇒ `.venv` links it; `skipped` ⇒ no link (nothing to provision). */
   venv: SkillVenvState;
   skills: SnapshotSkillRow[];
+  /** The generated delivery views (design v3.2 §4) — today only `copilot`. */
+  views: { copilot: SnapshotView };
 }
 
-/** A skill row is `{name, dir}` strings + a boolean `portable` (the seat-compatibility fact core requires). */
+/**
+ * A skill row is `{name, dir}` + a boolean `portable` (the seat-compatibility fact core requires),
+ * and — codex round 2: metadata is never trusted to name paths — `name` is a legal skill name,
+ * `dir` a safe relative `skills/<…>` path (no `..`, no absolute, no empty segment, no separator
+ * but the nested `/`) whose path-derived name IS `name`. A row that fails this cannot address any
+ * file of the snapshot it sits in.
+ */
 function isSnapshotSkillRow(row: unknown): boolean {
   if (typeof row !== 'object' || row === null) return false;
   const r = row as Partial<SnapshotSkillRow>;
-  return typeof r.name === 'string' && r.name !== '' && typeof r.dir === 'string' && r.dir !== '' && typeof r.portable === 'boolean';
+  if (typeof r.name !== 'string' || !SKILL_NAME_RE.test(r.name) || !r.name.startsWith(SKILL_NAME_PREFIX)) return false;
+  if (typeof r.dir !== 'string' || typeof r.portable !== 'boolean') return false;
+  let segments: string[];
+  try {
+    segments = validateRelSegments(r.dir);
+  } catch {
+    return false;
+  }
+  if (segments.length < 2 || segments[0] !== SKILLS_SUBDIR) return false;
+  return derivedSkillName(segments.slice(1).join('/')) === r.name;
+}
+
+/** The `views` block: exactly the copilot view at its fixed dir, naming a sorted subset of the rows' names. */
+function isSnapshotViews(views: unknown, rows: ReadonlyArray<SnapshotSkillRow>): boolean {
+  if (typeof views !== 'object' || views === null) return false;
+  const copilot = (views as { copilot?: Partial<SnapshotView> }).copilot;
+  if (typeof copilot !== 'object' || copilot === null) return false;
+  if (copilot.dir !== COPILOT_VIEW_REL || !Array.isArray(copilot.skills)) return false;
+  const portable = new Set(rows.filter((r) => r.portable).map((r) => r.name));
+  return copilot.skills.every((n) => typeof n === 'string' && portable.has(n));
 }
 
 /** Whether a skill dir is nested: anything deeper than `skills/<dir>`. */
@@ -353,10 +461,12 @@ export class SkillsStore {
   private readonly warn: (message: string) => void;
   /** Generations live runs may still read — the reaper keeps them (fed by `observeEvent`). */
   readonly live = new LiveGenerations();
-  /** The VERIFIED answer for one `current` link target — snapshots are immutable, so it holds until the link moves. */
-  private currentMemo: { target: string; value: { gen: number; path: string } } | null = null;
   /** `currentSnapshot()?.gen` memoized for the per-event hot path; `undefined` = not yet read. */
   private currentGenMemo: number | null | undefined = undefined;
+  /** The one publish that may run at a time (module header) — `null` when none is in flight. */
+  private publishInFlight: Promise<SkillPublishResult> | null = null;
+  /** One provisioning per baseline hash: a concurrent caller awaits the in-flight one. */
+  private readonly venvInFlight = new Map<string, Promise<SkillVenvState>>();
 
   constructor(opts: SkillsStoreOptions) {
     this.rootDir = opts.root;
@@ -373,11 +483,18 @@ export class SkillsStore {
     return this.rootDir;
   }
 
-  /** Re-aim the store (the `skills_root` setting changed). Touches no disk. */
+  /**
+   * Re-aim the store (the `skills_root` setting changed). Touches no disk. A publish in flight
+   * against the previous root detects the change at its next await and aborts (module header).
+   */
   reroot(root: string): void {
     this.rootDir = root;
-    this.currentMemo = null;
     this.currentGenMemo = undefined;
+  }
+
+  /** Whether a publish is running right now (diagnostics + tests). */
+  isPublishing(): boolean {
+    return this.publishInFlight !== null;
   }
 
   effectiveDir(): string {
@@ -458,6 +575,9 @@ export class SkillsStore {
     if (typeof m.baseline !== 'string' || typeof m.baselines !== 'object' || m.baselines === null) {
       throw new SkillsManifestCorruptError(path, 'no baseline record');
     }
+    // The withdrawn v3.2 mirror ledger (pre-release manifests only): dropped on read, never
+    // persisted again — it recorded absolute paths under the user's home.
+    delete (m as Record<string, unknown>)['mirror'];
     return m as SkillManifest;
   }
 
@@ -485,7 +605,9 @@ export class SkillsStore {
    * The published snapshot `current` resolves to, VERIFIED (module header), or `null` when there
    * is no link (never published). `path` is the absolute REAL path of the generation — exactly the
    * value the engine is handed as `WICKED_SKILLS_SNAPSHOT` (v3.1 §2). A link that exists but fails
-   * verification throws `SkillsCurrentInvalidError`. The verified answer is memoized per link target.
+   * verification throws `SkillsCurrentInvalidError`. Verified on EVERY call — never memoized by
+   * link text (codex round 2): the answer holds for the daemon's whole lifetime only because it is
+   * re-derived each time it is handed out.
    */
   currentSnapshot(): { gen: number; path: string } | null {
     const link = this.currentLink();
@@ -497,10 +619,7 @@ export class SkillsStore {
       if (errnoCode(err) === 'EINVAL') throw new SkillsCurrentInvalidError(link, 'it is not a symbolic link');
       throw err;
     }
-    if (this.currentMemo !== null && this.currentMemo.target === target) return this.currentMemo.value;
-    const value = this.verifyCurrent(link, target);
-    this.currentMemo = { target, value };
-    return value;
+    return this.verifyCurrent(link, target);
   }
 
   private verifyCurrent(link: string, target: string): { gen: number; path: string } {
@@ -559,15 +678,18 @@ export class SkillsStore {
     if (typeof s.contentHash !== 'string' || !CONTENT_HASH_RE.test(s.contentHash)) return `${SNAPSHOT_MANIFEST_FILENAME} has no sha256 contentHash`;
     if (!Array.isArray(s.skills)) return `${SNAPSHOT_MANIFEST_FILENAME} has no skills array`;
     if (!s.skills.every(isSnapshotSkillRow)) {
-      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row without {name, dir} strings and a boolean portable — core cannot judge seat compatibility from it`;
+      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, portable: boolean} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
     }
     if (typeof s.gardenSource !== 'object' || s.gardenSource === null || typeof s.gardenSource.baseline !== 'string') {
       return `${SNAPSHOT_MANIFEST_FILENAME} has no gardenSource.baseline`;
     }
+    if (!isSnapshotViews(s.views, s.skills as SnapshotSkillRow[])) {
+      return `${SNAPSHOT_MANIFEST_FILENAME} has no well-formed views block ({copilot: {dir: "${COPILOT_VIEW_REL}", skills: [portable names]}})`;
+    }
     return s as SnapshotManifest;
   }
 
-  /** The verified `snapshot.json` of a published generation (the mirror reads it through here). */
+  /** The verified `snapshot.json` of a published generation. */
   readSnapshotManifest(dir: string): SnapshotManifest {
     const parsed = this.parseSnapshotManifest(dir);
     if (typeof parsed === 'string') throw new SkillsCurrentInvalidError(dir, parsed);
@@ -629,9 +751,8 @@ export class SkillsStore {
     const effective = this.effectiveDir();
     rmSync(effective, { recursive: true, force: true });
     copyFiles(bundle, effective);
-    rmSync(this.snapshotsDir(), { recursive: true, force: true });
+    removeTreeForce(this.snapshotsDir()); // published generations are locked read-only
     rmSync(this.currentLink(), { force: true });
-    this.currentMemo = null;
     this.currentGenMemo = null;
 
     const files: Record<string, SkillFileRecord> = {};
@@ -646,7 +767,6 @@ export class SkillsStore {
       skills: {},
       files,
       published: null,
-      mirror: { ledger: {}, skipped_non_portable: [], foreign_modified: {}, last_run: null },
     };
     this.rebuildCatalog(m);
     this.writeManifest(m);
@@ -704,31 +824,64 @@ export class SkillsStore {
   }
 
   /**
-   * Provision the baseline's `.venv` unless it is already `synced`, record the outcome (state, not
-   * a user mutation — no revision bump), and lock a synced env read-only. AWAITED by publish.
+   * Provision the baseline's `.venv` unless the on-disk ready marker says it is complete, and lock
+   * a synced env read-only (the marker is written first, so a locked env is always a complete
+   * one). PERSISTS NOTHING in the manifest — the publish that succeeds records the state in its
+   * commit (a blocked publish must persist nothing, provisioning state included; codex round 2).
+   * One provisioning per hash: a concurrent caller awaits the in-flight one. A `.venv` without the
+   * marker is a torn earlier sync and is removed before `uv sync` runs again — the manifest is
+   * never the authority on what exists on disk. AWAITED by publish.
    */
-  private async ensureVenv(hash: string): Promise<SkillVenvState> {
-    const before = this.manifest().baselines[hash];
-    if (before?.venv === 'synced' && existsSync(baselineVenvDir(this.baselineDir(hash)))) return 'synced';
-    const state = await this.provisionVenv(this.baselineDir(hash), { log: this.warn, cacheDir: this.uvCacheDir() });
-    if (state === 'synced') makeTreeReadOnly(baselineVenvDir(this.baselineDir(hash)));
-    if (!this.isSeeded()) return state; // torn down meanwhile
-    const m = this.manifest();
-    const record = m.baselines[hash];
-    if (record !== undefined && record.venv !== state) {
-      record.venv = state;
-      this.writeManifest(m);
-    }
-    return state;
+  private ensureVenv(hash: string): Promise<SkillVenvState> {
+    const baselineDir = this.baselineDir(hash);
+    const venvDir = baselineVenvDir(baselineDir);
+    if (existsSync(join(venvDir, VENV_READY_MARKER))) return Promise.resolve('synced');
+    const inFlight = this.venvInFlight.get(hash);
+    if (inFlight !== undefined) return inFlight;
+    const run = (async (): Promise<SkillVenvState> => {
+      if (this.entryExists(venvDir)) {
+        this.warn(`[skills] ${venvDir} exists without its ready marker (a torn earlier sync) — removed and re-provisioned`);
+        removeTreeForce(venvDir);
+      }
+      const state = await this.provisionVenv(baselineDir, { log: this.warn, cacheDir: this.uvCacheDir() });
+      if (state !== 'synced') return state;
+      if (!existsSync(venvDir)) {
+        this.warn(`[skills] the provisioner answered synced but ${venvDir} does not exist — recorded as failed`);
+        return 'failed';
+      }
+      try {
+        writeFileAtomic(join(venvDir, VENV_READY_MARKER), `synced ${this.now()}\n`);
+        makeTreeReadOnly(venvDir);
+      } catch (err) {
+        // An env this daemon cannot lock read-only is not the shared read-only env the contract
+        // requires (tree.ts surfaces the permission failure; codex round 2) — a failed provisioning.
+        this.warn(`[skills] could not lock ${venvDir} read-only: ${err instanceof Error ? err.message : String(err)} — recorded as failed`);
+        return 'failed';
+      }
+      return 'synced';
+    })();
+    const tracked = run.finally(() => {
+      this.venvInFlight.delete(hash);
+    });
+    this.venvInFlight.set(hash, tracked);
+    return tracked;
   }
 
   /**
-   * Boot / settings entry point: seed when unseeded, finish a publish a crash interrupted between
-   * the manifest commit and the `current` flip, publish when nothing is published. Throws
-   * `SkillsSourceUnavailableError` for the seed and `SkillsCurrentInvalidError` /
-   * `SkillsManifestCorruptError` for a corrupt root; a blocked first publish is returned, not thrown.
+   * Boot / settings entry point: wait out a publish in flight (never start a second one), seed
+   * when unseeded, finish a publish a crash interrupted between the manifest commit and the
+   * `current` flip, publish when nothing is published. Throws `SkillsSourceUnavailableError` for
+   * the seed and `SkillsCurrentInvalidError` / `SkillsManifestCorruptError` for a corrupt root; a
+   * blocked first publish is returned, not thrown.
    */
   async ensureReady(): Promise<{ seeded: boolean; published: SkillPublishResult | null }> {
+    while (this.publishInFlight !== null) {
+      try {
+        await this.publishInFlight;
+      } catch {
+        // Its own caller reports that outcome; this entry point only needed it to settle.
+      }
+    }
     const seeded = this.seed().seeded;
     const m = this.manifest();
     const current = this.currentSnapshot();
@@ -757,9 +910,21 @@ export class SkillsStore {
     return walkFiles(this.effectiveDir()).map((f) => ({ rel: f.rel, abs: f.abs, sha: sha256Hex(readFileSync(f.abs)) }));
   }
 
-  /** Every manifest `dir` — what a skill's own-files walk prunes nested skills against. */
+  /** Every manifest `dir` — the registered skills. */
   private manifestDirs(m: SkillManifest): Set<string> {
     return new Set(Object.values(m.skills).map((e) => e.dir));
+  }
+
+  /**
+   * Every skill dir that OWNS files (v3 §6): the registered dirs plus every dir holding a `SKILL.md`
+   * on disk in `effective/` — ownership follows the FILESYSTEM, so a nested skill created by a
+   * direct edit (unregistered until publish reports it) still owns its subtree: a parent's
+   * edit/reset/replace never reaches it, and the parent's endpoint refuses its paths (codex round 2).
+   */
+  private ownershipDirs(m: SkillManifest): Set<string> {
+    const dirs = this.manifestDirs(m);
+    for (const dir of skillDirsOf(walkFiles(this.effectiveDir()))) dirs.add(dir);
+    return dirs;
   }
 
   /** Plugin-relative paths of the skill's own files ON DISK in `base` (nested skill subtrees excluded). */
@@ -770,10 +935,25 @@ export class SkillsStore {
     }));
   }
 
-  /** Manifest file records that belong to the skill (nested skills excluded), keyed by plugin-relative path. */
+  /** Manifest file records that belong to the skill (nested skills — registered or on disk — excluded). */
   private ownRecords(m: SkillManifest, dir: string): Array<[string, SkillFileRecord]> {
-    const dirs = this.manifestDirs(m);
+    const dirs = this.ownershipDirs(m);
     return Object.entries(m.files).filter(([rel]) => owningSkillDir(rel, dirs) === dir);
+  }
+
+  /**
+   * The baseline copy of a plugin-relative file, lstat-walked from the root (a symlinked baseline
+   * ancestor is refused, never read through), or `null` when the baseline has no such file.
+   */
+  private baselineFile(m: SkillManifest, rel: string): string | null {
+    const abs = this.containedBaseline(m.baseline, rel.split('/'));
+    return this.entryExists(abs) && lstatSync(abs).isFile() ? abs : null;
+  }
+
+  /** `sha256` of the baseline copy of `rel`, or `null` when the baseline has none. */
+  private baselineHashOf(m: SkillManifest, rel: string): string | null {
+    const abs = this.baselineFile(m, rel);
+    return abs === null ? null : sha256Hex(readFileSync(abs));
   }
 
   private catalogView(m: SkillManifest): CatalogView {
@@ -838,7 +1018,7 @@ export class SkillsStore {
 
   /** Every file record grouped by the skill dir that owns it (`null` = support), computed once per pass. */
   private recordsByOwner(m: SkillManifest): Map<string | null, Array<[string, SkillFileRecord]>> {
-    const dirs = this.manifestDirs(m);
+    const dirs = this.ownershipDirs(m);
     const out = new Map<string | null, Array<[string, SkillFileRecord]>>();
     for (const pair of Object.entries(m.files)) {
       const owner = owningSkillDir(pair[0], dirs);
@@ -867,29 +1047,42 @@ export class SkillsStore {
       const fileConflict = records.some(([, r]) => r.conflict);
       entry.upgradeAvailable = fileConflict;
       entry.conflict = fileConflict || (entry.conflict && userAdded);
-      const skillMdAbs = this.pluginPath(`${entry.dir}/SKILL.md`);
+      const skillMd = this.regularFileBytes(this.pluginPath(`${entry.dir}/SKILL.md`));
       let kind: SkillKind = 'module';
-      if (existsSync(skillMdAbs)) {
-        const text = readFileSync(skillMdAbs, 'utf8');
+      if (skillMd !== null) {
+        const text = skillMd.toString('utf8');
         catalogMd.set(name, text);
         const parsed = parseFrontmatter(text);
         if (parsed.ok) kind = skillKindOf(parsed.fields);
       }
       entry.kind = kind;
+      // Judged from what is on disk as a REGULAR file: a recorded file that vanished or became a
+      // link (a direct edit) is drift — publish reports it; the mutation in progress must not die on it.
       entry.portable = records
         .filter(([, r]) => r.effectiveHash !== null)
         .every(([rel]) => {
-          const buf = readFileSync(this.pluginPath(rel));
-          return looksBinary(buf) || portabilityIssueOf(buf.toString('utf8')) === null;
+          const buf = this.regularFileBytes(this.pluginPath(rel));
+          return buf === null || looksBinary(buf) || portabilityIssueOf(buf.toString('utf8')) === null;
         });
     }
     const closure = coreClosure(this.registeredRefs(), catalogMd);
     for (const [name, entry] of Object.entries(m.skills)) entry.core = closure.core.has(name);
   }
 
+  /** The bytes of `abs` when it is a REGULAR file (never through a link), `null` when absent or anything else. */
+  private regularFileBytes(abs: string): Buffer | null {
+    try {
+      if (!lstatSync(abs).isFile()) return null;
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') return null;
+      throw err;
+    }
+    return readFileSync(abs);
+  }
+
   /** Whether the current baseline ships a skill at `dir` (a user-added skill has no baseline dir). */
   private hasBaselineDir(m: SkillManifest, dir: string): boolean {
-    return existsSync(join(this.baselineDir(m.baseline), ...dir.split('/'), 'SKILL.md'));
+    return this.baselineFile(m, `${dir}/SKILL.md`) !== null;
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────────────────────
@@ -905,7 +1098,7 @@ export class SkillsStore {
     const entry = m.skills[name];
     if (entry === undefined) throw new UnknownSkillError(name);
     this.assertSkillDirContained(entry.dir);
-    const files = this.ownFilesIn(this.effectiveDir(), entry.dir, this.manifestDirs(m)).map((f) => ({
+    const files = this.ownFilesIn(this.effectiveDir(), entry.dir, this.ownershipDirs(m)).map((f) => ({
       path: f.rel.slice(entry.dir.length + 1),
       size: statSync(f.abs).size,
       sha256: sha256Hex(readFileSync(f.abs)),
@@ -916,8 +1109,8 @@ export class SkillsStore {
 
   /**
    * Contain a skill-relative path (raw from the URL): decode once, validate, refuse a path a NESTED
-   * skill owns, lstat-walk FROM THE ROOT through the skill dir refusing symlinks. Returns the
-   * on-disk target in `effective/` and both spellings of the path.
+   * skill owns (registered or merely present on disk), lstat-walk FROM THE ROOT through the skill
+   * dir refusing symlinks. Returns the on-disk target in `effective/` and both spellings of the path.
    */
   resolveSkillFile(name: string, rawRel: string): { abs: string; rel: string; pluginRel: string } {
     const m = this.manifest();
@@ -926,26 +1119,38 @@ export class SkillsStore {
     const segments = validateRelSegments(decodePathParam(rawRel));
     const rel = segments.join('/');
     const pluginRel = `${entry.dir}/${rel}`;
-    const owner = owningSkillDir(pluginRel, this.manifestDirs(m));
+    const owner = owningSkillDir(pluginRel, this.ownershipDirs(m));
     if (owner !== entry.dir) {
-      const ownerName = Object.entries(m.skills).find(([, e]) => e.dir === owner)?.[0] ?? owner;
+      const ownerName = Object.entries(m.skills).find(([, e]) => e.dir === owner)?.[0];
       throw new SkillPathError(
         'nested-skill',
-        `${rel} belongs to the nested skill ${ownerName} (${owner}) — address it through that skill`,
+        ownerName === undefined
+          ? `${rel} belongs to the nested skill at ${owner} (a SKILL.md on disk the manifest has not registered) — register it with POST /skills or remove it; it is not addressed through ${name}`
+          : `${rel} belongs to the nested skill ${ownerName} (${owner}) — address it through that skill`,
       );
     }
     const abs = this.containedEffective([...entry.dir.split('/'), ...segments]);
     return { abs, rel, pluginRel };
   }
 
-  /** Contain a root support path: not under `skills/` (those belong to a skill's endpoint), no symlinks. */
+  /**
+   * Contain a root support path: not under `skills/` (those belong to a skill's endpoint), not a
+   * name the store itself owns (`RESERVED_SUPPORT_NAMES`), no symlinks.
+   */
   resolveSupportFile(rawRel: string): { abs: string; rel: string } {
     const segments = validateRelSegments(decodePathParam(rawRel));
     const rel = segments.join('/');
-    if (segments[0] === SKILLS_SUBDIR) {
+    const head = segments[0] ?? '';
+    if (head === SKILLS_SUBDIR) {
       throw new SkillPathError(
         'nested-skill',
         `${rel} is under ${SKILLS_SUBDIR}/ — skill files are addressed through /skills/:name/files`,
+      );
+    }
+    if (RESERVED_SUPPORT_NAMES.has(head)) {
+      throw new SkillPathError(
+        'reserved',
+        `${rel}: ${head} is reserved — the store generates it at publish (${SNAPSHOT_MANIFEST_FILENAME}, ${VIEWS_DIRNAME}/), links it (${VENV_LINKNAME}, ${CURRENT_LINKNAME}) or keeps its state in it (${MANIFEST_FILENAME}); a support file by that name would be overwritten or break the snapshot`,
       );
     }
     return { abs: this.containedEffective(segments), rel };
@@ -992,16 +1197,18 @@ export class SkillsStore {
     if (!(err instanceof SkillPathError)) throw err;
     const explanation =
       err.reason === 'symlink'
-        ? 'the skills root never follows symlinks — a link on the path (the skill directory itself included) would redirect the write outside the store'
+        ? 'the skills root never follows symlinks — a link on the path (the skill directory itself, a child directory, or a baseline ancestor included) would redirect the operation outside the store'
         : err.reason === 'nested-skill'
           ? 'a nested skill owns its own files; address it through that skill'
-          : 'the path must be a normalized skill-relative POSIX path that stays inside the skill directory';
+          : err.reason === 'reserved'
+            ? 'the name is owned by the store at that level (snapshot metadata, the manifest, the current link, the generated views, the shared env link)'
+            : 'the path must be a normalized skill-relative POSIX path that stays inside the skill directory';
     return finding('path-invalid', 'blocking', explanation, err.message, { skill, file });
   }
 
   /** Re-hash the skill's own files on disk into the records (absent baseline files stay as `effectiveHash: null`). */
   private refreshRecords(m: SkillManifest, dir: string): void {
-    const onDisk = new Map(this.ownFilesIn(this.effectiveDir(), dir, this.manifestDirs(m)).map((f) => [f.rel, f.abs]));
+    const onDisk = new Map(this.ownFilesIn(this.effectiveDir(), dir, this.ownershipDirs(m)).map((f) => [f.rel, f.abs]));
     for (const [rel, record] of this.ownRecords(m, dir)) {
       const abs = onDisk.get(rel);
       if (abs === undefined) {
@@ -1012,11 +1219,9 @@ export class SkillsStore {
         onDisk.delete(rel);
       }
     }
-    const base = this.baselineDir(m.baseline);
     for (const [rel, abs] of onDisk) {
-      const baseAbs = this.pluginPath(rel, base);
       m.files[rel] = {
-        baselineHash: existsSync(baseAbs) ? sha256Hex(readFileSync(baseAbs)) : null,
+        baselineHash: this.baselineHashOf(m, rel),
         effectiveHash: sha256Hex(readFileSync(abs)),
         lastPublishedHash: null,
         conflict: false,
@@ -1032,13 +1237,32 @@ export class SkillsStore {
     return entry;
   }
 
+  /**
+   * Enable — with the content + containment guards a write gets (codex round 2: enable used to
+   * flip the flag blind): the skill dir and its `SKILL.md` are lstat-walked from the root (a
+   * symlinked skill is `path-invalid`), the `SKILL.md` must exist (`missing-skill-md`), parse
+   * (`frontmatter-invalid`) and declare the path-derived name (`name-mismatch`) — a skill that
+   * would block the next publish is not enabled.
+   */
   enable(name: string, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
     const entry = this.requireEntry(m, name, expectedRevision);
-    if (entry.enabled) return this.result(m, name, []);
+    const skillMdRel = `${entry.dir}/SKILL.md`;
+    let skillMdAbs: string;
+    try {
+      skillMdAbs = this.containedEffective(skillMdRel.split('/'));
+    } catch (err) {
+      return this.blocked(m, [this.pathFinding(err, name, skillMdRel)]);
+    }
+    // The walk above ended at the leaf without crossing a link: an existing entry here is the real file.
+    const skillMd = this.entryExists(skillMdAbs) && lstatSync(skillMdAbs).isFile() ? readFileSync(skillMdAbs, 'utf8') : undefined;
+    this.recomputeDerived(m); // `core` from the live registered refs, never the cached entry
+    const findings = frontmatterGuard(skillMd, name, { isCore: entry.core, file: skillMdRel });
+    if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
+    if (entry.enabled) return this.result(m, name, findings);
     entry.enabled = true;
     this.commit(m);
-    return this.result(m, name, []);
+    return this.result(m, name, findings);
   }
 
   /** Disable — core membership is RECOMPUTED here (registered refs are read at use time), never trusted from the cached entry. */
@@ -1054,22 +1278,31 @@ export class SkillsStore {
     return this.result(m, name, findings);
   }
 
-  /** Restore the skill's own files from the current baseline (mode bits ride the copy). `enabled` is untouched by design. */
+  /**
+   * Restore the skill's own files from the current baseline (mode bits ride the copy). `enabled`
+   * is untouched by design. BOTH sides are walked from the root: the effective skill dir and the
+   * baseline skill dir — every ancestor (`baseline/`, `<hash>/`, `skills/`, …) — so a symlinked
+   * baseline ancestor is refused, never imported from (codex round 2). Nested skills (registered or
+   * on disk) are never touched.
+   */
   reset(name: string, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
     const entry = this.requireEntry(m, name, expectedRevision);
-    const findings = compact([noBaselineGuard(name, !this.hasBaselineDir(m, entry.dir))]);
-    if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
+    let baseSkillDir: string;
     try {
       this.assertSkillDirContained(entry.dir);
+      baseSkillDir = this.containedBaseline(m.baseline, entry.dir.split('/'));
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
+    const findings = compact([noBaselineGuard(name, !this.hasBaselineDir(m, entry.dir))]);
+    if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     const base = this.baselineDir(m.baseline);
     const baseDirs = skillDirsOf(walkFiles(base));
-    const fresh = this.ownFilesIn(base, entry.dir, baseDirs);
+    // `walkFiles` from the contained skill dir never follows a link below it; the ancestors were walked above.
+    const fresh = walkFiles(baseSkillDir, (rel) => baseDirs.has(`${entry.dir}/${rel}`)).map((f) => ({ rel: `${entry.dir}/${f.rel}`, abs: f.abs }));
     const effective = this.effectiveDir();
-    removeFiles(this.ownFilesIn(effective, entry.dir, this.manifestDirs(m)), effective);
+    removeFiles(this.ownFilesIn(effective, entry.dir, this.ownershipDirs(m)), effective);
     copyFiles(fresh, effective);
     for (const [rel, record] of this.ownRecords(m, entry.dir)) {
       if (record.baselineHash === null) delete m.files[rel];
@@ -1128,9 +1361,8 @@ export class SkillsStore {
     const sha = sha256Hex(Buffer.from(content, 'utf8'));
     const record = m.files[target.rel];
     if (record === undefined) {
-      const baseAbs = this.pluginPath(target.rel, this.baselineDir(m.baseline));
       m.files[target.rel] = {
-        baselineHash: existsSync(baseAbs) ? sha256Hex(readFileSync(baseAbs)) : null,
+        baselineHash: this.baselineHashOf(m, target.rel),
         effectiveHash: sha,
         lastPublishedHash: null,
         conflict: false,
@@ -1140,6 +1372,28 @@ export class SkillsStore {
     }
     this.commit(m);
     return this.result(m, null, findings);
+  }
+
+  /**
+   * Every destination of a multi-file write, lstat-walked from the ROOT (the skill dir AND every
+   * component below it): a symlinked child directory inside the skill would otherwise redirect a
+   * descendant write outside the store (codex round 2: `gamma/link -> /outside` + `link/victim.txt`).
+   * Answers the blocking `path-invalid` finding for the first refused path, or the resolved targets.
+   */
+  private containedDestinations(
+    name: string,
+    dir: string,
+    files: Readonly<Record<string, string>>,
+  ): { targets: Array<{ rel: string; abs: string; text: string }> } | { finding: SkillConflictFinding } {
+    const targets: Array<{ rel: string; abs: string; text: string }> = [];
+    for (const [rel, text] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      try {
+        targets.push({ rel, abs: this.containedEffective([...dir.split('/'), ...rel.split('/')]), text });
+      } catch (err) {
+        return { finding: this.pathFinding(err, name, rel) };
+      }
+    }
+    return { targets };
   }
 
   /** Add a user skill at `skills/<name minus the prefix>`. */
@@ -1154,7 +1408,9 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, dir)]);
     }
-    for (const [rel, text] of Object.entries(files)) writeFileAtomic(this.pluginPath(`${dir}/${rel}`), text);
+    const destinations = this.containedDestinations(name, dir, files);
+    if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
+    for (const t of destinations.targets) writeFileAtomic(t.abs, t.text);
     m.skills[name] = {
       dir,
       kind: 'module',
@@ -1172,7 +1428,11 @@ export class SkillsStore {
     return this.result(m, name, findings);
   }
 
-  /** Replace the skill's own files wholesale (nested skills untouched); an existing file's mode bits survive the replace. */
+  /**
+   * Replace the skill's own files wholesale (nested skills — registered or on disk — untouched); an
+   * existing file's mode bits survive the replace. EVERY destination is lstat-walked from the root
+   * BEFORE the first byte moves: a refused path blocks the whole replace with nothing removed.
+   */
   replace(name: string, files: Readonly<Record<string, string>>, expectedRevision: number): SkillMutationResult {
     const m = this.manifest();
     const entry = this.requireEntry(m, name, expectedRevision);
@@ -1183,13 +1443,15 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, entry.dir)]);
     }
+    const destinations = this.containedDestinations(name, entry.dir, files);
+    if ('finding' in destinations) return this.blocked(m, [destinations.finding]);
     const effective = this.effectiveDir();
-    const own = this.ownFilesIn(effective, entry.dir, this.manifestDirs(m));
+    const own = this.ownFilesIn(effective, entry.dir, this.ownershipDirs(m));
     const modes = new Map(own.map((f) => [f.rel, lstatSync(f.abs).mode & 0o777]));
     removeFiles(own, effective);
-    for (const [rel, text] of Object.entries(files)) {
-      const mode = modes.get(`${entry.dir}/${rel}`);
-      writeFileAtomic(this.pluginPath(`${entry.dir}/${rel}`), text, mode === undefined ? {} : { mode });
+    for (const t of destinations.targets) {
+      const mode = modes.get(`${entry.dir}/${t.rel}`);
+      writeFileAtomic(t.abs, t.text, mode === undefined ? {} : { mode });
     }
     entry.editedAt = this.now();
     this.refreshRecords(m, entry.dir);
@@ -1239,7 +1501,7 @@ export class SkillsStore {
 
   private replaceGuards(m: SkillManifest, name: string, entry: SkillEntry, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
     const out = this.filesGuards(name, files);
-    const nestedUnder = [...this.manifestDirs(m)].filter((d) => d !== entry.dir && d.startsWith(`${entry.dir}/`));
+    const nestedUnder = [...this.ownershipDirs(m)].filter((d) => d !== entry.dir && d.startsWith(`${entry.dir}/`));
     for (const rel of Object.keys(files)) {
       const owner = owningSkillDir(`${entry.dir}/${rel}`, new Set([entry.dir, ...nestedUnder]));
       if (owner !== entry.dir) {
@@ -1454,29 +1716,81 @@ export class SkillsStore {
   }
 
   /**
-   * Provision the baseline env (awaited), re-check the CAS, validate the whole tree, then write
-   * `snapshots/<gen>/` (staging + rename, never over an existing generation), COMMIT the manifest,
-   * flip `current`, and reap generations / baselines nothing references. A `blocked` verdict
-   * persists nothing — the caller's revision stays valid.
+   * ONE publish at a time (module header): a concurrent call is refused with
+   * `SkillsPublishInFlightError` (the route's 409) rather than queued — the caller's revision would
+   * be stale by the time a queued publish ran.
    */
   async publish(expectedRevision: number): Promise<SkillPublishResult> {
+    if (this.publishInFlight !== null) throw new SkillsPublishInFlightError(this.revision());
+    const run = this.publishSerialized(expectedRevision);
+    this.publishInFlight = run;
+    try {
+      return await run;
+    } finally {
+      this.publishInFlight = null;
+    }
+  }
+
+  /** The root's identity a publish binds to: the configured path AND what it resolves to. */
+  private bindRoot(): { root: string; real: string } {
+    return { root: this.rootDir, real: realpathSync(this.rootDir) };
+  }
+
+  /** After EVERY await: the store must still be aimed at the very directory the operation started on. */
+  private assertRootUnchanged(bound: { root: string; real: string }, revision: number): void {
+    let real: string | null;
+    try {
+      real = realpathSync(this.rootDir);
+    } catch {
+      real = null;
+    }
+    if (this.rootDir !== bound.root || real !== bound.real) {
+      throw new SkillsRootChangedError(bound.root, this.rootDir, revision);
+    }
+  }
+
+  /**
+   * Bind the root, CAS, provision the baseline env (awaited), re-check the root identity and the
+   * CAS, validate the whole tree (a failed provisioning is a blocking `venv-failed`), then write
+   * `snapshots/<gen>/` (staging + rename, never over an existing generation) with the generated
+   * views, LOCK it read-only, COMMIT the manifest (venv state included), flip `current`, and reap
+   * generations / baselines nothing references. A `blocked` verdict persists nothing — the caller's
+   * revision stays valid. Everything after the one await is synchronous: no interleaving.
+   */
+  private async publishSerialized(expectedRevision: number): Promise<SkillPublishResult> {
+    const bound = this.bindRoot();
     const pre = this.manifest();
     this.assertRevision(pre, expectedRevision);
     // Provisioning FIRST (it may take minutes): a snapshot never links an env still being written.
     const venv = await this.ensureVenv(pre.baseline);
-    const m = this.manifest(); // the world may have moved while uv ran — the CAS is re-checked
+    // The world may have moved while uv ran: the root must be the same directory, the CAS re-checked.
+    this.assertRootUnchanged(bound, this.isSeeded() ? this.revision() : expectedRevision);
+    const m = this.manifest();
     this.assertRevision(m, expectedRevision);
     const v = this.validate(m);
+    if (venv === 'failed') {
+      v.findings.push(
+        finding(
+          'venv-failed',
+          'blocking',
+          "the baseline's shared read-only Python environment is REQUIRED (the bundle carries a pyproject.toml; skills `uv run` from the plugin root): a snapshot without it hands every worker a plugin whose scripts cannot start. Install uv, fix the sync error the log names, and publish again",
+          `uv sync did not produce ${baselineVenvDir(this.baselineDir(m.baseline))} (see the daemon log)`,
+          {},
+        ),
+      );
+    }
     if (verdictOf(v.findings) === 'blocked') {
       return { verdict: 'blocked', findings: v.findings, revision: m.revision, snapshot: null };
     }
     const gen = this.nextGeneration(m);
-    const contentHash = hashFileSet(v.snapshotFiles);
+    const views = this.viewFiles(v);
+    const allFiles = sortedRels([...v.snapshotFiles, ...views.files]);
+    const contentHash = hashFileSet(allFiles);
     const snapshots = this.snapshotsDir();
     mkdirSync(snapshots, { recursive: true });
     this.sweepStaging(snapshots);
     const staging = join(snapshots, `${STAGING_PREFIX}${randomBytes(6).toString('hex')}`);
-    copyFiles(v.snapshotFiles, staging);
+    copyFiles(allFiles, staging);
     const record = m.baselines[m.baseline];
     const snapshot: SnapshotManifest = {
       gen,
@@ -1498,6 +1812,7 @@ export class SkillsStore {
           nested: isNestedSkillDir(entry.dir),
         }))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+      views: { copilot: { dir: COPILOT_VIEW_REL, skills: views.copilotSkills } },
     };
     writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);
     // The shared per-baseline env, linked ONLY when it exists (a Windows junction needs its target;
@@ -1505,7 +1820,7 @@ export class SkillsStore {
     // `snapshot.json.venv` carries the state either way.
     const venvDir = baselineVenvDir(this.baselineDir(m.baseline));
     if (venv === 'synced' && existsSync(venvDir)) {
-      this.symlink(posix.join('..', '..', BASELINE_DIRNAME, m.baseline, '.venv'), join(staging, '.venv'), venvDir);
+      this.symlink(posix.join('..', '..', BASELINE_DIRNAME, m.baseline, VENV_LINKNAME), join(staging, VENV_LINKNAME), venvDir);
     }
     const dest = this.snapshotDir(gen);
     if (this.entryExists(dest)) {
@@ -1513,6 +1828,14 @@ export class SkillsStore {
       throw new SkillsPublishError(`${dest} already exists — a published generation is never removed or overwritten`);
     }
     renameSync(staging, dest);
+    // Immutable by contract, and now by mode bits: a published generation is locked read-only
+    // (verification by hash stays the authority — the lock is what makes an accidental edit fail).
+    try {
+      makeTreeReadOnly(dest);
+    } catch (err) {
+      removeTreeForce(dest);
+      throw new SkillsPublishError(`could not lock ${dest} read-only: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     // Manifest FIRST, then `current`: a crash in between leaves a committed generation `ensureReady`
     // finishes flipping to; the reverse order would leave a live `current` the manifest disowns.
@@ -1520,6 +1843,7 @@ export class SkillsStore {
     for (const [rel, r] of Object.entries(m.files)) {
       if (included.has(rel)) r.lastPublishedHash = r.effectiveHash;
     }
+    if (record !== undefined) record.venv = venv; // provisioning state rides the SUCCESSFUL publish only
     m.published = { gen, contentHash, at: this.now() };
     this.commit(m);
     this.flipCurrent(gen);
@@ -1533,6 +1857,30 @@ export class SkillsStore {
       // The REAL path — the same spelling `currentSnapshot()` answers and the engine is handed.
       snapshot: { gen, path: realpathSync(dest), contentHash, skills: snapshot.skills.length },
     };
+  }
+
+  /**
+   * The generated delivery views (design v3.2 §2/§4) as snapshot-relative file records over the
+   * EFFECTIVE bytes the validation admitted — today the copilot view only: every enabled, PORTABLE
+   * skill's own files (nested subtrees excluded — they are their own skills) under
+   * `views/copilot/.github/skills/<frontmatter name>/`. A non-portable skill needs the plugin root,
+   * the snapshot cwd or a sibling link, none of which a flat `.github/skills` layout provides.
+   */
+  private viewFiles(v: Validation): { files: FileRecord[]; copilotSkills: string[] } {
+    const files: FileRecord[] = [];
+    const copilotSkills: string[] = [];
+    const byRel = new Map(v.snapshotFiles.map((f) => [f.rel, f]));
+    const dirs = new Set(v.enabledSkills.map(({ entry }) => entry.dir));
+    for (const { name, entry } of v.enabledSkills) {
+      if (!entry.portable) continue;
+      copilotSkills.push(name);
+      const prefix = `${entry.dir}/`;
+      for (const [rel, f] of byRel) {
+        if (!rel.startsWith(prefix) || owningSkillDir(rel, dirs) !== entry.dir) continue;
+        files.push({ rel: `${COPILOT_VIEW_SKILLS_REL}/${name}/${rel.slice(prefix.length)}`, abs: f.abs });
+      }
+    }
+    return { files: sortedRels(files), copilotSkills: copilotSkills.sort() };
   }
 
   /** The next generation: one past the highest that EXISTS (on disk or in the manifest) — never a reuse. */
@@ -1556,7 +1904,6 @@ export class SkillsStore {
     const tmp = `${link}.tmp-${randomBytes(6).toString('hex')}`;
     this.symlink(posix.join(SNAPSHOTS_DIRNAME, generationDirName(gen)), tmp, this.snapshotDir(gen));
     renameSync(tmp, link);
-    this.currentMemo = null;
     this.currentGenMemo = gen;
   }
 
@@ -1577,7 +1924,7 @@ export class SkillsStore {
       .sort((a, b) => b - a);
     for (const gen of gens.slice(KEEP_GENERATIONS - 1)) {
       if (pinned.has(gen)) continue;
-      rmSync(this.snapshotDir(gen), { recursive: true, force: true });
+      removeTreeForce(this.snapshotDir(gen)); // locked read-only at publish
     }
   }
 
@@ -1651,13 +1998,11 @@ export class SkillsStore {
 
     // Direct filesystem edits: detected by hash, reported, recorded — never silently trusted.
     const drift: string[] = [];
-    const base = this.baselineDir(m.baseline);
     for (const f of scanned) {
       const record = m.files[f.rel];
       if (record === undefined) {
-        const baseAbs = this.pluginPath(f.rel, base);
         m.files[f.rel] = {
-          baselineHash: existsSync(baseAbs) ? sha256Hex(readFileSync(baseAbs)) : null,
+          baselineHash: this.baselineHashOf(m, f.rel),
           effectiveHash: f.sha,
           lastPublishedHash: null,
           conflict: false,
@@ -1738,13 +2083,57 @@ export class SkillsStore {
 
     // Per skill.
     const enabledSkills: Array<{ name: string; entry: SkillEntry }> = [];
-    const dirs = this.manifestDirs(m);
+    const dirs = new Set([...registered.keys(), ...diskDirs]); // ownership follows the filesystem (v3 §6)
+    const declaredBy = new Map<string, string[]>();
     for (const [name, entry] of Object.entries(m.skills).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       const severity = entry.enabled ? 'blocking' : 'warning';
       const skillMd = catalogMd.get(name);
       findings.push(...frontmatterGuard(skillMd, name, { isCore: entry.core, file: `${entry.dir}/SKILL.md`, severity }));
+      if (skillMd !== undefined) {
+        const parsed = parseFrontmatter(skillMd);
+        const declared = parsed.ok ? parsed.fields['name'] : undefined;
+        if (declared !== undefined && declared !== '' && declared !== name) {
+          const list = declaredBy.get(declared);
+          if (list === undefined) declaredBy.set(declared, [name]);
+          else list.push(name);
+        }
+      }
       if (entry.core && !entry.enabled) findings.push(...compact([coreDisableGuard(name, entry)]));
       if (entry.enabled) enabledSkills.push({ name, entry });
+    }
+    // Declared names are checked across the FULL catalog, disabled entries included (codex round
+    // 2): a skill — enabled or not — whose frontmatter declares ANOTHER catalog skill's name is a
+    // blocking collision (a disabled one downgraded to a mismatch warning could still shadow a core
+    // skill's identity the moment it is enabled or read by a tool keyed on frontmatter).
+    for (const [declared, holders] of [...declaredBy.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const target = m.skills[declared];
+      for (const from of holders) {
+        if (target !== undefined) {
+          findings.push(
+            finding(
+              'name-collision',
+              'blocking',
+              target.core
+                ? 'the declared name is a core-by-reference skill\'s identity (a registered workflow dispatches phases to it); a second SKILL.md declaring it would shadow the one the workflow means'
+                : 'the declared name is another catalog skill\'s identity (disabled skills count — the manifest is keyed by name); two definitions of one name cannot both be loaded',
+              `${m.skills[from]?.dir ?? from}/SKILL.md declares ${JSON.stringify(declared)}, the name of the catalog skill at ${target.dir} (${target.enabled ? 'enabled' : 'disabled'})`,
+              { skill: from, file: `${m.skills[from]?.dir ?? ''}/SKILL.md`, against: { name: declared, core: target.core } },
+            ),
+          );
+        }
+      }
+      const enabledHolders = holders.filter((h) => m.skills[h]?.enabled === true);
+      if (target === undefined && enabledHolders.length > 1) {
+        findings.push(
+          finding(
+            'name-collision',
+            'blocking',
+            'two enabled skills declare the same frontmatter name — the plugin would load two definitions of one identity',
+            `${enabledHolders.join(' and ')} both declare ${JSON.stringify(declared)}`,
+            { skill: enabledHolders[0] ?? null, against: { name: declared, core: false } },
+          ),
+        );
+      }
     }
 
     // The would-be snapshot: support files + enabled skills' own files (owner computed once per file).
@@ -1823,46 +2212,63 @@ export class SkillsStore {
       }
     }
 
-    // The plugin manifest + the runtime catalogs: present, parseable, still naming this plugin.
+    // The plugin manifest + the runtime catalogs: present, parseable, the right SHAPE (codex round
+    // 2: existence alone let a manifest without `name` and a catalog holding `[]` publish clear).
+    const parseJsonObject = (rel: string, f: ScannedFile): Record<string, unknown> | null => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(f.abs, 'utf8'));
+      } catch (err) {
+        findings.push(finding('catalog-invalid', 'blocking', "Claude Code loads the plugin from its manifest and garden's runtime reads the catalogs beside it as JSON; one that does not parse loads nothing", `${rel}: ${err instanceof Error ? err.message : String(err)}`, { file: rel }));
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        findings.push(finding('catalog-invalid', 'blocking', 'the plugin manifest and the runtime catalogs are JSON OBJECTS (a top-level array or scalar is not a catalog)', `${rel}: top-level value is ${Array.isArray(parsed) ? 'an array' : typeof parsed}`, { file: rel }));
+        return null;
+      }
+      return parsed as Record<string, unknown>;
+    };
     const pluginJson = onDisk.get(PLUGIN_JSON_REL);
     if (pluginJson === undefined) {
       findings.push(finding('missing-plugin-manifest', 'blocking', 'a plugin root is its .claude-plugin/plugin.json — Claude Code loads nothing without it', `no ${PLUGIN_JSON_REL} in effective/`, { file: PLUGIN_JSON_REL }));
     } else {
-      let declared: unknown;
-      try {
-        declared = (JSON.parse(readFileSync(pluginJson.abs, 'utf8')) as { name?: unknown }).name;
-      } catch (err) {
-        findings.push(finding('frontmatter-invalid', 'blocking', 'Claude Code loads a plugin from its manifest; one it cannot parse loads nothing', `${PLUGIN_JSON_REL}: ${err instanceof Error ? err.message : String(err)}`, { file: PLUGIN_JSON_REL }));
-      }
-      if (declared !== undefined && declared !== PLUGIN_NAME) {
-        findings.push(finding('name-mismatch', 'blocking', `workers invoke skills as \`${PLUGIN_NAME}:<skill>\`; the plugin manifest must keep that name`, `${PLUGIN_JSON_REL} names ${JSON.stringify(declared)}`, { file: PLUGIN_JSON_REL }));
+      const manifestJson = parseJsonObject(PLUGIN_JSON_REL, pluginJson);
+      if (manifestJson !== null) {
+        const declared = manifestJson['name'];
+        if (typeof declared !== 'string' || declared === '') {
+          findings.push(finding('name-mismatch', 'blocking', `a plugin manifest MUST declare its \`name\` — workers invoke skills as \`${PLUGIN_NAME}:<skill>\`, and Claude Code registers the plugin under it`, `${PLUGIN_JSON_REL} declares no "name" (expected ${JSON.stringify(PLUGIN_NAME)})`, { file: PLUGIN_JSON_REL }));
+        } else if (declared !== PLUGIN_NAME) {
+          findings.push(finding('name-mismatch', 'blocking', `workers invoke skills as \`${PLUGIN_NAME}:<skill>\`; the plugin manifest must keep that name`, `${PLUGIN_JSON_REL} names ${JSON.stringify(declared)}`, { file: PLUGIN_JSON_REL }));
+        }
       }
     }
     for (const rel of REQUIRED_PLUGIN_CATALOGS) {
-      if (onDisk.has(rel)) continue;
-      findings.push(
-        finding(
-          'missing-plugin-manifest',
-          'blocking',
-          "garden's runtime reads the plugin catalogs beside plugin.json (archetypes_v11.py raises without archetypes.json); a snapshot missing one hands every worker a plugin whose runtime cannot start",
-          `no ${rel} in effective/`,
-          { file: rel },
-        ),
-      );
+      const f = onDisk.get(rel);
+      if (f === undefined) {
+        findings.push(
+          finding(
+            'missing-plugin-manifest',
+            'blocking',
+            "garden's runtime reads the plugin catalogs beside plugin.json (archetypes_v11.py raises without archetypes.json); a snapshot missing one hands every worker a plugin whose runtime cannot start",
+            `no ${rel} in effective/`,
+            { file: rel },
+          ),
+        );
+        continue;
+      }
+      const catalog = parseJsonObject(rel, f);
+      if (catalog === null) continue;
+      if (rel.endsWith('/archetypes.json')) {
+        const archetypes = catalog['archetypes'];
+        if (typeof archetypes !== 'object' || archetypes === null) {
+          findings.push(finding('catalog-invalid', 'blocking', "garden's archetype detector reads the `archetypes` collection of archetypes.json (archetypes_v11.py load_catalog); a catalog without it is not a catalog", `${rel} has no \`archetypes\` collection`, { file: rel }));
+        }
+      }
     }
     if (enabledSkills.length === 0) {
       findings.push(finding('empty-snapshot', 'blocking', 'a snapshot with no enabled skills would hand every worker an empty plugin', 'no enabled skills', {}));
     }
     return { findings, snapshotFiles: sortedRels(snapshotFiles), enabledSkills };
-  }
-
-  // ── Mirror bookkeeping ────────────────────────────────────────────────────────────────────
-
-  /** Record a mirror pass. Bumps the revision: the ledger is manifest state clients may hold. */
-  setMirrorState(state: SkillMirrorState): void {
-    const m = this.manifest();
-    m.mirror = state;
-    this.commit(m);
   }
 }
 

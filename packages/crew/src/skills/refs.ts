@@ -8,12 +8,20 @@
  *     disabled skill or a file the bundle does not carry is a blocking finding naming file:line.
  *   - `../<p>` — sibling links (`repo-learn/SKILL.md` → `../search/refs/hotspots.md`): resolved
  *     from the referencing file's directory, must land inside the snapshot.
- *   - `python3 scripts/…` / `uv run scripts/…` — a script invoked relative to the WORKTREE cwd
- *     (`domain-extractor/SKILL.md:42`): not a reference to resolve, but a portability marker.
+ *   - `python3 scripts/…` / `python3 -u scripts/x/run.py` / `bash scripts/x` / `./scripts/x` — a
+ *     script invoked relative to the WORKTREE cwd (`domain-extractor/SKILL.md:42`): not a reference
+ *     to resolve, but a portability marker. ANY interpreter followed by a cwd-relative path (after
+ *     optional flags) counts, not only one literally followed by `scripts/` (codex round 2).
  *
  * `portable` (v3 §5) is `false` when a skill's files carry any of the three: non-Claude CLIs have
  * no plugin root, no snapshot cwd, and only a flat `<name>/SKILL.md` layout — a skill that needs
- * any of them is excluded from the mirror with a manifest note.
+ * any of them is Claude-only: excluded from every non-Claude delivery view the snapshot carries
+ * (`views/copilot/`, design v3.2 §4) and from the per-launch `--skill` lists core builds.
+ *
+ * Path tokens keep EVERY legal filename character (`+`, `@`, `~`, `%`, `=`, `,`, `:` …): a
+ * reference truncated at the first unusual character would validate a PREFIX of the file it names
+ * (`scripts/a+b.py` → `scripts/a`), so the token runs until whitespace, a quote/backtick, a
+ * bracket/paren, or a shell separator (`|;&<>`) — trailing sentence punctuation is then trimmed.
  */
 
 import { posix } from 'node:path';
@@ -30,21 +38,33 @@ export interface TextRef {
   kind: 'plugin-root' | 'relative';
 }
 
-const PLUGIN_ROOT_RE = /\$\{CLAUDE_PLUGIN_ROOT\}(\/[A-Za-z0-9_./-]*)?/g;
+/** A path token: everything up to whitespace, a quote/backtick, a bracket/paren/brace, or a shell separator. */
+const PATH_CHARS = '[^\\s"\'`()\\[\\]{}<>|;&*?]';
+const PLUGIN_ROOT_RE = new RegExp(`\\$\\{CLAUDE_PLUGIN_ROOT\\}(\\/${PATH_CHARS}*)?`, 'g');
 // A `../`-prefixed path token not glued to a preceding path character (so `a/../b` inside a
 // longer path is not re-read as a reference of its own).
-const RELATIVE_RE = /(?<![A-Za-z0-9_./-])((?:\.\.\/)+[A-Za-z0-9_./-]*)/g;
-// A shell invocation of a plugin script by a cwd-relative path.
-const CWD_SCRIPT_RE = /(?<![A-Za-z0-9_./-])(?:python3?|uv run|bash|sh|node)\s+scripts\//;
+const RELATIVE_RE = new RegExp(`(?<![A-Za-z0-9_./-])((?:\\.\\.\\/)+${PATH_CHARS}*)`, 'g');
+// A shell invocation of a plugin script by a cwd-relative path: an interpreter, optional flags
+// (`-u`, `--frozen`, `-m mod` is NOT a path), then a path token that is relative — not absolute,
+// not `$`-expanded, not `~` — and looks like a script (carries a `/`, or a script extension).
+const INTERPRETER = '(?:python3?|uv\\s+run|bash|sh|zsh|node|npx|tsx|deno\\s+run)';
+const FLAG = '(?:\\s+-{1,2}[A-Za-z0-9_-]+(?:=\\S+)?)*';
+const SEG = '[A-Za-z0-9_.+@%=,:~-]+';
+const RELATIVE_SCRIPT = `(?:\\.{1,2}\\/)?(?:${SEG}\\/)*${SEG}(?:\\/|\\.(?:py|sh|bash|zsh|mjs|cjs|js|ts))`;
+const CWD_SCRIPT_RE = new RegExp(
+  `(?<![A-Za-z0-9_./-])${INTERPRETER}${FLAG}\\s+(?![/$~])(?:${RELATIVE_SCRIPT}|(?:${SEG}\\/)+${SEG})(?![A-Za-z0-9_])` +
+    `|(?<![A-Za-z0-9_./$-])\\.\\/${SEG}(?:\\/${SEG})*`,
+);
 
 /**
- * Trailing sentence punctuation a prose reference picks up (`…/foo.` at the end of a sentence).
- * A dot-DOT segment is never punctuation: `${CLAUDE_PLUGIN_ROOT}/..` must survive as `..` so the
- * resolver refuses it — stripping it would turn a plugin-root ESCAPE into the plugin root itself
- * (codex review of #480). A lone trailing `.` after a slash (`dir/.`) is the sentence's full stop.
+ * Trailing sentence punctuation a prose reference picks up (`…/foo.` at the end of a sentence,
+ * `…/foo,` before a clause). A dot-DOT segment is never punctuation: `${CLAUDE_PLUGIN_ROOT}/..`
+ * must survive as `..` so the resolver refuses it — stripping it would turn a plugin-root ESCAPE
+ * into the plugin root itself (codex review of #480). A lone trailing `.` after a slash (`dir/.`)
+ * is the sentence's full stop. Only TRAILING punctuation is trimmed — `a,b.py` keeps its comma.
  */
 function trimPunctuation(p: string): string {
-  const noSeparators = p.replace(/[,;:]+$/, '');
+  const noSeparators = p.replace(/[,:]+$/, '');
   if (/(^|\/)\.\.$/.test(noSeparators)) return noSeparators;
   return noSeparators.replace(/\.+$/, '');
 }

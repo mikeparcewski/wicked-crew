@@ -50,7 +50,7 @@ import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
 import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
-import { defaultMirrorHome, SkillsRuntime } from '../skills/runtime.js';
+import { SkillsRuntime } from '../skills/runtime.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
 import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
@@ -290,18 +290,17 @@ export interface CreateServerOptions {
   /**
    * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` (or
    * `skills_root`) from the LIVE installed wicked-garden plugin, publishes a first immutable
-   * snapshot when none exists, exports `WICKED_SKILLS_SNAPSHOT` for the engine, and mirrors
-   * portable skills into the non-Claude CLIs' skill dirs (`skills_mirror`). `disabled: true`
-   * registers the routes without a store (they answer 503) — the manifest collector and tests that
-   * must not touch a plugin cache use it. `source` / `mirrorHome` / `provisionVenv` aim a test at
-   * a fixture plugin root, a temp home, and a provisioner that spawns nothing (`noVenv`) — a boot
-   * test must never run the host's `uv` or download anything; production omits all three (live
-   * discovery, the real home, `uvSyncBaseline`).
+   * snapshot when none exists (its `views/copilot/` generated alongside), and exports
+   * `WICKED_SKILLS_SNAPSHOT` for the engine. It never writes into the user's own CLI directories
+   * (design v3.2 §1). `disabled: true` registers the routes without a store (they answer 503) —
+   * the manifest collector and tests that must not touch a plugin cache use it. `source` /
+   * `provisionVenv` aim a test at a fixture plugin root and a provisioner that spawns nothing
+   * (`noVenv`) — a boot test must never run the host's `uv` or download anything; production omits
+   * both (live discovery, `uvSyncBaseline`).
    */
   skills?: {
     disabled?: boolean;
     source?: () => PluginSource | null;
-    mirrorHome?: string;
     provisionVenv?: VenvProvisioner;
   };
 }
@@ -388,7 +387,6 @@ export async function createServer(
         ...(source !== undefined ? { source } : {}),
         warn: (m) => app.log.warn(m),
       }),
-      mirrorHome: options?.skills?.mirrorHome ?? defaultMirrorHome(),
       log: (m) => app.log.warn(m),
     });
     await skillsRuntime.apply(bootSettings);

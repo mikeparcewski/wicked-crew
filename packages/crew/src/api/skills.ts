@@ -16,17 +16,20 @@
  *
  * Guard results ALWAYS return 2xx `{verdict, findings[], revision}` — studio's `apiFetch` throws
  * on non-2xx, so a `blocked` verdict is a normal 200 with nothing written; that includes a
- * containment refusal on a WRITE (the store answers `path-invalid`). The one 409 is a stale
- * `expectedRevision` (`{error, revision}`); 404 an unknown skill or file; 400 a body the schemas
- * refuse or a READ path containment refuses (a read has no verdict envelope); 503 an unseeded root
- * or a `current` link that fails verification; 502 no plugin source to refresh from.
- * Thin by design: validation is zod (strict, unknown keys named); everything else is the store's.
+ * containment refusal on a WRITE (the store answers `path-invalid`). 409 (`{error, revision}`) is
+ * "the world moved — re-read and retry": a stale `expectedRevision`, a publish already in flight
+ * (one runs at a time), or a skills root that changed under a running publish; 404 an unknown skill
+ * or file; 400 a body the schemas refuse or a READ path containment refuses (a read has no verdict
+ * envelope); 503 an unseeded root or a `current` link that fails verification; 502 no plugin
+ * source to refresh from. Thin by design: validation is zod (strict, unknown keys named);
+ * everything else is the store's. Nothing here (or anywhere in the store) writes outside the
+ * skills root — the user's own CLI directories are never touched (design v3.2 §1).
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import type { Actor, CrewSystemSettings, SkillReadResult } from '../core/types.js';
+import type { Actor, SkillReadResult } from '../core/types.js';
 import { SkillPathError } from '../skills/contain.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
 import {
@@ -34,6 +37,8 @@ import {
   SkillsCurrentInvalidError,
   SkillsManifestCorruptError,
   SkillsPublishError,
+  SkillsPublishInFlightError,
+  SkillsRootChangedError,
   SkillsSourceUnavailableError,
   SkillsUnseededError,
   UnknownSkillError,
@@ -77,7 +82,6 @@ export interface SkillsRouteDeps {
   runtime?: SkillsRuntime;
   audit: AuditLog;
   actorOf: (req: FastifyRequest) => Actor;
-  getSettings: () => Promise<CrewSystemSettings>;
 }
 
 /** The zod failure → 400 shape every route here shares (unknown keys are named by zod itself). */
@@ -96,6 +100,8 @@ function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof SkillPathError) return reply.code(400).send({ error: err.message });
   if (err instanceof NotARegularFileError) return reply.code(400).send({ error: err.message });
   if (err instanceof RevisionMismatchError) return reply.code(409).send({ error: err.message, revision: err.actual });
+  if (err instanceof SkillsPublishInFlightError) return reply.code(409).send({ error: err.message, revision: err.revision });
+  if (err instanceof SkillsRootChangedError) return reply.code(409).send({ error: err.message, revision: err.revision });
   if ((err as NodeJS.ErrnoException).code === 'ENOENT') return reply.code(404).send({ error: 'no such file' });
   throw err;
 }
@@ -275,11 +281,8 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       return guarded(reply, async () => {
         const runtime = runtimeOf();
         const result = await runtime.store.publish(parsed.data.expectedRevision);
-        if (result.snapshot !== null) {
-          // The published snapshot is what the engine and the mirror consume — re-derive both now.
-          const mirror = runtime.afterPublish(await deps.getSettings());
-          if (mirror !== null) result.revision = runtime.store.revision(); // the mirror ledger is manifest state
-        }
+        // The published snapshot is what the engine consumes — export its real path now.
+        if (result.snapshot !== null) runtime.afterPublish();
         recordMutation(req, 'skills.published', {
           verdict: result.verdict,
           gen: result.snapshot?.gen ?? null,

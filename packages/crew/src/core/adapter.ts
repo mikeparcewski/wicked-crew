@@ -2332,9 +2332,9 @@ export class CoreAdapter {
         const r = parsed.skills_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.skills_root;
       }
-      // skills_mirror (skills keystone): boolean only — this knob writes into other CLIs' homes,
-      // so garbage reads as the shipped default, never as "mirror".
-      if ('skills_mirror' in parsed && typeof parsed.skills_mirror !== 'boolean') delete parsed.skills_mirror;
+      // The v3 `skills_mirror` knob is withdrawn (design v3.2 §1 — wicked never writes into the
+      // user's CLI directories): a hand-edited value is dropped, never read.
+      if ('skills_mirror' in parsed) delete (parsed as Record<string, unknown>)['skills_mirror'];
       // deliverDefault (crew#393): 'pr' | 'none' only — same values PUT /settings admits. A
       // hand-edited anything-else falls back to the shipped default ('pr') rather than turning
       // the repo-scoped delivery default into an unparseable third state.

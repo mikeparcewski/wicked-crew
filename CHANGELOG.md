@@ -231,36 +231,61 @@ mentioned only where a daemon release depends on them.
   snapshot (`..` is an escape, `dir/` resolves; file:line on failure), the frontmatter `name` must
   equal the path-derived name, malformed frontmatter (unterminated flow sequences / quotes) blocks,
   `.claude-plugin/{plugin.json,archetypes.json,components.json}` are required
-  (`missing-plugin-manifest`), and the core-by-reference closure (every registered workflow
+  (`missing-plugin-manifest`) and must have the shape their readers expect — `plugin.json` names the
+  plugin, `archetypes.json` carries its `archetypes` collection (`catalog-invalid`) — a declared
+  frontmatter name that is ANOTHER catalog skill's key blocks whether or not the declaring skill is
+  enabled (`name-collision`), and the core-by-reference closure (every registered workflow
   `skill_ref` + transitive SKILL.md mandates) must be COMPLETE: a missing registered skill or an
-  absent mandate is blocking, and disable recomputes membership from the live refs. The baseline's
-  `.venv` is provisioned (`uv sync`, through the daemon's `execCapped` chokepoint, `UV_CACHE_DIR`
-  under the root) and AWAITED before a publish returns, locked read-only, and linked from a
-  snapshot only once it exists (`snapshot.json.venv` records the state either way).
+  absent mandate is blocking, and disable recomputes membership from the live refs. Enable runs the
+  same content + containment guards a write gets (a missing, malformed, renamed or symlinked skill is
+  not enabled). The baseline's `.venv` is provisioned (`uv sync`, through the daemon's `execCapped`
+  chokepoint, `UV_CACHE_DIR` under the root; ONE provisioning per baseline hash — concurrent callers
+  await it) and AWAITED before a publish returns, marked complete on disk, locked read-only, and
+  linked from a snapshot only once it exists. The env is REQUIRED, not best-effort: a bundle with a
+  `pyproject.toml` whose env cannot be built (uv missing, sync error, lock failure) BLOCKS the
+  publish (`venv-failed`). Publish is SERIALIZED (one at a time; a concurrent one is a 409) and
+  root-bound (a `skills_root` change under a running publish aborts it — 409 — with nothing written
+  to either root). A published generation is locked read-only, and `current` is re-verified
+  (`snapshot.json` shape — its rows may only name safe `skills/…` dirs deriving their own names —
+  and content hash) on EVERY read, so a snapshot modified under a running daemon is refused by that
+  daemon, not only after a restart. Ownership of a path follows the deepest `SKILL.md` ON DISK, so a
+  nested skill created by a direct edit is never reached through its parent's edit/reset/replace.
 - **`/api/v1/skills*` file manager** — `GET /skills`, `GET /skills/:name/files[/*path]`,
   `PUT /skills/:name/files/*path`, `GET|PUT /skills/support/*path`, `POST /skills`,
   `POST /skills/:name/{enable,disable,reset,replace}`, `POST /skills/{refresh-baseline,publish,analyze}`.
   Every mutation is CAS-guarded (`expectedRevision`; 409 only on a stale one) and answers 2xx
   `{verdict, findings[], revision}` — a `blocked` verdict is a normal response, and so is a
   containment refusal on a write (`path-invalid`). Containment is no-follow everywhere, walked FROM
-  THE SKILLS ROOT (a skill directory replaced by a symlink is refused, baseline reads and
-  reset/replace included); atomic writes open their temp file `O_EXCL` under an unpredictable name
-  and preserve mode bits (executable support scripts survive edit/replace); typed capped reads
+  THE SKILLS ROOT: a skill directory replaced by a symlink, a symlinked CHILD directory inside it
+  (every replace/add destination is walked before a byte moves), and a symlinked BASELINE ancestor
+  (reset, `?side=baseline`, every baseline hash lookup) are refused, never followed; the names the
+  store itself owns (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`) are refused as
+  support paths. Atomic writes open their temp file `O_EXCL` under an unpredictable name and
+  preserve mode bits (executable support scripts survive edit/replace); typed capped reads
   (`content: null` on binary). `analyze` is a pure dry run (nothing persisted, revision unchanged);
-  a blocked publish persists nothing. Reset restores content only, never enablement;
-  refresh-baseline merges three-way per FILE — a user deletion is a modification (kept; `conflict`
-  when upstream changed). api-types **0.27.0** carries the `Skill*` contract, the
-  `skills_root` / `skills_mirror` settings, `missing-plugin-manifest`, and the `skills` block of
-  `GET /diagnostics`.
+  a blocked publish persists nothing — not the drift it observed, not the provisioning state. Reset
+  restores content only, never enablement; refresh-baseline merges three-way per FILE — a user
+  deletion is a modification (kept; `conflict` when upstream changed). Frontmatter is a STRICT
+  subset: a plain scalar with `: ` (`description: hello: world`) or a flow collection continued on
+  indented lines is checked, not folded. Portability treats ANY cwd-relative script invocation
+  (`python3 -u scripts/x.py`, `./scripts/x`, `bash scripts/x`) as non-portable and never truncates
+  a reference at a legal filename character. api-types **0.27.0** carries the `Skill*` contract, the
+  `skills_root` setting, `missing-plugin-manifest` / `catalog-invalid` / `venv-failed`, and the
+  `skills` block of `GET /diagnostics`.
 - **One storage root, an explicit worker fence** (design v3.1 §1/§2). The skills root stays
   `<state home>/skills` — the same storage root as every other crew store. The worker Read fence is
   core's explicit denylist of state-home subtrees (the resolved `skills/snapshots/<gen>/` being the
   one non-denied path); `packages/crew/tests/fixtures/state-home-subtrees.json` is the shared
   registry of every top-level entry crew's stores create there, and a crew test asserts the daemon
   never creates an entry outside it (a new store cannot appear unfenced). Crew hands the engine
-  exactly one input, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL path of `snapshots/<gen>`
+  exactly one SKILLS input, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL path of `snapshots/<gen>`
   (`GET /skills` `current.path` and `POST /skills/publish` `snapshot.path` spell the same real
-  path); `WICKED_SKILLS_CURRENT` is never set. Every `snapshot.json` skill row carries a boolean
+  path); `WICKED_SKILLS_CURRENT` is never set. Beside it, on every apply, `WICKED_CREW_STATE_HOME` =
+  the canonical realpath of the daemon state home — core derives the worker fence from it (no more
+  literal `.wicked-crew` basename; core#399 round 3) and cross-checks the snapshot is
+  `<state home>/skills/snapshots/<gen>`, so a `skills_root` outside the state home publishes but is
+  refused at launch — `GET /diagnostics` → `skills` reports it (`stateHome`, a `skills.config`
+  warning) before the first refusal. Every `snapshot.json` skill row carries a boolean
   `portable` (validated when `current` is verified) and a `nested` flag (a dir deeper than
   `skills/<dir>` — not invocable for a Claude seat).
 - **Degradation ladder, surfaced** — `GET /diagnostics` → `skills` reports `published` /
@@ -269,12 +294,23 @@ mentioned only where a daemon release depends on them.
   input unset; a blocked first publish or a corrupt root points `WICKED_SKILLS_SNAPSHOT` at a
   non-existent refusal path (`<root>/refused/skills.{blocked,config}`) so launches fail loudly
   instead of falling back to the live cache past recorded disablement.
-- **Portable-skill mirror** — after each publish the enabled, portable skills are mirrored as
-  `<name>/<the skill's whole own tree>` into `~/.codex/skills` (and the pi/opencode/copilot skill
-  dirs where present), behind `skills_mirror` (default on). An adoption ledger in the manifest
-  (tree hashes) adopts pre-existing garden entries and NEVER overwrites them (a differing tree is
-  `foreign_modified`), never overwrites a hand-edited copy of what it wrote, never deletes what the
-  daemon did not write; non-portable skills are noted, not mirrored.
+- **No writes into the user's CLI directories — ever; the copilot view rides the snapshot**
+  (design v3.2). The daemon never writes to `~/.codex/skills`, `~/.pi/agent/skills`,
+  `~/.config/opencode/skills`, `~/.copilot/skills`, `~/.claude/plugins` or any other user-level CLI
+  location: the v3 additive mirror and its adoption ledger are withdrawn (nothing of the kind
+  shipped), and there is no `skills_mirror` setting — a client sending one has it dropped and named
+  in the audit entry like any unknown key. Skills reach non-Claude workers only through per-launch,
+  wicked-owned delivery core performs from the snapshot: each published generation now carries
+  `views/copilot/.github/skills/<name>/` — copies of the enabled PORTABLE skills' own files, part of
+  the snapshot's content hash, immutable — which core hands a copilot seat as `--add-dir
+  <snapshot>/views/copilot`; `snapshot.json` names the view (`views.copilot`). `portable` stays the
+  admission key for every non-Claude view. A CLI without a lever (codex today) runs without wicked
+  skills, and a unit on such a seat that requires one is REFUSED at launch by core — there is no
+  proceed-with-disclosure setting. A test drives the whole store lifecycle under a fake HOME with
+  populated CLI dirs and asserts they are byte-identical afterwards. `tests/fixtures/state-home-subtrees.json`
+  now carries core's machine-readable fence half (`read_slot` / `denied_children` on the `skills`
+  entry — byte-identical to core's embedded copy) and the crew test checks every child the daemon
+  creates under `skills/` is either the read slot or a denied child.
 
 ## [0.7.25] — 2026-09-08
 

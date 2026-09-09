@@ -1,7 +1,8 @@
 // The `/api/v1/skills*` file manager (design v3 §API) over a fixture store: every guard answers
-// 2xx `{verdict, findings[], revision}`; the ONE 409 is a stale expectedRevision; containment and
-// strict bodies are 400; unknown skill/file 404; no runtime 503. Publish exports the snapshot path
-// for the engine (`WICKED_SKILLS_SNAPSHOT`) and mirrors into the temp home.
+// 2xx `{verdict, findings[], revision}`; 409 is "the world moved" (a stale expectedRevision, a
+// publish already in flight); containment and strict bodies are 400; unknown skill/file 404; no
+// runtime 503. Publish exports the snapshot path for the engine (`WICKED_SKILLS_SNAPSHOT`) with the
+// copilot view inside the snapshot — nothing is written into any home directory (design v3.2 §1).
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
@@ -22,8 +23,10 @@ import type {
   SkillsManifestResponse,
   SystemSettings,
 } from '../src/core/types.js';
-import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { canonicalCrewStateHome, CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
+import { COPILOT_VIEW_SKILLS_REL } from '../src/skills/store.js';
+import type { VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
 
@@ -56,7 +59,7 @@ beforeEach(async () => {
   s = scaffold();
   s.store.seed();
   logs = [];
-  app = buildApp(new SkillsRuntime({ store: s.store, mirrorHome: s.home, log: (m) => logs.push(m) }));
+  app = buildApp(new SkillsRuntime({ store: s.store, log: (m) => logs.push(m) }));
   await app.ready();
 });
 
@@ -172,6 +175,24 @@ describe('mutations — 2xx verdicts, CAS 409, strict bodies', () => {
     expect((await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-gamma/files/SKILL.md' })).json()).not.toMatchObject({ content: 'x' });
   });
 
+  it('the support endpoint refuses the names the store owns (snapshot.json, manifest.json, current, views/, .venv): PUT → blocked path-invalid, GET → 400', async () => {
+    for (const rel of ['snapshot.json', 'manifest.json', 'current', 'views/copilot/.github/skills/x/SKILL.md', '.venv/bin/python']) {
+      const put = await app.inject({ method: 'PUT', url: `/api/v1/skills/support/${rel}`, payload: { content: 'x', expectedRevision: 1 } });
+      expect(put.statusCode, rel).toBe(200);
+      const body = put.json() as SkillMutationResult;
+      expect(body.verdict, rel).toBe('blocked');
+      expect(body.findings[0]?.kind, rel).toBe('path-invalid');
+      expect(body.findings[0]?.evidence, rel).toContain('reserved');
+      const get = await app.inject({ method: 'GET', url: `/api/v1/skills/support/${rel}` });
+      expect(get.statusCode, rel).toBe(400);
+    }
+    expect((await manifest()).revision).toBe(1);
+    // …and the publish that follows verifies: none of those names leaked into the snapshot.
+    const published = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
+    expect((published.json() as SkillPublishResult).verdict).toBe('clear');
+    expect((await manifest()).current?.gen).toBe(1);
+  });
+
   it('refuses unknown body keys and malformed bodies with 400', async () => {
     expect((await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-delta/disable', payload: { expectedRevision: 1, extra: true } })).statusCode).toBe(400);
     expect((await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-delta/disable', payload: {} })).statusCode).toBe(400);
@@ -205,8 +226,8 @@ describe('mutations — 2xx verdicts, CAS 409, strict bodies', () => {
   });
 });
 
-describe('publish / analyze — the engine handoff and the mirror', () => {
-  it('publishes, exports WICKED_SKILLS_SNAPSHOT as the resolved snapshot path, and mirrors portable skills into the temp home', async () => {
+describe('publish / analyze — the engine handoff and the copilot view', () => {
+  it('publishes, exports WICKED_SKILLS_SNAPSHOT as the resolved snapshot path, lays the portable skills out in the snapshot\'s copilot view — and writes nothing into the home', async () => {
     delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
     const res = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
     expect(res.statusCode).toBe(200);
@@ -216,13 +237,60 @@ describe('publish / analyze — the engine handoff and the mirror', () => {
     const real = realpathSync(join(s.root, 'snapshots', '000001'));
     expect(body.snapshot).toMatchObject({ gen: 1, path: real, skills: 6 });
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real);
-    expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined(); // withdrawn: crew hands the engine ONE input
-    // skills_mirror defaults ON: the portable skills landed in the temp home's codex dir.
-    expect(existsSync(join(s.home, '.codex', 'skills', 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
-    expect(existsSync(join(s.home, '.codex', 'skills', 'wicked-garden-alpha'))).toBe(false);
-    // The mirror ledger is manifest state: the answered revision is the final one.
+    expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined(); // withdrawn: crew hands the engine ONE skills input
+    expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonicalCrewStateHome()); // …and the fenced state home beside it
+    // The copilot view (v3.2 §4) is INSIDE the snapshot: portable skills only, under their frontmatter names.
+    const view = join(real, ...COPILOT_VIEW_SKILLS_REL.split('/'));
+    expect(existsSync(join(view, 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(view, 'wicked-garden-beta', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(view, 'wicked-garden-alpha'))).toBe(false);
+    // The user's CLI directories are never touched (v3.2 §1): the fixture home stays non-existent.
+    expect(existsSync(s.home)).toBe(false);
+    // The answered revision is the final one — a publish moves it exactly once.
     expect(body.revision).toBe((await manifest()).revision);
+    expect(body.revision).toBe(2);
     expect((await manifest()).current).toEqual({ gen: 1, path: real });
+  });
+
+  it('one publish at a time: a concurrent publish is a 409 naming the revision, the first one lands, the provisioner ran once', async () => {
+    let release: (() => void) | undefined;
+    let calls = 0;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provisioner: VenvProvisioner = async () => {
+      calls += 1;
+      await gate;
+      return 'skipped';
+    };
+    const slow = scaffold({ provisionVenv: provisioner });
+    const slowApp = buildApp(new SkillsRuntime({ store: slow.store, log: () => undefined }));
+    try {
+      slow.store.seed();
+      await slowApp.ready();
+      const first = slowApp.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
+      // Let the first request travel Fastify's hook pipeline and park at its provisioning await.
+      const deadline = Date.now() + 5_000;
+      while (!slow.store.isPublishing()) {
+        if (Date.now() > deadline) throw new Error('the first publish never reached the store');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(slow.store.isPublishing()).toBe(true);
+      const second = await slowApp.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } });
+      expect(second.statusCode).toBe(409);
+      expect(second.json() as SkillRevisionConflict).toMatchObject({ revision: 1 });
+      expect((second.json() as SkillRevisionConflict).error).toContain('in flight');
+      (release as () => void)();
+      const done = await first;
+      expect(done.statusCode).toBe(200);
+      expect((done.json() as SkillPublishResult).snapshot?.gen).toBe(1);
+      expect(calls).toBe(1);
+      expect(slow.store.isPublishing()).toBe(false);
+      expect(slow.store.generationsOnDisk()).toEqual([1]);
+    } finally {
+      await slowApp.close();
+      removeScratch(slow.base);
+    }
   });
 
   it('a blocked publish is a 200 with file:line findings, no snapshot, no env export', async () => {

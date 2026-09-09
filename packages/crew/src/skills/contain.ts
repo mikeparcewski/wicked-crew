@@ -19,7 +19,8 @@
 
 import { assertNoSymlinkComponents, SymlinkComponentError } from './tree.js';
 
-export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root';
+/** `reserved`: a name the store itself owns at that level (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`). */
+export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root' | 'reserved';
 
 /** A skill-relative path the store refuses. `reason` names why; the route answers 400 with `message`. */
 export class SkillPathError extends Error {

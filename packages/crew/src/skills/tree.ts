@@ -233,14 +233,23 @@ export function pruneEmptyDirs(dir: string, upTo: string): void {
   }
 }
 
-/** Every directory under `root` (root included, deepest first), symlinks never followed. */
-function directoriesUnder(root: string): string[] {
+function isEnoent(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+/**
+ * Every directory under `root` (root included, deepest first), symlinks never followed. `strict`
+ * propagates every error but ENOENT (an entry that vanished mid-walk); the lenient mode (the
+ * force-remove's) skips what it cannot list — `rmSync` reports what matters there.
+ */
+function directoriesUnder(root: string, strict: boolean): string[] {
   const out: string[] = [];
   const visit = (dir: string): void => {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      if (strict && !isEnoent(err)) throw err;
       return;
     }
     for (const entry of entries) {
@@ -251,7 +260,8 @@ function directoriesUnder(root: string): string[] {
   };
   try {
     if (!lstatSync(root).isDirectory()) return out;
-  } catch {
+  } catch (err) {
+    if (strict && !isEnoent(err)) throw err;
     return out;
   }
   visit(root);
@@ -263,32 +273,37 @@ const WRITE_BITS = 0o222;
 /**
  * Strip the write bits from every directory and file under `root` — the shared per-baseline
  * `.venv` is read-only by contract (design v3 §4): a worker's `uv run` from a snapshot must not
- * install into, or remove from, an env every other snapshot links. Files first, then directories
- * (deepest first), so the walk never has to re-open a directory it already closed. Best-effort on
- * platforms without POSIX modes.
+ * install into, or remove from, an env every other snapshot links; a published snapshot is locked
+ * the same way (immutable by contract, verified by hash). Files first, then directories (deepest
+ * first), so the walk never has to re-open a directory it already closed. A permission failure
+ * PROPAGATES (codex round 2 on #480: "silently swallows permission failures while claiming to
+ * lock") — a tree this cannot lock is not locked, and the caller decides what that means (the
+ * store treats an unlockable env as a failed provisioning, blocking the publish). Only an entry
+ * that vanished mid-walk (ENOENT) is tolerated. A no-op on platforms without POSIX modes.
  */
 export function makeTreeReadOnly(root: string): void {
   if (process.platform === 'win32') return;
-  for (const dir of directoriesUnder(root)) {
+  for (const dir of directoriesUnder(root, true)) {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
+    } catch (err) {
+      if (isEnoent(err)) continue;
+      throw err;
     }
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const p = join(dir, entry.name);
       try {
         chmodSync(p, lstatSync(p).mode & 0o777 & ~WRITE_BITS);
-      } catch {
-        /* a file that vanished mid-walk needs no protecting */
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
       }
     }
     try {
       chmodSync(dir, lstatSync(dir).mode & 0o777 & ~WRITE_BITS);
-    } catch {
-      /* same */
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
     }
   }
 }
@@ -299,7 +314,7 @@ export function makeTreeReadOnly(root: string): void {
  * parent, whatever the entry's own mode). A missing root is a no-op.
  */
 export function removeTreeForce(root: string): void {
-  for (const dir of directoriesUnder(root)) {
+  for (const dir of directoriesUnder(root, false)) {
     try {
       chmodSync(dir, lstatSync(dir).mode & 0o777 | 0o700);
     } catch {

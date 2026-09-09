@@ -10,10 +10,13 @@
  * grammar admits shapes (anchors, flow mappings, multi-documents) no SKILL.md uses and no reviewer
  * expects a skill editor to accept.
  *
- * It is a STRICT subset, not a lenient one (codex review of #480): a scalar that opens a flow
- * sequence `[`, a flow mapping `{`, or a quote must close it on the same line — `tags: [a, b` is a
- * parse failure naming the line, not a string value of `[a, b`. The live catalog's 231 flow values
- * are all single-line and terminated, so nothing shipped is refused.
+ * It is a STRICT subset, not a lenient one (codex reviews of #480): a scalar that opens a flow
+ * sequence `[`, a flow mapping `{`, or a quote must close it — `tags: [a, b` is a parse failure
+ * naming the line, not a string value of `[a, b`; a flow collection continued on indented lines
+ * (`tags:` newline `  [a, b`) is joined and checked the same way; a PLAIN scalar may not contain
+ * `: ` or open with `- ` (`description: hello: world` is a nested mapping to YAML, not the string
+ * `hello: world` — quote it). The live catalog's 231 flow values are all single-line and
+ * terminated, so nothing shipped is refused.
  */
 
 import type { SkillKind } from '../core/types.js';
@@ -35,13 +38,28 @@ function unquote(value: string): string {
   return value;
 }
 
+/** A scalar that opens a flow collection or a quote — everything else is a PLAIN scalar. */
+function opensFlowOrQuote(value: string): boolean {
+  const first = value[0];
+  return first === '[' || first === '{' || first === '"' || first === "'";
+}
+
 /**
- * A single-line scalar must be well-formed: an opened flow sequence / flow mapping / quoted scalar
- * closes on the line. Returns the reason it is malformed, or `null`.
+ * A scalar must be well-formed: an opened flow sequence / flow mapping / quoted scalar closes; a
+ * plain scalar carries no `: ` (YAML reads `hello: world` as a nested mapping — "mapping values
+ * are not allowed here") and does not open with `- ` (a block sequence entry). Returns the reason
+ * it is malformed, or `null`.
  */
 function malformedScalar(value: string): string | null {
   const first = value[0];
   const last = value[value.length - 1];
+  if (!opensFlowOrQuote(value)) {
+    if (value.includes(': ') || value.endsWith(':')) {
+      return 'a plain scalar cannot contain `: ` (YAML reads it as a nested mapping) — quote the value';
+    }
+    if (value.startsWith('- ') || value === '-') return 'a plain scalar cannot open with `- ` (YAML reads it as a sequence entry) — quote the value';
+    return null;
+  }
   if (first === '[' && last !== ']') return 'unterminated flow sequence (`[` without `]`)';
   if (first === '{' && last !== '}') return 'unterminated flow mapping (`{` without `}`)';
   if ((first === '"' || first === "'") && (value.length < 2 || last !== first)) {
@@ -83,7 +101,9 @@ function closingFence(src: string): number {
  * Parse the frontmatter block at the top of `text`. Top-level keys only; a block scalar or an
  * indented continuation (a nested mapping, a list) is folded into the key's string value — the
  * store never interprets those, it only needs the flat scalars and the fact that the block is
- * well-formed. Duplicate keys and non-`key: value` lines are parse failures with a line number.
+ * well-formed. An indented continuation that opens a flow collection or a quote is a multi-line
+ * scalar and is checked like a single-line one (joined). Duplicate keys and non-`key: value` lines
+ * are parse failures with a line number.
  */
 export function parseFrontmatter(text: string): FrontmatterResult {
   const src = text.replace(/\r\n/g, '\n');
@@ -111,7 +131,8 @@ export function parseFrontmatter(text: string): FrontmatterResult {
     let value = (m[2] ?? '').trim();
     const keyLine = i + 2;
     i += 1;
-    const isBlock = value === '' || /^[|>][+-]?$/.test(value);
+    const literal = /^[|>][+-]?$/.test(value);
+    const isBlock = value === '' || literal;
     if (!isBlock) {
       const malformed = malformedScalar(value);
       if (malformed !== null) return { ok: false, reason: `line ${keyLine}: \`${key}\`: ${malformed}` };
@@ -126,6 +147,12 @@ export function parseFrontmatter(text: string): FrontmatterResult {
       }
       while (block.length > 0 && block[block.length - 1] === '') block.pop();
       value = block.join(value.startsWith('>') ? ' ' : '\n');
+      // An indented continuation without a `|`/`>` indicator that opens a flow collection or a
+      // quote is one multi-line scalar — checked joined, never folded unchecked (codex round 2).
+      if (!literal && value !== '' && opensFlowOrQuote(value)) {
+        const malformed = malformedScalar(block.join(' '));
+        if (malformed !== null) return { ok: false, reason: `line ${keyLine}: \`${key}\`: ${malformed}` };
+      }
     }
     fields[key] = unquote(value);
   }

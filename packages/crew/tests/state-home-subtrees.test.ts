@@ -11,11 +11,14 @@
 //      registry does not classify.
 //
 // The fence itself is core's (one deny rule per entry, `skills/snapshots/<gen>/` the only read
-// root); crew's job is that the list is complete and true.
+// root); crew's job is that the list is complete and true. The file is byte-identical to the copy
+// core embeds (`src/state_home.rs`, `include_str!`): the `skills` entry's `read_slot` /
+// `denied_children` are the machine-readable half core enforces — checked here against the store's
+// own constants AND against what a booted daemon actually creates under `skills/`.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
-import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,11 +26,20 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter } from '../src/core/adapter.js';
-import { DEFAULT_SETTINGS } from '../src/core/types.js';
+import { DEFAULT_SETTINGS, type DiagnosticsResponse } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
+import { CREW_STATE_HOME_ENGINE_ENV, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
-import { SKILLS_DIRNAME, SKILLS_ROOT_ENV } from '../src/skills/store.js';
-import { noVenv } from '../src/skills/venv.js';
+import {
+  BASELINE_DIRNAME,
+  CURRENT_LINKNAME,
+  EFFECTIVE_DIRNAME,
+  MANIFEST_FILENAME,
+  SKILLS_DIRNAME,
+  SKILLS_ROOT_ENV,
+  SNAPSHOTS_DIRNAME,
+} from '../src/skills/store.js';
+import { noVenv, UV_CACHE_DIRNAME } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN } from './support/skills-fixture.js';
 
@@ -42,6 +54,10 @@ interface RegistryEntry {
   owner: 'crew' | 'engine' | 'operator';
   source: string;
   worker_read: string;
+  /** The ONE child a worker may read beneath (its resolved generation only) — the skills entry. */
+  read_slot?: string;
+  /** Children core denies by rule; `x/y-*` is a prefix glob for entries under child `x`. */
+  denied_children?: string[];
 }
 interface Registry {
   version: number;
@@ -57,6 +73,11 @@ function classify(topLevel: string): RegistryEntry | null {
     if (e.prefix !== undefined && topLevel.startsWith(e.prefix)) return e;
   }
   return null;
+}
+
+/** Whether a `denied_children` pattern (`name`, or `dir/prefix-*`) covers a child path relative to the entry. */
+function deniedBy(patterns: ReadonlyArray<string>, childRel: string): boolean {
+  return patterns.some((p) => (p.endsWith('*') ? childRel.startsWith(p.slice(0, -1)) : p === childRel));
 }
 
 function tsFiles(dir: string): string[] {
@@ -92,6 +113,26 @@ describe('state-home-subtrees.json — the registry itself', () => {
     const skills = classify(SKILLS_DIRNAME);
     expect(skills?.owner).toBe('crew');
     expect(skills?.worker_read).toMatch(/snapshots\/<gen>\/.*only/);
+  });
+
+  it("the skills entry's machine-readable half (core's `read_slot` / `denied_children`) names the store's own layout: the snapshots slot is readable, every other child the store creates is denied", () => {
+    const skills = classify(SKILLS_DIRNAME) as RegistryEntry;
+    expect(skills.read_slot).toBe(SNAPSHOTS_DIRNAME);
+    const denied = skills.denied_children ?? [];
+    for (const child of [BASELINE_DIRNAME, EFFECTIVE_DIRNAME, MANIFEST_FILENAME, CURRENT_LINKNAME, UV_CACHE_DIRNAME]) {
+      expect(deniedBy(denied, child), `${child} must be a denied child of skills/`).toBe(true);
+    }
+    // Torn staging under the slot is denied too (a half-written generation is never a read root).
+    expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/.staging-abc123`)).toBe(true);
+    expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/.tmp-abc123`)).toBe(true);
+    // …while a generation directory under the slot is NOT denied — it is what the worker reads.
+    expect(deniedBy(denied, `${SNAPSHOTS_DIRNAME}/000001`)).toBe(false);
+    // No other entry claims a read slot: the snapshot is the ONLY non-denied path under the state home.
+    for (const e of registry.entries) {
+      if (e.name === SKILLS_DIRNAME) continue;
+      expect(e.read_slot, `${e.name ?? e.prefix} must not open a read slot`).toBeUndefined();
+      expect(e.denied_children).toBeUndefined();
+    }
   });
 });
 
@@ -172,7 +213,7 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
       interactiveWsRelay: { disabled: true },
       stallWatchdog: { enabled: false },
       studioRoot: join(scratch, 'no-studio'),
-      skills: { source: () => pluginSourceAt(FIXTURE_PLUGIN), mirrorHome: join(scratch, 'mirror-home'), provisionVenv: noVenv },
+      skills: { source: () => pluginSourceAt(FIXTURE_PLUGIN), provisionVenv: noVenv },
     });
     await app.ready();
     // Touch the settings + skills surfaces so lazily-created stores land too.
@@ -202,9 +243,27 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
       unclassified,
       `the daemon created ${JSON.stringify(unclassified)} under the state home — register them in tests/fixtures/state-home-subtrees.json (workers are fenced from the state home by that list)`,
     ).toEqual([]);
-    // The skills root's fence is real: the published snapshot exists and everything else under `skills/` is denied by the registry's verdict.
+    // The skills root's fence is real: the published snapshot exists, and EVERY child the store created
+    // under `skills/` is either the read slot or a denied child of core's machine-readable list — a
+    // new child the store started writing would fail here until core's rule set names it.
+    const skills = classify(SKILLS_DIRNAME) as RegistryEntry;
     const skillsEntries = readdirSync(join(stateHome, SKILLS_DIRNAME)).sort();
     expect(skillsEntries).toEqual(expect.arrayContaining(['baseline', 'current', 'effective', 'manifest.json', 'snapshots']));
+    const unfenced = skillsEntries.filter((child) => child !== skills.read_slot && !deniedBy(skills.denied_children ?? [], child));
+    expect(unfenced, `children of skills/ that are neither the read slot nor denied: ${JSON.stringify(unfenced)} — register them in the shared registry (core enforces it)`).toEqual([]);
+    // Under the slot: only generation dirs (readable when handed out) and denied torn-staging names.
+    const slotEntries = readdirSync(join(stateHome, SKILLS_DIRNAME, skills.read_slot as string));
+    for (const child of slotEntries) {
+      expect(/^\d{6}$/.test(child) || deniedBy(skills.denied_children ?? [], `${skills.read_slot}/${child}`), child).toBe(true);
+    }
     expect(process.env['WICKED_SKILLS_SNAPSHOT']?.startsWith(join(stateHome, SKILLS_DIRNAME, 'snapshots')) || process.env['WICKED_SKILLS_SNAPSHOT']?.includes(`/${SKILLS_DIRNAME}/snapshots/`)).toBe(true);
+  });
+
+  it('hands the engine the fenced state home beside the snapshot, and the snapshot IS <state home>/skills/snapshots/<gen> — core\'s cross-check passes, no warning (core#399 round 3)', async () => {
+    const canonical = realpathSync(stateHome);
+    expect(process.env[CREW_STATE_HOME_ENGINE_ENV]).toBe(canonical);
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]?.startsWith(join(canonical, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + '/')).toBe(true);
+    const skills = ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
+    expect(skills).toMatchObject({ state: 'published', stateHome: canonical, engineInput: process.env[SKILLS_SNAPSHOT_ENGINE_ENV], findings: [] });
   });
 });

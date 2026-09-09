@@ -15,7 +15,8 @@
  *   - an edit under `scripts/` or `schemas/` (a skill's own, or the root support tree) is allowed
  *     but a WARNING: those files back behavior, not prose, and every invocation shares them;
  *   - content that makes a skill non-portable (`${CLAUDE_PLUGIN_ROOT}`, cwd-relative scripts,
- *     `../` links) is a warning: the skill becomes Claude-only and leaves the mirror.
+ *     `../` links) is a warning: the skill becomes Claude-only and leaves every non-Claude
+ *     delivery view (`views/copilot/`, the per-launch `--skill` lists core builds).
  *
  * `{verdict, findings[]}` is the ONE result shape; a mutation with a `blocked` verdict writes nothing.
  * Publish-time validation (unresolved refs, core closure, drift) lives in the store — it needs the
@@ -218,10 +219,10 @@ export function nestedSkillCreateGuard(rel: string, skill: string): SkillConflic
 const PORTABILITY_EXPLANATION: Record<PortabilityIssue, string> = {
   'plugin-root': 'the content resolves `${CLAUDE_PLUGIN_ROOT}`, which only Claude Code provides',
   'cwd-script': 'the content invokes a plugin script relative to the worktree cwd, which only the Claude plugin path arranges',
-  'relative-link': 'the content links a sibling via `../`, which the flat `<name>/SKILL.md` mirror layout cannot follow',
+  'relative-link': 'the content links a sibling via `../`, which the flat `<name>/SKILL.md` layout of every non-Claude view cannot follow',
 };
 
-/** Content that makes a skill non-portable → warning (it leaves the non-Claude CLI mirror). */
+/** Content that makes a skill non-portable → warning (it leaves every non-Claude delivery view). */
 export function nonPortableGuard(
   files: Readonly<Record<string, string>>,
   skill: string,
@@ -232,7 +233,7 @@ export function nonPortableGuard(
     return finding(
       'non-portable',
       'warning',
-      `${PORTABILITY_EXPLANATION[issue]}; the skill becomes Claude-only and is excluded from the codex/pi/opencode/copilot mirror`,
+      `${PORTABILITY_EXPLANATION[issue]}; the skill becomes Claude-only — excluded from the snapshot's copilot view and from the per-launch skill lists core builds for pi/opencode, so a non-Claude seat that requires it is refused at launch`,
       `${rel}: ${issue}`,
       { skill, file: rel },
     );

@@ -119,7 +119,7 @@ describe('SkillsRuntime.observe delegates to the store', () => {
   });
 
   it('pins on a live-run event and reaps on the terminal frame', async () => {
-    const runtime = new SkillsRuntime({ store: s.store, mirrorHome: s.home, log: () => undefined });
+    const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
     expect((await s.store.publish(1)).verdict).toBe('clear');
     runtime.observe(ev('sessionStarted', 'run-a'));
     for (let i = 0; i < KEEP_GENERATIONS + 1; i += 1) expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');

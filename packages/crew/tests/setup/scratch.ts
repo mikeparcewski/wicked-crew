@@ -20,13 +20,44 @@
 // binding exposes no `Core.shutdown`/`drain`/`join`.
 // A bounded retry is therefore the crew-side defence in depth; an awaitable engine drain/join is
 // required to make this ordering mathematically race-free.
-import { rmSync } from 'node:fs';
+//
+// The skills store locks what it publishes read-only (`snapshots/<gen>/` and the baseline `.venv`
+// — src/skills/tree.ts `makeTreeReadOnly`): unlinking an entry needs a WRITABLE parent, so the
+// write bit is restored on every directory (symlinks never followed) before the tree is removed.
+import { chmodSync, lstatSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 
 const REMOVE_RETRIES = 20;
 const REMOVE_RETRY_DELAY_MS = 100;
 
-/** Remove a test scratch dir, tolerating the engine's async worktree-reaper tail (crew#429). */
+/** Give every directory under `root` (root included) its owner write bit back; best-effort. */
+function restoreWriteBits(root: string): void {
+  let st;
+  try {
+    st = lstatSync(root);
+  } catch {
+    return;
+  }
+  if (!st.isDirectory()) return;
+  try {
+    chmodSync(root, (st.mode & 0o777) | 0o700);
+  } catch {
+    /* not ours to chmod — rmSync below reports what matters */
+  }
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.isSymbolicLink()) restoreWriteBits(join(root, entry.name));
+  }
+}
+
+/** Remove a test scratch dir, tolerating the engine's async worktree-reaper tail (crew#429) and read-only subtrees. */
 export function removeScratch(dir: string): void {
+  if (process.platform !== 'win32') restoreWriteBits(dir);
   rmSync(dir, {
     recursive: true,
     force: true,
