@@ -1,12 +1,15 @@
 // skills_root / skills_mirror — the settings half of the skills seam, modeled on worker_config_root:
 // validated at the PUT boundary (absolute path or ""; strict boolean), allowlisted (an unknown key
 // is dropped and NAMED in the audit entry), re-applied on every change (the store re-roots, seeds,
-// publishes, exports WICKED_SKILLS_SNAPSHOT), and restored at daemon boot (createServer).
+// publishes, exports WICKED_SKILLS_SNAPSHOT), and restored at daemon boot (createServer) — with the
+// degradation ladder: no garden → fallback (engine input unset); a blocked first publish or a
+// corrupt root → a refusal path the engine fails loudly on, surfaced on GET /diagnostics. Boot tests
+// are HERMETIC: the provisioner is injected (`noVenv`) — no host `uv`, no downloads.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -16,11 +19,12 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
-import { DEFAULT_SETTINGS, type SystemSettings } from '../src/core/types.js';
+import { DEFAULT_SETTINGS, type DiagnosticsResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { BOOT_SKILLS_SNAPSHOT, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
-import { SkillsRuntime } from '../src/skills/runtime.js';
+import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
 import { SKILLS_ROOT_ENV } from '../src/skills/store.js';
+import { noVenv } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN, scaffold, type Scaffold } from './support/skills-fixture.js';
 
@@ -62,7 +66,6 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
   afterEach(async () => {
     await app?.close();
     app = undefined;
-    await s.store.pendingVenv;
     removeScratch(s.base);
     restoreEnv();
   });
@@ -93,6 +96,7 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     expect(s.store.root).toBe(newRoot);
     expect(existsSync(join(newRoot, 'manifest.json'))).toBe(true);
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(join(newRoot, 'snapshots', '000001'));
+    expect(runtime.health()).toMatchObject({ state: 'published', root: newRoot, current: { gen: 1 }, findings: [] });
     // skills_mirror: false → nothing written into the home.
     expect(existsSync(join(s.home, '.codex'))).toBe(false);
   });
@@ -155,13 +159,17 @@ describe('adapter getSettings read-validation', () => {
   });
 });
 
-describe('daemon boot applies the skills settings (createServer)', () => {
+describe('daemon boot applies the skills settings (createServer) — the degradation ladder', () => {
   let dir: string;
   let adapter: CoreAdapter;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'skills-boot-'));
     adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+    // The fixture catalog does not carry the daemon's built-in skill_refs (domain*, repo-learn), and
+    // a registered ref the catalog lacks is BLOCKING at publish — so the boot suite registers no
+    // workflows; the blocked-first-publish rung has its own test below (a missing plugin catalog).
+    adapter.listWorkflows = () => [];
     delete process.env[SKILLS_ROOT_ENV];
   });
 
@@ -175,8 +183,12 @@ describe('daemon boot applies the skills settings (createServer)', () => {
     projectEvents: { disabled: true },
     auditPath: join(dir, 'audit.log'),
     studioRoot: join(dir, 'no-studio'),
-    skills: { ...skills, mirrorHome: join(dir, 'home') },
+    // HERMETIC: the provisioner is injected — a boot test never runs the host's `uv`.
+    skills: { ...skills, mirrorHome: join(dir, 'home'), provisionVenv: noVenv },
   });
+
+  const diagnostics = async (app: FastifyInstance): Promise<DiagnosticsResponse['skills']> =>
+    ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
 
   it('seeds the persisted skills_root from the plugin source, publishes, exports WICKED_SKILLS_SNAPSHOT, mirrors into the given home', async () => {
     const root = join(dir, 'skills-root');
@@ -189,18 +201,66 @@ describe('daemon boot applies the skills settings (createServer)', () => {
       expect(existsSync(join(dir, 'home', '.codex', 'skills', 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
+      expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: join(root, 'snapshots', '000001') });
+      expect(await diagnostics(app)).toMatchObject({ state: 'published', root, current: { gen: 1 }, engineInput: join(root, 'snapshots', '000001'), findings: [] });
     } finally {
       await app.close();
     }
   });
 
-  it('restores the boot-time env when no plugin source exists (the engine falls back to the live plugin)', async () => {
+  it('ABSENT configuration (no plugin source) is the fallback: the boot-time env is restored and skills.fallback is reported', async () => {
     adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, skills_root: join(dir, 'skills-root') });
     process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = '/stale';
     const app = await createServer(adapter, options({ source: () => null }));
     try {
       expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(BOOT_SKILLS_SNAPSHOT);
       expect((await app.inject({ method: 'GET', url: '/api/v1/skills' })).statusCode).toBe(503);
+      const skills = await diagnostics(app);
+      expect(skills.state).toBe('fallback');
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
+      expect(skills.findings[0]?.message).toContain('install wicked-garden first');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a BLOCKED first publish is never a fallback: the engine input points at a refusal path and skills.blocked is reported', async () => {
+    const root = join(dir, 'skills-root');
+    const plugin = join(dir, 'defective-plugin');
+    cpSync(FIXTURE_PLUGIN, plugin, { recursive: true });
+    rmSync(join(plugin, '.claude-plugin', 'archetypes.json')); // a required catalog is missing → publish blocks
+    adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, skills_root: root });
+    process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = '/stale';
+    const app = await createServer(adapter, options({ source: () => pluginSourceAt(plugin) }));
+    try {
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(refusalPath(root, 'skills.blocked'));
+      expect(existsSync(refusalPath(root, 'skills.blocked'))).toBe(false); // it does not exist — that is the point
+      const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
+      expect(res.statusCode).toBe(200);
+      expect((res.json() as SkillsManifestResponse).current).toBeNull();
+      const skills = await diagnostics(app);
+      expect(skills).toMatchObject({ state: 'blocked', root, current: null, engineInput: refusalPath(root, 'skills.blocked') });
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.blocked']);
+      expect(skills.findings[0]?.message).toContain('missing-plugin-manifest');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('a CORRUPT root is skills.config: never "restore and proceed" — the engine input points at a refusal path and /skills is 503', async () => {
+    const root = join(dir, 'skills-root');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'manifest.json'), 'not a manifest');
+    adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, skills_root: root });
+    process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = '/stale';
+    const app = await createServer(adapter, options({ source: () => pluginSourceAt(FIXTURE_PLUGIN) }));
+    try {
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(refusalPath(root, 'skills.config'));
+      expect((await app.inject({ method: 'GET', url: '/api/v1/skills' })).statusCode).toBe(503);
+      const skills = await diagnostics(app);
+      expect(skills).toMatchObject({ state: 'config-error', root, engineInput: refusalPath(root, 'skills.config') });
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.config']);
+      expect(skills.findings[0]?.message).toContain('not a skills manifest');
     } finally {
       await app.close();
     }
@@ -210,6 +270,7 @@ describe('daemon boot applies the skills settings (createServer)', () => {
     const app = await createServer(adapter, options({ disabled: true }));
     try {
       expect((await app.inject({ method: 'GET', url: '/api/v1/skills' })).statusCode).toBe(503);
+      expect((await diagnostics(app)).state).toBe('disabled');
     } finally {
       await app.close();
     }

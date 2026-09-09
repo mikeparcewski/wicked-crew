@@ -52,7 +52,7 @@ import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { defaultMirrorHome, SkillsRuntime } from '../skills/runtime.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
-import { uvSyncBaseline } from '../skills/venv.js';
+import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   DEFAULT_WORKER_STALL_MINUTES,
@@ -293,13 +293,16 @@ export interface CreateServerOptions {
    * snapshot when none exists, exports `WICKED_SKILLS_SNAPSHOT` for the engine, and mirrors
    * portable skills into the non-Claude CLIs' skill dirs (`skills_mirror`). `disabled: true`
    * registers the routes without a store (they answer 503) — the manifest collector and tests that
-   * must not touch a plugin cache use it. `source` / `mirrorHome` aim a test at a fixture plugin
-   * root and a temp home; production omits both (live discovery, the real home).
+   * must not touch a plugin cache use it. `source` / `mirrorHome` / `provisionVenv` aim a test at
+   * a fixture plugin root, a temp home, and a provisioner that spawns nothing (`noVenv`) — a boot
+   * test must never run the host's `uv` or download anything; production omits all three (live
+   * discovery, the real home, `uvSyncBaseline`).
    */
   skills?: {
     disabled?: boolean;
     source?: () => PluginSource | null;
     mirrorHome?: string;
+    provisionVenv?: VenvProvisioner;
   };
 }
 
@@ -368,7 +371,10 @@ export async function createServer(
   // The store hangs off the resolved state home (never a `~/.wicked-crew` literal, crew#353) unless
   // `skills_root` names another; the core-by-reference closure is seeded from the workflow catalog
   // the daemon serves (built-ins + user-registered), read at use time so a later registration
-  // counts at the next publish. `apply` never throws: no installed plugin is a logged fallback.
+  // counts at the next publish. `apply` never throws and never fails open: no installed plugin is
+  // the logged fallback (engine input unset); a blocked first publish or a corrupt root points the
+  // engine at a refusal path so launches fail loudly (skills/runtime.ts). Awaited: a first publish
+  // provisions the baseline env before it returns.
   let skillsRuntime: SkillsRuntime | undefined;
   if (options?.skills?.disabled !== true) {
     const source = options?.skills?.source;
@@ -376,14 +382,14 @@ export async function createServer(
       store: new SkillsStore({
         root: resolveSkillsRoot(bootSettings.skills_root),
         registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
-        provisionVenv: uvSyncBaseline,
+        provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
         ...(source !== undefined ? { source } : {}),
         warn: (m) => app.log.warn(m),
       }),
       mirrorHome: options?.skills?.mirrorHome ?? defaultMirrorHome(),
       log: (m) => app.log.warn(m),
     });
-    skillsRuntime.apply(bootSettings);
+    await skillsRuntime.apply(bootSettings);
   }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the

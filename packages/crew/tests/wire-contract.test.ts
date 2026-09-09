@@ -42,6 +42,7 @@ import type {
   SkillRevisionSchema,
 } from '../src/api/skills.js';
 import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
+import type { SkillsHealth } from '../src/skills/runtime.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
@@ -349,8 +350,12 @@ respondsWith<
     stores: StoreFileEntry[];
     recentErrors: RecentError[];
     acp: { byCli: Record<string, AcpCliFold> };
+    skills: SkillsHealth;
   }
 >();
+// The skills seam's health block (api-types 0.27.0), both directions.
+respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
+respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();
@@ -410,7 +415,8 @@ respondsWith<Wire.SkillReadResult, Awaited<ReturnType<SkillsStore['readFile']>>>
 respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['enable']>>();
 respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['writeFile']>>();
 respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['add']>>();
-respondsWith<Wire.SkillPublishResult, ReturnType<SkillsStore['publish']>>();
+// publish is async (it awaits the baseline env provisioner) — pin what it RESOLVES to.
+respondsWith<Wire.SkillPublishResult, Awaited<ReturnType<SkillsStore['publish']>>>();
 respondsWith<Wire.SkillRefreshResult, ReturnType<SkillsStore['refreshBaseline']>>();
 respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
 respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();

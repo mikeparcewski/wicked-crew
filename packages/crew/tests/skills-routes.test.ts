@@ -62,7 +62,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await app.close();
-  await s.store.pendingVenv;
   removeScratch(s.base);
   if (savedEnv === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
   else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = savedEnv;
@@ -146,6 +145,33 @@ describe('mutations — 2xx verdicts, CAS 409, strict bodies', () => {
     expect((await manifest()).manifest.skills['wicked-garden-beta']?.enabled).toBe(true);
   });
 
+  it('a containment refusal on a WRITE is a normal 200 blocked envelope (path-invalid), never a 400', async () => {
+    const nested = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/wicked-garden-alpha/files/nested/SKILL.md',
+      payload: { content: 'x', expectedRevision: 1 },
+    });
+    expect(nested.statusCode).toBe(200);
+    expect(nested.json() as SkillMutationResult).toMatchObject({ verdict: 'blocked', revision: 1 });
+    expect((nested.json() as SkillMutationResult).findings[0]?.kind).toBe('path-invalid');
+    const escaped = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/wicked-garden-alpha/files/%2e%2e%2Fgamma/SKILL.md',
+      payload: { content: 'x', expectedRevision: 1 },
+    });
+    expect(escaped.statusCode).toBe(200);
+    expect((escaped.json() as SkillMutationResult).verdict).toBe('blocked');
+    const support = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/support/skills/beta/SKILL.md',
+      payload: { content: 'x', expectedRevision: 1 },
+    });
+    expect(support.statusCode).toBe(200);
+    expect((support.json() as SkillMutationResult).findings[0]?.kind).toBe('path-invalid');
+    expect((await manifest()).revision).toBe(1);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-gamma/files/SKILL.md' })).json()).not.toMatchObject({ content: 'x' });
+  });
+
   it('refuses unknown body keys and malformed bodies with 400', async () => {
     expect((await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-delta/disable', payload: { expectedRevision: 1, extra: true } })).statusCode).toBe(400);
     expect((await app.inject({ method: 'POST', url: '/api/v1/skills/wicked-garden-delta/disable', payload: {} })).statusCode).toBe(400);
@@ -207,10 +233,12 @@ describe('publish / analyze — the engine handoff and the mirror', () => {
     expect(body.snapshot).toBeNull();
     expect(body.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({ file: 'skills/alpha/nested/SKILL.md', line: 10 });
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBeUndefined();
-    // analyze is the same validation, dry: same findings, nothing published, CAS untouched.
+    // analyze is the same validation, PURE: same findings, nothing published, nothing persisted, CAS untouched.
     const analyze = await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' });
     expect(analyze.statusCode).toBe(200);
     expect((analyze.json() as SkillPublishResult).verdict).toBe('blocked');
+    expect((analyze.json() as SkillPublishResult).revision).toBe(rev);
+    expect((await manifest()).revision).toBe(rev);
     expect((await manifest()).current).toBeNull();
   });
 

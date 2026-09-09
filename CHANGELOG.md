@@ -214,29 +214,56 @@ mentioned only where a daemon release depends on them.
   internal-corpus pin / samples / materialize / run semantics over a git fixture).
 - **Crew-owned skills root** (skills keystone, design v3; companion to wicked-core#396). The daemon
   seeds `<state home>/skills` from the LIVE installed wicked-garden plugin (the marketplace cache's
-  highest version, else the hand-installed copy — never a repo checkout) into a content-hash
-  `baseline/<hash>/`, keeps the operator-edited `effective/` root beside it, and PUBLISHES immutable
-  `snapshots/<gen>/` (enabled skills only, dependency closure, `snapshot.json`) behind an atomically
-  flipped `current` link — handing the engine `WICKED_SKILLS_SNAPSHOT=<resolved snapshot>` at every
-  spawn. The newest three generations are kept; older ones are reaped only once no live run pins
-  them (pins fold from the CoreEvent stream). Publish validates the whole tree: every
-  `${CLAUDE_PLUGIN_ROOT}/…` and `../…` reference of an enabled skill must resolve inside the
-  snapshot (file:line on failure), and the core-by-reference closure (every registered workflow
-  `skill_ref` + transitive SKILL.md mandates) cannot be disabled or renamed.
+  highest version — never the hand-installed copy, never a repo checkout; `WICKED_CREW_SKILLS_SOURCE`
+  is the one explicit override) into a content-hash `baseline/<hash>/`, keeps the operator-edited
+  `effective/` root beside it, and PUBLISHES immutable `snapshots/<gen>/` (enabled skills only,
+  dependency closure, `snapshot.json`) behind an atomically flipped `current` link — handing the
+  engine `WICKED_SKILLS_SNAPSHOT=<resolved snapshot>` at every spawn. Publish is crash-safe and
+  idempotent on retry: the generation is allocated from the filesystem (max existing + 1), staged
+  under `.staging-*`, renamed — never over an existing generation — the manifest is committed
+  BEFORE `current` flips (an interrupted flip is finished at the next boot), and torn staging is
+  swept. The newest three generations are kept; older ones are reaped only once no live run pins
+  them (pins fold from the CoreEvent stream); a baseline (and its shared `.venv`) lives while any
+  generation on disk references it. `current` is never trusted: it is realpath-contained under
+  `snapshots/`, its `snapshot.json` validated, and the tree re-hashed against `contentHash` before
+  the path is exported (`SkillsCurrentInvalidError` otherwise). Publish validates the whole tree —
+  every `${CLAUDE_PLUGIN_ROOT}/…` and `../…` reference of an enabled skill must resolve INSIDE the
+  snapshot (`..` is an escape, `dir/` resolves; file:line on failure), the frontmatter `name` must
+  equal the path-derived name, malformed frontmatter (unterminated flow sequences / quotes) blocks,
+  `.claude-plugin/{plugin.json,archetypes.json,components.json}` are required
+  (`missing-plugin-manifest`), and the core-by-reference closure (every registered workflow
+  `skill_ref` + transitive SKILL.md mandates) must be COMPLETE: a missing registered skill or an
+  absent mandate is blocking, and disable recomputes membership from the live refs. The baseline's
+  `.venv` is provisioned (`uv sync`, through the daemon's `execCapped` chokepoint, `UV_CACHE_DIR`
+  under the root) and AWAITED before a publish returns, locked read-only, and linked from a
+  snapshot only once it exists (`snapshot.json.venv` records the state either way).
 - **`/api/v1/skills*` file manager** — `GET /skills`, `GET /skills/:name/files[/*path]`,
   `PUT /skills/:name/files/*path`, `GET|PUT /skills/support/*path`, `POST /skills`,
   `POST /skills/:name/{enable,disable,reset,replace}`, `POST /skills/{refresh-baseline,publish,analyze}`.
   Every mutation is CAS-guarded (`expectedRevision`; 409 only on a stale one) and answers 2xx
-  `{verdict, findings[], revision}` — a `blocked` verdict is a normal response. Skill-scoped
-  containment (lstat walk refusing symlinks, `..`/absolute/encoded escapes, nested-skill ownership),
-  atomic writes, typed capped reads (`content: null` on binary). Reset restores content only, never
-  enablement; refresh-baseline merges three-way per FILE. api-types **0.26.0** carries the
-  `Skill*` contract + the `skills_root` / `skills_mirror` settings.
+  `{verdict, findings[], revision}` — a `blocked` verdict is a normal response, and so is a
+  containment refusal on a write (`path-invalid`). Containment is no-follow everywhere, walked FROM
+  THE SKILLS ROOT (a skill directory replaced by a symlink is refused, baseline reads and
+  reset/replace included); atomic writes open their temp file `O_EXCL` under an unpredictable name
+  and preserve mode bits (executable support scripts survive edit/replace); typed capped reads
+  (`content: null` on binary). `analyze` is a pure dry run (nothing persisted, revision unchanged);
+  a blocked publish persists nothing. Reset restores content only, never enablement;
+  refresh-baseline merges three-way per FILE — a user deletion is a modification (kept; `conflict`
+  when upstream changed). api-types **0.27.0** carries the `Skill*` contract, the
+  `skills_root` / `skills_mirror` settings, `missing-plugin-manifest`, and the `skills` block of
+  `GET /diagnostics`.
+- **Degradation ladder, surfaced** — `GET /diagnostics` → `skills` reports `published` /
+  `fallback` / `blocked` / `config-error` with `skills.fallback` / `skills.blocked` /
+  `skills.config` findings. Only an ABSENT configuration (no garden installed) leaves the engine
+  input unset; a blocked first publish or a corrupt root points `WICKED_SKILLS_SNAPSHOT` at a
+  non-existent refusal path (`<root>/refused/skills.{blocked,config}`) so launches fail loudly
+  instead of falling back to the live cache past recorded disablement.
 - **Portable-skill mirror** — after each publish the enabled, portable skills are mirrored as
-  `<name>/SKILL.md` into `~/.codex/skills` (and the pi/opencode/copilot skill dirs where present),
-  behind `skills_mirror` (default on). An adoption ledger in the manifest adopts pre-existing
-  garden entries, never overwrites a foreign-modified one, never deletes what the daemon did not
-  write; non-portable skills are noted, not mirrored.
+  `<name>/<the skill's whole own tree>` into `~/.codex/skills` (and the pi/opencode/copilot skill
+  dirs where present), behind `skills_mirror` (default on). An adoption ledger in the manifest
+  (tree hashes) adopts pre-existing garden entries and NEVER overwrites them (a differing tree is
+  `foreign_modified`), never overwrites a hand-edited copy of what it wrote, never deletes what the
+  daemon did not write; non-portable skills are noted, not mirrored.
 
 ## [0.7.25] — 2026-09-08
 

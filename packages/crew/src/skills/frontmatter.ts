@@ -9,6 +9,11 @@
  * "frontmatter parses" must answer the same on every platform and every daemon, and a full YAML
  * grammar admits shapes (anchors, flow mappings, multi-documents) no SKILL.md uses and no reviewer
  * expects a skill editor to accept.
+ *
+ * It is a STRICT subset, not a lenient one (codex review of #480): a scalar that opens a flow
+ * sequence `[`, a flow mapping `{`, or a quote must close it on the same line — `tags: [a, b` is a
+ * parse failure naming the line, not a string value of `[a, b`. The live catalog's 231 flow values
+ * are all single-line and terminated, so nothing shipped is refused.
  */
 
 import type { SkillKind } from '../core/types.js';
@@ -28,6 +33,38 @@ function unquote(value: string): string {
     if ((first === '"' && last === '"') || (first === "'" && last === "'")) return value.slice(1, -1);
   }
   return value;
+}
+
+/**
+ * A single-line scalar must be well-formed: an opened flow sequence / flow mapping / quoted scalar
+ * closes on the line. Returns the reason it is malformed, or `null`.
+ */
+function malformedScalar(value: string): string | null {
+  const first = value[0];
+  const last = value[value.length - 1];
+  if (first === '[' && last !== ']') return 'unterminated flow sequence (`[` without `]`)';
+  if (first === '{' && last !== '}') return 'unterminated flow mapping (`{` without `}`)';
+  if ((first === '"' || first === "'") && (value.length < 2 || last !== first)) {
+    return `unterminated quoted scalar (opening ${first} without a closing one)`;
+  }
+  if (first === '[' || first === '{') {
+    // Balanced brackets inside the flow collection — `[a, [b]` closes the outer with the inner's.
+    let depth = 0;
+    let quote: string | null = null;
+    for (const ch of value) {
+      if (quote !== null) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '[' || ch === '{') depth += 1;
+      else if (ch === ']' || ch === '}') depth -= 1;
+      if (depth < 0) return 'unbalanced flow collection (a closing bracket before its opening one)';
+    }
+    if (depth !== 0) return 'unbalanced flow collection (brackets do not pair up)';
+    if (quote !== null) return 'unterminated quoted scalar inside a flow collection';
+  }
+  return null;
 }
 
 /** Find the closing fence: a `---` line by itself after the opening fence, or -1. */
@@ -72,8 +109,13 @@ export function parseFrontmatter(text: string): FrontmatterResult {
     const key = m[1] ?? '';
     if (Object.hasOwn(fields, key)) return { ok: false, reason: `duplicate key \`${key}\`` };
     let value = (m[2] ?? '').trim();
+    const keyLine = i + 2;
     i += 1;
     const isBlock = value === '' || /^[|>][+-]?$/.test(value);
+    if (!isBlock) {
+      const malformed = malformedScalar(value);
+      if (malformed !== null) return { ok: false, reason: `line ${keyLine}: \`${key}\`: ${malformed}` };
+    }
     if (isBlock) {
       const block: string[] = [];
       while (i < lines.length) {

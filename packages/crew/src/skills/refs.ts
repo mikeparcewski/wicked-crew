@@ -37,9 +37,29 @@ const RELATIVE_RE = /(?<![A-Za-z0-9_./-])((?:\.\.\/)+[A-Za-z0-9_./-]*)/g;
 // A shell invocation of a plugin script by a cwd-relative path.
 const CWD_SCRIPT_RE = /(?<![A-Za-z0-9_./-])(?:python3?|uv run|bash|sh|node)\s+scripts\//;
 
-/** Trailing sentence punctuation a prose reference picks up (`…/foo.` at the end of a sentence). */
+/**
+ * Trailing sentence punctuation a prose reference picks up (`…/foo.` at the end of a sentence).
+ * A dot-DOT segment is never punctuation: `${CLAUDE_PLUGIN_ROOT}/..` must survive as `..` so the
+ * resolver refuses it — stripping it would turn a plugin-root ESCAPE into the plugin root itself
+ * (codex review of #480). A lone trailing `.` after a slash (`dir/.`) is the sentence's full stop.
+ */
 function trimPunctuation(p: string): string {
-  return p.replace(/[.,;:]+$/, '');
+  const noSeparators = p.replace(/[,;:]+$/, '');
+  if (/(^|\/)\.\.$/.test(noSeparators)) return noSeparators;
+  return noSeparators.replace(/\.+$/, '');
+}
+
+/**
+ * Resolve a `${CLAUDE_PLUGIN_ROOT}/<p>` reference to a normalized plugin-relative path: a trailing
+ * `/` (a directory reference) is dropped, `.` segments folded, and any path that climbs OUT of the
+ * plugin root (`..`, `scripts/../../x`) answers `null` — never the root, never a sibling of it.
+ * `''` is the bare root.
+ */
+export function resolvePluginRootRef(p: string): string | null {
+  if (p === '' || p === '.') return '';
+  const normalized = posix.normalize(p).replace(/\/+$/, '');
+  if (normalized === '..' || normalized.startsWith('../')) return null;
+  return normalized === '.' ? '' : normalized;
 }
 
 /** Every `${CLAUDE_PLUGIN_ROOT}/<p>` reference in `text`, in order. */

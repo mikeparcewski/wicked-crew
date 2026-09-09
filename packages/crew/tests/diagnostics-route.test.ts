@@ -140,6 +140,15 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
       lastFallbackTs: null,
     });
     expect(body.acp.byCli['codex']).toBeUndefined(); // no traffic = no key, zeros never invented
+
+    // skills — the hermetic harness aims the seam at a source that holds no plugin, so the boot
+    // took the ABSENT-configuration rung: fallback, engine input unset, one skills.fallback finding.
+    expect(body.skills.state).toBe('fallback');
+    expect(body.skills.current).toBeNull();
+    // Unset — or whatever value this process booted with (an operator export survives the rung).
+    expect(body.skills.engineInput).toBe(process.env['WICKED_SKILLS_SNAPSHOT'] ?? null);
+    expect(body.skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
+    expect(typeof body.skills.root).toBe('string');
   });
 
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {

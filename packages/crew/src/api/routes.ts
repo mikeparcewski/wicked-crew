@@ -56,7 +56,7 @@ import {
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
-import type { SkillsRuntime } from '../skills/runtime.js';
+import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -801,6 +801,10 @@ export function registerRoutes(
         stores,
         recentErrors: runtime.errorRing?.list() ?? [],
         acp: { byCli },
+        // The skills seam's last outcome (skills keystone): published / fallback / blocked /
+        // config-error, with the `skills.*` findings the ladder produced — the operator's one
+        // read-only answer to "why do launches refuse the snapshot".
+        skills: runtime.skills?.health() ?? disabledSkillsHealth(),
       };
     },
   );
@@ -3174,8 +3178,9 @@ export function registerRoutes(
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
     // Re-apply the skills settings the same way (skills keystone): re-root the store, seed/publish
-    // when needed, export WICKED_SKILLS_SNAPSHOT for the engine's next spawn, mirror per the flag.
-    runtime.skills?.apply(settings);
+    // when needed (awaited — a publish provisions the baseline env first), export
+    // WICKED_SKILLS_SNAPSHOT for the engine's next spawn, mirror per the flag.
+    await runtime.skills?.apply(settings);
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {

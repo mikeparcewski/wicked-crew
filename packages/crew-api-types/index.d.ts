@@ -1357,10 +1357,11 @@ export type SkillProvenance = 'shipped' | 'override' | 'user-added';
  *  git working tree; `directory` any other explicit plugin-shaped directory. */
 export type SkillSourceKind = 'claude-plugin-cache' | 'checkout' | 'directory';
 
-/** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash and
- *  shared read-only by every snapshot): `pending` until the sync answers, `synced` on success,
- *  `failed` (logged) when uv errored, `skipped` when uv is not installed or the bundle carries no
- *  `pyproject.toml`. */
+/** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash — the
+ *  publish that needs it AWAITS it — and shared read-only by every snapshot that links it):
+ *  `pending` until a publish provisions it, `synced` on success (the snapshot carries a `.venv`
+ *  link), `failed` (logged) when uv errored, `skipped` when uv is not installed or the bundle
+ *  carries no `pyproject.toml` (no link either way; a later publish retries). */
 export type SkillVenvState = 'pending' | 'synced' | 'failed' | 'skipped';
 
 /** One captured baseline — keyed in `SkillManifest.baselines` by the content hash of its bundle
@@ -1425,10 +1426,13 @@ export interface SkillPublishedRecord {
 }
 
 export interface SkillMirrorLedgerEntry {
-  /** sha256 of the `SKILL.md` as the daemon last saw it (what it wrote, or what it adopted). */
+  /** TREE hash of the mirrored skill dir (sorted relative paths + sha256 digests of every file —
+   *  a portable skill's whole own tree is mirrored, not only `SKILL.md`) as the daemon last saw
+   *  it: what it wrote, or what it adopted (api-types 0.27.0; was the `SKILL.md` digest). */
   hash: string;
-  /** `written` = the daemon placed it; `adopted` = a garden-named entry that pre-existed at first
-   *  run (tracked so it is kept in sync, never deleted). */
+  /** `written` = the daemon placed it (rewritten while unmodified, removed when no longer
+   *  eligible); `adopted` = a garden-named entry that pre-existed at first run — tracked, NEVER
+   *  overwritten (a differing tree is `foreign_modified`) and never deleted. */
   origin: 'written' | 'adopted';
 }
 
@@ -1461,13 +1465,15 @@ export interface SkillManifest {
   mirror: SkillMirrorState;
 }
 
-/** `GET /skills` 200 body. 503 when the root is not seeded (no installed plugin was found). */
+/** `GET /skills` 200 body. 503 when the root is not seeded (no installed plugin was found) or when
+ *  `current` exists but fails verification (realpath outside `snapshots/`, malformed
+ *  `snapshot.json`, content hash mismatch) — a corrupt root is a loud error, never an empty catalog. */
 export interface SkillsManifestResponse {
   manifest: SkillManifest;
   revision: number;
   /** The resolved skills root on the daemon host. */
   root: string;
-  /** The published snapshot `current` resolves to, or `null` before the first publish. */
+  /** The VERIFIED published snapshot `current` resolves to, or `null` before the first publish. */
   current: { gen: number; path: string } | null;
 }
 
@@ -1521,7 +1527,11 @@ export type SkillFindingKind =
   | 'no-baseline'
   | 'fs-drift'
   | 'refresh-conflict'
-  | 'empty-snapshot';
+  | 'empty-snapshot'
+  /** `.claude-plugin/plugin.json`, `archetypes.json` or `components.json` is absent from `effective/`
+   *  — the plugin manifest + the runtime catalogs are REQUIRED snapshot members (blocking at
+   *  publish; api-types 0.27.0). */
+  | 'missing-plugin-manifest';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
 
@@ -1547,8 +1557,9 @@ export interface SkillConflictFinding {
   explanation: string;
 }
 
-/** `POST /skills/analyze` 200 body (a dry run of the publish validation) — and the base of every
- *  mutation result. */
+/** `POST /skills/analyze` 200 body (a PURE dry run of the publish validation: nothing persisted,
+ *  `revision` unchanged — drift it observes is reported, and recorded only by the publish that
+ *  ships it) — and the base of every mutation result. */
 export interface SkillAnalyzeResult {
   verdict: SkillVerdict;
   findings: SkillConflictFinding[];
@@ -1560,16 +1571,19 @@ export interface SkillMutationResult extends SkillAnalyzeResult {
   skill?: SkillEntry & { name: string };
 }
 
-/** `POST /skills/publish` 200 body. `snapshot` is `null` when the verdict is `blocked`. */
+/** `POST /skills/publish` 200 body. `snapshot` is `null` when the verdict is `blocked` — and then
+ *  `revision` is unchanged (a blocked publish persists nothing). */
 export interface SkillPublishResult extends SkillAnalyzeResult {
   snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
 }
 
 /** `POST /skills/refresh-baseline` 200 body — the three-way merge per FILE (baseline_old /
  *  baseline_new / effective): unchanged → take new; user-modified & upstream-unchanged → keep;
- *  both changed → keep + `conflict` (new side readable as `?side=baseline`); upstream-deleted &
- *  user-unmodified → remove; upstream-deleted & user-modified → keep as user-added; a new upstream
- *  skill under a user-added name → conflict. 502 when no plugin is installed. */
+ *  both changed → keep + `conflict` (new side readable as `?side=baseline`); user-DELETED &
+ *  upstream-changed → the deletion is kept + `conflict` (a deletion is a modification; reset
+ *  restores upstream); upstream-deleted & user-unmodified → remove; upstream-deleted &
+ *  user-modified → keep as user-added; a new upstream skill whose path-derived name is a
+ *  user-added skill's → conflict. 502 when no plugin is installed. */
 export interface SkillRefreshResult extends SkillAnalyzeResult {
   previous_baseline: string;
   baseline: string;
@@ -3299,6 +3313,38 @@ export interface DiagnosticsResponse {
   /** Bounded tail of the daemon's own error-level log lines, newest first. */
   recentErrors: DiagnosticsRecentError[];
   acp: AcpDiagnostics;
+  /** The skills seam's last outcome (api-types 0.27.0) — see `DiagnosticsSkills`. */
+  skills: DiagnosticsSkills;
+}
+
+/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.27.0). */
+export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
+
+/** One finding the skills degradation ladder produced (design v3 §3). */
+export interface DiagnosticsSkillsFinding {
+  /** `skills.fallback` = no wicked-garden installed (engine input left unset — the engine resolves
+   *  the live cache itself); `skills.blocked` = the first publish is blocked (engine input points
+   *  at a non-existent refusal path — launches fail loudly until the catalog is fixed);
+   *  `skills.config` = the configured root is corrupt/unusable (same refusal). */
+  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config';
+  severity: 'warning' | 'error';
+  message: string;
+}
+
+/**
+ * `GET /diagnostics` → `skills`: whether the engine is being handed a verified snapshot, and if not,
+ * why — the one read-only answer to "why do launches refuse the skills snapshot". `disabled` is a
+ * daemon booted without the seam (the manifest collector, some tests).
+ */
+export interface DiagnosticsSkills {
+  state: DiagnosticsSkillsState;
+  /** The resolved skills root on the daemon host; `null` when `disabled`. */
+  root: string | null;
+  /** The VERIFIED published snapshot (`current` realpath-contained, `snapshot.json` + content hash checked), or `null`. */
+  current: { gen: number; path: string } | null;
+  /** What `WICKED_SKILLS_SNAPSHOT` is exported as right now; `null` = unset / the boot value. */
+  engineInput: string | null;
+  findings: DiagnosticsSkillsFinding[];
 }
 
 // ── Memory proposal queue (DES-MEM-FACETED-001 §5.0, api-types 0.21.0) ─────────

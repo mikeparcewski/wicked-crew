@@ -3,14 +3,14 @@
  *
  * The daemon seeds (and refreshes) its skills root from the plugin Claude Code actually runs —
  * the marketplace cache under `<CLAUDE_CONFIG_DIR|~/.claude>/plugins/cache/wicked-garden/
- * wicked-garden/<version>` (highest version wins), else the hand-installed
- * `<config dir>/plugins/wicked-garden`. NEVER a repo checkout by default: the operator's
- * `clis.toml` hack pointed workers at a stale hand copy (12.28.1) while the live cache was
- * 12.32.0 (design v3 §"Verified mechanics") — the whole point of the daemon-owned root is that
- * "what the operator installed" is the one source. `WICKED_CREW_SKILLS_SOURCE` overrides the
- * discovery for tests and for an operator who deliberately wants a checkout. A machine without
- * garden installed has no source at all: crew does not vendor garden (design v3 §8) — the seed
- * says "install garden first" loudly and the engine falls back to its own resolution.
+ * wicked-garden/<version>` (highest version wins). That is the ONLY automatic source (design v3
+ * §3/§8; codex review of #480): the hand-installed `<config dir>/plugins/wicked-garden` copy is the
+ * exact stale artifact the operator's `clis.toml` hack pointed workers at (12.28.1 while the live
+ * cache was 12.32.0 — design v3 §"Verified mechanics"), so it is never a fallback. NEVER a repo
+ * checkout by default either. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override — for
+ * tests, and for an operator who deliberately wants a checkout or that hand copy. A machine without
+ * the cache has no source at all: crew does not vendor garden — the seed says "install garden
+ * first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine input unset.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -89,10 +89,17 @@ export function pluginSourceAt(dir: string): PluginSource | null {
   return version === null ? null : { path: dir, kind: classifySource(dir), plugin_version: version };
 }
 
+/** The marketplace cache dir the live plugin versions live under, for a config dir. */
+export function livePluginCacheDir(configDir: string): string {
+  return join(configDir, 'plugins', 'cache', PLUGIN_NAME, PLUGIN_NAME);
+}
+
 /**
- * Discover the live installed plugin. `env`/`home` are injectable so tests never read the
- * developer's real config dir. Returns `null` when nothing is installed — the caller decides
- * whether that is a boot warning (crew) or a fall-through (the engine's own resolution).
+ * Discover the live installed plugin: the explicit `WICKED_CREW_SKILLS_SOURCE` override, else the
+ * highest version in the marketplace cache. NOTHING else — in particular not the hand-installed
+ * `plugins/wicked-garden` copy (see the module header). `env`/`home` are injectable so tests never
+ * read the developer's real config dir. Returns `null` when nothing is installed — the caller says
+ * "install garden first" loudly.
  */
 export function discoverLivePlugin(
   opts: { env?: NodeJS.ProcessEnv; home?: string } = {},
@@ -102,22 +109,15 @@ export function discoverLivePlugin(
   const override = env[SKILLS_SOURCE_ENV];
   if (override !== undefined && override !== '') return pluginSourceAt(override);
 
-  const cfg = claudeConfigDir(env, home);
-  const cache = join(cfg, 'plugins', 'cache', PLUGIN_NAME, PLUGIN_NAME);
-  if (existsSync(cache)) {
-    const versions = readdirSync(cache)
-      .filter((entry) => pluginVersionAt(join(cache, entry)) !== null)
-      .sort(compareVersions);
-    const top = versions[versions.length - 1];
-    if (top !== undefined) {
-      const dir = join(cache, top);
-      return { path: dir, kind: 'claude-plugin-cache', plugin_version: pluginVersionAt(dir) ?? top };
-    }
-  }
-  const hand = join(cfg, 'plugins', PLUGIN_NAME);
-  const handVersion = pluginVersionAt(hand);
-  if (handVersion !== null) return { path: hand, kind: 'claude-plugin-cache', plugin_version: handVersion };
-  return null;
+  const cache = livePluginCacheDir(claudeConfigDir(env, home));
+  if (!existsSync(cache)) return null;
+  const versions = readdirSync(cache)
+    .filter((entry) => pluginVersionAt(join(cache, entry)) !== null)
+    .sort(compareVersions);
+  const top = versions[versions.length - 1];
+  if (top === undefined) return null;
+  const dir = join(cache, top);
+  return { path: dir, kind: 'claude-plugin-cache', plugin_version: pluginVersionAt(dir) ?? top };
 }
 
 export interface GitState {

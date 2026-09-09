@@ -17,8 +17,7 @@
  * decides WHERE.
  */
 
-import { lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { assertNoSymlinkComponents, SymlinkComponentError } from './tree.js';
 
 export type SkillPathReason = 'invalid' | 'symlink' | 'nested-skill' | 'root';
 
@@ -61,29 +60,21 @@ export function validateRelSegments(rel: string): string[] {
 }
 
 /**
- * `join(root, ...segments)` after an lstat walk refusing any symlink component. A component that
- * does not exist yet ends the walk (a not-yet-written leaf, or its new parent dirs) — the write
- * creates them. Any filesystem error other than ENOENT propagates: an unreadable component is not
- * judged lexically.
+ * `join(root, ...segments)` after an lstat walk refusing any symlink component — the walk itself
+ * is `tree.ts` `assertNoSymlinkComponents` (the one no-follow rule every store path goes
+ * through); this wrapper only speaks the file manager's error type. `root` is the SKILLS root:
+ * the store passes `effective/<skill dir>/<path>` (or `baseline/<hash>/…`) as segments, so the
+ * skill directory itself is a walked component — replacing it with a link is refused, not
+ * followed. A component that does not exist yet ends the walk (a not-yet-written leaf, or its new
+ * parent dirs) — the write creates them. Any filesystem error other than ENOENT propagates: an
+ * unreadable component is not judged lexically.
  */
 export function containedPath(root: string, segments: ReadonlyArray<string>): string {
   if (segments.length === 0) throw new SkillPathError('root', 'the root itself is not a file');
-  let cur = root;
-  for (const seg of segments) {
-    cur = join(cur, seg);
-    let st;
-    try {
-      st = lstatSync(cur);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
-      throw err;
-    }
-    if (st.isSymbolicLink()) {
-      throw new SkillPathError(
-        'symlink',
-        `${segments.join('/')} crosses a symlink at ${seg} — the skills root never follows links`,
-      );
-    }
+  try {
+    return assertNoSymlinkComponents(root, segments);
+  } catch (err) {
+    if (err instanceof SymlinkComponentError) throw new SkillPathError('symlink', err.message);
+    throw err;
   }
-  return join(root, ...segments);
 }

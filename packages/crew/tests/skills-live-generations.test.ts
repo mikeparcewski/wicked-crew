@@ -57,31 +57,30 @@ describe('SkillsStore reaping honours live pins', () => {
     s.store.seed();
   });
 
-  afterEach(async () => {
-    await s.store.pendingVenv;
+  afterEach(() => {
     removeScratch(s.base);
   });
 
-  const publishTimes = (n: number): void => {
+  const publishTimes = async (n: number): Promise<void> => {
     for (let i = 0; i < n; i += 1) {
-      const r = s.store.publish(s.store.revision());
+      const r = await s.store.publish(s.store.revision());
       expect(r.verdict).toBe('clear');
     }
   };
 
-  it('a generation a live run started on survives the newest-three rule until the run ends, then is reaped', () => {
-    publishTimes(1);
+  it('a generation a live run started on survives the newest-three rule until the run ends, then is reaped', async () => {
+    await publishTimes(1);
     s.store.observeEvent(ev('sessionStarted', 'run-a')); // pins gen 1
-    publishTimes(KEEP_GENERATIONS + 2); // gens 2..6; 1 would be reaped without the pin
+    await publishTimes(KEEP_GENERATIONS + 2); // gens 2..6; 1 would be reaped without the pin
     expect(s.store.generationsOnDisk()).toEqual([1, 2, 3, 4, 5, 6]); // 2..5 pinned by `published`, 6 current
     s.store.observeEvent(ev('sessionCompleted', 'run-a'));
     expect(s.store.generationsOnDisk()).toEqual([4, 5, 6]);
   });
 
-  it('only the generations a live run could have read are kept; unrelated older ones go at publish', () => {
-    publishTimes(3); // gens 1..3, no live run
+  it('only the generations a live run could have read are kept; unrelated older ones go at publish', async () => {
+    await publishTimes(3); // gens 1..3, no live run
     s.store.observeEvent(ev('unitDistributed', 'run-c')); // pins 3
-    publishTimes(3); // gens 4..6 — each pinned to run-c as it lands; 1 and 2 are reaped on the way
+    await publishTimes(3); // gens 4..6 — each pinned to run-c as it lands; 1 and 2 are reaped on the way
     expect(s.store.generationsOnDisk()).toEqual([3, 4, 5, 6]);
     s.store.observeEvent(ev('runCancelled', 'run-c'));
     expect(s.store.generationsOnDisk()).toEqual([4, 5, 6]);
@@ -93,8 +92,8 @@ describe('SkillsStore reaping honours live pins', () => {
     expect(s.store.generationsOnDisk()).toEqual([]);
   });
 
-  it('re-rooting forgets the memoized current generation (the next event reads the new root)', () => {
-    publishTimes(2);
+  it('re-rooting forgets the memoized current generation (the next event reads the new root)', async () => {
+    await publishTimes(2);
     const other = scaffold();
     try {
       other.store.seed();
@@ -115,16 +114,15 @@ describe('SkillsRuntime.observe delegates to the store', () => {
     s.store.seed();
   });
 
-  afterEach(async () => {
-    await s.store.pendingVenv;
+  afterEach(() => {
     removeScratch(s.base);
   });
 
-  it('pins on a live-run event and reaps on the terminal frame', () => {
+  it('pins on a live-run event and reaps on the terminal frame', async () => {
     const runtime = new SkillsRuntime({ store: s.store, mirrorHome: s.home, log: () => undefined });
-    expect(s.store.publish(1).verdict).toBe('clear');
+    expect((await s.store.publish(1)).verdict).toBe('clear');
     runtime.observe(ev('sessionStarted', 'run-a'));
-    for (let i = 0; i < KEEP_GENERATIONS + 1; i += 1) expect(s.store.publish(s.store.revision()).verdict).toBe('clear');
+    for (let i = 0; i < KEEP_GENERATIONS + 1; i += 1) expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');
     expect(s.store.generationsOnDisk()).toEqual([1, 2, 3, 4, 5]);
     runtime.observe(ev('sessionCompleted', 'run-a'));
     expect(s.store.generationsOnDisk()).toEqual([3, 4, 5]);

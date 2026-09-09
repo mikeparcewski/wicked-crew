@@ -1,31 +1,38 @@
 /**
  * The non-Claude CLI mirror (design v3 §2/§8): the PUBLISHED snapshot's enabled, PORTABLE skills as
- * `<frontmatter-name>/SKILL.md` into the skill dirs codex, pi, opencode and copilot read — additive
- * discovery, documented as additive, never exclusive. Behind the `skills_mirror` setting (ON by
- * default).
+ * `<frontmatter-name>/<the skill's own files>` into the skill dirs codex, pi, opencode and copilot
+ * read — additive discovery, documented as additive, never exclusive. Behind the `skills_mirror`
+ * setting (ON by default).
  *
  * Targets: `~/.codex/skills` always (created when absent — codex is the roster's primary
  * non-Claude seat); `~/.pi/agent/skills`, `~/.config/opencode/skills`, `~/.copilot/skills` only
  * when those dirs already exist (the daemon does not conjure another CLI's home).
  *
+ * What is mirrored is the skill's WHOLE own tree (its dir minus nested skills' subtrees) — a
+ * portable skill may link `refs/notes.md` beside its SKILL.md, and a mirror carrying only SKILL.md
+ * would arrive broken (codex review of #480). Hashes are therefore TREE hashes (tree.ts
+ * `hashFileSet` over the dir), on disk and in the ledger alike.
+ *
  * The adoption ledger (manifest `mirror.ledger[target][name] = {hash, origin}`) is what makes a
  * pass safe to run after every publish:
  *   - first run per target: every pre-existing `wicked-garden-*` entry is ADOPTED — its current
- *     hash recorded — so the operator's 48 existing codex copies are kept in sync, never duplicated;
- *   - an entry is (over)written only when its on-disk hash equals the ledger's (ours, or adopted
- *     and untouched since); one that differs is `foreign-modified` — left alone and named;
+ *     tree hash recorded — so the operator's existing codex copies are tracked, never duplicated;
+ *   - an ADOPTED entry is NEVER overwritten: byte-identical to ours it is simply in sync; different
+ *     it is `foreign-modified` — left alone and named (design v3 §8: "never overwritten if the hash
+ *     differs from ours"). Adoption records the foreign hash and stops there;
+ *   - an entry the daemon WROTE is rewritten only while its on-disk hash still equals the ledger's
+ *     (ours, untouched since); one that differs is `foreign-modified` too;
  *   - an entry is removed (a skill disabled, removed, or gone non-portable) only when the ledger
  *     says the daemon WROTE it and it is unmodified; adopted and unknown entries are never deleted.
- * Only `SKILL.md` is mirrored: a portable skill by definition needs nothing beside it.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { SkillMirrorLedgerEntry, SkillMirrorState } from '../core/types.js';
 import { SKILL_NAME_PREFIX } from './frontmatter.js';
-import { SNAPSHOT_MANIFEST_FILENAME, type SkillsStore, type SnapshotManifest } from './store.js';
-import { pruneEmptyDirs, sha256Hex, writeFileAtomic } from './tree.js';
+import type { SkillsStore } from './store.js';
+import { copyFiles, hashFileSet, walkFiles, type FileRecord } from './tree.js';
 
 /** The target always written (created when absent). */
 export const PRIMARY_MIRROR_REL: ReadonlyArray<string> = ['.codex', 'skills'];
@@ -53,18 +60,26 @@ export interface MirrorResult {
   removed: Record<string, string[]>;
   /** Names adopted per target dir on this pass (pre-existing garden entries found). */
   adopted: Record<string, string[]>;
-  /** Names left alone per target because their on-disk hash differs from the ledger. */
+  /** Names left alone per target because their on-disk tree differs from ours / the ledger. */
   foreign_modified: Record<string, string[]>;
   skipped_non_portable: string[];
 }
 
-function hashOnDisk(file: string): string | null {
+/** Tree hash of a mirrored skill dir on disk, or `null` when absent, not a directory, a link, or empty. */
+function treeHashOnDisk(dir: string): string | null {
   try {
-    return sha256Hex(readFileSync(file));
+    if (!lstatSync(dir).isDirectory()) return null;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
+  const files = walkFiles(dir);
+  return files.length === 0 ? null : hashFileSet(files);
+}
+
+/** The skill's OWN files inside the snapshot (nested skills' subtrees excluded), rel to the skill dir. */
+function ownFilesInSnapshot(snapshotPath: string, skillDir: string, snapshotDirs: ReadonlySet<string>): FileRecord[] {
+  return walkFiles(join(snapshotPath, ...skillDir.split('/')), (rel) => snapshotDirs.has(`${skillDir}/${rel}`));
 }
 
 /**
@@ -74,7 +89,8 @@ function hashOnDisk(file: string): string | null {
 export function mirrorSkills(store: SkillsStore, home: string): MirrorResult | null {
   const current = store.currentSnapshot();
   if (current === null) return null;
-  const snapshot = JSON.parse(readFileSync(join(current.path, SNAPSHOT_MANIFEST_FILENAME), 'utf8')) as SnapshotManifest;
+  const snapshot = store.readSnapshotManifest(current.path);
+  const snapshotDirs = new Set(snapshot.skills.map((s) => s.dir));
   const eligible = snapshot.skills.filter((s) => s.portable);
   const skipped = snapshot.skills.filter((s) => !s.portable).map((s) => s.name).sort();
   const manifest = store.manifest();
@@ -89,39 +105,42 @@ export function mirrorSkills(store: SkillsStore, home: string): MirrorResult | n
     const adopted: string[] = [];
     const foreign: string[] = [];
 
-    // Adoption: garden-named entries on disk the ledger has never seen.
+    // Adoption: garden-named entries on disk the ledger has never seen — recorded, never touched.
     for (const entry of readdirSync(target, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith(SKILL_NAME_PREFIX) || book[entry.name] !== undefined) continue;
-      const hash = hashOnDisk(join(target, entry.name, 'SKILL.md'));
+      const hash = treeHashOnDisk(join(target, entry.name));
       if (hash === null) continue;
       book[entry.name] = { hash, origin: 'adopted' };
       adopted.push(entry.name);
     }
 
     for (const skill of eligible) {
-      const file = join(target, skill.name, 'SKILL.md');
-      const content = readFileSync(join(current.path, ...skill.dir.split('/'), 'SKILL.md'));
-      const wanted = sha256Hex(content);
-      const onDisk = hashOnDisk(file);
+      const dir = join(target, skill.name);
+      const own = ownFilesInSnapshot(current.path, skill.dir, snapshotDirs);
+      const wanted = hashFileSet(own);
+      const onDisk = treeHashOnDisk(dir);
       const known = book[skill.name];
-      if (onDisk !== null && known !== undefined && onDisk !== known.hash) {
-        foreign.push(skill.name);
-        continue;
-      }
       if (onDisk === wanted) {
         book[skill.name] = { hash: wanted, origin: known?.origin ?? 'written' };
         continue;
       }
-      writeFileAtomic(file, content.toString('utf8'));
-      book[skill.name] = { hash: wanted, origin: known?.origin === 'adopted' ? 'adopted' : 'written' };
+      if (onDisk !== null && (known === undefined || known.origin === 'adopted' || onDisk !== known.hash)) {
+        // Not ours-and-unmodified: an adopted copy that differs, a hand edit of what we wrote, or
+        // a dir that appeared since adoption ran. Left alone, named.
+        foreign.push(skill.name);
+        continue;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      copyFiles(own, dir);
+      book[skill.name] = { hash: wanted, origin: 'written' };
       written.push(skill.name);
     }
 
     const eligibleNames = new Set(eligible.map((s) => s.name));
     for (const [name, known] of Object.entries(book)) {
       if (eligibleNames.has(name) || known.origin !== 'written') continue;
-      const file = join(target, name, 'SKILL.md');
-      const onDisk = hashOnDisk(file);
+      const dir = join(target, name);
+      const onDisk = treeHashOnDisk(dir);
       if (onDisk === null) {
         delete book[name]; // already gone
         continue;
@@ -130,8 +149,7 @@ export function mirrorSkills(store: SkillsStore, home: string): MirrorResult | n
         foreign.push(name);
         continue;
       }
-      rmSync(file, { force: true });
-      pruneEmptyDirs(join(target, name), target);
+      rmSync(dir, { recursive: true, force: true });
       delete book[name];
       removed.push(name);
     }
@@ -140,7 +158,7 @@ export function mirrorSkills(store: SkillsStore, home: string): MirrorResult | n
     result.written[target] = written.sort();
     result.removed[target] = removed.sort();
     result.adopted[target] = adopted.sort();
-    result.foreign_modified[target] = foreign.sort();
+    result.foreign_modified[target] = [...new Set(foreign)].sort();
   }
 
   const state: SkillMirrorState = {

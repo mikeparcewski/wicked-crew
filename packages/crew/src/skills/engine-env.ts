@@ -9,10 +9,13 @@
  * the next spawn sees the new snapshot, no daemon or engine restart.
  *
  * The degradation ladder (v3 §3) is the engine's: with the variable unset it falls back to the
- * live installed garden cache and logs `skills.fallback`. Crew therefore only ever exports a path
- * that RESOLVES; when it has nothing to offer (no plugin installed, seed refused) it restores what
- * the process booted with — an operator-exported value, or the hermetic test arming — and
- * deletes the variable when there was none.
+ * live installed garden cache and logs `skills.fallback`; with it set to a path that does not
+ * resolve, every launch FAILS loudly (config error). Crew uses both rungs deliberately
+ * (runtime.ts): a VERIFIED snapshot path when it has one; the boot value / unset ONLY when the
+ * configuration is absent (no garden installed — an operator-exported value, or the hermetic test
+ * arming, survives); and a non-existent refusal path (`<root>/refused/skills.{blocked,config}`)
+ * when the configuration is present but defective — a blocked first publish or a corrupt root
+ * must never be "restored" into a live-cache fallback that bypasses recorded disablement.
  */
 
 export const SKILLS_SNAPSHOT_ENGINE_ENV = 'WICKED_SKILLS_SNAPSHOT';

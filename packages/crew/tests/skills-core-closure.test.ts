@@ -60,7 +60,7 @@ describe('mentionedSkillNames + coreClosure', () => {
   });
 
   it('closes transitively from the registered refs and reports refs no catalog skill answers to', () => {
-    const { core, missing } = coreClosure(['wicked-garden-repo-learn', 'wicked-garden-ghost'], catalog);
+    const { core, missing, absentMandates } = coreClosure(['wicked-garden-repo-learn', 'wicked-garden-ghost'], catalog);
     expect([...core].sort()).toEqual([
       'wicked-garden-mem',
       'wicked-garden-mem-capture',
@@ -68,5 +68,21 @@ describe('mentionedSkillNames + coreClosure', () => {
       'wicked-garden-search',
     ]);
     expect(missing).toEqual(['wicked-garden-ghost']);
+    expect(absentMandates).toEqual([]);
+  });
+
+  it('reports an ABSENT transitive mandate — a core skill naming a skill the catalog lacks — with file line', () => {
+    const withPhantom = new Map(catalog);
+    withPhantom.set(
+      'wicked-garden-search',
+      'NOT for concept search — use the wicked-garden-mem skill.\nHand structural work to wicked-garden-phantom.\nFamily glob: wicked-garden-qe-* is fine; wicked-garden:crew:implementer is a subagent type.',
+    );
+    const { core, absentMandates } = coreClosure(['wicked-garden-repo-learn'], withPhantom);
+    expect(core.has('wicked-garden-search')).toBe(true);
+    expect(absentMandates).toEqual([{ from: 'wicked-garden-search', name: 'wicked-garden-phantom', line: 2 }]);
+    // A NON-core skill mentioning a phantom is not a mandate — only the closure's members mandate.
+    const unrelated = new Map(catalog);
+    unrelated.set('wicked-garden-qe', 'see wicked-garden-phantom');
+    expect(coreClosure(['wicked-garden-repo-learn'], unrelated).absentMandates).toEqual([]);
   });
 });

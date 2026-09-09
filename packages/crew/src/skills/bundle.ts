@@ -3,7 +3,9 @@
  *
  *   .claude-plugin/{plugin.json, archetypes.json, components.json}   the manifest + the catalogs the
  *                                                                     runtime reads (archetypes_v11.py
- *                                                                     raises when archetypes.json is absent)
+ *                                                                     raises when archetypes.json is
+ *                                                                     absent) — all three REQUIRED at
+ *                                                                     publish (`REQUIRED_PLUGIN_CATALOGS`)
  *   skills/**                                                         nested layout VERBATIM — never renamed
  *   scripts/**  minus ci/ and the wg dev tools                        what `${CLAUDE_PLUGIN_ROOT}/scripts/…` resolves
  *   schemas/                                                          `../schemas/evidence.json` links
@@ -23,13 +25,20 @@ import { toPosix, walkFiles, type FileRecord } from './tree.js';
 /** The plugin subdirectory skills live in (and the prefix of every manifest `dir`). */
 export const SKILLS_SUBDIR = 'skills';
 
-/** Root-level files copied when present (`plugin.json` is required — its absence means "not a plugin"). */
-const OPTIONAL_ROOT_FILES: ReadonlyArray<string> = [
+/**
+ * The runtime catalogs every snapshot MUST carry beside `plugin.json` (design v3 §4): garden's
+ * runtime reads `archetypes.json` (`scripts/crew/archetypes_v11.py:60-74` raises when it is absent)
+ * and `components.json`. Their absence in `effective/` is a BLOCKING publish finding
+ * (`missing-plugin-manifest`) — a seed copies what the source has (a source missing them is a
+ * defective install the publish names, not a seed failure).
+ */
+export const REQUIRED_PLUGIN_CATALOGS: ReadonlyArray<string> = [
   '.claude-plugin/archetypes.json',
   '.claude-plugin/components.json',
-  'pyproject.toml',
-  'uv.lock',
 ];
+
+/** Root-level files copied when present (`plugin.json` is required — its absence means "not a plugin"). */
+const OPTIONAL_ROOT_FILES: ReadonlyArray<string> = [...REQUIRED_PLUGIN_CATALOGS, 'pyproject.toml', 'uv.lock'];
 
 /** Directories copied whole (POSIX-relative to the plugin root). */
 const BUNDLE_DIRS: ReadonlyArray<string> = [SKILLS_SUBDIR, 'scripts', 'schemas', 'docs/examples'];

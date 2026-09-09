@@ -15,9 +15,11 @@
  *   POST /skills/analyze               dry-run of the publish validation
  *
  * Guard results ALWAYS return 2xx `{verdict, findings[], revision}` — studio's `apiFetch` throws
- * on non-2xx, so a `blocked` verdict is a normal 200 with nothing written. The one 409 is a stale
- * `expectedRevision` (`{error, revision}`); 404 an unknown skill or file; 400 a body or path the
- * schemas/containment refuse; 503 an unseeded root; 502 no plugin source to refresh from.
+ * on non-2xx, so a `blocked` verdict is a normal 200 with nothing written; that includes a
+ * containment refusal on a WRITE (the store answers `path-invalid`). The one 409 is a stale
+ * `expectedRevision` (`{error, revision}`); 404 an unknown skill or file; 400 a body the schemas
+ * refuse or a READ path containment refuses (a read has no verdict envelope); 503 an unseeded root
+ * or a `current` link that fails verification; 502 no plugin source to refresh from.
  * Thin by design: validation is zod (strict, unknown keys named); everything else is the store's.
  */
 
@@ -29,6 +31,9 @@ import { SkillPathError } from '../skills/contain.js';
 import type { SkillsRuntime } from '../skills/runtime.js';
 import {
   RevisionMismatchError,
+  SkillsCurrentInvalidError,
+  SkillsManifestCorruptError,
+  SkillsPublishError,
   SkillsSourceUnavailableError,
   SkillsUnseededError,
   UnknownSkillError,
@@ -83,6 +88,9 @@ function invalidBody(reply: FastifyReply, err: z.ZodError): FastifyReply {
 /** Map the store's named errors onto the route's status codes; anything else is a 500. */
 function fail(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof SkillsUnseededError) return reply.code(503).send({ error: err.message });
+  if (err instanceof SkillsCurrentInvalidError) return reply.code(503).send({ error: err.message });
+  if (err instanceof SkillsManifestCorruptError) return reply.code(503).send({ error: err.message });
+  if (err instanceof SkillsPublishError) return reply.code(503).send({ error: err.message });
   if (err instanceof SkillsSourceUnavailableError) return reply.code(502).send({ error: err.message });
   if (err instanceof UnknownSkillError) return reply.code(404).send({ error: err.message });
   if (err instanceof SkillPathError) return reply.code(400).send({ error: err.message });
@@ -266,7 +274,7 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, async () => {
         const runtime = runtimeOf();
-        const result = runtime.store.publish(parsed.data.expectedRevision);
+        const result = await runtime.store.publish(parsed.data.expectedRevision);
         if (result.snapshot !== null) {
           // The published snapshot is what the engine and the mirror consume — re-derive both now.
           const mirror = runtime.afterPublish(await deps.getSettings());
