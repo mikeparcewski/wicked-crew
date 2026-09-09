@@ -14,6 +14,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -192,14 +193,21 @@ describe('publish (design v3 §1)', () => {
       'wicked-garden-epsilon',
       'wicked-garden-gamma',
     ]);
+    // Every row carries the seat-compatibility facts core requires (v3.1 §5): a boolean `portable`,
+    // and `nested` for a dir deeper than `skills/<dir>` (not invocable for a Claude seat).
     expect(manifest.skills.find((x) => x.name === 'wicked-garden-alpha-nested')).toEqual({
       name: 'wicked-garden-alpha-nested',
       dir: 'skills/alpha/nested',
       kind: 'fork-worker',
       core: false,
       portable: false,
+      nested: true,
     });
-    // `current` resolves (verified) to the generation; the manifest records the publish and lastPublishedHash.
+    expect(manifest.skills.every((x) => typeof x.portable === 'boolean' && typeof x.nested === 'boolean')).toBe(true);
+    expect(manifest.skills.filter((x) => x.nested).map((x) => x.name)).toEqual(['wicked-garden-alpha-nested']);
+    // `current` resolves (verified) to the generation as an absolute REAL path (v3.1 §2 — the engine's
+    // one input); the manifest records the publish and lastPublishedHash.
+    expect(snap.path).toBe(realpathSync(join(s.root, 'snapshots', '000001')));
     expect(s.store.currentSnapshot()).toEqual({ gen: 1, path: snap.path });
     expect(storeOver(s).currentSnapshot()).toEqual({ gen: 1, path: snap.path });
     const m = s.store.manifest();
@@ -429,6 +437,7 @@ describe('`current` is verified, never trusted', () => {
     s.store.seed();
     const r = await s.store.publish(1);
     const gen = (r.snapshot as NonNullable<typeof r.snapshot>).path;
+    const pristine = JSON.parse(readFileSync(join(gen, 'snapshot.json'), 'utf8')) as { skills: Array<Record<string, unknown>> };
     const before = readFileSync(join(gen, 'skills', 'gamma', 'SKILL.md'), 'utf8');
     writeFileSync(join(gen, 'skills', 'gamma', 'SKILL.md'), `${before}tampered\n`);
     expect(() => storeOver(s).currentSnapshot()).toThrow(/content hash mismatch/);
@@ -438,6 +447,10 @@ describe('`current` is verified, never trusted', () => {
     expect(() => storeOver(s).currentSnapshot()).toThrow(/no integer gen/);
     writeFileSync(join(gen, 'snapshot.json'), 'not json');
     expect(() => storeOver(s).currentSnapshot()).toThrow(/does not parse/);
+    // A skill row without a boolean `portable` is not a snapshot core can judge a seat against (v3.1 §5).
+    const broken = { ...pristine, skills: pristine.skills.map((row, i) => (i === 0 ? { ...row, portable: 'yes' } : row)) };
+    writeFileSync(join(gen, 'snapshot.json'), JSON.stringify(broken));
+    expect(() => storeOver(s).currentSnapshot()).toThrow(/boolean portable/);
   });
 });
 

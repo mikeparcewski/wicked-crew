@@ -3,7 +3,11 @@
  * root the operator edits like a filesystem, PUBLISHED as immutable snapshots the engine hands to
  * every worker. Nothing a worker runs is ever read from `effective/`.
  *
- * # Layout — `<root>/` (`<crewStateHome()>/skills` by default; never a `~/.wicked-crew` literal)
+ * # Layout — `<root>/` (`<crewStateHome()>/skills` by default; never a `~/.wicked-crew` literal —
+ * the ONE storage root every crew store shares, design v3.1 §1; the worker Read fence is core's
+ * explicit denylist of state-home subtrees — `skills/baseline/`, `skills/effective/`,
+ * `skills/manifest.json`, `skills/current`, … — with the resolved `skills/snapshots/<gen>/` the
+ * only non-denied path; `tests/fixtures/state-home-subtrees.json` is the shared registry)
  *
  *   manifest.json              the state (`SkillManifest`; presence = seeded), CAS `revision`
  *   baseline/<contentHash>/    the shipped bundle (dependency closure, bundle.ts) — identity is the
@@ -16,7 +20,8 @@
  *                              verbatim, support closure, `snapshot.json`, `.venv -> baseline venv`
  *                              (only when that env exists)
  *   current -> snapshots/<gen> flipped atomically after each publish; the engine receives the
- *                              RESOLVED path as `WICKED_SKILLS_SNAPSHOT` (engine-env.ts)
+ *                              absolute REAL path of the generation as `WICKED_SKILLS_SNAPSHOT`
+ *                              (engine-env.ts) — the ONLY input core reads (v3.1 §2)
  *   .uv-cache/                 the daemon's own uv cache (`UV_CACHE_DIR`), never the operator's
  *
  * # Identity, ownership, hashes
@@ -81,6 +86,7 @@ import {
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 
 import { readFileCapped } from '../api/run-files.js';
+import { crewStateHome } from '../projects/state-home.js';
 import type {
   CoreEvent,
   SkillAnalyzeResult,
@@ -99,7 +105,6 @@ import type {
   SkillSourceKind,
   SkillVenvState,
 } from '../core/types.js';
-import { crewStateHome } from '../projects/state-home.js';
 import {
   NotAPluginRootError,
   owningSkillDir,
@@ -150,7 +155,7 @@ import { baselineVenvDir, UV_CACHE_DIRNAME, type VenvProvisioner } from './venv.
 
 /** Explicit root override — the more specific instruction, and what the hermetic test harness arms. */
 export const SKILLS_ROOT_ENV = 'WICKED_CREW_SKILLS_ROOT';
-/** The default root's name under the daemon state home. */
+/** The default root's name under the daemon state home — a top-level entry `tests/fixtures/state-home-subtrees.json` registers. */
 export const SKILLS_DIRNAME = 'skills';
 export const MANIFEST_FILENAME = 'manifest.json';
 export const EFFECTIVE_DIRNAME = 'effective';
@@ -170,7 +175,8 @@ const STAGING_PREFIX = '.staging-';
 
 /**
  * Where the root lives: env override, then the `skills_root` setting (absolute only — a relative
- * path is meaningless against an arbitrary cwd), then `<state home>/skills`.
+ * path is meaningless against an arbitrary cwd), then `<state home>/skills` (design v3.1 §1: the
+ * same storage root as every other crew store).
  */
 export function resolveSkillsRoot(setting: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
   const override = env[SKILLS_ROOT_ENV];
@@ -244,6 +250,20 @@ export class RevisionMismatchError extends Error {
 /** Which copy of a file a read addresses. */
 export type ReadSide = 'effective' | 'baseline';
 
+/** One skill row of `snapshot.json` — what core checks a seat's invocability against (v3.1 §5). */
+export interface SnapshotSkillRow {
+  name: string;
+  /** Plugin-relative dir, nested layout verbatim. */
+  dir: string;
+  kind: SkillKind;
+  core: boolean;
+  /** REQUIRED boolean: non-Claude seats may only invoke portable skills. */
+  portable: boolean;
+  /** `true` when the dir is not directly under `skills/` — Claude Code discovers top-level skill dirs
+   *  only, so a nested skill is not invocable for a Claude seat (core enforces; crew just says so). */
+  nested: boolean;
+}
+
 /** `snapshot.json` inside every published generation — what the engine reads (never a parent dir). */
 export interface SnapshotManifest {
   gen: number;
@@ -251,7 +271,19 @@ export interface SnapshotManifest {
   gardenSource: { kind: SkillSourceKind; path: string; plugin_version: string; baseline: string };
   /** The baseline env's state at publish: `synced` ⇒ `.venv` links it; anything else ⇒ no link. */
   venv: SkillVenvState;
-  skills: Array<{ name: string; dir: string; kind: SkillKind; core: boolean; portable: boolean }>;
+  skills: SnapshotSkillRow[];
+}
+
+/** A skill row is `{name, dir}` strings + a boolean `portable` (the seat-compatibility fact core requires). */
+function isSnapshotSkillRow(row: unknown): boolean {
+  if (typeof row !== 'object' || row === null) return false;
+  const r = row as Partial<SnapshotSkillRow>;
+  return typeof r.name === 'string' && r.name !== '' && typeof r.dir === 'string' && r.dir !== '' && typeof r.portable === 'boolean';
+}
+
+/** Whether a skill dir is nested: anything deeper than `skills/<dir>`. */
+export function isNestedSkillDir(dir: string): boolean {
+  return dir.slice(`${SKILLS_SUBDIR}/`.length).includes('/');
 }
 
 export interface SeedResult {
@@ -451,8 +483,9 @@ export class SkillsStore {
 
   /**
    * The published snapshot `current` resolves to, VERIFIED (module header), or `null` when there
-   * is no link (never published). A link that exists but fails verification throws
-   * `SkillsCurrentInvalidError`. The verified answer is memoized per link target.
+   * is no link (never published). `path` is the absolute REAL path of the generation — exactly the
+   * value the engine is handed as `WICKED_SKILLS_SNAPSHOT` (v3.1 §2). A link that exists but fails
+   * verification throws `SkillsCurrentInvalidError`. The verified answer is memoized per link target.
    */
   currentSnapshot(): { gen: number; path: string } | null {
     const link = this.currentLink();
@@ -494,11 +527,11 @@ export class SkillsStore {
     const parsed = this.parseSnapshotManifest(lexical);
     if (typeof parsed === 'string') return invalid(parsed);
     if (parsed.gen !== Number(dirName)) return invalid(`snapshot.json says gen ${parsed.gen} but the directory is ${dirName}`);
-    const hash = this.snapshotHash(lexical);
+    const hash = this.snapshotHash(real);
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
-    return { gen: parsed.gen, path: lexical };
+    return { gen: parsed.gen, path: real };
   }
 
   /** Hash over a snapshot dir's files, `snapshot.json` excluded (the `.venv` link is skipped by the walk). */
@@ -525,6 +558,9 @@ export class SkillsStore {
     if (typeof s.gen !== 'number' || !Number.isInteger(s.gen) || s.gen < 1) return `${SNAPSHOT_MANIFEST_FILENAME} has no integer gen`;
     if (typeof s.contentHash !== 'string' || !CONTENT_HASH_RE.test(s.contentHash)) return `${SNAPSHOT_MANIFEST_FILENAME} has no sha256 contentHash`;
     if (!Array.isArray(s.skills)) return `${SNAPSHOT_MANIFEST_FILENAME} has no skills array`;
+    if (!s.skills.every(isSnapshotSkillRow)) {
+      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row without {name, dir} strings and a boolean portable — core cannot judge seat compatibility from it`;
+    }
     if (typeof s.gardenSource !== 'object' || s.gardenSource === null || typeof s.gardenSource.baseline !== 'string') {
       return `${SNAPSHOT_MANIFEST_FILENAME} has no gardenSource.baseline`;
     }
@@ -1453,7 +1489,14 @@ export class SkillsStore {
       },
       venv,
       skills: v.enabledSkills
-        .map(({ name, entry }) => ({ name, dir: entry.dir, kind: entry.kind, core: entry.core, portable: entry.portable }))
+        .map(({ name, entry }) => ({
+          name,
+          dir: entry.dir,
+          kind: entry.kind,
+          core: entry.core,
+          portable: entry.portable,
+          nested: isNestedSkillDir(entry.dir),
+        }))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     };
     writeFileAtomic(join(staging, SNAPSHOT_MANIFEST_FILENAME), `${JSON.stringify(snapshot, null, 2)}\n`);
@@ -1487,7 +1530,8 @@ export class SkillsStore {
       verdict: verdictOf(v.findings),
       findings: v.findings,
       revision: m.revision,
-      snapshot: { gen, path: dest, contentHash, skills: snapshot.skills.length },
+      // The REAL path — the same spelling `currentSnapshot()` answers and the engine is handed.
+      snapshot: { gen, path: realpathSync(dest), contentHash, skills: snapshot.skills.length },
     };
   }
 

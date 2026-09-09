@@ -252,6 +252,17 @@ mentioned only where a daemon release depends on them.
   when upstream changed). api-types **0.27.0** carries the `Skill*` contract, the
   `skills_root` / `skills_mirror` settings, `missing-plugin-manifest`, and the `skills` block of
   `GET /diagnostics`.
+- **One storage root, an explicit worker fence** (design v3.1 §1/§2). The skills root stays
+  `<state home>/skills` — the same storage root as every other crew store. The worker Read fence is
+  core's explicit denylist of state-home subtrees (the resolved `skills/snapshots/<gen>/` being the
+  one non-denied path); `packages/crew/tests/fixtures/state-home-subtrees.json` is the shared
+  registry of every top-level entry crew's stores create there, and a crew test asserts the daemon
+  never creates an entry outside it (a new store cannot appear unfenced). Crew hands the engine
+  exactly one input, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL path of `snapshots/<gen>`
+  (`GET /skills` `current.path` and `POST /skills/publish` `snapshot.path` spell the same real
+  path); `WICKED_SKILLS_CURRENT` is never set. Every `snapshot.json` skill row carries a boolean
+  `portable` (validated when `current` is verified) and a `nested` flag (a dir deeper than
+  `skills/<dir>` — not invocable for a Claude seat).
 - **Degradation ladder, surfaced** — `GET /diagnostics` → `skills` reports `published` /
   `fallback` / `blocked` / `config-error` with `skills.fallback` / `skills.blocked` /
   `skills.config` findings. Only an ABSENT configuration (no garden installed) leaves the engine

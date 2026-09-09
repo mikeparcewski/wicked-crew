@@ -1,9 +1,10 @@
 /**
  * The engine handoff: `WICKED_SKILLS_SNAPSHOT` (design v3 DECISION 2).
  *
- * wicked-core consumes exactly one input for skills — the CONCRETE path of a published snapshot
- * (`<skills root>/snapshots/<gen>`, never the `current` link and never a parent dir it would have
- * to infer a manifest from). Crew resolves `current` and exports the path here; the engine reads
+ * wicked-core consumes exactly one input for skills — the absolute REAL path of a published
+ * snapshot (`<skills root>/snapshots/<gen>` with every link resolved, never the `current` link
+ * itself and never a parent dir it would have to infer a manifest from; `WICKED_SKILLS_CURRENT` is
+ * withdrawn — v3.1 §2). Crew resolves `current` and exports the path here; the engine reads
  * `process.env` per worker spawn (the `WICKED_WORKER_HOME` discipline in api/seat-signin.ts), so
  * applying it at boot, after every publish, and on every settings change is the whole mechanism —
  * the next spawn sees the new snapshot, no daemon or engine restart.

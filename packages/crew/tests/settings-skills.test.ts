@@ -9,7 +9,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -95,7 +95,9 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     expect(settings.skills_mirror).toBe(false);
     expect(s.store.root).toBe(newRoot);
     expect(existsSync(join(newRoot, 'manifest.json'))).toBe(true);
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(join(newRoot, 'snapshots', '000001'));
+    // The engine input is the absolute REAL path of the generation (v3.1 §2), and the only input.
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(realpathSync(join(newRoot, 'snapshots', '000001')));
+    expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined();
     expect(runtime.health()).toMatchObject({ state: 'published', root: newRoot, current: { gen: 1 }, findings: [] });
     // skills_mirror: false → nothing written into the home.
     expect(existsSync(join(s.home, '.codex'))).toBe(false);
@@ -120,7 +122,7 @@ describe('PUT/GET /settings skills_root + skills_mirror', () => {
     const put = await app.inject({ method: 'PUT', url: '/api/v1/settings', payload: { graphNodeLimit: 100 } });
     expect(put.statusCode).toBe(200);
     expect(s.store.root).toBe(root);
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(join(root, 'snapshots', '000001'));
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(realpathSync(join(root, 'snapshots', '000001')));
   });
 });
 
@@ -197,12 +199,15 @@ describe('daemon boot applies the skills settings (createServer) — the degrada
     const app = await createServer(adapter, options({ source: () => pluginSourceAt(FIXTURE_PLUGIN) }));
     try {
       expect(existsSync(join(root, 'manifest.json'))).toBe(true);
-      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(join(root, 'snapshots', '000001'));
+      // ONE engine input, the absolute REAL path of the generation (v3.1 §2); WICKED_SKILLS_CURRENT is never set.
+      const real = realpathSync(join(root, 'snapshots', '000001'));
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real);
+      expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined();
       expect(existsSync(join(dir, 'home', '.codex', 'skills', 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
-      expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: join(root, 'snapshots', '000001') });
-      expect(await diagnostics(app)).toMatchObject({ state: 'published', root, current: { gen: 1 }, engineInput: join(root, 'snapshots', '000001'), findings: [] });
+      expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: real });
+      expect(await diagnostics(app)).toMatchObject({ state: 'published', root, current: { gen: 1, path: real }, engineInput: real, findings: [] });
     } finally {
       await app.close();
     }

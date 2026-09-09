@@ -24,6 +24,9 @@
  *                  (`<root>/refused/skills.config`), same loud launch failure: recorded disablement
  *                  is never bypassed by "restoring" the live cache. Finding `skills.config` (error).
  *
+ * What the engine is handed is ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL path of
+ * `snapshots/<gen>` (v3.1 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set.
+ *
  * `health()` is the last outcome, surfaced read-only on `GET /diagnostics` (`skills`).
  */
 

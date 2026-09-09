@@ -369,7 +369,9 @@ export async function createServer(
 
   // The skills seam (skills keystone): same boot + on-change discipline as the worker-config root.
   // The store hangs off the resolved state home (never a `~/.wicked-crew` literal, crew#353) unless
-  // `skills_root` names another; the core-by-reference closure is seeded from the workflow catalog
+  // `skills_root` names another — the worker Read fence is core's explicit denylist of state-home
+  // subtrees (v3.1 §1; tests/fixtures/state-home-subtrees.json is the shared registry), with the
+  // resolved snapshot the one non-denied path; the core-by-reference closure is seeded from the workflow catalog
   // the daemon serves (built-ins + user-registered), read at use time so a later registration
   // counts at the next publish. `apply` never throws and never fails open: no installed plugin is
   // the logged fallback (engine input unset); a blocked first publish or a corrupt root points the

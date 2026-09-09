@@ -6,7 +6,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -212,14 +212,17 @@ describe('publish / analyze — the engine handoff and the mirror', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json() as SkillPublishResult;
     expect(body.verdict).toBe('clear');
-    expect(body.snapshot).toMatchObject({ gen: 1, path: join(s.root, 'snapshots', '000001'), skills: 6 });
-    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(join(s.root, 'snapshots', '000001'));
+    // The snapshot path is the absolute REAL path (v3.1 §2) — the one value the engine is handed.
+    const real = realpathSync(join(s.root, 'snapshots', '000001'));
+    expect(body.snapshot).toMatchObject({ gen: 1, path: real, skills: 6 });
+    expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real);
+    expect(process.env['WICKED_SKILLS_CURRENT']).toBeUndefined(); // withdrawn: crew hands the engine ONE input
     // skills_mirror defaults ON: the portable skills landed in the temp home's codex dir.
     expect(existsSync(join(s.home, '.codex', 'skills', 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(s.home, '.codex', 'skills', 'wicked-garden-alpha'))).toBe(false);
     // The mirror ledger is manifest state: the answered revision is the final one.
     expect(body.revision).toBe((await manifest()).revision);
-    expect((await manifest()).current).toEqual({ gen: 1, path: join(s.root, 'snapshots', '000001') });
+    expect((await manifest()).current).toEqual({ gen: 1, path: real });
   });
 
   it('a blocked publish is a 200 with file:line findings, no snapshot, no env export', async () => {

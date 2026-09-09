@@ -1471,9 +1471,11 @@ export interface SkillManifest {
 export interface SkillsManifestResponse {
   manifest: SkillManifest;
   revision: number;
-  /** The resolved skills root on the daemon host. */
+  /** The resolved skills root on the daemon host (`<state home>/skills` by default). */
   root: string;
-  /** The VERIFIED published snapshot `current` resolves to, or `null` before the first publish. */
+  /** The VERIFIED published snapshot `current` resolves to, or `null` before the first publish.
+   *  `path` is the absolute REAL path of `snapshots/<gen>` — byte-identical to the one input the
+   *  engine is handed (`WICKED_SKILLS_SNAPSHOT`; design v3.1 §2). */
   current: { gen: number; path: string } | null;
 }
 
@@ -3340,9 +3342,12 @@ export interface DiagnosticsSkills {
   state: DiagnosticsSkillsState;
   /** The resolved skills root on the daemon host; `null` when `disabled`. */
   root: string | null;
-  /** The VERIFIED published snapshot (`current` realpath-contained, `snapshot.json` + content hash checked), or `null`. */
+  /** The VERIFIED published snapshot (`current` realpath-contained, `snapshot.json` + content hash
+   *  checked), or `null`. `path` is the absolute REAL path of `snapshots/<gen>`. */
   current: { gen: number; path: string } | null;
-  /** What `WICKED_SKILLS_SNAPSHOT` is exported as right now; `null` = unset / the boot value. */
+  /** What `WICKED_SKILLS_SNAPSHOT` — the engine's ONE skills input (v3.1 §2; `WICKED_SKILLS_CURRENT`
+   *  is never set) — is exported as right now: the real snapshot path, a `<root>/refused/…` refusal
+   *  path, or `null` = unset / the boot value. */
   engineInput: string | null;
   findings: DiagnosticsSkillsFinding[];
 }
