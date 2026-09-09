@@ -50,8 +50,8 @@ mentioned only where a daemon release depends on them.
   sha256 of the sample's full payload (id, description, kind, steering_type, signals), stamped by
   a producer that held the samples (the engine echoes no signals); the offline comparison keys
   comparability on it.
-  Codex round 7, in the same 0.27.0 (0.25.0 → 0.27.0 is this PR's one api-types bump; no 0.26.0 was
-  ever published): `GovernanceEvalRuleCoverage` is completed with the
+  Codex round 7, in the same 0.27.0 (0.26.0 → 0.27.0 is this PR's one api-types bump — #474 landed
+  0.26.0 first): `GovernanceEvalRuleCoverage` is completed with the
   engine's other two serialized fields — `recall_only` (the active rules of the slice carrying no
   effect, core #395) and `per_type` (the same partition per steering type: all seven keys, an
   `{ exercised, unexercised }` count pair each — evals.rs `RuleCoverage` / `TypeCoverage`) — both
