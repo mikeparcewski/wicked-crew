@@ -56,8 +56,25 @@ import { join } from 'node:path';
 import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
+import { SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type SkillsStore } from './store.js';
+
+/**
+ * The seed source named for the boot log by what it IS (Copilot on #480: the line used to hard-code
+ * "the installed wicked-garden plugin" although an explicit `WICKED_CREW_SKILLS_SOURCE` checkout or
+ * directory seeds just as well): its kind, its path and the plugin version it declares — so an
+ * operator debugging which bytes were seeded reads the actual root, never an assumption.
+ */
+function describeSeedSource(source: PluginSource): string {
+  const what =
+    source.kind === 'claude-plugin-cache'
+      ? 'the installed wicked-garden plugin (Claude plugin cache)'
+      : source.kind === 'checkout'
+        ? `a wicked-garden git checkout (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`
+        : `a plugin directory (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`;
+  return `${what} at ${source.path}, plugin version ${source.plugin_version}, source kind ${source.kind}`;
+}
 
 /** The refusal sentinel directory name — from the ONE table of root names (design v3.5 §2); re-exported for the tests. */
 export { REFUSED_DIRNAME };
@@ -180,7 +197,7 @@ export class SkillsRuntime {
         findings: [{ kind: 'skills.config', severity: 'error', message }],
       });
     }
-    if (ready.seeded) this.log(`[skills] seeded ${root} from the installed wicked-garden plugin`);
+    if (ready.seeded) this.log(`[skills] seeded ${root} from ${ready.source === null ? 'a source the seed did not record' : describeSeedSource(ready.source)}`);
     if (ready.published !== null && ready.published.verdict === 'blocked') {
       const named = ready.published.findings
         .filter((f) => f.severity === 'blocking')

@@ -420,7 +420,7 @@ describe('publish (design v3 §1)', () => {
     // authenticated published generation BEFORE it verifies `current`.
     expect(() => fresh.currentSnapshot()).toThrow(/not the generation manifest\.json published/);
     const ready = await fresh.ensureReady();
-    expect(ready).toEqual({ seeded: false, published: null }); // finished, not re-published
+    expect(ready).toEqual({ seeded: false, source: null, published: null }); // finished, not re-published
     expect(fresh.currentSnapshot()?.gen).toBe(2);
     expect(fresh.generationsOnDisk()).toEqual([1, 2]);
   });
@@ -1116,7 +1116,7 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
       const r = await first;
       expect(r.verdict).toBe('clear');
       expect(r.snapshot?.gen).toBe(1);
-      expect(await ready).toEqual({ seeded: false, published: null });
+      expect(await ready).toEqual({ seeded: false, source: null, published: null });
       expect(v.store.isPublishing()).toBe(false);
       expect(gate.calls).toHaveLength(1);
       expect(v.store.generationsOnDisk()).toEqual([1]);

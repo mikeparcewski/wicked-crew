@@ -1634,9 +1634,12 @@ export class SkillsStore {
    * when unseeded, finish a publish a crash interrupted between the manifest commit and the
    * `current` flip, publish when nothing is published. Throws `SkillsSourceUnavailableError` for
    * the seed and `SkillsCurrentInvalidError` / `SkillsManifestCorruptError` for a corrupt root; a
-   * blocked first publish is returned, not thrown.
+   * blocked first publish is returned, not thrown. `source` is the plugin root the seed copied
+   * from — its kind, path and plugin version — so the boot log names what was actually seeded (an
+   * explicit `WICKED_CREW_SKILLS_SOURCE` checkout or directory as readily as the installed plugin;
+   * Copilot on #480); `null` when the root was already seeded.
    */
-  async ensureReady(): Promise<{ seeded: boolean; published: SkillPublishResult | null }> {
+  async ensureReady(): Promise<{ seeded: boolean; source: PluginSource | null; published: SkillPublishResult | null }> {
     while (this.publishInFlight !== null) {
       try {
         await this.publishInFlight;
@@ -1644,7 +1647,7 @@ export class SkillsStore {
         // Its own caller reports that outcome; this entry point only needed it to settle.
       }
     }
-    const seeded = this.seed().seeded;
+    const { seeded, source } = this.seed();
     const m = this.manifest();
     // A crash between the manifest commit and the `current` flip leaves `current` ABSENT or naming an
     // OLDER generation. Finish the flip FIRST — from the published generation the manifest
@@ -1670,8 +1673,8 @@ export class SkillsStore {
       }
     }
     const current = this.currentSnapshot();
-    if (current !== null) return { seeded, published: null };
-    return { seeded, published: await this.publish(m.revision) };
+    if (current !== null) return { seeded, source, published: null };
+    return { seeded, source, published: await this.publish(m.revision) };
   }
 
   /**

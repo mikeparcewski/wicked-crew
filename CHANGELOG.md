@@ -49,7 +49,10 @@ mentioned only where a daemon release depends on them.
   identity (documented on `baselineProblem`). A pruned-name directory inside a generation is
   refused BY NAME as an unexpected entry before the hash is compared (`verifyCurrent`) — publish
   never copies one. (2) The `reapBaselines` doc comment no longer claims "no revision bump": the
-  record drop is the committed, revision-advancing CAS path it has been since round 9.
+  record drop is the committed, revision-advancing CAS path it has been since round 9. Copilot: the
+  boot's seed log line names the ACTUAL source — its kind, path and plugin version (`ensureReady`
+  now answers the `PluginSource` the seed copied from) — instead of hard-coding "the installed
+  wicked-garden plugin" when an explicit `WICKED_CREW_SKILLS_SOURCE` checkout or directory seeded.
 - **Skills keystone — codex round-9 REJECT (2 HIGH, 2 MEDIUM)** (PR #480). (H1) ONE walker classifies
   every entry under `effective/` (`tree.ts` `walkEntries`: file / dir / symlink / other, never
   following a link, an empty directory reported like any entry) and `scanEffective` plus every

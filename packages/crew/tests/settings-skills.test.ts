@@ -123,6 +123,53 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
     expect(Object.hasOwn(DEFAULT_SETTINGS, 'skills_mirror')).toBe(false);
   });
 
+  it('the boot seed log names the ACTUAL source — kind, path and plugin version — never an assumed installed plugin (Copilot on #480): a plugin directory, a git checkout, the plugin cache; an already-seeded root logs no seed line', async () => {
+    const saved = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+    try {
+      // The scaffold seeds from a writable COPY of the fixture: a plain directory (no `.git`, no `plugins` segment).
+      const source = pluginSourceAt(s.upstream);
+      expect(source?.kind).toBe('directory');
+      const lines: string[] = [];
+      const seeding = new SkillsRuntime({ store: s.store, log: (m) => lines.push(m) });
+      await seeding.apply();
+      const seedLine = lines.find((l) => l.startsWith('[skills] seeded '));
+      expect(seedLine).toBe(
+        `[skills] seeded ${s.root} from a plugin directory (an explicit plugin root — WICKED_CREW_SKILLS_SOURCE or the configured source) at ${s.upstream}, plugin version ${source?.plugin_version ?? '?'}, source kind directory`,
+      );
+      expect(seedLine).not.toContain('installed wicked-garden plugin');
+      // Already seeded: a second boot re-verifies and logs no seed line at all.
+      lines.length = 0;
+      await seeding.apply();
+      expect(lines.some((l) => l.startsWith('[skills] seeded '))).toBe(false);
+      // A git checkout as the explicit source (classified by its `.git`).
+      const co = scaffold();
+      try {
+        mkdirSync(join(co.upstream, '.git'));
+        const coLines: string[] = [];
+        await new SkillsRuntime({ store: co.store, log: (m) => coLines.push(m) }).apply();
+        expect(coLines.find((l) => l.startsWith('[skills] seeded '))).toBe(
+          `[skills] seeded ${co.root} from a wicked-garden git checkout (an explicit plugin root — WICKED_CREW_SKILLS_SOURCE or the configured source) at ${co.upstream}, plugin version 1.0.0, source kind checkout`,
+        );
+      } finally {
+        removeScratch(co.base);
+      }
+      // The installed plugin (Claude plugin cache) — the one case the old hard-coded line was right about.
+      const cache = scaffold({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'claude-plugin-cache', plugin_version: '1.0.0' }) });
+      try {
+        const cacheLines: string[] = [];
+        await new SkillsRuntime({ store: cache.store, log: (m) => cacheLines.push(m) }).apply();
+        expect(cacheLines.find((l) => l.startsWith('[skills] seeded '))).toBe(
+          `[skills] seeded ${cache.root} from the installed wicked-garden plugin (Claude plugin cache) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind claude-plugin-cache`,
+        );
+      } finally {
+        removeScratch(cache.base);
+      }
+    } finally {
+      if (saved === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+      else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = saved;
+    }
+  });
+
   it('a settings PUT never touches the skills seam: a seeded store stays at its root and revision', async () => {
     s.store.seed();
     app = build(memoryAdapter());
