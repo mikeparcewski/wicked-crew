@@ -60,6 +60,7 @@ import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
+import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
 import type { DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -3592,6 +3593,16 @@ export function registerRoutes(
     // the operator's real ~/.wicked-crew ledgers. The real sweep always arrives from
     // `createServer`.
     dropDocLedgerRows: runtime.dropDocLedgerRows ?? (() => ({ ok: true, removed_keys: [] })),
+    log: (m) => app.log.warn(m),
+  });
+
+  // ── Project-attributed docs list (crew#472) ──
+  // `GET /projects/:id/interactive/api/docs` relays the bridge's list and stamps each row with
+  // the mount's `projectId` — the attribution the bridge cannot know. Same static-over-wildcard
+  // discipline as the delete: only this GET leaves the proxy, `POST /api/docs` still streams.
+  registerInteractiveDocList(app, adapter, {
+    settings: projectSettings,
+    pool: interactiveBridges,
     log: (m) => app.log.warn(m),
   });
 }

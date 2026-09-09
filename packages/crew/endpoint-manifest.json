@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.25.0",
+  "apiTypesVersion": "0.26.0",
   "endpoints": [
     {
       "method": "GET",
@@ -454,6 +454,18 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/projects/:projectId/interactive/api/docs",
+      "requestType": null,
+      "responseType": "InteractiveDocSummary",
+      "statusCodes": [
+        200,
+        404,
+        502,
+        503
+      ]
     },
     {
       "method": "DELETE",

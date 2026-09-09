@@ -10,6 +10,23 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Interactive docs are no longer shared across projects (#472).** `/projects/:projectId/interactive/*`
+  honored `:projectId` only to look up a per-project root setting no project ever had, so every
+  project fell through to the one shared default root — one bridge, one registry, the same docs
+  under every project's URL. A project without an explicit `interactiveRoot` now resolves to its
+  own partition, `~/wicked-interactive/docs/projects/<projectId>` (created on first use by the
+  bridge pool); the synthesized `default` project keeps the legacy shared root, so every existing
+  document stays visible under Unfiled with no migration. Explicit per-project roots and
+  `WICKED_INTERACTIVE_ROOT` are honored exactly as before.
+
+### Added
+- **`GET /projects/:projectId/interactive/api/docs` stamps `projectId` on every row** (#472) — the
+  bridge's list relayed field-for-field plus the mount's project, so clients can attribute docs
+  across projects. One static segment more specific than the proxy wildcard; `POST /api/docs` and
+  everything else still stream through the pure-transport proxy. api-types **0.26.0** carries
+  `InteractiveDocSummary`.
+
 ## [0.7.25] — 2026-09-08
 
 ### Changed

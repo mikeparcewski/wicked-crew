@@ -14,7 +14,10 @@ import { createServer, type Server } from 'node:http';
 import type { ChildProcess } from 'node:child_process';
 import {
   defaultInteractiveRoot,
+  partitionedInteractiveRoot,
+  PROJECTS_DIR,
   resolveInteractiveRoot,
+  resolveProjectInteractiveRoot,
   ROOT_ENV,
 } from '../src/interactive/bridge-root.js';
 import {
@@ -66,6 +69,61 @@ describe('resolveInteractiveRoot (§7.1)', () => {
     expect(resolveInteractiveRoot({ interactiveRoot: null }, env, HOME)).toBe('/scratch/docs');
     // An explicit project binding still wins — the env only names the default.
     expect(resolveInteractiveRoot({ interactiveRoot: '/srv/decks' }, env, HOME)).toBe('/srv/decks');
+  });
+});
+
+describe('resolveProjectInteractiveRoot (crew#472 — the default root is partitioned by project)', () => {
+  const LEGACY = defaultInteractiveRoot(HOME);
+
+  it('the synthesized `default` project keeps the LEGACY shared root — no data migration', () => {
+    for (const setting of [null, undefined, {}, { interactiveRoot: null }, { interactiveRoot: '  ' }]) {
+      expect(resolveProjectInteractiveRoot('default', setting, NO_ENV, HOME)).toBe(LEGACY);
+    }
+    // No project identity at all (an event carrying no `project_id`) belongs to Unfiled too.
+    expect(resolveProjectInteractiveRoot(undefined, null, NO_ENV, HOME)).toBe(LEGACY);
+  });
+
+  it('every other unbound project gets its OWN partition under the default root', () => {
+    expect(resolveProjectInteractiveRoot('p-1', null, NO_ENV, HOME)).toBe(join(LEGACY, PROJECTS_DIR, 'p-1'));
+    expect(resolveProjectInteractiveRoot('p-1', {}, NO_ENV, HOME)).toBe(partitionedInteractiveRoot('p-1', HOME));
+    // An engine-minted id is a plain path segment.
+    expect(resolveProjectInteractiveRoot('proj_000000000000100001', null, NO_ENV, HOME)).toBe(
+      join(LEGACY, PROJECTS_DIR, 'proj_000000000000100001'),
+    );
+    // Two projects ⇒ two pool keys, neither of them the legacy root: the leak this closes was
+    // three spellings of one directory.
+    const keys = new Set(
+      ['default', 'p-1', 'p-2'].map((id) => resolveProjectInteractiveRoot(id, null, NO_ENV, HOME)),
+    );
+    expect(keys.size).toBe(3);
+  });
+
+  it('an explicit own root still wins for every project, `default` included', () => {
+    expect(resolveProjectInteractiveRoot('p-1', { interactiveRoot: '/srv/decks' }, NO_ENV, HOME)).toBe('/srv/decks');
+    expect(resolveProjectInteractiveRoot('p-1', { interactiveRoot: '~/decks' }, NO_ENV, HOME)).toBe(join(HOME, 'decks'));
+    expect(resolveProjectInteractiveRoot('default', { interactiveRoot: '/srv/unfiled' }, NO_ENV, HOME)).toBe(
+      '/srv/unfiled',
+    );
+  });
+
+  it('WICKED_INTERACTIVE_ROOT is an explicit SHARED binding — while set, nothing partitions', () => {
+    // Exactly the pre-#472 behavior: the env names one root for every unbound project (the e2e
+    // rigs point crew at the bridge root they started), so it takes precedence over the partition.
+    const env = { [ROOT_ENV]: '/scratch/docs' };
+    expect(resolveProjectInteractiveRoot('default', null, env, HOME)).toBe('/scratch/docs');
+    expect(resolveProjectInteractiveRoot('p-1', null, env, HOME)).toBe('/scratch/docs');
+    // ...and an explicit project binding still beats the env.
+    expect(resolveProjectInteractiveRoot('p-1', { interactiveRoot: '/srv/decks' }, env, HOME)).toBe('/srv/decks');
+  });
+
+  it('refuses an id that cannot name a directory instead of falling back to the shared root', () => {
+    // A silent fallback here would quietly re-open the cross-project leak; loud is the only option.
+    for (const bad of ['..', '.', 'a/b', 'a\\b', '', ' ', '-x', '.hidden']) {
+      expect(() => partitionedInteractiveRoot(bad, HOME)).toThrow(/cannot name an interactive docs partition/);
+      expect(() => resolveProjectInteractiveRoot(bad, null, NO_ENV, HOME)).toThrow();
+    }
+    // The partition never escapes the projects dir.
+    expect(partitionedInteractiveRoot('a..', HOME)).toBe(join(LEGACY, PROJECTS_DIR, 'a..'));
   });
 });
 
