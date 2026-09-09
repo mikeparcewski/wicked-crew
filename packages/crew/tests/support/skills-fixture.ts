@@ -38,7 +38,7 @@ export interface Scaffold {
   root: string;
   /** A writable copy of the fixture plugin — "upstream" for refresh tests. */
   upstream: string;
-  /** A temp HOME for mirror tests. */
+  /** A temp HOME for the tests that simulate a user's CLI directories (`skills-no-user-cli-writes`): nothing under it is ever written by the store — the v3 mirror is withdrawn (design v3.2 §1). */
   home: string;
   store: SkillsStore;
   warnings: string[];

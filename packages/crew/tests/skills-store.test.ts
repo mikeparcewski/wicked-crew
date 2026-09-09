@@ -24,6 +24,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -45,7 +46,7 @@ import {
   SkillsStore,
   type SnapshotManifest,
 } from '../src/skills/store.js';
-import { hashFileSet, hashTree, removeTreeForce, sha256Hex, walkFiles, walkTree } from '../src/skills/tree.js';
+import { hashFileSet, hashTree, removeTreeForce, sha256Hex, walkEntries, walkFiles, walkTree } from '../src/skills/tree.js';
 import { noVenv, VENV_READY_MARKER, type VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { CLOCK, FIXTURE_PLUGIN, REGISTERED_REFS, scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -267,7 +268,10 @@ describe('publish (design v3 §1)', () => {
     ]);
     expect(manifest.views).toEqual({ copilot: { dir: 'views/copilot', skills: ['wicked-garden-beta', 'wicked-garden-gamma'] } });
     expect(readFileSync(viewPath(snap.path, 'wicked-garden-gamma', 'SKILL.md'), 'utf8')).toBe(readFileSync(join(snap.path, 'skills', 'gamma', 'SKILL.md'), 'utf8'));
-    expect(snap.contentHash).toBe(hashFileSet(walkFiles(snap.path).filter((f) => f.rel !== 'snapshot.json')));
+    // The content hash covers the files (snapshot.json excluded), the links and the DIRECTORY entries (codex round 9).
+    const walked = walkTree(snap.path);
+    expect(snap.contentHash).toBe(hashTree(walked.files.filter((f) => f.rel !== 'snapshot.json'), walked.links, walked.dirs));
+    expect(snap.contentHash).not.toBe(hashFileSet(walked.files.filter((f) => f.rel !== 'snapshot.json')));
     // Immutable by mode bits too: the generation, its dirs and its files carry no write bit.
     expect(lstatSync(snap.path).mode & 0o222).toBe(0);
     expect(lstatSync(join(snap.path, 'skills', 'gamma')).mode & 0o222).toBe(0);
@@ -1565,8 +1569,9 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       const tree = walkTree(snap.path);
       expect(tree.links).toEqual([{ rel: '.venv', abs: join(snap.path, '.venv'), target: join('..', '..', 'baseline', hash, '.venv') }]);
       const files = tree.files.filter((f) => f.rel !== 'snapshot.json');
-      expect(snap.contentHash).toBe(hashTree(files, tree.links));
+      expect(snap.contentHash).toBe(hashTree(files, tree.links, tree.dirs)); // files, the link AND the directory entries (codex round 9)
       expect(snap.contentHash).not.toBe(hashFileSet(files)); // a hash that skipped the link would not be this one
+      expect(snap.contentHash).not.toBe(hashTree(files, tree.links)); // …nor one that skipped the directories
       expect(storeOver(v).currentSnapshot()).toEqual({ gen: 1, path: snap.path });
     } finally {
       removeTreeForce(v.base);
@@ -1586,7 +1591,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       // Forge the hash to cover the link: the link itself is then refused by name.
       const tree = walkTree(snap.path);
       const forged = snapshotManifest(snap.path);
-      forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+      forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs);
       unlock(join(snap.path, 'snapshot.json'));
       writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
       expect(() => v.store.currentSnapshot()).toThrow(/not the metadata this root published/); // the manifest authenticates the metadata (codex round 7)
@@ -1607,7 +1612,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       const forgeHash = (): void => {
         const tree = walkTree(snap.path);
         const forged = snapshotManifest(snap.path);
-        forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+        forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs);
         unlock(join(snap.path, 'snapshot.json'));
         writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
         stampPublished(v.root, join(snap.path, 'snapshot.json')); // the attacker-with-manifest model: the deeper link checks stay defense in depth
@@ -1646,7 +1651,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
     expect(() => s.store.currentSnapshot()).toThrow(/content hash mismatch/);
     const tree = walkTree(snap.path);
     const forged = snapshotManifest(snap.path);
-    forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links);
+    forged.contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs);
     unlock(join(snap.path, 'snapshot.json'));
     writeFileSync(join(snap.path, 'snapshot.json'), `${JSON.stringify(forged, null, 2)}\n`);
     stampPublished(s.root, join(snap.path, 'snapshot.json'));
@@ -2509,8 +2514,127 @@ describe('snapshot.json is AUTHENTICATED by the manifest and RE-DERIVED from the
     mkdirSync(extra);
     writeFileSync(join(extra, 'SKILL.md'), '---\nname: wicked-garden-zzz\n---\n');
     const tree = walkTree(snap.path);
-    stamp({ ...pristine, contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links) });
-    expect(() => s.store.currentSnapshot()).toThrow(/copilot view lays out \[.*wicked-garden-zzz.*\] but the enabled portable skills are exactly \[/);
+    stamp({ ...pristine, contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs) });
+    expect(() => s.store.currentSnapshot()).toThrow(/unexpected view file views\/copilot\/\.github\/skills\/wicked-garden-zzz\/SKILL\.md/);
     expect(() => s.store.currentSnapshot()).toThrow(/missing or extra/);
+  });
+
+  it('the copilot view is verified as a WHOLE tree (codex round 9): an EMPTY extra directory changes the content hash (directories are hashed) and, with the hash forged and the manifest re-stamped, is refused BY NAME; an extra directory elsewhere in the generation is a hash mismatch too; the legitimate view verifies', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const metadata = join(snap.path, 'snapshot.json');
+    const pristine = snapshotManifest(snap.path);
+    expect(s.store.currentSnapshot()?.gen).toBe(1); // the legitimate view verifies
+    unlock(metadata);
+    // An EMPTY directory under the view: invisible to a file-only hash — not to this one.
+    const extra = viewPath(snap.path, 'wicked-garden-zzz');
+    chmodSync(dirname(extra), 0o755);
+    mkdirSync(extra);
+    expect(() => s.store.currentSnapshot()).toThrow(/content hash mismatch/);
+    // Hash forged over the walked tree (directories included) and the manifest re-stamped: the shape check names it.
+    const tree = walkTree(snap.path);
+    expect(tree.dirs).toContain('views/copilot/.github/skills/wicked-garden-zzz');
+    writeFileSync(metadata, `${JSON.stringify({ ...pristine, contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs) }, null, 2)}\n`);
+    stampPublished(s.root, metadata);
+    expect(() => s.store.currentSnapshot()).toThrow(/unexpected view directory views\/copilot\/\.github\/skills\/wicked-garden-zzz — the copilot view is exactly/);
+    expect(() => s.store.currentSnapshot()).toThrow(/missing or extra/);
+    rmSync(extra, { recursive: true });
+    writeFileSync(metadata, `${JSON.stringify(pristine, null, 2)}\n`);
+    stampPublished(s.root, metadata);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    // An empty directory ANYWHERE else in the generation is a hash mismatch as well.
+    chmodSync(join(snap.path, 'skills'), 0o755);
+    mkdirSync(join(snap.path, 'skills', 'planted-empty'));
+    expect(() => s.store.currentSnapshot()).toThrow(/content hash mismatch/);
+    rmSync(join(snap.path, 'skills', 'planted-empty'), { recursive: true });
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+  });
+});
+
+describe('effective/ is classified WHOLE (codex round 9): a symlink anywhere blocks by name, a special node blocks, empty directories are visible', () => {
+  it('an extra symlink inside a registered skill ⇒ analyze and publish are blocked path-invalid naming the link and the skill; removed ⇒ clear', async () => {
+    s.store.seed();
+    const outside = join(s.base, 'outside.md');
+    writeFileSync(outside, 'outside\n');
+    const link = join(s.root, 'effective', 'skills', 'gamma', 'link.md');
+    symlinkSync(outside, link);
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const refusal = analyzed.findings.filter((f) => f.kind === 'path-invalid');
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/link.md' });
+    expect(refusal[0]?.evidence).toBe(`skills/gamma/link.md is a symlink -> ${outside}`);
+    const blocked = await s.store.publish(1);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+    expect(existsSync(join(s.root, 'snapshots'))).toBe(false);
+    // A link at the support level is refused the same way (no owner).
+    rmSync(link);
+    symlinkSync(outside, join(s.root, 'effective', 'schemas', 'link.json'));
+    const support = s.store.analyze();
+    expect(support.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ skill: null, file: 'schemas/link.json' });
+    rmSync(join(s.root, 'effective', 'schemas', 'link.json'));
+    expect(s.store.analyze().verdict).toBe('clear');
+  });
+
+  it.skipIf(process.platform === 'win32')('a fifo under effective/ ⇒ blocked by name (neither a regular file nor a directory); an empty directory is visible to the walk and blocks nothing', async () => {
+    s.store.seed();
+    mkdirSync(join(s.root, 'effective', 'skills', 'gamma', 'empty-dir'));
+    expect(s.store.analyze().verdict).toBe('clear'); // visible (walkEntries reports it), not carried, not refused
+    expect(walkEntries(join(s.root, 'effective')).find((e) => e.rel === 'skills/gamma/empty-dir')?.kind).toBe('dir');
+    execFileSync('mkfifo', [join(s.root, 'effective', 'skills', 'gamma', 'pipe')]);
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    expect(analyzed.findings.find((f) => f.kind === 'path-invalid')).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/pipe' });
+    expect(analyzed.findings.find((f) => f.kind === 'path-invalid')?.evidence).toContain('neither a regular file nor a directory');
+    const blocked = await s.store.publish(1);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+  });
+});
+
+describe('baseline reaping is a CAS mutation (codex round 9): a record drop rides the mutation that causes it, or commits on its own — the revision always advances, a stale expectedRevision is refused', () => {
+  it('a publish that retires a generation drops the baseline it alone referenced in its OWN commit (one bump); a refresh with nothing published drops the previous baseline in its own commit; a standalone reap (a launch pin released) commits through the validated path and advances the revision', async () => {
+    s.store.seed();
+    const first = await s.store.publish(1); // gen 1 references baseline A
+    const a = s.store.manifest().baseline;
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\ngamma v2\n');
+    const ref = s.store.refreshBaseline(first.revision); // baseline B; A's record stays while gen 1 references it — ONE bump
+    expect(ref.revision).toBe(first.revision + 1);
+    expect(Object.keys(s.store.manifest().baselines).sort()).toEqual([a, ref.baseline].sort());
+    // A launch is reading gen 1: it stays pinned (and A with it) through the next publishes.
+    s.store.live.exported(1);
+    s.store.live.launched('run', 'run-a');
+    let rev = ref.revision;
+    for (let i = 0; i < 4; i += 1) {
+      const p = await s.store.publish(rev); // gens 2..5 — every generation is pinned by the open launch, nothing is reaped, ONE bump each
+      expect(p.revision).toBe(rev + 1);
+      rev = p.revision;
+    }
+    expect(s.store.generationsOnDisk()).toEqual([1, 2, 3, 4, 5]);
+    expect(s.store.baselinesOnDisk()).toEqual([a, ref.baseline].sort());
+    // The run ends: the pin releases, the event-driven reap retires gens 1 and 2, and A — referenced by
+    // nothing now — leaves the manifest through a validated commit of its own: the revision advances.
+    s.store.observeEvent({ type: 'sessionCompleted', session: 'run-a' });
+    expect(s.store.revision()).toBe(rev + 1);
+    expect(s.store.generationsOnDisk()).toEqual([3, 4, 5]);
+    expect(s.store.baselinesOnDisk()).toEqual([ref.baseline]);
+    expect(Object.keys(s.store.manifest().baselines)).toEqual([ref.baseline]);
+    // A client holding the revision from before the reap is stale — the 409 it should be.
+    expect(() => s.store.disable('wicked-garden-alpha', rev)).toThrow(RevisionMismatchError);
+    expect(s.store.disable('wicked-garden-alpha', rev + 1).verdict).toBe('clear');
+  });
+
+  it('a refresh with no generation on disk drops the previous baseline record in its OWN commit — one bump, directory gone, no second manifest at that revision', () => {
+    s.store.seed();
+    const a = s.store.manifest().baseline;
+    writeFileSync(join(s.upstream, 'skills', 'gamma', 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\ngamma v2\n');
+    const ref = s.store.refreshBaseline(1);
+    expect(ref.revision).toBe(2);
+    expect(s.store.revision()).toBe(2);
+    expect(Object.keys(s.store.manifest().baselines)).toEqual([ref.baseline]);
+    expect(s.store.baselinesOnDisk()).toEqual([ref.baseline]);
+    expect(existsSync(join(s.root, 'baseline', a))).toBe(false);
   });
 });

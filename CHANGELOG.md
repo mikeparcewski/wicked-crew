@@ -33,6 +33,26 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — codex round-9 REJECT (2 HIGH, 2 MEDIUM)** (PR #480). (H1) ONE walker classifies
+  every entry under `effective/` (`tree.ts` `walkEntries`: file / dir / symlink / other, never
+  following a link, an empty directory reported like any entry) and `scanEffective` plus every
+  validator consume it — a symlink ANYWHERE under `effective/` is a blocking `path-invalid` naming it
+  (there is no permitted link there), a special node (socket / fifo / device) blocks by name, and
+  nothing is invisible; `walkFiles` / `walkTree` are views of that one walk. (H2) the snapshot hash
+  covers DIRECTORY entries (`hashTree(files, links, dirs)`; publish hashes the directories its file set
+  implies, a verification the ones it walked — an extra empty directory anywhere in a generation is a
+  mismatch) and the copilot view is verified as an exact WHOLE tree: `views/copilot/.github/skills/
+  <name>/…` for exactly the sorted enabled-portable skills — each skill's own files and the
+  directories they imply — with every unexpected file or directory named in the refusal; special
+  nodes anywhere in a generation refuse. (M1) a refresh-time name collision records the held-back
+  upstream skill's directory on the entry (`SkillEntry.upstreamDir`, api-types 0.27.0) and
+  `GET /skills/:name/files/*?side=baseline` reads THAT directory, so the two sides of the collision
+  are comparable (`path` names the file actually read). (M2) `reapBaselines` is a CAS mutation like
+  every other: dropping a baseline record goes through the validated `manifest.json.tmp-…` → rename
+  commit with the revision advanced (the commit lands before any directory is removed, so a failed
+  commit removes nothing); a publish or refresh whose reap commits answers THAT revision, and a
+  stale `expectedRevision` after a reap is the 409 it should be. Copilot: the `Scaffold.home` doc no
+  longer speaks of the withdrawn mirror.
 - **Skills keystone — codex round-8 REJECT (3 HIGH, 2 MEDIUM, 1 LOW), design amendment v3.5**
   (PR #480). (H1, v3.5 §2) EVERY name the store can create under `<state home>/skills/` is registered
   in the shared fence fixture `tests/fixtures/state-home-subtrees.json` — settled (`baseline/`,

@@ -168,15 +168,33 @@ export function assertNoSymlinkComponents(root: string, segments: ReadonlyArray<
   return join(root, ...segments);
 }
 
+/** How the walk classifies one entry — from lstat, never following a link. */
+export type EntryKind = 'file' | 'dir' | 'symlink' | 'other';
+
+/** One entry under the walk root: `rel` POSIX-relative, `kind` from lstat; `target` is a symlink's link text (never followed). */
+export interface TreeEntry {
+  rel: string;
+  abs: string;
+  kind: EntryKind;
+  target?: string;
+}
+
 /**
- * Every regular file under `root`, sorted by `rel`. `skipDir(rel)` prunes a subtree (rel is the
- * subtree's POSIX path from `root`); `SKIP_DIR_NAMES`/`SKIP_FILE_NAMES` always apply. A missing
- * `root` yields `[]` — callers treat optional plugin dirs (`schemas/`) as empty, not as errors. A
- * `root` that IS a symlink is refused: `readdirSync` would follow it, and "list this skill's own
- * files" must never enumerate a tree outside the store.
+ * THE walker (design v3 no-follow everywhere; codex round 9 on #480): every entry under `root` —
+ * the root itself excluded — classified by lstat as a regular file, a directory, a symlink or
+ * something else (a socket, fifo, device …), sorted by `rel`, never following a link and never
+ * descending into one. NOTHING is invisible: an empty directory is an entry, a symlink is an entry
+ * with its link text, a special node is an entry of kind `other`. A directory named in
+ * `SKIP_DIR_NAMES` (`.venv`, `node_modules`, `__pycache__`) or pruned by `skipDir(rel)` is still
+ * REPORTED as an entry but not descended — its contents are never part of any tree the store
+ * copies, hashes or judges. Every other view derives from this one: `walkFiles` (regular files
+ * minus Finder noise), `walkTree` (files + links + directories + special nodes — what a verification
+ * must see). A missing `root` yields `[]` — callers treat optional plugin dirs (`schemas/`) as
+ * empty, not as errors; a `root` that IS a symlink is refused (`readdirSync` would follow it, and
+ * "list this skill's own files" must never enumerate a tree outside the store).
  */
-export function walkFiles(root: string, skipDir?: (rel: string) => boolean): FileRecord[] {
-  const out: FileRecord[] = [];
+export function walkEntries(root: string, skipDir?: (rel: string) => boolean): TreeEntry[] {
+  const out: TreeEntry[] = [];
   try {
     if (lstatSync(root).isSymbolicLink()) throw new SymlinkComponentError(root, root);
   } catch (err) {
@@ -193,20 +211,39 @@ export function walkFiles(root: string, skipDir?: (rel: string) => boolean): Fil
     }
     for (const entry of entries) {
       const rel = relDir === '' ? entry.name : `${relDir}/${entry.name}`;
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) {
+      const abs = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        out.push({ rel, abs, kind: 'symlink', target: readlinkSync(abs) });
+      } else if (entry.isDirectory()) {
+        out.push({ rel, abs, kind: 'dir' });
         if (SKIP_DIR_NAMES.has(entry.name)) continue;
         if (skipDir !== undefined && skipDir(rel)) continue;
-        visit(join(dir, entry.name), rel);
+        visit(abs, rel);
       } else if (entry.isFile()) {
-        if (SKIP_FILE_NAMES.has(entry.name)) continue;
-        out.push({ rel, abs: join(dir, entry.name) });
+        out.push({ rel, abs, kind: 'file' });
+      } else {
+        out.push({ rel, abs, kind: 'other' });
       }
     }
   };
   visit(root, '');
   out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return out;
+}
+
+/** Whether a walk entry is a regular file the store carries (Finder noise, `SKIP_FILE_NAMES`, is not). */
+function isCarriedFile(e: TreeEntry): boolean {
+  return e.kind === 'file' && !SKIP_FILE_NAMES.has(e.rel.split('/').pop() ?? '');
+}
+
+/**
+ * Every regular file under `root`, sorted by `rel` — `walkEntries` filtered to the files the store
+ * carries. `skipDir(rel)` prunes a subtree; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` always apply.
+ */
+export function walkFiles(root: string, skipDir?: (rel: string) => boolean): FileRecord[] {
+  return walkEntries(root, skipDir)
+    .filter(isCarriedFile)
+    .map(({ rel, abs }) => ({ rel, abs }));
 }
 
 /** One symlink entry: `rel` POSIX-relative to the walk root, `target` its link text as read (never followed). */
@@ -216,53 +253,48 @@ export interface LinkRecord {
   target: string;
 }
 
-/** A whole tree, links ENUMERATED (not followed, not skipped): what a snapshot verification must see. */
+/**
+ * A whole tree as a verification must see it: the carried files, every symlink (with its link
+ * text), every DIRECTORY (empty ones included — codex round 9: an extra empty directory used to be
+ * invisible to the snapshot hash and to the copilot-view check) and every special node.
+ */
 export interface TreeListing {
   files: FileRecord[];
   links: LinkRecord[];
+  /** Every directory entry's `rel`, sorted — pruned-name directories included (reported, not descended). */
+  dirs: string[];
+  /** Entries that are neither a file, a directory nor a symlink (sockets, fifos, devices …). */
+  others: TreeEntry[];
 }
 
 /**
- * Every regular file AND every symlink under `root`, sorted by `rel` — the walk `walkFiles` does,
- * except that a symlink entry is LISTED with its link text instead of skipped (codex round 5 on
- * #480: a verification that skips links leaves an injected outside-pointing link invisible to the
- * hash). A link is never followed and never descended; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` still
- * prune real directories and files, but a LINK bearing one of those names is listed too (the
- * snapshot's `.venv` link is exactly that). A symlinked `root` is refused like `walkFiles`.
- * `skipDir(rel)` prunes a real subtree the way `walkFiles` does (the bundle walk prunes the
- * `scripts/` dev tooling with it — a link INSIDE a pruned subtree is never reached, and never
- * copied either).
+ * `walkEntries` split into what a verification consumes: files (Finder noise excluded), links
+ * (listed with their text, never followed or descended — codex round 5: a verification that skips
+ * links leaves an injected outside-pointing link invisible to the hash), directories and special
+ * nodes. `SKIP_DIR_NAMES` still prunes DESCENT into `.venv` / `node_modules` / `__pycache__`, but
+ * the directory entry itself is reported; a LINK bearing one of those names is listed like any link
+ * (the snapshot's `.venv` link is exactly that). `skipDir(rel)` prunes a real subtree the way
+ * `walkFiles` does (the bundle walk prunes the `scripts/` dev tooling with it — a link INSIDE a
+ * pruned subtree is never reached, and never copied either).
  */
 export function walkTree(root: string, skipDir?: (rel: string) => boolean): TreeListing {
-  const files: FileRecord[] = [];
-  const links: LinkRecord[] = [];
-  try {
-    if (lstatSync(root).isSymbolicLink()) throw new SymlinkComponentError(root, root);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { files, links };
-    throw err;
-  }
-  const visit = (dir: string, relDir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const rel = relDir === '' ? entry.name : `${relDir}/${entry.name}`;
-      const abs = join(dir, entry.name);
-      if (entry.isSymbolicLink()) {
-        links.push({ rel, abs, target: readlinkSync(abs) });
-      } else if (entry.isDirectory()) {
-        if (SKIP_DIR_NAMES.has(entry.name)) continue;
-        if (skipDir !== undefined && skipDir(rel)) continue;
-        visit(abs, rel);
-      } else if (entry.isFile()) {
-        if (SKIP_FILE_NAMES.has(entry.name)) continue;
-        files.push({ rel, abs });
-      }
-    }
+  const entries = walkEntries(root, skipDir);
+  return {
+    files: entries.filter(isCarriedFile).map(({ rel, abs }) => ({ rel, abs })),
+    links: entries.filter((e) => e.kind === 'symlink').map(({ rel, abs, target }) => ({ rel, abs, target: target ?? '' })),
+    dirs: entries.filter((e) => e.kind === 'dir').map((e) => e.rel),
+    others: entries.filter((e) => e.kind === 'other'),
   };
-  visit(root, '');
-  const byRel = <T extends { rel: string }>(a: T, b: T): number => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
-  files.sort(byRel);
-  links.sort(byRel);
-  return { files, links };
+}
+
+/** Every proper ancestor directory a set of POSIX-relative file paths implies (`a/b/c.md` → `a`, `a/b`), sorted. */
+export function impliedDirs(rels: Iterable<string>): string[] {
+  const out = new Set<string>();
+  for (const rel of rels) {
+    const segments = rel.split('/');
+    for (let i = 1; i < segments.length; i += 1) out.add(segments.slice(0, i).join('/'));
+  }
+  return [...out].sort();
 }
 
 export function sha256Hex(data: Buffer | string): string {
@@ -357,14 +389,23 @@ export function hashFileSet(files: ReadonlyArray<FileRecord>): string {
 }
 
 /**
- * One hash over a file set AND its symlink entries: the files as `hashFileSet` spells them, then
- * every link as `rel \0 -> \0 <link text> \n` (sorted). With no links this IS `hashFileSet`, so a
- * link-free tree hashes as before; a link added, removed or re-pointed changes the hash — which is
- * what lets `current` verification refuse an injected link (codex round 5). Only `rel` and the link
- * TEXT enter the hash, never what the link reaches: two trees with the same layout, bytes and link
- * texts hash equal wherever they live.
+ * One hash over a file set, its symlink entries AND its directory entries: the files as
+ * `hashFileSet` spells them, then every link as `rel \0 -> \0 <link text> \n` (sorted), then every
+ * directory as `rel \0 dir \n` (sorted; codex round 9 — an extra EMPTY directory planted in a
+ * generation used to leave the hash unchanged). With no links and no directories this IS
+ * `hashFileSet`, so a bundle's identity hashes as before; a link added, removed or re-pointed, or a
+ * directory added or removed, changes the hash — which is what lets `current` verification refuse
+ * an injected link or directory (codex rounds 5, 9). Only `rel`s, digests and link TEXT enter the
+ * hash, never what a link reaches: two trees with the same layout, bytes and link texts hash equal
+ * wherever they live. Publish hashes the directories its file set IMPLIES (`impliedDirs`); a
+ * verification hashes the directories it WALKED — equal iff the generation carries no directory
+ * beyond those.
  */
-export function hashTree(files: ReadonlyArray<FileRecord>, links: ReadonlyArray<Pick<LinkRecord, 'rel' | 'target'>>): string {
+export function hashTree(
+  files: ReadonlyArray<FileRecord>,
+  links: ReadonlyArray<Pick<LinkRecord, 'rel' | 'target'>>,
+  dirs: ReadonlyArray<string> = [],
+): string {
   const h = createHash('sha256');
   for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
     h.update(f.rel);
@@ -377,6 +418,10 @@ export function hashTree(files: ReadonlyArray<FileRecord>, links: ReadonlyArray<
     h.update('\0->\0');
     h.update(l.target);
     h.update('\n');
+  }
+  for (const d of [...dirs].sort()) {
+    h.update(d);
+    h.update('\0dir\n');
   }
   return h.digest('hex');
 }

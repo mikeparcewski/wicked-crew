@@ -14,6 +14,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -24,10 +25,12 @@ import {
   copyFiles,
   hashFileSet,
   hashTree,
+  impliedDirs,
   makeTreeReadOnly,
   removeTreeForce,
   SymlinkComponentError,
   UnsafePathSegmentError,
+  walkEntries,
   walkFiles,
   walkTree,
   writeFileAtomic,
@@ -86,7 +89,49 @@ describe('walkTree + hashTree — a verification that SEES links (codex round 5)
     // A symlinked root is refused; a missing root is empty.
     symlinkSync(real, join(base, 'linked-root'));
     expect(() => walkTree(join(base, 'linked-root'))).toThrow(SymlinkComponentError);
-    expect(walkTree(join(base, 'missing'))).toEqual({ files: [], links: [] });
+    expect(walkTree(join(base, 'missing'))).toEqual({ files: [], links: [], dirs: [], others: [] });
+    // Directories are part of the listing too (codex round 9): the real ones, the pruned `.venv` included, sorted.
+    expect(tree.dirs).toEqual(['.venv', 'sub']);
+    expect(tree.others).toEqual([]);
+  });
+
+  it('walkEntries is THE walker (codex round 9): every entry with its kind — an empty directory, a symlink with its text, a special node — nothing invisible; impliedDirs names every ancestor', () => {
+    const root = join(base, 'classified');
+    mkdirSync(join(root, 'empty'), { recursive: true });
+    mkdirSync(join(root, 'a', 'b'), { recursive: true });
+    writeFileSync(join(root, 'a', 'b', 'c.md'), 'c');
+    writeFileSync(join(root, 'a', 'd.md'), 'd');
+    symlinkSync(join(base, 'nowhere'), join(root, 'a', 'link'));
+    const entries = walkEntries(root);
+    expect(entries.map((e) => [e.rel, e.kind])).toEqual([
+      ['a', 'dir'],
+      ['a/b', 'dir'],
+      ['a/b/c.md', 'file'],
+      ['a/d.md', 'file'],
+      ['a/link', 'symlink'],
+      ['empty', 'dir'],
+    ]);
+    expect(entries.find((e) => e.rel === 'a/link')?.target).toBe(join(base, 'nowhere'));
+    expect(walkTree(root).dirs).toEqual(['a', 'a/b', 'empty']);
+    expect(impliedDirs(['a/b/c.md', 'a/d.md', 'top.md'])).toEqual(['a', 'a/b']);
+    // The hash covers directory entries: an empty directory changes it (codex round 9).
+    const files = walkFiles(root);
+    expect(hashTree(files, [], ['a', 'a/b'])).not.toBe(hashTree(files, [], ['a', 'a/b', 'empty']));
+    expect(hashTree(files, [], [])).toBe(hashFileSet(files)); // a bundle's identity is unchanged
+  });
+
+  it.skipIf(process.platform === 'win32')('a special node (a fifo) is classified as `other`, never as a file the store carries', () => {
+    const root = join(base, 'special');
+    mkdirSync(root);
+    execFileSync('mkfifo', [join(root, 'pipe')]);
+    writeFileSync(join(root, 'ok.md'), 'ok');
+    const entries = walkEntries(root);
+    expect(entries.map((e) => [e.rel, e.kind])).toEqual([
+      ['ok.md', 'file'],
+      ['pipe', 'other'],
+    ]);
+    expect(walkFiles(root).map((f) => f.rel)).toEqual(['ok.md']);
+    expect(walkTree(root).others.map((e) => e.rel)).toEqual(['pipe']);
   });
 
   it('hashTree equals hashFileSet with no links, and changes when a link is added, removed or re-pointed — by link TEXT, never by what it reaches', () => {

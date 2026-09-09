@@ -397,6 +397,39 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect((await manifest()).revision).toBe(rev2);
   });
 
+  it('a refresh-time NAME COLLISION keeps the operator\'s skill and records the held-back upstream directory (codex round 9): `?side=baseline` reads the UPSTREAM bytes at that directory, the default read the local bytes', async () => {
+    // Local skill `wicked-garden-a-b` lands at skills/a-b; upstream ships the SAME name at skills/a/b.
+    const added = await app.inject({
+      method: 'POST',
+      url: '/api/v1/skills',
+      payload: { name: 'wicked-garden-a-b', files: { 'SKILL.md': '---\nname: wicked-garden-a-b\n---\n\nLOCAL bytes\n' }, expectedRevision: 1 },
+    });
+    expect(added.statusCode).toBe(200);
+    const rev = (added.json() as SkillMutationResult).revision;
+    expect((added.json() as SkillMutationResult).skill).toMatchObject({ dir: 'skills/a-b', upstreamDir: null });
+    mkdirSync(join(s.upstream, 'skills', 'a', 'b'), { recursive: true });
+    writeFileSync(join(s.upstream, 'skills', 'a', 'b', 'SKILL.md'), '---\nname: wicked-garden-a-b\n---\n\nUPSTREAM bytes\n');
+    const refreshed = await app.inject({ method: 'POST', url: '/api/v1/skills/refresh-baseline', payload: { expectedRevision: rev } });
+    expect(refreshed.statusCode).toBe(200);
+    const body = refreshed.json() as SkillMutationResult & { conflicts: string[] };
+    expect(body.verdict).toBe('warnings');
+    expect(body.conflicts).toEqual(['wicked-garden-a-b']);
+    expect(body.findings.find((f) => f.kind === 'refresh-conflict')?.evidence).toContain('upstream at skills/a/b');
+    const entry = (await manifest()).manifest.skills['wicked-garden-a-b'];
+    expect(entry).toMatchObject({ dir: 'skills/a-b', conflict: true, upstreamDir: 'skills/a/b', provenance: 'user-added' });
+    // The two sides of the collision are readable: default = the operator's, ?side=baseline = upstream's held-back directory.
+    const local = await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-a-b/files/SKILL.md' });
+    expect(local.statusCode).toBe(200);
+    expect(local.json() as SkillReadResult).toMatchObject({ path: 'skills/a-b/SKILL.md' });
+    expect((local.json() as SkillReadResult).content).toContain('LOCAL bytes');
+    const upstream = await app.inject({ method: 'GET', url: '/api/v1/skills/wicked-garden-a-b/files/SKILL.md?side=baseline' });
+    expect(upstream.statusCode).toBe(200);
+    expect(upstream.json() as SkillReadResult).toMatchObject({ path: 'skills/a/b/SKILL.md' });
+    expect((upstream.json() as SkillReadResult).content).toContain('UPSTREAM bytes');
+    // The held-back skill never entered effective/ — the operator's tree is untouched.
+    expect(existsSync(join(s.root, 'effective', 'skills', 'a'))).toBe(false);
+  });
+
   it('a support PUT outside the bundle closure (hooks/x, tests/x) is a 200 blocked `outside-closure` envelope — nothing written, the revision unchanged; a GET there is a 400 (codex round 6)', async () => {
     const put = await app.inject({ method: 'PUT', url: '/api/v1/skills/support/hooks/hooks.json', payload: { content: '{}\n', expectedRevision: 1 } });
     expect(put.statusCode).toBe(200);

@@ -1415,6 +1415,12 @@ export interface SkillEntry {
   /** `upgradeAvailable`, or the last refresh found a name collision (upstream now ships a skill
    *  under this user-added name at another dir). Cleared by reset / a later refresh. */
   conflict: boolean;
+  /** The held-back UPSTREAM skill's directory in the current baseline when the last refresh found a
+   *  name collision (upstream ships this name at another dir than the operator's skill); `null`
+   *  otherwise. `GET /skills/:name/files/*path?side=baseline` reads THIS directory for such a skill,
+   *  so the two sides of the collision are comparable — the answer's `path` names the file actually
+   *  read (api-types 0.27.0). Re-derived by every refresh. */
+  upstreamDir: string | null;
 }
 
 /** One managed file (plugin-relative path → hashes). `baselineHash` `null` = user-added file;

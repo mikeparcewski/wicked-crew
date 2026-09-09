@@ -201,17 +201,21 @@ import {
   EntrySwappedError,
   hashFileSet,
   hashTree,
+  impliedDirs,
   makeTreeReadOnly,
   pruneEmptyDirs,
   readFileNoFollow,
   removeTreeForce,
   sha256Hex,
+  SKIP_FILE_NAMES,
   SymlinkComponentError,
+  walkEntries,
   walkFiles,
   walkTree,
   writeFileAtomic,
   type FileRecord,
   type LinkRecord,
+  type TreeEntry,
   type TreeListing,
 } from './tree.js';
 
@@ -514,6 +518,18 @@ interface ScannedFile {
   rel: string;
   abs: string;
   sha: string;
+}
+
+/**
+ * The classified `effective/` tree (codex round 9): the carried files hashed, plus every entry the
+ * validation must refuse or see — symlinks (there is NO permitted link under `effective/`), special
+ * nodes, and every directory (empty ones included: nothing is invisible to the walk).
+ */
+interface EffectiveScan {
+  files: ScannedFile[];
+  links: TreeEntry[];
+  others: TreeEntry[];
+  dirs: string[];
 }
 
 /** The whole-tree validation's answer: findings + the snapshot file set when not blocked. */
@@ -828,7 +844,7 @@ export class SkillsStore {
       }
       const where = `skills[${name}]`;
       const e = record(value, where);
-      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict'], where);
+      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict', 'upstreamDir'], where);
       const dir = str(e['dir'], `${where}.dir`);
       const bad = unsafeSkillDir(dir);
       if (bad !== null) fail(`${where}: ${bad}`);
@@ -844,7 +860,14 @@ export class SkillsStore {
         editedAt: strOrNull(e['editedAt'], `${where}.editedAt`),
         upgradeAvailable: bool(e['upgradeAvailable'], `${where}.upgradeAvailable`),
         conflict: bool(e['conflict'], `${where}.conflict`),
+        upstreamDir: strOrNull(e['upstreamDir'], `${where}.upstreamDir`),
       };
+      const upstreamDir = skills[name]?.upstreamDir ?? null;
+      if (upstreamDir !== null) {
+        const badUpstream = unsafeSkillDir(upstreamDir);
+        if (badUpstream !== null) fail(`${where}.upstreamDir: ${badUpstream}`);
+        if (upstreamDir === dir) fail(`${where}.upstreamDir equals dir — a held-back upstream skill lives at ANOTHER directory`);
+      }
     }
     const files: Record<string, SkillFileRecord> = {};
     for (const [rel, value] of Object.entries(record(top['files'], 'files'))) {
@@ -984,11 +1007,13 @@ export class SkillsStore {
     // skipping them, the hash covers them (path + link text), and the only link a generation may
     // carry is `.venv` at its root, pointing at THIS root's baseline env for the recorded baseline.
     const tree = walkTree(real);
+    const special = tree.others[0];
+    if (special !== undefined) return invalid(`${special.rel} is neither a file, a directory nor a symlink — a published generation carries no special nodes`);
     const hash = this.snapshotHash(tree);
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
-    const rowProblem = this.snapshotRowsProblem(parsed, tree.files);
+    const rowProblem = this.snapshotRowsProblem(parsed, tree);
     if (rowProblem !== null) return invalid(rowProblem);
     const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
     if (linkProblem !== null) return invalid(linkProblem);
@@ -1006,7 +1031,8 @@ export class SkillsStore {
    * rather than re-derived. Read-only mode bits are re-checked by nobody: they are a guard against
    * accidents, never the integrity boundary — the hashes are.
    */
-  private snapshotRowsProblem(parsed: SnapshotManifest, files: ReadonlyArray<FileRecord>): string | null {
+  private snapshotRowsProblem(parsed: SnapshotManifest, tree: TreeListing): string | null {
+    const files = tree.files;
     const byRel = new Map(files.map((f) => [f.rel, f]));
     const dirs = new Set(parsed.skills.map((r) => r.dir));
     for (const row of parsed.skills) {
@@ -1029,27 +1055,37 @@ export class SkillsStore {
       }
       if (portable !== row.portable) return `skill row ${row.name} claims portable: ${String(row.portable)}, but its files derive ${String(portable)}`;
     }
+    // The copilot view as a WHOLE tree (codex round 9): EXACTLY `views/copilot/.github/skills/<name>/…`
+    // for the sorted portable rows — the files each row owns, the directories they imply — and nothing
+    // else under `views/`: no other directory (empty or not), no other file; every unexpected entry is
+    // named. Links and special nodes anywhere in the generation are refused by `verifyCurrent` /
+    // `snapshotLinkProblem` before this runs.
     const expectedView = parsed.skills.filter((r) => r.portable).map((r) => r.name).sort();
-    const onDisk = new Set<string>();
-    const viewPrefix = `${COPILOT_VIEW_SKILLS_REL}/`;
-    for (const f of files) {
-      if (f.rel.startsWith(`${VIEWS_DIRNAME}/`) && !f.rel.startsWith(viewPrefix)) {
-        return `unexpected view file ${f.rel} — a generation carries only the copilot view under ${COPILOT_VIEW_SKILLS_REL}/`;
+    const expectedFiles = new Set<string>();
+    for (const row of parsed.skills) {
+      if (!row.portable) continue;
+      const prefix = `${row.dir}/`;
+      for (const f of files) {
+        if (f.rel.startsWith(prefix) && owningSkillDir(f.rel, dirs) === row.dir) expectedFiles.add(`${COPILOT_VIEW_SKILLS_REL}/${row.name}/${f.rel.slice(prefix.length)}`);
       }
-      if (f.rel.startsWith(viewPrefix)) onDisk.add(f.rel.slice(viewPrefix.length).split('/')[0] ?? '');
     }
-    const found = [...onDisk].sort();
-    if (found.length !== expectedView.length || found.some((n, i) => n !== expectedView[i])) {
-      return `the copilot view lays out [${found.join(', ')}] but the enabled portable skills are exactly [${expectedView.join(', ')}] — a view entry is missing or extra`;
-    }
+    const underViews = (rel: string): boolean => rel === VIEWS_DIRNAME || rel.startsWith(`${VIEWS_DIRNAME}/`);
+    const expectedDirs = new Set(impliedDirs(expectedFiles).filter(underViews));
+    const shape = `the copilot view is exactly ${COPILOT_VIEW_SKILLS_REL}/<name>/… for [${expectedView.join(', ')}] (each skill's own files and the directories they imply); a view entry is missing or extra`;
+    for (const f of files) if (underViews(f.rel) && !expectedFiles.has(f.rel)) return `unexpected view file ${f.rel} — ${shape}`;
+    for (const d of tree.dirs) if (underViews(d) && !expectedDirs.has(d)) return `unexpected view directory ${d} — ${shape}`;
+    for (const f of expectedFiles) if (!byRel.has(f)) return `the copilot view is missing ${f} — ${shape}`;
+    const dirSet = new Set(tree.dirs);
+    for (const d of expectedDirs) if (!dirSet.has(d)) return `the copilot view is missing directory ${d} — ${shape}`;
     return null;
   }
 
-  /** Hash over a snapshot tree — files (`snapshot.json` excluded) AND link entries (path + link text). */
-  private snapshotHash(tree: { files: FileRecord[]; links: LinkRecord[] }): string {
+  /** Hash over a snapshot tree — files (`snapshot.json` excluded), link entries (path + link text) AND directory entries (codex round 9: an extra empty directory changes it). */
+  private snapshotHash(tree: TreeListing): string {
     return hashTree(
       tree.files.filter((f) => f.rel !== SNAPSHOT_MANIFEST_FILENAME),
       tree.links,
+      tree.dirs,
     );
   }
 
@@ -1237,7 +1273,7 @@ export class SkillsStore {
     rmSync(this.currentLink(), { force: true });
 
     const files: Record<string, SkillFileRecord> = {};
-    for (const f of this.scanEffective()) {
+    for (const f of this.scanEffective().files) {
       files[f.rel] = { baselineHash: f.sha, effectiveHash: f.sha, lastPublishedHash: null, conflict: false };
     }
     const m: SkillManifest = {
@@ -1335,6 +1371,8 @@ export class SkillsStore {
     }
     const link = tree.links[0];
     if (link !== undefined) return `${dir} carries a symlink at ${link.rel} -> ${link.target}`;
+    const special = tree.others[0];
+    if (special !== undefined) return `${dir} carries ${special.rel}, which is neither a file nor a directory`;
     const actual = hashFileSet(tree.files);
     if (actual !== hash) return `${dir} hashes to ${actual}, not to its name — a bundle file was modified, added or removed`;
     return null;
@@ -1371,6 +1409,11 @@ export class SkillsStore {
     const tree = walkTree(stagedDir);
     const link = tree.links[0];
     if (link !== undefined) return `the staged tree carries a symlink at ${link.rel} -> ${link.target}`;
+    const special = tree.others[0];
+    if (special !== undefined) return `the staged tree carries ${special.rel}, which is neither a file nor a directory`;
+    const implied = new Set(impliedDirs(expected.keys()));
+    const extraDir = tree.dirs.find((d) => !implied.has(d));
+    if (extraDir !== undefined) return `the staged tree carries a directory ${extraDir} that no staged file implies`;
     const seen = new Set<string>();
     for (const f of tree.files) {
       const want = expected.get(f.rel);
@@ -1627,9 +1670,20 @@ export class SkillsStore {
   // ── Scanning ──────────────────────────────────────────────────────────────────────────────
 
   /** Every managed file under `effective/`, hashed. */
-  private scanEffective(): ScannedFile[] {
+  private scanEffective(): EffectiveScan {
     this.assertRootIdentity();
-    return walkFiles(this.effectiveDir()).map((f) => ({ rel: f.rel, abs: f.abs, sha: sha256Hex(readFileNoFollow(f.abs)) }));
+    // ONE walker classifies every entry (tree.ts `walkEntries`; codex round 9): the files are hashed,
+    // the links and special nodes are handed to the validation to refuse by name, the directories are
+    // visible — a symlink or a fifo under effective/ used to be skipped and therefore never judged.
+    const entries = walkEntries(this.effectiveDir());
+    return {
+      files: entries
+        .filter((e) => e.kind === 'file' && !SKIP_FILE_NAMES.has(e.rel.split('/').pop() ?? ''))
+        .map((e) => ({ rel: e.rel, abs: e.abs, sha: sha256Hex(readFileNoFollow(e.abs)) })),
+      links: entries.filter((e) => e.kind === 'symlink'),
+      others: entries.filter((e) => e.kind === 'other'),
+      dirs: entries.filter((e) => e.kind === 'dir').map((e) => e.rel),
+    };
   }
 
   /** Every manifest `dir` — the registered skills. */
@@ -1708,6 +1762,7 @@ export class SkillsStore {
         editedAt: null,
         upgradeAvailable: false,
         conflict: false,
+        upstreamDir: null,
       };
       byDir.set(dir, name);
     }
@@ -1963,8 +2018,17 @@ export class SkillsStore {
   /** A typed, capped read of one of the skill's files (`side: 'baseline'` reads the shipped copy, contained the same way). */
   async readFile(name: string, rawRel: string, side: ReadSide = 'effective'): Promise<SkillReadResult> {
     const target = this.resolveSkillFile(name, rawRel);
-    const abs = side === 'effective' ? target.abs : this.containedBaseline(this.manifest().baseline, target.pluginRel.split('/'));
-    return this.typedRead(target.pluginRel, abs);
+    if (side === 'effective') return this.typedRead(target.pluginRel, target.abs);
+    // The baseline side of a skill a refresh HELD BACK — upstream ships a skill under this name at
+    // ANOTHER directory (`upstreamDir`, codex round 9) — is that upstream directory in the current
+    // baseline, so the two sides of the collision are actually comparable; otherwise the skill's own
+    // dir. `path` in the answer names the plugin-relative file actually read.
+    const m = this.manifest();
+    const entry = m.skills[name];
+    if (entry === undefined) throw new UnknownSkillError(name);
+    const baseDir = entry.upstreamDir ?? entry.dir;
+    const pluginRel = `${baseDir}/${target.rel}`;
+    return this.typedRead(pluginRel, this.containedBaseline(m.baseline, pluginRel.split('/')));
   }
 
   async readSupport(rawRel: string, side: ReadSide = 'effective'): Promise<SkillReadResult> {
@@ -2535,6 +2599,7 @@ export class SkillsStore {
         editedAt: this.now(),
         upgradeAvailable: false,
         conflict: false,
+        upstreamDir: null,
       };
       this.refreshRecords(m, dir);
       findings.push(...this.recomputeWarnings(m));
@@ -2715,7 +2780,7 @@ export class SkillsStore {
 
     // ── Decide (in memory — nothing on disk moves until the preflight below has passed) ─────
     const newFiles = new Map(bundle.map((f) => [f.rel, sha256Hex(readFileNoFollow(f.abs))])); // the source entries the bundle walk judged, read no-follow
-    const effective = new Map(this.scanEffective().map((f) => [f.rel, f.sha]));
+    const effective = new Map(this.scanEffective().files.map((f) => [f.rel, f.sha]));
     const oldFiles = new Map(
       Object.entries(m.files).filter(([, r]) => r.baselineHash !== null).map(([rel, r]) => [rel, r.baselineHash as string]),
     );
@@ -2727,7 +2792,10 @@ export class SkillsStore {
     const heldBack = new Set<string>();
     const conflicts = new Set<string>();
     const manifestDirs = this.manifestDirs(m);
-    for (const entry of Object.values(m.skills)) entry.conflict = false;
+    for (const entry of Object.values(m.skills)) {
+      entry.conflict = false;
+      entry.upstreamDir = null;
+    }
     for (const dir of skillDirsOf(bundle)) {
       if (manifestDirs.has(dir)) continue;
       const name = derivedSkillName(dir.slice(`${SKILLS_SUBDIR}/`.length));
@@ -2735,6 +2803,7 @@ export class SkillsStore {
       if (existing === undefined || existing.dir === dir) continue;
       heldBack.add(dir);
       existing.conflict = true;
+      existing.upstreamDir = dir; // `?side=baseline` reads of this skill resolve HERE (codex round 9)
       conflicts.add(name);
       findings.push(
         finding(
@@ -2895,6 +2964,7 @@ export class SkillsStore {
     // the content swap back, and the unreferenced new baseline is reaped with it.
     let added: string[] = [];
     let removed: string[] = [];
+    let baselineDirsToRemove: string[] = [];
     const taken = new Set<string>();
     const kept = new Set<string>();
     try {
@@ -2908,6 +2978,9 @@ export class SkillsStore {
         // The new baseline is the one `recomputeDerived` / `hasBaselineDir` read from now on.
         m.baselines[newHash] = this.baselineRecord(source);
         m.baseline = newHash;
+        // The previous baseline's record leaves in THIS commit when no generation on disk references
+        // it (codex round 9: one mutation, one revision); its directory goes once the commit landed.
+        baselineDirsToRemove = this.pruneBaselineRecords(m, this.generationsOnDisk()).dirs;
         findings.push(...this.rebuildCatalog(m).map((f) => ({ ...f, severity: 'warning' as const })));
         for (const [name, entry] of Object.entries(m.skills)) {
           if (conflicts.has(name)) entry.conflict = true;
@@ -2948,8 +3021,9 @@ export class SkillsStore {
       this.reapBaselines(); // the content is back; the new capture nothing references goes with the failed commit
       throw err;
     }
-    // The previous baseline goes only when no snapshot on disk still links its `.venv` / records it.
-    this.reapBaselines();
+    // The previous baseline's directory goes only when no snapshot on disk still links its `.venv` /
+    // records it — its record already left in the commit above.
+    for (const dir of baselineDirsToRemove) removeTreeForce(dir);
     return base({
       verdict: verdictOf(findings),
       findings,
@@ -3064,7 +3138,10 @@ export class SkillsStore {
     // carries the state either way.
     const venvDir = baselineVenvDir(this.baselineDir(m.baseline));
     const venvLink = venv === 'synced' && existsSync(venvDir) ? this.venvLinkText(m.baseline) : null;
-    const contentHash = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }]);
+    // The hash covers the directories the file set IMPLIES (codex round 9): the staged tree and every
+    // later verification hash the directories they WALK, so an extra directory — empty or not — is a
+    // mismatch, never an invisible passenger.
+    const contentHash = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
     const snapshots = this.snapshotsDir();
     mkdirSync(snapshots, { recursive: true });
     this.sweepStaging(snapshots);
@@ -3129,6 +3206,12 @@ export class SkillsStore {
     }
     if (record !== undefined) record.venv = venv; // provisioning state rides the SUCCESSFUL publish only
     m.published = { gen, contentHash, at: this.now(), snapshotHash: sha256Hex(snapshotText) };
+    // Retention is decided BEFORE the commit and rides it (codex round 9): the generations this
+    // publish retires, and the baseline records nothing will reference once they are gone, leave the
+    // manifest in this very commit — one mutation, one revision — and their directories are removed
+    // only after it landed (the new generation is on disk already, so it counts as live).
+    const retiredGens = this.generationsToReap(gen);
+    const prune = this.pruneBaselineRecords(m, this.generationsOnDisk().filter((g) => !retiredGens.includes(g)));
     try {
       this.commit(m);
     } catch (err) {
@@ -3139,8 +3222,8 @@ export class SkillsStore {
     }
     this.flipCurrent(gen);
     this.live.published(gen);
-    this.reapGenerations(gen);
-    this.reapBaselines();
+    for (const g of retiredGens) removeTreeForce(this.snapshotDir(g)); // locked read-only at publish
+    for (const dir of prune.dirs) removeTreeForce(dir);
     return {
       verdict: verdictOf(v.findings),
       findings: v.findings,
@@ -3222,41 +3305,45 @@ export class SkillsStore {
    * never one a live session still pins (it is reaped by the release that frees it).
    */
   private reapGenerations(currentGen: number): void {
+    for (const gen of this.generationsToReap(currentGen)) removeTreeForce(this.snapshotDir(gen)); // locked read-only at publish
+  }
+
+  /** The generations `reapGenerations(currentGen)` would remove: beyond the newest `KEEP_GENERATIONS`, never the current one, never a pinned one. */
+  private generationsToReap(currentGen: number): number[] {
     const pinned = this.live.pinned();
-    const gens = this.generationsOnDisk()
+    return this.generationsOnDisk()
       .filter((g) => g !== currentGen)
-      .sort((a, b) => b - a);
-    for (const gen of gens.slice(KEEP_GENERATIONS - 1)) {
-      if (pinned.has(gen)) continue;
-      removeTreeForce(this.snapshotDir(gen)); // locked read-only at publish
-    }
+      .sort((a, b) => b - a)
+      .slice(KEEP_GENERATIONS - 1)
+      .filter((g) => !pinned.has(g));
   }
 
   /**
-   * Remove every baseline dir (and its record) that neither the manifest nor ANY generation on
-   * disk references — a retained snapshot keeps the `.venv` it links alive. Records mirror the dirs
-   * that exist; the write is bookkeeping (no revision bump).
+   * Drop, IN MEMORY, every baseline record that neither `m.baseline` nor any of `liveGens` (the
+   * generations that will remain on disk) references — and every record whose directory is gone.
+   * The caller commits `m` (a publish's or refresh's OWN commit, or the standalone reap's) and only
+   * THEN removes the directories answered here (codex round 9): the record change rides a validated
+   * commit with the revision advanced, a client never sees two manifests at one revision, and a
+   * failed commit removes nothing.
    */
-  private reapBaselines(): void {
-    if (!this.isSeeded()) return;
-    const m = this.manifest();
+  private pruneBaselineRecords(m: SkillManifest, liveGens: ReadonlyArray<number>): { changed: boolean; dirs: string[] } {
     const referenced = new Set<string>([m.baseline]);
-    for (const gen of this.generationsOnDisk()) {
+    for (const gen of liveGens) {
       const parsed = this.parseSnapshotManifest(this.snapshotDir(gen));
       if (typeof parsed !== 'string') referenced.add(parsed.gardenSource.baseline);
     }
     const parent = join(this.rootDir, BASELINE_DIRNAME);
-    let entries: string[];
+    let entries: string[] = [];
     try {
       entries = readdirSync(parent);
     } catch (err) {
-      if (errnoCode(err) === 'ENOENT') return;
-      throw err;
+      if (errnoCode(err) !== 'ENOENT') throw err;
     }
+    const dirs: string[] = [];
     let changed = false;
     for (const e of entries) {
       if (e.startsWith('.') || referenced.has(e)) continue;
-      removeTreeForce(join(parent, e));
+      dirs.push(join(parent, e));
       if (m.baselines[e] !== undefined) {
         delete m.baselines[e];
         changed = true;
@@ -3268,7 +3355,33 @@ export class SkillsStore {
         changed = true;
       }
     }
-    if (changed) this.writeManifest(m);
+    return { changed, dirs };
+  }
+
+  /**
+   * Remove every baseline dir (and its record) that neither the manifest nor ANY generation on
+   * disk references — a retained snapshot keeps the `.venv` it links alive. Records mirror the dirs
+   * that exist; the write is bookkeeping (no revision bump).
+   */
+  private reapBaselines(): number | null {
+    if (!this.isSeeded()) return null;
+    const m = this.manifest();
+    const prune = this.pruneBaselineRecords(m, this.generationsOnDisk());
+    // Dropping a baseline record is a MUTATION like any other (codex round 9): it goes through the
+    // validated `manifest.json.tmp-…` → rename commit with the revision ADVANCED — a client never sees
+    // two different manifests at one revision, and a stale `expectedRevision` after a reap is the 409
+    // it should be. The commit lands BEFORE any directory is removed, so a failed commit removes
+    // nothing (there is nothing to roll back); the removals that follow are of directories no
+    // generation and no record references. (A publish or refresh folds this into its OWN commit —
+    // `pruneBaselineRecords` — so one mutation stays one revision; this standalone form serves the
+    // event-driven reap of a generation a run stopped pinning.)
+    let committed: number | null = null;
+    if (prune.changed) {
+      this.commit(m);
+      committed = m.revision;
+    }
+    for (const dir of prune.dirs) removeTreeForce(dir);
+    return committed;
   }
 
   /** The generations present on disk, ascending. */
@@ -3314,7 +3427,8 @@ export class SkillsStore {
     // this AFTER the provisioner ran, so a provisioner that wrote outside `.venv` is caught here.
     const baselineProblem = this.baselineProblem(m.baseline);
     if (baselineProblem !== null) findings.push(this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${m.baseline}`, baselineProblem));
-    const scanned = this.scanEffective();
+    const scan = this.scanEffective();
+    const scanned = scan.files;
     const onDisk = new Map(scanned.map((f) => [f.rel, f]));
 
     // Direct filesystem edits: detected by hash, reported, recorded — never silently trusted.
@@ -3371,6 +3485,40 @@ export class SkillsStore {
     // Derived fields are recomputed CONTAINED: a skill whose dir (or a file in it) crosses a symlink
     // is skipped, never read through, and BLOCKS here by name (codex round 5).
     findings.push(...this.recomputeDerived(m));
+    // EVERY entry of effective/ is classified (codex round 9): a symlink ANYWHERE under it is refused
+    // by name — there is no permitted link there (the store never follows one, and a snapshot would
+    // otherwise copy whatever it reaches) — and so is a node that is neither a file nor a directory.
+    // Empty directories are visible to the walk (`scan.dirs`); a snapshot is a file set, so they are
+    // not carried, but nothing is invisible. An entry the containment recompute already refused by
+    // the same path (a skill dir that IS a link) is not reported twice.
+    const alreadyRefused = new Set(findings.filter((f) => f.kind === 'path-invalid').map((f) => f.file));
+    const ownerNameOf = (rel: string): string | null => {
+      const owner = owningSkillDir(rel, new Set(registered.keys()));
+      return owner === null ? null : (registered.get(owner) ?? null);
+    };
+    for (const e of scan.links) {
+      if (alreadyRefused.has(e.rel)) continue;
+      findings.push(
+        finding(
+          'path-invalid',
+          'blocking',
+          'the skills root carries no symlinks — there is no permitted link under effective/ (no-follow everywhere, design v3 §API): a link would make a snapshot copy whatever it reaches on the worker host, so every entry is classified and a link is refused by name, never skipped',
+          `${e.rel} is a symlink -> ${e.target ?? ''}`,
+          { skill: ownerNameOf(e.rel), file: e.rel },
+        ),
+      );
+    }
+    for (const e of scan.others) {
+      findings.push(
+        finding(
+          'path-invalid',
+          'blocking',
+          'only regular files and directories live under effective/: a socket, fifo or device node cannot be copied into a snapshot and is refused by name',
+          `${e.rel} is neither a regular file nor a directory`,
+          { skill: ownerNameOf(e.rel), file: e.rel },
+        ),
+      );
+    }
     const catalogMd = new Map<string, string>();
     for (const [name, entry] of Object.entries(m.skills)) {
       const rel = `${entry.dir}/SKILL.md`;
