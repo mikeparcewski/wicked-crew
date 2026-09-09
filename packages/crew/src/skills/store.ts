@@ -202,12 +202,13 @@ import {
   hashFileSet,
   hashTree,
   impliedDirs,
+  isCarriedFile,
   makeTreeReadOnly,
   pruneEmptyDirs,
   readFileNoFollow,
   removeTreeForce,
   sha256Hex,
-  SKIP_FILE_NAMES,
+  SKIP_DIR_NAMES,
   SymlinkComponentError,
   walkEntries,
   walkFiles,
@@ -523,7 +524,11 @@ interface ScannedFile {
 /**
  * The classified `effective/` tree (codex round 9): the carried files hashed, plus every entry the
  * validation must refuse or see — symlinks (there is NO permitted link under `effective/`), special
- * nodes, and every directory (empty ones included: nothing is invisible to the walk).
+ * nodes, and every carried directory (empty ones included: nothing is invisible to the walk).
+ * `links` and `others` INCLUDE the entries beneath a pruned directory (`.venv`, `node_modules`,
+ * `__pycache__`; `TreeEntry.pruned` names it — codex round 10): such a subtree is never copied or
+ * hashed, which is exactly why what it holds must be judged rather than skipped. `files` and `dirs`
+ * exclude it, as every copy and hash view does.
  */
 interface EffectiveScan {
   files: ScannedFile[];
@@ -1009,6 +1014,14 @@ export class SkillsStore {
     const tree = walkTree(real);
     const special = tree.others[0];
     if (special !== undefined) return invalid(`${special.rel} is neither a file, a directory nor a symlink — a published generation carries no special nodes`);
+    // A pruned-name directory (`SKIP_DIR_NAMES`) never enters a generation: publish copies a file set
+    // that excludes such subtrees, and the environment is the `.venv` LINK at the generation root. One
+    // on disk is therefore an unexpected entry, refused BY NAME before the hash is compared (codex
+    // round 10) — whatever it holds, and however the metadata was re-stamped.
+    const prunedDir = tree.dirs.find((d) => SKIP_DIR_NAMES.has(posix.basename(d)));
+    if (prunedDir !== undefined) {
+      return invalid(`unexpected directory ${prunedDir} — a published generation never carries a ${posix.basename(prunedDir)} directory (publish copies no pruned directory; the environment is the .venv link at the generation root): the immutable snapshot was modified`);
+    }
     const hash = this.snapshotHash(tree);
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
@@ -1356,6 +1369,17 @@ export class SkillsStore {
    * before a refresh reuses it, before publish provisions in it and after the provisioner ran
    * (`validate`), and per file before reset restores from it. Read-only mode bits are a guard
    * against accidents, never the integrity boundary — this hash is.
+   *
+   * The pruned subtrees stay pruned AND UNCLASSIFIED here (codex round 10; `walkTree(...).pruned`
+   * is deliberately not consulted), unlike under `effective/`: the provisioned `.venv` is an
+   * interpreter environment and legitimately holds symlinks (`bin/python -> python3.x`,
+   * `lib64 -> lib`). That is safe because nothing beneath a pruned directory is ever DELIVERED
+   * except through the snapshot's `.venv` link, whose target both verifiers check by identity —
+   * `snapshotLinkProblem` here (this root's `baseline/<hash>/.venv` for the recorded baseline, the
+   * link text as publish wrote it) and core on its side (every component a real directory, the
+   * target ending exactly at `<baseline>/<64-hex>/.venv`). A link inside the env reaches a worker
+   * only as part of the env the store itself provisioned; the bundle identity re-derived here never
+   * covers it, and no other pruned name is linked from anywhere.
    */
   private baselineProblem(hash: string): string | null {
     const dir = this.baselineDir(hash);
@@ -1675,14 +1699,16 @@ export class SkillsStore {
     // ONE walker classifies every entry (tree.ts `walkEntries`; codex round 9): the files are hashed,
     // the links and special nodes are handed to the validation to refuse by name, the directories are
     // visible — a symlink or a fifo under effective/ used to be skipped and therefore never judged.
+    // The walk DESCENDS pruned directories too (codex round 10): a link or special node beneath
+    // `node_modules/`, `.venv/` or `__pycache__/` is in `links` / `others` (marked `pruned`) for the
+    // validation to refuse; the files and directories beneath one stay out of the scan — never
+    // carried, never hashed, exactly as before.
     const entries = walkEntries(this.effectiveDir());
     return {
-      files: entries
-        .filter((e) => e.kind === 'file' && !SKIP_FILE_NAMES.has(e.rel.split('/').pop() ?? ''))
-        .map((e) => ({ rel: e.rel, abs: e.abs, sha: sha256Hex(readFileNoFollow(e.abs)) })),
+      files: entries.filter(isCarriedFile).map((e) => ({ rel: e.rel, abs: e.abs, sha: sha256Hex(readFileNoFollow(e.abs)) })),
       links: entries.filter((e) => e.kind === 'symlink'),
       others: entries.filter((e) => e.kind === 'other'),
-      dirs: entries.filter((e) => e.kind === 'dir').map((e) => e.rel),
+      dirs: entries.filter((e) => e.kind === 'dir' && e.pruned === null).map((e) => e.rel),
     };
   }
 
@@ -3360,8 +3386,11 @@ export class SkillsStore {
 
   /**
    * Remove every baseline dir (and its record) that neither the manifest nor ANY generation on
-   * disk references — a retained snapshot keeps the `.venv` it links alive. Records mirror the dirs
-   * that exist; the write is bookkeeping (no revision bump).
+   * disk references — a retained snapshot keeps the `.venv` it links alive. Dropping the records is
+   * a COMMITTED, revision-advancing mutation (the validated `manifest.json.tmp-…` → rename path,
+   * codex round 9), landed BEFORE any directory is removed. Answers the revision that commit
+   * produced, or `null` when no record changed (nothing to reap, or an unseeded root) — directories
+   * with no record left are still removed in that case.
    */
   private reapBaselines(): number | null {
     if (!this.isSeeded()) return null;
@@ -3490,33 +3519,55 @@ export class SkillsStore {
     // otherwise copy whatever it reaches) — and so is a node that is neither a file nor a directory.
     // Empty directories are visible to the walk (`scan.dirs`); a snapshot is a file set, so they are
     // not carried, but nothing is invisible. An entry the containment recompute already refused by
-    // the same path (a skill dir that IS a link) is not reported twice.
+    // the same path (a skill dir that IS a link) is not reported twice. The entries BENEATH a pruned
+    // directory (`.venv`, `node_modules`, `__pycache__`) are classified too (codex round 10): such a
+    // directory is not bundle content — nothing beneath it is copied or hashed — so a link or a
+    // special node inside one is refused by name with that reason; the store's provisioned env lives
+    // under baseline/<hash>/.venv and is linked from the snapshot root, never held under effective/.
     const alreadyRefused = new Set(findings.filter((f) => f.kind === 'path-invalid').map((f) => f.file));
     const ownerNameOf = (rel: string): string | null => {
       const owner = owningSkillDir(rel, new Set(registered.keys()));
       return owner === null ? null : (registered.get(owner) ?? null);
     };
+    const prunedNames = [...SKIP_DIR_NAMES].sort().join(', ');
+    const prunedLinkReason = (prunedBy: string): string =>
+      `a pruned directory (${prunedNames}) is not bundle content — nothing beneath one is copied into a snapshot or hashed — and holds no links: every entry beneath one is still classified, and a symlink there is refused by name${
+        posix.basename(prunedBy) === VENV_LINKNAME ? "; provisioned environments live under baseline/, not the editable root (publish links the snapshot's .venv to baseline/<hash>/.venv)" : ''
+      }`;
     for (const e of scan.links) {
       if (alreadyRefused.has(e.rel)) continue;
       findings.push(
-        finding(
-          'path-invalid',
-          'blocking',
-          'the skills root carries no symlinks — there is no permitted link under effective/ (no-follow everywhere, design v3 §API): a link would make a snapshot copy whatever it reaches on the worker host, so every entry is classified and a link is refused by name, never skipped',
-          `${e.rel} is a symlink -> ${e.target ?? ''}`,
-          { skill: ownerNameOf(e.rel), file: e.rel },
-        ),
+        e.pruned === null
+          ? finding(
+              'path-invalid',
+              'blocking',
+              'the skills root carries no symlinks — there is no permitted link under effective/ (no-follow everywhere, design v3 §API): a link would make a snapshot copy whatever it reaches on the worker host, so every entry is classified and a link is refused by name, never skipped',
+              `${e.rel} is a symlink -> ${e.target ?? ''}`,
+              { skill: ownerNameOf(e.rel), file: e.rel },
+            )
+          : finding('path-invalid', 'blocking', prunedLinkReason(e.pruned), `${e.rel} is a symlink -> ${e.target ?? ''} inside the pruned directory ${e.pruned}`, {
+              skill: ownerNameOf(e.rel),
+              file: e.rel,
+            }),
       );
     }
     for (const e of scan.others) {
       findings.push(
-        finding(
-          'path-invalid',
-          'blocking',
-          'only regular files and directories live under effective/: a socket, fifo or device node cannot be copied into a snapshot and is refused by name',
-          `${e.rel} is neither a regular file nor a directory`,
-          { skill: ownerNameOf(e.rel), file: e.rel },
-        ),
+        e.pruned === null
+          ? finding(
+              'path-invalid',
+              'blocking',
+              'only regular files and directories live under effective/: a socket, fifo or device node cannot be copied into a snapshot and is refused by name',
+              `${e.rel} is neither a regular file nor a directory`,
+              { skill: ownerNameOf(e.rel), file: e.rel },
+            )
+          : finding(
+              'path-invalid',
+              'blocking',
+              `a pruned directory (${prunedNames}) is classified like the rest of effective/ — nothing beneath one is copied or hashed, but what it holds is judged: a socket, fifo or device node inside one is refused by name`,
+              `${e.rel} is neither a regular file nor a directory (inside the pruned directory ${e.pruned})`,
+              { skill: ownerNameOf(e.rel), file: e.rel },
+            ),
       );
     }
     const catalogMd = new Map<string, string>();

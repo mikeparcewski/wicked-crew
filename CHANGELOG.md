@@ -33,6 +33,23 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — confirmation-review residuals, review pass 10** (PR #480). (1) Pruned
+  directories (`.venv`, `node_modules`, `__pycache__`) are WALKED for classification while staying
+  excluded from every copy and hash: `tree.ts` `walkEntries` descends them and reports every entry
+  beneath with its kind, marked `pruned` with the pruned directory's path; `walkFiles`, `walkTree`'s
+  `files` / `links` / `dirs` / `others` (so `hashTree` and the closure copy) exclude the subtree
+  exactly as before, and `walkTree.pruned` hands what it holds to the validators. Under `effective/`
+  a symlink or special node inside a pruned directory is a blocking `path-invalid` naming the entry
+  and the pruned directory, with the reason (pruned trees are not bundle content and hold no links;
+  an operator-created `effective/.venv` with interpreter links is refused with "provisioned
+  environments live under baseline/, not the editable root"); a regular file there stays outside
+  the scan as before. Under `baseline/<hash>/` the provisioned `.venv` stays pruned AND unclassified
+  — an interpreter env legitimately holds symlinks, and nothing beneath a pruned directory is ever
+  delivered except through the snapshot's `.venv` link, whose target crew and core verify by
+  identity (documented on `baselineProblem`). A pruned-name directory inside a generation is
+  refused BY NAME as an unexpected entry before the hash is compared (`verifyCurrent`) — publish
+  never copies one. (2) The `reapBaselines` doc comment no longer claims "no revision bump": the
+  record drop is the committed, revision-advancing CAS path it has been since round 9.
 - **Skills keystone — codex round-9 REJECT (2 HIGH, 2 MEDIUM)** (PR #480). (H1) ONE walker classifies
   every entry under `effective/` (`tree.ts` `walkEntries`: file / dir / symlink / other, never
   following a link, an empty directory reported like any entry) and `scanEffective` plus every

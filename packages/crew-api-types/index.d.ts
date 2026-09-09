@@ -1531,6 +1531,13 @@ export type SkillFindingKind =
    *  warnings answers `verdict: 'warnings'` with the findings AND a written snapshot (api-types
    *  0.27.0). */
   | 'unresolved-ref'
+  /** A path the store refuses BY NAME rather than reads through: a shape that could leave its root
+   *  (`..`, an absolute piece), a component that crosses a symlink, or — under `effective/`, where
+   *  every entry is classified — a symlink or a special node (socket, fifo, device) anywhere,
+   *  the contents of a pruned directory (`.venv`, `node_modules`, `__pycache__`) INCLUDED: such a
+   *  directory is never copied or hashed, but what it holds is still judged, and a link inside one
+   *  blocks with the reason (a provisioned environment lives under `baseline/`, not the editable
+   *  root). Blocking; `file` names the entry, `skill` its owning skill when it has one. */
   | 'path-invalid'
   | 'unknown-skill'
   | 'no-baseline'

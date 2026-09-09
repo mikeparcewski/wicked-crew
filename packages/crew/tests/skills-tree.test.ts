@@ -61,11 +61,12 @@ describe('walkFiles', () => {
 });
 
 describe('walkTree + hashTree — a verification that SEES links (codex round 5)', () => {
-  it('lists every symlink with its link text (never followed, never descended), files as walkFiles does; a `.venv` LINK is listed although a `.venv` DIR is pruned', () => {
+  it('lists every symlink with its link text (never followed, never descended), files as walkFiles does; a `.venv` LINK is listed although a `.venv` DIR is pruned — and what the pruned dir holds is classified under `pruned`, carried by no view (review pass 10)', () => {
     const real = join(base, 'real');
     mkdirSync(join(real, 'sub'), { recursive: true });
-    mkdirSync(join(real, '.venv', 'bin'), { recursive: true }); // a real .venv dir: pruned
-    writeFileSync(join(real, '.venv', 'bin', 'python'), '');
+    mkdirSync(join(real, '.venv', 'bin'), { recursive: true }); // a real .venv dir: pruned — walked for classification, part of no file/link/dir view
+    writeFileSync(join(real, '.venv', 'bin', 'python3.12'), '');
+    symlinkSync('python3.12', join(real, '.venv', 'bin', 'python')); // an interpreter link INSIDE the pruned env
     writeFileSync(join(real, 'a.md'), 'a');
     writeFileSync(join(base, 'elsewhere.md'), 'outside');
     mkdirSync(join(base, 'outside-dir'));
@@ -89,49 +90,89 @@ describe('walkTree + hashTree — a verification that SEES links (codex round 5)
     // A symlinked root is refused; a missing root is empty.
     symlinkSync(real, join(base, 'linked-root'));
     expect(() => walkTree(join(base, 'linked-root'))).toThrow(SymlinkComponentError);
-    expect(walkTree(join(base, 'missing'))).toEqual({ files: [], links: [], dirs: [], others: [] });
-    // Directories are part of the listing too (codex round 9): the real ones, the pruned `.venv` included, sorted.
+    expect(walkTree(join(base, 'missing'))).toEqual({ files: [], links: [], dirs: [], others: [], pruned: [] });
+    // Directories are part of the listing too (codex round 9): the real ones, the pruned `.venv` itself included, sorted —
+    // nothing BENEATH it (review pass 10: `.venv/bin` is not a carried directory).
     expect(tree.dirs).toEqual(['.venv', 'sub']);
     expect(tree.others).toEqual([]);
+    // The pruned subtree is WALKED and classified (review pass 10): every entry beneath `.venv` with its kind,
+    // marked with the pruned directory — the interpreter link is seen here and NOWHERE in files/links/dirs.
+    expect(tree.pruned.map((e) => [e.rel, e.kind, e.pruned])).toEqual([
+      ['.venv/bin', 'dir', '.venv'],
+      ['.venv/bin/python', 'symlink', '.venv'],
+      ['.venv/bin/python3.12', 'file', '.venv'],
+    ]);
+    expect(tree.pruned.find((e) => e.rel === '.venv/bin/python')?.target).toBe('python3.12');
+    expect(walkEntries(real).find((e) => e.rel === '.venv')).toMatchObject({ kind: 'dir', pruned: null }); // the pruned-name dir itself is a carried entry
   });
 
-  it('walkEntries is THE walker (codex round 9): every entry with its kind — an empty directory, a symlink with its text, a special node — nothing invisible; impliedDirs names every ancestor', () => {
+  it('walkEntries is THE walker (codex round 9): every entry with its kind — an empty directory, a symlink with its text, a special node — nothing invisible; a pruned directory is DESCENDED for classification and its entries marked (review pass 10); impliedDirs names every ancestor', () => {
     const root = join(base, 'classified');
     mkdirSync(join(root, 'empty'), { recursive: true });
     mkdirSync(join(root, 'a', 'b'), { recursive: true });
     writeFileSync(join(root, 'a', 'b', 'c.md'), 'c');
     writeFileSync(join(root, 'a', 'd.md'), 'd');
     symlinkSync(join(base, 'nowhere'), join(root, 'a', 'link'));
+    // A pruned directory with a link, a file and a NESTED pruned name inside: everything beneath is
+    // reported, marked with the OUTERMOST pruned directory.
+    mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(root, 'node_modules', '__pycache__'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', 'dep.js'), 'dep');
+    symlinkSync(join('..', 'dep.js'), join(root, 'node_modules', '.bin', 'dep'));
     const entries = walkEntries(root);
-    expect(entries.map((e) => [e.rel, e.kind])).toEqual([
-      ['a', 'dir'],
-      ['a/b', 'dir'],
-      ['a/b/c.md', 'file'],
-      ['a/d.md', 'file'],
-      ['a/link', 'symlink'],
-      ['empty', 'dir'],
+    expect(entries.map((e) => [e.rel, e.kind, e.pruned])).toEqual([
+      ['a', 'dir', null],
+      ['a/b', 'dir', null],
+      ['a/b/c.md', 'file', null],
+      ['a/d.md', 'file', null],
+      ['a/link', 'symlink', null],
+      ['empty', 'dir', null],
+      ['node_modules', 'dir', null],
+      ['node_modules/.bin', 'dir', 'node_modules'],
+      ['node_modules/.bin/dep', 'symlink', 'node_modules'],
+      ['node_modules/__pycache__', 'dir', 'node_modules'],
+      ['node_modules/dep.js', 'file', 'node_modules'],
     ]);
     expect(entries.find((e) => e.rel === 'a/link')?.target).toBe(join(base, 'nowhere'));
-    expect(walkTree(root).dirs).toEqual(['a', 'a/b', 'empty']);
+    expect(entries.find((e) => e.rel === 'node_modules/.bin/dep')?.target).toBe(join('..', 'dep.js'));
+    // The carried views exclude the pruned subtree exactly as before: the pruned-name dir is a directory
+    // entry, nothing beneath it is a file, a link or a directory of the tree.
+    const tree = walkTree(root);
+    expect(tree.dirs).toEqual(['a', 'a/b', 'empty', 'node_modules']);
+    expect(tree.links.map((l) => l.rel)).toEqual(['a/link']);
+    expect(tree.files.map((f) => f.rel)).toEqual(['a/b/c.md', 'a/d.md']);
+    expect(walkFiles(root).map((f) => f.rel)).toEqual(['a/b/c.md', 'a/d.md']);
+    expect(tree.pruned.map((e) => e.rel)).toEqual(['node_modules/.bin', 'node_modules/.bin/dep', 'node_modules/__pycache__', 'node_modules/dep.js']);
     expect(impliedDirs(['a/b/c.md', 'a/d.md', 'top.md'])).toEqual(['a', 'a/b']);
     // The hash covers directory entries: an empty directory changes it (codex round 9).
     const files = walkFiles(root);
     expect(hashTree(files, [], ['a', 'a/b'])).not.toBe(hashTree(files, [], ['a', 'a/b', 'empty']));
     expect(hashTree(files, [], [])).toBe(hashFileSet(files)); // a bundle's identity is unchanged
+    // …and nothing beneath a pruned directory enters it: another file there leaves the walked hash as it was.
+    const before = hashTree(tree.files, tree.links, tree.dirs);
+    writeFileSync(join(root, 'node_modules', 'extra.js'), 'extra');
+    const after = walkTree(root);
+    expect(hashTree(after.files, after.links, after.dirs)).toBe(before);
+    expect(after.pruned.map((e) => e.rel)).toContain('node_modules/extra.js');
   });
 
-  it.skipIf(process.platform === 'win32')('a special node (a fifo) is classified as `other`, never as a file the store carries', () => {
+  it.skipIf(process.platform === 'win32')('a special node (a fifo) is classified as `other`, never as a file the store carries — inside a pruned directory too, where it is reported under `pruned` (review pass 10)', () => {
     const root = join(base, 'special');
-    mkdirSync(root);
+    mkdirSync(join(root, '__pycache__'), { recursive: true });
     execFileSync('mkfifo', [join(root, 'pipe')]);
+    execFileSync('mkfifo', [join(root, '__pycache__', 'pipe2')]);
     writeFileSync(join(root, 'ok.md'), 'ok');
     const entries = walkEntries(root);
-    expect(entries.map((e) => [e.rel, e.kind])).toEqual([
-      ['ok.md', 'file'],
-      ['pipe', 'other'],
+    expect(entries.map((e) => [e.rel, e.kind, e.pruned])).toEqual([
+      ['__pycache__', 'dir', null],
+      ['__pycache__/pipe2', 'other', '__pycache__'],
+      ['ok.md', 'file', null],
+      ['pipe', 'other', null],
     ]);
     expect(walkFiles(root).map((f) => f.rel)).toEqual(['ok.md']);
-    expect(walkTree(root).others.map((e) => e.rel)).toEqual(['pipe']);
+    const tree = walkTree(root);
+    expect(tree.others.map((e) => e.rel)).toEqual(['pipe']);
+    expect(tree.pruned.map((e) => [e.rel, e.kind])).toEqual([['__pycache__/pipe2', 'other']]);
   });
 
   it('hashTree equals hashFileSet with no links, and changes when a link is added, removed or re-pointed — by link TEXT, never by what it reaches', () => {

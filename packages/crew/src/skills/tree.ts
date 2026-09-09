@@ -10,7 +10,11 @@
  *   - `walkFiles` refuses a symlinked ROOT (the skill dir itself replaced by a link) and skips
  *     symlink entries (never followed, never copied, never hashed); `walkTree` is the variant a
  *     VERIFICATION uses — it ENUMERATES link entries with their link text (still never followed)
- *     so an injected link cannot hide from `current`'s hash (codex round 5);
+ *     so an injected link cannot hide from `current`'s hash (codex round 5); a PRUNED directory
+ *     (`SKIP_DIR_NAMES`: `.venv`, `node_modules`, `__pycache__`) is descended for CLASSIFICATION
+ *     only — every entry beneath it is reported with its kind and marked `pruned`, and stays out of
+ *     every file, hash and copy view (codex round 10: a link under `effective/node_modules/` used
+ *     to be invisible to the validators because the walk stopped at the directory);
  *   - `copyFiles` PREFLIGHTS every destination — each `rel` must be a safe relative path (no `..`,
  *     `.`, empty or separator-carrying segment, no absolute/drive prefix, no NUL:
  *     `assertSafeRelSegments`) and symlink-free (`assertNoSymlinkComponents`) — BEFORE it creates a
@@ -70,7 +74,12 @@ export interface FileRecord {
   abs: string;
 }
 
-/** Directory names never walked (build caches, vendored deps, the per-baseline `uv sync` env). */
+/**
+ * Directory names PRUNED from every file, hash and copy view (build caches, vendored deps, the
+ * per-baseline `uv sync` env): nothing beneath one is bundle content — never copied into a baseline
+ * or a generation, never hashed. The walk still DESCENDS them for classification (codex round 10),
+ * so a validator sees what such a directory holds (`TreeEntry.pruned`, `TreeListing.pruned`).
+ */
 export const SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['__pycache__', 'node_modules', '.venv']);
 /** File names never copied into the root (Finder noise). */
 export const SKIP_FILE_NAMES: ReadonlySet<string> = new Set(['.DS_Store']);
@@ -171,12 +180,19 @@ export function assertNoSymlinkComponents(root: string, segments: ReadonlyArray<
 /** How the walk classifies one entry — from lstat, never following a link. */
 export type EntryKind = 'file' | 'dir' | 'symlink' | 'other';
 
-/** One entry under the walk root: `rel` POSIX-relative, `kind` from lstat; `target` is a symlink's link text (never followed). */
+/**
+ * One entry under the walk root: `rel` POSIX-relative, `kind` from lstat; `target` is a symlink's
+ * link text (never followed). `pruned` is the `rel` of the OUTERMOST `SKIP_DIR_NAMES` directory the
+ * entry sits beneath — such an entry is classified (a validator judges it) but is part of NO file,
+ * hash or copy view — or `null` for an entry of the tree the store carries. The pruned-name
+ * directory itself is a carried `dir` entry (`pruned: null`), reported like any directory.
+ */
 export interface TreeEntry {
   rel: string;
   abs: string;
   kind: EntryKind;
   target?: string;
+  pruned: string | null;
 }
 
 /**
@@ -185,11 +201,15 @@ export interface TreeEntry {
  * something else (a socket, fifo, device …), sorted by `rel`, never following a link and never
  * descending into one. NOTHING is invisible: an empty directory is an entry, a symlink is an entry
  * with its link text, a special node is an entry of kind `other`. A directory named in
- * `SKIP_DIR_NAMES` (`.venv`, `node_modules`, `__pycache__`) or pruned by `skipDir(rel)` is still
- * REPORTED as an entry but not descended — its contents are never part of any tree the store
- * copies, hashes or judges. Every other view derives from this one: `walkFiles` (regular files
- * minus Finder noise), `walkTree` (files + links + directories + special nodes — what a verification
- * must see). A missing `root` yields `[]` — callers treat optional plugin dirs (`schemas/`) as
+ * `SKIP_DIR_NAMES` (`.venv`, `node_modules`, `__pycache__`) is reported AND descended (codex round
+ * 10): every entry beneath it is classified like any other and marked `pruned` with that
+ * directory's `rel`, so a validator SEES a link or a special node planted there — while the file,
+ * hash and copy views (`walkFiles`, `walkTree`'s `files` / `links` / `dirs` / `others`, and
+ * therefore `hashTree` and `copyFiles`) exclude the whole subtree exactly as before: nothing under
+ * a pruned directory is ever copied or hashed. `skipDir(rel)` is the caller's CLOSURE prune (the
+ * bundle walk drops `scripts/` dev tooling with it): content outside the closure is not reported
+ * and not descended — it is never reached, so never copied either. Every other view derives from
+ * this one. A missing `root` yields `[]` — callers treat optional plugin dirs (`schemas/`) as
  * empty, not as errors; a `root` that IS a symlink is refused (`readdirSync` would follow it, and
  * "list this skill's own files" must never enumerate a tree outside the store).
  */
@@ -201,7 +221,7 @@ export function walkEntries(root: string, skipDir?: (rel: string) => boolean): T
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return out;
     throw err;
   }
-  const visit = (dir: string, relDir: string): void => {
+  const visit = (dir: string, relDir: string, pruned: string | null): void => {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -213,32 +233,37 @@ export function walkEntries(root: string, skipDir?: (rel: string) => boolean): T
       const rel = relDir === '' ? entry.name : `${relDir}/${entry.name}`;
       const abs = join(dir, entry.name);
       if (entry.isSymbolicLink()) {
-        out.push({ rel, abs, kind: 'symlink', target: readlinkSync(abs) });
+        out.push({ rel, abs, kind: 'symlink', target: readlinkSync(abs), pruned });
       } else if (entry.isDirectory()) {
-        out.push({ rel, abs, kind: 'dir' });
-        if (SKIP_DIR_NAMES.has(entry.name)) continue;
+        out.push({ rel, abs, kind: 'dir', pruned });
         if (skipDir !== undefined && skipDir(rel)) continue;
-        visit(abs, rel);
+        // A pruned-name directory is descended for CLASSIFICATION: its entries carry the outermost
+        // pruned directory's rel (a `node_modules` inside a `.venv` is still pruned by the `.venv`).
+        visit(abs, rel, pruned ?? (SKIP_DIR_NAMES.has(entry.name) ? rel : null));
       } else if (entry.isFile()) {
-        out.push({ rel, abs, kind: 'file' });
+        out.push({ rel, abs, kind: 'file', pruned });
       } else {
-        out.push({ rel, abs, kind: 'other' });
+        out.push({ rel, abs, kind: 'other', pruned });
       }
     }
   };
-  visit(root, '');
+  visit(root, '', null);
   out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return out;
 }
 
-/** Whether a walk entry is a regular file the store carries (Finder noise, `SKIP_FILE_NAMES`, is not). */
-function isCarriedFile(e: TreeEntry): boolean {
-  return e.kind === 'file' && !SKIP_FILE_NAMES.has(e.rel.split('/').pop() ?? '');
+/**
+ * Whether a walk entry is a regular file the store CARRIES — copies, hashes, records: a regular
+ * file outside every pruned directory that is not Finder noise (`SKIP_FILE_NAMES`).
+ */
+export function isCarriedFile(e: TreeEntry): boolean {
+  return e.kind === 'file' && e.pruned === null && !SKIP_FILE_NAMES.has(e.rel.split('/').pop() ?? '');
 }
 
 /**
  * Every regular file under `root`, sorted by `rel` — `walkEntries` filtered to the files the store
- * carries. `skipDir(rel)` prunes a subtree; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` always apply.
+ * carries (`isCarriedFile`: nothing beneath a pruned directory, no Finder noise). `skipDir(rel)`
+ * prunes a subtree; `SKIP_DIR_NAMES` / `SKIP_FILE_NAMES` always apply.
  */
 export function walkFiles(root: string, skipDir?: (rel: string) => boolean): FileRecord[] {
   return walkEntries(root, skipDir)
@@ -261,29 +286,40 @@ export interface LinkRecord {
 export interface TreeListing {
   files: FileRecord[];
   links: LinkRecord[];
-  /** Every directory entry's `rel`, sorted — pruned-name directories included (reported, not descended). */
+  /** Every carried directory entry's `rel`, sorted — a pruned-name directory itself included (it is an entry of the tree), nothing beneath one. */
   dirs: string[];
-  /** Entries that are neither a file, a directory nor a symlink (sockets, fifos, devices …). */
+  /** Carried entries that are neither a file, a directory nor a symlink (sockets, fifos, devices …). */
   others: TreeEntry[];
+  /**
+   * Every entry BENEATH a pruned-name directory, with its kind (codex round 10) — classified for a
+   * validator to judge, part of no file, link, directory or hash view above. `TreeEntry.pruned`
+   * names the pruned directory each sits under.
+   */
+  pruned: TreeEntry[];
 }
 
 /**
  * `walkEntries` split into what a verification consumes: files (Finder noise excluded), links
  * (listed with their text, never followed or descended — codex round 5: a verification that skips
  * links leaves an injected outside-pointing link invisible to the hash), directories and special
- * nodes. `SKIP_DIR_NAMES` still prunes DESCENT into `.venv` / `node_modules` / `__pycache__`, but
- * the directory entry itself is reported; a LINK bearing one of those names is listed like any link
- * (the snapshot's `.venv` link is exactly that). `skipDir(rel)` prunes a real subtree the way
- * `walkFiles` does (the bundle walk prunes the `scripts/` dev tooling with it — a link INSIDE a
- * pruned subtree is never reached, and never copied either).
+ * nodes — each of these OUTSIDE every pruned directory — plus `pruned`: what the pruned
+ * directories hold. `SKIP_DIR_NAMES` (`.venv` / `node_modules` / `__pycache__`) keeps the
+ * subtree out of `files` / `links` / `dirs` / `others` (so out of every hash and copy) exactly as
+ * before, but the subtree is now WALKED and reported under `pruned` (codex round 10); the
+ * pruned-name directory entry itself is in `dirs`; a LINK bearing one of those names is listed like
+ * any link (the snapshot's `.venv` link is exactly that). `skipDir(rel)` is the caller's closure
+ * prune (the bundle walk drops the `scripts/` dev tooling with it — content there is never reached,
+ * and never copied either).
  */
 export function walkTree(root: string, skipDir?: (rel: string) => boolean): TreeListing {
   const entries = walkEntries(root, skipDir);
+  const carried = entries.filter((e) => e.pruned === null);
   return {
-    files: entries.filter(isCarriedFile).map(({ rel, abs }) => ({ rel, abs })),
-    links: entries.filter((e) => e.kind === 'symlink').map(({ rel, abs, target }) => ({ rel, abs, target: target ?? '' })),
-    dirs: entries.filter((e) => e.kind === 'dir').map((e) => e.rel),
-    others: entries.filter((e) => e.kind === 'other'),
+    files: carried.filter(isCarriedFile).map(({ rel, abs }) => ({ rel, abs })),
+    links: carried.filter((e) => e.kind === 'symlink').map(({ rel, abs, target }) => ({ rel, abs, target: target ?? '' })),
+    dirs: carried.filter((e) => e.kind === 'dir').map((e) => e.rel),
+    others: carried.filter((e) => e.kind === 'other'),
+    pruned: entries.filter((e) => e.pruned !== null),
   };
 }
 

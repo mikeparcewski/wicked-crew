@@ -2594,6 +2594,154 @@ describe('effective/ is classified WHOLE (codex round 9): a symlink anywhere blo
   });
 });
 
+describe('pruned directories are CLASSIFIED under effective/ (review pass 10): a link or special node beneath .venv / node_modules / __pycache__ blocks by name, a regular file there stays outside every view, the baseline .venv stays unclassified, a generation never carries one', () => {
+  it('a symlink under effective/node_modules/ ⇒ analyze and publish are blocked path-invalid naming the link and the pruned directory; a regular file there is neither carried nor a finding; removed ⇒ clear', async () => {
+    s.store.seed();
+    const effective = join(s.root, 'effective');
+    const bin = join(effective, 'node_modules', '.bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(effective, 'node_modules', 'left-pad.js'), 'module.exports = 1;\n');
+    expect(s.store.analyze().verdict).toBe('clear'); // a regular file beneath a pruned directory is outside the scan, exactly as before
+    expect(walkFiles(effective).some((f) => f.rel.startsWith('node_modules/'))).toBe(false);
+    const outside = join(s.base, 'outside-tool');
+    writeFileSync(outside, '#!/bin/sh\n');
+    symlinkSync(outside, join(bin, 'tool'));
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const refusal = analyzed.findings.filter((f) => f.kind === 'path-invalid');
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).toMatchObject({ severity: 'blocking', skill: null, file: 'node_modules/.bin/tool' });
+    expect(refusal[0]?.evidence).toBe(`node_modules/.bin/tool is a symlink -> ${outside} inside the pruned directory node_modules`);
+    expect(refusal[0]?.explanation).toContain('not bundle content');
+    expect(refusal[0]?.explanation).not.toContain('provisioned environments live under baseline/'); // the hint follows the `.venv` NAME
+    const blocked = await s.store.publish(1);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+    expect(existsSync(join(s.root, 'snapshots'))).toBe(false);
+    // The pruned view surfaced it; every carried view excludes the subtree exactly as before.
+    const tree = walkTree(effective);
+    expect(tree.links).toEqual([]);
+    expect(tree.dirs).toContain('node_modules');
+    expect(tree.dirs).not.toContain('node_modules/.bin');
+    expect(tree.pruned.map((e) => [e.rel, e.kind, e.pruned])).toEqual([
+      ['node_modules/.bin', 'dir', 'node_modules'],
+      ['node_modules/.bin/tool', 'symlink', 'node_modules'],
+      ['node_modules/left-pad.js', 'file', 'node_modules'],
+    ]);
+    rmSync(join(bin, 'tool'));
+    expect(s.store.analyze().verdict).toBe('clear');
+  });
+
+  it.skipIf(process.platform === 'win32')('a fifo under effective/<skill>/__pycache__/ ⇒ blocked by name, the pruned directory and the owning skill named; the .pyc beside it is no finding', async () => {
+    s.store.seed();
+    const cache = join(s.root, 'effective', 'skills', 'gamma', '__pycache__');
+    mkdirSync(cache);
+    writeFileSync(join(cache, 'mod.cpython-312.pyc'), '');
+    expect(s.store.analyze().verdict).toBe('clear');
+    execFileSync('mkfifo', [join(cache, 'pipe')]);
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const refusal = analyzed.findings.find((f) => f.kind === 'path-invalid');
+    expect(refusal).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/__pycache__/pipe' });
+    expect(refusal?.evidence).toBe('skills/gamma/__pycache__/pipe is neither a regular file nor a directory (inside the pruned directory skills/gamma/__pycache__)');
+    const blocked = await s.store.publish(1);
+    expect(blocked.verdict).toBe('blocked');
+    expect(blocked.snapshot).toBeNull();
+  });
+
+  it('an operator-created effective/.venv with an interpreter link ⇒ blocked path-invalid carrying the baseline hint (provisioned environments live under baseline/, not the editable root); inside a skill the owner is named', async () => {
+    s.store.seed();
+    const venv = join(s.root, 'effective', '.venv');
+    mkdirSync(join(venv, 'bin'), { recursive: true });
+    writeFileSync(join(venv, 'bin', 'python3.12'), '');
+    symlinkSync('python3.12', join(venv, 'bin', 'python'));
+    const analyzed = s.store.analyze();
+    expect(analyzed.verdict).toBe('blocked');
+    const refusal = analyzed.findings.filter((f) => f.kind === 'path-invalid');
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).toMatchObject({ severity: 'blocking', skill: null, file: '.venv/bin/python' });
+    expect(refusal[0]?.evidence).toBe('.venv/bin/python is a symlink -> python3.12 inside the pruned directory .venv');
+    expect(refusal[0]?.explanation).toContain('provisioned environments live under baseline/, not the editable root');
+    expect((await s.store.publish(1)).verdict).toBe('blocked');
+    rmSync(venv, { recursive: true });
+    // Inside a skill the owner is named; the hint follows the pruned directory's NAME (a `.venv` anywhere).
+    const nestedVenv = join(s.root, 'effective', 'skills', 'gamma', '.venv');
+    mkdirSync(join(nestedVenv, 'bin'), { recursive: true });
+    symlinkSync(join(s.base, 'nowhere', 'python3'), join(nestedVenv, 'bin', 'python'));
+    const nested = s.store.analyze().findings.find((f) => f.kind === 'path-invalid');
+    expect(nested).toMatchObject({ severity: 'blocking', skill: 'wicked-garden-gamma', file: 'skills/gamma/.venv/bin/python' });
+    expect(nested?.explanation).toContain('provisioned environments live under baseline/');
+    rmSync(nestedVenv, { recursive: true });
+    expect(s.store.analyze().verdict).toBe('clear');
+  });
+
+  it('the provisioned baseline/<hash>/.venv keeps its interpreter links — pruned AND unclassified there: publish clear with the links present, the snapshot links the env, current verifies, the baseline re-verifies on reuse', async () => {
+    const provisioner: VenvProvisioner = async (baselineDir) => {
+      const env = join(baselineDir, '.venv');
+      mkdirSync(join(env, 'bin'), { recursive: true });
+      mkdirSync(join(env, 'lib'), { recursive: true });
+      writeFileSync(join(env, 'bin', 'python3.12'), '#!/bin/sh\n');
+      symlinkSync('python3.12', join(env, 'bin', 'python')); // the interpreter link every venv carries
+      symlinkSync('lib', join(env, 'lib64'));
+      return 'synced';
+    };
+    const v = scaffold({ provisionVenv: provisioner });
+    try {
+      v.store.seed();
+      const r = await v.store.publish(1); // `validate` re-derives the baseline AFTER the provisioner ran — the links are present
+      expect(r.verdict).toBe('clear');
+      expect(r.findings.filter((f) => f.kind === 'path-invalid' || f.kind === 'baseline-corrupt')).toEqual([]);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const hash = v.store.manifest().baseline;
+      const baselineDir = join(v.root, 'baseline', hash);
+      expect(lstatSync(join(baselineDir, '.venv', 'bin', 'python')).isSymbolicLink()).toBe(true);
+      // The walk SEES the links (classified under `pruned`); no carried view — so no hash — covers them.
+      const tree = walkTree(baselineDir);
+      expect(tree.links).toEqual([]);
+      expect(tree.pruned.filter((e) => e.kind === 'symlink').map((e) => [e.rel, e.pruned])).toEqual([
+        ['.venv/bin/python', '.venv'],
+        ['.venv/lib64', '.venv'],
+      ]);
+      expect(hashFileSet(tree.files)).toBe(hash); // the bundle identity never covers the env
+      expect(readlinkSync(join(snap.path, '.venv'))).toBe(join('..', '..', 'baseline', hash, '.venv'));
+      expect(v.store.currentSnapshot()).toEqual({ gen: 1, path: snap.path });
+      // A later publish REUSES the synced baseline (`baselineProblem` re-derived, the provisioner not re-run): still clear.
+      const off = v.store.disable('wicked-garden-delta', r.revision);
+      const again = await v.store.publish(off.revision);
+      expect(again.verdict).toBe('clear');
+      expect(again.snapshot?.gen).toBe(2);
+      expect(v.store.currentSnapshot()?.gen).toBe(2);
+    } finally {
+      removeTreeForce(v.base);
+    }
+  });
+
+  it('a pruned-name directory inside a generation is refused BY NAME before the hash, whatever it holds: snapshots/<gen>/node_modules/ ⇒ current invalid naming it — a forged hash and a re-stamped manifest change nothing; removed ⇒ verifies', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    chmodSync(snap.path, 0o755);
+    mkdirSync(join(snap.path, 'node_modules', '.bin'), { recursive: true });
+    symlinkSync(join(s.base, 'outside'), join(snap.path, 'node_modules', '.bin', 'tool'));
+    expect(() => s.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    expect(() => s.store.currentSnapshot()).toThrow(/unexpected directory node_modules — a published generation never carries a node_modules directory/);
+    // Forge the hash over the walked tree and re-stamp the manifest: the name check runs first, so nothing changes.
+    const metadata = join(snap.path, 'snapshot.json');
+    const pristine = snapshotManifest(snap.path);
+    const tree = walkTree(snap.path);
+    expect(tree.dirs).toContain('node_modules');
+    unlock(metadata);
+    writeFileSync(metadata, `${JSON.stringify({ ...pristine, contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs) }, null, 2)}\n`);
+    stampPublished(s.root, metadata);
+    expect(() => s.store.currentSnapshot()).toThrow(/unexpected directory node_modules/);
+    rmSync(join(snap.path, 'node_modules'), { recursive: true });
+    writeFileSync(metadata, `${JSON.stringify(pristine, null, 2)}\n`);
+    stampPublished(s.root, metadata);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+  });
+});
+
 describe('baseline reaping is a CAS mutation (codex round 9): a record drop rides the mutation that causes it, or commits on its own — the revision always advances, a stale expectedRevision is refused', () => {
   it('a publish that retires a generation drops the baseline it alone referenced in its OWN commit (one bump); a refresh with nothing published drops the previous baseline in its own commit; a standalone reap (a launch pin released) commits through the validated path and advances the revision', async () => {
     s.store.seed();
