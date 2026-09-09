@@ -8,30 +8,35 @@
 // present on one side only, ids whose kind changed and ids whose PAYLOAD identity changed (the
 // corpus changed under the name); treat a row without a `sample.payload_hash` as UNVERIFIED (never
 // comparable, never "different"); reconcile the two stored summaries to the per-sample accounting;
-// and diff `rule_coverage` when both carry it over what the records ENUMERATE (codex round 6):
-// `exercised` is a COUNT of every rule any claim fired, blocking or not, while `results[].fired` is
-// the blocking subset — so a record names only `unexercised ∪ fired`, and its rule set is fully
-// identified only when `exercised === |fired|`. `gained`/`lost` are asserted from listed ids on both
-// ends (always sound); `added_rules`/`removed_rules` only when the silent side's inventory is
-// complete, else WITHHELD by name (`inventory: 'partial'`, `transitions_withheld`); a count above
-// the fired ids is valid warn-only exercise, never a reconciliation error; a delta is never
-// fabricated from one side. Type filters (codex round 7): the engine's `--type` slices the samples
-// and the coverage DENOMINATOR but not the gate (evals.rs `run_evals` 974-977 / `decide_lane_rules`
-// 816-844 vs `evaluate_sample` 901), so a filtered run's rows may fire rules OUTSIDE the denominator
-// — `fired: ['SECURITY-DENY']` beside `exercised: 0` is a valid development-filtered record. Its
-// coverage is reconciled against the engine's own `per_type[<filter>]` row (`'per_type'`), or not at
-// all when the record has none (`'n/a …'`); the fired-based denominator check runs only unfiltered
-// (`'rows'`); two runs under different filters are not comparable and get no coverage delta.
+// and diff `rule_coverage` when both carry it over what the records ENUMERATE (codex rounds 6 and
+// 8): `exercised` is a COUNT of every rule any claim fired, blocking or not, while `results[].fired`
+// is the blocking subset — so a record names only `unexercised ∪ fired`, and NO field of the wire
+// lists its rule set. `gained`/`lost` are asserted from listed ids on both ends (always sound);
+// `added_rules`/`removed_rules` NEVER (they need an explicit inventory on both records, which no
+// daemon-recorded run carries): every one-sided id is WITHHELD by name (`inventory: 'partial'`,
+// `transitions_withheld`) — round 8 deleted round 6's `exercised === |fired|` ⇒ complete inference,
+// which under a type filter typed a fired id into the slice through the OTHER run's row and reported
+// a present, exercised rule as removed; `unidentified` is per record (unfiltered `exercised −
+// |fired|`, filtered the whole `exercised`). A count above the fired ids is valid warn-only exercise,
+// never a reconciliation error; a delta is never fabricated from one side; a malformed persisted
+// coverage (`per_type: null`) is `unverified (malformed rule_coverage)` on that side, never a throw.
+// Type filters (codex round 7): the engine's `--type` slices the samples and the coverage
+// DENOMINATOR but not the gate (evals.rs `run_evals` 974-977 / `decide_lane_rules` 816-844 vs
+// `evaluate_sample` 901), so a filtered run's rows may fire rules OUTSIDE the denominator — `fired:
+// ['SECURITY-DENY']` beside `exercised: 0` is a valid development-filtered record. Its coverage is
+// reconciled against the engine's own `per_type[<filter>]` row (`'per_type'`), or not at all when
+// the record has none (`'n/a …'`); the fired-based denominator check runs only unfiltered (`'rows'`);
+// two runs under different filters are not comparable and get no coverage delta.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
-import { classifyFlip, compareEvalRuns, DIFFERING_TYPE_FILTER, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
+import { classifyFlip, compareEvalRuns, DIFFERING_TYPE_FILTER, MALFORMED_RULE_COVERAGE, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
 import { PAYLOAD_HASH_RE, samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
-import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSignals, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../src/core/types.js';
+import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalRuleCoverage, GovernanceEvalSignals, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../src/core/types.js';
 
 let dir: string;
 let store: EvalRunStore;
@@ -110,6 +115,40 @@ async function recorded(over: Partial<RecordEvalRunInput> & { results: Governanc
   const detail = await store.get(id);
   expect(detail).not.toBeNull();
   return detail!;
+}
+
+/** A coverage delta with nothing gained, lost or withheld. `inventory` is ALWAYS `partial` and the
+ *  rule-set lists ALWAYS empty — the wire carries no rule inventory (codex round 8). */
+function delta(over: Partial<EvalRuleCoverageDelta> = {}): EvalRuleCoverageDelta {
+  return {
+    exercised_delta: 0,
+    inventory: 'partial',
+    unidentified: { a: 0, b: 0 },
+    gained: [],
+    lost: [],
+    added_rules: [],
+    removed_rules: [],
+    transitions_withheld: [],
+    ...over,
+  };
+}
+
+/** The reason `compareEvalRuns` gives for withholding a rule-set transition: `id` enumerated by one
+ *  side (b for `added_rules`, a for `removed_rules`) as `listedAs` and not by the other, whose
+ *  `unidentified` count is `silentUnidentified`; under a type `filter` the other-type possibility is
+ *  named too. The codex round-8 test below pins one of these as a literal string. */
+function withheld(kind: 'added_rules' | 'removed_rules', id: string, listedAs: 'unexercised' | 'blocking-fired', silentUnidentified: number, filter: SteeringType | null = null): string {
+  const [lister, silent] = kind === 'added_rules' ? ['b', 'a'] : ['a', 'b'];
+  const maybe: string[] = [];
+  if (silentUnidentified > 0) {
+    maybe.push(`one of ${silent}'s ${silentUnidentified} exercised rule(s) named nowhere (${filter === null ? 'fired by a non-blocking effect alone' : `under type filter ${filter} no fired id is typed into the slice`})`);
+  }
+  maybe.push('an effect-less (recall-only) or retired rule outside the eligible partition');
+  if (filter !== null) maybe.push(`a rule of another type outside the ${filter} denominator (a row's fired ids carry no steering_type)`);
+  return (
+    `${kind} ${id}: enumerated by ${lister} (${listedAs}) and not by ${silent} — the wire lists no rule inventory (rule_coverage.exercised and recall_only are counts; only unexercised and blocking-fired ids are named), ` +
+    `so ${silent}'s silence is not absence: ${id} may be ${maybe.join(', ')} or a rule the store ${kind === 'added_rules' ? 'gained' : 'lost'}: not asserted`
+  );
 }
 
 // Sample ids in the corpus's `<repo>@<sha12>` shape.
@@ -213,21 +252,23 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     expect(c.coverage_reconciliation).toEqual({ a: 'rows', b: 'rows' });
 
     // Coverage. Both sides: exercised 3 = 3 distinct blocking-fired ids ⇒ every exercised rule is
-    // named, the inventory is COMPLETE. Rule sets: A = {POL-1301, PAT-014, POL-007} ∪ {PAT-9, POL-1801};
-    // B = {POL-1301, PAT-9, POL-007} ∪ {PAT-014, POL-1801, POL-2000}.
-    //   PAT-9    unexercised in A, blocking-fired in B           → gained
-    //   PAT-014  blocking-fired in A, unexercised in B           → lost
-    //   POL-2000 enumerated by B only, A complete (the store grew) → added_rules, NOT lost
-    //   POL-1801 unexercised on both sides                       → nothing
+    // named (`unidentified` 0/0) — yet neither record LISTS its rule set, so the inventory is
+    // `partial` and no rule-set change is asserted. Enumerated: A = {POL-1301, PAT-014, POL-007} ∪
+    // {PAT-9, POL-1801}; B = {POL-1301, PAT-9, POL-007} ∪ {PAT-014, POL-1801, POL-2000}.
+    //   PAT-9    unexercised in A, blocking-fired in B  → gained (both ends listed)
+    //   PAT-014  blocking-fired in A, unexercised in B  → lost
+    //   POL-2000 enumerated by B only                    → NOT lost, NOT added_rules: withheld by name
+    //                                                      (it may be recall-only or retired in A)
+    //   POL-1801 unexercised on both sides              → nothing
     expect(c.rule_coverage_delta).toEqual({
       exercised_delta: 0,
-      inventory: 'complete',
+      inventory: 'partial',
       unidentified: { a: 0, b: 0 },
       gained: ['PAT-9'],
       lost: ['PAT-014'],
-      added_rules: ['POL-2000'],
+      added_rules: [],
       removed_rules: [],
-      transitions_withheld: [],
+      transitions_withheld: [withheld('added_rules', 'POL-2000', 'unexercised', 0)],
     });
   });
 
@@ -390,112 +431,69 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
   });
 });
 
-describe('rule_coverage delta — exercise transitions vs. rule-set changes, over what the records ENUMERATE', () => {
+describe('rule_coverage delta — exercise transitions over what the records ENUMERATE; every rule-set transition withheld (no inventory is on the wire)', () => {
   const R = { rule_id: 'POL-9000', steering_type: 'security' as const };
   const WARN = { rule_id: 'WARN-1', steering_type: 'development' as const };
   const quiet = [row(CREW_A, 'bad', 'development', 'gap'), row(GARDEN_A, 'good', 'development', 'caught')];
   const firing = [row(CREW_A, 'bad', 'development', 'caught', ['POL-9000']), row(GARDEN_A, 'good', 'development', 'caught')];
-  /** The delta of two COMPLETE inventories (every exercised rule named on both sides), nothing withheld. */
-  const complete = (over: Partial<EvalRuleCoverageDelta> = {}): EvalRuleCoverageDelta => ({
-    exercised_delta: 0,
-    inventory: 'complete',
-    unidentified: { a: 0, b: 0 },
-    gained: [],
-    lost: [],
-    added_rules: [],
-    removed_rules: [],
-    transitions_withheld: [],
-    ...over,
-  });
-  /** The reason `compareEvalRuns` gives for withholding a rule-set transition on a partial side. */
-  const withheld = (kind: 'added_rules' | 'removed_rules', id: string, listedAs: 'unexercised' | 'blocking-fired', side: 'a' | 'b', exercised: number, fired: number) =>
-    `${kind} ${id}: enumerated by ${side === 'a' ? 'b' : 'a'} (${listedAs}) and not by ${side}, whose exercised set is only partially identified — ${exercised - fired} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${exercised} vs ${fired} distinct blocking-fired id(s)) — so it may be one of those${kind === 'removed_rules' ? ' (exercised now, id unknown) or a rule removed from the store' : ' or a rule the store gained'}: not asserted`;
 
-  it('a rule that VANISHES from the unexercised list because it left the store is removed, never gained — asserted because B names every exercised rule (exercised 0 = 0 blocking-fired)', async () => {
+  it('a rule that VANISHES from the unexercised list is NOT `removed_rules` even when B counts 0 exercised and fires nothing — no record lists its rule set, so it is withheld by name (it may have lost its effect or been retired: outside the eligible partition, still in the store); the mirror withholds `added_rules` (codex round 8 deleted the `exercised === |fired|` ⇒ complete inference)', async () => {
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
     const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
     const c = compareEvalRuns(a, b);
-    expect(c.rule_coverage_delta).toEqual(complete({ removed_rules: ['POL-9000'] }));
     expect(c.reconciles).toBe(true);
+    expect(c.rule_coverage_delta).toEqual(delta({ transitions_withheld: [withheld('removed_rules', 'POL-9000', 'unexercised', 0)] }));
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual(delta({ transitions_withheld: [withheld('added_rules', 'POL-9000', 'unexercised', 0)] }));
   });
 
-  it('a rule that APPEARS unexercised because the store grew it is added, never lost — asserted because A names every exercised rule', async () => {
-    const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
-    const b = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
-    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual(complete({ added_rules: ['POL-9000'] }));
-  });
-
-  it('a rule that stops being unexercised because a sample now fires it BLOCKING is gained; the mirror image is lost — both ends listed, certain', async () => {
+  it('a rule that stops being unexercised because a sample now fires it BLOCKING is gained; the mirror image is lost — both ends listed, certain, nothing withheld', async () => {
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [R] } });
     const b = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [] } });
-    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual(complete({ exercised_delta: 1, gained: ['POL-9000'] }));
-    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual(complete({ exercised_delta: -1, lost: ['POL-9000'] }));
+    expect(compareEvalRuns(a, b).rule_coverage_delta).toEqual(delta({ exercised_delta: 1, gained: ['POL-9000'] }));
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual(delta({ exercised_delta: -1, lost: ['POL-9000'] }));
   });
 
-  it("codex round 6: a rule that leaves A's unexercised list and is exercised in B by a NON-BLOCKING effect alone (counted in `exercised`, never in any row's `fired`) is NOT `removed_rules` — B's inventory is partial, the transition is withheld by name, the delta says exercised +1 with the id unknown, and two valid records reconcile; the mirror withholds `added_rules`", async () => {
+  it("codex round 6: a rule that leaves A's unexercised list and is exercised in B by a NON-BLOCKING effect alone (counted in `exercised`, never in any row's `fired`) is NOT `removed_rules` — withheld by name with B's unnamed count in the reason, the delta says exercised +1 with the id unknown, and two valid records reconcile; the mirror withholds `added_rules`", async () => {
     // A: WARN-1 unexercised. B: WARN-1 fired with effect `warn` on some sample — evals.rs counts it
-    // exercised (rule_coverage 815-827 over every claim's policy_ids) but `fired` is deny-only
-    // (evaluate_sample 857-869), so NO row names it and it simply vanishes from the unexercised list.
+    // exercised (rule_coverage over every claim's policy_ids) but `fired` is deny-only
+    // (evaluate_sample), so NO row names it and it simply vanishes from the unexercised list.
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [WARN] } });
     const b = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
     const c = compareEvalRuns(a, b);
     expect(c.reconciles).toBe(true);
     expect(c.reconciliation_errors).toEqual([]);
-    expect(c.rule_coverage_delta).toEqual({
-      exercised_delta: 1,
-      inventory: 'partial',
-      unidentified: { a: 0, b: 1 },
-      gained: [],
-      lost: [],
-      added_rules: [],
-      removed_rules: [], // the round-6 finding: this used to say ['WARN-1'] with reconciles false
-      transitions_withheld: [withheld('removed_rules', 'WARN-1', 'unexercised', 'b', 1, 0)],
-    });
-    // The mirror: exercised-by-warn in A (unnamed), unexercised in B — A is partial, so a rule that
-    // "appears" in B's unexercised list is neither `added_rules` nor `lost`: withheld.
+    // the round-6 finding: removed_rules used to say ['WARN-1'] with reconciles false
+    expect(c.rule_coverage_delta).toEqual(delta({ exercised_delta: 1, unidentified: { a: 0, b: 1 }, transitions_withheld: [withheld('removed_rules', 'WARN-1', 'unexercised', 1)] }));
+    // The mirror: exercised-by-warn in A (unnamed), unexercised in B — a rule that "appears" in B's
+    // unexercised list is neither `added_rules` nor `lost`: withheld.
     const rev = compareEvalRuns(b, a);
     expect(rev.reconciles).toBe(true);
-    expect(rev.rule_coverage_delta).toEqual({
-      exercised_delta: -1,
-      inventory: 'partial',
-      unidentified: { a: 1, b: 0 },
-      gained: [],
-      lost: [],
-      added_rules: [],
-      removed_rules: [],
-      transitions_withheld: [withheld('added_rules', 'WARN-1', 'unexercised', 'a', 1, 0)],
-    });
+    expect(rev.rule_coverage_delta).toEqual(delta({ exercised_delta: -1, unidentified: { a: 1, b: 0 }, transitions_withheld: [withheld('added_rules', 'WARN-1', 'unexercised', 1)] }));
   });
 
-  it('under a PARTIAL inventory the certain transitions are still asserted — gained/lost need only the listed ids on both ends — while a blocking-fired id the partial side never enumerated is withheld, and asserted as added once that side is complete', async () => {
+  it("the certain transitions are asserted whatever the counts — gained/lost need only the listed ids on both ends — while a blocking-fired id the other side never enumerated is withheld with that side's unnamed count in the reason (none when it names every exercised rule), and several withheld ids come back codepoint-sorted", async () => {
     // A: POL-9000 unexercised plus one warn-only exercised rule (unnamed). B: POL-9000 fired blocking.
     const a = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [R] } });
     const b = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [] } });
     const c = compareEvalRuns(a, b);
     expect(c.reconciles).toBe(true);
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'partial', unidentified: { a: 1, b: 0 }, gained: ['POL-9000'], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
-    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'partial', unidentified: { a: 0, b: 1 }, gained: [], lost: ['POL-9000'], added_rules: [], removed_rules: [], transitions_withheld: [] });
+    expect(c.rule_coverage_delta).toEqual(delta({ unidentified: { a: 1, b: 0 }, gained: ['POL-9000'] }));
+    expect(compareEvalRuns(b, a).rule_coverage_delta).toEqual(delta({ unidentified: { a: 0, b: 1 }, lost: ['POL-9000'] }));
     // A names nothing but counts one exercised rule; B fires POL-9000 blocking: was POL-9000 A's
-    // unnamed warn-exercised rule, or did the store gain it? Withheld — until A is complete.
+    // unnamed warn-exercised rule, or did the store gain it? Withheld — the reason says A has 1 unnamed.
     const unnamed = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
-    expect(compareEvalRuns(unnamed, b).rule_coverage_delta).toEqual({
-      exercised_delta: 0,
-      inventory: 'partial',
-      unidentified: { a: 1, b: 0 },
-      gained: [],
-      lost: [],
-      added_rules: [],
-      removed_rules: [],
-      transitions_withheld: [withheld('added_rules', 'POL-9000', 'blocking-fired', 'a', 1, 0)],
-    });
+    expect(compareEvalRuns(unnamed, b).rule_coverage_delta).toEqual(delta({ unidentified: { a: 1, b: 0 }, transitions_withheld: [withheld('added_rules', 'POL-9000', 'blocking-fired', 1)] }));
+    // A counts NOTHING exercised and fires nothing — round 6 called that "complete" and asserted
+    // `added_rules: ['POL-9000']`. The wire still lists no inventory (POL-9000 may be recall-only or
+    // retired in A), so it is withheld — without the "unnamed" clause, because A has none.
     const none = await recorded({ results: quiet, rule_coverage: { exercised: 0, unexercised: [] } });
-    expect(compareEvalRuns(none, b).rule_coverage_delta).toEqual(complete({ exercised_delta: 1, added_rules: ['POL-9000'] }));
+    expect(compareEvalRuns(none, b).rule_coverage_delta).toEqual(delta({ exercised_delta: 1, transitions_withheld: [withheld('added_rules', 'POL-9000', 'blocking-fired', 0)] }));
     // Several withheld ids come back codepoint-sorted.
     const two = await recorded({ results: quiet, rule_coverage: { exercised: 1, unexercised: [] } });
     const grew = await recorded({ results: firing, rule_coverage: { exercised: 1, unexercised: [{ rule_id: 'PAT-1', steering_type: 'testing' }] } });
     expect(compareEvalRuns(two, grew).rule_coverage_delta?.transitions_withheld).toEqual([
-      withheld('added_rules', 'PAT-1', 'unexercised', 'a', 1, 0),
-      withheld('added_rules', 'POL-9000', 'blocking-fired', 'a', 1, 0),
+      withheld('added_rules', 'PAT-1', 'unexercised', 1),
+      withheld('added_rules', 'POL-9000', 'blocking-fired', 1),
     ]);
   });
 
@@ -524,7 +522,7 @@ describe('rule_coverage delta — exercise transitions vs. rule-set changes, ove
     const c4 = compareEvalRuns(above, ok);
     expect(c4.reconciles).toBe(true);
     expect(c4.reconciliation_errors).toEqual([]);
-    expect(c4.rule_coverage_delta).toEqual({ exercised_delta: -2, inventory: 'partial', unidentified: { a: 2, b: 0 }, gained: [], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
+    expect(c4.rule_coverage_delta).toEqual(delta({ exercised_delta: -2, unidentified: { a: 2, b: 0 } }));
   });
 });
 
@@ -550,16 +548,6 @@ describe('type-filtered runs (codex round 7) — the coverage denominator is the
   /** codex's reproduction: the security rule denies the development sample. */
   const crossType = [row(CREW_A, 'bad', 'development', 'caught', [SEC]), row(GARDEN_A, 'good', 'development', 'caught')];
   const devFired = [row(CREW_A, 'bad', 'development', 'caught', ['DEV-1']), row(GARDEN_A, 'good', 'development', 'caught')];
-  /** The reason a LISTED candidate is withheld under a filter: the silent side's slice is only partially identified. */
-  const listedWithheld = (kind: 'added_rules' | 'removed_rules', id: string, exercised: number, known: number) => {
-    const [lister, silent] = kind === 'added_rules' ? ['b', 'a'] : ['a', 'b'];
-    return `${kind} ${id}: listed unexercised (development) by ${lister} and not enumerated by ${silent}, whose exercised development rules are only partially identified — under type filter development the rows' fired ids carry no steering_type, so of ${silent}'s ${exercised} exercised rule(s) only the ${known} ${lister} lists unexercised are known to be development rules (${exercised - known} unknown) — it may be one of those${kind === 'removed_rules' ? ' (exercised now, id unknown) or a rule removed from the store' : ' or a rule the store gained'}: not asserted`;
-  };
-  /** The reason a fired-only id is withheld under a filter — it may be a rule of another type, outside the denominator. */
-  const firedWithheld = (kind: 'added_rules' | 'removed_rules', id: string) => {
-    const [side, other] = kind === 'added_rules' ? ['b', 'a'] : ['a', 'b'];
-    return `${kind} ${id}: blocking-fired by ${side} for development sample(s) and listed unexercised by neither side — under type filter development a row's fired ids carry no steering_type (evals.rs evaluate_sample fires every active rule whatever its type; rule_coverage counts the development slice only), so it may be a rule of another type outside this denominator, a development rule ${kind === 'added_rules' ? 'the store gained' : 'removed from the store'}, or one a warn effect exercised in ${other}: not asserted`;
-  };
 
   it("codex round 7: a development-filtered run with fired: ['SECURITY-DENY'] and exercised: 0 is VALID — compared with itself it reconciles and is comparable; its coverage is reconciled against per_type.development, never against the rows' fired ids. The SAME numbers under type_filter null contradict the rows", async () => {
     const run = await recorded({ results: crossType, type_filter: 'development', rule_coverage: { exercised: 0, unexercised: [], recall_only: 0, per_type: perType() } });
@@ -570,8 +558,9 @@ describe('type-filtered runs (codex round 7) — the coverage denominator is the
     expect(c.comparable_reason).toBeNull();
     expect(c.identity.type_filter).toEqual({ a: 'development', b: 'development', same: true });
     expect(c.coverage_reconciliation).toEqual({ a: 'per_type', b: 'per_type' });
-    // SECURITY-DENY fired on BOTH sides: not one-sided, so nothing is withheld either.
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: [], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
+    // SECURITY-DENY fired on BOTH sides: not one-sided, so nothing is withheld either; exercised 0 on
+    // both sides ⇒ nothing unidentified.
+    expect(c.rule_coverage_delta).toEqual(delta());
     expect(c.unchanged).toBe(2);
     expect(c.flips).toEqual([]);
     // Control: UNFILTERED, every active rule is in the denominator — the same numbers contradict the rows.
@@ -617,18 +606,9 @@ describe('type-filtered runs (codex round 7) — the coverage denominator is the
     expect(c.reconciliation_errors).toEqual([]);
     expect(c.comparable).toBe(true);
     // DEV-1 left A's unexercised list and B counts one exercised development rule — but B's rows fire
-    // only SECURITY-DENY, which carries no type: DEV-1 is withheld as a removed_rules candidate (B is
-    // partial) and the +1 is reported with its id unknown.
-    expect(c.rule_coverage_delta).toEqual({
-      exercised_delta: 1,
-      inventory: 'partial',
-      unidentified: { a: 0, b: 1 },
-      gained: [],
-      lost: [],
-      added_rules: [],
-      removed_rules: [],
-      transitions_withheld: [listedWithheld('removed_rules', 'DEV-1', 1, 0)],
-    });
+    // only SECURITY-DENY, which carries no type: DEV-1 is withheld as a removed_rules candidate and
+    // the +1 is reported with its id unknown.
+    expect(c.rule_coverage_delta).toEqual(delta({ exercised_delta: 1, unidentified: { a: 0, b: 1 }, transitions_withheld: [withheld('removed_rules', 'DEV-1', 'unexercised', 1, 'development')] }));
   });
 
   it("per_type is the slice's own number and must agree with the totals and the listed rows — a per_type that does not sum to exercised, a filtered record whose per_type.<filter>.exercised differs from exercised, an unexercised row of ANOTHER type under the filter, a per-type unexercised count off the listed rows, or a fired id listed unexercised (a contradiction under a filter too) is the record contradicting itself; unfiltered records carry per_type as well and get the same sum checks beside the fired-based one", async () => {
@@ -682,16 +662,17 @@ describe('type-filtered runs (codex round 7) — the coverage denominator is the
     expect(c.reconciliation_errors).toEqual([`run b (${noRow.id}): rule_coverage.per_type carries no development row although the run was filtered to development — the slice's own numbers are missing`]);
   });
 
-  it('under the SAME filter: gained/lost stay certain (the unexercised row types the id), unidentified counts what the other side cannot type, a LISTED candidate is asserted only when the silent side is complete, and a fired-only id is ALWAYS withheld — it may be a rule of another type outside the denominator', async () => {
+  it("under the SAME filter: gained/lost stay certain (both ends listed), `unidentified` is each record's WHOLE exercised count — no fired id is typed into the slice by the OTHER run's row (codex round 8) — and every one-sided id is withheld, listed or fired-only, the reason naming the other-type possibility", async () => {
     const unex = await recorded({ results: devQuiet, type_filter: 'development', rule_coverage: { exercised: 0, unexercised: [DEV], recall_only: 0, per_type: perType({ development: { exercised: 0, unexercised: 1 } }) } });
     const fires = await recorded({ results: devFired, type_filter: 'development', rule_coverage: { exercised: 1, unexercised: [], recall_only: 0, per_type: perType({ development: { exercised: 1, unexercised: 0 } }) } });
-    // gained: DEV-1 unexercised in A (typed development) and blocking-fired in B — B's one exercised
-    // development rule is thereby named: complete on both sides. The mirror is lost.
-    expect(compareEvalRuns(unex, fires).rule_coverage_delta).toEqual({ exercised_delta: 1, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: ['DEV-1'], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [] });
-    expect(compareEvalRuns(fires, unex).rule_coverage_delta).toEqual({ exercised_delta: -1, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: [], lost: ['DEV-1'], added_rules: [], removed_rules: [], transitions_withheld: [] });
-    // A cross-type firing joins in B: SECURITY-DENY denies the development sample too, listed
-    // unexercised nowhere — withheld by name even though both inventories are complete (unfiltered, a
-    // complete inventory withholds nothing; here the id may be outside the denominator).
+    // gained: DEV-1 unexercised in A (A's row types it development) and blocking-fired in B. B counts
+    // one exercised development rule — DEV-1? B's own record cannot say (a fired id carries no type,
+    // and DEV-1 may have moved type), so `unidentified.b` stays 1; round 7 subtracted the gained id
+    // here and called B complete. The mirror is lost.
+    expect(compareEvalRuns(unex, fires).rule_coverage_delta).toEqual(delta({ exercised_delta: 1, unidentified: { a: 0, b: 1 }, gained: ['DEV-1'] }));
+    expect(compareEvalRuns(fires, unex).rule_coverage_delta).toEqual(delta({ exercised_delta: -1, unidentified: { a: 1, b: 0 }, lost: ['DEV-1'] }));
+    // A cross-type firing joins in B: SECURITY-DENY denies the development sample too, enumerated by
+    // B alone — withheld, the reason naming that it may be a rule of another type outside the denominator.
     const both = await recorded({
       results: [row(CREW_A, 'bad', 'development', 'caught', ['DEV-1', SEC]), row(GARDEN_A, 'good', 'development', 'caught')],
       type_filter: 'development',
@@ -699,31 +680,113 @@ describe('type-filtered runs (codex round 7) — the coverage denominator is the
     });
     const c = compareEvalRuns(unex, both);
     expect(c.reconciles).toBe(true);
-    expect(c.rule_coverage_delta).toEqual({ exercised_delta: 1, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: ['DEV-1'], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [firedWithheld('added_rules', SEC)] });
-    expect(compareEvalRuns(both, unex).rule_coverage_delta).toEqual({ exercised_delta: -1, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: [], lost: ['DEV-1'], added_rules: [], removed_rules: [], transitions_withheld: [firedWithheld('removed_rules', SEC)] });
+    expect(c.rule_coverage_delta).toEqual(delta({ exercised_delta: 1, unidentified: { a: 0, b: 1 }, gained: ['DEV-1'], transitions_withheld: [withheld('added_rules', SEC, 'blocking-fired', 0, 'development')] }));
+    expect(compareEvalRuns(both, unex).rule_coverage_delta).toEqual(delta({ exercised_delta: -1, unidentified: { a: 1, b: 0 }, lost: ['DEV-1'], transitions_withheld: [withheld('removed_rules', SEC, 'blocking-fired', 0, 'development')] }));
     // A LISTED candidate: DEV-1 appears unexercised in B; A names nothing but counts one exercised
     // development rule (a warn-only firing, or a deny rule whose id A's rows carry untyped) — withheld
-    // until A is complete, then asserted as added; the mirror is removed.
+    // with A's 1 unnamed in the reason; the mirror likewise.
     const unnamed = await recorded({ results: devQuiet, type_filter: 'development', rule_coverage: { exercised: 1, unexercised: [], recall_only: 0, per_type: perType({ development: { exercised: 1, unexercised: 0 } }) } });
-    expect(compareEvalRuns(unnamed, unex).rule_coverage_delta).toEqual({ exercised_delta: -1, inventory: 'partial', unidentified: { a: 1, b: 0 }, gained: [], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [listedWithheld('added_rules', 'DEV-1', 1, 0)] });
-    expect(compareEvalRuns(unex, unnamed).rule_coverage_delta).toEqual({ exercised_delta: 1, inventory: 'partial', unidentified: { a: 0, b: 1 }, gained: [], lost: [], added_rules: [], removed_rules: [], transitions_withheld: [listedWithheld('removed_rules', 'DEV-1', 1, 0)] });
+    expect(compareEvalRuns(unnamed, unex).rule_coverage_delta).toEqual(delta({ exercised_delta: -1, unidentified: { a: 1, b: 0 }, transitions_withheld: [withheld('added_rules', 'DEV-1', 'unexercised', 1, 'development')] }));
+    expect(compareEvalRuns(unex, unnamed).rule_coverage_delta).toEqual(delta({ exercised_delta: 1, unidentified: { a: 0, b: 1 }, transitions_withheld: [withheld('removed_rules', 'DEV-1', 'unexercised', 1, 'development')] }));
+    // A counts NOTHING exercised: round 7 asserted `added_rules: ['DEV-1']` here. Still withheld — a
+    // record with no exercised rules has no inventory either (DEV-1 may be recall-only, retired, or of
+    // another type in A); the mirror withholds `removed_rules`.
     const none = await recorded({ results: devQuiet, type_filter: 'development', rule_coverage: { exercised: 0, unexercised: [], recall_only: 0, per_type: perType() } });
-    expect(compareEvalRuns(none, unex).rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: [], lost: [], added_rules: ['DEV-1'], removed_rules: [], transitions_withheld: [] });
-    expect(compareEvalRuns(unex, none).rule_coverage_delta).toEqual({ exercised_delta: 0, inventory: 'complete', unidentified: { a: 0, b: 0 }, gained: [], lost: [], added_rules: [], removed_rules: ['DEV-1'], transitions_withheld: [] });
-    // A deny rule A's rows DO fire but nobody lists unexercised cannot type itself into the slice: A
-    // counts 1 exercised development rule and fires SECURITY-DENY — is that the rule? Unknown, so A is
-    // partial and DEV-1 (listed by B) is withheld; SECURITY-DENY is withheld as fired-only too.
+    expect(compareEvalRuns(none, unex).rule_coverage_delta).toEqual(delta({ transitions_withheld: [withheld('added_rules', 'DEV-1', 'unexercised', 0, 'development')] }));
+    expect(compareEvalRuns(unex, none).rule_coverage_delta).toEqual(delta({ transitions_withheld: [withheld('removed_rules', 'DEV-1', 'unexercised', 0, 'development')] }));
+    // A fires SECURITY-DENY and counts 1 exercised development rule; B lists DEV-1 unexercised: two
+    // one-sided ids, both withheld, codepoint-sorted.
     const firesSec = await recorded({ results: crossType, type_filter: 'development', rule_coverage: { exercised: 1, unexercised: [], recall_only: 0, per_type: perType({ development: { exercised: 1, unexercised: 0 } }) } });
-    expect(compareEvalRuns(firesSec, unex).rule_coverage_delta).toEqual({
-      exercised_delta: -1,
+    expect(compareEvalRuns(firesSec, unex).rule_coverage_delta).toEqual(
+      delta({
+        exercised_delta: -1,
+        unidentified: { a: 1, b: 0 },
+        transitions_withheld: [withheld('added_rules', 'DEV-1', 'unexercised', 1, 'development'), withheld('removed_rules', SEC, 'blocking-fired', 0, 'development')],
+      }),
+    );
+  });
+
+  it("codex round 8: A lists R and Q unexercised (development); B moves R to security, fires R blocking for a development sample and exercises Q by warn — two VALID development-filtered records. Round 7 typed R into B's slice through A's row, called B's inventory complete and reported `removed_rules: ['Q']` although Q is present and exercised. Now: no removed_rules, inventory partial, Q withheld by name, unidentified.b = 1 (Q, named nowhere), reconciles — both directions", async () => {
+    const Q = { rule_id: 'DEV-Q', steering_type: 'development' as const };
+    const RR = { rule_id: 'DEV-R', steering_type: 'development' as const };
+    const before = await recorded({ results: devQuiet, type_filter: 'development', rule_coverage: { exercised: 0, unexercised: [RR, Q], recall_only: 0, per_type: perType({ development: { exercised: 0, unexercised: 2 } }) } });
+    // B: R is a security rule now — it denies the development sample (fired, OUTSIDE the development
+    // denominator); Q fired with effect warn (exercised: 1, named in no row). The development slice:
+    // 1 exercised (Q), 0 unexercised. A valid record.
+    const after = await recorded({
+      results: [row(CREW_A, 'bad', 'development', 'caught', ['DEV-R']), row(GARDEN_A, 'good', 'development', 'caught')],
+      type_filter: 'development',
+      rule_coverage: { exercised: 1, unexercised: [], recall_only: 0, per_type: perType({ development: { exercised: 1, unexercised: 0 } }) },
+    });
+    const c = compareEvalRuns(before, after);
+    expect(c.reconciles).toBe(true);
+    expect(c.reconciliation_errors).toEqual([]);
+    expect(c.comparable).toBe(true);
+    expect(c.coverage_reconciliation).toEqual({ a: 'per_type', b: 'per_type' });
+    expect(c.rule_coverage_delta).toEqual({
+      exercised_delta: 1,
       inventory: 'partial',
-      unidentified: { a: 1, b: 0 },
-      gained: [],
+      unidentified: { a: 0, b: 1 },
+      gained: ['DEV-R'], // listed unexercised by A, blocking-fired by B: R IS exercised in B (whatever its type there)
       lost: [],
       added_rules: [],
-      removed_rules: [],
-      transitions_withheld: [listedWithheld('added_rules', 'DEV-1', 1, 0), firedWithheld('removed_rules', SEC)],
+      removed_rules: [], // the round-8 finding: this said ['DEV-Q'] beside inventory 'complete'
+      transitions_withheld: [
+        "removed_rules DEV-Q: enumerated by a (unexercised) and not by b — the wire lists no rule inventory (rule_coverage.exercised and recall_only are counts; only unexercised and blocking-fired ids are named), so b's silence is not absence: DEV-Q may be one of b's 1 exercised rule(s) named nowhere (under type filter development no fired id is typed into the slice), an effect-less (recall-only) or retired rule outside the eligible partition, a rule of another type outside the development denominator (a row's fired ids carry no steering_type) or a rule the store lost: not asserted",
+      ],
     });
+    // The other direction: R lost (blocking-fired in A, unexercised in B), Q withheld as an
+    // added_rules candidate with A's 1 unnamed in the reason.
+    const rev = compareEvalRuns(after, before);
+    expect(rev.reconciles).toBe(true);
+    expect(rev.rule_coverage_delta).toEqual(delta({ exercised_delta: -1, unidentified: { a: 1, b: 0 }, lost: ['DEV-R'], transitions_withheld: [withheld('added_rules', 'DEV-Q', 'unexercised', 1, 'development')] }));
+  });
+
+  it('a persisted rule_coverage that is not the wire shape — `per_type: null` (codex round 8: `Object.values(null)` threw), `rule_coverage: null`, `unexercised` not an array, a per_type row that is null or negative, a key that is no steering type — is `unverified (malformed rule_coverage)` on THAT side: one reconciliation error naming the run and the defect, no coverage delta, the other side still reconciled, the per-sample comparison intact, and never a throw', async () => {
+    const ok = await recorded({ results: devQuiet, type_filter: 'development', rule_coverage: { exercised: 0, unexercised: [DEV], recall_only: 0, per_type: perType({ development: { exercised: 0, unexercised: 1 } }) } });
+    /** Record a run with an ARBITRARY persisted coverage value — the store writes the engine's value verbatim. */
+    const persisted = (rule_coverage: unknown) => recorded({ results: devQuiet, type_filter: 'development', rule_coverage: rule_coverage as GovernanceEvalRuleCoverage });
+    const TYPES = 'architecture|development|security|testing|operations|compliance|design-ux';
+    const cases: [unknown, string][] = [
+      [{ exercised: 0, unexercised: [], per_type: null }, 'per_type null is not an object keyed by steering type'],
+      [null, 'expected an object { exercised, unexercised[] }, got null'],
+      [[], 'expected an object { exercised, unexercised[] }, got []'],
+      [{ exercised: '0', unexercised: [] }, 'exercised "0" is not a non-negative integer'],
+      [{ exercised: 0, unexercised: null }, 'unexercised null is not an array'],
+      [{ exercised: 0, unexercised: [{ steering_type: 'development' }] }, 'unexercised[0] carries no string rule_id (got {"steering_type":"development"})'],
+      [{ exercised: 0, unexercised: [{ rule_id: 'X', steering_type: 'vibes' }] }, `unexercised[0] (X) steering_type "vibes" is not one of ${TYPES}`],
+      [{ exercised: 0, unexercised: [], recall_only: -1 }, 'recall_only -1 is not a non-negative integer'],
+      [{ exercised: 0, unexercised: [], per_type: [] }, 'per_type [] is not an object keyed by steering type'],
+      [{ exercised: 0, unexercised: [], per_type: { vibes: { exercised: 0, unexercised: 0 } } }, `per_type key "vibes" is not one of ${TYPES}`],
+      [{ exercised: 0, unexercised: [], per_type: { development: null } }, 'per_type.development null is not an object { exercised, unexercised }'],
+      [{ exercised: 0, unexercised: [], per_type: { development: { exercised: -1, unexercised: 0 } } }, 'per_type.development.exercised -1 is not a non-negative integer'],
+      [{ exercised: 0, unexercised: [], per_type: { development: { exercised: 0 } } }, 'per_type.development.unexercised undefined is not a non-negative integer'],
+    ];
+    for (const [rc, defect] of cases) {
+      const bad = await persisted(rc);
+      const c = compareEvalRuns(ok, bad); // a throw here fails the test — the round-8 crash
+      expect(c.coverage_reconciliation, JSON.stringify(rc)).toEqual({ a: 'per_type', b: MALFORMED_RULE_COVERAGE });
+      expect(c.reconciles, JSON.stringify(rc)).toBe(false);
+      expect(c.reconciliation_errors, JSON.stringify(rc)).toEqual([
+        `run b (${bad.id}): rule_coverage is malformed — ${defect} — not the wire shape (api-types GovernanceEvalRuleCoverage), so it is not reconciled and no coverage delta is computed over it`,
+      ]);
+      expect('rule_coverage_delta' in c, JSON.stringify(rc)).toBe(false);
+      // Malformed on the baseline side: the same, per side.
+      const rev = compareEvalRuns(bad, ok);
+      expect(rev.coverage_reconciliation, JSON.stringify(rc)).toEqual({ a: MALFORMED_RULE_COVERAGE, b: 'per_type' });
+      expect('rule_coverage_delta' in rev, JSON.stringify(rc)).toBe(false);
+    }
+    expect(MALFORMED_RULE_COVERAGE).toBe('unverified (malformed rule_coverage)');
+    // Malformed on BOTH sides: two errors, two marks, no delta — and the per-sample comparison
+    // (flips, comparability, summaries) is untouched by any of it.
+    const bad = await persisted({ exercised: 0, unexercised: [], per_type: null });
+    const c = compareEvalRuns(bad, bad);
+    expect(c.coverage_reconciliation).toEqual({ a: MALFORMED_RULE_COVERAGE, b: MALFORMED_RULE_COVERAGE });
+    expect(c.reconciliation_errors).toHaveLength(2);
+    expect('rule_coverage_delta' in c).toBe(false);
+    expect(c.comparable).toBe(true);
+    expect(c.flips).toEqual([]);
+    expect(c.unchanged).toBe(2);
   });
 });
 

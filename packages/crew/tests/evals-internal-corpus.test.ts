@@ -43,9 +43,11 @@
 // `gap` on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking
 // verdict fired — `degraded` present, `rule_coverage` absent or well-formed AND reconciled with
 // the rows (no id both fired and unexercised, `exercised` ≥ the distinct blocking-fired ids, no
-// duplicate unexercised id, `recall_only` a non-negative integer — codex round 5); an EMPTY
-// report, an impossible row, `rule_coverage: null` and a contradictory coverage are refused by
-// name, a valid all-gap report over BAD samples passes),
+// duplicate unexercised id, `recall_only` a non-negative integer — codex round 5; `per_type`, when
+// present, an object keyed by steering type of non-negative `{ exercised, unexercised }` rows that
+// sum to the totals — codex round 8); an EMPTY report, an impossible row, `rule_coverage: null`,
+// `per_type: null` and a contradictory coverage are refused by name, a valid all-gap report over
+// BAD samples passes),
 // stamps every result row with its sample's `payload_hash`, and publishes
 // report + meta as ONE verifiable generation carrying complete provenance (engine build identity
 // = the realpath + sha256 of the executable ACTUALLY spawned — resolved once with exec's search
@@ -2053,8 +2055,24 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       [{ exercised: 1 }, /malformed: unexercised undefined is not an array/],
       [{ exercised: 1, unexercised: [{ steering_type: 'architecture' }] }, /malformed: unexercised\[0\] carries no string rule_id \(got \{"steering_type":"architecture"\}\)/],
       [{ exercised: 1, unexercised: [{ rule_id: 'DOC-1', steering_type: 'vibes' }] }, /malformed: unexercised\[0\] \(DOC-1\) steering_type "vibes" is not one of architecture\|development\|security\|testing\|operations\|compliance\|design-ux/],
+      // `per_type` (codex round 8): present ⇒ a plain object keyed by steering type, rows of non-negative integers.
+      [{ exercised: 1, unexercised: [], per_type: null }, /malformed: per_type null is not an object keyed by steering type — an engine predating core #394 omits the field/],
+      [{ exercised: 1, unexercised: [], per_type: [] }, /malformed: per_type \[\] is not an object keyed by steering type/],
+      [{ exercised: 1, unexercised: [], per_type: { vibes: { exercised: 1, unexercised: 0 } } }, /malformed: per_type key "vibes" is not one of architecture\|development\|security\|testing\|operations\|compliance\|design-ux/],
+      [{ exercised: 1, unexercised: [], per_type: { development: null } }, /malformed: per_type\.development null is not an object \{ exercised, unexercised \}/],
+      [{ exercised: 1, unexercised: [], per_type: { development: { exercised: -1, unexercised: 0 } } }, /malformed: per_type\.development\.exercised -1 is not a non-negative integer/],
+      [{ exercised: 1, unexercised: [], per_type: { development: { exercised: 1, unexercised: '0' } } }, /malformed: per_type\.development\.unexercised "0" is not a non-negative integer/],
+      [{ exercised: 1, unexercised: [], per_type: { development: { exercised: 1 } } }, /malformed: per_type\.development\.unexercised undefined is not a non-negative integer/],
     ];
     for (const [rc, re] of coverageRefusals) expect(m.verifyEngineReport(report(okRows, { rule_coverage: rc }), staged), JSON.stringify(rc)).toMatch(re);
+    // A well-formed `per_type` that CONTRADICTS the totals (codex round 8's reproduction): nothing
+    // fired, `exercised: 0`, yet `development.exercised` says 999 — refused before publication; the
+    // same rows with a per_type that partitions them pass.
+    const nothingFired = [goodCaught, { ...badCaught, fired: [], verdict: 'gap', nearest_rules: [] }];
+    expect(m.verifyEngineReport(report(nothingFired, { rule_coverage: { exercised: 0, unexercised: [], per_type: { development: { exercised: 999, unexercised: 0 } } } }), staged)).toBe(
+      "the engine report's `rule_coverage` contradicts itself: per_type sums to 999 exercised but exercised is 0 — evals.rs `rule_coverage` partitions the same eligible rules per steering type (`per_type`), so the rows' `exercised` sum to the total and each type's `unexercised` is the number of listed unexercised rules of that type (`run` evaluates unfiltered)",
+    );
+    expect(m.verifyEngineReport(report(nothingFired, { rule_coverage: { exercised: 0, unexercised: [{ rule_id: 'DOC-0', steering_type: 'development' }], per_type: { development: { exercised: 0, unexercised: 1 } } } }), staged)).toBeNull();
 
     // Through the CLI — nothing published, the refusal named: codex round 4's exact report (good
     // samples with expected deny, empty fired, verdict gap — the shape S14h used to bless as a valid
@@ -2067,6 +2085,11 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
         /results\[0\] \(alpha@[0-9a-f]{12}\) carries expected "deny" but a good sample expects "allow"/,
       ],
       ['rule_coverage null', { coverageJs: ', rule_coverage: null' }, /the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null/],
+      [
+        'per_type null (codex round 8)',
+        { coverageJs: ', rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }], recall_only: 0, per_type: null }' },
+        /the engine report's `rule_coverage` is malformed: per_type null is not an object keyed by steering type/,
+      ],
       ['degraded absent', { degradedJs: '' }, /the engine report carries no `degraded` field/],
       ['degraded boolean', { degradedJs: ', degraded: true' }, /the engine report's `degraded` is true, not null or one of facet-only/],
     ];
@@ -2124,8 +2147,17 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       [{ exercised: 2, unexercised: [], recall_only: '0' }, /is malformed: recall_only "0" is not a non-negative integer/],
       [{ exercised: 2, unexercised: [], recall_only: 1.5 }, /is malformed: recall_only 1\.5 is not a non-negative integer/],
       [{ exercised: 2, unexercised: [], recall_only: null }, /is malformed: recall_only null is not a non-negative integer/],
+      // `per_type` must partition the same rules (codex round 8): the rows' exercised sum to the total,
+      // each type's unexercised count is the listed rows of that type, a listed type needs its row.
+      [{ exercised: 2, unexercised: [], per_type: { development: { exercised: 999, unexercised: 0 } } }, /contradicts itself: per_type sums to 999 exercised but exercised is 2 — evals\.rs `rule_coverage` partitions the same eligible rules per steering type/],
+      [{ exercised: 2, unexercised: [], per_type: { security: { exercised: 1, unexercised: 0 } } }, /contradicts itself: per_type sums to 1 exercised but exercised is 2/],
+      [{ exercised: 2, unexercised: [{ rule_id: 'T', steering_type: 'testing' }], per_type: { security: { exercised: 2, unexercised: 0 }, testing: { exercised: 0, unexercised: 0 } } }, /contradicts itself: per_type\.testing\.unexercised is 0 but unexercised lists 1 testing rule\(s\)/],
+      [{ exercised: 2, unexercised: [{ rule_id: 'T', steering_type: 'testing' }], per_type: { security: { exercised: 2, unexercised: 0 } } }, /contradicts itself: unexercised lists 1 testing rule\(s\) but per_type carries no testing row/],
+      [{ exercised: 2, unexercised: [], per_type: { security: { exercised: 2, unexercised: 1 } } }, /contradicts itself: per_type\.security\.unexercised is 1 but unexercised lists 0 security rule\(s\)/],
     ];
     for (const [rc, re] of refusals) expect(m.verifyEngineReport(report(rc), staged), JSON.stringify(rc)).toMatch(re);
+    // A `per_type` that partitions the rows passes: R and S booked under security, T unexercised under testing.
+    expect(m.verifyEngineReport(report({ exercised: 2, unexercised: [{ rule_id: 'T', steering_type: 'testing' }], recall_only: 0, per_type: { security: { exercised: 2, unexercised: 0 }, testing: { exercised: 0, unexercised: 1 } } }), staged)).toBeNull();
     // Through the CLI: one good sample judged false_positive with DOC-1 fired, against the fake's
     // default coverage (exercised 0, DOC-1 unexercised) ⇒ TOOL FAILURE, nothing published; a
     // coverage that reconciles publishes, and the summary line shows the blocking-fired count beside

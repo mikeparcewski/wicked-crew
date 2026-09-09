@@ -147,6 +147,13 @@ mentioned only where a daemon release depends on them.
   after the `--version` probe answered is a TOOL FAILURE (exit 1) naming the step, the errno and the
   executable, where it used to throw a TypeError on the undefined output (exit 2, the errno lost); a
   step killed by a signal reports `signal SIG…` instead of `exit null`.
+  Codex round 8: `verifyEngineReport` validates a present `rule_coverage.per_type` — a plain object
+  keyed by steering type, each row `{ exercised, unexercised }` of non-negative integers, the rows'
+  `exercised` summing to the total and each type's `unexercised` equal to the listed rows of that
+  type (`run` never passes `--type`, so the report is unfiltered and the rows partition the whole
+  eligible set) — so `per_type: null` (which passed the gate and then crashed the offline
+  comparison) or `development: { exercised: 999 }` beside `exercised: 0` is a named refusal before
+  publication.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
@@ -178,6 +185,21 @@ mentioned only where a daemon release depends on them.
   — `gained`/`lost` stay certain, `unidentified` counts what the other side cannot type, listed
   candidates are asserted only when the silent side is complete, and a fired-only id is always
   withheld by name (it may be a rule of another type, outside the denominator).
+  Codex round 8 — no inferred inventory: `added_rules`/`removed_rules` are asserted only from an
+  explicit rule inventory on BOTH records, and no field of the wire carries one (`exercised` and
+  `recall_only` are counts, `unexercised` names only the unexercised rules, a row's `fired` only the
+  blocking firings), so every comparison of daemon-recorded runs is `inventory: 'partial'` with both
+  lists empty and each one-sided id in `transitions_withheld` with what it may be instead (an unnamed
+  warn-exercised rule, a recall-only or retired rule outside the eligible partition, under a filter a
+  rule of another type, or a real store change). The round-6 `exercised === |fired|` ⇒ complete
+  inference is deleted: under a filter it typed a fired id into the slice through the OTHER run's
+  row and, after a rule moved type, reported a present, exercised rule as removed. `unidentified` is
+  per record (unfiltered `exercised − |fired|`, filtered the whole `exercised`), never reduced by a
+  cross-run intersection; `gained`/`lost` stay certain. A persisted `rule_coverage` that is not the
+  wire shape (`per_type: null`, `null`, a non-array `unexercised`, a bad row or key) is
+  `coverage_reconciliation: 'unverified (malformed rule_coverage)'` on that side with a
+  reconciliation error naming the defect, no delta — and no throw (it used to crash on
+  `Object.values(null)`).
 - **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
   eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,

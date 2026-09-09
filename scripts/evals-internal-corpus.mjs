@@ -1854,9 +1854,15 @@ function rulesIdentityFrom(listed, coreBin, seed) {
  *     `ENGINE_DEGRADED_MODES`); `rule_coverage` is either ABSENT (an engine predating core #394,
  *     printed as such) or a well-formed `{ exercised: int ≥ 0, unexercised: [{ rule_id,
  *     steering_type }] }` — `null` (what crashed the summary print after publication) is malformed
- *     — that RECONCILES with the rows (`ruleCoverageProblem`): no id both fired and unexercised,
- *     `exercised` ≥ the distinct ids the rows' `fired` name, no duplicate unexercised id,
- *     `recall_only` a non-negative integer when present.
+ *     — with `recall_only` a non-negative integer when present and `per_type`, when present, a plain
+ *     object keyed by steering type whose rows are `{ exercised, unexercised }` of non-negative
+ *     integers (codex round 8: `per_type: null` passed through and crashed the offline comparison);
+ *     that RECONCILES with the rows (`ruleCoverageProblem`): no id both fired and unexercised,
+ *     `exercised` ≥ the distinct ids the rows' `fired` name, no duplicate unexercised id; and that
+ *     does not CONTRADICT ITSELF: the per-type `exercised` sum to the total and each type's
+ *     `unexercised` count equals the listed unexercised rows of that type (`run` evaluates
+ *     UNFILTERED — its `rules eval` carries no `--type` — so the rows partition the whole eligible
+ *     set; `development: { exercised: 999 }` beside `exercised: 0` is refused).
  * Each row then gets its staged sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over
  * the full payload incl. signals — what makes two runs comparable, `eval-compare.ts`). A valid
  * all-gap report — BAD samples nothing caught — passes: gaps are findings. Returns the failure text
@@ -1949,37 +1955,66 @@ export function verifyEngineReport(report, samples) {
         'evals.rs `rule_coverage` partitions the eligible rules by whether ANY evaluated claim fired them, and a row\'s `fired` is the blocking subset of that'
       );
     }
+    if (problem?.contradictory !== undefined) {
+      return (
+        `the engine report's \`rule_coverage\` contradicts itself: ${problem.contradictory} — ` +
+        'evals.rs `rule_coverage` partitions the same eligible rules per steering type (`per_type`), so the rows\' `exercised` sum to the total and each type\'s `unexercised` is the number of listed unexercised rules of that type (`run` evaluates unfiltered)'
+      );
+    }
   }
   return null;
 }
 
 /**
- * Why `rc` is not a `rule_coverage` of THESE rows, or null when it is. Two kinds, kept apart:
- *   `{ malformed }`    — not the wire shape (api-types `GovernanceEvalRuleCoverage`): `exercised` a
- *                        non-negative integer, `unexercised` an array of `{ rule_id, steering_type }`
- *                        with a known steering type, `recall_only` (the engine's third field —
- *                        optional on the api-types shape since 0.27.0, so optional here) a
- *                        non-negative integer when present; `per_type` (the fourth) is passed
- *                        through — the offline comparison reconciles it against the totals;
- *   `{ inconsistent }` — the shape is fine but the numbers contradict the rows. The engine's
- *                        definition (wicked-governance `evals.rs`, `rule_coverage` + `run_evals`): a
- *                        rule is EXERCISED when ANY evaluated claim fired it — blocking or not (a
- *                        `warn`-effect firing counts) — and UNEXERCISED otherwise; a row's `fired`
- *                        is the BLOCKING (deny) subset of the same firings. Hence, exactly: no id in
- *                        any row's `fired` may be `unexercised`; `exercised` ≥ the number of distinct
- *                        ids the rows' `fired` name (equal only when nothing non-blocking fired);
- *                        `unexercised` names a rule at most once. `fired` is `rule id → rows`.
+ * Why `rc` is not a `rule_coverage` of THESE rows, or null when it is. Three kinds, kept apart:
+ *   `{ malformed }`     — not the wire shape (api-types `GovernanceEvalRuleCoverage`): `exercised` a
+ *                         non-negative integer, `unexercised` an array of `{ rule_id, steering_type }`
+ *                         with a known steering type, `recall_only` (the engine's third field —
+ *                         optional on the api-types shape since 0.27.0, so optional here) a
+ *                         non-negative integer when present; `per_type` (the fourth, optional
+ *                         likewise) a plain object whose keys are steering types and whose values are
+ *                         `{ exercised, unexercised }` of non-negative integers — codex round 8:
+ *                         `per_type: null` used to pass through and crash the offline comparison;
+ *   `{ inconsistent }`  — the shape is fine but the numbers contradict the rows. The engine's
+ *                         definition (wicked-governance `evals.rs`, `rule_coverage` + `run_evals`): a
+ *                         rule is EXERCISED when ANY evaluated claim fired it — blocking or not (a
+ *                         `warn`-effect firing counts) — and UNEXERCISED otherwise; a row's `fired`
+ *                         is the BLOCKING (deny) subset of the same firings. Hence, exactly: no id in
+ *                         any row's `fired` may be `unexercised`; `exercised` ≥ the number of distinct
+ *                         ids the rows' `fired` name (equal only when nothing non-blocking fired);
+ *                         `unexercised` names a rule at most once. `fired` is `rule id → rows`;
+ *   `{ contradictory }` — the shape is fine but `per_type` contradicts the totals. `rule_coverage()`
+ *                         buckets every eligible rule into its type's row as it counts it, so the
+ *                         rows' `exercised` sum to `exercised` and each type's `unexercised` equals
+ *                         the listed unexercised rules of that type — exactly, because `run` never
+ *                         passes `--type` (the `rules eval` spawn carries no filter): the report is
+ *                         unfiltered and the rows partition the WHOLE eligible set. A type listed in
+ *                         `unexercised` with no `per_type` row is a contradiction too.
  */
 function ruleCoverageProblem(rc, fired) {
   const malformed = (m) => ({ malformed: m });
   const inconsistent = (m) => ({ inconsistent: m });
+  const contradictory = (m) => ({ contradictory: m });
   if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) return malformed(`expected an object { exercised, unexercised[] }, got ${JSON.stringify(rc)}`);
   if (!Number.isInteger(rc.exercised) || rc.exercised < 0) return malformed(`exercised ${JSON.stringify(rc.exercised)} is not a non-negative integer`);
   if (!Array.isArray(rc.unexercised)) return malformed(`unexercised ${JSON.stringify(rc.unexercised)} is not an array`);
   if (rc.recall_only !== undefined && (!Number.isInteger(rc.recall_only) || rc.recall_only < 0)) {
     return malformed(`recall_only ${JSON.stringify(rc.recall_only)} is not a non-negative integer`);
   }
+  const perType = rc.per_type;
+  if (perType !== undefined) {
+    if (perType === null || typeof perType !== 'object' || Array.isArray(perType)) return malformed(`per_type ${JSON.stringify(perType)} is not an object keyed by steering type`);
+    for (const [t, row] of Object.entries(perType)) {
+      if (!STEERING_TYPES.includes(t)) return malformed(`per_type key ${JSON.stringify(t)} is not one of ${STEERING_TYPES.join('|')}`);
+      if (row === null || typeof row !== 'object' || Array.isArray(row)) return malformed(`per_type.${t} ${JSON.stringify(row)} is not an object { exercised, unexercised }`);
+      for (const k of ['exercised', 'unexercised']) {
+        if (!Number.isInteger(row[k]) || row[k] < 0) return malformed(`per_type.${t}.${k} ${JSON.stringify(row[k])} is not a non-negative integer`);
+      }
+    }
+  }
   const seen = new Set();
+  /** steering type → how many `unexercised` rows list it — what `per_type[<type>].unexercised` must equal. */
+  const listedByType = new Map();
   for (const [i, u] of rc.unexercised.entries()) {
     if (u === null || typeof u !== 'object' || Array.isArray(u) || typeof u.rule_id !== 'string' || u.rule_id === '') {
       return malformed(`unexercised[${i}] carries no string rule_id (got ${JSON.stringify(u)})`);
@@ -1989,6 +2024,7 @@ function ruleCoverageProblem(rc, fired) {
     }
     if (seen.has(u.rule_id)) return inconsistent(`unexercised[${i}] repeats ${u.rule_id} — a rule is unexercised once or not at all`);
     seen.add(u.rule_id);
+    listedByType.set(u.steering_type, (listedByType.get(u.steering_type) ?? 0) + 1);
     if (fired.has(u.rule_id)) {
       return inconsistent(`unexercised[${i}] names ${u.rule_id}, which \`fired\` for ${fired.get(u.rule_id)} row(s) — a rule that fired for any sample is exercised, never unexercised`);
     }
@@ -1998,6 +2034,16 @@ function ruleCoverageProblem(rc, fired) {
       `exercised ${rc.exercised} is below the ${fired.size} distinct rule id(s) the rows' \`fired\` name (${listSome([...fired.keys()].sort())}) — ` +
         'every blocking firing is an exercised rule, so exercised ≥ distinct fired (equality only when no non-blocking effect fired)',
     );
+  }
+  if (perType !== undefined) {
+    const sumExercised = Object.values(perType).reduce((n, row) => n + row.exercised, 0);
+    if (sumExercised !== rc.exercised) return contradictory(`per_type sums to ${sumExercised} exercised but exercised is ${rc.exercised}`);
+    for (const t of [...new Set([...Object.keys(perType), ...listedByType.keys()])].sort()) {
+      const counted = perType[t]?.unexercised;
+      const listed = listedByType.get(t) ?? 0;
+      if (counted === undefined) return contradictory(`unexercised lists ${listed} ${t} rule(s) but per_type carries no ${t} row`);
+      if (counted !== listed) return contradictory(`per_type.${t}.unexercised is ${counted} but unexercised lists ${listed} ${t} rule(s)`);
+    }
   }
   return null;
 }

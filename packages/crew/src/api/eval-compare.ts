@@ -39,44 +39,55 @@
  * `good` is a sample KIND, not a verdict — the draft plan's `good → false_positive` spelling was
  * corrected in revision 3; this module is the executable form of that correction.
  *
- * # Coverage transitions vs. rule-set changes — and what a record CANNOT tell (codex round 6)
+ * # Coverage transitions vs. rule-set changes — what a record CANNOT tell (codex rounds 6 and 8)
  *
  * The wire carries `rule_coverage.exercised` as a COUNT and `unexercised` as a LIST of ids
  * (api-types `GovernanceEvalRuleCoverage`; wicked-core `crates/wicked-governance/src/evals.rs` on
  * branch `feat/evals-effect-and-coverage` (core #394/#395, PR #398) at `a87e461` — `RuleCoverage`
  * lines 323-328: `exercised: usize`, `unexercised: Vec<UnexercisedRule>`, `recall_only: usize`,
- * `per_type: BTreeMap<String, TypeCoverage>`). A rule is EXERCISED when it appeared in ANY evaluated
- * claim's `policy_ids`, whatever its effect (`RuleCoverage` docs lines 312-314; `rule_coverage()`
- * lines 849-880 partitions the eligible rules by `triggered`, the union `run_evals` collects at
- * lines 987-991 of every claim's `policy_ids`). A result row's `fired`, however, is the BLOCKING
- * subset only: `evaluate_sample` lines 906-916 keep the ids whose effect is `Deny` and hand the full
- * `policy_ids` back separately (line 950). Hence, for an UNFILTERED run,
+ * `per_type: BTreeMap<String, TypeCoverage>`). The partition is over the ELIGIBLE rules — the
+ * active, effect-bearing rules of the slice (`decide_lane_rules` lines 816-843: `effect.is_some()
+ * && !retired && in_slice`); `recall_only` counts the effect-less active rules OUTSIDE it (docs
+ * lines 317-319, computed at 875-878). A rule is EXERCISED when it appeared in ANY evaluated claim's
+ * `policy_ids`, whatever its effect (`RuleCoverage` docs lines 312-314; `rule_coverage()` lines
+ * 849-880 partitions the eligible rules by `triggered`, the union `run_evals` collects of every
+ * claim's `policy_ids`). A result row's `fired`, however, is the BLOCKING subset only:
+ * `evaluate_sample` lines 906-916 keep the ids whose effect is `Deny`. Hence, for an UNFILTERED run,
  *
  *   fired(run) ⊆ exercised(run), and `exercised − |fired|` rules were exercised by a non-blocking
  *   (`warn`) effect ALONE — counted, but NEVER named anywhere in the record.
  *
- * So the rule identities a record enumerates are exactly `unexercised ∪ fired`, and a run's rule
- * set is fully identified ("complete") only when `exercised === |fired|` — then the exercised set
- * IS the fired set. When `exercised > |fired|` the record has `unidentified` exercised rules and
- * its rule set is only partially known (`inventory: "partial"`). Reconstructing "the inventory"
- * as `unexercised ∪ fired` and diffing it was therefore unsound (codex round 6: a rule that went
- * from unexercised to exercised-by-warn vanished from the reconstruction and was reported as
- * `removed_rules`, with `reconciles: false` over two valid records). The delta asserts ONLY what
- * the records prove:
+ * NO field of the wire lists a run's rule set: `exercised` and `recall_only` are counts,
+ * `unexercised` names only the rules nothing exercised, `fired` only the blocking firings. The rule
+ * identities a record enumerates are therefore exactly `unexercised ∪ fired`, and an id one record
+ * enumerates and the other does not is NOT thereby absent from the other's store: it may be one of
+ * that side's unnamed warn-exercised rules, an effect-less (recall-only) or retired rule outside the
+ * eligible partition, under a type filter a rule of another type outside the denominator — or a rule
+ * the store really gained or lost. Round 6 replaced a reconstruction of "the inventory" as
+ * `unexercised ∪ fired` with a completeness inference: `exercised === |fired|` ⇒ every exercised rule
+ * is named ⇒ the silent side's absence was asserted as `added_rules`/`removed_rules`. Round 8 deleted
+ * that inference too — under a type filter a fired id is typed into the slice only by the OTHER run's
+ * `unexercised` row, and a rule's type in run A does not establish its type in run B (codex's
+ * reproduction: A lists R and Q unexercised under `development`; B moves R to `security`, fires R
+ * blocking and exercises Q by `warn`; the cross-run intersection named R, declared B complete and
+ * reported Q — still present and exercised — as `removed_rules`). The delta asserts ONLY what the
+ * records state:
  *
- *   gained         unexercised in A (listed) AND blocking-fired in B (listed): certain, always
- *   lost           blocking-fired in A AND unexercised in B: certain, always
- *   added_rules    enumerated by B, not by A — asserted only when A's inventory is complete (A's
- *                  rule set is fully known, so "not enumerated by A" means "not in A")
- *   removed_rules  enumerated by A, not by B — asserted only when B's inventory is complete
+ *   gained         unexercised in A (listed) AND blocking-fired in B (listed): a sample now exercises
+ *                  the rule — a statement about the RULE, both ends named, certain
+ *   lost           blocking-fired in A AND unexercised in B (listed): certain
+ *   unidentified   PER RECORD, how many exercised rules of its denominator it does not name:
+ *                  unfiltered `exercised − |fired|`; under a type filter the whole `exercised` (a
+ *                  fired id carries no steering_type, so a record types none of its own firings into
+ *                  the slice) — never reduced by what the OTHER run lists
+ *   added_rules /  asserted only from an explicit rule inventory on BOTH records — the wire carries
+ *   removed_rules  none, so both are EMPTY for every daemon-recorded run and `inventory` is `partial`
  *   transitions_withheld
- *                  every added/removed candidate the partial side cannot settle (the id may be
- *                  one of that side's unidentified warn-exercised rules, or absent from its store),
- *                  one reason per id — WITHHELD, never guessed
+ *                  every id enumerated by one record and not the other, one reason per id saying what
+ *                  it may be besides a rule-set change — WITHHELD, never guessed
  *
- * `exercised_delta` is always the difference of the two counts (a warn-only gain shows up there
- * with `unidentified` saying how many exercised ids the record does not carry). Reconciliation
- * errors on coverage are the record contradicting ITSELF; two valid reports always `reconcile`.
+ * `exercised_delta` is always the difference of the two counts. Reconciliation errors on coverage are
+ * the record contradicting ITSELF (or being malformed — below); two valid reports always `reconcile`.
  *
  * # Type filters (codex round 7) — the denominator is the SLICE; the firings are not
  *
@@ -110,21 +121,25 @@
  *
  * Two runs under DIFFERENT filters get NO `rule_coverage_delta` (an inventory diff across
  * denominators would report the other slice's rules as changes) and are not comparable. Under the
- * SAME filter T the delta's certainty changes, because a fired id is typed into the slice only when
- * the OTHER side lists it unexercised (that row carries `steering_type: T`):
+ * SAME filter T the delta is computed exactly as unfiltered — `gained`/`lost` from ids listed on both
+ * ends (the unexercised row carries `steering_type: T`, the firing is a firing), every one-sided id
+ * withheld — except that `unidentified` is the whole `exercised` count (see above) and each withheld
+ * reason adds that the id may be a rule of another type outside the denominator.
  *
- *   gained / lost     unchanged — both ends listed; the unexercised row types the id
- *   unidentified      `exercised − |fired ids the other side lists unexercised|` (a: `− |lost|`,
- *                     b: `− |gained|`): how many exercised type-T rules the record cannot name
- *   added / removed   only ids LISTED unexercised on one side and not typed on the other, asserted
- *                     when the silent side is complete; a fired-only id (listed unexercised on
- *                     neither side) is ALWAYS withheld under a filter — it may be a rule of another
- *                     type outside the denominator — so `transitions_withheld` can be non-empty on a
- *                     `complete` inventory here (never when unfiltered).
+ * # Malformed persisted coverage (codex round 8)
+ *
+ * The daemon persists a run's `rule_coverage` verbatim and validates none of it (the script's
+ * `verifyEngineReport` gates only its own reports). A recorded `rule_coverage` that is not the wire
+ * shape — `null`; `unexercised` not an array; `per_type: null`, a row that is not `{ exercised,
+ * unexercised }` of non-negative integers, a key that is no steering type … — cannot be reconciled:
+ * that side is `coverage_reconciliation: 'unverified (malformed rule_coverage)'`
+ * ({@link MALFORMED_RULE_COVERAGE}), a reconciliation error names the run and the defect, no
+ * `rule_coverage_delta` is computed, and the comparison never throws over persisted data.
  */
 
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../core/types.js';
 import { PAYLOAD_HASH_RE } from './eval-sample.js';
+import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
 
 export type EvalVerdict = GovernanceEvalResult['verdict'];
 export type EvalSampleKind = GovernanceEvalResult['sample']['kind'];
@@ -154,9 +169,17 @@ export interface EvalVerdictFlip {
   reason: string;
 }
 
-/** Whether both records identify EVERY exercised rule of their rule set (`unidentified` 0/0) or at
- *  least one counts exercised rules it does not name. See the module doc. */
+/** Whether the two records LIST their rule sets. `complete` requires an explicit rule inventory on
+ *  BOTH records; no field of `GovernanceEvalRuleCoverage` (api-types 0.27.0) carries one — `exercised`
+ *  and `recall_only` are counts, `unexercised` names only the unexercised rules, a row's `fired` only
+ *  the blocking firings — so every comparison of daemon-recorded runs is `partial` and the rule-set
+ *  transitions are withheld by name. See the module doc. */
 export type EvalRuleInventory = 'complete' | 'partial';
+
+/** The exact `coverage_reconciliation` value of a side whose persisted `rule_coverage` is not the wire
+ *  shape — unverified, not reconciled, no delta computed over it (module doc, "Malformed persisted
+ *  coverage"). */
+export const MALFORMED_RULE_COVERAGE = 'unverified (malformed rule_coverage)';
 
 /**
  * How one record's `rule_coverage` was reconciled — which denominator its numbers were checked
@@ -166,42 +189,45 @@ export type EvalRuleInventory = 'complete' | 'partial';
  *   - `'per_type'` — `type_filter` set and `per_type` present: checked against the engine's own row
  *     for that type, `per_type[<filter>]`; the rows' fired ids may belong to other types;
  *   - `'n/a (engine reports no per-type coverage)'` — `type_filter` set and no `per_type`: the
- *     denominator is the filter's slice and the record carries no number to check it against.
+ *     denominator is the filter's slice and the record carries no number to check it against;
+ *   - {@link MALFORMED_RULE_COVERAGE} — the persisted value is not the wire shape: nothing was
+ *     checked, a reconciliation error names the defect, no delta is computed over this side.
  */
-export type EvalCoverageReconciliation = 'rows' | 'per_type' | 'n/a (engine reports no per-type coverage)';
+export type EvalCoverageReconciliation = 'rows' | 'per_type' | 'n/a (engine reports no per-type coverage)' | typeof MALFORMED_RULE_COVERAGE;
 
-/** Which rules gained or lost exercise between the runs (present only when BOTH carry coverage AND
- *  both were produced under the same `type_filter`). */
+/** Which rules gained or lost exercise between the runs (present only when BOTH carry WELL-FORMED
+ *  coverage AND both were produced under the same `type_filter`). */
 export interface EvalRuleCoverageDelta {
   /** `b.rule_coverage.exercised − a.rule_coverage.exercised` — the counts, always. */
   exercised_delta: number;
-  /** `complete` when both sides identify every exercised rule (so `added_rules`/`removed_rules`
-   *  are asserted); `partial` when a side counts exercised rules it never names (then the
-   *  unsettled transitions are in `transitions_withheld`). */
+  /** `partial` for every comparison of daemon-recorded runs: the wire carries no rule inventory, so
+   *  `added_rules`/`removed_rules` are never asserted and every one-sided id is in
+   *  `transitions_withheld`. `complete` is reserved for two records that LIST their rule sets. */
   inventory: EvalRuleInventory;
-  /** Per side, how many exercised rules the record counts but does not identify. Unfiltered:
-   *  `rule_coverage.exercised − |distinct blocking-fired ids|` (exercised by a `warn` effect alone).
-   *  Under a type filter: `exercised − |fired ids the OTHER side lists unexercised|` — the only fired
-   *  ids typed into the slice (a: `− |lost|`, b: `− |gained|`). 0/0 ⇔ complete. */
+  /** Per side, how many exercised rules of its denominator the record counts but does not name —
+   *  a fact about THAT record alone, never reduced by what the other run lists. Unfiltered:
+   *  `rule_coverage.exercised − |distinct blocking-fired ids|` (the rules exercised by a `warn`
+   *  effect alone). Under a type filter: `rule_coverage.exercised` — a fired id carries no
+   *  steering_type, so the record types none of its own firings into the slice. */
   unidentified: { a: number; b: number };
   /** Unexercised in A (listed) AND blocking-fired in B (listed) — a sample now exercises the rule.
-   *  Certain on both sides, whatever the inventory or the filter. */
+   *  A statement about the RULE, certain on both ends whatever the filter (under one, the id is typed
+   *  into the slice by A's row alone — B's `unidentified` does not subtract it). */
   gained: string[];
   /** Blocking-fired in A AND unexercised in B (listed) — a rule nothing exercises any more. Certain. */
   lost: string[];
-  /** Enumerated by B and not by A, when A's inventory is COMPLETE — a rule the store gained between
-   *  the runs (not a coverage change). Unfiltered, "enumerated" is unexercised-or-fired; under a
-   *  type filter only a LISTED unexercised id qualifies (a fired id carries no type). Empty when A is
-   *  partial. */
+  /** Enumerated by B and not by A AND absent from A's explicit rule inventory — the wire carries no
+   *  inventory, so this is EMPTY for every daemon-recorded run (the candidates are in
+   *  `transitions_withheld`). */
   added_rules: string[];
-  /** Enumerated by A and not by B, when B's inventory is COMPLETE — a rule that vanished
-   *  (deleted/retired) between the runs; NOT `gained`. Same enumeration rule. Empty when B is partial. */
+  /** Enumerated by A and not by B AND absent from B's explicit rule inventory — EMPTY for the same
+   *  reason. */
   removed_rules: string[];
-  /** The added/removed candidates a side cannot settle — one reason per id, codepoint-sorted by id:
-   *  unfiltered, the candidates a PARTIAL side may hold among its unnamed warn-exercised rules
-   *  (empty when `inventory` is `complete`); under a type filter also every blocking-fired id listed
-   *  unexercised on neither side, whatever the inventory (it may be a rule of another type, outside
-   *  the denominator). */
+  /** Every id enumerated (unexercised or blocking-fired) by one record and not the other, one reason
+   *  per id, codepoint-sorted — what the id may be besides a rule-set change: an exercised rule the
+   *  silent side never names (a `warn`-only firing; under a type filter any of its firings), an
+   *  effect-less (recall-only) or retired rule outside the eligible partition, under a type filter a
+   *  rule of another type outside the denominator. WITHHELD, never guessed. */
   transitions_withheld: string[];
 }
 
@@ -242,16 +268,18 @@ export interface EvalRunComparison {
   /** `b.summary − a.summary`, field by field. */
   summary_delta: GovernanceEvalSummary;
   /** Each run's summary equals its own results' tally AND the delta equals the flip/add/remove
-   *  accounting AND each run's coverage does not contradict itself (see `coverage_reconciliation`
-   *  for what it was checked against) — a stored record that disagrees with ITSELF is a defect, not a
-   *  flip. Two valid records always reconcile; an exercised count ABOVE the fired ids is valid
-   *  (warn-only exercise), and so is a fired id outside a filtered run's denominator. */
+   *  accounting AND each run's coverage is well-formed and does not contradict itself (see
+   *  `coverage_reconciliation` for what it was checked against) — a stored record that disagrees
+   *  with ITSELF, or carries a `rule_coverage` that is not the wire shape, is a defect, not a flip.
+   *  Two valid records always reconcile; an exercised count ABOVE the fired ids is valid (warn-only
+   *  exercise), and so is a fired id outside a filtered run's denominator. */
   reconciles: boolean;
   reconciliation_errors: string[];
-  /** Per side, how the record's `rule_coverage` was reconciled ({@link EvalCoverageReconciliation}),
-   *  or `null` when that side carries no coverage (a pre-#394 engine). */
+  /** Per side, how the record's `rule_coverage` was reconciled ({@link EvalCoverageReconciliation};
+   *  {@link MALFORMED_RULE_COVERAGE} when the persisted value is not the wire shape), or `null` when
+   *  that side carries no coverage (a pre-#394 engine). */
   coverage_reconciliation: { a: EvalCoverageReconciliation | null; b: EvalCoverageReconciliation | null };
-  /** Present only when BOTH sides carry coverage AND `identity.type_filter.same`. */
+  /** Present only when BOTH sides carry WELL-FORMED coverage AND `identity.type_filter.same`. */
   rule_coverage_delta?: EvalRuleCoverageDelta;
 }
 
@@ -376,9 +404,11 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
 
   // Each record's coverage is reconciled ON ITS OWN whenever it carries one — a record that
   // contradicts itself is a defect whether or not the other side measured coverage. Coverage is
-  // OPTIONAL on a record (a pre-#394 engine emits none).
-  const covA = a.rule_coverage === undefined ? null : reconcileCoverage(a, 'a', errors);
-  const covB = b.rule_coverage === undefined ? null : reconcileCoverage(b, 'b', errors);
+  // OPTIONAL on a record (a pre-#394 engine emits none: `undefined` here); a PRESENT value that is
+  // not the wire shape is named as a defect and never thrown over (`null` here).
+  const covA = a.rule_coverage === undefined ? undefined : reconcileCoverage(a, 'a', errors);
+  const covB = b.rule_coverage === undefined ? undefined : reconcileCoverage(b, 'b', errors);
+  const modeOf = (cov: CoverageFacts | null | undefined): EvalCoverageReconciliation | null => (cov === undefined ? null : cov === null ? MALFORMED_RULE_COVERAGE : cov.mode);
 
   const comparison: EvalRunComparison = {
     a: a.id,
@@ -396,12 +426,12 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
     summary_delta,
     reconciles: true,
     reconciliation_errors: errors,
-    coverage_reconciliation: { a: covA === null ? null : covA.mode, b: covB === null ? null : covB.mode },
+    coverage_reconciliation: { a: modeOf(covA), b: modeOf(covB) },
   };
-  // The delta exists only when both sides measured coverage over the SAME denominator — never
-  // fabricated from one side, never diffed across two different slices.
-  if (covA !== null && covB !== null && identity.type_filter.same) {
-    comparison.rule_coverage_delta = a.type_filter === null ? unfilteredDelta(covA, covB) : filteredDelta(covA, covB, a.type_filter);
+  // The delta exists only when both sides measured WELL-FORMED coverage over the SAME denominator —
+  // never fabricated from one side, never over a malformed record, never across two different slices.
+  if (covA && covB && identity.type_filter.same) {
+    comparison.rule_coverage_delta = coverageDelta(covA, covB, a.type_filter);
   }
   comparison.reconciles = errors.length === 0;
   return comparison;
@@ -439,30 +469,80 @@ function indexById(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): Map<
   return map;
 }
 
-/** What one record's coverage lets us KNOW about its rule set. `fired` is every distinct rule id in
- *  `results[].fired` — the BLOCKING firings (evals.rs `evaluate_sample`, `Effect::Deny` only) —
- *  typed into the denominator only when `type_filter` is null (module doc, "Type filters"). */
+/** What one record's coverage lets us KNOW about its rule set, and what it was reconciled against
+ *  (`mode`). `fired` is every distinct rule id in `results[].fired` — the BLOCKING firings (evals.rs
+ *  `evaluate_sample`, `Effect::Deny` only) — in the denominator only when `type_filter` is null
+ *  (module doc, "Type filters"). */
 interface CoverageFacts {
-  mode: EvalCoverageReconciliation;
+  mode: Exclude<EvalCoverageReconciliation, typeof MALFORMED_RULE_COVERAGE>;
   exercised: number;
   unexercised: Set<string>;
   fired: Set<string>;
 }
 
+function isPlainObject(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === 'object' && !Array.isArray(x);
+}
+
+function isCount(x: unknown): x is number {
+  return Number.isInteger(x) && (x as number) >= 0;
+}
+
+/**
+ * Why a persisted `rule_coverage` is not the wire shape (api-types `GovernanceEvalRuleCoverage`
+ * 0.27.0), or null when it is — checked BEFORE any field is read, because the store writes the
+ * engine's value verbatim and the comparison must name a malformed record, never throw over it
+ * (codex round 8: `per_type: null` made `Object.values` throw). The shape: `exercised` a non-negative
+ * integer; `unexercised` an array of `{ rule_id: non-empty string, steering_type: one of the seven }`;
+ * `recall_only`, when present, a non-negative integer; `per_type`, when present, a plain object whose
+ * keys are steering types and whose values are `{ exercised, unexercised }` of non-negative integers.
+ */
+function coverageShapeProblem(rc: unknown): string | null {
+  if (!isPlainObject(rc)) return `expected an object { exercised, unexercised[] }, got ${JSON.stringify(rc)}`;
+  if (!isCount(rc['exercised'])) return `exercised ${JSON.stringify(rc['exercised'])} is not a non-negative integer`;
+  const unexercised: unknown = rc['unexercised'];
+  if (!Array.isArray(unexercised)) return `unexercised ${JSON.stringify(unexercised)} is not an array`;
+  for (const [i, u] of unexercised.entries()) {
+    if (!isPlainObject(u) || typeof u['rule_id'] !== 'string' || u['rule_id'] === '') return `unexercised[${i}] carries no string rule_id (got ${JSON.stringify(u)})`;
+    if (typeof u['steering_type'] !== 'string' || !STEERING_TYPES.has(u['steering_type'])) {
+      return `unexercised[${i}] (${u['rule_id']}) steering_type ${JSON.stringify(u['steering_type'])} is not one of ${STEERING_TYPE_VALUES.join('|')}`;
+    }
+  }
+  if (rc['recall_only'] !== undefined && !isCount(rc['recall_only'])) return `recall_only ${JSON.stringify(rc['recall_only'])} is not a non-negative integer`;
+  const perType: unknown = rc['per_type'];
+  if (perType !== undefined) {
+    if (!isPlainObject(perType)) return `per_type ${JSON.stringify(perType)} is not an object keyed by steering type`;
+    for (const [t, row] of Object.entries(perType)) {
+      if (!STEERING_TYPES.has(t)) return `per_type key ${JSON.stringify(t)} is not one of ${STEERING_TYPE_VALUES.join('|')}`;
+      if (!isPlainObject(row)) return `per_type.${t} ${JSON.stringify(row)} is not an object { exercised, unexercised }`;
+      for (const k of ['exercised', 'unexercised']) {
+        if (!isCount(row[k])) return `per_type.${t}.${k} ${JSON.stringify(row[k])} is not a non-negative integer`;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Reconcile one record's `rule_coverage` with ITSELF and with its rows, pushing every contradiction
- * to `errors` (naming the run), and say what it was checked against (`mode`). Whatever the filter:
- * no duplicate unexercised id; `per_type`, when present, sums to `exercised` and agrees per type with
- * the listed rows; no listed-unexercised id fired (the row types the rule into the slice; a firing
- * makes an eligible rule exercised — evals.rs 862-873). Unfiltered (`'rows'`): `exercised` is at
- * least the distinct blocking-fired ids. Filtered: every listed row is of the filter's type, and
- * with `per_type` present (`'per_type'`) the slice's own row equals the total — the rows' fired
- * ids may name rules of other types and are NOT a denominator check; without `per_type`
- * (`'n/a …'`) nothing more can be checked.
+ * to `errors` (naming the run), and say what it was checked against (`mode`). A value that is not
+ * the wire shape (`coverageShapeProblem`) is ONE error naming the defect and `null` — nothing else is
+ * read from it. Whatever the filter: no duplicate unexercised id; `per_type`, when present, sums to
+ * `exercised` and agrees per type with the listed rows; no listed-unexercised id fired (the row types
+ * the rule into the slice; a firing makes an eligible rule exercised — evals.rs 862-873). Unfiltered
+ * (`'rows'`): `exercised` is at least the distinct blocking-fired ids. Filtered: every listed row is
+ * of the filter's type, and with `per_type` present (`'per_type'`) the slice's own row equals the
+ * total — the rows' fired ids may name rules of other types and are NOT a denominator check; without
+ * `per_type` (`'n/a …'`) nothing more can be checked.
  */
-function reconcileCoverage(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): CoverageFacts {
-  const rc = run.rule_coverage!;
+function reconcileCoverage(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): CoverageFacts | null {
   const who = `run ${label} (${run.id})`;
+  const malformed = coverageShapeProblem(run.rule_coverage);
+  if (malformed !== null) {
+    errors.push(`${who}: rule_coverage is malformed — ${malformed} — not the wire shape (api-types GovernanceEvalRuleCoverage), so it is not reconciled and no coverage delta is computed over it`);
+    return null;
+  }
+  const rc = run.rule_coverage!;
   const filter = run.type_filter;
   const fired = new Set<string>();
   for (const r of run.results) for (const id of r.fired) fired.add(id);
@@ -518,93 +598,67 @@ function reconcileCoverage(run: EvalRunDetail, label: 'a' | 'b', errors: string[
   return { mode: 'per_type', ...facts };
 }
 
-/** The delta of two UNFILTERED records — every fired id is an exercised rule of the denominator, so
- *  a record enumerates `unexercised ∪ fired` and is complete iff `exercised === |fired|`. */
-function unfilteredDelta(covA: CoverageFacts, covB: CoverageFacts): EvalRuleCoverageDelta {
-  // `unidentified` is floored at 0: an undercut was already reported as a reconciliation error.
-  const unidentifiedA = Math.max(0, covA.exercised - covA.fired.size);
-  const unidentifiedB = Math.max(0, covB.exercised - covB.fired.size);
-  // The identities each record ENUMERATES — its unexercised list plus its blocking-fired ids.
-  // Nothing else about a run's rule set is on the wire (module doc: `exercised` is a count).
-  const knownA = new Set([...covA.unexercised, ...covA.fired]);
-  const knownB = new Set([...covB.unexercised, ...covB.fired]);
-  const withheld: string[] = [];
-  // Certain transitions: both ends are LISTED identities (unexercised on one side, blocking-fired
-  // on the other) — sound whatever the inventory.
+/**
+ * The delta of two records produced under the SAME `type_filter` (`filter`), over what they ENUMERATE
+ * (module doc, "Coverage transitions vs. rule-set changes"): `gained`/`lost` from ids listed on both
+ * ends, `unidentified` per record, and EVERY one-sided id withheld with its reason — the wire carries
+ * no rule inventory, so `added_rules`/`removed_rules` are never asserted and `inventory` is `partial`.
+ */
+function coverageDelta(covA: CoverageFacts, covB: CoverageFacts, filter: SteeringType | null): EvalRuleCoverageDelta {
+  // Certain, both ends listed: the unexercised row names the id on one side, the blocking firing on
+  // the other (under a filter the row carries the filter's steering_type; a firing is a firing).
   const gained = [...covA.unexercised].filter((id) => covB.fired.has(id)).sort(codepoint);
   const lost = [...covA.fired].filter((id) => covB.unexercised.has(id)).sort(codepoint);
-  // Rule-set changes: an id one side enumerates and the other does not. Asserted ONLY when the
-  // silent side's inventory is complete (its rule set is fully known); a partial side may hold
-  // the id among its unidentified warn-exercised rules — withheld, never guessed.
-  const added_rules: string[] = [];
-  const removed_rules: string[] = [];
-  for (const id of [...knownB].filter((id) => !knownA.has(id)).sort(codepoint)) {
-    if (unidentifiedA === 0) added_rules.push(id);
-    else withheld.push(`added_rules ${id}: enumerated by b (${covB.unexercised.has(id) ? 'unexercised' : 'blocking-fired'}) and not by a, whose exercised set is only partially identified — ${unidentifiedA} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${covA.exercised} vs ${covA.fired.size} distinct blocking-fired id(s)) — so it may be one of those or a rule the store gained: not asserted`);
-  }
-  for (const id of [...knownA].filter((id) => !knownB.has(id)).sort(codepoint)) {
-    if (unidentifiedB === 0) removed_rules.push(id);
-    else withheld.push(`removed_rules ${id}: enumerated by a (${covA.unexercised.has(id) ? 'unexercised' : 'blocking-fired'}) and not by b, whose exercised set is only partially identified — ${unidentifiedB} exercised rule id(s) fired by a non-blocking effect alone are unknown (rule_coverage.exercised ${covB.exercised} vs ${covB.fired.size} distinct blocking-fired id(s)) — so it may be one of those (exercised now, id unknown) or a rule removed from the store: not asserted`);
-  }
+  const unidentified = { a: unidentifiedOf(covA, filter), b: unidentifiedOf(covB, filter) };
+  // The identities each record ENUMERATES — its unexercised list plus its blocking-fired ids.
+  // Nothing else about a run's rule set is on the wire, so an id the other side does not enumerate
+  // is a candidate for a rule-set change and NOTHING more: withheld, with what else it may be.
+  const knownA = new Set([...covA.unexercised, ...covA.fired]);
+  const knownB = new Set([...covB.unexercised, ...covB.fired]);
+  const withheld = [
+    ...[...knownB].filter((id) => !knownA.has(id)).map((id) => withheldReason('added_rules', id, covB, unidentified.a, filter)),
+    ...[...knownA].filter((id) => !knownB.has(id)).map((id) => withheldReason('removed_rules', id, covA, unidentified.b, filter)),
+  ].sort(codepoint);
   return {
     exercised_delta: covB.exercised - covA.exercised,
-    inventory: unidentifiedA === 0 && unidentifiedB === 0 ? 'complete' : 'partial',
-    unidentified: { a: unidentifiedA, b: unidentifiedB },
+    inventory: 'partial',
+    unidentified,
     gained,
     lost,
-    added_rules,
-    removed_rules,
-    transitions_withheld: withheld.sort(codepoint),
+    added_rules: [],
+    removed_rules: [],
+    transitions_withheld: withheld,
   };
 }
 
-/** The delta of two records produced under the SAME type filter — a fired id carries no steering
- *  type, so it is typed into the slice only when the OTHER side lists it unexercised (module doc,
- *  "Type filters"). */
-function filteredDelta(covA: CoverageFacts, covB: CoverageFacts, filter: SteeringType): EvalRuleCoverageDelta {
-  // Certain, both ends listed: the unexercised row types the id into the slice, the firing exercises it.
-  const gained = [...covA.unexercised].filter((id) => covB.fired.has(id)).sort(codepoint);
-  const lost = [...covA.fired].filter((id) => covB.unexercised.has(id)).sort(codepoint);
-  // The fired ids PROVABLY in the slice are exactly those the other side lists unexercised; every
-  // other exercised rule of the slice is unnamed. Floored at 0 (a rule's type may have changed
-  // between the runs — not a contradiction the records can prove).
-  const unidentifiedA = Math.max(0, covA.exercised - lost.length);
-  const unidentifiedB = Math.max(0, covB.exercised - gained.length);
-  const typedA = new Set([...covA.unexercised, ...lost]);
-  const typedB = new Set([...covB.unexercised, ...gained]);
-  const added_rules: string[] = [];
-  const removed_rules: string[] = [];
-  const withheld: string[] = [];
-  // Listed unexercised on one side (typed into the slice) and not typed on the other: a rule-set
-  // change — asserted only when the silent side names every exercised rule of the slice.
-  for (const id of [...covB.unexercised].filter((id) => !typedA.has(id)).sort(codepoint)) {
-    if (unidentifiedA === 0) added_rules.push(id);
-    else withheld.push(`added_rules ${id}: listed unexercised (${filter}) by b and not enumerated by a, whose exercised ${filter} rules are only partially identified — under type filter ${filter} the rows' fired ids carry no steering_type, so of a's ${covA.exercised} exercised rule(s) only the ${lost.length} b lists unexercised are known to be ${filter} rules (${unidentifiedA} unknown) — it may be one of those or a rule the store gained: not asserted`);
+/** How many exercised rules of its denominator ONE record does not name. Unfiltered, every
+ *  blocking-fired id is an exercised rule of the (universal) denominator, so `exercised − |fired|`
+ *  (floored at 0: an undercut was already reported as a reconciliation error). Under a type filter a
+ *  fired id carries no steering_type — the record types none of its own firings into the slice — so
+ *  the whole count; what the OTHER run lists never reduces it (codex round 8). */
+function unidentifiedOf(cov: CoverageFacts, filter: SteeringType | null): number {
+  return filter === null ? Math.max(0, cov.exercised - cov.fired.size) : cov.exercised;
+}
+
+/** Why an id enumerated by one record (`lister`: b for `added_rules`, a for `removed_rules`) and not
+ *  by the other is withheld instead of asserted as a rule-set change — one sentence naming what the
+ *  id may be instead. `silentUnidentified` is the silent side's `unidentified` count. */
+function withheldReason(kind: 'added_rules' | 'removed_rules', id: string, lister: CoverageFacts, silentUnidentified: number, filter: SteeringType | null): string {
+  const [listerLabel, silent] = kind === 'added_rules' ? ['b', 'a'] : ['a', 'b'];
+  const listedAs = lister.unexercised.has(id) ? 'unexercised' : 'blocking-fired';
+  const maybe: string[] = [];
+  if (silentUnidentified > 0) {
+    maybe.push(
+      `one of ${silent}'s ${silentUnidentified} exercised rule(s) named nowhere (${filter === null ? 'fired by a non-blocking effect alone' : `under type filter ${filter} no fired id is typed into the slice`})`,
+    );
   }
-  for (const id of [...covA.unexercised].filter((id) => !typedB.has(id)).sort(codepoint)) {
-    if (unidentifiedB === 0) removed_rules.push(id);
-    else withheld.push(`removed_rules ${id}: listed unexercised (${filter}) by a and not enumerated by b, whose exercised ${filter} rules are only partially identified — under type filter ${filter} the rows' fired ids carry no steering_type, so of b's ${covB.exercised} exercised rule(s) only the ${gained.length} a lists unexercised are known to be ${filter} rules (${unidentifiedB} unknown) — it may be one of those (exercised now, id unknown) or a rule removed from the store: not asserted`);
-  }
-  // Fired on one side only and listed unexercised by neither: untyped — it may be a rule of another
-  // type that denied a sample of this slice (outside the denominator) — ALWAYS withheld.
-  const firedOnly = (own: CoverageFacts, other: CoverageFacts) =>
-    [...own.fired].filter((id) => !other.fired.has(id) && !other.unexercised.has(id) && !own.unexercised.has(id)).sort(codepoint);
-  for (const id of firedOnly(covB, covA)) {
-    withheld.push(`added_rules ${id}: blocking-fired by b for ${filter} sample(s) and listed unexercised by neither side — under type filter ${filter} a row's fired ids carry no steering_type (evals.rs evaluate_sample fires every active rule whatever its type; rule_coverage counts the ${filter} slice only), so it may be a rule of another type outside this denominator, a ${filter} rule the store gained, or one a warn effect exercised in a: not asserted`);
-  }
-  for (const id of firedOnly(covA, covB)) {
-    withheld.push(`removed_rules ${id}: blocking-fired by a for ${filter} sample(s) and listed unexercised by neither side — under type filter ${filter} a row's fired ids carry no steering_type (evals.rs evaluate_sample fires every active rule whatever its type; rule_coverage counts the ${filter} slice only), so it may be a rule of another type outside this denominator, a ${filter} rule removed from the store, or one a warn effect exercised in b: not asserted`);
-  }
-  return {
-    exercised_delta: covB.exercised - covA.exercised,
-    inventory: unidentifiedA === 0 && unidentifiedB === 0 ? 'complete' : 'partial',
-    unidentified: { a: unidentifiedA, b: unidentifiedB },
-    gained,
-    lost,
-    added_rules,
-    removed_rules,
-    transitions_withheld: withheld.sort(codepoint),
-  };
+  maybe.push('an effect-less (recall-only) or retired rule outside the eligible partition');
+  if (filter !== null) maybe.push(`a rule of another type outside the ${filter} denominator (a row's fired ids carry no steering_type)`);
+  const change = `a rule the store ${kind === 'added_rules' ? 'gained' : 'lost'}`;
+  return (
+    `${kind} ${id}: enumerated by ${listerLabel} (${listedAs}) and not by ${silent} — the wire lists no rule inventory (rule_coverage.exercised and recall_only are counts; only unexercised and blocking-fired ids are named), ` +
+    `so ${silent}'s silence is not absence: ${id} may be ${maybe.join(', ')} or ${change}: not asserted`
+  );
 }
 
 function field(v: EvalVerdict): 'caught' | 'gaps' | 'false_positives' {
