@@ -91,6 +91,18 @@ mentioned only where a daemon release depends on them.
   exactly one row per staged sample, engine verdicts, `fired` arrays, a summary that is the rows'
   tally — so an empty or partial report is a named tool failure, never a recorded evaluation
   (a valid all-gap report still passes).
+  Codex round 4: every git the script runs is replacement-blind (`--no-replace-objects` +
+  `GIT_NO_REPLACE_OBJECTS=1`) and `check` / `pin` refuse a checkout carrying `refs/replace/*` by
+  name (`replace-refs-present` — a replacement rewrites a window commit's message and tree while
+  both tag shas and `rev-list --count` stay the pin's); `materialize` keeps every `.prev` backup
+  until the receipt is published and rolls a failed swap or receipt write back (destinations
+  restored byte-identical, the previous receipt intact; a failed rollback removes the receipt and
+  names both faults — proven by test-only fault injection at the second swap, the receipt write
+  and the rollback itself); `verifyEngineReport` also refuses rows inconsistent with their sample's
+  kind (a good sample judged `gap`, a bad one `false_positive`, `expected` missing or off its kind,
+  `fired` disagreeing with the verdict) and malformed report fields (`degraded` absent or not
+  null / `facet-only`, `rule_coverage: null` — what crashed the summary print after publication);
+  the valid all-gap fixture is now built from BAD samples.
 - **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
   eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
   payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a

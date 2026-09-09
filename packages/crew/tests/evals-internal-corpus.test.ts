@@ -19,8 +19,13 @@
 // un-overridable `export-ignore` is a named refusal), extracts + verifies EVERY repo into a staging
 // dir beside its destination under `.materialize.lock` and swaps only after all verified (a failed
 // repeat leaves the previous trees and receipt byte-intact, a failed first run leaves no receipt,
-// a receipt beside a missing tree is removed, two concurrent materializations never interleave);
-// filenames with leading/trailing spaces,
+// a receipt beside a missing tree is removed, two concurrent materializations never interleave;
+// every `.prev` backup is kept until the receipt is published and a fault DURING the swap or the
+// receipt write is rolled back — destinations byte-identical, receipt intact-or-absent, never a
+// receipt over a damaged tree — via a vitest-only fault hook, codex round 4); `check` refuses a
+// checkout carrying git REPLACEMENT refs (`refs/replace/*` — a window commit rewritten with the
+// same parents, tag shas and counts but another message + tree, codex round 4) and every git the
+// script runs is replacement-blind; filenames with leading/trailing spaces,
 // tabs, quotes, backslashes and newlines round-trip EXACTLY into `signals.files` (NUL-delimited
 // extraction, never trimmed) and the steering-type inference sees the real paths; samples are
 // validated by the ROUTE's own zod schema (no mirror — what the route rejects, `samples`/`run`
@@ -30,7 +35,11 @@
 // against samples.json AND the pin before the engine is probed, stages EXACTLY the pinned samples
 // in a fresh private dir, VERIFIES the engine's report before publication (exactly one row per
 // staged sample — no duplicate, extra or missing id — engine verdicts, `fired` arrays, a summary
-// that is the rows' tally; an EMPTY report is refused by name, a valid all-gap report passes),
+// that is the rows' tally, every row CONSISTENT with its sample's kind — `expected` by kind, never
+// `gap` on a good sample or `false_positive` on a bad one, `fired` non-empty iff a blocking
+// verdict fired — `degraded` present, `rule_coverage` absent or well-formed; an EMPTY report, an
+// impossible row and `rule_coverage: null` are refused by name, a valid all-gap report over BAD
+// samples passes),
 // stamps every result row with its sample's `payload_hash`, and publishes
 // report + meta as ONE verifiable generation carrying complete provenance (engine build identity,
 // rule-snapshot identity with its method, pin/samples hashes, the report's own sha256) — a torn
@@ -102,12 +111,16 @@ interface ReportMeta {
 }
 interface ReportRow {
   sample: { id: string; description: string; kind: 'good' | 'bad'; steering_type: string; payload_hash?: string };
+  expected: string;
+  fired: string[];
   verdict: string;
 }
 interface Report {
   generation: string;
   results: ReportRow[];
   summary: { total: number; caught: number; gaps: number; false_positives: number };
+  /** ALWAYS present on the wire (the engine serializes the Option) — null, or `facet-only`. */
+  degraded: 'facet-only' | null;
   rule_coverage?: { exercised: number; unexercised: unknown[] };
 }
 /** The script's exported pure functions (typed here — the file is plain JS). */
@@ -125,7 +138,11 @@ interface CorpusModule {
   rulesSnapshotHash: (rules: unknown[]) => string;
   seedDirIdentity: (dir: string) => { dir: string; sha256: string; files: number };
   shallowEvidence: (checkout: string) => string[];
+  replaceRefs: (checkout: string) => string[];
+  windowCommits: (checkout: string, fromSha: string, tagSha: string) => { sha: string; subject: string; body: string; files: string[] }[];
   verifyEngineReport: (report: unknown, samples: Sample[]) => string | null;
+  ENGINE_DEGRADED_MODES: readonly string[];
+  FAULT_ENV: string;
   UsageError: new (message: string) => Error;
   RefusalError: new (message: string) => Error;
   RELEASE_TAG_RE: RegExp;
@@ -590,6 +607,59 @@ describe('check — the tags still resolve to the pinned shas', () => {
     expect(meta.windows.find((w) => w.repo === 'alpha')!.commits).toBe(pinned.commits);
     expect(meta.total).toBe(6);
   });
+
+  it("S14j: a git REPLACEMENT ref (a window commit `git replace`d by one with the SAME parents but another message + tree) leaves both tag shas and `rev-list --count` exactly the pin's while an unpinned `git log` reads the replacement — refused by name (exit 1) by `check` and `samples`, exit 2 by `pin`; every git the script runs is replacement-blind; with the ref deleted the derived samples are byte-identical to the pre-replace run", async () => {
+    const m = await mod();
+    const alphaDir = join(sourceRoot, 'alpha');
+    const pinned = pinOf(readPin(), 'alpha');
+    // The reference derivation BEFORE any replacement.
+    expect(run('samples', outDir).status).toBe(0);
+    const before = readFileSync(join(outDir, 'samples.json'), 'utf8');
+    expect(m.replaceRefs(alphaDir)).toEqual([]);
+    // Replace the window commit "feat: more" (v0.3.0~1) with a commit of the SAME parent but v0.1.0's
+    // tree and another message — the parents, both tags and the count do not move.
+    const target = git(alphaDir, 'rev-parse', 'v0.3.0~1');
+    expect(git(alphaDir, 'log', '-1', '--format=%s', target)).toBe('feat: more');
+    const replacement = git(alphaDir, 'commit-tree', git(alphaDir, 'rev-parse', 'v0.1.0^{tree}'), '-p', git(alphaDir, 'rev-parse', `${target}^`), '-m', 'evil: rewritten through refs/replace');
+    git(alphaDir, 'replace', target, replacement);
+    // The pin's facts are UNCHANGED — no sha or count comparison can see what is wrong…
+    expect(git(alphaDir, 'rev-parse', 'v0.3.0^{commit}')).toBe(pinned.commit_sha);
+    expect(git(alphaDir, 'rev-parse', 'v0.1.0^{commit}')).toBe(pinned.action_window_from_sha);
+    expect(git(alphaDir, 'rev-list', '--count', 'v0.1.0..v0.3.0')).toBe(String(pinned.commits));
+    expect(m.shallowEvidence(alphaDir)).toEqual([]);
+    // …while an UNPINNED log reads the replacement (the control — else the refusal proves nothing).
+    expect(git(alphaDir, 'log', '--format=%s', 'v0.1.0..v0.3.0').split('\n')).toEqual(['fix: again', 'evil: rewritten through refs/replace', 'test: core', 'feat: core']);
+    expect(git(alphaDir, 'log', '-1', '--format=%s', '--name-only', target)).not.toContain('src/more.ts');
+    // The script's own git is replacement-blind (`--no-replace-objects` + GIT_NO_REPLACE_OBJECTS=1):
+    // the window derives the ORIGINAL commit even with the ref present.
+    expect(m.replaceRefs(alphaDir)).toEqual([target.slice(0, 12)]);
+    const window = m.windowCommits(alphaDir, pinned.action_window_from_sha, pinned.commit_sha);
+    expect(window.map((c) => c.subject)).toEqual(['fix: again', 'feat: more', 'test: core', 'feat: core']);
+    expect(window.find((c) => c.sha === target)!.files).toEqual(['src/more.ts']);
+    // And the checkout is REFUSED by name — a pin must be derivable from the immutable history alone.
+    const c = run('check');
+    expect(c.status).toBe(1);
+    expect(c.stdout).toContain(
+      `DRIFT     alpha — replace-refs-present: the checkout carries 1 git replacement ref(s) (refs/replace/ for ${target.slice(0, 12)}) — a replacement rewrites what a window commit says without moving any tag or count; a pin must be derivable from the immutable history alone: git replace -d <sha> (or use a clean clone) and retry`,
+    );
+    expect(c.stdout).toMatch(/ok\s+beta/);
+    expect(c.stderr).toMatch(/FAIL — 1 drifted repo\(s\): alpha$/m);
+    const s = run('samples', join(fixture, 'out-replaced'));
+    expect(s.status).toBe(1);
+    expect(s.stderr).toMatch(/refusing to derive from the wrong history:\n\s+DRIFT\s+alpha — replace-refs-present: the checkout carries 1 git replacement ref\(s\)/);
+    expect(existsSync(join(fixture, 'out-replaced', 'samples.json'))).toBe(false);
+    // `pin` refuses too (exit 2 — a usage error, like a shallow source).
+    const p = run('pin');
+    expect(p.status).toBe(2);
+    expect(p.stderr).toMatch(/alpha: refusing to pin from a checkout carrying 1 git replacement ref\(s\) \(refs\/replace\/ for [0-9a-f]{12}\) — a pin must be derivable from the immutable history alone/);
+    // The ref deleted: `check` passes and the derivation is byte-identical to the pre-replace run.
+    git(alphaDir, 'replace', '-d', target);
+    expect(m.replaceRefs(alphaDir)).toEqual([]);
+    const clean = run('check');
+    expect(clean.status, clean.stderr).toBe(0);
+    expect(run('samples', outDir).status).toBe(0);
+    expect(readFileSync(join(outDir, 'samples.json'), 'utf8')).toBe(before);
+  });
 });
 
 describe('samples — one EvalSample per window commit', () => {
@@ -1050,6 +1120,73 @@ describe('materialize — git archive of each pinned tag', () => {
     expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
   });
 
+  it('S15o: every `.prev` backup is kept until the receipt is published — a fault at the SECOND staging rename or at the receipt write is rolled back (every destination byte-identical to before, the previous receipt untouched, no debris); on a fresh root the same faults leave an empty root; a fault in the rollback itself removes the receipt and names BOTH faults; the hook is inert outside the test env', async () => {
+    const m = await mod();
+    expect(m.FAULT_ENV).toBe('EVALS_CORPUS_FAULT');
+    const trees = ['alpha@v0.3.0', 'beta@v0.2.0', 'gamma@v0.3.0'];
+    const first = run('materialize', outDir);
+    expect(first.status, first.stderr).toBe(0);
+    // Markers planted in the PREVIOUS trees: a successful repeat replaces them (the committed tree has
+    // no marker), so a marker that survives proves the destination is the RESTORED previous tree, not
+    // a new one that happens to be byte-identical.
+    for (const t of trees) writeFileSync(join(outDir, t, 'previous-marker.txt'), t, 'utf8');
+    const before = Object.fromEntries(trees.map((t) => [t, treeIdentity(join(outDir, t))]));
+    const receiptBefore = readFileSync(join(outDir, 'materialized.json'), 'utf8');
+    const faultAt = (points: string, dir = outDir) => runEnv({ [m.FAULT_ENV]: points }, 'materialize', dir);
+    // (a) The SECOND repo's staging → destination rename fails (codex's injection point): alpha
+    // (first) was already swapped in, beta's destination already moved to .prev, gamma untouched.
+    const swap2 = faultAt('swap:2');
+    expect(swap2.status).toBe(2); // an IO error, like the fs failure it stands in for
+    expect(swap2.stderr).toMatch(/injected fault at swap:2 \(EVALS_CORPUS_FAULT, test hook\)/);
+    expect(swap2.stderr).not.toMatch(/rollback failed/);
+    for (const t of trees) {
+      expect(treeIdentity(join(outDir, t)), t).toBe(before[t]);
+      expect(readFileSync(join(outDir, t, 'previous-marker.txt'), 'utf8'), t).toBe(t);
+    }
+    expect(readFileSync(join(outDir, 'materialized.json'), 'utf8')).toBe(receiptBefore);
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']); // no .staging-*, .prev-*, .tmp, lock
+    // (b) The receipt write fails AFTER every swap: all three destinations restored, receipt untouched.
+    const receipt = faultAt('receipt');
+    expect(receipt.status).toBe(2);
+    expect(receipt.stderr).toMatch(/injected fault at receipt \(EVALS_CORPUS_FAULT, test hook\)/);
+    for (const t of trees) {
+      expect(treeIdentity(join(outDir, t)), t).toBe(before[t]);
+      expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(true);
+    }
+    expect(readFileSync(join(outDir, 'materialized.json'), 'utf8')).toBe(receiptBefore);
+    expect(readdirSync(outDir).sort()).toEqual([...trees, 'materialized.json']);
+    // (c) A FIRST run (no previous trees, no receipt) under the same faults: an empty root — never
+    // a partial tree, never a receipt.
+    for (const point of ['swap:2', 'receipt']) {
+      const fresh = join(fixture, `fresh-${point.replace(':', '-')}`);
+      const r = faultAt(point, fresh);
+      expect(r.status, point).toBe(2);
+      expect(readdirSync(fresh), point).toEqual([]);
+    }
+    // (d) The DOUBLE fault: the swap fails AND the rollback fails — the receipt is removed (nothing
+    // may describe a damaged tree), exit 1, and the error names both faults + the debris left behind.
+    const double = faultAt('swap:2,rollback');
+    expect(double.status).toBe(1);
+    expect(double.stderr).toMatch(
+      /materialize failed while swapping the verified trees into .* \(injected fault at swap:2 \(EVALS_CORPUS_FAULT, test hook\)\) AND the rollback failed \(injected fault at rollback \(EVALS_CORPUS_FAULT, test hook\)\) — the trees there may be damaged: the receipt was removed so nothing describes them; inspect the \.staging-\d{8}-\d{6}-[0-9a-f]{8} \/ \.prev-\d{8}-\d{6}-[0-9a-f]{8} entries by hand before re-running/,
+    );
+    expect(existsSync(join(outDir, 'materialized.json'))).toBe(false);
+    expect(existsSync(join(outDir, 'beta@v0.2.0'))).toBe(false); // the damage the rollback would have undone
+    expect(readdirSync(outDir).some((f) => f.startsWith('.beta@v0.2.0.prev-'))).toBe(true); // its backup is still there for the operator
+    expect(readdirSync(outDir).some((f) => f.endsWith('.lock'))).toBe(false); // the lock is always released
+    // (e) The hook is INERT outside the test environment: the same variable with NODE_ENV not `test`
+    // and VITEST not "true" ⇒ a normal, successful materialization that also repairs the root.
+    const inert = runEnv({ [m.FAULT_ENV]: 'swap:1', NODE_ENV: 'production', VITEST: '' }, 'materialize', outDir);
+    expect(inert.status, inert.stderr).toBe(0);
+    for (const t of trees) expect(existsSync(join(outDir, t, 'previous-marker.txt')), t).toBe(false); // NEW trees — the committed ones
+    const published = JSON.parse(readFileSync(join(outDir, 'materialized.json'), 'utf8')) as { repos: { repo: string; path: string; tree_sha: string }[] };
+    expect(published.repos.map((r) => r.repo)).toEqual(['alpha', 'beta', 'gamma']);
+    for (const r of published.repos) {
+      expect(existsSync(r.path)).toBe(true);
+      expect(r.tree_sha).toBe(git(join(sourceRoot, r.repo), 'rev-parse', `${pinOf(readPin(), r.repo).commit_sha}^{tree}`));
+    }
+  });
+
   it(
     'S15n: two CONCURRENT materializations into one root — each either publishes or is refused by `.materialize.lock` (never interleaved); the surviving trees are the committed trees, the receipt describes them, no staging/prev/lock debris',
     async () => {
@@ -1153,14 +1290,17 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
    *  `--corpus` is a directory (never a file); `--db` / `--knowledge-db` are TEMP paths (never the
    *  output dir or the operator's home). `rowsJs` replaces the row synthesis (a misbehaving engine);
    *  `summaryJs` the summary expression (a roll-up that is not the rows' tally); `ruleCoverage:
-   *  false` drops `rule_coverage` (a pre-#394 engine); `rulesList: 'usage'` answers `rules list`
-   *  with the usage banner (an engine without the command). */
-  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; rulesList?: 'json' | 'usage' } = {}): void {
+   *  false` drops `rule_coverage` (a pre-#394 engine); `coverageJs` / `degradedJs` replace the
+   *  `, rule_coverage: …` / `, degraded: …` fragments verbatim (`''` omits the key — a malformed
+   *  wire shape); `rulesList: 'usage'` answers `rules list` with the usage banner (an engine
+   *  without the command). */
+  function okEngine(opts: { rowsJs?: string; summaryJs?: string; ruleCoverage?: boolean; coverageJs?: string; degradedJs?: string; rulesList?: 'json' | 'usage' } = {}): void {
     const rowsJs =
       opts.rowsJs ??
       'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: x.kind === "bad" ? "deny" : "allow", fired: [], verdict: x.kind === "bad" ? "gap" : "caught" }));';
     const summaryJs = opts.summaryJs ?? '{ total: results.length, caught: count("caught"), gaps: count("gap"), false_positives: count("false_positive") }';
-    const coverageJs = opts.ruleCoverage === false ? '' : ', rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }] }';
+    const coverageJs = opts.coverageJs ?? (opts.ruleCoverage === false ? '' : ', rule_coverage: { exercised: 0, unexercised: [{ rule_id: "DOC-1", steering_type: "architecture" }] }');
+    const degradedJs = opts.degradedJs ?? ', degraded: "facet-only"';
     // The eval branch is node (the fake shells out to the test's own node): sh cannot parse JSON.
     // Double quotes only — the program rides inside the shell's single quotes.
     const evalJs = [
@@ -1168,7 +1308,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       'const samples = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).flatMap((f) => JSON.parse(fs.readFileSync(p.join(dir, f), "utf8")));',
       rowsJs,
       'const count = (v) => results.filter((r) => r.verdict === v).length;',
-      `process.stdout.write(JSON.stringify({ results, summary: ${summaryJs}, degraded: "facet-only"${coverageJs} }));`,
+      `process.stdout.write(JSON.stringify({ results, summary: ${summaryJs}${degradedJs}${coverageJs} }));`,
     ].join(' ');
     const rulesList =
       opts.rulesList === 'usage'
@@ -1386,7 +1526,7 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
     expect(existsSync(join(outDir, 'report.json'))).toBe(false);
   });
 
-  it("S14h: the engine's report is refused (exit 1, named, nothing published) unless it holds EXACTLY one row per staged sample — a duplicate id, an extra id, a missing row, a row without an engine verdict or a `fired` array, or a summary that is not the rows' tally; a VALID all-gap report passes (gaps are findings)", async () => {
+  it("S14h: the engine's report is refused (exit 1, named, nothing published) unless it holds EXACTLY one row per staged sample — a duplicate id, an extra id, a missing row, a row without an engine verdict or a `fired` array, or a summary that is not the rows' tally; a VALID all-gap report — BAD samples nothing caught — passes (gaps are findings)", async () => {
     const m = await mod();
     expect([...m.ENGINE_VERDICTS]).toEqual(['caught', 'gap', 'false_positive']);
     // One well-formed `caught` row for the staged sample `x` (double quotes only — it rides inside the fake's single quotes).
@@ -1423,24 +1563,123 @@ describe('run — ingest the doctrine seed, eval the samples (a fake engine CLI 
       expect(existsSync(join(outDir, 'report.json')), label).toBe(false);
       expect(existsSync(join(outDir, 'report.meta.json')), label).toBe(false);
     }
-    // The pure verifier, on the same shapes, for the summary the tally must equal.
+    // The pure verifier, on the same shapes, for the summary the tally must equal. All-gap is only
+    // VALID over BAD samples — a gap is a bad behavior nothing caught (S14k has the good-sample case).
     const { samples } = readSamples();
-    const rows = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: 'allow', fired: [], verdict: 'gap' }));
-    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 0, gaps: 6, false_positives: 0 } }, samples)).toBeNull();
-    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 6, gaps: 0, false_positives: 0 } }, samples)).toMatch(/^the engine report's summary does not reconcile with its rows: caught 6 != 0, gaps 0 != 6/);
-    expect(m.verifyEngineReport({ results: rows }, samples)).toBe('the engine report carries no `summary` object');
+    const badSamples = samples.map((x) => ({ ...x, kind: 'bad' as const }));
+    const rows = badSamples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: 'deny', fired: [], verdict: 'gap' }));
+    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 0, gaps: 6, false_positives: 0 }, degraded: null }, badSamples)).toBeNull();
+    expect(m.verifyEngineReport({ results: rows, summary: { total: 6, caught: 6, gaps: 0, false_positives: 0 }, degraded: null }, badSamples)).toMatch(/^the engine report's summary does not reconcile with its rows: caught 6 != 0, gaps 0 != 6/);
+    expect(m.verifyEngineReport({ results: rows, degraded: null }, badSamples)).toBe('the engine report carries no `summary` object');
     expect(m.verifyEngineReport({ results: [null] }, samples)).toBe('results[0] is not a result object');
     expect(m.verifyEngineReport([], samples)).toMatch(/not a report object with a `results` array/);
-    // A VALID all-gap report: every staged sample judged once, engine verdicts, `fired` arrays, summary = tally — exit 0, published, gaps printed as findings.
-    okEngine({ rowsJs: `const results = samples.map((x) => ({ ...${rowOf}, expected: "deny", verdict: "gap", nearest_rules: [] }));` });
+    // A VALID all-gap report: every staged sample is BAD (the known-bad allowlist names all six) and
+    // nothing caught it — one row each, engine verdicts, `expected: deny`, empty `fired`, summary =
+    // tally ⇒ exit 0, published, gaps printed as findings.
+    writeFileSync(knownBadPath, JSON.stringify({ samples: Object.fromEntries(samples.map((x) => [x.id, { reason: 'fixture: every window commit judged bad' }])) }), 'utf8');
+    expect(run('samples', outDir).status).toBe(0);
+    expect(readSamples().samples.every((x) => x.kind === 'bad')).toBe(true);
+    okEngine(); // the default rows: a bad sample ⇒ expected deny, fired [], verdict gap
     const gaps = runWithPath();
     expect(gaps.status, gaps.stderr).toBe(0);
     const report = JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report;
     expect(report.summary).toEqual({ total: 6, caught: 0, gaps: 6, false_positives: 0 });
     expect(report.results).toHaveLength(6);
-    expect(report.results.every((row) => row.verdict === 'gap' && typeof row.sample.payload_hash === 'string')).toBe(true);
+    expect(report.results.every((row) => row.sample.kind === 'bad' && row.verdict === 'gap' && row.expected === 'deny' && row.fired.length === 0 && typeof row.sample.payload_hash === 'string')).toBe(true);
     expect(gaps.stdout).toContain('summary: total 6 · caught 0 · gaps 6 · false_positives 0');
     expect(m.readPublishedReport(outDir).report.summary.gaps).toBe(6);
+  });
+
+  it("S14k: a row INCONSISTENT with its sample's kind — a good sample judged `gap` (codex round 4: good + expected deny + empty fired + gap, the shape S14h used to bless), a bad one `false_positive`, `expected` missing or off its kind, `fired` disagreeing with the verdict — and a report whose `degraded` is absent or not null/facet-only, or whose `rule_coverage` is null or malformed, is refused by name before publication; `rule_coverage` ABSENT still passes", async () => {
+    const m = await mod();
+    expect([...m.ENGINE_DEGRADED_MODES]).toEqual(['facet-only']);
+    const { samples } = readSamples(); // all good
+    const good = samples[0]!;
+    const bad = { ...samples[1]!, kind: 'bad' as const };
+    const staged = [good, bad];
+    const ref = (x: Sample) => ({ id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type });
+    /** A result row as the engine would print it — any shape, so the malformed ones type too. */
+    type Row = Record<string, unknown> & { verdict?: string };
+    const goodCaught: Row = { sample: ref(good), expected: 'allow', fired: [], verdict: 'caught' };
+    const badCaught: Row = { sample: ref(bad), expected: 'deny', fired: ['DOC-1'], verdict: 'caught' };
+    const summaryOf = (rows: Row[]) => ({
+      total: rows.length,
+      caught: rows.filter((r) => r.verdict === 'caught').length,
+      gaps: rows.filter((r) => r.verdict === 'gap').length,
+      false_positives: rows.filter((r) => r.verdict === 'false_positive').length,
+    });
+    const report = (rows: Row[], top: Record<string, unknown> = {}): Record<string, unknown> => ({ results: rows, summary: summaryOf(rows), degraded: null, ...top });
+    // The four CONSISTENT shapes pass: good caught (nothing fired), bad caught (a rule fired), good
+    // false_positive (a rule fired), bad gap (nothing fired — with the engine's `nearest_rules`).
+    expect(m.verifyEngineReport(report([goodCaught, badCaught]), staged)).toBeNull();
+    expect(m.verifyEngineReport(report([{ ...goodCaught, fired: ['DOC-1'], verdict: 'false_positive' }, { ...badCaught, fired: [], verdict: 'gap', nearest_rules: [] }]), staged)).toBeNull();
+    // Every impossible / inconsistent row, refused by name.
+    const rowRefusals: [string, Row[], RegExp][] = [
+      ['good + expected deny + empty fired + gap (codex round 4)', [{ ...goodCaught, expected: 'deny', verdict: 'gap' }, badCaught], /^results\[0\] \(alpha@[0-9a-f]{12}\) carries expected "deny" but a good sample expects "allow" \(the engine derives `expected` from `kind`\)$/],
+      ['good judged gap (expected right)', [{ ...goodCaught, verdict: 'gap' }, badCaught], /^results\[0\] \(alpha@[0-9a-f]{12}\) is a good sample with verdict "gap" — impossible: a gap is a BAD behavior nothing caught \(a good sample is caught or false_positive\)$/],
+      ['bad judged false_positive', [goodCaught, { ...badCaught, verdict: 'false_positive' }], /^results\[1\] \(alpha@[0-9a-f]{12}\) is a bad sample with verdict "false_positive" — impossible: a false positive is a GOOD behavior a rule denied \(a bad sample is caught or gap\)$/],
+      ['expected missing', [{ sample: ref(good), fired: [], verdict: 'caught' }, badCaught], /^results\[0\] \(alpha@[0-9a-f]{12}\) carries expected undefined but a good sample expects "allow"/],
+      ['expected off its kind (bad ⇒ allow)', [goodCaught, { ...badCaught, expected: 'allow' }], /^results\[1\] \(alpha@[0-9a-f]{12}\) carries expected "allow" but a bad sample expects "deny"/],
+      ['fired non-empty on good caught', [{ ...goodCaught, fired: ['DOC-1'] }, badCaught], /^results\[0\] \(alpha@[0-9a-f]{12}\) says nothing blocking fired \(good ⇒ caught\) but `fired` names \["DOC-1"\] — deny-dominates: the verdict and the fired set must agree$/],
+      ['fired empty on bad caught', [goodCaught, { ...badCaught, fired: [] }], /^results\[1\] \(alpha@[0-9a-f]{12}\) says a blocking rule fired \(bad ⇒ caught\) but `fired` is empty — deny-dominates: the verdict and the fired set must agree$/],
+      ['fired non-empty on bad gap', [goodCaught, { ...badCaught, verdict: 'gap' }], /^results\[1\] \(alpha@[0-9a-f]{12}\) says nothing blocking fired \(bad ⇒ gap\) but `fired` names \["DOC-1"\]/],
+      ['fired empty on good false_positive', [{ ...goodCaught, verdict: 'false_positive' }, badCaught], /^results\[0\] \(alpha@[0-9a-f]{12}\) says a blocking rule fired \(good ⇒ false_positive\) but `fired` is empty/],
+    ];
+    for (const [label, rows, re] of rowRefusals) expect(m.verifyEngineReport(report(rows), staged), label).toMatch(re);
+    // Report-level wire fields: `degraded` is ALWAYS serialized by the engine — absent is malformed.
+    const okRows = [goodCaught, badCaught];
+    const withoutDegraded = report(okRows);
+    delete withoutDegraded['degraded'];
+    expect(m.verifyEngineReport(withoutDegraded, staged)).toBe('the engine report carries no `degraded` field (the wire shape always serializes it: null for full fidelity, "facet-only" when gap hints fell back to keyword matching)');
+    expect(m.verifyEngineReport(report(okRows, { degraded: 'facet-only' }), staged)).toBeNull();
+    for (const wrong of [true, false, 'yes', 0, {}]) {
+      expect(m.verifyEngineReport(report(okRows, { degraded: wrong }), staged), JSON.stringify(wrong)).toBe(`the engine report's \`degraded\` is ${JSON.stringify(wrong)}, not null or one of facet-only`);
+    }
+    // `rule_coverage`: absent passes (an older engine); present must be well-formed — null is malformed.
+    expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 1, unexercised: [] } }), staged)).toBeNull();
+    expect(m.verifyEngineReport(report(okRows, { rule_coverage: { exercised: 0, unexercised: [{ rule_id: 'DOC-1', steering_type: 'architecture' }] } }), staged)).toBeNull();
+    const coverageRefusals: [unknown, RegExp][] = [
+      [null, /^the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null — an engine predating core #394 omits the field \(recorded as such\); a present field must be a well-formed \{ exercised, unexercised\[\] \}, never null$/],
+      [[], /malformed: expected an object \{ exercised, unexercised\[\] \}, got \[\]/],
+      [{ exercised: '3', unexercised: [] }, /malformed: exercised "3" is not a non-negative integer/],
+      [{ exercised: -1, unexercised: [] }, /malformed: exercised -1 is not a non-negative integer/],
+      [{ exercised: 1 }, /malformed: unexercised undefined is not an array/],
+      [{ exercised: 1, unexercised: [{ steering_type: 'architecture' }] }, /malformed: unexercised\[0\] carries no string rule_id \(got \{"steering_type":"architecture"\}\)/],
+      [{ exercised: 1, unexercised: [{ rule_id: 'DOC-1', steering_type: 'vibes' }] }, /malformed: unexercised\[0\] \(DOC-1\) steering_type "vibes" is not one of architecture\|development\|security\|testing\|operations\|compliance\|design-ux/],
+    ];
+    for (const [rc, re] of coverageRefusals) expect(m.verifyEngineReport(report(okRows, { rule_coverage: rc }), staged), JSON.stringify(rc)).toMatch(re);
+
+    // Through the CLI — nothing published, the refusal named: codex round 4's exact report (good
+    // samples with expected deny, empty fired, verdict gap — the shape S14h used to bless as a valid
+    // all-gap run), `rule_coverage: null` (which then crashed the summary print AFTER publication),
+    // a report without `degraded`, and a boolean `degraded`.
+    const spawnRefusals: [string, Parameters<typeof okEngine>[0], RegExp][] = [
+      [
+        'good + deny + gap',
+        { rowsJs: 'const results = samples.map((x) => ({ sample: { id: x.id, description: x.description, kind: x.kind, steering_type: x.steering_type }, expected: "deny", fired: [], verdict: "gap" }));' },
+        /results\[0\] \(alpha@[0-9a-f]{12}\) carries expected "deny" but a good sample expects "allow"/,
+      ],
+      ['rule_coverage null', { coverageJs: ', rule_coverage: null' }, /the engine report's `rule_coverage` is malformed: expected an object \{ exercised, unexercised\[\] \}, got null/],
+      ['degraded absent', { degradedJs: '' }, /the engine report carries no `degraded` field/],
+      ['degraded boolean', { degradedJs: ', degraded: true' }, /the engine report's `degraded` is true, not null or one of facet-only/],
+    ];
+    for (const [label, opts, re] of spawnRefusals) {
+      okEngine(opts);
+      const r = runWithPath();
+      expect(r.status, label).toBe(1);
+      expect(r.stderr, label).toMatch(/run: TOOL FAILURE \(wicked-core 9\.9\.9-fake\) — /);
+      expect(r.stderr, label).toMatch(re);
+      expect(existsSync(join(outDir, 'report.json')), label).toBe(false);
+      expect(existsSync(join(outDir, 'report.meta.json')), label).toBe(false);
+    }
+    // `degraded: null` (full fidelity) with `rule_coverage` ABSENT: published, and the summary print
+    // says "not reported" instead of crashing.
+    okEngine({ degradedJs: ', degraded: null', ruleCoverage: false });
+    const r = runWithPath();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('summary: total 6 · caught 6 · gaps 0 · false_positives 0 · degraded null');
+    expect(r.stdout).toContain('rule_coverage: not reported by this engine (predates core #394)');
+    expect((JSON.parse(readFileSync(join(outDir, 'report.json'), 'utf8')) as Report).degraded).toBeNull();
   });
 
   it('S14e: report.json + report.meta.json are ONE verifiable generation — an interruption between the two renames (report renamed, meta not) is refused on read by name, an edited meta generation too', async () => {

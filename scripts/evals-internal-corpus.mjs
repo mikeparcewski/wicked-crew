@@ -57,6 +57,15 @@
  *     pin recorded from `rev-list --count` (a field `pin_hash` deliberately does not cover: it is
  *     derived, and the real count comes from git — a mismatch is a DriftError naming both numbers,
  *     never a smaller sample set published as the pin's).
+ *   - `check` (and every mode that derives): a checkout carrying git REPLACEMENT refs
+ *     (`refs/replace/*`, `replaceRefs`) is refused by name (`replace-refs-present`). A replacement
+ *     makes git read another object wherever a sha is named: a window commit's message and tree
+ *     can be swapped for other content while its parents, both tag shas and `rev-list --count`
+ *     stay exactly the pin's — derived actions change under the unchanged pin identity. Belt and
+ *     braces: EVERY git the script runs is replacement-blind (`--no-replace-objects` on the command
+ *     line AND `GIT_NO_REPLACE_OBJECTS=1` in the child env — `gitRaw`), so even a checkout that
+ *     slipped past the refusal derives from the immutable objects; a pin must be derivable from the
+ *     immutable history alone.
  *   - `materialize`: works only on direct children of the REALPATH of `<dir>`; an existing entry
  *     that is a symlink, or resolves outside that root, is refused before anything is removed or
  *     extracted; the transient archive lives in a private mkdtemp dir, never at a predictable name.
@@ -64,10 +73,17 @@
  *     materializations never interleave). Every repo is extracted AND verified into a private
  *     staging dir beside its destination (`.<repo>@<tag>.staging-<generation>`); only when EVERY
  *     repo verified are the trees swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
- *     staging → destination, `.prev` removed) and the receipt published. Any failure before the
- *     swap removes the staging dirs and leaves the previous trees AND `materialized.json` exactly
- *     as they were; a receipt that describes a tree which is no longer there is removed, so a
- *     receipt never outlives the output it describes.
+ *     staging → destination) and the receipt published; ONLY THEN are the `.prev` backups removed
+ *     — every backup is kept until the receipt is on disk. Any failure before the swap removes the
+ *     staging dirs and leaves the previous trees AND `materialized.json` exactly as they were. Any
+ *     failure DURING the swap or the receipt write rolls the swap back (`rollbackSwap`: each
+ *     `.prev` restored to its destination, partial destinations and staging removed, a torn
+ *     receipt tmp removed) so the destinations are the previous trees again, byte for byte, and
+ *     the previous receipt still describes them; if the rollback itself fails, the receipt is
+ *     REMOVED (no receipt may describe a damaged tree) and the error names both faults. A receipt
+ *     that describes a tree which is no longer there is removed, so a receipt never outlives the
+ *     output it describes. Test-only fault points (`EVALS_CORPUS_FAULT`, honoured under vitest /
+ *     NODE_ENV=test only) prove the rollback at the n-th swap, the receipt write and the rollback.
  *     The extracted tree must EQUAL the committed tree: the operator's global/system git
  *     attributes are pinned away for the archive (`-c core.attributesFile=<empty file>`,
  *     `GIT_ATTR_NOSYSTEM=1`, never `--worktree-attributes`), and every `git ls-tree -r -z` entry is
@@ -96,10 +112,18 @@
  *     no duplicate, no extra, none missing), every row with a `sample.id`, a `verdict` from the
  *     engine's set (`ENGINE_VERDICTS`) and a `fired` array of rule ids, echoing its staged
  *     sample's description/kind/steering_type, and a `summary` that IS the rows' tally (total =
- *     rows; caught/gaps/false_positives = the verdict counts). Anything else is a named tool
- *     failure and nothing is published — an empty or partial report is never recorded as an
- *     evaluation of the full corpus. A valid all-gap report passes: gaps are findings.
- *     Every row is then stamped with its staged sample's `payload_hash`.
+ *     rows; caught/gaps/false_positives = the verdict counts). Every row must also be CONSISTENT
+ *     with its sample's kind (evals.rs `evaluate_sample`): `expected` = deny for a bad sample /
+ *     allow for a good one; a good sample is `caught` or `false_positive`, never `gap` (a gap is a
+ *     BAD behavior nothing caught); a bad sample is `caught` or `gap`, never `false_positive`; and
+ *     `fired` is non-empty exactly when a blocking verdict fired (caught-on-bad,
+ *     false_positive-on-good) — deny-dominates, the verdict and the fired set agree. The report's
+ *     `degraded` must be PRESENT (null, or `facet-only`); `rule_coverage` is either ABSENT (an
+ *     engine predating core #394 — printed as such) or a well-formed `{ exercised, unexercised[]
+ *     }` — `null` is malformed and refused before publication. Anything else is a named tool
+ *     failure and nothing is published — an empty, partial or impossible report is never recorded
+ *     as an evaluation of the full corpus. A valid all-gap report (BAD samples nothing caught)
+ *     passes: gaps are findings. Every row is then stamped with its staged sample's `payload_hash`.
  *   - `run` publishes report.json + report.meta.json as ONE verifiable generation under a
  *     `.report.lock`: both carry the `generation`, the meta carries `report_sha256` over the
  *     published report bytes, and `readPublishedReport()` refuses a pair that does not verify (a
@@ -179,6 +203,12 @@ export const MATERIALIZE_RECEIPT = 'materialized.json';
 /** The engine's verdict vocabulary (evals.rs `Verdict`; api-types `GovernanceEvalResult.verdict`)
  *  — a report row carrying anything else is refused, never published. */
 export const ENGINE_VERDICTS = Object.freeze(['caught', 'gap', 'false_positive']);
+/** The engine's `degraded` vocabulary (evals.rs `DEGRADED_FACET_ONLY`; api-types
+ *  `GovernanceEvalReport.degraded: 'facet-only' | null`) — the key is ALWAYS serialized by the
+ *  engine (an `Option` without `skip_serializing_if`), so an absent key is a malformed report. */
+export const ENGINE_DEGRADED_MODES = Object.freeze(['facet-only']);
+/** The TEST-ONLY fault hook (see `injectedFault`): `EVALS_CORPUS_FAULT=<point>[,<point>…]`. */
+export const FAULT_ENV = 'EVALS_CORPUS_FAULT';
 /** verdict → the `summary` field that counts it (the engine's roll-up spelling). */
 const SUMMARY_FIELD_OF_VERDICT = Object.freeze({ caught: 'caught', gap: 'gaps', false_positive: 'false_positives' });
 /** What `materialize` pins for every `git archive` call (recorded in the receipt). */
@@ -352,14 +382,39 @@ function git(cwd, args, opts = {}) {
   return gitRaw(cwd, args, opts).trimEnd();
 }
 
-/** `git` output VERBATIM — for NUL-delimited listings, where a trailing byte is data, never noise. */
+/**
+ * `git` output VERBATIM — for NUL-delimited listings, where a trailing byte is data, never noise.
+ * EVERY git the script runs goes through here, REPLACEMENT-BLIND: `--no-replace-objects` on the
+ * command line AND `GIT_NO_REPLACE_OBJECTS=1` in the child env (either alone suffices — both, so
+ * neither a wrapper nor an alias can drop one). A `refs/replace/<sha>` ref makes git read another
+ * object wherever `<sha>` is named: a window commit's message and tree can be swapped for other
+ * content while its parents, the tag shas and `rev-list --count` stay exactly the pin's. The pin,
+ * the checks, the derivation and the archive must see the immutable objects only (`checkPin`
+ * additionally REFUSES a checkout that carries any such ref — `replaceRefs`).
+ */
 function gitRaw(cwd, args, opts = {}) {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  const { env: baseEnv = process.env, ...rest } = opts;
+  return execFileSync('git', ['-C', cwd, '--no-replace-objects', ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: GIT_MAX_BUFFER,
-    ...opts,
+    env: { ...baseEnv, GIT_NO_REPLACE_OBJECTS: '1' },
+    ...rest,
   });
+}
+
+/**
+ * The TEST-ONLY fault hook: `EVALS_CORPUS_FAULT=<point>[,<point>…]` names points at which the
+ * named step throws — `swap:<n>` (the n-th repo's staging → destination rename, after its
+ * destination was moved to `.prev`), `receipt` (the receipt write, after every swap), `rollback`
+ * (the rollback itself — the double fault). Honoured ONLY under vitest / NODE_ENV=test
+ * (`process.env.VITEST` = "true" or NODE_ENV = "test"); inert everywhere else, so an operator's
+ * stray variable can never fault a real materialization.
+ */
+function injectedFault(point) {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['VITEST'] !== 'true') return;
+  const armed = (process.env[FAULT_ENV] ?? '').split(',').map((s) => s.trim());
+  if (armed.includes(point)) throw new Error(`injected fault at ${point} (${FAULT_ENV}, test hook)`);
 }
 
 function sha256Hex(bytes) {
@@ -425,6 +480,17 @@ export function shallowEvidence(checkout) {
   const shallowFile = join(resolve(checkout, git(checkout, ['rev-parse', '--git-dir'])), 'shallow');
   if (existsSync(shallowFile)) evidence.push(`${shallowFile} exists`);
   return evidence;
+}
+
+/**
+ * The checkout's git REPLACEMENT refs (`refs/replace/<sha>`), as the replaced shas' first
+ * `SHORT_SHA_LEN` chars; empty = none. A ref LISTING (`for-each-ref`), so `--no-replace-objects`
+ * does not hide them — it hides only their effect. Any such ref is a refusal in `pin` and `check`:
+ * a pin must be derivable from the immutable history alone (see `gitRaw`).
+ */
+export function replaceRefs(checkout) {
+  const out = git(checkout, ['for-each-ref', '--format=%(refname)', 'refs/replace/']);
+  return out === '' ? [] : out.split('\n').map((ref) => ref.replace(/^refs\/replace\//, '').slice(0, SHORT_SHA_LEN));
 }
 
 /** Resolve a tag to its COMMIT sha (annotated tags peel), or null when the tag does not exist. */
@@ -579,6 +645,14 @@ export function buildPin(pinPath, sourceRoot) {
     if (shallow.length > 0) {
       throw new UsageError(`${c.repo}: refusing to pin from a checkout with INCOMPLETE history (${shallow.join('; ')}) — unshallow it (git fetch --unshallow) or use a full clone`);
     }
+    // A replacement ref rewrites what a sha resolves to without moving any tag or count: the pin
+    // must be derivable from the immutable history alone — refuse before resolving.
+    const replaced = replaceRefs(checkout);
+    if (replaced.length > 0) {
+      throw new UsageError(
+        `${c.repo}: refusing to pin from a checkout carrying ${replaced.length} git replacement ref(s) (refs/replace/ for ${replaced.join(', ')}) — a pin must be derivable from the immutable history alone; git replace -d <sha> (or use a clean clone) and retry`,
+      );
+    }
     const table = tagTable(checkout);
     if (!table.has(c.tag)) throw new UsageError(`${c.repo}: tag ${c.tag} does not exist in ${checkout}`);
     const { tagDate, from, notes } = resolveWindow(checkout, c.tag, rule, table);
@@ -606,10 +680,11 @@ export function buildPin(pinPath, sourceRoot) {
 
 /**
  * `check`: does every pinned tag (and window-from tag) still resolve to its recorded sha, over a
- * COMPLETE history? Pure over the git facts — returns per-repo findings so the CLI prints and the
- * tests assert.
- *   drift[] — { repo, reason: 'tag' | 'from' | 'missing' | 'shallow', detail }
- *   ok[]    — repos whose two shas both match and whose history is not shallow
+ * COMPLETE, UNREPLACED history? Pure over the git facts — returns per-repo findings so the CLI
+ * prints and the tests assert.
+ *   drift[] — { repo, reason: 'tag' | 'from' | 'missing' | 'shallow' | 'replace-refs-present', detail }
+ *   ok[]    — repos whose two shas both match, whose history is not shallow and which carry no
+ *             `refs/replace/*` (a replacement changes derived actions under unchanged shas + counts)
  */
 export function checkPin(pin, sourceRoot) {
   const drift = [];
@@ -632,6 +707,18 @@ export function checkPin(pin, sourceRoot) {
         repo: r.repo,
         reason: 'shallow',
         detail: `the checkout has INCOMPLETE history (${shallow.join('; ')}) — a pinned window cannot be walked over a shallow clone; unshallow it (git fetch --unshallow) or use a full clone`,
+      });
+    }
+    // Replacement refs: both shas and the count can match the pin EXACTLY while a window commit's
+    // message and tree read as something else (every git call here is replacement-blind, but a
+    // pin must be derivable from the immutable history alone — a checkout carrying them is refused).
+    const replaced = replaceRefs(checkout);
+    if (replaced.length > 0) {
+      clean = false;
+      drift.push({
+        repo: r.repo,
+        reason: 'replace-refs-present',
+        detail: `the checkout carries ${replaced.length} git replacement ref(s) (refs/replace/ for ${replaced.join(', ')}) — a replacement rewrites what a window commit says without moving any tag or count; a pin must be derivable from the immutable history alone: git replace -d <sha> (or use a clean clone) and retry`,
       });
     }
     const tagSha = resolveTag(checkout, r.tag);
@@ -715,12 +802,19 @@ function containedChild(root, name) {
  * extracted AND verified into a private staging dir beside its destination
  * (`.<repo>@<tag>.staging-<generation>`); the previous trees are not touched until EVERY repo has
  * verified. Then each tree is swapped into place (old → `.<repo>@<tag>.prev-<generation>`,
- * staging → destination, `.prev` removed) and the receipt is published atomically, stamped with the
- * same `generation`. Any failure before the swap removes the staging dirs and leaves the previous
- * trees AND `materialized.json` exactly as they were — an old success receipt never sits beside
- * output the failure damaged, because the failure never reached the output. If a receipt describes
- * a tree that is no longer there (a first run never had one; an operator removed one by hand), it
- * is removed: a receipt never outlives the trees it describes.
+ * staging → destination) and the receipt is published atomically, stamped with the same
+ * `generation`; ONLY THEN are the `.prev` backups removed — every backup lives until the receipt is
+ * on disk. Any failure before the swap removes the staging dirs and leaves the previous trees AND
+ * `materialized.json` exactly as they were — an old success receipt never sits beside output the
+ * failure damaged, because the failure never reached the output. Any failure DURING the swap or
+ * the receipt write is rolled back (`rollbackSwap`, in reverse order: a swapped-in tree is removed
+ * and its `.prev` restored, a moved-away destination is restored, staging and a torn receipt tmp
+ * are removed) — the destinations are the previous trees again, byte for byte, and the previous
+ * receipt still describes exactly them; the original error is rethrown. If the rollback itself
+ * fails, the receipt is REMOVED — no receipt may describe a damaged tree — and a RefusalError names
+ * BOTH faults and the `.staging-`/`.prev-<generation>` entries left for the operator. If a receipt
+ * describes a tree that is no longer there (a first run never had one; an operator removed one by
+ * hand), it is removed: a receipt never outlives the trees it describes.
  *
  * Fidelity: the extracted tree must EQUAL the committed tree. `git archive` honors
  * `export-ignore` / `export-subst` attributes from three sources. The operator's global/system
@@ -785,18 +879,67 @@ export function materialize(pin, pinPath, sourceRoot, outDir) {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
-    // Phase 2 — every tree verified: swap each into place, then publish the receipt that
-    // describes exactly these trees.
+    // Phase 2 — every tree verified: swap each into place, keeping EVERY previous tree as
+    // `.prev-<generation>` until the receipt is published; then publish the receipt that describes
+    // exactly these trees; only then drop the backups. Any failure in here rolls the swap back —
+    // and if the rollback itself fails, no receipt may describe what is left.
     const receipt = { pin_hash: pin.pin_hash, generation, materialized_at: new Date().toISOString(), attributes: ARCHIVE_ATTRIBUTES_NOTE, repos: [] };
-    for (const p of plan) {
-      if (existsSync(p.dest)) renameSync(p.dest, p.prev);
-      renameSync(p.staging, p.dest);
-      rmSync(p.prev, { recursive: true, force: true });
-      receipt.repos.push({ repo: p.r.repo, tag: p.r.tag, commit_sha: p.r.commit_sha, tree_sha: p.tree.tree_sha, entries: p.tree.entries, path: p.dest });
+    /** Per repo, how far its swap got — what `rollbackSwap` undoes:
+     *  `{ hadPrev, step }` with step 0 = nothing moved · 1 = dest moved to .prev · 2 = staging moved to dest. */
+    const progress = new Map();
+    try {
+      for (const [i, p] of plan.entries()) {
+        const state = { hadPrev: existsSync(p.dest), step: 0 };
+        progress.set(p, state);
+        if (state.hadPrev) renameSync(p.dest, p.prev);
+        state.step = 1;
+        injectedFault(`swap:${i + 1}`);
+        renameSync(p.staging, p.dest);
+        state.step = 2;
+        receipt.repos.push({ repo: p.r.repo, tag: p.r.tag, commit_sha: p.r.commit_sha, tree_sha: p.tree.tree_sha, entries: p.tree.entries, path: p.dest });
+      }
+      injectedFault('receipt');
+      publishJson(receiptPath, receipt, generation);
+    } catch (err) {
+      const why = (e) => (e instanceof Error ? e.message : String(e));
+      try {
+        injectedFault('rollback');
+        rollbackSwap(plan, progress);
+        // A receipt write that tore between its tmp write and its rename left the tmp beside it.
+        rmSync(`${receiptPath}.${generation}.tmp`, { force: true });
+        // The destinations are the previous trees again; the previous receipt (if any) describes
+        // them — unless it describes a tree that was never there.
+        dropReceiptWithoutTrees(receiptPath);
+      } catch (rollbackErr) {
+        rmSync(receiptPath, { force: true });
+        throw new RefusalError(
+          `materialize failed while swapping the verified trees into ${root} (${why(err)}) AND the rollback failed (${why(rollbackErr)}) — ` +
+            `the trees there may be damaged: the receipt was removed so nothing describes them; inspect the .staging-${generation} / .prev-${generation} entries by hand before re-running`,
+        );
+      }
+      throw err;
     }
-    publishJson(receiptPath, receipt, generation);
+    // Published: the receipt describes the trees now in place — the backups may go.
+    for (const p of plan) rmSync(p.prev, { recursive: true, force: true });
     return receipt;
   });
+}
+
+/**
+ * Undo a partial swap (materialize Phase 2), newest repo first, from what `progress` recorded per
+ * repo: a swapped-in tree (step 2) is removed and its `.prev` restored to the destination; a
+ * destination moved to `.prev` whose staging never landed (step 1) is restored and the staging
+ * removed; a repo the swap never reached loses only its staging. A repo without a previous tree
+ * (`hadPrev` false — a first run) ends with no destination at all. Throws on the first fs failure —
+ * the caller then removes the receipt and names both faults.
+ */
+function rollbackSwap(plan, progress) {
+  for (const p of [...plan].reverse()) {
+    const state = progress.get(p) ?? { hadPrev: false, step: 0 };
+    if (state.step === 2) rmSync(p.dest, { recursive: true, force: true });
+    else rmSync(p.staging, { recursive: true, force: true });
+    if (state.step >= 1 && state.hadPrev) renameSync(p.prev, p.dest);
+  }
 }
 
 /**
@@ -1308,11 +1451,22 @@ function rulesIdentityFrom(listed, coreBin, seed) {
  *     samples is the incomplete case, not a clean run);
  *   - every row carries a `verdict` from the engine's set (`ENGINE_VERDICTS`) and a `fired` array
  *     of rule ids, and echoes its staged sample's description/kind/steering_type;
+ *   - every row is CONSISTENT with its sample's kind, as evals.rs `evaluate_sample` derives it:
+ *     `expected` = `deny` for a bad sample, `allow` for a good one; a good sample is `caught` or
+ *     `false_positive` — never `gap` (a gap is a BAD behavior nothing caught); a bad sample is
+ *     `caught` or `gap` — never `false_positive` (a good behavior a rule denied); `fired` is
+ *     non-empty exactly when a BLOCKING verdict fired (caught-on-bad, false_positive-on-good) —
+ *     deny-dominates: the verdict and the fired set must agree;
  *   - the summary IS the rows' tally: `total` = rows, `caught`/`gaps`/`false_positives` = the
- *     verdict counts.
+ *     verdict counts;
+ *   - `degraded` is PRESENT (the engine always serializes it: null, or one of
+ *     `ENGINE_DEGRADED_MODES`); `rule_coverage` is either ABSENT (an engine predating core #394,
+ *     printed as such) or a well-formed `{ exercised: int ≥ 0, unexercised: [{ rule_id,
+ *     steering_type }] }` — `null` (what crashed the summary print after publication) is malformed.
  * Each row then gets its staged sample's `payload_hash` (`eval-sample.js` `samplePayloadHash` over
  * the full payload incl. signals — what makes two runs comparable, `eval-compare.ts`). A valid
- * all-gap report passes — gaps are findings. Returns the failure text (a named refusal), or null.
+ * all-gap report — BAD samples nothing caught — passes: gaps are findings. Returns the failure text
+ * (a named refusal), or null.
  */
 export function verifyEngineReport(report, samples) {
   if (report === null || typeof report !== 'object' || Array.isArray(report) || !Array.isArray(report.results)) {
@@ -1340,6 +1494,24 @@ export function verifyEngineReport(report, samples) {
     if (!Array.isArray(row.fired) || row.fired.some((f) => typeof f !== 'string')) {
       return `results[${i}] (${ref.id}) carries no \`fired\` array of rule ids (got ${JSON.stringify(row.fired)})`;
     }
+    // Consistency with the sample's kind — what evals.rs `evaluate_sample` derives, restated.
+    const expectedOfKind = s.kind === 'bad' ? 'deny' : 'allow';
+    if (row.expected !== expectedOfKind) {
+      return `results[${i}] (${ref.id}) carries expected ${JSON.stringify(row.expected)} but a ${s.kind} sample expects ${JSON.stringify(expectedOfKind)} (the engine derives \`expected\` from \`kind\`)`;
+    }
+    const impossible = s.kind === 'good' ? 'gap' : 'false_positive';
+    if (row.verdict === impossible) {
+      return (
+        `results[${i}] (${ref.id}) is a ${s.kind} sample with verdict ${JSON.stringify(row.verdict)} — impossible: ` +
+        (s.kind === 'good' ? 'a gap is a BAD behavior nothing caught (a good sample is caught or false_positive)' : 'a false positive is a GOOD behavior a rule denied (a bad sample is caught or gap)')
+      );
+    }
+    const blocking = row.verdict === (s.kind === 'bad' ? 'caught' : 'false_positive');
+    if (row.fired.length > 0 !== blocking) {
+      return blocking
+        ? `results[${i}] (${ref.id}) says a blocking rule fired (${s.kind} ⇒ ${row.verdict}) but \`fired\` is empty — deny-dominates: the verdict and the fired set must agree`
+        : `results[${i}] (${ref.id}) says nothing blocking fired (${s.kind} ⇒ ${row.verdict}) but \`fired\` names ${JSON.stringify(row.fired)} — deny-dominates: the verdict and the fired set must agree`;
+    }
     counts[SUMMARY_FIELD_OF_VERDICT[row.verdict]] += 1;
     ref.payload_hash = samplePayloadHash(s);
   }
@@ -1359,6 +1531,39 @@ export function verifyEngineReport(report, samples) {
       `the engine report's summary does not reconcile with its rows: ${off.map(([k, v]) => `${k} ${JSON.stringify(summary[k])} != ${v}`).join(', ')} ` +
       `(the rows tally total ${expected.total} · caught ${expected.caught} · gaps ${expected.gaps} · false_positives ${expected.false_positives})`
     );
+  }
+  // The wire shape's report-level fields: `degraded` is ALWAYS serialized by the engine (an absent
+  // key is not "not degraded" — it is not the engine's report); `rule_coverage` is optional but,
+  // when present, must be the object — `null` crashed the summary print AFTER publication.
+  if (!('degraded' in report)) {
+    return 'the engine report carries no `degraded` field (the wire shape always serializes it: null for full fidelity, "facet-only" when gap hints fell back to keyword matching)';
+  }
+  if (report.degraded !== null && !ENGINE_DEGRADED_MODES.includes(report.degraded)) {
+    return `the engine report's \`degraded\` is ${JSON.stringify(report.degraded)}, not null or one of ${ENGINE_DEGRADED_MODES.join('|')}`;
+  }
+  if (report.rule_coverage !== undefined) {
+    const problem = ruleCoverageProblem(report.rule_coverage);
+    if (problem !== null) {
+      return `the engine report's \`rule_coverage\` is malformed: ${problem} — an engine predating core #394 omits the field (recorded as such); a present field must be a well-formed { exercised, unexercised[] }, never null`;
+    }
+  }
+  return null;
+}
+
+/** Why `rc` is not a well-formed `rule_coverage` (api-types `GovernanceEvalRuleCoverage`:
+ *  `exercised` a non-negative integer, `unexercised` an array of `{ rule_id, steering_type }` with
+ *  a known steering type), or null when it is. */
+function ruleCoverageProblem(rc) {
+  if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) return `expected an object { exercised, unexercised[] }, got ${JSON.stringify(rc)}`;
+  if (!Number.isInteger(rc.exercised) || rc.exercised < 0) return `exercised ${JSON.stringify(rc.exercised)} is not a non-negative integer`;
+  if (!Array.isArray(rc.unexercised)) return `unexercised ${JSON.stringify(rc.unexercised)} is not an array`;
+  for (const [i, u] of rc.unexercised.entries()) {
+    if (u === null || typeof u !== 'object' || Array.isArray(u) || typeof u.rule_id !== 'string' || u.rule_id === '') {
+      return `unexercised[${i}] carries no string rule_id (got ${JSON.stringify(u)})`;
+    }
+    if (!STEERING_TYPES.includes(u.steering_type)) {
+      return `unexercised[${i}] (${u.rule_id}) steering_type ${JSON.stringify(u.steering_type)} is not one of ${STEERING_TYPES.join('|')}`;
+    }
   }
   return null;
 }

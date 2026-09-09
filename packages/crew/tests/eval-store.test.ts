@@ -172,7 +172,7 @@ describe('EvalRunStore — tolerant reads (one bad row never blanks the history)
       './x', // dot-segment
       'a.b', // any `.` — an id never carries one (a `.json` suffix would double-extend)
       'run-ok.json', // the detail file's own name
-      'run-ok ', // NUL — a C-string truncation would resolve `run-ok`
+      'run-ok\0', // NUL (the `\0` escape — never a raw byte in source) — a C-string truncation would resolve `run-ok`
       'run ok', // whitespace
       '', // empty
     ];
