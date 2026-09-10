@@ -95,31 +95,49 @@ export const REPO_REFS_MAX = 8;
  *  filesystem path segment after sanitizing. */
 const REPO_REF = /^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$/;
 
-export type RepoRefsParse = { ok: true; refs: string[] } | { ok: false; error: string };
+/** A failed parse still carries `requested` — the refs AS THE CLIENT SPELLED them (best-effort:
+ *  non-strings stringified, capped), so the refusal can render exactly what was sent (Copilot, #506). */
+export type RepoRefsParse = { ok: true; refs: string[] } | { ok: false; error: string; requested: string[] };
+
+/** The raw spellings a body carried, for a refusal's `requested` — never used for matching. */
+function spelledRefs(body: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    const text = typeof v === 'string' ? v : JSON.stringify(v) ?? String(v);
+    if (out.length < REPO_REFS_MAX * 2) out.push(text.slice(0, 200));
+  };
+  if (body['repo_ref'] !== undefined && body['repo_ref'] !== null) push(body['repo_ref']);
+  if (body['repo_refs'] !== undefined && body['repo_refs'] !== null) {
+    if (Array.isArray(body['repo_refs'])) for (const v of body['repo_refs']) push(v);
+    else push(body['repo_refs']);
+  }
+  return out;
+}
 
 /**
  * Read `repo_ref` / `repo_refs` off a create body. Both may be present; the union is de-duplicated
  * in order. `{ok: true, refs: []}` when neither is present — the common case, nothing named.
  */
 export function parseRepoRefs(body: Record<string, unknown>): RepoRefsParse {
+  const fail = (error: string): RepoRefsParse => ({ ok: false, error, requested: spelledRefs(body) });
   const raw: unknown[] = [];
   if (body['repo_ref'] !== undefined && body['repo_ref'] !== null) raw.push(body['repo_ref']);
   if (body['repo_refs'] !== undefined && body['repo_refs'] !== null) {
-    if (!Array.isArray(body['repo_refs'])) return { ok: false, error: 'repo_refs must be an array of repository ids' };
+    if (!Array.isArray(body['repo_refs'])) return fail('repo_refs must be an array of repository ids');
     raw.push(...body['repo_refs']);
   }
   const refs: string[] = [];
   for (const entry of raw) {
-    if (typeof entry !== 'string') return { ok: false, error: 'repo_ref / repo_refs entries must be strings' };
+    if (typeof entry !== 'string') return fail('repo_ref / repo_refs entries must be strings');
     const ref = entry.trim();
     if (ref.length === 0) continue;
     if (!REPO_REF.test(ref)) {
-      return { ok: false, error: `repo_ref "${ref.slice(0, 40)}" is not a repository id, name, or directory name` };
+      return fail(`repo_ref "${ref.slice(0, 40)}" is not a repository id, name, or directory name`);
     }
     if (!refs.includes(ref)) refs.push(ref);
   }
   if (refs.length > REPO_REFS_MAX) {
-    return { ok: false, error: `a document may name at most ${REPO_REFS_MAX} repositories (${refs.length} given)` };
+    return fail(`a document may name at most ${REPO_REFS_MAX} repositories (${refs.length} given)`);
   }
   return { ok: true, refs };
 }

@@ -1060,12 +1060,29 @@ export async function startInteractiveDemoSubscriber(
           snapshotDirs.push(dest);
           snapshotted.push(repo);
           subjects.push({ name: repo.name, snapshotDir: dest });
-        } else {
-          // A demo's deliverable never lands inside the repo (the spec goes to the inbox), so even a
-          // dest-overlap degrades here instead of refusing: the app is still inspected live.
-          log(`[interactive-demo] ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — no snapshot for ${repo.repoRef}`);
-          subjects.push({ name: repo.name });
+          continue;
         }
+        if (snap.reason === 'dest-overlap') {
+          // FAIL CLOSED, exactly like the draft seam (Copilot on #506): the configured demo dir places
+          // this run's write root inside the live application repository (or the repo is registered
+          // at the inbox). The spec itself lands in the inbox, but `extraWriteRoots: [runDir]` would
+          // still hand the unbound worker write access INSIDE the live repo — so the launch is
+          // refused outright: sibling snapshots removed, no run, no ledger row. The status names the
+          // CONFIG problem; the thrown error dead-letters the frame, replayable once it is fixed.
+          removeSnapshots(snapshotDirs);
+          const message =
+            `Crew refused to author this demo: the configured demo directory (${demoDir}) overlaps the ` +
+            `application's repository (${repo.rootPath}), so launching would give the worker write access ` +
+            `inside the live repo. Point the crew demo directory outside every registered repository, then ` +
+            `replay the request.`;
+          emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+          log(`[interactive-demo] ${doc.documentId}: REFUSING launch — demo dir ${demoDir} overlaps repo ${repo.rootPath} (dest-overlap)`);
+          throw new Error(message);
+        }
+        // Any other failure degrades honestly: the subject is still NAMED, only its snapshot is
+        // missing, and the app is still inspected live.
+        log(`[interactive-demo] ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — no snapshot for ${repo.repoRef}`);
+        subjects.push({ name: repo.name });
       }
       const line = groundingNarration(decision, snapshotted, 'demo');
       if (line !== null) emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });

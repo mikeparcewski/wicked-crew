@@ -633,6 +633,53 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(fileExists(snap), 'the launch-scoped snapshot must not outlive the run').toBe(false);
   });
 
+  it('REFUSES the launch when the configured demo dir overlaps the app repository — fail closed, no run, no ledger row, snapshots swept (Copilot on #506)', async () => {
+    const bus = await import('wicked-bus');
+    // The repo is the sole member — and the demo dir is INSIDE it, so the run's write root would
+    // hand the worker write access inside the live repository.
+    const repoRoot = join(dir, 'app-repo');
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'app.ts'), 'export const app = 1;\n', 'utf8');
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-app' }],
+      listRepos: async () => [{ id: 'repo-app', root_path: repoRoot }],
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const demoDir = join(repoRoot, 'inbox');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir,
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('overlaps the application\'s repository'),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    expect(engine.launches.length, 'a refused launch must not start a run').toBe(0);
+    expect(sub!.ledger.has('checkout-demo'), 'a refused launch earns no ledger row — a replay must retry').toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(fileExists(join(demoDir, 'checkout-demo', 'repos'))).toBe(false);
+    // The error frame carries project_id like every other (F-045).
+    const error = probeEvents.find((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')!;
+    expect((error.payload as { project_id?: string }).project_id).toBe('proj-7');
+  });
+
   it('finalize is copy-THEN-emit: installs the spec into the doc workspace, then demo.requested, then complete', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();

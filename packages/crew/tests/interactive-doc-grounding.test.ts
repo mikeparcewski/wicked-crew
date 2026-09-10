@@ -41,14 +41,22 @@ describe('parseRepoRefs (the create grammar)', () => {
     expect(parseRepoRefs({ repo_ref: null, repo_refs: undefined })).toEqual({ ok: true, refs: [] });
   });
 
-  it('refuses non-string entries, a non-array repo_refs, junk spellings, and more than the cap', () => {
-    expect(parseRepoRefs({ repo_refs: 'x' }).ok).toBe(false);
-    expect(parseRepoRefs({ repo_refs: [1] }).ok).toBe(false);
-    expect(parseRepoRefs({ repo_ref: 'has space' }).ok).toBe(false);
+  it('refuses non-string entries, a non-array repo_refs, junk spellings, and more than the cap — carrying the refs AS SPELLED so the refusal can show them (Copilot, #506)', () => {
+    const nonArray = parseRepoRefs({ repo_refs: 'x' });
+    expect(nonArray).toEqual({ ok: false, error: 'repo_refs must be an array of repository ids', requested: ['x'] });
+    const nonString = parseRepoRefs({ repo_refs: [1] });
+    expect(nonString.ok).toBe(false);
+    if (!nonString.ok) expect(nonString.requested).toEqual(['1']);
+    const spaced = parseRepoRefs({ repo_ref: 'has space', repo_refs: ['ok-one'] });
+    expect(spaced.ok).toBe(false);
+    if (!spaced.ok) expect(spaced.requested).toEqual(['has space', 'ok-one']);
     expect(parseRepoRefs({ repo_ref: '../escape' }).ok).toBe(false);
     const many = parseRepoRefs({ repo_refs: Array.from({ length: REPO_REFS_MAX + 1 }, (_, i) => `r${i}`) });
     expect(many.ok).toBe(false);
-    if (!many.ok) expect(many.error).toContain(`at most ${REPO_REFS_MAX}`);
+    if (!many.ok) {
+      expect(many.error).toContain(`at most ${REPO_REFS_MAX}`);
+      expect(many.requested).toHaveLength(REPO_REFS_MAX + 1);
+    }
   });
 });
 

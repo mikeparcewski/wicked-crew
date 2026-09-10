@@ -171,7 +171,7 @@ export async function prepareDocCreate(
 
   const refs = parseRepoRefs(body);
   if (!refs.ok) {
-    return { ...passthrough, refusal: { error: refs.error, code: 'invalid_repo_ref', requested: [] } };
+    return { ...passthrough, refusal: { error: refs.error, code: 'invalid_repo_ref', requested: refs.requested } };
   }
   const repoRefs: string[] = [];
   if (refs.refs.length > 0) {

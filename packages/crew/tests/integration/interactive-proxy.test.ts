@@ -380,7 +380,9 @@ describe('interactive proxy — doc create interception (F-046)', () => {
   it('REFUSES junk refs before touching the project', async () => {
     const res = await post('p-a', { name: 'd', kind: 'source', brief: 'x', repo_refs: 'not-an-array' });
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { code: string }).code).toBe('invalid_repo_ref');
+    const body = (await res.json()) as { code: string; requested: string[] };
+    expect(body.code).toBe('invalid_repo_ref');
+    expect(body.requested).toEqual(['not-an-array']); // as the client spelled it
   }, 30_000);
 
   it('forwards a valid create with repo_ref STRIPPED and style INFERRED from the brief, and records the binding under the doc name the bridge answered with', async () => {
