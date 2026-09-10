@@ -131,7 +131,10 @@ mentioned only where a daemon release depends on them.
   stderrTail}]`, `skipped`, `passed`; the doc states the engine's contract exactly: checks run
   ONLY inside an OS write boundary with an isolated HOME/caches and `--ignore-scripts` installs,
   the floor FAILS when no boundary can be armed or a manifest cannot be read or trusted — probed
-  without following links — and only a repo with no manifest is a disclosed vacuous pass), plus
+  without following links — only a repo with no DETECTABLE check (no manifest, or a manifest with
+  no `typecheck`/`lint`/`test` script and no `Cargo.toml`) is a disclosed vacuous pass, and a check
+  process gets a MINIMAL environment — `PATH`, locale, `TERM`, `RUSTUP_HOME` and the isolation
+  overrides, never the daemon's tokens), plus
   `WorktreeChangedPath`, `RepoCheckRun` and the
   `GateEvidenceEvent` union — as `type` aliases, so they satisfy `CoreEvent`'s index signature and
   relay through the CoreEvent-typed broadcast seams (compile-time relay assertions in

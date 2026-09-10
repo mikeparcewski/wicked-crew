@@ -809,8 +809,10 @@ export interface DataUsedEvent {
  *   `evaluator` — the evaluator≠creator second pass;
  * - `worker_failure` — the CLI process failed; `substance` — no reviewable substance;
  *   `deliverables` — declared deliverables missing; `elicitation` — ACP elicitation ended;
- * - `worktree_guard` — an `executes_code: false` phase changed the worktree it was reviewing
- *   (wicked-core F-036, see {@link EvaluatorMutatedWorktreeEvent});
+ * - `worktree_guard` — a def-driven, agent-executed `executes_code: false` phase changed the
+ *   worktree it was reviewing (wicked-core F-036, see {@link EvaluatorMutatedWorktreeEvent}) — or
+ *   the guard could not re-verify it (no baseline persisted at dispatch, comparison unverifiable),
+ *   which denies fail-closed WITHOUT that event; `reason` names the cause;
  * - `repo_checks` — the repository's own checks failed in the worktree (wicked-core F-039, see
  *   {@link RepoChecksEvaluatedEvent}).
  * Open-ended (`string & {}`) so a newer engine's source parses in an older studio.
@@ -1032,16 +1034,21 @@ export interface WorktreeChangedPath {
 }
 
 /** wicked-core F-036 — an `executes_code: false` phase (an evaluator, a recon rung, a review) CHANGED
- *  the worktree it was working in. The engine snapshots the tree at dispatch and takes the FINAL
- *  snapshot after everything the phase owned has run (seat quiesced — its process group killed, a
- *  persistent session closed — judge rendered, repo checks done), for EVERY seat and carrier
- *  regardless of governance adapter. `changed` is EVERY path that differs, and every one DENIES the
- *  unit (its `gateEvaluated.denial.source` is `worktree_guard`): there are NO exemptions — not
- *  documentation, not a declared `required_deliverables` entry, not tool state (a phase whose
- *  deliverable must live in the tree is a code phase; the engine's own `tmp/` scratch is excluded
- *  from the snapshot by construction). `headMoved`: the run branch was committed/amended/reset. The
- *  event is emitted exactly when the unit is denied (`changed` non-empty and/or `headMoved`), so an
- *  operator always sees what an evaluator wrote. Evaluator ≠ creator is no longer a promise the
+ *  the worktree it was working in. Scope: the guard governs a DEF-DRIVEN, AGENT-executed
+ *  `executes_code: false` phase (`WorkUnit.worktree_guarded`, derived at plan time); Tool phases —
+ *  crew's `deliver-pr` included — and prose-planned runs are not guarded. The engine snapshots the
+ *  tree at dispatch and takes the FINAL snapshot after everything the phase owned has run (seat
+ *  quiesced — its process group killed, a persistent session closed — judge rendered, repo checks
+ *  done), for EVERY seat and carrier regardless of governance adapter. `changed` is EVERY path that
+ *  differs, and every one DENIES the unit (its `gateEvaluated.denial.source` is `worktree_guard`):
+ *  there are NO exemptions — not documentation, not a declared `required_deliverables` entry, not
+ *  tool state (a phase whose deliverable must live in the tree is a code phase; the engine's own
+ *  `tmp/` scratch is excluded from the snapshot by construction). `headMoved`: the run branch was
+ *  committed/amended/reset. The event is emitted exactly when a MUTATION denies the unit (`changed`
+ *  non-empty and/or `headMoved`), so an operator always sees what an evaluator wrote. A
+ *  `worktree_guard` denial can also come from the guard's fail-closed paths — no baseline persisted
+ *  at dispatch, or the comparison unverifiable — and those carry NO `evaluatorMutatedWorktree`
+ *  event: the gate's `denial.reason` names the cause. Evaluator ≠ creator is no longer a promise the
  *  seat keeps; it is a check.
  *
  *  `type` alias on purpose, not `interface`: only anonymous object types satisfy `CoreEvent`'s index
@@ -1071,8 +1078,9 @@ export interface RepoCheckRun {
   /** The process exit code; `null` when it produced none (timed out / could not spawn). */
   exitCode: number | null;
   timedOut: boolean;
-  /** The OS error when the command could not be started (binary not on PATH, …). */
-  spawnError?: string | null;
+  /** The OS error when the command could not be started (binary not on PATH, …); `null` otherwise
+   *  — the key is always present on the wire. */
+  spawnError: string | null;
   durationMs: number;
   /** The last 4 KiB of each stream — the evidence, verbatim. */
   stdoutTail: string;
@@ -1091,14 +1099,19 @@ export interface RepoCheckRun {
  *  The checks are repo-controlled code and run ONLY inside an OS write boundary (macOS
  *  `sandbox-exec` / Linux `bwrap`: writes confined to the worktree, the curated secret directories
  *  unreadable, network open for installs) with an isolated `HOME`, `npm_config_cache`, `CARGO_HOME`,
- *  `CARGO_TARGET_DIR` and `XDG_*` under `<worktree>/tmp/wicked-checks/`; installs are always
+ *  `CARGO_TARGET_DIR` and `XDG_*` under `<worktree>/tmp/wicked-checks/`, and with a MINIMAL
+ *  environment — the daemon's env is cleared and only `PATH`, locale (`LANG`/`LC_*`), `TERM`,
+ *  `USER`/`LOGNAME`, `RUSTUP_HOME`, the Windows shell essentials and those isolation overrides
+ *  (`CI=1` included) reach a check: no token, API key or `WICKED_*` variable does; installs are always
  *  `--ignore-scripts` (`--no-package-lock` when the repo ships no lockfile). When NO boundary can be
  *  armed (no sandbox tool on the host — Windows) the checks do NOT run and the floor FAILS
  *  (`passed: false`, `checks: []`, the reason on the unit record) — repo-controlled scripts never
  *  run unsandboxed. Detection is fail-closed the same way: a `package.json` that cannot be read or
  *  parsed, or a symlinked manifest/lockfile/`node_modules` (every probe `lstat`s, opens `O_NOFOLLOW`
  *  and `fstat`s the opened descriptor before reading — links are never followed), FAILS the floor.
- *  Only a repo with NO manifest at all is a disclosed vacuous pass (`checks: []`, `passed: true`).
+ *  Only a repo with NO DETECTABLE check is the disclosed vacuous pass (`checks: []`, `passed:
+ *  true`): no manifest at all, or a readable `package.json` with no string `typecheck`/`lint`/`test`
+ *  script and no `Cargo.toml`. A manifest that cannot be read or trusted still FAILS.
  *  "Done" for a verify phase is now the exit code the engine observed, not the seat's account of
  *  having run the suite. `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
 export type RepoChecksEvaluatedEvent = {

@@ -76,7 +76,8 @@ respondsWith<Wire.CoreEvent, Wire.EvaluatorMutatedWorktreeEvent>();
 respondsWith<Wire.CoreEvent, Wire.RepoChecksEvaluatedEvent>();
 respondsWith<Wire.CoreEvent, Wire.GateEvidenceEvent>();
 // … and `gateEvaluated.denial` names both new layers alongside the established ones. The literals
-// are what wicked-core's `denial_json` emits for each source (camelCase, `null` never absent).
+// are SHAPED like wicked-core's `denial_json` output (camelCase, every key present, `null` never
+// absent); the `reason` wording and `phase` values are illustrative, not core's exact strings.
 const WORKTREE_GUARD_DENIAL = {
   source: 'worktree_guard' as const,
   reason: 'evaluator≠creator: phase `verify` declares `executes_code: false` but changed the worktree',

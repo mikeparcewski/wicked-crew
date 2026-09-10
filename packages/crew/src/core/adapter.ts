@@ -632,7 +632,8 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       // `coverage` is `executes_code: true` (wicked-core#414): it WRITES `coverage-report.json`
       // into the worktree for its pinned validator to read, and an `executes_code: false` phase
       // may write nothing there — the worktree guard has no exemptions, declared deliverables
-      // included. Its role stays `evaluator`; the deliver default keys off code-writing CREATORS.
+      // included. Its role stays `evaluator`; the deliver default keys off code-writing
+      // NON-EVALUATOR phases (`executes_code && role !== 'evaluator'`), so this def never delivers.
       { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
