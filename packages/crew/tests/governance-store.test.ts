@@ -24,6 +24,7 @@ import {
   governanceSidecarDb,
   governanceSidecarDir,
   governanceSidecarOutbox,
+  isStoreSpec,
   legacyHomeOutboxPath,
   resolveGovernanceStore,
 } from '../src/core/governance-store.js';
@@ -73,6 +74,18 @@ describe('resolveGovernanceStore (crew#495)', () => {
     expect(resolveGovernanceStore({ ...core, flagDb: 'rel/gov.db' }).dbPath).toBe(resolve('rel/gov.db'));
     expect(resolveGovernanceStore({ ...core, flagDb: ':memory:' }).dbPath).toBe(':memory:');
     expect(resolveGovernanceStore({ ...core, envEstateDb: 'postgres://h/db' }).dbPath).toBe('postgres://h/db');
+  });
+
+  it('isStoreSpec: engine specs are `:memory:` and real URL schemes — a Windows drive written with forward slashes is a PATH (Copilot on #516)', () => {
+    expect(isStoreSpec(':memory:')).toBe(true);
+    expect(isStoreSpec('postgres://h/db')).toBe(true);
+    expect(isStoreSpec('postgresql://h:5432/db')).toBe(true);
+    expect(isStoreSpec('C://tmp/gov.db')).toBe(false);
+    expect(isStoreSpec('C:\\tmp\\gov.db')).toBe(false);
+    expect(isStoreSpec('/state/core.db.governance/governance.db')).toBe(false);
+    expect(isStoreSpec('rel/gov.db')).toBe(false);
+    // …and a drive path resolves like any other path rather than riding through verbatim.
+    expect(resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: 'C://tmp/gov.db' }).dbPath).toBe(resolve('C://tmp/gov.db'));
   });
 
   it('the outbox lives in the sidecar whichever store won — never under HOME — unless the engine\'s own override is set', () => {

@@ -35,6 +35,7 @@ import {
   ESTATE_DB_ENGINE_ENV,
   GOVERNANCE_DB_ENV,
   GOVERNANCE_DB_FLAG,
+  isStoreSpec,
   resolveGovernanceStore,
   type GovernanceStoreLocation,
 } from '../core/governance-store.js';
@@ -189,8 +190,9 @@ export async function replayOutbox(
   if (!CoreAdapter.replayEmitOutboxSupported()) {
     throw new GovernanceReplayUnsupportedError('Replaying a dead-letter outbox');
   }
-  // The sidecar (or whatever directory the store lives in) must exist before the engine opens it.
-  if (!store.dbPath.includes('://')) mkdirSync(dirname(store.dbPath), { recursive: true });
+  // The sidecar (or whatever directory the store lives in) must exist before the engine opens it
+  // — for a filesystem path, never for an engine spec (`postgres://…`; `:memory:` was refused above).
+  if (!isStoreSpec(store.dbPath)) mkdirSync(dirname(store.dbPath), { recursive: true });
 
   // 1. Archive first — atomic, so nothing the daemon appends from here on is lost.
   const archive = archiveNameFor(outbox);

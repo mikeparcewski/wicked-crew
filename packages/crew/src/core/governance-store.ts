@@ -131,9 +131,15 @@ export function governanceSidecarOutbox(coreDbPath: string): string {
   return join(governanceSidecarDir(coreDbPath), EMIT_OUTBOX_FILENAME);
 }
 
-/** A store spec the engine parses itself rather than a filesystem path — left exactly as written. */
-function isStoreSpec(value: string): boolean {
-  return value === ':memory:' || value.includes('://');
+/** A URL scheme of two or more characters followed by `://` — `postgres://`, `postgresql://`. A
+ *  single letter before `://` is a Windows drive written with forward slashes (`C://tmp/gov.db`),
+ *  which is a PATH (Copilot on #516). */
+const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]+:\/\//;
+
+/** A store spec the engine parses itself (`:memory:`, a `postgres://…` URL) rather than a filesystem
+ *  path — left exactly as written, never resolved, never `mkdir`ed for. */
+export function isStoreSpec(value: string): boolean {
+  return value === ':memory:' || URL_SCHEME_RE.test(value);
 }
 
 function present(value: string | undefined): string | undefined {

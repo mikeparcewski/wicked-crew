@@ -38,7 +38,7 @@ import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { applyGovernanceStoreEnv, type GovernanceStoreLocation } from './governance-store.js';
+import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 
 
 
@@ -1058,8 +1058,7 @@ export class CoreAdapter {
     const fn = Core.eventStoreCount;
     if (typeof fn !== 'function') return null;
     return async (dbPath: string): Promise<number> => {
-      const isFilePath = dbPath !== ':memory:' && !dbPath.includes('://');
-      if (isFilePath && !existsSync(dbPath)) return 0;
+      if (!isStoreSpec(dbPath) && !existsSync(dbPath)) return 0;
       const raw = await fn.call(Core, dbPath);
       const n = Number(JSON.parse(raw));
       if (!Number.isInteger(n) || n < 0) throw new Error(`eventStoreCount answered a non-count: ${raw}`);
