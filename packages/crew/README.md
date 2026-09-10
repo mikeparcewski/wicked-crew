@@ -32,7 +32,9 @@ control room: launch and steer runs, answer human gates, browse projects and evi
 engine events. Durable state (runs, evidence, event log) lives in `~/.wicked-crew/` (`--db`
 overrides). Governance evidence — conformance claims, phase transitions, rule lifecycle — lands in
 `<core db>.governance/governance.db` (`--governance-db` / `WICKED_CREW_GOVERNANCE_DB` override; an
-inherited `WICKED_ESTATE_DB` is honoured); events the engine cannot store dead-letter to
+inherited `WICKED_ESTATE_DB` is honoured — the emit seam is SQLite-only, so a URL-form value such as
+`postgres://…` in your shell refuses boot until `--governance-db` names a SQLite file); events the
+engine cannot store dead-letter to
 `<core db>.governance/emit-outbox.ndjson` by default (under the state home, not HOME; an explicit
 `WICKED_APPS_EMIT_DEADLETTER` is honoured), are counted on
 `GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back

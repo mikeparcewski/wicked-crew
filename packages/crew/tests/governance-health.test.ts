@@ -197,16 +197,20 @@ describe('governanceHealth (the findings)', () => {
     expect(msg).toContain('no shared store (WICKED_ESTATE_DB unset)');
     // The recipe names THIS daemon's target — the default sidecar through its core db — so following
     // it on a custom --db daemon never replays into a different store.
-    expect(msg).toContain(`wicked-crew governance replay ${shellQuote(path)} --db ${shellQuote(resolve('/state/core.db'))}`);
+    expect(msg).toContain(`wicked-crew governance replay ${shellQuote(path)} --governance-db ${shellQuote(resolve('/state/core.db.governance/governance.db'))}`);
     expect(msg).toContain(new Date(1_757_500_000_000).toISOString());
   });
 
-  it('replayCommand is target-specific and shell-quoted per platform: --db for the sidecar default, --governance-db for an explicit store, bare when no store is known', () => {
+  it('replayCommand names an explicit DURABLE --governance-db (the flag outranks a shell-exported env rung; a :memory: daemon is pointed at its sidecar), shell-quoted per platform, bare when no store is known', () => {
     const sidecar = resolveGovernanceStore({ coreDbPath: '/state/core.db' });
-    expect(replayCommand('/o.ndjson', sidecar)).toBe(`wicked-crew governance replay /o.ndjson --db ${resolve('/state/core.db')}`);
+    expect(replayCommand('/o.ndjson', sidecar)).toBe(`wicked-crew governance replay /o.ndjson --governance-db ${resolve('/state/core.db.governance/governance.db')}`);
     const explicit = resolveGovernanceStore({ coreDbPath: '/state/core.db', flagDb: '/opt/gov.db' });
     expect(replayCommand('/o.ndjson', explicit)).toBe(`wicked-crew governance replay /o.ndjson --governance-db ${resolve('/opt/gov.db')}`);
+    const memory = resolveGovernanceStore({ coreDbPath: '/state/core.db', flagDb: ':memory:' });
+    expect(replayCommand('/o.ndjson', memory)).toBe(`wicked-crew governance replay /o.ndjson --governance-db ${resolve('/state/core.db.governance/governance.db')}`);
     expect(replayCommand('/o.ndjson', null)).toBe('wicked-crew governance replay /o.ndjson');
+    // `<` and `>` are redirections, never bare.
+    expect(shellQuote('<outbox.ndjson>')).toBe(process.platform === 'win32' ? '"<outbox.ndjson>"' : "'<outbox.ndjson>'");
     // Quoting is the SHELL's, not JSON's: a path with a space is quoted for the platform's shell.
     const spaced = replayCommand('/tmp/my outbox.ndjson', null);
     expect(spaced).toBe(
@@ -215,7 +219,6 @@ describe('governanceHealth (the findings)', () => {
         : "wicked-crew governance replay '/tmp/my outbox.ndjson'",
     );
     expect(shellQuote('/plain/path.ndjson')).toBe('/plain/path.ndjson');
-    expect(shellQuote('<outbox.ndjson>')).toBe('<outbox.ndjson>');
     if (process.platform !== 'win32') expect(shellQuote("it's.ndjson")).toBe("'it'\\''s.ndjson'");
   });
 
@@ -232,7 +235,7 @@ describe('governanceHealth (the findings)', () => {
     expect(health.findings[0]!.severity).toBe('error');
     expect(health.findings[0]!.message).toContain('WICKED_ESTATE_DB');
     // Every governance finding carries a copyable recipe — with no store known, the bare dry-run one.
-    expect(health.findings[0]!.message).toContain('wicked-crew governance replay <outbox.ndjson> --dry-run');
+    expect(health.findings[0]!.message).toContain(`wicked-crew governance replay ${shellQuote('<outbox.ndjson>')} --dry-run`);
   });
 
   it('a pre-fix outbox under HOME is governance.legacy-outbox (warning) with the dry-run recipe', () => {
@@ -244,7 +247,7 @@ describe('governanceHealth (the findings)', () => {
     });
     expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'warning']]);
     expect(health.findings[0]!.message).toContain('--dry-run');
-    expect(health.findings[0]!.message).toContain(`--db ${shellQuote(resolve('/state/core.db'))}`);
+    expect(health.findings[0]!.message).toContain(`--governance-db ${shellQuote(resolve('/state/core.db.governance/governance.db'))}`);
     // W10: a replay of that file appends its failed lines back onto it — the warning persists until repaired.
     expect(health.findings[0]!.message).toContain('persists until they are repaired');
     expect(health.deadletters.legacyOutbox).toEqual({ path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415 });

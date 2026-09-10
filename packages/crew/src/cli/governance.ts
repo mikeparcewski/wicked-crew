@@ -41,7 +41,10 @@ import { Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
+import { randomBytes } from 'node:crypto';
+
 import { CoreAdapter, GovernanceReplayUnsupportedError, type EmitOutboxReplayReport } from '../core/adapter.js';
+import { CrewBusError, resolveCrewBus } from '../interactive/bus-location.js';
 import {
   EMIT_DEADLETTER_ENGINE_ENV,
   ESTATE_DB_ENGINE_ENV,
@@ -52,7 +55,7 @@ import {
   resolveGovernanceStore,
   type GovernanceStoreLocation,
 } from '../core/governance-store.js';
-import { foldDeadletters } from '../api/governance-health.js';
+import { foldDeadletters, type DeadletterFold } from '../api/governance-health.js';
 import { crewStateHome } from '../projects/state-home.js';
 
 export const GOVERNANCE_USAGE =
@@ -120,20 +123,69 @@ export function positionalArgs(args: string[]): string[] {
   return out;
 }
 
-/** Resolve the target store for a replay — `serve`'s rule, over the core db named (or defaulted). */
+/** Resolve the target store for a replay — `serve`'s rule, over the core db named (or defaulted),
+ *  with the cross-product bus resolved the way `serve` resolves it (`WICKED_BUS_DB` ›
+ *  `WICKED_BUS_DATA_DIR` › `<core db>.bus/bus.db`) so the bus db is refused as a target here too. */
 export function replayTarget(args: string[], env: NodeJS.ProcessEnv = process.env): GovernanceStoreLocation {
   const coreDbPath = flagValue(args, '--db') ?? join(crewStateHome(), 'core.db');
+  const bus = resolveCrewBus({ explicitDb: env['WICKED_BUS_DB'], envDataDir: env['WICKED_BUS_DATA_DIR'], coreDbPath });
   return resolveGovernanceStore({
     flagDb: flagValue(args, GOVERNANCE_DB_FLAG),
     envCrewDb: env[GOVERNANCE_DB_ENV],
     envEstateDb: env[ESTATE_DB_ENGINE_ENV],
     coreDbPath,
+    busDbPath: bus.dbPath,
   });
 }
 
-/** The archive name a drained outbox is renamed to. */
-export function archiveNameFor(outbox: string, now: Date = new Date()): string {
-  return `${outbox}.replayed-${now.toISOString().replace(/[:.]/g, '-')}`;
+/** The archive name a drained outbox is renamed to: timestamp + pid + a random nonce, so two replays
+ *  of the same outbox in the same millisecond (or two processes) can never pick one name and have a
+ *  later rename replace the earlier archive — the full recovery/audit copy. */
+export function archiveNameFor(outbox: string, now: Date = new Date(), nonce: string = randomBytes(3).toString('hex')): string {
+  return `${outbox}.replayed-${now.toISOString().replace(/[:.]/g, '-')}-${process.pid}-${nonce}`;
+}
+
+/** A fresh archive name that does not exist yet (the nonce makes a collision astronomically
+ *  unlikely; the check makes it impossible to rename over an existing archive). */
+function reserveArchiveName(outbox: string): string {
+  for (;;) {
+    const candidate = archiveNameFor(outbox);
+    if (!existsSync(candidate)) return candidate;
+  }
+}
+
+/**
+ * Put the lines that did not land back onto the live outbox — and if THAT write fails (permissions,
+ * a full disk), say exactly where they are: the archive is retained (nothing is lost on disk), but
+ * `/diagnostics` folds only the live path, so without this the operator would see fewer dead letters
+ * than exist.
+ */
+export function appendFailedLines(outbox: string, archive: string, lines: string[]): void {
+  try {
+    appendLines(outbox, lines);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${lines.length} line(s) that failed to replay could not be written back to ${outbox} — they remain in the ` +
+        `retained archive ${archive} (nothing is lost; /diagnostics does not fold the archive): ${reason}`,
+    );
+  }
+}
+
+/**
+ * The caveat a replay that found entries `already_present` must state when the outbox holds
+ * UNTIMESTAMPED (pre-stamp) entries: replay ids are content-addressed, and with no stamp to tell
+ * them apart, byte-identical unstamped lines share one id — two dead letters of the same event land
+ * once. `null` when there is nothing to say.
+ */
+export function conflationNote(alreadyPresent: number, fold: Pick<DeadletterFold, 'untimestamped'>): string | null {
+  if (alreadyPresent <= 0 || fold.untimestamped <= 0) return null;
+  return (
+    `${alreadyPresent} entr${alreadyPresent === 1 ? 'y was' : 'ies were'} already on the store. This outbox holds ` +
+    `${fold.untimestamped} untimestamped (pre-stamp) entr${fold.untimestamped === 1 ? 'y' : 'ies'}: byte-identical ` +
+    'unstamped lines share one replay id, so two dead letters of the same event land once (stamped lines never conflate ' +
+    'unless their ts and content both match).'
+  );
 }
 
 const NL = 0x0a;
@@ -230,6 +282,8 @@ export interface ReplayOutcome {
   alreadyPresent: number | null;
   failed: number;
   dryRun: boolean;
+  /** The conflation caveat (see `conflationNote`), or `null`. */
+  note: string | null;
   fold?: Awaited<ReturnType<typeof foldDeadletters>>;
 }
 
@@ -263,6 +317,7 @@ export async function replayOutbox(
         alreadyPresent: null,
         failed: 0,
         dryRun: true,
+        note: null,
         fold,
       },
       exitCode: 0,
@@ -279,8 +334,9 @@ export async function replayOutbox(
   // — for a filesystem path, never for an engine spec (`postgres://…`; `:memory:` was refused above).
   if (!isStoreSpec(store.dbPath)) mkdirSync(dirname(store.dbPath), { recursive: true });
 
-  // 1. Archive first — atomic, so nothing the daemon appends from here on is lost.
-  const archive = archiveNameFor(outbox);
+  // 1. Archive first — atomic, so nothing the daemon appends from here on is lost; the name is
+  //    fresh (timestamp + pid + nonce, checked), so no earlier archive is ever renamed over.
+  const archive = reserveArchiveName(outbox);
   renameSync(outbox, archive);
   // 2. Replay from the archive. If the engine THROWS (a store it cannot open, an I/O error
   //    mid-file, a permission problem) the archive goes back where the daemon spools and
@@ -297,11 +353,17 @@ export async function replayOutbox(
     throw new Error(`replay failed and the outbox was restored to ${outbox} (nothing is lost): ${reason}`);
   }
   // 3. What did not land stays a dead letter on the live outbox (append: the daemon may have
-  //    started a fresh file already — and may be mid-record on it, hence the boundary-safe append).
-  appendLines(
-    outbox,
-    report.failed.map((f) => f.line),
-  );
+  //    started a fresh file already — and may be mid-record on it, hence the boundary-safe append);
+  //    a failed write-back names the archive the lines are still in.
+  if (report.failed.length > 0) {
+    appendFailedLines(
+      outbox,
+      archive,
+      report.failed.map((f) => f.line),
+    );
+  }
+  const alreadyPresent = report.already_present ?? null;
+  const note = alreadyPresent !== null && alreadyPresent > 0 ? conflationNote(alreadyPresent, await foldDeadletters(archive)) : null;
   return {
     outcome: {
       outbox,
@@ -309,9 +371,10 @@ export async function replayOutbox(
       archive,
       read: report.read,
       replayed: report.replayed,
-      alreadyPresent: report.already_present ?? null,
+      alreadyPresent,
       failed: report.failed.length,
       dryRun: false,
+      note,
     },
     exitCode: report.failed.length > 0 ? 1 : 0,
   };
@@ -327,12 +390,13 @@ export async function runGovernance(argv: string[]): Promise<void> {
   try {
     const { outcome, exitCode } = await replayOutbox(rest);
     console.log(JSON.stringify(outcome, null, 2));
+    if (outcome.note !== null) console.error(`[governance] ${outcome.note}`);
     if (!outcome.dryRun && outcome.failed > 0) {
       console.error(`[governance] ${outcome.failed} entr${outcome.failed === 1 ? 'y' : 'ies'} did not land and were appended back onto ${outcome.outbox}`);
     }
     process.exit(exitCode);
   } catch (err) {
-    if (err instanceof UsageError || err instanceof GovernanceStoreError) {
+    if (err instanceof UsageError || err instanceof GovernanceStoreError || err instanceof CrewBusError) {
       console.error(`[governance] ${err.message}\n\n${GOVERNANCE_USAGE}`);
       process.exit(2);
     }

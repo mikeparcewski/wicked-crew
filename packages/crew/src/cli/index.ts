@@ -396,6 +396,8 @@ async function main(): Promise<void> {
         '  --governance-db <path>          Governance store the engine writes conformance claims, phase transitions and\n' +
         '                                  rule-lifecycle events to (env: WICKED_CREW_GOVERNANCE_DB; an inherited\n' +
         '                                  WICKED_ESTATE_DB is honoured next; default <core db>.governance/governance.db).\n' +
+        '                                  The emit seam stores to SQLite only: a URL-form WICKED_ESTATE_DB (postgres://…)\n' +
+        '                                  in the shell refuses boot until --governance-db names a SQLite file.\n' +
         '                                  Dead letters spool to <core db>.governance/emit-outbox.ndjson by default — under the\n' +
         '                                  state home, not HOME (an explicit WICKED_APPS_EMIT_DEADLETTER is honoured);\n' +
         '                                  see `wicked-crew governance replay`\n' +

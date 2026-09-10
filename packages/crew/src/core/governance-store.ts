@@ -60,8 +60,8 @@
  * ({@link childEnvWithBootEstateDb}) — the operator's instruction, not the daemon's sidecar.
  */
 
-import { mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 /** The `serve` / `governance` flag naming the store explicitly. */
 export const GOVERNANCE_DB_FLAG = '--governance-db';
@@ -191,11 +191,38 @@ function present(value: string | undefined): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
-/** Spell an explicit store absolute AND normalized (`resolve` also folds `..` segments, so the
- *  core-db / bus-db refusals compare like with like); relative flags land next to the cwd the
- *  operator typed them in, not wherever a later `join` happens to run. `:memory:` is untouched. */
+/** Spell an explicit store absolute AND normalized (`resolve` also folds `..` segments); relative
+ *  flags land next to the cwd the operator typed them in, not wherever a later `join` happens to
+ *  run. `:memory:` is untouched. */
 function absoluteStore(value: string): string {
   return isStoreSpec(value) ? value : resolve(value);
+}
+
+/**
+ * The CANONICAL spelling of a path that may not exist yet: the real path of its nearest existing
+ * ancestor plus the remaining segments — so a symlink to `core.db` (or to its directory) compares
+ * equal to `core.db` itself, which `resolve()` alone (lexical `..` folding) cannot see. Fails
+ * closed: anything but "does not exist" while walking up is a {@link GovernanceStoreError}.
+ */
+export function canonicalPath(p: string): string {
+  const abs = resolve(p);
+  let existing = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(existing);
+      return tail.length === 0 ? real : join(real, ...tail);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw new GovernanceStoreError(`cannot canonicalize ${abs} to check it against the daemon's own stores: ${(err as Error).message}`);
+      }
+      const parent = dirname(existing);
+      if (parent === existing) return abs; // nothing on the way to the root exists yet
+      tail.unshift(basename(existing));
+      existing = parent;
+    }
+  }
 }
 
 /** Resolve the governance store and its outbox for one daemon — pure, so two `--db` inputs can be compared. */
@@ -229,14 +256,16 @@ export function resolveGovernanceStore(input: GovernanceStoreInput): GovernanceS
       );
     }
     const dbPath = absoluteStore(raw);
-    if (dbPath === coreDbPath) {
+    // Compared CANONICALLY (symlinks resolved), so an alias of the core db or the bus db is caught.
+    const canonical = canonicalPath(dbPath);
+    if (canonical === canonicalPath(coreDbPath)) {
       throw new GovernanceStoreError(
         `${how} names the daemon's own core db (${coreDbPath}); the single-writer actor holds that store and the emit ` +
           'seam opens its own connection per emit — a second writer there is the race the design rules out. ' +
           'Name a separate SQLite file (default: <core db>.governance/governance.db).',
       );
     }
-    if (busDbPath !== undefined && dbPath === busDbPath) {
+    if (busDbPath !== undefined && canonical === canonicalPath(busDbPath)) {
       throw new GovernanceStoreError(
         `${how} names the cross-product bus db (${busDbPath}), which wicked-bus owns; name a separate SQLite file ` +
           '(default: <core db>.governance/governance.db).',
