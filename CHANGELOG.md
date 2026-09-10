@@ -30,6 +30,9 @@ mentioned only where a daemon release depends on them.
   lets through untouched (every other `codeGraphDb` throw still becomes
   `ProjectGraphEngineTooOldError` / 501 `engine-too-old`) and the project-graph routes answer 503
   with the finding's message: a daemon-environment fault, not a stale addon and not a bad request.
+  `resolveProjectGraphBinding()` records the same truth on a launch: with no repo-graph root there
+  is no per-repo graph to degrade to, so its reason names the environment fault and says the run
+  gets no code graph — never "uses its own repo's code graph".
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
