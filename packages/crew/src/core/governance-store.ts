@@ -28,7 +28,11 @@
  *     `core.db.governance/` directory, exactly as it covers core's own `core.db.events/` and crew's
  *     `core.db.bus/` (F-043). A new top-level name would need a byte-identical registry change in
  *     BOTH repos and a core release before one governed run could start beside it; the sidecar
- *     needs neither, and `GET /diagnostics.stores` lists it for free.
+ *     needs neither, and `GET /diagnostics.stores` lists it for free. The prefix claim is spelled
+ *     for the DEFAULT basename: a `--db` named anything but `core.db` already puts the db itself,
+ *     its `-wal`/`-shm`, core's own `<db>.events/` and crew's `<db>.bus/` outside the registry —
+ *     this sidecar is no different, so a daemon that hosts governed runs keeps the default
+ *     basename (the same residual `interactive/bus-location.ts` documents).
  *
  * Why NOT the core db itself: the single-writer actor holds `core.db` open, and the emit seam opens
  * its OWN connection per emit — pointing it at `core.db` would put a second writer on the actor's
@@ -93,8 +97,13 @@ export type GovernanceOutboxSource = 'env' | 'core-db-sidecar';
 
 export interface GovernanceStoreLocation {
   /** The estate store the engine's emit seam writes to — exported as `WICKED_ESTATE_DB`. An
-   *  absolute SQLite path, or a spec the engine parses itself (`:memory:`, `postgres://…`). */
+   *  absolute SQLite path, or a spec the engine parses itself (`:memory:`, `postgres://…`). RAW:
+   *  a URL spec may carry credentials, so this value is for the ENGINE HANDOFF only. */
   dbPath: string;
+  /** `dbPath` with any URL userinfo redacted (`postgres://***@host/db`; a path is unchanged) — the
+   *  ONLY spelling operator-facing surfaces print: the boot log, the readiness line,
+   *  `/diagnostics.governance.store.path`, `governance replay` output (Copilot on #516). */
+  displayPath: string;
   source: GovernanceStoreSource;
   /** The dead-letter outbox — exported as `WICKED_APPS_EMIT_DEADLETTER`. */
   outboxPath: string;
@@ -142,6 +151,16 @@ export function isStoreSpec(value: string): boolean {
   return value === ':memory:' || URL_SCHEME_RE.test(value);
 }
 
+/** The userinfo of a URL spec — everything between `scheme://` and the first `@` before a `/`. */
+const URL_USERINFO_RE = /^([A-Za-z][A-Za-z0-9+.-]+:\/\/)[^/@]*@/;
+
+/** A store spec safe to print: a URL's credentials become `***` (`postgres://u:p@h/db` →
+ *  `postgres://***@h/db`); `:memory:` and filesystem paths are returned unchanged. The raw value
+ *  is exported to the engine and nowhere else. */
+export function redactStoreSpec(value: string): string {
+  return isStoreSpec(value) ? value.replace(URL_USERINFO_RE, '$1***@') : value;
+}
+
 function present(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
@@ -163,19 +182,21 @@ export function resolveGovernanceStore(input: GovernanceStoreInput): GovernanceS
       ? { outboxPath: resolve(envOutbox), outboxSource: 'env' }
       : { outboxPath: join(sidecarDir, EMIT_OUTBOX_FILENAME), outboxSource: 'core-db-sidecar' };
 
+  const at = (dbPath: string, source: GovernanceStoreSource): GovernanceStoreLocation => ({
+    dbPath,
+    displayPath: redactStoreSpec(dbPath),
+    source,
+    sidecarDir,
+    ...outbox,
+  });
+
   const flagDb = present(input.flagDb);
-  if (flagDb !== undefined) {
-    return { dbPath: absoluteStore(flagDb), source: 'flag', sidecarDir, ...outbox };
-  }
+  if (flagDb !== undefined) return at(absoluteStore(flagDb), 'flag');
   const envCrewDb = present(input.envCrewDb);
-  if (envCrewDb !== undefined) {
-    return { dbPath: absoluteStore(envCrewDb), source: 'env-crew', sidecarDir, ...outbox };
-  }
+  if (envCrewDb !== undefined) return at(absoluteStore(envCrewDb), 'env-crew');
   const envEstateDb = present(input.envEstateDb);
-  if (envEstateDb !== undefined) {
-    return { dbPath: absoluteStore(envEstateDb), source: 'env-estate', sidecarDir, ...outbox };
-  }
-  return { dbPath: join(sidecarDir, GOVERNANCE_DB_FILENAME), source: 'core-db-sidecar', sidecarDir, ...outbox };
+  if (envEstateDb !== undefined) return at(absoluteStore(envEstateDb), 'env-estate');
+  return at(join(sidecarDir, GOVERNANCE_DB_FILENAME), 'core-db-sidecar');
 }
 
 /**

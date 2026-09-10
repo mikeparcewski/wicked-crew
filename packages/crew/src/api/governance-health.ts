@@ -292,8 +292,9 @@ export interface GovernanceHealthInputs {
 
 export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealth {
   const findings: GovernanceFinding[] = [];
+  // `displayPath`, never `dbPath`: a URL spec's credentials are for the engine, not the wire.
   const store: GovernanceStoreInfo | null =
-    input.location !== null ? { path: input.location.dbPath, source: input.location.source } : null;
+    input.location !== null ? { path: input.location.displayPath, source: input.location.source } : null;
   if (store === null) {
     findings.push({
       kind: 'governance.store',

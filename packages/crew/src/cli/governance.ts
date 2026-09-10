@@ -25,8 +25,22 @@
  * wicked-core-ts), or the arguments are wrong.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 import { CoreAdapter, GovernanceReplayUnsupportedError, type EmitOutboxReplayReport } from '../core/adapter.js';
@@ -124,19 +138,28 @@ export function archiveNameFor(outbox: string, now: Date = new Date()): string {
 }
 
 /**
- * Put an archived outbox back after a replay that threw. When no live outbox has appeared since
- * the rename, the archive is renamed back — byte-identical. When the daemon has already spooled a
- * fresh file, the archive's entries are APPENDED to it (append mode, so a concurrent spool is
- * never clobbered) and the archive is removed — every entry stays a visible dead letter, at the
- * cost of the two batches' relative order (each entry carries its own `ts` on a stamping engine).
+ * Put an archived outbox back after a replay that threw — APPEND-ONLY, never a rename over the
+ * live path: a daemon can create a fresh outbox at any instant, and an `exists`-then-`rename` would
+ * replace it and lose what it had just spooled (Copilot on #516). Appending (`O_APPEND`, so a
+ * concurrent spool is never clobbered — the file is created if absent) is loss-free in every
+ * interleaving; the cost is the two batches' relative order when the daemon did spool meanwhile
+ * (each entry carries its own `ts` on a stamping engine). Streamed, never the whole archive in
+ * memory; the archive is removed only after its last byte is on the live outbox, and a missing
+ * trailing newline is repaired so a later spool never joins onto the last restored line.
  */
-export function restoreOutbox(outbox: string, archive: string): void {
-  if (!existsSync(outbox)) {
-    renameSync(archive, outbox);
-    return;
+export async function restoreOutbox(outbox: string, archive: string): Promise<void> {
+  const size = statSync(archive).size;
+  await pipeline(createReadStream(archive), createWriteStream(outbox, { flags: 'a' }));
+  if (size > 0) {
+    const fd = openSync(archive, 'r');
+    try {
+      const last = Buffer.alloc(1);
+      readSync(fd, last, 0, 1, size - 1);
+      if (last[0] !== 0x0a) appendFileSync(outbox, '\n', 'utf8');
+    } finally {
+      closeSync(fd);
+    }
   }
-  const archived = readFileSync(archive, 'utf8');
-  appendFileSync(outbox, archived.endsWith('\n') || archived === '' ? archived : `${archived}\n`, 'utf8');
   rmSync(archive);
 }
 
@@ -166,16 +189,15 @@ export async function replayOutbox(
   if (!existsSync(outbox)) throw new UsageError(`outbox not found: ${outbox}`);
   const dryRun = args.includes('--dry-run');
   const store = replayTarget(args, env);
-  if (store.dbPath === ':memory:') {
-    throw new UsageError('refusing to replay into :memory: — name a durable store with --governance-db or --db');
-  }
 
   if (dryRun) {
+    // A dry run folds the FILE and touches no store — so the same target configuration a daemon
+    // runs with (`:memory:` included) is inspectable; the refusal below guards only a real replay.
     const fold = await foldDeadletters(outbox);
     return {
       outcome: {
         outbox,
-        store: { path: store.dbPath, source: store.source },
+        store: { path: store.displayPath, source: store.source },
         archive: null,
         read: fold.count,
         replayed: 0,
@@ -187,6 +209,9 @@ export async function replayOutbox(
     };
   }
 
+  if (store.dbPath === ':memory:') {
+    throw new UsageError('refusing to replay into :memory: — name a durable store with --governance-db or --db');
+  }
   if (!CoreAdapter.replayEmitOutboxSupported()) {
     throw new GovernanceReplayUnsupportedError('Replaying a dead-letter outbox');
   }
@@ -207,7 +232,7 @@ export async function replayOutbox(
   try {
     report = await CoreAdapter.replayEmitOutbox(archive, store.dbPath);
   } catch (err) {
-    restoreOutbox(outbox, archive);
+    await restoreOutbox(outbox, archive);
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(`replay failed and the outbox was restored to ${outbox} (nothing is lost): ${reason}`);
   }
@@ -219,7 +244,7 @@ export async function replayOutbox(
   return {
     outcome: {
       outbox,
-      store: { path: store.dbPath, source: store.source },
+      store: { path: store.displayPath, source: store.source },
       archive,
       read: report.read,
       replayed: report.replayed,

@@ -8,7 +8,7 @@
 // crew CI builds the addon from core `main`, so whichever is true there is what runs.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,11 +90,18 @@ describe('replayOutbox (the command body)', () => {
     expect(readdirSync(scratch as string)).toEqual(['emit-outbox.ndjson']); // no archive, no store
   });
 
-  it('refuses a missing outbox and a :memory: target with a usage error', async () => {
+  it('refuses a missing outbox, and a :memory: target for a REAL replay only — a dry run folds the file and touches no store (Copilot on #516)', async () => {
     const { coreDb } = fixture();
     await expect(replayOutbox([join(scratch as string, 'nope.ndjson'), '--db', coreDb], {})).rejects.toThrow(/outbox not found/);
     const { outbox } = fixture();
     await expect(replayOutbox([outbox, '--governance-db', ':memory:'], {})).rejects.toThrow(/refusing to replay into :memory:/);
+    const dry = await replayOutbox([outbox, '--governance-db', ':memory:', '--dry-run'], {});
+    expect(dry.exitCode).toBe(0);
+    expect(dry.outcome.store).toEqual({ path: ':memory:', source: 'flag' });
+    expect(dry.outcome.read).toBe(3);
+    // Operator-facing output never carries a URL spec's credentials — the dry run's store line is the display spelling.
+    const redacted = await replayOutbox([outbox, '--governance-db', 'postgres://user:s3cret@h/db', '--dry-run'], {});
+    expect(redacted.outcome.store.path).toBe('postgres://***@h/db');
   });
 
   it('the archive name is the outbox plus a filesystem-safe timestamp', () => {
@@ -103,24 +110,30 @@ describe('replayOutbox (the command body)', () => {
     );
   });
 
-  it('a replay that THROWS after the archive rename puts the outbox back — never "0 dead letters" for entries that never landed (Copilot on #516)', () => {
-    // No live outbox appeared meanwhile → the archive is renamed back, byte-identical.
+  it('a replay that THROWS after the archive rename puts the outbox back — append-only, never "0 dead letters", never a clobbered fresh spool (Copilot on #516)', async () => {
+    // No live outbox appeared meanwhile → the live file is re-created with the archive's content.
     const { outbox } = fixture();
     const archive = archiveNameFor(outbox);
     renameSync(outbox, archive);
     expect(existsSync(outbox)).toBe(false);
-    restoreOutbox(outbox, archive);
+    await restoreOutbox(outbox, archive);
     expect(existsSync(archive)).toBe(false);
     expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
 
     // The daemon spooled a fresh entry while the replay ran → the archive is APPENDED to the live
-    // file (the new entry is never clobbered) and the archive is removed.
+    // file (the new entry is never clobbered — no rename ever targets the live path) and removed.
     renameSync(outbox, archive);
     const fresh = JSON.stringify({ type: 'wicked.estate.rule.retired', domain: 'wicked-governance', subdomain: 'governance.rules', payload: {}, deadletter_reason: 'store write failed: locked' });
     writeFileSync(outbox, `${fresh}\n`, 'utf8');
-    restoreOutbox(outbox, archive);
+    await restoreOutbox(outbox, archive);
     expect(existsSync(archive)).toBe(false);
     expect(readFileSync(outbox, 'utf8')).toBe(`${fresh}\n${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+
+    // An archive without a trailing newline (a torn tail) is repaired so a later spool never joins onto its last line.
+    writeFileSync(archive, `${RECORD_A}\n${TORN}`, 'utf8');
+    rmSync(outbox);
+    await restoreOutbox(outbox, archive);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n`);
   });
 
   it.runIf(!CoreAdapter.replayEmitOutboxSupported())(

@@ -3515,7 +3515,8 @@ export type DiagnosticsGovernanceStoreSource = 'flag' | 'env-crew' | 'env-estate
 
 /** The store the engine's emit seam writes governance events to. */
 export interface DiagnosticsGovernanceStore {
-  /** The store as exported to the engine — an absolute SQLite path, or an engine spec (`:memory:`, `postgres://…`). */
+  /** The store as exported to the engine — an absolute SQLite path, or an engine spec (`:memory:`, `postgres://…`)
+   *  with any URL credentials redacted (`postgres://***@host/db`); the raw value never rides this wire. */
   path: string;
   source: DiagnosticsGovernanceStoreSource;
 }

@@ -26,6 +26,7 @@ import {
   governanceSidecarOutbox,
   isStoreSpec,
   legacyHomeOutboxPath,
+  redactStoreSpec,
   resolveGovernanceStore,
 } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
@@ -38,6 +39,7 @@ describe('resolveGovernanceStore (crew#495)', () => {
     const b = resolveGovernanceStore({ coreDbPath: '/scratch/fresh/state/core.db' });
     expect(a).toEqual({
       dbPath: resolve('/homes/a/.wicked-crew/core.db.governance/governance.db'),
+      displayPath: resolve('/homes/a/.wicked-crew/core.db.governance/governance.db'),
       source: 'core-db-sidecar',
       outboxPath: resolve('/homes/a/.wicked-crew/core.db.governance/emit-outbox.ndjson'),
       outboxSource: 'core-db-sidecar',
@@ -86,6 +88,20 @@ describe('resolveGovernanceStore (crew#495)', () => {
     expect(isStoreSpec('rel/gov.db')).toBe(false);
     // …and a drive path resolves like any other path rather than riding through verbatim.
     expect(resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: 'C://tmp/gov.db' }).dbPath).toBe(resolve('C://tmp/gov.db'));
+  });
+
+  it('a URL spec\'s credentials reach the engine and NOTHING else: displayPath is redacted, paths and :memory: are unchanged (Copilot on #516)', () => {
+    expect(redactStoreSpec('postgres://user:s3cret@db.internal:5432/gov')).toBe('postgres://***@db.internal:5432/gov');
+    expect(redactStoreSpec('postgresql://user@h/db')).toBe('postgresql://***@h/db');
+    expect(redactStoreSpec('postgres://h/db')).toBe('postgres://h/db');
+    expect(redactStoreSpec(':memory:')).toBe(':memory:');
+    expect(redactStoreSpec('/state/core.db.governance/governance.db')).toBe('/state/core.db.governance/governance.db');
+    // An `@` in a PATH is not userinfo.
+    expect(redactStoreSpec('/homes/op@corp/gov.db')).toBe('/homes/op@corp/gov.db');
+    const loc = resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: 'postgres://user:s3cret@h/db' });
+    expect(loc.dbPath).toBe('postgres://user:s3cret@h/db'); // the engine handoff, verbatim
+    expect(loc.displayPath).toBe('postgres://***@h/db'); // every operator-facing surface
+    expect(loc.displayPath).not.toContain('s3cret');
   });
 
   it('the outbox lives in the sidecar whichever store won — never under HOME — unless the engine\'s own override is set', () => {

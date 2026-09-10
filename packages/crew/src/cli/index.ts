@@ -224,7 +224,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // there — the adapter exports the store/outbox variables to the engine before it spawns.
   const { governanceStore } = opts;
   console.error(
-    `[crew] governance store: ${governanceStore.dbPath} (${governanceStore.source}); ` +
+    `[crew] governance store: ${governanceStore.displayPath} (${governanceStore.source}); ` +
       `dead letters: ${governanceStore.outboxPath} (${governanceStore.outboxSource})`,
   );
   const crewVersion = crewPackageVersion();
@@ -413,8 +413,9 @@ async function main(): Promise<void> {
       mode: 'serve',
       port,
       db: opts.dbPath,
-      // Where the engine's governance events land (crew#495) — an evidence harness can open it.
-      governanceDb: opts.governanceStore.dbPath,
+      // Where the engine's governance events land (crew#495) — an evidence harness can open it
+      // (a URL spec's credentials redacted; the raw value went to the engine only).
+      governanceDb: opts.governanceStore.displayPath,
       stub: opts.stub,
       // The identity seam's resolved mode (task #88): `required` under
       // WICKED_RUNTIME=team / WICKED_CREW_AUTH=required, else `off` (local).
