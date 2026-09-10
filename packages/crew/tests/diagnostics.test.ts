@@ -17,6 +17,7 @@ import {
   foldAcpEvents,
   installedPackageVersion,
   listStoreFiles,
+  repoGraphRoot,
   parseVersionOutput,
   readStudioBundleVersion,
   teeStreamWithErrorRing,
@@ -308,7 +309,7 @@ describe('listStoreFiles (core.db + sidecars + events-dir total)', () => {
     writeFileSync(join(graphs, 'api-fedcba987654', 'estate.db.migrating-4242'), 'x', 'utf8');
     mkdirSync(join(graphs, 'never-indexed-000000000000'));
 
-    const stores = await listStoreFiles(db);
+    const stores = await listStoreFiles(db, {});
     expect(stores.map((s) => s.name)).toEqual([
       'core.db',
       'repo-graphs/api-fedcba987654/estate.db',
@@ -326,7 +327,36 @@ describe('listStoreFiles (core.db + sidecars + events-dir total)', () => {
     const home = scratch();
     const db = join(home, 'core.db');
     writeFileSync(db, 'x', 'utf8');
-    expect((await listStoreFiles(db)).map((s) => s.name)).toEqual(['core.db']);
+    expect((await listStoreFiles(db, {})).map((s) => s.name)).toEqual(['core.db']);
+  });
+
+  it("honours WICKED_ESTATE_REPO_GRAPH_ROOT — the engine's precedence-1 override — over <state home>/repo-graphs", async () => {
+    const home = scratch();
+    const db = join(home, 'core.db');
+    writeFileSync(db, 'x', 'utf8');
+    // A stale graph under the state home that the engine would NOT be writing while the override
+    // is set — it must not be listed, or the operator reads the wrong inventory.
+    mkdirSync(join(home, 'repo-graphs', 'stale-000000000000'), { recursive: true });
+    writeFileSync(join(home, 'repo-graphs', 'stale-000000000000', 'estate.db'), 'x'.repeat(3), 'utf8');
+    // The override root, where the engine actually writes.
+    const override = join(scratch(), 'graphs-elsewhere');
+    mkdirSync(join(override, 'wicked-core-0123456789ab'), { recursive: true });
+    writeFileSync(join(override, 'wicked-core-0123456789ab', 'estate.db'), 'x'.repeat(13), 'utf8');
+
+    const env = { WICKED_ESTATE_REPO_GRAPH_ROOT: override };
+    expect(repoGraphRoot(db, env)).toBe(override);
+    expect(repoGraphRoot(db, {})).toBe(join(home, 'repo-graphs'));
+    expect(repoGraphRoot(db, { WICKED_ESTATE_REPO_GRAPH_ROOT: '' })).toBe(join(home, 'repo-graphs'));
+
+    const stores = await listStoreFiles(db, env);
+    expect(stores.map((s) => s.name)).toEqual(['core.db', 'repo-graphs/wicked-core-0123456789ab/estate.db']);
+    expect(stores[1]?.path).toBe(join(override, 'wicked-core-0123456789ab', 'estate.db'));
+    expect(stores[1]?.bytes).toBe(13);
+    // Unset → the state home's own root, exactly as before.
+    expect((await listStoreFiles(db, {})).map((s) => s.name)).toEqual([
+      'core.db',
+      'repo-graphs/stale-000000000000/estate.db',
+    ]);
   });
 
   it('eventsDirOf follows the engine convention <db>.events', () => {

@@ -428,13 +428,37 @@ export const REPO_GRAPHS_DIRNAME = 'repo-graphs';
 const REPO_GRAPH_DB_FILE = 'estate.db';
 
 /**
+ * The engine's precedence-1 override for the repo-graph root (`code_graph.rs` ADR): when set, the
+ * engine writes every repo graph under it instead of `<state home>/repo-graphs`, so the listing
+ * must look there too or it silently omits every graph. Same name the engine reads; an empty value
+ * means unset, as in the engine.
+ */
+export const REPO_GRAPH_ROOT_ENV = 'WICKED_ESTATE_REPO_GRAPH_ROOT';
+
+/**
+ * Where this daemon's repo graphs live, spelled with the engine's precedence: the env override
+ * when set, else `<state home>/repo-graphs` (the state home being the `--db` parent, exactly how
+ * the engine derives it). The two remaining engine arms (a thread-bound state home; the default
+ * `~/.wicked-crew`) collapse to the same answer here, because the daemon's state home IS
+ * `dirname(--db)`.
+ */
+export function repoGraphRoot(dbPath: string, env: NodeJS.ProcessEnv = process.env): string {
+  const override = env[REPO_GRAPH_ROOT_ENV];
+  if (override !== undefined && override !== '') return override;
+  return join(dirname(dbPath), REPO_GRAPHS_DIRNAME);
+}
+
+/**
  * `core.db` and every sidecar sharing its basename (`core.db-wal`, `core.db.knowledge`,
  * `core.db.mem*`, …), plus the events dir (`core.db.events`) sized as a TOTAL of its
  * contents, followed by one entry per repo graph under `<state home>/repo-graphs/<key>/estate.db`
  * (wicked-core#406 — the store issue #406 asked this surface to list). Paths and sizes only — no
  * file contents ever ride this wire.
  */
-export async function listStoreFiles(dbPath: string): Promise<StoreFileEntry[]> {
+export async function listStoreFiles(
+  dbPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<StoreFileEntry[]> {
   const home = dirname(dbPath);
   const base = basename(dbPath);
   let names: string[];
@@ -456,7 +480,7 @@ export async function listStoreFiles(dbPath: string): Promise<StoreFileEntry[]> 
       /* raced deletion — skip */
     }
   }
-  out.push(...(await listRepoGraphStores(join(home, REPO_GRAPHS_DIRNAME))));
+  out.push(...(await listRepoGraphStores(repoGraphRoot(dbPath, env))));
   return out;
 }
 
