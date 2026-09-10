@@ -47,6 +47,13 @@ import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
+import type {
+  GovernanceDeadletters,
+  GovernanceFindingKind,
+  GovernanceHealth,
+  GovernanceRecords,
+} from '../src/api/governance-health.js';
+import type { GovernanceStoreSource } from '../src/core/governance-store.js';
 import type { CREATE_UNDETERMINED, DocCreateBody, DocCreateRefusal, PreparedCreate } from '../src/interactive/proxy-routes.js';
 import type { SeamStatusPayload } from '../src/interactive/draft-events.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
@@ -375,8 +382,23 @@ respondsWith<
     recentErrors: RecentError[];
     acp: { byCli: Record<string, AcpCliFold> };
     skills: SkillsHealth;
+    governance: GovernanceHealth;
   }
 >();
+// The governance block (api-types 0.31.0, crew#495): the store the engine's emit seam writes to,
+// the records on it, the dead-letter fold and its findings — pinned both directions so a
+// null-vs-absent drift, a renamed source token or a finding kind one side does not know stops
+// compiling instead of shipping.
+respondsWith<Wire.DiagnosticsGovernance, GovernanceHealth>();
+respondsWith<GovernanceHealth, Wire.DiagnosticsGovernance>();
+respondsWith<Wire.DiagnosticsGovernanceStoreSource, GovernanceStoreSource>();
+respondsWith<GovernanceStoreSource, Wire.DiagnosticsGovernanceStoreSource>();
+respondsWith<Wire.DiagnosticsGovernanceFinding['kind'], GovernanceFindingKind>();
+respondsWith<GovernanceFindingKind, Wire.DiagnosticsGovernanceFinding['kind']>();
+respondsWith<Wire.DiagnosticsGovernanceDeadletters, GovernanceDeadletters>();
+respondsWith<GovernanceDeadletters, Wire.DiagnosticsGovernanceDeadletters>();
+respondsWith<Wire.DiagnosticsGovernanceRecords, GovernanceRecords>();
+respondsWith<GovernanceRecords, Wire.DiagnosticsGovernanceRecords>();
 // The skills seam's health block (api-types 0.28.0), both directions.
 respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();

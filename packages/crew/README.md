@@ -30,7 +30,12 @@ installs/updates the whole wicked-\* family, crew included.
 serves the bundled **wicked-studio** browser console same-origin — open the URL and you have the
 control room: launch and steer runs, answer human gates, browse projects and evidence, watch live
 engine events. Durable state (runs, evidence, event log) lives in `~/.wicked-crew/` (`--db`
-overrides).
+overrides). Governance evidence — conformance claims, phase transitions, rule lifecycle — lands in
+`<core db>.governance/governance.db` (`--governance-db` / `WICKED_CREW_GOVERNANCE_DB` override; an
+inherited `WICKED_ESTATE_DB` is honoured); events the engine cannot store dead-letter to
+`<core db>.governance/emit-outbox.ndjson`, never under HOME, are counted on
+`GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back
+with `wicked-crew governance replay <outbox>`.
 
 ## Quickstart
 

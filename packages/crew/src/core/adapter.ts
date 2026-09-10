@@ -38,6 +38,7 @@ import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
+import { applyGovernanceStoreEnv, type GovernanceStoreLocation } from './governance-store.js';
 
 
 
@@ -338,6 +339,25 @@ interface CoreConstructor {
   spawn(path: string): CoreHandleFull;
   spawnStub(path: string): CoreHandleFull;
   registryRoster(): string;
+  // crew#495 companion statics (wicked-core-ts ≥ the release carrying them). Optional for the same
+  // reason as `GovernanceMethods.retirePolicy`, and not hypothetically: NO released addon carries
+  // them yet, so `/diagnostics.governance.records` answers `null` ("cannot count") rather than a
+  // fabricated 0 and `wicked-crew governance replay` says "upgrade the engine" until one does.
+  /** EVENT nodes on the estate store at `dbPath` (a read-only connection), as a JSON number string. */
+  eventStoreCount?(dbPath: string): Promise<string>;
+  /** Replay a dead-letter outbox (the engine's NDJSON spool records) into the estate store at
+   *  `dbPath`; resolves to a JSON `{ read, replayed, failed: [{ line, reason }] }` report. */
+  replayEmitOutbox?(outboxPath: string, dbPath: string): Promise<string>;
+}
+
+/** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
+export interface EmitOutboxReplayReport {
+  /** Non-empty lines read from the outbox. */
+  read: number;
+  /** Entries written to the store as EVENT nodes. */
+  replayed: number;
+  /** Entries that did not land — the ORIGINAL line verbatim (so the caller can keep it dead-lettered) and why. */
+  failed: Array<{ line: string; reason: string }>;
 }
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
@@ -760,6 +780,23 @@ export class GovernanceScoreboardUnsupportedError extends Error {
   }
 }
 
+/**
+ * Replaying a dead-letter outbox is not available in this deployment — the installed
+ * wicked-core-ts predates the `Core.replayEmitOutbox` static (crew#495's engine companion). Typed
+ * for the same reason as `SteeringUnsupportedError`: the CLI says "upgrade the engine" (exit 2) and
+ * never pretends the entries landed. Gated on METHOD PRESENCE, the campaigns doctrine.
+ */
+export class GovernanceReplayUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts has no ` +
+        'replayEmitOutbox binding — upgrade it to a release carrying the crew#495 governance ' +
+        'store companion)',
+    );
+    this.name = 'GovernanceReplayUnsupportedError';
+  }
+}
+
 /** The engine's own way of reporting a build that cannot do chat, raised at call time. */
 const ENGINE_CHAT_UNSUPPORTED = /chat unsupported/i;
 
@@ -795,6 +832,14 @@ export interface CoreAdapterOptions {
   engineExec?: boolean;
   /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
   busDbPath?: string;
+  /**
+   * The governance store + dead-letter outbox this daemon hands the engine (crew#495 / F-022) —
+   * resolved by the CLI (`core/governance-store.ts`), exported to `process.env` HERE, before the
+   * Core exists, as `WICKED_ESTATE_DB` + `WICKED_APPS_EMIT_DEADLETTER` (the emit seam reads both at
+   * emit time). Absent — a library boot, a unit test — exports nothing: the engine keeps whatever
+   * the process carried (the hermetic test arming included) and `/diagnostics` reports `store: null`.
+   */
+  governanceStore?: GovernanceStoreLocation;
 }
 
 
@@ -937,6 +982,8 @@ export class CoreAdapter {
    * `api/server.ts`, crew#309).
    */
   readonly stub: boolean;
+  /** The governance store this adapter exported to the engine (crew#495), or `null` when none was resolved. */
+  readonly governanceStore: GovernanceStoreLocation | null;
 
   constructor(opts: CoreAdapterOptions) {
     // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
@@ -969,6 +1016,13 @@ export class CoreAdapter {
       if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
     }
 
+    // The governance store (crew#495): export the engine's store + outbox variables and create the
+    // sidecar BEFORE the engine exists, in the same breath as the other engine env above. Without
+    // this, every `wicked.*` governance event the engine emits dead-letters under the operator's
+    // HOME — silently, on every default install.
+    this.governanceStore = opts.governanceStore ?? null;
+    if (this.governanceStore !== null) applyGovernanceStoreEnv(this.governanceStore);
+
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
     this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
@@ -991,6 +1045,53 @@ export class CoreAdapter {
         }
       }
     });
+  }
+
+  /**
+   * The engine's EVENT-node counter over an estate store (`Core.eventStoreCount`, crew#495's
+   * companion binding), or `null` when the installed addon predates it — `/diagnostics.governance`
+   * then reports `records: { total: null, sinceBoot: null }`, honestly, never a fabricated 0. A
+   * store FILE that does not exist yet counts as 0: nothing has landed, which is a number, not an
+   * unknown (the engine's read-only open refuses a missing file, and that refusal is not "unknown").
+   */
+  static eventStoreCounter(): ((dbPath: string) => Promise<number>) | null {
+    const fn = Core.eventStoreCount;
+    if (typeof fn !== 'function') return null;
+    return async (dbPath: string): Promise<number> => {
+      const isFilePath = dbPath !== ':memory:' && !dbPath.includes('://');
+      if (isFilePath && !existsSync(dbPath)) return 0;
+      const raw = await fn.call(Core, dbPath);
+      const n = Number(JSON.parse(raw));
+      if (!Number.isInteger(n) || n < 0) throw new Error(`eventStoreCount answered a non-count: ${raw}`);
+      return n;
+    };
+  }
+
+  /** Whether the installed addon can replay a dead-letter outbox (`Core.replayEmitOutbox`, crew#495). */
+  static replayEmitOutboxSupported(): boolean {
+    return typeof Core.replayEmitOutbox === 'function';
+  }
+
+  /**
+   * Replay the engine's NDJSON spool records at `outboxPath` into the estate store at `dbPath` —
+   * the engine writes each as the EVENT node it should have been (its original `ts` restored where
+   * the record carries one). Throws {@link GovernanceReplayUnsupportedError} on an older addon.
+   */
+  static async replayEmitOutbox(outboxPath: string, dbPath: string): Promise<EmitOutboxReplayReport> {
+    const fn = Core.replayEmitOutbox;
+    if (typeof fn !== 'function') {
+      throw new GovernanceReplayUnsupportedError('Replaying a dead-letter outbox');
+    }
+    const raw = await fn.call(Core, outboxPath, dbPath);
+    const parsed = JSON.parse(raw) as Partial<EmitOutboxReplayReport>;
+    if (
+      typeof parsed.read !== 'number' ||
+      typeof parsed.replayed !== 'number' ||
+      !Array.isArray(parsed.failed)
+    ) {
+      throw new Error(`replayEmitOutbox answered an unexpected report: ${raw.slice(0, 200)}`);
+    }
+    return { read: parsed.read, replayed: parsed.replayed, failed: parsed.failed };
   }
 
   /** Register a CoreEvent listener. Returns an unsubscribe function. */
