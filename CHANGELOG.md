@@ -26,7 +26,10 @@ mentioned only where a daemon release depends on them.
   package version moves at its next release). `repoPaths.ts codeGraphDb()` reads it for the one case
   that shares the empty-`code_graph_db` shape with a stale addon: an engine that resolved NO root
   (`code_graph_root_unresolvable`) now surfaces its own diagnosis instead of the "reinstall
-  wicked-core-ts" error.
+  wicked-core-ts" error — as its own `CodeGraphRootUnresolvableError`, which `projects/graph.ts`
+  lets through untouched (every other `codeGraphDb` throw still becomes
+  `ProjectGraphEngineTooOldError` / 501 `engine-too-old`) and the project-graph routes answer 503
+  with the finding's message: a daemon-environment fault, not a stale addon and not a bad request.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /

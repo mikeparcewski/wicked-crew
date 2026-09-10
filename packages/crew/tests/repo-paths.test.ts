@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   CODE_GRAPH_ROOT_UNRESOLVABLE,
+  CodeGraphRootUnresolvableError,
   codeGraphDb,
   requirementsGraph,
   requirementsOverrides,
@@ -81,6 +82,9 @@ describe('repoPaths', () => {
     };
     expect(() => codeGraphDb(unresolvable)).toThrow(message);
     expect(() => codeGraphDb(unresolvable)).not.toThrow(/wicked-core#170/);
+    // Its OWN class, so `projects/graph.ts assertEngineFresh` can let it through instead of
+    // reporting a current engine as too old (501, "reinstall").
+    expect(() => codeGraphDb(unresolvable)).toThrow(CodeGraphRootUnresolvableError);
     // An unrelated finding does not change the diagnosis: empty with no root finding is still the
     // stale-addon case.
     const inTree: RepoEntry = {

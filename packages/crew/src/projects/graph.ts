@@ -44,7 +44,7 @@ import { dirname } from 'node:path';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
-import { codeGraphDb } from '../core/repoPaths.js';
+import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
   ProjectBlastRadius,
   ProjectGraphHit,
@@ -451,6 +451,10 @@ function assertEngineFresh(repos: MemberRepo[]): void {
     try {
       codeGraphDb(m.repo);
     } catch (err) {
+      // A CURRENT engine that resolved no repo-graph root (wicked-core#406) is not a stale addon:
+      // its remedy is the daemon's environment, and "engine too old" (501, reinstall) would send
+      // the operator the wrong way. Let it through with its own class; the routes classify it.
+      if (err instanceof CodeGraphRootUnresolvableError) throw err;
       throw new ProjectGraphEngineTooOldError(message(err));
     }
   }

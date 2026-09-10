@@ -28,6 +28,7 @@
  *   409 · anything else 400. A pre-0.6.0 addon answers 501 (ProjectsUnsupportedError), never 400.
  */
 
+import { CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -501,9 +502,12 @@ export function registerProjectRoutes(
     };
   }
 
-  /** Engine capability gaps map to 501, everything else to the projects mapping. */
+  /** Engine capability gaps map to 501; a current engine with no resolvable repo-graph root (a
+   *  daemon-environment fault, wicked-core#406) to 503; everything else to the projects mapping. */
   function graphErrorStatus(err: unknown): number {
-    return err instanceof ProjectGraphEngineTooOldError ? 501 : engineErrorStatus(err);
+    if (err instanceof ProjectGraphEngineTooOldError) return 501;
+    if (err instanceof CodeGraphRootUnresolvableError) return 503;
+    return engineErrorStatus(err);
   }
 
   app.get(`${V}/projects/:id/graph`, async (req, reply) => {
