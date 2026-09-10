@@ -8,14 +8,14 @@
 // crew CI builds the addon from core `main`, so whichever is true there is what runs.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
-import { archiveNameFor, GOVERNANCE_USAGE, replayOutbox, replayTarget, UsageError } from '../src/cli/governance.js';
+import { archiveNameFor, GOVERNANCE_USAGE, replayOutbox, replayTarget, restoreOutbox, UsageError } from '../src/cli/governance.js';
 import { governanceSidecarDb, resolveGovernanceStore } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -101,6 +101,26 @@ describe('replayOutbox (the command body)', () => {
     expect(archiveNameFor('/x/emit-outbox.ndjson', new Date('2026-09-10T15:29:07.123Z'))).toBe(
       '/x/emit-outbox.ndjson.replayed-2026-09-10T15-29-07-123Z',
     );
+  });
+
+  it('a replay that THROWS after the archive rename puts the outbox back — never "0 dead letters" for entries that never landed (Copilot on #516)', () => {
+    // No live outbox appeared meanwhile → the archive is renamed back, byte-identical.
+    const { outbox } = fixture();
+    const archive = archiveNameFor(outbox);
+    renameSync(outbox, archive);
+    expect(existsSync(outbox)).toBe(false);
+    restoreOutbox(outbox, archive);
+    expect(existsSync(archive)).toBe(false);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+
+    // The daemon spooled a fresh entry while the replay ran → the archive is APPENDED to the live
+    // file (the new entry is never clobbered) and the archive is removed.
+    renameSync(outbox, archive);
+    const fresh = JSON.stringify({ type: 'wicked.estate.rule.retired', domain: 'wicked-governance', subdomain: 'governance.rules', payload: {}, deadletter_reason: 'store write failed: locked' });
+    writeFileSync(outbox, `${fresh}\n`, 'utf8');
+    restoreOutbox(outbox, archive);
+    expect(existsSync(archive)).toBe(false);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${fresh}\n${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
   });
 
   it.runIf(!CoreAdapter.replayEmitOutboxSupported())(

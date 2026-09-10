@@ -25,11 +25,11 @@
  * wicked-core-ts), or the arguments are wrong.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CoreAdapter, GovernanceReplayUnsupportedError } from '../core/adapter.js';
+import { CoreAdapter, GovernanceReplayUnsupportedError, type EmitOutboxReplayReport } from '../core/adapter.js';
 import {
   EMIT_DEADLETTER_ENGINE_ENV,
   ESTATE_DB_ENGINE_ENV,
@@ -122,6 +122,23 @@ export function archiveNameFor(outbox: string, now: Date = new Date()): string {
   return `${outbox}.replayed-${now.toISOString().replace(/[:.]/g, '-')}`;
 }
 
+/**
+ * Put an archived outbox back after a replay that threw. When no live outbox has appeared since
+ * the rename, the archive is renamed back — byte-identical. When the daemon has already spooled a
+ * fresh file, the archive's entries are APPENDED to it (append mode, so a concurrent spool is
+ * never clobbered) and the archive is removed — every entry stays a visible dead letter, at the
+ * cost of the two batches' relative order (each entry carries its own `ts` on a stamping engine).
+ */
+export function restoreOutbox(outbox: string, archive: string): void {
+  if (!existsSync(outbox)) {
+    renameSync(archive, outbox);
+    return;
+  }
+  const archived = readFileSync(archive, 'utf8');
+  appendFileSync(outbox, archived.endsWith('\n') || archived === '' ? archived : `${archived}\n`, 'utf8');
+  rmSync(archive);
+}
+
 export interface ReplayOutcome {
   outbox: string;
   store: { path: string; source: string };
@@ -178,8 +195,20 @@ export async function replayOutbox(
   // 1. Archive first — atomic, so nothing the daemon appends from here on is lost.
   const archive = archiveNameFor(outbox);
   renameSync(outbox, archive);
-  // 2. Replay from the archive.
-  const report = await CoreAdapter.replayEmitOutbox(archive, store.dbPath);
+  // 2. Replay from the archive. If the engine THROWS (a store it cannot open, an I/O error
+  //    mid-file, a permission problem) the archive goes back where the daemon spools and
+  //    `/diagnostics` looks — an exception must never turn "not replayed" into "0 dead letters"
+  //    (Copilot on #516). Restored WHOLE: the engine may have landed some records before it threw,
+  //    so a later replay can duplicate those (visible on the store, auditable via `replayed`);
+  //    losing the rest would not be visible anywhere.
+  let report: EmitOutboxReplayReport;
+  try {
+    report = await CoreAdapter.replayEmitOutbox(archive, store.dbPath);
+  } catch (err) {
+    restoreOutbox(outbox, archive);
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`replay failed and the outbox was restored to ${outbox} (nothing is lost): ${reason}`);
+  }
   // 3. What did not land stays a dead letter on the live outbox (append: the daemon may have
   //    started a fresh file already).
   if (report.failed.length > 0) {
