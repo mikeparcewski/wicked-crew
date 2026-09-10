@@ -15,7 +15,7 @@ mentioned only where a daemon release depends on them.
 Release train: bundles the published `wicked-studio` 0.5.2 skin, pins the published
 `wicked-core-ts` `^0.7.17` engine, and ships `wicked-crew-api-types` 0.28.0 (0.25.0 → 0.26.0 →
 0.27.0 → 0.28.0 across the three PRs below). What merged since 0.7.25 — the detailed entries
-follow under Fixed / Added:
+follow under Changed / Fixed / Added:
 
 - **#474 — project-partitioned interactive root** (api-types 0.26.0): `/projects/:projectId/interactive/*`
   resolves each project to its own `~/wicked-interactive/docs/projects/<projectId>` partition
