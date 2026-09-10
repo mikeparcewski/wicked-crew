@@ -63,6 +63,8 @@ import {
   proposeClause,
   recallClause,
   type RecallIntent,
+  docScope,
+  type SeamStatusPayload,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -363,6 +365,8 @@ export interface InteractiveChatSubscription {
 interface InFlight {
   key: string;
   documentId: string;
+  /** The doc's project binding — stamped on every emit (F-045). Undefined = unfiled. */
+  projectId?: string | undefined;
   outPath: string;
   /** The manifest head the launch snapshotted — the landing gate's baseline. */
   headAtLaunch: number;
@@ -506,10 +510,16 @@ export async function startInteractiveChatSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+    emitStatus({
+      ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
     });
@@ -644,8 +654,8 @@ export async function startInteractiveChatSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+      emitStatus({
+        ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
           `The crew run answering your ask ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
@@ -659,7 +669,7 @@ export async function startInteractiveChatSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
-    const { key, documentId, outPath } = flight;
+    const { key, documentId, projectId, outPath } = flight;
     let ok = false;
     try {
       ok = existsSync(outPath) && statSync(outPath).size > 0;
@@ -668,8 +678,8 @@ export async function startInteractiveChatSubscriber(
     }
     if (!ok) {
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no revised document at ${outPath} (run ${runId}). Resend the message to retry.`,
       });
@@ -681,7 +691,7 @@ export async function startInteractiveChatSubscriber(
     // makes a re-announce a WB-002 no-op.
     const emitted = emitInteractive(
       DRAFT_COMPLETED,
-      { document_id: documentId, html_path: outPath },
+      { ...docScope(documentId, projectId), html_path: outPath },
       `crew:interactive.chat:${key}`,
     );
     if (!emitted) {
@@ -689,8 +699,8 @@ export async function startInteractiveChatSubscriber(
       // reached the service. Fail HONEST — leaving the row launched-but-never-closed would
       // silently eat a redelivery of this ask (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+      emitStatus({
+        ...docScope(documentId, projectId),
         state: 'error',
         message:
           `Crew finished the revision but could not announce it on the bus (run ${runId}); ` +
@@ -708,8 +718,8 @@ export async function startInteractiveChatSubscriber(
       minHead: flight.headAtLaunch + 1,
       until: Date.now() + landingGateMs,
     });
-    emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+    emitStatus({
+      ...docScope(documentId, projectId),
       state: 'complete',
       message: 'Revision is in — landing the new version on the canvas now.',
     });
@@ -740,8 +750,8 @@ export async function startInteractiveChatSubscriber(
       headOk = false;
     }
     if (!headOk) {
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not read the document's current version (missing ${doc.headHtmlPath}) — the ask was not answered.`,
       });
@@ -765,8 +775,8 @@ export async function startInteractiveChatSubscriber(
 
     // The studio's 90s silence budget: this pickup line is what keeps the thread honest, so
     // it fires BEFORE the launch resolves.
-    emitInteractive(STATUS_POSTED, {
-      document_id: ask.documentId,
+    emitStatus({
+      ...docScope(ask.documentId, ask.projectId),
       state: 'processing',
       message: 'A governed crew picked up your ask — revising the document…',
     });
@@ -846,8 +856,8 @@ export async function startInteractiveChatSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not start a run for your ask: ${reason}. Resend the message to retry.`,
       });
@@ -864,14 +874,15 @@ export async function startInteractiveChatSubscriber(
     const flight: InFlight = {
       key,
       documentId: ask.documentId,
+      projectId: ask.projectId,
       outPath,
       headAtLaunch: doc.head,
       narration: 'Crew run launched — working on your revision…',
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
+        emitStatus({
+          ...docScope(flight.documentId, flight.projectId),
           state: 'working',
           message: flight.narration,
         });
@@ -993,8 +1004,8 @@ export async function startInteractiveChatSubscriber(
       const queue = queues.get(ask.documentId) ?? [];
       queue.push(queued);
       queues.set(ask.documentId, queue);
-      emitInteractive(STATUS_POSTED, {
-        document_id: ask.documentId,
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
         state: 'processing',
         message:
           'Crew has your ask — a run is already working this document, so it is queued and will start as soon as the current work lands.',

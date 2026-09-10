@@ -50,6 +50,7 @@ import { cp, lstat, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises'
 import path, { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execCapped } from '../core/exec.js';
+import type { CoreAdapter } from '../core/adapter.js';
 
 /** Default snapshot budget (~200MB). A repo whose working tree exceeds this is not
  *  snapshotted — the launch proceeds ungrounded, honestly narrated. */
@@ -146,7 +147,7 @@ async function sweepSnapshot(root: string): Promise<void> {
  *  error (EACCES, ELOOP, …) means an EXISTING component could not be resolved — a lexical
  *  reconstruction there could miss an overlap through the unresolved link, so it THROWS and
  *  the caller's overlap-check catch fails closed (no snapshot, degrade). */
-async function realpathNearest(p: string): Promise<string> {
+export async function realpathNearest(p: string): Promise<string> {
   let existing = resolve(p);
   const tail: string[] = [];
   // Walk up until something exists; dirname() at the root returns itself, which always exists.
@@ -330,4 +331,65 @@ export async function snapshotRepo(
     await rm(dest, { recursive: true, force: true }).catch(() => {}); // never leave a partial snapshot
     return { ok: false, reason: 'copy-failed' };
   }
+}
+
+/** The registry could not be enumerated or a registered root could not be resolved — the inbox
+ *  cannot be PROVEN clear, so the caller refuses the launch (codex on crew#506: fail closed). */
+export class RunDirUnverifiableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunDirUnverifiableError';
+  }
+}
+
+/**
+ * The registered repository whose root a run's inbox would sit INSIDE (or contain), or `null` when
+ * the inbox is PROVABLY clear of every registered repo (codex on crew#506, CRITICAL). A seam
+ * declares its per-run directory as the worker's extra write root, so an inbox configured inside a
+ * live repository — `--interactive-*-dir` pointing into a checkout, or a repo registered AT the
+ * inbox — would hand the unbound worker write access to live source no matter what the run is
+ * about. The per-repo snapshot check catches only the repo being snapshotted; this walks the WHOLE
+ * registry BEFORE anything is created, realpath'd both sides (symlinked parents cannot hide an
+ * overlap).
+ *
+ * FAIL CLOSED: a registry that cannot be listed (engine/addon hiccup) or a root that cannot be
+ * resolved for any reason but plain ENOENT THROWS {@link RunDirUnverifiableError} — "could not
+ * check" is never read as "clear". A root that does not exist (ENOENT — a stale registration) is
+ * CANONICALIZED through its nearest existing ancestor (`realpathNearest`, codex on crew#506): a
+ * missing root beneath a symlinked ancestor then compares in the same namespace as the run dir,
+ * so an inbox configured inside the registered path is still caught.
+ */
+export async function runDirInsideRepo(adapter: CoreAdapter, runDir: string): Promise<string | null> {
+  let repos: Array<{ id?: string; root_path: string }>;
+  try {
+    repos = await adapter.listRepos();
+  } catch (err) {
+    throw new RunDirUnverifiableError(
+      `the repository registry could not be listed (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  const realRun = await realpathNearest(runDir);
+  for (const repo of repos) {
+    let realRoot: string;
+    try {
+      realRoot = await realpath(repo.root_path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new RunDirUnverifiableError(
+          `registered repository ${repo.root_path} could not be resolved (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+      try {
+        realRoot = await realpathNearest(repo.root_path);
+      } catch (nearest) {
+        throw new RunDirUnverifiableError(
+          `registered repository ${repo.root_path} could not be resolved through its ancestors (${
+            nearest instanceof Error ? nearest.message : String(nearest)
+          })`,
+        );
+      }
+    }
+    if (pathsOverlap(realRoot, realRun)) return repo.root_path;
+  }
+  return null;
 }

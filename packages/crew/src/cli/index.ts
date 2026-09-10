@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
@@ -10,6 +10,7 @@ import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { CrewBusError, resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -41,6 +42,9 @@ interface BootstrapOpts {
   qeGateEvents: boolean;
   /** Bus db for the QE subscription; `undefined` = wicked-bus's own default resolution. */
   qeBusDbPath: string | undefined;
+  /** The CROSS-PRODUCT bus (F-043): the interactive seams, the project bus, the /ws relay AND the
+   *  spawned bridge meet here — see `interactive/bus-location.ts` for the resolution. */
+  crewBus: CrewBusLocation;
   /** DEFAULT ON (#261): answer project-bound wicked-interactive doc.created with a governed draft run. */
   interactiveDraftEvents: boolean;
   /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
@@ -97,6 +101,26 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
   // events are cross-product traffic that never lands there.
   const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
+  // The CROSS-PRODUCT bus (acceptance findings F-042/F-043) — the interactive seams, the project
+  // bus, the /ws relay (which used to open wicked-bus's default REGARDLESS of --bus-db) and the
+  // bridge crew spawns (handed the directory as WICKED_BUS_DATA_DIR, bridge-pool.ts) all meet on
+  // ONE db: an explicit --bus-db / WICKED_BUS_DB, else WICKED_BUS_DATA_DIR, else the daemon's OWN
+  // `<core db>.bus/bus.db` — a sidecar of the core db, so two daemons on one host never share a
+  // bus by default. `interactive/bus-location.ts` says why a sidecar and not `<state home>/bus/`.
+  let crewBus: CrewBusLocation;
+  try {
+    crewBus = resolveCrewBus({
+      explicitDb: qeBusDbPath,
+      envDataDir: process.env['WICKED_BUS_DATA_DIR'],
+      coreDbPath: dbPath,
+    });
+  } catch (err) {
+    // An explicit bus db the bridge could never share is a CONFIG error — refuse to boot rather
+    // than run a daemon and its bridge on two buses (codex on crew#506).
+    if (!(err instanceof CrewBusError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
   // governed `interactive-draft` run. The bus is already required for the project bridge.
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
@@ -132,7 +156,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
-    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath,
+    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath, crewBus,
     interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
     interactiveSeats,
   };
@@ -153,6 +177,11 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // so the default daemon is byte-identical; the explicit per-store env overrides
   // (WICKED_CREW_PROJECT_GRAPH_ROOT, WICKED_CREW_PROJECT_SETTINGS) still outrank this.
   setCrewStateHome(stateHomeOfDb(opts.dbPath));
+  const { crewBus } = opts;
+  console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
+  // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —
+  // or an explicit dir — must exist before the seams open the db, or every seam disables itself.
+  mkdirSync(dirname(crewBus.dbPath), { recursive: true });
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
@@ -173,8 +202,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveDraftEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            // The cross-product bus (F-043): explicit --bus-db / WICKED_BUS_DB › WICKED_BUS_DATA_DIR › <core db>.bus.
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -183,8 +212,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveEditEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -193,8 +221,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveChatEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -203,20 +230,20 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveDemoEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
       : {}),
     // Projects (DES-PROJECT-001): default-ON, loud-non-fatal. Bus-db resolution follows the
-    // cross-product seams above (explicit --bus-db / WICKED_BUS_DB wins; otherwise wicked-bus's
-    // own default, where interactive's service also lands) — NOT the exec seam's crew-private
-    // fallback: `wicked.crew.project.*` and the interactive activity bridge are cross-product
-    // traffic, and the two skins must meet on one db.
-    ...(opts.qeBusDbPath !== undefined
-      ? { projectEvents: { dbPath: opts.qeBusDbPath } }
-      : {}),
+    // cross-product seams above — `wicked.crew.project.*`, the interactive activity bridge and the
+    // /ws relay are cross-product traffic, and the bridge crew spawns must meet them on ONE db
+    // (F-043) — NOT the exec seam's crew-private fallback.
+    projectEvents: { dbPath: crewBus.dbPath },
+    interactiveWsRelay: { dbPath: crewBus.dbPath },
+    // F-042/F-043: what the spawned bridge is told — the bus dir this daemon's seams read, and the
+    // daemon's own origin (resolved by the pool from the bound address).
+    interactiveBridge: { busDataDir: crewBus.dataDir },
   };
   const { port } = await startServer(
     adapter,
@@ -293,7 +320,9 @@ async function main(): Promise<void> {
         'Options:\n' +
         '  --port <n>                      Port to listen on (default: 7701, env: CREW_PORT)\n' +
         '  --db <path>                     Core database path (default: ~/.wicked-crew/core.db)\n' +
-        '  --bus-db <path>                 Bus database path (default: ~/.wicked-crew/bus.db, env: WICKED_BUS_DB)\n' +
+        '  --bus-db <path>                 Bus database path (env: WICKED_BUS_DB) for the interactive/project seams,\n' +
+        '                                  the /ws relay and the bridge crew spawns (default: $WICKED_BUS_DATA_DIR/bus.db,\n' +
+        '                                  else <core db>.bus/bus.db); --engine-exec defaults to <state home>/bus.db\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
         '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +

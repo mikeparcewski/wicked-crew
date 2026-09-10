@@ -60,6 +60,7 @@ import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
 import { registerInteractiveDocList } from '../interactive/doc-list-routes.js';
@@ -586,6 +587,13 @@ export interface RuntimeDeps {
    *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
    *  spawning a real `npx wicked-interactive serve`. */
   interactiveBridges?: InteractiveBridgePool;
+  /** F-043 — the directory of the bus db this daemon's interactive seams read, exported to a
+   *  bridge the pool spawns as `WICKED_BUS_DATA_DIR`. `null`/absent = not exported. Ignored when
+   *  `interactiveBridges` is injected (the injected pool carries its own io). */
+  interactiveBridgeBusDataDir?: string | null;
+  /** F-046 — the create-time doc → subject-repo binding store the proxy records into and the
+   *  draft/demo seams read. Absent = the create stays pure transport (a directly-driven route set). */
+  docGrounding?: DocGroundingStore;
   /** The governed doc-delete's handoff-ledger sweep (crew#338) — `createServer` wires the real
    *  four-ledger sweep (live seam instances first, ledger files as fallback); a directly-driven
    *  route set gets an INERT one so unit tests never touch ~/.wicked-crew. */
@@ -3598,10 +3606,13 @@ export function registerRoutes(
       // pool POSTs it to the bridge's /api/studio-origin on start/adopt so the bridge's
       // `GET /` redirects into studio.
       studioOrigin: () => boundOrigin(app.server.address()),
+      // F-043: the bridge emits where this daemon's interactive seams read — one bus per daemon.
+      busDataDir: runtime.interactiveBridgeBusDataDir ?? null,
     });
   registerInteractiveProxy(app, adapter, {
     settings: projectSettings,
     pool: interactiveBridges,
+    ...(runtime.docGrounding !== undefined ? { grounding: runtime.docGrounding } : {}),
     log: (m) => app.log.warn(m),
   });
 

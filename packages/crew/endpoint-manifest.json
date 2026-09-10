@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.29.0",
+  "apiTypesVersion": "0.30.0",
   "endpoints": [
     {
       "method": "GET",
@@ -464,6 +464,21 @@
         200,
         404,
         500,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/projects/:projectId/interactive/api/docs",
+      "requestType": "InteractiveDocCreateRequest",
+      "responseType": "InteractiveDocCreateResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        413,
         502,
         503
       ]

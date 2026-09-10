@@ -293,3 +293,35 @@ describe('pathsOverlap (Copilot round 2: root bases must match)', () => {
     expect(pathsOverlap('/a/b', '/a/c', path.posix)).toBe(false);
   });
 });
+
+// ── runDirInsideRepo — the registry-wide inbox guard (codex r3 on crew#506) ─────────────────────
+
+describe('runDirInsideRepo — a missing registered root beneath a SYMLINKED ancestor still catches the inbox', () => {
+  it('canonicalizes the missing root through its nearest existing ancestor and compares in the run dir\'s namespace', async () => {
+    const { mkdtempSync, mkdirSync, symlinkSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { runDirInsideRepo, RunDirUnverifiableError } = await import('../src/interactive/repo-snapshot.js');
+    const { removeScratch } = await import('./setup/scratch.js');
+    const scratch = mkdtempSync(join(tmpdir(), 'crew-rdir-'));
+    try {
+      const real = join(scratch, 'real');
+      mkdirSync(real, { recursive: true });
+      symlinkSync(real, join(scratch, 'link'), 'dir');
+      // Registered as `<link>/missing-repo` — the directory does not exist (a stale registration),
+      // and its ANCESTOR is a symlink to `real/`.
+      const registered = join(scratch, 'link', 'missing-repo');
+      const adapter = { listRepos: async () => [{ id: 'r', root_path: registered }] } as unknown as import('../src/core/adapter.js').CoreAdapter;
+      // An inbox configured INSIDE the registered path, spelled through the real directory: a
+      // lexical comparison of `<link>/missing-repo` vs `<real>/missing-repo/inbox` would miss it.
+      expect(await runDirInsideRepo(adapter, join(real, 'missing-repo', 'inbox'))).toBe(registered);
+      // A sibling is clear.
+      expect(await runDirInsideRepo(adapter, join(real, 'other', 'inbox'))).toBeNull();
+      // The registry failing to list, or a root failing to resolve for any other reason, is NOT "clear".
+      const broken = { listRepos: async () => { throw new Error('addon hiccup'); } } as unknown as import('../src/core/adapter.js').CoreAdapter;
+      await expect(runDirInsideRepo(broken, join(real, 'x'))).rejects.toBeInstanceOf(RunDirUnverifiableError);
+    } finally {
+      removeScratch(scratch);
+    }
+  });
+});

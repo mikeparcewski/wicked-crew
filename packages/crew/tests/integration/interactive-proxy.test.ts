@@ -22,7 +22,9 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
+import { CREW_GROUNDING_FILE, DocGroundingStore } from '../../src/interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js';
+import { mkdirSync as mkdirp } from 'node:fs';
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project } from '../../src/core/types.js';
@@ -38,11 +40,28 @@ const { createServer } = require('node:http');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const root = process.argv[1];  // under \`node -e\`, the first script arg is argv[1]
+let created = 0;               // how many creates REACHED this bridge (replay detection)
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/api/create-count') {
+    return res.writeHead(200, {'content-type':'application/json'}).end(JSON.stringify({ created }));
+  }
   if (url.pathname === '/api/health') {
     return res.writeHead(200, {'content-type':'application/json'})
       .end(JSON.stringify({ ok: true, root, pid: process.pid }));
+  }
+  if (url.pathname === '/api/docs' && req.method === 'POST') {  // the create: echoes what arrived
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    return req.on('end', () => {
+      created += 1;
+      // A bridge that created + emitted the doc and then died before answering (codex on #506).
+      if (req.headers['x-fake-reset']) { req.socket.destroy(); return; }
+      let received = {};
+      try { received = JSON.parse(body); } catch { received = { unparsed: body }; }
+      res.writeHead(200, {'content-type':'application/json'})
+        .end(JSON.stringify({ name: received.name || 'made-doc', head: 0, generating: true, received }));
+    });
   }
   if (url.pathname === '/api/docs') {
     return res.writeHead(200, {'content-type':'application/json'})
@@ -300,5 +319,195 @@ describe('interactive proxy — transport semantics', () => {
       rest += new TextDecoder().decode(next.value);
     }
     expect(rest).toContain('data: last');
+  }, 30_000);
+});
+
+describe('interactive proxy — doc create interception (F-046)', () => {
+  let createApp: FastifyInstance;
+  let createBase: string;
+  let grounding: DocGroundingStore;
+  const studioRoot = (): string => join(dir, 'repos', 'wicked-studio');
+
+  beforeAll(async () => {
+    mkdirp(studioRoot(), { recursive: true });
+    grounding = new DocGroundingStore();
+    // The adapter knows p-a's members and the registry — what the proxy validates a repo_ref against.
+    // p-twins has TWO checkouts of wicked-studio (same name/basename) — the ambiguity case.
+    const adapter = Object.assign(stubAdapter(new Set(['p-a', 'p-twins'])), {
+      projectMembers: async (id: string) =>
+        id === 'p-a'
+          ? [
+              { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+              { member_kind: 'crew.run', member_ref: 'run-1' },
+            ]
+          : id === 'p-twins'
+            ? [
+                { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+                { member_kind: 'crew.repo', member_ref: 'repo-studio-twin' },
+              ]
+            : [],
+      listRepos: async () => [
+        { id: 'repo-studio', name: 'wicked-studio', root_path: studioRoot() },
+        { id: 'repo-studio-twin', name: 'wicked-studio', root_path: join(dir, 'elsewhere', 'wicked-studio') },
+      ],
+    }) as CoreAdapter;
+    createApp = Fastify({ logger: false });
+    registerInteractiveProxy(createApp, adapter, {
+      settings: new ProjectSettingsStore(settingsPath),
+      pool,
+      env: { WICKED_INTERACTIVE_ROOT: join(dir, 'shared-docs') },
+      grounding,
+    });
+    await createApp.listen({ port: 0, host: '127.0.0.1' });
+    const addr = createApp.server.address();
+    createBase = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  }, 30_000);
+
+  afterAll(async () => {
+    await createApp.close();
+  });
+
+  const post = (project: string, body: unknown, raw = false): Promise<Response> =>
+    fetch(`${createBase}/api/v1/projects/${project}/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': raw ? 'text/plain' : 'application/json' },
+      body: raw ? String(body) : JSON.stringify(body),
+    });
+
+  it('REFUSES a repo the project does not have — 400 repo_not_in_project naming the fix, nothing forwarded, nothing recorded', async () => {
+    const res = await post('p-a', { name: 'brochure', kind: 'source', brief: 'x', project: 'p-a', repo_ref: 'wicked-crew' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; requested: string[]; missing: string[]; available: Array<{ id: string; name: string }>; error: string };
+    expect(body.code).toBe('repo_not_in_project');
+    expect(body.requested).toEqual(['wicked-crew']);
+    expect(body.missing).toEqual(['wicked-crew']);
+    expect(body.available).toEqual([{ id: 'repo-studio', name: 'wicked-studio' }]);
+    expect(body.error).toContain('pick one of: wicked-studio');
+    expect(existsSync(join(dir, 'shared-docs', 'brochure'))).toBe(false); // nothing recorded, nothing created
+    expect(grounding.pendingCount('p-a')).toBe(0);
+  }, 30_000);
+
+  it('REFUSES a repo on the Unfiled mount — an unbound doc cannot be about a project repository', async () => {
+    const res = await post('default', { name: 'loose', kind: 'source', brief: 'x', repo_refs: ['wicked-studio'] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('unfiled_doc_repo');
+  }, 30_000);
+
+  it('REFUSES junk refs before touching the project', async () => {
+    const res = await post('p-a', { name: 'd', kind: 'source', brief: 'x', repo_refs: 'not-an-array' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; requested: string[] };
+    expect(body.code).toBe('invalid_repo_ref');
+    expect(body.requested).toEqual(['not-an-array']); // as the client spelled it
+  }, 30_000);
+
+  it('forwards a valid create with repo_ref STRIPPED and style INFERRED from the brief, and records the binding under the doc name the bridge answered with', async () => {
+    const res = await post('p-a', {
+      name: 'brochure',
+      kind: 'source',
+      brief: 'A high-end product brochure. Print-ready A4, two pages.',
+      project: 'p-a',
+      repo_ref: 'wicked-studio', // by NAME — canonicalized to the registry id below
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; received: Record<string, unknown> };
+    expect(body.name).toBe('brochure');
+    expect('repo_ref' in body.received).toBe(false);
+    expect('repo_refs' in body.received).toBe(false);
+    expect(body.received.style).toBe('brochure');
+    expect(body.received.brief).toBe('A high-end product brochure. Print-ready A4, two pages.');
+    // Recorded as a sidecar BESIDE THE DOC under the project's docs root — never under the state home.
+    const sidecar = join(dir, 'shared-docs', 'brochure', CREW_GROUNDING_FILE);
+    expect(existsSync(sidecar)).toBe(true);
+    expect(grounding.get(join(dir, 'shared-docs'), 'brochure')).toMatchObject({ project_id: 'p-a', repo_refs: ['repo-studio'], style: 'brochure' });
+    expect(grounding.pendingCount('p-a')).toBe(0);
+  }, 30_000);
+
+  it('passes a client style through untouched, and leaves a brief with no format words style-less', async () => {
+    const kept = (await (await post('p-a', { name: 'deck', kind: 'source', brief: 'notes', style: 'ppt', project: 'p-a' })).json()) as {
+      received: Record<string, unknown>;
+    };
+    expect(kept.received.style).toBe('ppt');
+    const bare = (await (await post('p-a', { name: 'plain', kind: 'source', brief: 'notes for the team', project: 'p-a' })).json()) as {
+      received: Record<string, unknown>;
+    };
+    expect('style' in bare.received).toBe(false);
+    expect(grounding.get(join(dir, 'shared-docs'), 'plain')).toBeUndefined(); // nothing named → nothing recorded
+  }, 30_000);
+
+  it('is pure transport for a create body that is not a JSON object', async () => {
+    const res = await post('p-a', 'not json at all', true);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { received: { unparsed?: string } }).received.unparsed).toBe('not json at all');
+  }, 30_000);
+
+  it('canonicalizes the body\'s project from the ROUTE: omitted → filled in; conflicting → 400 project_mismatch; a project on the Unfiled mount → 400 (codex on #506)', async () => {
+    const omitted = (await (await post('p-a', { name: 'no-project', kind: 'source', brief: 'x' })).json()) as { received: Record<string, unknown> };
+    expect(omitted.received.project).toBe('p-a');
+    const conflicting = await post('p-a', { name: 'wrong', kind: 'source', brief: 'x', project: 'p-b', repo_ref: 'wicked-studio' });
+    expect(conflicting.status).toBe(400);
+    const cbody = (await conflicting.json()) as { code: string; error: string; requested: string[] };
+    expect(cbody.code).toBe('project_mismatch');
+    expect(cbody.error).toContain('"p-b"');
+    expect(cbody.error).toContain('p-a');
+    expect(cbody.requested, 'a project mismatch still reports the refs as spelled (Copilot)').toEqual(['wicked-studio']);
+    const unfiled = await post('default', { name: 'loose', kind: 'source', brief: 'x', project: 'p-a' });
+    expect(unfiled.status).toBe(400);
+    expect(((await unfiled.json()) as { code: string }).code).toBe('project_mismatch');
+    // …a matching project passes through as the EXACT route id — an untrimmed spelling is never
+    // forwarded as sent, and a non-string is a mismatch (codex on #506).
+    const same = (await (await post('p-a', { name: 'same', kind: 'source', brief: 'x', project: 'p-a' })).json()) as { received: Record<string, unknown> };
+    expect(same.received.project).toBe('p-a');
+    const padded = (await (await post('p-a', { name: 'padded', kind: 'source', brief: 'x', project: '  p-a  ' })).json()) as { received: Record<string, unknown> };
+    expect(padded.received.project).toBe('p-a');
+    const numeric = await post('p-a', { name: 'num', kind: 'source', brief: 'x', project: 7, repo_refs: ['a', 'b'] });
+    expect(numeric.status).toBe(400);
+    const nbody = (await numeric.json()) as { code: string; requested: string[] };
+    expect(nbody.code).toBe('project_mismatch');
+    expect(nbody.requested).toEqual(['a', 'b']);
+  }, 30_000);
+
+  it('REFUSES an AMBIGUOUS alias — a name shared by two member repos — listing the candidates; the id resolves it (codex on #506)', async () => {
+    const res = await post('p-twins', { name: 'which', kind: 'source', brief: 'x', repo_ref: 'wicked-studio' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; requested: string[]; ambiguous: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }>; error: string };
+    expect(body.code).toBe('ambiguous_repo_ref');
+    expect(body.requested).toEqual(['wicked-studio']);
+    expect(body.ambiguous).toEqual([
+      { ref: 'wicked-studio', candidates: [{ id: 'repo-studio', name: 'wicked-studio' }, { id: 'repo-studio-twin', name: 'wicked-studio' }] },
+    ]);
+    expect(body.error).toContain('name the repository by id');
+    expect(existsSync(join(dir, 'shared-docs', 'which'))).toBe(false);
+    // By id: unambiguous, forwarded, recorded.
+    const byId = await post('p-twins', { name: 'which-id', kind: 'source', brief: 'x', repo_ref: 'repo-studio-twin' });
+    expect(byId.status).toBe(200);
+    expect(grounding.get(join(dir, 'shared-docs'), 'which-id')?.repo_refs).toEqual(['repo-studio-twin']);
+  }, 30_000);
+
+  it('NEVER replays a create the bridge already received: a connection dropped after dispatch is a 502 create_undetermined, and the bridge saw exactly ONE create (codex on #506)', async () => {
+    const countUrl = `${createBase}/api/v1/projects/p-a/interactive/api/create-count`;
+    const before = ((await (await fetch(countUrl)).json()) as { created: number }).created;
+    const res = await fetch(`${createBase}/api/v1/projects/p-a/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fake-reset': '1' },
+      body: JSON.stringify({ name: 'dropped', kind: 'source', brief: 'x', project: 'p-a', repo_ref: 'wicked-studio' }),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('create_undetermined');
+    expect(body.error).toContain('may already exist');
+    const after = ((await (await fetch(countUrl)).json()) as { created: number }).created;
+    expect(after - before, 'the create must reach the bridge exactly once — no replay').toBe(1);
+    expect(grounding.pendingCount('p-a')).toBe(0);
+  }, 30_000);
+
+  it('WITHOUT a grounding store the create is untouched transport — repo_ref reaches the bridge as sent', async () => {
+    const res = await fetch(`${base}/api/v1/projects/p-a/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'raw', kind: 'source', brief: 'x', repo_ref: 'wicked-studio' }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { received: Record<string, unknown> }).received.repo_ref).toBe('wicked-studio');
   }, 30_000);
 });
