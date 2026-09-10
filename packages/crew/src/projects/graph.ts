@@ -44,7 +44,7 @@ import { dirname } from 'node:path';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
-import { codeGraphDb } from '../core/repoPaths.js';
+import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
   ProjectBlastRadius,
   ProjectGraphHit,
@@ -451,6 +451,10 @@ function assertEngineFresh(repos: MemberRepo[]): void {
     try {
       codeGraphDb(m.repo);
     } catch (err) {
+      // A CURRENT engine that resolved no repo-graph root (wicked-core#406) is not a stale addon:
+      // its remedy is the daemon's environment, and "engine too old" (501, reinstall) would send
+      // the operator the wrong way. Let it through with its own class; the routes classify it.
+      if (err instanceof CodeGraphRootUnresolvableError) throw err;
       throw new ProjectGraphEngineTooOldError(message(err));
     }
   }
@@ -821,6 +825,18 @@ export async function resolveProjectGraphBinding(
   try {
     status = await projectGraphStatus(adapter, projectId, env);
   } catch (err) {
+    // A CURRENT engine that resolved no repo-graph root at all (wicked-core#406): there is no
+    // per-repo graph to degrade to either — the engine will ship the worker no estate tools —
+    // so the reason must not promise one. Name the environment fault instead; it is the remedy.
+    if (err instanceof CodeGraphRootUnresolvableError) {
+      return {
+        binding: null,
+        reason:
+          `no code graph can be bound: ${err.finding.message}. This run gets no code graph ` +
+          `(not the project's, not its own repo's) until the daemon's environment resolves a ` +
+          `repo-graph root.`,
+      };
+    }
     // Resolving the binding is an ENHANCEMENT to the launch. A project whose membership cannot be
     // read, or an addon too old to vouch for repo graph paths, must not take the run down with it —
     // the run is still perfectly launchable against its own repo's graph.
