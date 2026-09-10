@@ -8,7 +8,7 @@
 // crew CI builds the addon from core `main`, so whichever is true there is what runs.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,8 +19,10 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 import {
+  appendFailedLines,
   appendLines,
   archiveNameFor,
+  conflationNote,
   GOVERNANCE_USAGE,
   LineBoundaryGuard,
   replayOutbox,
@@ -83,6 +85,11 @@ describe('replayTarget — the target store follows serve\'s rule', () => {
     // A URL spec is refused here exactly as `serve` refuses it (the emit seam is SQLite-only) — exit 2, no secret echoed.
     expect(() => replayTarget(['--governance-db', 'postgres://u:s3cret@h/db'], env)).toThrow(GovernanceStoreError);
     expect(() => replayTarget(['--governance-db', 'postgres://u:s3cret@h/db'], env)).not.toThrow(/s3cret/);
+    // …and so are the bus db (resolved the way `serve` resolves it: WICKED_BUS_DB › WICKED_BUS_DATA_DIR › the sidecar) and the core db.
+    expect(() => replayTarget(['--db', '/state/core.db', '--governance-db', '/state/core.db.bus/bus.db'], env)).toThrow(/bus db/);
+    expect(() => replayTarget(['--db', '/state/core.db', '--governance-db', '/shared/bus.db'], { WICKED_BUS_DB: '/shared/bus.db' })).toThrow(/bus db/);
+    expect(() => replayTarget(['--db', '/state/core.db', '--governance-db', '/busdir/bus.db'], { WICKED_BUS_DATA_DIR: '/busdir' })).toThrow(/bus db/);
+    expect(() => replayTarget(['--db', '/state/core.db', '--governance-db', '/state/core.db'], env)).toThrow(/own core db/);
   });
 });
 
@@ -103,6 +110,7 @@ describe('replayOutbox (the command body)', () => {
     expect(outcome.fold?.untimestamped).toBe(2);
     expect(existsSync(outbox)).toBe(true);
     expect(readdirSync(scratch as string)).toEqual(['emit-outbox.ndjson']); // no archive, no store
+    expect(outcome.note).toBeNull();
   });
 
   it('refuses a missing outbox, and a :memory: target for a REAL replay only — a dry run folds the file and touches no store', async () => {
@@ -117,10 +125,34 @@ describe('replayOutbox (the command body)', () => {
     expect(dry.outcome.alreadyPresent).toBeNull();
   });
 
-  it('the archive name is the outbox plus a filesystem-safe timestamp', () => {
-    expect(archiveNameFor('/x/emit-outbox.ndjson', new Date('2026-09-10T15:29:07.123Z'))).toBe(
-      '/x/emit-outbox.ndjson.replayed-2026-09-10T15-29-07-123Z',
+  it('the archive name is the outbox plus a filesystem-safe timestamp, the pid and a nonce — two replays in one millisecond never share it', () => {
+    expect(archiveNameFor('/x/emit-outbox.ndjson', new Date('2026-09-10T15:29:07.123Z'), 'abc123')).toBe(
+      `/x/emit-outbox.ndjson.replayed-2026-09-10T15-29-07-123Z-${process.pid}-abc123`,
     );
+    const now = new Date();
+    expect(archiveNameFor('/x/o.ndjson', now)).not.toBe(archiveNameFor('/x/o.ndjson', now));
+    expect(archiveNameFor('/x/o.ndjson', now)).toMatch(/\.replayed-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-\d+-[0-9a-f]{6}$/);
+  });
+
+  it('a failed write-back of the failed lines names the retained archive instead of hiding the dead letters', () => {
+    fixture();
+    const archive = join(scratch as string, 'emit-outbox.ndjson.replayed-x');
+    const outboxAsDir = join(scratch as string, 'live-is-a-dir.ndjson');
+    mkdirSync(outboxAsDir); // appending to a directory fails (EISDIR)
+    expect(() => appendFailedLines(outboxAsDir, archive, [TORN])).toThrow(/remain in the retained archive/);
+    expect(() => appendFailedLines(outboxAsDir, archive, [TORN])).toThrow(new RegExp(archive.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    // Nothing to write back → nothing to fail.
+    expect(() => appendFailedLines(outboxAsDir, archive, [])).not.toThrow();
+  });
+
+  it('conflationNote states the pre-stamp caveat only when entries were already present AND the outbox holds untimestamped lines', () => {
+    expect(conflationNote(0, { untimestamped: 3 })).toBeNull();
+    expect(conflationNote(2, { untimestamped: 0 })).toBeNull();
+    const note = conflationNote(2, { untimestamped: 3 }) as string;
+    expect(note).toContain('2 entries were already on the store');
+    expect(note).toContain('3 untimestamped');
+    expect(note).toContain('byte-identical unstamped lines share one replay id');
+    expect(conflationNote(1, { untimestamped: 1 })).toContain('1 entry was already on the store');
   });
 
   /** The NDJSON entries of a file — what every reader (the fold, the engine's replay) sees: blank lines are not entries. */
@@ -236,6 +268,7 @@ describe('replayOutbox (the command body)', () => {
       expect(existsSync(outcome.archive as string)).toBe(true);
       expect(readFileSync(outcome.archive as string, 'utf8')).toBe(`${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
       expect(readFileSync(outbox, 'utf8')).toBe(`\n${TORN}\n`); // the failed batch, behind its unconditional separator
+      expect(outcome.note).toBeNull(); // nothing was already present on a first replay
       // Both records are EVENT nodes on the store now — counted through the same engine binding.
       const count = CoreAdapter.eventStoreCounter();
       expect(count).not.toBeNull();

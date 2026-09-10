@@ -28,7 +28,7 @@ import { createReadStream } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { createInterface } from 'node:readline';
 
-import type { GovernanceStoreLocation, GovernanceStoreSource } from '../core/governance-store.js';
+import { governanceSidecarDb, type GovernanceStoreLocation, type GovernanceStoreSource } from '../core/governance-store.js';
 
 // ── Wire-facing shapes (mirrored by wicked-crew-api-types `DiagnosticsGovernance*`) ──────────
 
@@ -299,23 +299,25 @@ export class GovernanceRecordCounter {
 /** Quote one argument for the operator's shell: bare when it needs no quoting, otherwise
  *  single-quoted on POSIX and double-quoted on Windows (JSON quoting is not shell quoting there). */
 export function shellQuote(arg: string): string {
-  if (/^[A-Za-z0-9_./:@%+=,<>-]+$/.test(arg)) return arg;
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(arg)) return arg; // `<` `>` are redirections — never bare
   return process.platform === 'win32' ? `"${arg.replace(/"/g, '\\"')}"` : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
  * The replay recipe every finding points at — one spelling, so the console and the log agree — and
- * TARGET-SPECIFIC: `replayTarget()` defaults to the state home's `core.db` sidecar, so a bare
- * recipe followed on a daemon booted with a custom `--db` or `--governance-db` would replay into a
- * different store than the one that dead-lettered. The default sidecar is named through its core db
- * (`--db`); an explicit store through `--governance-db`. `null` target = no daemon store known: the
- * bare recipe, for a `--dry-run` inspection.
+ * TARGET-SPECIFIC: a bare recipe followed on a daemon booted with a custom `--db` or
+ * `--governance-db` would replay into a different store than the one that dead-lettered. The target
+ * is ALWAYS an explicit, DURABLE `--governance-db`: the flag outranks the env rungs of
+ * `replayTarget()`'s ladder (a `WICKED_CREW_GOVERNANCE_DB` / `WICKED_ESTATE_DB` exported in the
+ * operator's shell would otherwise win over `--db`), and a `:memory:` daemon's dead letters are
+ * pointed at its durable sidecar store rather than at a target a real replay refuses. `null` target
+ * = no daemon store known: the bare recipe, for a `--dry-run` inspection.
  */
 export function replayCommand(outboxPath: string, target: GovernanceStoreLocation | null): string {
   const base = `wicked-crew governance replay ${shellQuote(outboxPath)}`;
   if (target === null) return base;
-  if (target.source === 'core-db-sidecar') return `${base} --db ${shellQuote(target.coreDbPath)}`;
-  return `${base} --governance-db ${shellQuote(target.displayPath)}`;
+  const durable = target.dbPath === ':memory:' ? governanceSidecarDb(target.coreDbPath) : target.displayPath;
+  return `${base} --governance-db ${shellQuote(durable)}`;
 }
 
 export interface GovernanceHealthInputs {

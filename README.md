@@ -67,7 +67,9 @@ terminal, `governance replay <outbox>` drains governance events the engine could
 
 Governance evidence (conformance claims, phase transitions, rule lifecycle) lands in a store
 beside the core db — `<core db>.governance/governance.db` (`--governance-db` /
-`WICKED_CREW_GOVERNANCE_DB` override; an inherited `WICKED_ESTATE_DB` is honoured). Events the
+`WICKED_CREW_GOVERNANCE_DB` override; an inherited `WICKED_ESTATE_DB` is honoured — the emit seam stores
+to SQLite only, so a URL-form `WICKED_ESTATE_DB` such as `postgres://…` in your shell refuses boot until
+`--governance-db` names a SQLite file). Events the
 engine cannot store dead-letter to `<core db>.governance/emit-outbox.ndjson` by default — under the
 state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` is honoured);
 `GET /api/v1/diagnostics` → `governance` counts them and raises a

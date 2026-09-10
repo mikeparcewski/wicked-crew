@@ -7,7 +7,7 @@
 // state-home fence registry already classifies (the `core.db` prefix claim), the override ladder,
 // the outbox never leaving the state home, the env handoff, and the boot-value restore for children.
 
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyEmitOrigin,
   applyGovernanceStoreEnv,
+  canonicalPath,
   childEnvWithBootEstateDb,
   EMIT_DEADLETTER_ENGINE_ENV,
   EMIT_ORIGIN_ENGINE_ENV,
@@ -114,6 +115,29 @@ describe('resolveGovernanceStore (crew#495)', () => {
     // …while a sibling file beside them is fine, and the sidecar default never collides.
     expect(resolveGovernanceStore({ ...core, flagDb: '/state/other.db' }).source).toBe('flag');
     expect(resolveGovernanceStore(core).dbPath).toBe(resolve('/state/core.db.governance/governance.db'));
+  });
+
+  it('…and the refusal compares CANONICAL paths: a symlink to the core db, or to its directory, is caught (canonicalPath resolves the nearest existing ancestor)', () => {
+    const scratchDir = mkdtempSync(join(tmpdir(), 'crew-gov-canon-'));
+    try {
+      const state = join(scratchDir, 'state');
+      mkdirSync(state);
+      writeFileSync(join(state, 'core.db'), '', 'utf8');
+      const fileLink = join(scratchDir, 'core-link.db');
+      const dirLink = join(scratchDir, 'state-link');
+      symlinkSync(join(state, 'core.db'), fileLink);
+      symlinkSync(state, dirLink);
+      const core = { coreDbPath: join(state, 'core.db') };
+      expect(() => resolveGovernanceStore({ ...core, flagDb: fileLink })).toThrow(/own core db/);
+      expect(() => resolveGovernanceStore({ ...core, flagDb: join(dirLink, 'core.db') })).toThrow(/own core db/);
+      expect(() => resolveGovernanceStore({ ...core, busDbPath: join(state, 'core.db.bus', 'bus.db'), flagDb: join(dirLink, 'core.db.bus', 'bus.db') })).toThrow(/bus db/);
+      // A not-yet-existing file under the linked directory canonicalizes through the link…
+      expect(canonicalPath(join(dirLink, 'new', 'gov.db'))).toBe(join(realpathSync.native(state), 'new', 'gov.db'));
+      // …and a sibling that is NOT an alias is admitted.
+      expect(resolveGovernanceStore({ ...core, flagDb: join(dirLink, 'other.db') }).source).toBe('flag');
+    } finally {
+      removeScratch(scratchDir);
+    }
   });
 
   it('isStoreSpec is `:memory:` and nothing else; a Windows drive written with forward slashes is a PATH, not a URL', () => {
