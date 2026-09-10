@@ -149,6 +149,11 @@ jobs:
   probe:
     name: The registry can actually serve it
     needs: release
+    # Runs even when `release` FAILED (Copilot on #520): under the default success condition a failed
+    # `npm publish` would leave this job skipped, and the message naming the real publish failure
+    # would never print. Guarded on the version output so a failure before the tag check (nothing to
+    # probe for) still skips; `!cancelled()` rather than `always()` so a cancelled run stays cancelled.
+    if: ${{ !cancelled() && needs.release.outputs.version != '' }}
     runs-on: ubuntu-latest
     # No checkout and no OIDC: `npm view` against the public registry needs neither.
     permissions: {}
@@ -161,6 +166,12 @@ jobs:
     steps:
       - name: Poll until the registry resolves the version (up to 10 min)
         run: |
+          # PUBLISHED is empty when the publish step failed or never ran: nothing to poll for, and
+          # the release job's publish log already holds the reason.
+          if [ -z "$PUBLISHED" ]; then
+            echo "::error::the release job's publish step failed or did not run, so ${PACKAGE}@${VERSION} was never published: a REAL publish failure. Nothing to probe — read the release job's publish step log; re-running this probe cannot fix it."
+            exit 1
+          fi
           # `--prefer-online`: the registry serves packuments with `cache-control: max-age=300`, so
           # without it a 30 s poll can keep re-reading the stale, pre-publish packument from npm's
           # local cache for five minutes after the registry has caught up.
