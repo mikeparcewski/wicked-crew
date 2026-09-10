@@ -3670,6 +3670,83 @@ export interface DiagnosticsResponse {
   acp: AcpDiagnostics;
   /** The skills seam's last outcome (api-types 0.28.0) — see `DiagnosticsSkills`. */
   skills: DiagnosticsSkills;
+  /** Whether the engine's governance evidence is LANDING (api-types 0.31.0, crew#495) — see `DiagnosticsGovernance`. */
+  governance: DiagnosticsGovernance;
+}
+
+// ── Diagnostics — governance store + dead letters (api-types 0.31.0, crew#495 / F-022) ─────────
+//
+// The engine's emit seam writes every cross-product `wicked.*` event — conformance claims and
+// decisions, phase transitions, the steering-rule lifecycle — onto the shared estate store named
+// by `WICKED_ESTATE_DB`, or, when it cannot, spools the event to an NDJSON dead-letter outbox
+// (`WICKED_APPS_EMIT_DEADLETTER`). `serve` now resolves that store (`--governance-db` /
+// `WICKED_CREW_GOVERNANCE_DB` › an inherited `WICKED_ESTATE_DB` › `<core db>.governance/
+// governance.db`) and keeps the outbox under the state home (`<core db>.governance/
+// emit-outbox.ndjson`), never under HOME; this block is the read-only account of both.
+
+/** Which rule chose the store: the flag, crew's env override, the engine's own inherited
+ *  `WICKED_ESTATE_DB`, or the default sidecar of the core db. */
+export type DiagnosticsGovernanceStoreSource = 'flag' | 'env-crew' | 'env-estate' | 'core-db-sidecar';
+
+/** The store the engine's emit seam writes governance events to. */
+export interface DiagnosticsGovernanceStore {
+  /** The store as exported to the engine — an absolute SQLite path, or `:memory:`. The emit seam is SQLite-only,
+   *  so a URL spec (`postgres://…`) is refused at boot and never appears here. */
+  path: string;
+  source: DiagnosticsGovernanceStoreSource;
+}
+
+/** EVENT records on the governance store. Counted through the engine binding; an engine without
+ *  it answers `null` for both — never a fabricated 0. */
+export interface DiagnosticsGovernanceRecords {
+  /** Event records on the store right now (short-TTL), or `null` when the engine cannot count. */
+  total: number | null;
+  /** Records landed since this daemon's API came up (`total − baseline`; the baseline is taken when the routes
+   *  register, after the engine has booted, so its boot-time emits are in the baseline), or `null` when either
+   *  side is unknown. */
+  sinceBoot: number | null;
+}
+
+/** The dead-letter outbox, folded (streamed, size-capped). */
+export interface DiagnosticsGovernanceDeadletters {
+  /** The outbox this daemon exports to the engine; `null` when no store was resolved (library boot). */
+  path: string | null;
+  /** Entries in the outbox — 0 is the good answer. A floor when `truncated`. */
+  count: number;
+  /** Entries per event type (`wicked.crew.governance.conformance_recorded`, …); overflow folds into `other`. */
+  byType: Record<string, number>;
+  /** Entries per reason bucket — the engine's reason text before its first `:` (`no shared store (WICKED_ESTATE_DB unset)`,
+   *  `open shared store failed`, `store write failed`). */
+  byReason: Record<string, number>;
+  /** Entries carrying the engine's `ts` (epoch ms; written by wicked-core builds that stamp spooled records). */
+  timestamped: number;
+  /** Entries without a timestamp (a pre-stamp engine, or an unparseable line) — counted, never given an invented time. */
+  untimestamped: number;
+  /** Epoch ms of the oldest / newest timestamped entry, or `null` when none carries one. */
+  oldestTs: number | null;
+  newestTs: number | null;
+  /** `true` when the fold stopped at its byte cap — `count` is then a floor. */
+  truncated: boolean;
+  /** The pre-fix outbox under HOME (`~/.something-wicked/wicked-apps/emit-outbox.ndjson`) when it exists and is
+   *  non-empty — events earlier daemons on this host spooled there; `null` otherwise. Reported, never written. */
+  legacyOutbox: { path: string; bytes: number } | null;
+}
+
+/** One governance finding. `governance.store` (error) = no store resolved, every emit dead-letters;
+ *  `governance.deadletter` (error) = the outbox holds entries; `governance.legacy-outbox` (warning) =
+ *  the pre-fix HOME outbox exists. Every message names the replay command. */
+export interface DiagnosticsGovernanceFinding {
+  kind: 'governance.store' | 'governance.deadletter' | 'governance.legacy-outbox';
+  severity: 'warning' | 'error';
+  message: string;
+}
+
+/** `GET /diagnostics` → `governance` (api-types 0.31.0). */
+export interface DiagnosticsGovernance {
+  store: DiagnosticsGovernanceStore | null;
+  records: DiagnosticsGovernanceRecords;
+  deadletters: DiagnosticsGovernanceDeadletters;
+  findings: DiagnosticsGovernanceFinding[];
 }
 
 /** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0). */

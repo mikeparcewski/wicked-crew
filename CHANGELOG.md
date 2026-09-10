@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.28] — 2026-09-10
+
+Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
+`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
+merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
+worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
+the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
+under Fixed / Added / Changed:
+
+- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
+  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
+  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
+  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
+  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
+- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
+  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
+  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
+  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
+  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
+  registration now requires.
+
 ### Fixed
 - **State-home registry: `repo-graphs` is a registered subtree (wicked-core#406).** wicked-core now
   keeps every registered repo's code graph under the daemon state home —
@@ -40,6 +61,37 @@ mentioned only where a daemon release depends on them.
   the state home's `repo-graphs` (the `--db` parent, exactly how the engine derives it) — so no
   new engine export is needed; `-wal`/`-shm` siblings, in-flight `estate.db.migrating-*` temps and
   never-indexed key dirs are not stores and are not listed.
+- **Governance records land in a state-home store; dead letters are visible and never under HOME
+  (crew#495, acceptance finding F-022).** The engine's emit seam writes every cross-product
+  governance event — conformance claims and decisions, phase transitions, the steering-rule
+  lifecycle — to the estate store named by `WICKED_ESTATE_DB`, and `serve` never set it: on EVERY
+  default install EVERY such event dead-lettered to `~/.something-wicked/wicked-apps/
+  emit-outbox.ndjson` under the operator's HOME (3,400+ entries on one host, shared by every daemon,
+  no timestamp, nothing on `/diagnostics` or the console) while the home board asserted "Governed
+  100%". Now: `serve` resolves the store — `--governance-db` / `WICKED_CREW_GOVERNANCE_DB`, else an
+  inherited `WICKED_ESTATE_DB`, else the daemon's OWN `<core db>.governance/governance.db` (a
+  sidecar for the same reason the bus is one, F-043: the state-home fence registry's `core.db`
+  prefix claim already covers it) — exports it to the in-process engine before it spawns, and logs
+  which rule won; a URL spec (`postgres://…`) is refused at boot — the emit seam is SQLite-only and
+  would dead-letter every event — as is the core db or the bus db (a second writer on a store another
+  process owns). The dead-letter outbox is `<core db>.governance/emit-outbox.ndjson` (an explicit
+  `WICKED_APPS_EMIT_DEADLETTER` is honoured), under the state home rather than HOME; the daemon stamps
+  `WICKED_APPS_EMIT_ORIGIN` so an engine carrying the companion change writes `ts` (epoch ms), `pid`
+  and `origin` on every spooled entry. `GET /diagnostics` gains `governance` — the store and its
+  source, EVENT records on it (total / since boot, via the engine's `eventStoreCount` binding; `null`
+  on an older addon, never a fabricated 0), the outbox folded (count, per-type, per-reason,
+  timestamp range, truncation) and findings: `governance.deadletter` (error) the moment the outbox
+  holds an entry, `governance.store` (error) when no store was resolved, `governance.legacy-outbox`
+  (warning) when the pre-fix HOME outbox still exists. New `wicked-crew governance replay <outbox>
+  [--governance-db | --db] [--dry-run]` drains an outbox into the store through the engine's
+  `replayEmitOutbox` binding (archive first, replay from the archive, failed lines back onto the
+  outbox; exit 2 with the outbox untouched on an older addon). Crew's own estate-MCP child gets the
+  boot-time `WICKED_ESTATE_DB` back, never the daemon's sidecar. The readiness line carries
+  `governanceDb`. Engine companion: wicked-core (spool-record stamps + the two `Core` statics).
+  Studio follow-up: the Health panel renders the new block.
+  - **wicked-crew-api-types 0.31.0** — additive `DiagnosticsResponse.governance` with
+    `DiagnosticsGovernance` / `DiagnosticsGovernanceStore(Source)` / `DiagnosticsGovernanceRecords`
+    / `DiagnosticsGovernanceDeadletters` / `DiagnosticsGovernanceFinding`.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
@@ -1547,7 +1599,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...HEAD
+[0.7.28]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...v0.7.25

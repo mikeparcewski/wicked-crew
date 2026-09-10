@@ -11,6 +11,20 @@ import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
 import { CrewBusError, resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
+import {
+  applyEmitOrigin,
+  emitOrigin,
+  EMIT_DEADLETTER_ENGINE_ENV,
+  ESTATE_DB_ENGINE_ENV,
+  GOVERNANCE_DB_ENV,
+  GOVERNANCE_DB_FLAG,
+  GovernanceStoreError,
+  legacyHomeOutboxPath,
+  resolveGovernanceStore,
+  type GovernanceStoreLocation,
+} from '../core/governance-store.js';
+import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
+import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -45,6 +59,10 @@ interface BootstrapOpts {
   /** The CROSS-PRODUCT bus (F-043): the interactive seams, the project bus, the /ws relay AND the
    *  spawned bridge meet here — see `interactive/bus-location.ts` for the resolution. */
   crewBus: CrewBusLocation;
+  /** The governance store + dead-letter outbox handed to the engine (crew#495 / F-022):
+   *  `--governance-db` › `WICKED_CREW_GOVERNANCE_DB` › an inherited `WICKED_ESTATE_DB` › the
+   *  daemon's OWN `<core db>.governance/governance.db` — see `core/governance-store.ts`. */
+  governanceStore: GovernanceStoreLocation;
   /** DEFAULT ON (#261): answer project-bound wicked-interactive doc.created with a governed draft run. */
   interactiveDraftEvents: boolean;
   /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
@@ -121,6 +139,37 @@ function parseBootstrap(args: string[]): BootstrapOpts {
     console.error(`[crew] ${err.message}`);
     process.exit(1);
   }
+  // The governance store (crew#495 / F-022). The engine's emit seam writes every `wicked.*`
+  // governance event — conformance claims, phase transitions, rule lifecycle — to the estate store
+  // named by WICKED_ESTATE_DB, and `serve` never set it: on every default install EVERY such event
+  // dead-lettered to an outbox under the operator's HOME, silently. Resolution: an explicit
+  // --governance-db / WICKED_CREW_GOVERNANCE_DB, else an inherited WICKED_ESTATE_DB (the engine's
+  // own variable, honoured), else the daemon's OWN `<core db>.governance/governance.db` — a sidecar
+  // for the same fence reason as the bus above. The dead-letter outbox lives in that sidecar too
+  // (an explicit WICKED_APPS_EMIT_DEADLETTER wins), never under HOME.
+  const governanceDbFlag = flag(args, GOVERNANCE_DB_FLAG);
+  if (hasFlag(args, GOVERNANCE_DB_FLAG) && (governanceDbFlag === undefined || governanceDbFlag.startsWith('-'))) {
+    console.error(`${GOVERNANCE_DB_FLAG} requires a value (got: ${governanceDbFlag ?? '(missing)'})`);
+    process.exit(1);
+  }
+  let governanceStore: GovernanceStoreLocation;
+  try {
+    governanceStore = resolveGovernanceStore({
+      flagDb: governanceDbFlag,
+      envCrewDb: process.env[GOVERNANCE_DB_ENV],
+      envEstateDb: process.env[ESTATE_DB_ENGINE_ENV],
+      envOutbox: process.env[EMIT_DEADLETTER_ENGINE_ENV],
+      coreDbPath: dbPath,
+      busDbPath: crewBus.dbPath,
+    });
+  } catch (err) {
+    // A store the engine cannot honour (a URL spec on the SQLite-only emit seam) or must not share
+    // (the core db, the bus db) is a CONFIG error — refuse to boot rather than run a daemon that
+    // dead-letters every governance event or puts a second writer on the actor's store.
+    if (!(err instanceof GovernanceStoreError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
   // governed `interactive-draft` run. The bus is already required for the project bridge.
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
@@ -156,7 +205,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
-    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath, crewBus,
+    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath, crewBus, governanceStore,
     interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
     interactiveSeats,
   };
@@ -182,11 +231,30 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —
   // or an explicit dir — must exist before the seams open the db, or every seam disables itself.
   mkdirSync(dirname(crewBus.dbPath), { recursive: true });
+  // The governance store (crew#495): say which rule won, stamp the origin the engine copies onto
+  // any dead letter it spools, and point at a pre-fix outbox under HOME if one is still sitting
+  // there — the adapter exports the store/outbox variables to the engine before it spawns.
+  const { governanceStore } = opts;
+  console.error(
+    `[crew] governance store: ${governanceStore.displayPath} (${governanceStore.source}); ` +
+      `dead letters: ${governanceStore.outboxPath} (${governanceStore.outboxSource})`,
+  );
+  const crewVersion = crewPackageVersion();
+  applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath }));
+  const legacyOutbox = await probeLegacyOutbox(legacyHomeOutboxPath());
+  if (legacyOutbox !== null && legacyOutbox.path !== governanceStore.outboxPath) {
+    console.warn(
+      `[crew] a pre-fix dead-letter outbox exists under HOME at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
+        `governance events earlier daemons could not store; inspect with ${replayCommand(legacyOutbox.path, governanceStore)} --dry-run, ` +
+        'then replay it into this daemon\'s store with the same command',
+    );
+  }
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
     engineExec: opts.engineExec,
     busDbPath: opts.busDbPath,
+    governanceStore,
   });
   adapterRef = adapter;
   const serverOptions = {
@@ -251,6 +319,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     undefined,
     Object.keys(serverOptions).length > 0 ? serverOptions : undefined,
   );
+  // Now that the port is known, complete the origin stamp (the engine reads it at emit time).
+  applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath, port }));
   installShutdownHandlers();
   return { adapter, port };
 }
@@ -323,6 +393,14 @@ async function main(): Promise<void> {
         '  --bus-db <path>                 Bus database path (env: WICKED_BUS_DB) for the interactive/project seams,\n' +
         '                                  the /ws relay and the bridge crew spawns (default: $WICKED_BUS_DATA_DIR/bus.db,\n' +
         '                                  else <core db>.bus/bus.db); --engine-exec defaults to <state home>/bus.db\n' +
+        '  --governance-db <path>          Governance store the engine writes conformance claims, phase transitions and\n' +
+        '                                  rule-lifecycle events to (env: WICKED_CREW_GOVERNANCE_DB; an inherited\n' +
+        '                                  WICKED_ESTATE_DB is honoured next; default <core db>.governance/governance.db).\n' +
+        '                                  The emit seam stores to SQLite only: a URL-form WICKED_ESTATE_DB (postgres://…)\n' +
+        '                                  in the shell refuses boot until --governance-db names a SQLite file.\n' +
+        '                                  Dead letters spool to <core db>.governance/emit-outbox.ndjson by default — under the\n' +
+        '                                  state home, not HOME (an explicit WICKED_APPS_EMIT_DEADLETTER is honoured);\n' +
+        '                                  see `wicked-crew governance replay`\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
         '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +
@@ -350,6 +428,9 @@ async function main(): Promise<void> {
       mode: 'serve',
       port,
       db: opts.dbPath,
+      // Where the engine's governance events land (crew#495) — an evidence harness can open it
+      // (a URL spec's credentials redacted; the raw value went to the engine only).
+      governanceDb: opts.governanceStore.displayPath,
       stub: opts.stub,
       // The identity seam's resolved mode (task #88): `required` under
       // WICKED_RUNTIME=team / WICKED_CREW_AUTH=required, else `off` (local).
@@ -413,9 +494,11 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     await runMcpServer(port);
+  } else if (command === 'governance') {
+    await runGovernance(argv);
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp');
+    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance');
     process.exit(1);
   }
 }

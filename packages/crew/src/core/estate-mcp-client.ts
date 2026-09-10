@@ -38,6 +38,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { childEnvWithBootEstateDb } from './governance-store.js';
+
 /** The MCP protocol version crew declares in the handshake (the version the estate server speaks). */
 export const ESTATE_MCP_PROTOCOL_VERSION = '2024-11-05';
 
@@ -101,11 +103,15 @@ export function resolveMemoryDbPath(env: NodeJS.ProcessEnv = process.env): strin
   return join(base, 'memory.db');
 }
 
-/** The default spawn: `wicked-estate-mcp` with no `--readonly` flag and WICKED_MEMORY_DB pinned. */
+/** The default spawn: `wicked-estate-mcp` with no `--readonly` flag and WICKED_MEMORY_DB pinned.
+ *  The server resolves its GRAPH store from `WICKED_ESTATE_DB`, which the daemon exports as its
+ *  own governance store (crew#495) — the child gets the process's BOOT-TIME value back instead
+ *  (`childEnvWithBootEstateDb`): the daemon's sidecar is the engine's business, and a newer estate
+ *  binary must never migrate that file's schema past what the engine's vendored store opens. */
 function defaultSpawn(env: NodeJS.ProcessEnv): ChildProcess {
   return nodeSpawn(estateMcpExe(env), [], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...env, WICKED_MEMORY_DB: resolveMemoryDbPath(env) },
+    env: { ...childEnvWithBootEstateDb(env), WICKED_MEMORY_DB: resolveMemoryDbPath(env) },
     windowsHide: true,
   });
 }

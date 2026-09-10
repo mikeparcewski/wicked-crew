@@ -14,6 +14,9 @@ describe.runIf(existsSync(CLI))('serve --help (crew#352)', () => {
       const out = execFileSync('node', [CLI, 'serve', flag], { encoding: 'utf8', timeout: 20000 });
       expect(out).toContain('Usage: wicked-crew serve');
       expect(out).toContain('--port');
+      // crew#495: the governance store is an operator-visible knob, documented beside --bus-db.
+      expect(out).toContain('--governance-db');
+      expect(out).toContain('WICKED_CREW_GOVERNANCE_DB');
       expect(out).not.toContain('WICKED_CREW_READY');
     });
   }

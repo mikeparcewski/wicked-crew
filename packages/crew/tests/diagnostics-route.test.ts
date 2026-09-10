@@ -161,6 +161,27 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
     expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
   });
 
+  it('governance (crew#495): a boot that resolved no store says so — store null, an honest record count, no outbox, a governance.store error', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+    const body = res.json() as DiagnosticsResponse;
+    // This route set was assembled around an adapter that exported nothing to the engine (a library
+    // boot) — the engine would dead-letter every governance emit, and the surface must say so rather
+    // than paint a store that does not exist.
+    expect(body.governance.store).toBeNull();
+    expect(body.governance.deadletters.path).toBeNull();
+    expect(body.governance.deadletters.count).toBe(0);
+    expect(body.governance.deadletters.byType).toEqual({});
+    expect(body.governance.deadletters.truncated).toBe(false);
+    // No store → nothing to count, on every engine: null, never 0.
+    expect(body.governance.records).toEqual({ total: null, sinceBoot: null });
+    const kinds = body.governance.findings.map((f) => f.kind);
+    expect(kinds).toContain('governance.store');
+    expect(body.governance.findings.find((f) => f.kind === 'governance.store')?.severity).toBe('error');
+    // The legacy HOME pointer may or may not exist on the machine running this; it is the ONLY
+    // other finding this daemon can raise.
+    expect(kinds.filter((k) => k !== 'governance.store' && k !== 'governance.legacy-outbox')).toEqual([]);
+  });
+
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {
     app.log.error('diagnostics smoke: first error');
     app.log.error('diagnostics smoke: second error');
