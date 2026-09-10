@@ -1326,7 +1326,7 @@ export interface SteeringLandingResult {
   error?: string;
 }
 
-// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.27.0) ──
+// ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
 //
 // Skills are files (skills keystone, design v3 + amendments v3.1/v3.2). The daemon owns ONE
 // effective `wicked-garden`-shaped plugin root — `<state home>/skills/effective/`, the dependency
@@ -1419,7 +1419,7 @@ export interface SkillEntry {
    *  name collision (upstream ships this name at another dir than the operator's skill); `null`
    *  otherwise. `GET /skills/:name/files/*path?side=baseline` reads THIS directory for such a skill,
    *  so the two sides of the collision are comparable — the answer's `path` names the file actually
-   *  read (api-types 0.27.0). Re-derived by every refresh. */
+   *  read (api-types 0.28.0). Re-derived by every refresh. */
   upstreamDir: string | null;
 }
 
@@ -1444,7 +1444,7 @@ export interface SkillPublishedRecord {
   at: string;
   /** sha256 of the exact `snapshot.json` bytes publish wrote. `snapshot.json` is excluded from the
    *  content hash, so the crew-owned manifest AUTHENTICATES it: `current` verifies only the
-   *  generation this record names, with metadata hashing to this value (api-types 0.27.0). */
+   *  generation this record names, with metadata hashing to this value (api-types 0.28.0). */
   snapshotHash: string;
 }
 
@@ -1529,7 +1529,7 @@ export type SkillFindingKind =
    *  the snapshot does not carry it — a file the bundle omits, or a skill that is disabled) is a
    *  `warning`: a content bug the skill's author owns, published as found — a publish with only
    *  warnings answers `verdict: 'warnings'` with the findings AND a written snapshot (api-types
-   *  0.27.0). */
+   *  0.28.0). */
   | 'unresolved-ref'
   /** A path the store refuses BY NAME rather than reads through: a shape that could leave its root
    *  (`..`, an absolute piece), a component that crosses a symlink, or — under `effective/`, where
@@ -1546,24 +1546,24 @@ export type SkillFindingKind =
   | 'empty-snapshot'
   /** `.claude-plugin/plugin.json`, `archetypes.json` or `components.json` is absent from `effective/`
    *  — the plugin manifest + the runtime catalogs are REQUIRED snapshot members (blocking at
-   *  publish; api-types 0.27.0). */
+   *  publish; api-types 0.28.0). */
   | 'missing-plugin-manifest'
   /** The plugin manifest or a runtime catalog is present but not what its reader expects — does
    *  not parse as JSON, is not a JSON object, or `archetypes.json` lacks its `archetypes`
-   *  collection (blocking at publish; api-types 0.27.0). A manifest without `name` is
+   *  collection (blocking at publish; api-types 0.28.0). A manifest without `name` is
    *  `name-mismatch`. */
   | 'catalog-invalid'
   /** The baseline's shared read-only Python env could not be provisioned (uv missing, `uv sync`
    *  failed, or the env could not be locked) while the bundle carries a `pyproject.toml` — the env
    *  is REQUIRED, so the publish is blocked and nothing (the provisioning state included) is
-   *  persisted (api-types 0.27.0). */
+   *  persisted (api-types 0.28.0). */
   | 'venv-failed'
   /** A publish was refused because one is already running (one at a time) — nothing was written, so
    *  it is a 2xx `blocked` envelope, not a 409 (409 is only a stale `expectedRevision`; api-types
-   *  0.27.0). Re-read `GET /skills` and retry against the revision it answers. */
+   *  0.28.0). Re-read `GET /skills` and retry against the revision it answers. */
   | 'publish-in-flight'
   /** A publish was aborted because the skills root changed under it — nothing was written to either
-   *  root; a 2xx `blocked` envelope (api-types 0.27.0). Re-read `GET /skills` and retry. */
+   *  root; a 2xx `blocked` envelope (api-types 0.28.0). Re-read `GET /skills` and retry. */
   | 'root-changed'
   /** A path outside the bundle closure — the ONE allowlist of what the seed copies, what the support
    *  API may address, and what a snapshot may carry: the five runtime catalogs under `.claude-plugin`
@@ -1573,7 +1573,7 @@ export type SkillFindingKind =
    *  directories and any `wg-`-prefixed dev tooling, plus `pyproject.toml` and `uv.lock`. A support
    *  add/PUT there is a 2xx `blocked` envelope (nothing written); a file found there under
    *  `effective/` at publish/analyze (a direct filesystem edit) is a BLOCKING finding naming the path
-   *  — a snapshot never ships it (api-types 0.27.0). */
+   *  — a snapshot never ships it (api-types 0.28.0). */
   | 'outside-closure'
   /** A content-addressed `baseline/<hash>` whose tree does not hash to its name (a bundle file
    *  modified, planted or removed, or a symlink inside), or a baseline file whose bytes do not match
@@ -1581,7 +1581,7 @@ export type SkillFindingKind =
    *  refuses to reuse it (2xx `blocked`, nothing copied), reset refuses to restore from it (nothing
    *  written), publish/analyze report it blocking (before AND after the env was provisioned in it).
    *  Read-only mode bits on the baseline are a guard, never the integrity boundary — the hash is
-   *  (api-types 0.27.0). */
+   *  (api-types 0.28.0). */
   | 'baseline-corrupt';
 
 export type SkillFindingSeverity = 'warning' | 'blocking';
@@ -1657,7 +1657,7 @@ export interface SkillRefreshResult extends SkillAnalyzeResult {
 /** The 409 body of a `/skills` mutation whose `expectedRevision` is stale — a CAS conflict, the
  *  ONLY thing that answers 409. A publish refused because another is in flight, or aborted because
  *  the skills root changed under it, wrote nothing and instead answers a 2xx `blocked` findings
- *  envelope (`publish-in-flight` / `root-changed`; api-types 0.27.0), never a 409. */
+ *  envelope (`publish-in-flight` / `root-changed`; api-types 0.28.0), never a 409. */
 export interface SkillRevisionConflict {
   error: string;
   /** The current revision — re-read `GET /skills` (or use this) and retry. */
@@ -2410,7 +2410,7 @@ export interface SystemSettings {
    */
   worker_config_root?: string;
   /*
-   * There is NO skills setting (skills keystone, api-types 0.27.0). The daemon-owned skills root is
+   * There is NO skills setting (skills keystone, api-types 0.28.0). The daemon-owned skills root is
    * `<state home>/skills` — the directory holding `manifest.json`, `baseline/<hash>/`, `effective/`,
    * `snapshots/<gen>/` and the `current` symlink — full stop: not configurable (a `skills_root` a
    * client sends is dropped and named in the audit entry's `ignored`; design v3.1 §1 one storage
@@ -3362,11 +3362,11 @@ export interface DiagnosticsResponse {
   /** Bounded tail of the daemon's own error-level log lines, newest first. */
   recentErrors: DiagnosticsRecentError[];
   acp: AcpDiagnostics;
-  /** The skills seam's last outcome (api-types 0.27.0) — see `DiagnosticsSkills`. */
+  /** The skills seam's last outcome (api-types 0.28.0) — see `DiagnosticsSkills`. */
   skills: DiagnosticsSkills;
 }
 
-/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.27.0). */
+/** The skills seam's state as `GET /diagnostics` reports it (skills keystone, api-types 0.28.0). */
 export type DiagnosticsSkillsState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
 /** One finding the skills degradation ladder produced (design v3 §3). */

@@ -65,7 +65,7 @@ mentioned only where a daemon release depends on them.
   <name>/…` for exactly the sorted enabled-portable skills — each skill's own files and the
   directories they imply — with every unexpected file or directory named in the refusal; special
   nodes anywhere in a generation refuse. (M1) a refresh-time name collision records the held-back
-  upstream skill's directory on the entry (`SkillEntry.upstreamDir`, api-types 0.27.0) and
+  upstream skill's directory on the entry (`SkillEntry.upstreamDir`, api-types 0.28.0) and
   `GET /skills/:name/files/*?side=baseline` reads THAT directory, so the two sides of the collision
   are comparable (`path` names the file actually read). (M2) `reapBaselines` is a CAS mutation like
   every other: dropping a baseline record goes through the validated `manifest.json.tmp-…` → rename
@@ -107,7 +107,7 @@ mentioned only where a daemon release depends on them.
 - **Skills keystone — codex round-7 REVISE (3 HIGH, 2 MEDIUM)** (PR #480). (H1) content-addressed
   baselines are VERIFIED before every reuse and locked: an existing `baseline/<hash>` is reused only
   if its tree (links enumerated, `.venv` excluded) re-hashes to its name — a mismatch is
-  `baseline-corrupt` (a new finding kind, api-types 0.27.0): the seed re-captures over it, a refresh
+  `baseline-corrupt` (a new finding kind, api-types 0.28.0): the seed re-captures over it, a refresh
   refuses to reuse it (2xx `blocked`, nothing copied), reset verifies every file it would restore
   against the hash the manifest recorded for it (modified / planted / removed ⇒ `blocked`, nothing
   written), publish/analyze report it blocking BEFORE the env is provisioned in it and AFTER the
@@ -171,7 +171,7 @@ mentioned only where a daemon release depends on them.
   (`bundle.ts` `inBundleClosure`: the `.claude-plugin` catalogs, `skills/**`, `scripts/**` minus `ci/`,
   `wg/` and `wg-*`, `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) shared by the seed, the support API
   (a PUT outside it is a 2xx `blocked` `outside-closure` envelope — a new finding kind, api-types
-  0.27.0 — and a GET a 400) and publish/analyze (a file found under `effective/` outside it is
+  0.28.0 — and a GET a 400) and publish/analyze (a file found under `effective/` outside it is
   BLOCKING by path); (M2) the core-closure drift check is NON-skippable: the vendored
   `tests/fixtures/core-workflow-skill-refs.json` records wicked-core's `workflows/*.json` skill_refs
   at the pinned core-ts version, must equal the pin (else "refresh the fixture with the core-ts
@@ -273,7 +273,7 @@ mentioned only where a daemon release depends on them.
   (single-document mapping, scalar `name`, list `mandates`) kept on top; (8) 409 is reserved for a
   stale `expectedRevision` alone — a publish-in-flight or a root-changed refusal wrote nothing and
   answers a 2xx `blocked` findings envelope (`publish-in-flight` / `root-changed`, new finding kinds
-  in api-types 0.27.0); (9) the route concurrency test is deterministic (provisioner-entered gates,
+  in api-types 0.28.0); (9) the route concurrency test is deterministic (provisioner-entered gates,
   released in `finally`, no wall-clock deadlines). New dependency: `yaml` (the standard TS YAML
   library).
 
@@ -514,7 +514,9 @@ mentioned only where a daemon release depends on them.
   subset: a plain scalar with `: ` (`description: hello: world`) or a flow collection continued on
   indented lines is checked, not folded. Portability treats ANY cwd-relative script invocation
   (`python3 -u scripts/x.py`, `./scripts/x`, `bash scripts/x`) as non-portable and never truncates
-  a reference at a legal filename character. api-types **0.27.0** carries the `Skill*` contract,
+  a reference at a legal filename character. api-types **0.28.0** (re-minted from this PR's 0.27.0
+  after #475 landed 0.27.0 first; the skills block itself is unchanged by the re-mint) carries the
+  `Skill*` contract,
   `missing-plugin-manifest` / `catalog-invalid` / `venv-failed`, and the `skills` block of
   `GET /diagnostics` — and NO skills setting (see the round-5 entry: the root is not configurable).
 - **One storage root, an explicit worker fence** (design v3.1 §1/§2). The skills root stays

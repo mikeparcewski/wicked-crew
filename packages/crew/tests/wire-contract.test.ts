@@ -353,7 +353,7 @@ respondsWith<
     skills: SkillsHealth;
   }
 >();
-// The skills seam's health block (api-types 0.27.0), both directions.
+// The skills seam's health block (api-types 0.28.0), both directions.
 respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
@@ -407,8 +407,9 @@ respondsWith<
 respondsWith<Wire.RetireMemoryResponse, { erased: number }>();
 accepts<z.input<typeof RetireMemorySchema>, Wire.RetireMemoryBody>();
 
-// Skills keystone (api-types 0.27.0 — the version this branch mints; Copilot on #480 caught the
-// stale 0.26.0 label) — the daemon-owned garden plugin root's file manager.
+// Skills keystone (api-types 0.28.0 — re-minted from this branch's 0.27.0 after #475 landed 0.27.0
+// first; Copilot on #480 had caught the earlier stale 0.26.0 label) — the daemon-owned garden plugin
+// root's file manager.
 // Response direction: every store answer the routes hand through must satisfy the contract.
 respondsWith<Wire.SkillManifest, ReturnType<SkillsStore['manifest']>>();
 respondsWith<Wire.SkillFileTree, ReturnType<SkillsStore['listFiles']>>();
