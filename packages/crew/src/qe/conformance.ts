@@ -95,6 +95,14 @@ export interface UnenforcedUnit {
   attempt: number;
   cli: string;
   reason: string;
+  /**
+   * Which enforcement failure this is: `unchecked_tool_calls` — a governed unit ran on a seat with
+   * no input-governance adapter (`governanceUnenforced`); `worktree_mutation` — an
+   * `executes_code: false` unit changed the worktree it was reviewing (`evaluatorMutatedWorktree`
+   * with a denying `changed`/`headMoved`, wicked-core F-036). Classification rides here, never on
+   * the reason text (Copilot on #507).
+   */
+  kind: 'unchecked_tool_calls' | 'worktree_mutation';
 }
 
 /** What the run's durable event log says about whether governance was actually IN FORCE. */
@@ -237,15 +245,17 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
           attempt: num(ev['attempt']),
           cli: str(ev['cli']),
           reason: str(ev['reason']),
+          kind: 'unchecked_tool_calls',
         });
         break;
       case 'evaluatorMutatedWorktree': {
         // wicked-core F-036: an `executes_code: false` phase (an evaluator, a recon rung) CHANGED
         // the worktree it was reviewing. The engine denied its gate; for the acceptance view it is
         // the same class of fact as an unchecked unit — evaluator ≠ creator did not hold for this
-        // unit, so the run cannot be called guardrailed. Only a DENYING mutation counts: exempt-only
-        // changes (documentation, declared deliverables) arrive with `changed: []` and are not a
-        // separation failure.
+        // unit, so the run cannot be called guardrailed. The engine has NO exemptions (codex on
+        // wicked-core#414): a documentation write and a declared deliverable deny like any other
+        // path, so every emitted event is a denial — `changed` non-empty and/or `headMoved`. The
+        // guard below is the defensive spelling of that fact, never a policy of its own.
         const changed = Array.isArray(ev['changed']) ? (ev['changed'] as unknown[]) : [];
         const headMoved = ev['headMoved'] === true;
         if (changed.length > 0 || headMoved) {
@@ -259,6 +269,7 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
             ord: num(ev['ord']),
             attempt: num(ev['attempt']),
             cli: str(ev['cli']),
+            kind: 'worktree_mutation',
             reason:
               `evaluator≠creator violated: phase \`${str(ev['phase'])}\` (executes_code: false) ` +
               `changed the worktree it was reviewing` +
@@ -269,7 +280,7 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
         // Gate EVIDENCE, not a governance signal (Copilot on #507): the guard runs for every
         // seat whether or not input governance was armed, so this event must never be what
         // flips an otherwise ungoverned run to `enforced`. A denying mutation lands above as
-        // `unenforced` on its own; an exempt-only one contributes nothing here.
+        // `unenforced` on its own; the event never adds a governed signal.
         break;
       }
       case 'governanceContextArmed':
@@ -292,21 +303,28 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
   if (unenforced.length > 0) {
     // Deny-dominates: ONE unchecked governed unit breaks the whole run's guardrail claim, even
     // when every other unit was armed — a chain with a named missing link.
-    const clis = [...new Set(unenforced.map((u) => u.cli).filter((c) => c.length > 0))].join(', ');
-    const mutated = unenforced.filter((u) => u.reason.startsWith('evaluator≠creator violated'));
-    const unchecked = unenforced.length - mutated.length;
+    // Classified by `kind`, never by parsing the reason text (Copilot on #507), and each class
+    // names ONLY its own seats — an unchecked codex unit and a mutating pi evaluator must not
+    // read as "unchecked tool calls on codex, pi".
+    const clisOf = (units: UnenforcedUnit[]): string =>
+      [...new Set(units.map((u) => u.cli).filter((c) => c.length > 0))].join(', ');
+    const mutated = unenforced.filter((u) => u.kind === 'worktree_mutation');
+    const unchecked = unenforced.filter((u) => u.kind === 'unchecked_tool_calls');
     const parts: string[] = [];
-    if (unchecked > 0) {
+    if (unchecked.length > 0) {
+      const clis = clisOf(unchecked);
       parts.push(
-        `${unchecked} governed unit(s) ran with UNCHECKED tool calls` +
+        `${unchecked.length} governed unit(s) ran with UNCHECKED tool calls` +
           (clis.length > 0 ? ` on ${clis}` : '') +
           ' (gate-hook injection is claude-only; phase-boundary output gating still applied)',
       );
     }
     if (mutated.length > 0) {
+      const clis = clisOf(mutated);
       parts.push(
-        `${mutated.length} executes_code:false unit(s) CHANGED the worktree under review ` +
-          '(evaluator≠creator violated; the engine denied the gate — wicked-core F-036)',
+        `${mutated.length} executes_code:false unit(s) CHANGED the worktree under review` +
+          (clis.length > 0 ? ` on ${clis}` : '') +
+          ' (evaluator≠creator violated; the engine denied the gate — wicked-core F-036)',
       );
     }
     return {

@@ -11,7 +11,8 @@
 // `bug.verify` and `migration.verify` — every gate floor core ships, removed by a file write, on a
 // run that still reported the right workflow and the right phases.
 //
-// Two halves fix it. Core carries a shadowed pin forward as a backstop (`carry_shadowed_pins`).
+// Two halves fix it. Core REFUSES a shadow that drops a gate (registration judges the def as
+// authored — wicked-core#414; the earlier `carry_shadowed_pins` backstop is gone).
 // This is the other half, and it is the one that stops the shadowing: the write is now scoped to
 // the ids core does NOT seed, which is the only reason the write existed.
 //

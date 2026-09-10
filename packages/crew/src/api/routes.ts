@@ -1175,7 +1175,9 @@ export function registerRoutes(
     // HERE, at the boundary, for every launch:
     //   - explicit 'pr' / 'none' wins (the operator decided);
     //   - omitted + repo-scoped + a CODE-WORK workflow (the def carries at least one
-    //     `executes_code` phase — feature/bug/migration, not chat/onboarding/recon) ⇒ the
+    //     `executes_code` phase in the CREATOR role — feature/bug/migration, not
+    //     chat/onboarding/recon, and not domain-extraction, whose `coverage` evaluator executes
+    //     code only to write its own report into the tree — nothing to deliver) ⇒ the
     //     daemon's `deliverDefault` setting ('pr' unless the operator flipped it) — the default
     //     that keeps run 83052f0b's work from stranding invisibly again. The code-work guard is
     //     the issue's own scope ("default deliver:'pr' for CODE-WORK launches"): a read-only
@@ -1196,7 +1198,9 @@ export function registerRoutes(
       // Unknown def ⇒ no default (the launch fails at workflow resolution with its own error —
       // defaulting 'pr' onto it would swap that for a misleading deliver-flavored one).
       const def = adapter.getWorkflow(b.workflow);
-      const codeWork = def !== null && def.phases.some((p) => p.executes_code === true);
+      const codeWork =
+        def !== null &&
+        def.phases.some((p) => p.executes_code === true && p.role === 'creator');
       deliver =
         codeWork && (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
       deliverDefaulted = true;

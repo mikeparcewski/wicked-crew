@@ -1033,14 +1033,16 @@ export interface WorktreeChangedPath {
 
 /** wicked-core F-036 — an `executes_code: false` phase (an evaluator, a recon rung, a review) CHANGED
  *  the worktree it was working in. The engine snapshots the tree at dispatch and takes the FINAL
- *  snapshot after everything the phase owned has run (seat quiesced, judge rendered, repo checks
- *  done), for EVERY seat and carrier regardless of governance adapter. `changed` are the paths that
- *  DENY the unit (its `gateEvaluated.denial.source` is `worktree_guard`); `exempted` are differing
- *  paths the phase DECLARED as `required_deliverables` — the one exemption, disclosed, not denied
- *  (no documentation or tool-state exemption exists; the engine's own `tmp/` scratch is excluded from
- *  the snapshot by construction). `headMoved`: the run branch was committed/amended/reset. Also
- *  emitted when only declared deliverables changed (`changed: []`), so an operator always sees what
- *  an evaluator wrote. Evaluator ≠ creator is no longer a promise the seat keeps; it is a check.
+ *  snapshot after everything the phase owned has run (seat quiesced — its process group killed, a
+ *  persistent session closed — judge rendered, repo checks done), for EVERY seat and carrier
+ *  regardless of governance adapter. `changed` is EVERY path that differs, and every one DENIES the
+ *  unit (its `gateEvaluated.denial.source` is `worktree_guard`): there are NO exemptions — not
+ *  documentation, not a declared `required_deliverables` entry, not tool state (a phase whose
+ *  deliverable must live in the tree is a code phase; the engine's own `tmp/` scratch is excluded
+ *  from the snapshot by construction). `headMoved`: the run branch was committed/amended/reset. The
+ *  event is emitted exactly when the unit is denied (`changed` non-empty and/or `headMoved`), so an
+ *  operator always sees what an evaluator wrote. Evaluator ≠ creator is no longer a promise the
+ *  seat keeps; it is a check.
  *
  *  `type` alias on purpose, not `interface`: only anonymous object types satisfy `CoreEvent`'s index
  *  signature, which is what lets the frame flow through CoreEvent-typed broadcast seams. */
@@ -1057,7 +1059,6 @@ export type EvaluatorMutatedWorktreeEvent = {
   afterTree: string;
   headMoved: boolean;
   changed: WorktreeChangedPath[];
-  exempted: WorktreeChangedPath[];
 };
 
 /** One repository check the engine ran in the run's worktree (wicked-core F-039). */
@@ -1082,14 +1083,24 @@ export interface RepoCheckRun {
  *  code-verifying unit (`verified_evidence` with an `executes_code` creator upstream: `bug/verify`,
  *  `feature/test`, `migration/verify`) and folded them into the gate as a deterministic floor. Fires
  *  once per fold, just before `gateEvaluated` (whose `hasDeterministicFloor`/`criterion` include this
- *  floor). `checks` is what actually ran, in order; `skipped` names detected checks not run because an
- *  earlier one failed. `passed: false` ⇒ the unit is denied (`denial.source` is `repo_checks`). An
- *  empty `checks` with `passed: true` means no checks were detected — disclosed as such, never
- *  silently; a manifest that could not be read or trusted FAILS the floor (`passed: false`,
- *  `checks: []`, the reason on the unit record). The checks run inside the engine's OS write
- *  boundary with an isolated HOME and package caches, installs with `--ignore-scripts`. "Done" for a
- *  verify phase is now the exit code the engine observed, not the seat's account of having run the
- *  suite. `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
+ *  floor). `checks` is what actually ran, in order (`package.json` `typecheck`/`lint`/`test` via the
+ *  lockfile's package manager, an `install` first when `node_modules/` is absent; `Cargo.toml` →
+ *  `cargo test`); `skipped` names detected checks not run because an earlier one failed. `passed:
+ *  false` ⇒ the unit is denied (`denial.source` is `repo_checks`).
+ *
+ *  The checks are repo-controlled code and run ONLY inside an OS write boundary (macOS
+ *  `sandbox-exec` / Linux `bwrap`: writes confined to the worktree, the curated secret directories
+ *  unreadable, network open for installs) with an isolated `HOME`, `npm_config_cache`, `CARGO_HOME`,
+ *  `CARGO_TARGET_DIR` and `XDG_*` under `<worktree>/tmp/wicked-checks/`; installs are always
+ *  `--ignore-scripts` (`--no-package-lock` when the repo ships no lockfile). When NO boundary can be
+ *  armed (no sandbox tool on the host — Windows) the checks do NOT run and the floor FAILS
+ *  (`passed: false`, `checks: []`, the reason on the unit record) — repo-controlled scripts never
+ *  run unsandboxed. Detection is fail-closed the same way: a `package.json` that cannot be read or
+ *  parsed, or a symlinked manifest/lockfile/`node_modules` (every probe `lstat`s, opens `O_NOFOLLOW`
+ *  and `fstat`s the opened descriptor before reading — links are never followed), FAILS the floor.
+ *  Only a repo with NO manifest at all is a disclosed vacuous pass (`checks: []`, `passed: true`).
+ *  "Done" for a verify phase is now the exit code the engine observed, not the seat's account of
+ *  having run the suite. `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
 export type RepoChecksEvaluatedEvent = {
   type: 'repoChecksEvaluated';
   session: string;

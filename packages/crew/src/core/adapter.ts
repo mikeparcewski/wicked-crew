@@ -34,7 +34,7 @@ import type {
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
-import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
+import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
@@ -422,21 +422,17 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
  */
 const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
 
-/**
- * The content-address of core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`),
- * carried on the Evaluator phase of feature/bug/migration AND, since wicked-core F-039, on their
- * code-writing Creator phases (`build`/`fix`/`execute`) — so the gate that was supposed to make the
- * change re-derives its diff and a distinct seat judges it, instead of approving nothing.
- *
- * Duplicating a hash is a real cost, paid because the alternative is worse. What `listWorkflows()`
- * serves IS what `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads
- * as "this phase is ungated" — the opposite of the truth for the three phases core gates. Reporting
- * a gate that exists is the honest failure direction; the drift guard in
- * `tests/armed-workflow-served.test.ts` fails loudly on a developer machine the moment core's value
- * moves. This is display only: as of FINDING-049 these defs are never written to core's overlay dir
- * (see CORE_SEEDED_WORKFLOWS), so a stale value here cannot reach the engine.
- */
-const EVIDENCE_FLOOR_PIN = 'e2e7af1db9e48454';
+// `EVIDENCE_FLOOR_PIN` (imported from ./deliver.js, defined once) is carried on the Evaluator phase
+// of feature/bug/migration AND, since wicked-core F-039, on their code-writing Creator phases
+// (`build`/`fix`/`execute`) — so the gate that was supposed to make the change re-derives its diff
+// and a distinct seat judges it, instead of approving nothing. What `listWorkflows()` serves IS what
+// `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads as "this phase
+// is ungated" — the opposite of the truth. Since wicked-core#414 the engine also REFUSES a mirror
+// that lags (a code phase whose gate evaluates nothing is rejected as authored), so these values
+// are part of the contract with the engine, not display only: the drift guards in
+// `tests/armed-workflow-served.test.ts` and `tests/builtin-overlay-shadow.test.ts` fail loudly
+// the moment core's defs move. As of FINDING-049 these defs are never written to core's overlay dir
+// (see CORE_SEEDED_WORKFLOWS).
 
 export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
@@ -632,10 +628,15 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       // gate (reads the store) and domain-graph's fail-closed-on-coverage<1.0 — not a worktree file.
       // Only coverage emits a genuine standalone report the deterministic floor reads. Declaring
       // phantom files failed every phase under core's FINDING-101 deliverable gate.
+      //
+      // `coverage` is `executes_code: true` (wicked-core#414): it WRITES `coverage-report.json`
+      // into the worktree for its pinned validator to read, and an `executes_code: false` phase
+      // may write nothing there — the worktree guard has no exemptions, declared deliverables
+      // included. Its role stays `evaluator`; the deliver default keys off code-writing CREATORS.
       { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
-      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
+      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
       // domain-graph is a DETERMINISTIC Tool that runs `wicked-core domain-graph`, which PERSISTS the
       // domain/requirement/rule graph into the repo store (core#237) — not an LLM skill that could hit
       // a non-persisting hermetic fallback. Mirrors wicked-core/workflows/domain-extraction.json.

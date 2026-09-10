@@ -140,6 +140,7 @@ describe('resolveEnforcement — arch-R16, unknown is never guardrailed', () => 
         attempt: 0,
         cli: 'codex',
         reason: "unit is governed but 'codex' has no input-governance adapter",
+        kind: 'unchecked_tool_calls',
       },
     ]);
     expect(res.armedUnits).toEqual([0]);
@@ -338,7 +339,6 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
           { status: 'M', path: 'src/components/WorkPage.tsx' },
           { status: 'M', path: 'e2e/seed_surfaces_test.py' },
         ],
-        exempted: [],
       }),
     ]);
     expect(res.status).toBe('unenforced');
@@ -362,8 +362,7 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
           cli: 'codex',
           phase: 'verify',
           changed: [{ status: 'D', path: 'src/fix.ts' }],
-          exempted: [],
-          headMoved: false,
+            headMoved: false,
         }),
       ],
     });
@@ -371,7 +370,7 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
     expect(view.enforcement.status).toBe('unenforced');
   });
 
-  it('an exempt-only mutation (documentation, declared deliverables) is disclosed, not a violation', () => {
+  it('a documentation-only write is a violation too — the guard has NO exemptions (codex on wicked-core#414)', () => {
     const res = resolveEnforcement([
       ev({ type: 'governanceContextArmed', ord: 4, attempt: 0, path: 'wrapped_cli' }),
       ev({
@@ -380,18 +379,20 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
         attempt: 0,
         cli: 'claude',
         phase: 'adversarial-review',
-        changed: [],
-        exempted: [{ status: 'A', path: 'docs/review.md' }],
+        changed: [{ status: 'A', path: 'docs/review.md' }],
         headMoved: false,
       }),
     ]);
-    expect(res.status).toBe('enforced');
-    expect(res.unenforced).toEqual([]);
+    expect(res.status).toBe('unenforced');
+    expect(res.unenforced).toHaveLength(1);
+    expect(res.unenforced[0]).toMatchObject({ ord: 4, kind: 'worktree_mutation' });
+    expect(res.unenforced[0]!.reason).toMatch(/A docs\/review\.md/);
   });
 
   it('the event is gate evidence, not a governance signal: alone it never makes a run enforced (Copilot on #507)', () => {
-    // An UNGOVERNED run whose evaluator wrote only documentation: no armed signal anywhere, so the
-    // honest answer is `ungoverned` — never `enforced`, never guardrailed.
+    // An UNGOVERNED run whose evaluator rewrote a file: no armed signal anywhere. The mutation is a
+    // violation on its own (`unenforced`) — what the event must never do is stand in for a
+    // governed signal: strip the mutation and the same run is `ungoverned`, never `enforced`.
     const res = resolveEnforcement([
       ev({
         type: 'evaluatorMutatedWorktree',
@@ -399,16 +400,39 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
         attempt: 0,
         cli: 'codex',
         phase: 'verify',
-        changed: [],
-        exempted: [{ status: 'M', path: 'README.md' }],
+        changed: [{ status: 'M', path: 'README.md' }],
         headMoved: false,
       }),
     ]);
-    expect(res.status).toBe('ungoverned');
+    expect(res.status).toBe('unenforced');
+    expect(res.armedUnits).toEqual([]);
     const view = resolveConformance({ runId: 'run-1', claims: [claim()], events: [
-      ev({ type: 'evaluatorMutatedWorktree', ord: 4, attempt: 0, cli: 'codex', phase: 'verify', changed: [], exempted: [], headMoved: false }),
+      ev({ type: 'evaluatorMutatedWorktree', ord: 4, attempt: 0, cli: 'codex', phase: 'verify', changed: [{ status: 'M', path: 'README.md' }], headMoved: false }),
     ] });
     expect(view.guardrailed).toBe(false);
+    expect(view.enforcement.status).toBe('unenforced');
+    // The counterfactual: with no mutation event at all, the same (ungoverned) run is `ungoverned`.
+    expect(resolveEnforcement([]).status).toBe('ungoverned');
+  });
+
+  it('each class of the unenforced headline names ONLY its own seats, classified by kind (Copilot on #507)', () => {
+    const res = resolveEnforcement([
+      ev({ type: 'governanceUnenforced', ord: 2, attempt: 0, cli: 'codex', reason: 'no adapter' }),
+      ev({
+        type: 'evaluatorMutatedWorktree',
+        ord: 4,
+        attempt: 0,
+        cli: 'pi',
+        phase: 'verify',
+        changed: [{ status: 'M', path: 'src/app.ts' }],
+        headMoved: false,
+      }),
+    ]);
+    expect(res.status).toBe('unenforced');
+    expect(res.unenforced.map((u) => u.kind)).toEqual(['unchecked_tool_calls', 'worktree_mutation']);
+    expect(res.reason).toMatch(/UNCHECKED tool calls on codex \(/);
+    expect(res.reason).not.toMatch(/UNCHECKED tool calls on codex, pi/);
+    expect(res.reason).toMatch(/CHANGED the worktree under review on pi/);
   });
 
   it('a moved HEAD with an identical tree is still a violation (the run branch is no longer the creator\'s)', () => {
@@ -420,7 +444,6 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
         cli: 'pi',
         phase: 'verify',
         changed: [],
-        exempted: [],
         headMoved: true,
       }),
     ]);
