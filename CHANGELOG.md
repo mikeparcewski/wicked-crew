@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.27] — 2026-09-10
+
+Release train: ships the published `wicked-crew-api-types` 0.29.0 (workspace link; tagged
+`api-types-v0.29.0` on the #491 merge) and re-bundles the already-pinned `wicked-studio` `^0.5.2`
+skin on the unchanged `wicked-core-ts` `^0.7.17` engine. What merged since 0.7.26 — the detailed
+entries follow under Added / Changed:
+
+- **#491 — skills design v3.6, the installer-copy bridge** (closes #490; api-types 0.29.0): the
+  installer-managed garden copy becomes a LAST-resort skills source behind the marketplace cache,
+  recorded as `source.kind: 'installer-copy'` with a persistent `skills.source` warning in
+  `GET /diagnostics`; diagnostics fail closed on an unreadable skills manifest.
+
 ### Added
 - **#490 — the installer-managed garden copy is a LAST-resort skills source** (design amendment
   v3.6; `wicked-crew-api-types` 0.29.0). Discovery order is now (1) the explicit
@@ -1344,7 +1356,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...HEAD
+[0.7.27]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...v0.7.25
 [0.7.24]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...v0.7.24
