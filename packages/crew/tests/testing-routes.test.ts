@@ -387,7 +387,18 @@ describe('POST /api/v1/testing/evals/run', () => {
     expect(res.status).toBe(200);
     const body = res.body as unknown as GovernanceEvalReport;
     // 1. Every key at every depth is snake_case (or a bare lowercase word): no camelCase anywhere.
-    const keys = allKeys(body).map((p) => p.slice(p.lastIndexOf('.') + 1));
+    //    Exempt: the key DIRECTLY under a `per_type` map — those are steering TYPES (data, the
+    //    kebab-case `design-ux` included: api-types `GovernanceEvalRuleCoverage.per_type` and the
+    //    history row's `per_type` are both `Record<SteeringType, …>`), not schema fields; the
+    //    wire-contract test pins that map's keys. Their children (`exercised`, `unexercised`) are
+    //    still checked (Copilot on #475: the bare regex would fail a contract-valid body).
+    const isPerTypeKey = (p: string) => /\.per_type\.[^.[\]]+$/.test(p);
+    expect(isPerTypeKey('.rule_coverage.per_type.design-ux')).toBe(true);
+    expect(isPerTypeKey('.rule_coverage.per_type.design-ux.exercised')).toBe(false);
+    expect(isPerTypeKey('.rule_coverage.per_type')).toBe(false);
+    const keys = allKeys(body)
+      .filter((p) => !isPerTypeKey(p))
+      .map((p) => p.slice(p.lastIndexOf('.') + 1));
     for (const k of keys) expect(k, `key ${k}`).toMatch(/^[a-z][a-z0-9_]*$/);
     // 2. Placement: the rollup's spelling and types.
     expect(typeof body.summary.false_positives).toBe('number');
