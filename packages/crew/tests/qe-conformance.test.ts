@@ -362,7 +362,7 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
           cli: 'codex',
           phase: 'verify',
           changed: [{ status: 'D', path: 'src/fix.ts' }],
-            headMoved: false,
+          headMoved: false,
         }),
       ],
     });
