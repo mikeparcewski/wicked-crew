@@ -71,41 +71,20 @@ function invalidBody(err: z.ZodError, what: string): { error: string; details: z
   return { error, details: err.issues };
 }
 
-// The sample shape is the PINNED wire contract (snake_case, the engine's serde spelling) —
-// `steering_type` stays an open string on purpose: the engine validates it against ITS
-// vocabulary, so engine-side validation stays the one spelling of what a type is (the steering
-// import doctrine). The run body's `type` IS closed here, because it selects from the same
-// 7-value facet the steering routes already export — one spelling, shared.
-const EvalSignalsSchema = z
-  .object({
-    phase: z.string().optional(),
-    tool: z.string().optional(),
-    files: z.array(z.string()).optional(),
-    content: z.string().optional(),
-  })
-  .strict();
-
-const EvalSampleSchema = z
-  .object({
-    id: z.string().min(1),
-    description: z.string().min(1),
-    kind: z.enum(['good', 'bad']),
-    steering_type: z.string().min(1),
-    signals: EvalSignalsSchema,
-  })
-  .strict();
+// The sample shape is the PINNED wire contract (snake_case, the engine's serde spelling) and
+// lives in `eval-sample.js` — ONE module the route, `eval-compare.ts` AND the internal-corpus
+// script (`scripts/evals-internal-corpus.mjs`, plain node) all import, so the script can never
+// accept a sample this route rejects. Re-exported here because this is the route's public schema
+// surface (the wire-contract test reads it from here). The run body's `type` IS closed here,
+// because it selects from the same 7-value facet the steering routes already export — one
+// spelling, shared.
+import { ImportEvalCorpusSchema } from './eval-sample.js';
+export { ImportEvalCorpusSchema };
 
 export const RunGovernanceEvalsSchema = z
   .object({
     type: z.enum(STEERING_TYPE_VALUES).optional(),
     corpus: z.string().min(1).optional(),
-  })
-  .strict();
-
-export const ImportEvalCorpusSchema = z
-  .object({
-    name: z.string().min(1),
-    samples: z.array(EvalSampleSchema).min(1),
   })
   .strict();
 
@@ -213,6 +192,10 @@ export function registerTestingRoutes(
         // Record the run in the eval history (best-effort, LOUD-NON-FATAL): the report is the
         // contract and must answer even if persistence fails, so a store miss is warned and
         // swallowed, never a 500. `rule_store` is the daemon's own steering store the run judged.
+        // `degraded` and `rule_coverage` are the ENGINE's readings persisted verbatim — the
+        // daemon recomputes neither; `rule_coverage` is spread conditionally because an engine
+        // predating core #394 emits none, and an absent key (never a fabricated one) is how a
+        // history row says "this run did not measure rule coverage".
         if (deps.evalStore !== undefined) {
           try {
             await deps.evalStore.record({
@@ -223,6 +206,7 @@ export function registerTestingRoutes(
               summary: report.summary,
               per_type: perTypeRollup(report.results),
               degraded: report.degraded,
+              ...(report.rule_coverage !== undefined ? { rule_coverage: report.rule_coverage } : {}),
               results: report.results,
             });
           } catch (persistErr) {

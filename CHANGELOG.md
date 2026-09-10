@@ -40,6 +40,178 @@ mentioned only where a daemon release depends on them.
   across projects. One static segment more specific than the proxy wildcard; `POST /api/docs` and
   everything else still stream through the pure-transport proxy. api-types **0.26.0** carries
   `InteractiveDocSummary`.
+- **`rule_coverage` + `effect: 'warn'` on the wire** (the core #394/#395 companion) — api-types
+  **0.27.0**: `GovernanceEvalReport`, `EvalRunSummary` and `EvalRunDetail` carry an OPTIONAL
+  `rule_coverage { exercised, unexercised: [{ rule_id, steering_type }] }` (the rules NO sample
+  exercised — the blind spot a bare gap count hides; absent, never fabricated, on a report from a
+  pre-#394 engine), and `ConformanceRule.effect` admits the operator-authorable `warn` band. The
+  run route persists `rule_coverage` verbatim (like `degraded`) so `GET /testing/evals[/:id]`
+  serves it untouched. `GovernanceEvalResult.sample` gains an OPTIONAL `payload_hash` — the
+  sha256 of the sample's full payload (id, description, kind, steering_type, signals), stamped by
+  a producer that held the samples (the engine echoes no signals); the offline comparison keys
+  comparability on it.
+  Codex round 7, in the same 0.27.0 (0.26.0 → 0.27.0 is this PR's one api-types bump — #474 landed
+  0.26.0 first): `GovernanceEvalRuleCoverage` is completed with the
+  engine's other two serialized fields — `recall_only` (the active rules of the slice carrying no
+  effect, core #395) and `per_type` (the same partition per steering type: all seven keys, an
+  `{ exercised, unexercised }` count pair each — evals.rs `RuleCoverage` / `TypeCoverage`) — both
+  optional on the contract only because the daemon persists a run's coverage verbatim and validates
+  none of it (a consumer reads an absent `per_type` as "no per-type coverage", never as zeros). The
+  wire-contract test pins the engine's COMPLETE report shape — the fixture is evals.rs's own
+  pinned-serialization test — with key-exact pins in both directions, beside the pre-#394 report
+  (no coverage) and a two-field record, which still validate.
+  Copilot on the rebased #475: a persisted RESULT ROW that is not the wire shape (`GovernanceEvalResult`
+  — no `sample`, `fired` not an array, a verdict outside its union, a row that is no object; the store
+  validates `results` only as an array) is likewise one reconciliation error naming the run, the index
+  and the defect, EXCLUDED from the comparison — which stays over the well-formed rows, is not
+  comparable, and withholds that side's summary-vs-results check rather than misattribute the
+  shortfall — and never thrown over.
+- **The INTERNAL evals corpus** — `e2e/corpus/wicked-internal-corpus.json` pins five wicked
+  repos (estate v0.16.6 · garden v12.31.0 · crew v0.7.24 · studio v0.5.0 · interactive v0.8.1) to
+  the commit each tag resolved to plus an ACTION window of ≥ 50 real commits behind it (walk
+  release tags back, capped at 180 days; a shortfall is recorded, never widened); the pin is the
+  constant and moving a tag is a deliberate PR. `scripts/evals-internal-corpus.mjs` (plain node;
+  its one import beyond the builtins is crew's shared `src/api/eval-sample.js` — the ROUTE's own
+  zod sample schema, so the script can never accept a sample `POST /testing/corpora/import`
+  rejects) `pin`s / `check`s it (fail closed on a re-cut tag or a hand-edited pin), `materialize`s
+  each tag by `git archive`, derives `samples` (one `EvalSample` per window commit — path-table
+  steering type, unsure ⇒ development; `good` unless `known-bad.json` says otherwise), and `run`s
+  them through `wicked-core rules eval` when the engine is on PATH. Our doctrine rules apply to
+  these repos; the 15-repo wicked-e2e OSS set stays the E2E functional corpus and is NOT an eval
+  corpus. Fail-closed throughout (the two codex rounds on #475): a pinned `repo` must be one safe
+  path segment; `materialize` is contained to the realpath of its root, refuses symlinked
+  destinations, pins the operator's git attributes away for the archive and verifies the extracted
+  tree entry-for-entry against `git ls-tree` (an un-overridable `export-ignore` is a named
+  refusal; the receipt carries each `tree_sha`); the derivation pins its complete git
+  configuration and reads paths NUL-delimited, never trimmed (byte-identical samples under any
+  operator config, exact filenames — `samples_hash` is `sha256:6e70752f…`); a missing/malformed
+  `known-bad` file is an error, never an empty allowlist; every artifact publishes tmp+rename
+  (samples under a lock with one `generation` stamp); `run` verifies `samples.meta.json` against
+  `samples.json` and the selected pin before probing the engine (ENOENT is SKIP; any other probe
+  error, a non-zero `--version` or an empty answer is a tool failure), stages exactly those
+  samples in a fresh private dir, checks every result row against its staged sample and stamps it
+  with the sample's `payload_hash`, and publishes `report.json` + `report.meta.json` as ONE
+  verifiable generation (`.report.lock`; `generation` in both, `report_sha256` in the meta;
+  `readPublishedReport()` refuses a torn pair) carrying complete provenance — engine version +
+  build identity (realpath + sha256 of the binary), the rule-snapshot identity with its method
+  (`engine-list` from `rules list --include-retired --json` read back before the temp store is
+  deleted; `seed-dir` when the engine lacks the command — said so), `pin_hash`, `samples_hash`.
+  Codex round 3: `check` refuses a SHALLOW checkout by name (a depth-1 clone plus a depth-1 fetch
+  of the from-tag resolves BOTH pinned tags while the window between them is missing — fewer
+  samples under the unchanged pin identity) and `samples` checks each window's derived commit and
+  sample counts against the pin's `commits` (outside `pin_hash` by design; a mismatch is a
+  refusal); `materialize` holds `.materialize.lock`, extracts + verifies every tree into a staging
+  dir beside its destination and swaps only after ALL verified — a failed repeat leaves the
+  previous trees and receipt byte-intact, a failed first run leaves no receipt, concurrent
+  materializations never interleave; `run` verifies the engine's report before publication —
+  exactly one row per staged sample, engine verdicts, `fired` arrays, a summary that is the rows'
+  tally — so an empty or partial report is a named tool failure, never a recorded evaluation
+  (a valid all-gap report still passes).
+  Codex round 4: every git the script runs is replacement-blind (`--no-replace-objects` +
+  `GIT_NO_REPLACE_OBJECTS=1`) and `check` / `pin` refuse a checkout carrying `refs/replace/*` by
+  name (`replace-refs-present` — a replacement rewrites a window commit's message and tree while
+  both tag shas and `rev-list --count` stay the pin's); `materialize` keeps every `.prev` backup
+  until the receipt is published and rolls a failed swap or receipt write back (destinations
+  restored byte-identical, the previous receipt intact; a failed rollback removes the receipt and
+  names both faults — proven by test-only fault injection at the second swap, the receipt write
+  and the rollback itself); `verifyEngineReport` also refuses rows inconsistent with their sample's
+  kind (a good sample judged `gap`, a bad one `false_positive`, `expected` missing or off its kind,
+  `fired` disagreeing with the verdict) and malformed report fields (`degraded` absent or not
+  null / `facet-only`, `rule_coverage: null` — what crashed the summary print after publication);
+  the valid all-gap fixture is now built from BAD samples.
+  Codex round 5: `run` resolves the engine ONCE with exec's own search semantics (every `PATH`
+  entry in order, an EMPTY entry being the cwd — the old resolver skipped it and could hash
+  another build than the one the spawn ran — `PATHEXT` on Windows, an executable regular file
+  required) and spawns THAT absolute path for `--version` / `rules ingest` / `rules list` /
+  `rules eval`, never the bare name: the file hashed into the provenance is the file that ran
+  (hashed again after the run; a binary replaced underneath is a tool failure). `materialize`
+  invalidates the receipt BEFORE the first tree moves — an in-progress marker is published and the
+  previous `materialized.json` moved aside — so a process killed between two renames leaves
+  incomplete trees beside NO receipt; every start inspects the root (`inspectMaterializeRoot`) and
+  repairs a torn swap (`.prev` trees rolled back, staging / marker / previous receipt removed,
+  nothing trusted until the run publishes), finishes a torn cleanup, sweeps stale staging;
+  `readMaterializeReceipt()` refuses a damaged root by name with that repair as the hint (proven by
+  a deterministic SIGKILL between the two renames and after the receipt write). `verifyEngineReport`
+  reconciles `rule_coverage` with the rows per the engine's definition (a rule is exercised when
+  ANY claim fired it, blocking or not; a row's `fired` is the blocking subset): no id both fired and
+  unexercised, `exercised` ≥ the distinct blocking-fired ids, no duplicate unexercised id,
+  `recall_only` a non-negative integer when present — the round-4 fixture that blessed a fired rule
+  as unexercised is corrected; the summary line prints the blocking-fired count beside `exercised`.
+  Codex round 6 (+ one Copilot thread): `readMaterializeReceipt(dir, pin)` trusts a receipt only as
+  the materialization OF the selected pin — `pin_hash` and a well-formed `generation` present and
+  the pin's, `repos[]` exactly the pinned repos at their tag + sha, and every `path` the real
+  directory `<root>/<repo>@<tag>` (present, not a symlink, a directory, realpath-equal) — a
+  foreign path, a link, a plain file, a missing identity or an extra / missing / duplicated repo is
+  a named refusal, never "clean" (the reader used to accept any `existsSync` path and an
+  identity-less receipt). `resolveExecutable` reserves the exit-zero SKIP for true absence
+  (ENOENT / ENOTDIR): any other lookup error — `stat` EACCES on a PATH directory, EIO, a failing
+  realpath — is `{ path: null, error }` and `run` reports a TOOL FAILURE naming syscall, errno and
+  candidate (every lookup error used to be swallowed as "not installed"); a regular file without
+  execute permission stays `blocked`. A `tar` that fails or cannot be spawned inside `materialize`
+  is a `ToolError` (exit 1), not a plain Error (exit 2) — Copilot.
+  Codex round 7: `run` inspects `.error` on the `rules ingest` and `rules eval` spawns BEFORE
+  reading their exit status or output — an engine removed (ENOENT) or made non-executable (EACCES)
+  after the `--version` probe answered is a TOOL FAILURE (exit 1) naming the step, the errno and the
+  executable, where it used to throw a TypeError on the undefined output (exit 2, the errno lost); a
+  step killed by a signal reports `signal SIG…` instead of `exit null`.
+  Codex round 8: `verifyEngineReport` validates a present `rule_coverage.per_type` — a plain object
+  keyed by steering type, each row `{ exercised, unexercised }` of non-negative integers, the rows'
+  `exercised` summing to the total and each type's `unexercised` equal to the listed rows of that
+  type (`run` never passes `--type`, so the report is unfiltered and the rows partition the whole
+  eligible set) — so `per_type: null` (which passed the gate and then crashed the offline
+  comparison) or `development: { exercised: 999 }` beside `exercised: 0` is a named refusal before
+  publication.
+- **`compareEvalRuns`** (`src/api/eval-compare.ts`) — the offline S17 comparison of two recorded
+  eval runs: per-sample verdict flips classified permitted/flagged, one-sided ids, kind AND
+  payload-identity changes (`comparable` requires an equal `sample.payload_hash` per shared id; a
+  side without WELL-FORMED hashes — `sha256:` + 64 lowercase hex, `PAYLOAD_HASH_RE`; a malformed
+  persisted value is no identity, never "changed" — is `unverified: no sample identity`, never
+  comparable — `comparable_reason` says why), summary reconciliation, and a `rule_coverage` delta
+  over what the records ENUMERATE (codex round 6): the wire's `exercised` is a COUNT of every rule
+  any claim fired, blocking or not, while `results[].fired` is the blocking subset (evals.rs
+  `rule_coverage` / `evaluate_sample`), so a record names only `unexercised ∪ fired` and its rule
+  set is fully identified only when `exercised === |fired|`. `gained`/`lost` are asserted from
+  listed ids on both ends; `added_rules`/`removed_rules` only when the silent side's inventory is
+  complete, else withheld by name (`inventory: 'partial'`, `unidentified`, `transitions_withheld`)
+  — a rule that leaves `unexercised` for a warn-only firing is no longer misreported as removed.
+  An `exercised` count above the fired ids is valid warn-only exercise; a count BELOW, an id both
+  fired and unexercised, or a duplicate unexercised id is the record contradicting itself — a
+  reconciliation error. Two valid records always reconcile.
+  Codex round 7 — type filters: the engine's `--type` slices the samples and the coverage
+  DENOMINATOR but not the gate (evals.rs `run_evals` / `decide_lane_rules` vs `evaluate_sample`), so
+  a filtered run's rows may fire rules OUTSIDE the denominator — `fired: ['SECURITY-DENY']` beside
+  `exercised: 0` is a valid development-filtered record, which used to fail against itself. Each
+  record's coverage is now reconciled against the denominator it was produced under, reported per
+  side in `coverage_reconciliation`: unfiltered against the rows' blocking-fired ids (`'rows'`);
+  filtered against the engine's own `per_type[<filter>]` row (`'per_type'`), or not at all when the
+  record has none (`'n/a (engine reports no per-type coverage)'`). `per_type`, when present, must
+  sum to `exercised` and agree per type with the listed rows; a listed-unexercised id that fired is
+  a contradiction under any filter (the row types the rule into the slice). Two runs under
+  different filters are not comparable (`differing-type-filter`) and get no coverage delta; under
+  the same filter a fired id is typed into the slice only when the other side lists it unexercised
+  — `gained`/`lost` stay certain, `unidentified` counts what the other side cannot type, listed
+  candidates are asserted only when the silent side is complete, and a fired-only id is always
+  withheld by name (it may be a rule of another type, outside the denominator).
+  Codex round 8 — no inferred inventory: `added_rules`/`removed_rules` are asserted only from an
+  explicit rule inventory on BOTH records, and no field of the wire carries one (`exercised` and
+  `recall_only` are counts, `unexercised` names only the unexercised rules, a row's `fired` only the
+  blocking firings), so every comparison of daemon-recorded runs is `inventory: 'partial'` with both
+  lists empty and each one-sided id in `transitions_withheld` with what it may be instead (an unnamed
+  warn-exercised rule, a recall-only or retired rule outside the eligible partition, under a filter a
+  rule of another type, or a real store change). The round-6 `exercised === |fired|` ⇒ complete
+  inference is deleted: under a filter it typed a fired id into the slice through the OTHER run's
+  row and, after a rule moved type, reported a present, exercised rule as removed. `unidentified` is
+  per record (unfiltered `exercised − |fired|`, filtered the whole `exercised`), never reduced by a
+  cross-run intersection; `gained`/`lost` stay certain. A persisted `rule_coverage` that is not the
+  wire shape (`per_type: null`, `null`, a non-array `unexercised`, a bad row or key) is
+  `coverage_reconciliation: 'unverified (malformed rule_coverage)'` on that side with a
+  reconciliation error naming the defect, no delta — and no throw (it used to crash on
+  `Object.values(null)`).
+- **The revised evals test plan** at `docs/testing/evals-test-plan.md`, plus the deterministic
+  eval-store / route scenarios it names (traversal ids over HTTP, 50-way write serialization,
+  fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
+  `facet-only` + `rule_coverage` passthrough, the parsed snake_case guard, 501 parity, and the
+  internal-corpus pin / samples / materialize / run semantics over a git fixture).
 
 ## [0.7.25] — 2026-09-08
 

@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "use-local-core-ts": "node scripts/use-local-core-ts.mjs",
+    "evals:corpus:pin": "node scripts/evals-internal-corpus.mjs pin",
+    "evals:corpus:check": "node scripts/evals-internal-corpus.mjs check",
     "build": "npm run build -w packages/crew",
     "build:with-studio": "npm run build:with-studio -w packages/crew",
     "test": "npm run test --workspaces --if-present",

@@ -186,6 +186,86 @@ respondsWith<
 >();
 respondsWith<boolean, ReturnType<CoreAdapter['governanceEvalsSupported']>>();
 
+// Eval-run history (api-types 0.27.0, the #394/#395 companion): what the EvalRunStore records and
+// GET /testing/evals[/:id] serves must satisfy the published rows — INCLUDING `rule_coverage`
+// riding the summary row optionally (an engine predating core #394 emits none, and the row must
+// still validate without it), and the report's own optional `rule_coverage`. The `accepts` pins
+// below say the OPPOSITE direction holds too: a report WITH coverage and a report WITHOUT it are
+// both legal engine outputs the store's record input must take verbatim.
+respondsWith<Wire.EvalRunSummary, Awaited<ReturnType<import('../src/api/eval-store.js').EvalRunStore['record']>>>();
+respondsWith<Wire.EvalRunDetail, NonNullable<Awaited<ReturnType<import('../src/api/eval-store.js').EvalRunStore['get']>>>>();
+respondsWith<Wire.ListEvalRunsResponse, { runs: Wire.EvalRunSummary[] }>();
+// An OLDER engine's report — predating core #394, no `rule_coverage` at all — validates.
+accepts<
+  Wire.GovernanceEvalReport,
+  { results: Wire.GovernanceEvalResult[]; summary: Wire.GovernanceEvalSummary; degraded: 'facet-only' | null }
+>();
+// The engine's COMPLETE report (api-types 0.27.0 — codex round 7 on #475): the fixture is the JSON
+// wicked-core's own pinned-shape test asserts `rules eval --json` serializes (evals.rs
+// `report_wire_shape_is_the_pinned_snake_case_contract`, branch `feat/evals-effect-and-coverage` @
+// a87e461 lines 1520-1585: `sample()` at 1142-1163 spells the description) — every report field,
+// all four `rule_coverage` fields, all seven `per_type` keys. `as const` is avoided so the arrays
+// stay mutable like the parsed JSON; the literal unions are pinned where the contract narrows them.
+const ENGINE_REPORT_WITH_COVERAGE = {
+  results: [
+    {
+      sample: { id: 'dev-force-push', description: 'description of dev-force-push', kind: 'bad' as const, steering_type: 'development' },
+      expected: 'deny' as const,
+      fired: ['GOV-FORCE-PUSH'],
+      verdict: 'caught' as const,
+    },
+    {
+      sample: { id: 'sec-hardcoded', description: 'description of sec-hardcoded', kind: 'bad' as const, steering_type: 'security' },
+      expected: 'deny' as const,
+      fired: [] as string[],
+      verdict: 'gap' as const,
+      nearest_rules: [] as Wire.GovernanceEvalNearestRule[],
+    },
+  ],
+  summary: { total: 2, caught: 1, gaps: 1, false_positives: 0 },
+  degraded: 'facet-only' as const,
+  rule_coverage: {
+    exercised: 1,
+    unexercised: [] as Wire.GovernanceEvalUnexercisedRule[],
+    recall_only: 0,
+    per_type: {
+      architecture: { exercised: 0, unexercised: 0 },
+      compliance: { exercised: 0, unexercised: 0 },
+      'design-ux': { exercised: 0, unexercised: 0 },
+      development: { exercised: 0, unexercised: 0 },
+      operations: { exercised: 0, unexercised: 0 },
+      security: { exercised: 1, unexercised: 0 },
+      testing: { exercised: 0, unexercised: 0 },
+    },
+  },
+};
+accepts<Wire.GovernanceEvalReport, typeof ENGINE_REPORT_WITH_COVERAGE>();
+// … and the declaration covers EXACTLY the producer's coverage fields — a field the engine
+// serializes that the contract does not declare, or a declared field the engine never emits, stops
+// this file compiling (both directions of every key set; `keyof` includes optional keys).
+accepts<keyof Wire.GovernanceEvalRuleCoverage, keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage>();
+accepts<keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage, keyof Wire.GovernanceEvalRuleCoverage>();
+accepts<keyof Wire.GovernanceEvalTypeCoverage, keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage.per_type.security>();
+accepts<keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage.per_type.security, keyof Wire.GovernanceEvalTypeCoverage>();
+accepts<Wire.SteeringType, keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage.per_type>();
+accepts<keyof typeof ENGINE_REPORT_WITH_COVERAGE.rule_coverage.per_type, Wire.SteeringType>();
+accepts<Wire.GovernanceEvalRuleCoverage['per_type'], Record<Wire.SteeringType, Wire.GovernanceEvalTypeCoverage> | undefined>();
+// A stored record whose coverage carries only the two REQUIRED fields still validates: the daemon
+// persists `rule_coverage` verbatim and validates none of it, so `recall_only` / `per_type` are
+// optional on the contract — a consumer reads their absence as "no per-type coverage", never zeros.
+accepts<
+  Wire.GovernanceEvalReport,
+  {
+    results: Wire.GovernanceEvalResult[];
+    summary: Wire.GovernanceEvalSummary;
+    degraded: null;
+    rule_coverage: { exercised: number; unexercised: { rule_id: string; steering_type: Wire.SteeringType }[] };
+  }
+>();
+// Steering `effect` (api-types 0.27.0): the operator-authorable `warn` band is a legal effect on
+// the wire alongside the policy-era three; a rule WITHOUT one stays recall-only (still legal).
+accepts<Wire.ConformanceRule['effect'], 'deny' | 'warn' | 'allow_with_conditions' | 'allow' | undefined>();
+
 // Multiscope responses (api-types 0.15.0; 0.17.0 grew `campaignRegistered` + the optional
 // `projectAttachError`) — the recon trigger's fan receipt and the campaign launch's additive
 // `runIds`: what the routes construct must satisfy the published shapes.
@@ -321,6 +401,17 @@ describe('wire contract (wicked-crew-api-types) drift guard', () => {
     // which in turn means esbuild resolved every import. The real gate is
     // `tsc --noEmit -p tsconfig.test.json` (npm run typecheck), which CI runs per-PR.
     expect(true).toBe(true);
+  });
+
+  it("the engine's complete eval report fixture is internally consistent (per_type partitions the totals over the seven steering types)", () => {
+    // The compile-time pins above establish the SHAPE; this keeps the copied numbers honest, so a
+    // future edit to the fixture cannot silently make it a report no engine would emit.
+    const rc = ENGINE_REPORT_WITH_COVERAGE.rule_coverage;
+    const rows = Object.values(rc.per_type);
+    expect(rows).toHaveLength(7);
+    expect(rows.reduce((n, r) => n + r.exercised, 0)).toBe(rc.exercised);
+    expect(rows.reduce((n, r) => n + r.unexercised, 0)).toBe(rc.unexercised.length);
+    expect(ENGINE_REPORT_WITH_COVERAGE.summary.total).toBe(ENGINE_REPORT_WITH_COVERAGE.results.length);
   });
 
   it('the shipped built-in workflows are contract-shaped at runtime too', () => {
