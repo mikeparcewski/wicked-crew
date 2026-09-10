@@ -8,7 +8,7 @@
 // read-only by construction: `fs` reads and `git diff`/`git status` — zero write capability, a
 // strictly smaller threat surface than `/open` handing the path to an OS opener.
 
-import { promises as fsp } from 'node:fs';
+import { constants as fsConstants, promises as fsp } from 'node:fs';
 import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 
 /** File-content cap (DES-FEEDBACK-002 §3.3): past this, `content` holds the first 512 KB and
@@ -33,10 +33,21 @@ export interface CappedFileRead {
 /** The target exists but is not a regular file (directory, socket, …) — the route's 400, distinct
  *  from ENOENT's 404. Serving directory listings is explicitly out of scope (§3.3). */
 export class NotARegularFileError extends Error {
-  constructor(readonly path: string) {
-    super(`not a regular file: ${path}`);
+  constructor(
+    readonly path: string,
+    detail: string = 'not a regular file',
+  ) {
+    super(`${detail}: ${path}`);
     this.name = 'NotARegularFileError';
   }
+}
+
+/** Options for a NO-FOLLOW capped read (the skills store; design v3.5 §3). */
+export interface CappedReadOptions {
+  /** Open with `O_NOFOLLOW` where the platform has it: a symlink at the leaf fails the open (ELOOP → `NotARegularFileError`). */
+  noFollow?: boolean;
+  /** The dev/ino the caller's lstat walk saw: the opened file must be that very entry (the Windows close of the lstat-then-open gap, applied everywhere). */
+  identity?: { dev: number; ino: number };
 }
 
 /**
@@ -44,11 +55,21 @@ export class NotARegularFileError extends Error {
  * closes the classic swap race: the size and the bytes come from the SAME open file description.
  * Callers must have contained `target` already — this function does filesystem work only.
  */
-export async function readFileCapped(target: string): Promise<CappedFileRead> {
-  const fh = await fsp.open(target, 'r');
+export async function readFileCapped(target: string, opts: CappedReadOptions = {}): Promise<CappedFileRead> {
+  const noFollow = opts.noFollow === true ? ((fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0) : 0;
+  let fh: fsp.FileHandle;
+  try {
+    fh = await fsp.open(target, fsConstants.O_RDONLY | noFollow);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') throw new NotARegularFileError(target, 'a symlink stood at the leaf when it was opened — refused, never followed');
+    throw err;
+  }
   try {
     const st = await fh.stat();
     if (!st.isFile()) throw new NotARegularFileError(target);
+    if (opts.identity !== undefined && (st.dev !== opts.identity.dev || st.ino !== opts.identity.ino)) {
+      throw new NotARegularFileError(target, 'not the entry the containment walk judged — it changed between lstat and open');
+    }
     const size = st.size;
     const toRead = Math.min(size, FILE_CONTENT_CAP_BYTES);
     const buf = Buffer.alloc(toRead);

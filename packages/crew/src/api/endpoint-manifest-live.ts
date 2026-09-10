@@ -44,6 +44,7 @@ export async function collectLiveEndpointManifest(): Promise<EndpointManifest> {
     projectsSupported: () => false,
     getSettings: async () => ({}),
     // The daemon's single CoreEvent fan-out subscribes at boot; no event ever arrives here.
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: () => () => {},
   } as unknown as CoreAdapter;
   try {
@@ -53,6 +54,10 @@ export async function collectLiveEndpointManifest(): Promise<EndpointManifest> {
       projectEvents: { disabled: true },
       interactiveWsRelay: { disabled: true },
       stallWatchdog: { enabled: false },
+      // No skills seam: the manifest documents the routes, and an armed seam would seed the
+      // generating machine's REAL skills root from its installed plugin. The routes register
+      // regardless (they answer 503 unconfigured).
+      skills: { disabled: true },
       // Nonexistent on purpose — headless boot; see the module header.
       studioRoot: join(scratch, 'no-studio-bundle'),
     });

@@ -55,6 +55,8 @@ import {
 } from './governance-steering.js';
 import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js';
 import { registerTestingRoutes } from './testing.js';
+import { registerSkillsRoutes } from './skills.js';
+import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -599,6 +601,10 @@ export interface RuntimeDeps {
    *  (tests) gets one only when it injects it, so a test that never touches the eval routes writes
    *  nothing under `~/.wicked-crew`. */
   evalStore?: EvalRunStore;
+  /** The skills seam (skills keystone) — `createServer` builds one over the daemon state home
+   *  (seeded from the installed plugin, published); a directly-driven route set gets none and
+   *  `/skills*` answers 503 unless a test injects one over a fixture root. */
+  skills?: SkillsRuntime;
 }
 
 /**
@@ -795,6 +801,10 @@ export function registerRoutes(
         stores,
         recentErrors: runtime.errorRing?.list() ?? [],
         acp: { byCli },
+        // The skills seam's last outcome (skills keystone): published / fallback / blocked /
+        // config-error, with the `skills.*` findings the ladder produced — the operator's one
+        // read-only answer to "why do launches refuse the snapshot".
+        skills: runtime.skills?.health() ?? disabledSkillsHealth(),
       };
     },
   );
@@ -3039,6 +3049,11 @@ export function registerRoutes(
         });
       }
     }
+    // There is NO skills setting (skills keystone, codex round 5): the skills root is
+    // `<state home>/skills`, full stop — `skills_root` is retired (a configurable root let a PUT
+    // aim seeding at `~/.codex/skills`), and the v3 `skills_mirror` knob was withdrawn before it
+    // (design v3.2 §1: wicked never writes into the user's CLI directories). A client still sending
+    // either is an unknown key, dropped and NAMED in the audit entry like any other.
     // workerStallMinutes (crew#287): the stall watchdog's silence threshold. Bounded to a day —
     // a huge value is "off in practice", which should be a deliberate choice, not a typo.
     if (Object.hasOwn(patch, 'workerStallMinutes')) {
@@ -3151,6 +3166,7 @@ export function registerRoutes(
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
+    // (No skills re-apply: the skills root is not a setting — skills/runtime.ts, codex round 5.)
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.
     audit.record('settings.updated', actorOf(req), {
@@ -3555,6 +3571,16 @@ export function registerRoutes(
     // The eval history store: `createServer` supplies a real one (state-home-rooted); a
     // directly-driven route set records nothing unless it injects one (no `~/.wicked-crew` writes).
     ...(runtime.evalStore !== undefined ? { evalStore: runtime.evalStore } : {}),
+  });
+
+  // ── Skills (skills keystone) — the file manager over the daemon-owned garden plugin root ─────
+  // Manifest + typed reads, guarded CAS writes, refresh/publish/analyze. `createServer` injects the
+  // runtime it booted (store seeded from the installed plugin, snapshot published); a
+  // directly-driven route set answers 503 unless a test injects one over a fixture root.
+  registerSkillsRoutes(app, {
+    ...(runtime.skills !== undefined ? { runtime: runtime.skills } : {}),
+    audit,
+    actorOf,
   });
 
   // ── The wicked-interactive bridge, reverse-proxied (DES-MERGE-001 §5.3/§7.2) ──

@@ -301,6 +301,7 @@ describe('stall watchdog through the real server (/ws)', () => {
       getSettings: async (): Promise<CrewSystemSettings> => ({ graphNodeLimit: 150 }),
       projectsSupported: (): boolean => false,
       sessionsDetail: async (): Promise<SessionView[]> => [executingView('r-live', 2)],
+      onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
       onEvent: (l: Listener): (() => void) => {
         listeners.add(l);
         return () => listeners.delete(l);

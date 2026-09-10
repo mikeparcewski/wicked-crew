@@ -33,6 +33,249 @@ mentioned only where a daemon release depends on them.
   bridge, and treats a connection lost mid-body as the transport failure it is (invalidate →
   retry once → diagnostic 502) instead of a malformed body. The endpoint manifest declares the
   list's wire shape as the array it is, `InteractiveDocSummary[]`.
+- **Skills keystone — confirmation-review residuals, review pass 10** (PR #480). (1) Pruned
+  directories (`.venv`, `node_modules`, `__pycache__`) are WALKED for classification while staying
+  excluded from every copy and hash: `tree.ts` `walkEntries` descends them and reports every entry
+  beneath with its kind, marked `pruned` with the pruned directory's path; `walkFiles`, `walkTree`'s
+  `files` / `links` / `dirs` / `others` (so `hashTree` and the closure copy) exclude the subtree
+  exactly as before, and `walkTree.pruned` hands what it holds to the validators. Under `effective/`
+  a symlink or special node inside a pruned directory is a blocking `path-invalid` naming the entry
+  and the pruned directory, with the reason (pruned trees are not bundle content and hold no links;
+  an operator-created `effective/.venv` with interpreter links is refused with "provisioned
+  environments live under baseline/, not the editable root"); a regular file there stays outside
+  the scan as before. Under `baseline/<hash>/` the provisioned `.venv` stays pruned AND unclassified
+  — an interpreter env legitimately holds symlinks, and nothing beneath a pruned directory is ever
+  delivered except through the snapshot's `.venv` link, whose target crew and core verify by
+  identity (documented on `baselineProblem`). A pruned-name directory inside a generation is
+  refused BY NAME as an unexpected entry before the hash is compared (`verifyCurrent`) — publish
+  never copies one. (2) The `reapBaselines` doc comment no longer claims "no revision bump": the
+  record drop is the committed, revision-advancing CAS path it has been since round 9. Copilot: the
+  boot's seed log line names the ACTUAL source — its kind, path and plugin version (`ensureReady`
+  now answers the `PluginSource` the seed copied from) — instead of hard-coding "the installed
+  wicked-garden plugin" when an explicit `WICKED_CREW_SKILLS_SOURCE` checkout or directory seeded.
+- **Skills keystone — codex round-9 REJECT (2 HIGH, 2 MEDIUM)** (PR #480). (H1) ONE walker classifies
+  every entry under `effective/` (`tree.ts` `walkEntries`: file / dir / symlink / other, never
+  following a link, an empty directory reported like any entry) and `scanEffective` plus every
+  validator consume it — a symlink ANYWHERE under `effective/` is a blocking `path-invalid` naming it
+  (there is no permitted link there), a special node (socket / fifo / device) blocks by name, and
+  nothing is invisible; `walkFiles` / `walkTree` are views of that one walk. (H2) the snapshot hash
+  covers DIRECTORY entries (`hashTree(files, links, dirs)`; publish hashes the directories its file set
+  implies, a verification the ones it walked — an extra empty directory anywhere in a generation is a
+  mismatch) and the copilot view is verified as an exact WHOLE tree: `views/copilot/.github/skills/
+  <name>/…` for exactly the sorted enabled-portable skills — each skill's own files and the
+  directories they imply — with every unexpected file or directory named in the refusal; special
+  nodes anywhere in a generation refuse. (M1) a refresh-time name collision records the held-back
+  upstream skill's directory on the entry (`SkillEntry.upstreamDir`, api-types 0.28.0) and
+  `GET /skills/:name/files/*?side=baseline` reads THAT directory, so the two sides of the collision
+  are comparable (`path` names the file actually read). (M2) `reapBaselines` is a CAS mutation like
+  every other: dropping a baseline record goes through the validated `manifest.json.tmp-…` → rename
+  commit with the revision advanced (the commit lands before any directory is removed, so a failed
+  commit removes nothing); a publish or refresh whose reap commits answers THAT revision, and a
+  stale `expectedRevision` after a reap is the 409 it should be. Copilot: the `Scaffold.home` doc no
+  longer speaks of the withdrawn mirror.
+- **Skills keystone — codex round-8 REJECT (3 HIGH, 2 MEDIUM, 1 LOW), design amendment v3.5**
+  (PR #480). (H1, v3.5 §2) EVERY name the store can create under `<state home>/skills/` is registered
+  in the shared fence fixture `tests/fixtures/state-home-subtrees.json` — settled (`baseline/`,
+  `effective/`, `manifest.json`, `snapshots/`, `current`, `.uv-cache/`, the never-created `refused/`
+  sentinel) AND transient (`.staging-*` park-and-place directories, `manifest.json.tmp-*` commit
+  files, `snapshots/.staging-*` generations being written, `snapshots/.tmp-current-*` links before
+  their rename), each with its kind in an additive `denied_children_kinds` block (core mirrors the
+  file byte-for-byte); `src/skills/root-names.ts` `SKILLS_ROOT_NAMES` is the store's own table (its
+  constants bind to it), a static audit asserts fixture ≡ table and that every root join in the
+  store's source resolves to a row, and a paused-operation test observes the transient names at the
+  moment they exist and requires each to classify — a transient name missing from the registry is a
+  live race with a worker launch, refused by core. (H2, v3.5 §3) TOCTOU discipline: every open inside
+  the root is `O_NOFOLLOW` where the platform has it and the lstat-then-open gap is closed everywhere
+  with a post-open `fstat` dev/ino identity check (`tree.ts` `openRegularNoFollow` /
+  `readFileNoFollow`; typed reads too); copies read their SOURCE through such an open, never
+  `copyFileSync(path)` (`copyFileNoFollow`, `O_EXCL | O_NOFOLLOW` destinations); a staged tree is
+  re-walked and re-hashed AFTER the copy and BEFORE the rename/swap (baseline capture, publish, reset,
+  refresh, replace/add, the single-file write) — a mismatch refuses with nothing written; the
+  residual (a directory component swapped by another writer with access to the crew-owned state home
+  — mitigated by the single-writer daemon and the post-operation verification, not eliminated) is
+  documented in the module headers. (H3, v3.5 §4) an explicitly EMPTY `WICKED_SKILLS_SNAPSHOT` boot
+  value is preserved on the engine handoff (core refuses it) and reported as `config-error`
+  (`skills.config`, `engineInput: ""`) — never widened into the live-cache fallback; only an ABSENT
+  variable reaches that rung. (M1, v3.5 §5) a directly registered `skill_ref` keeps `core: true`
+  when its `SKILL.md` is missing or symlink-refused, so `disable` blocks (`core-disable`) and publish
+  reports the missing content; the closure's `missing` set stays reported. (M2, v3.5 §1) the
+  `.claude-plugin` closure is the five runtime catalogs by name (no behaviour change; the design
+  amendment is cited where the closure is spelled). (L1) `DiagnosticsSkills.stateHome` is documented
+  as diagnostics-only — `WICKED_CREW_STATE_HOME` is not exported; `engineInput` documents `""`.
+  Copilot: `tests/skills-plugin-source.test.ts` no longer reassigns `home` (the first temp dir leaked
+  past `afterEach`); a second home is tracked and removed.
+- **Skills keystone — codex round-7 REVISE (3 HIGH, 2 MEDIUM)** (PR #480). (H1) content-addressed
+  baselines are VERIFIED before every reuse and locked: an existing `baseline/<hash>` is reused only
+  if its tree (links enumerated, `.venv` excluded) re-hashes to its name — a mismatch is
+  `baseline-corrupt` (a new finding kind, api-types 0.28.0): the seed re-captures over it, a refresh
+  refuses to reuse it (2xx `blocked`, nothing copied), reset verifies every file it would restore
+  against the hash the manifest recorded for it (modified / planted / removed ⇒ `blocked`, nothing
+  written), publish/analyze report it blocking BEFORE the env is provisioned in it and AFTER the
+  provisioner ran; bundle files and subdirectories are made read-only after capture (the top dir
+  keeps owner write for `.venv` — mode bits are a guard, the hash is the integrity boundary), the
+  provisioner may write only under `.venv` (a `uv.lock` uv resolves for a lock-less bundle is removed
+  again), and effective copies restored by reset/refresh get their owner-write bit back. (H2)
+  `manifest.json` is validated by a COMPLETE fail-closed schema on every load and before every write
+  — every field typed strictly (booleans are booleans, hashes 64-hex or `null` where allowed,
+  `revision` a non-negative integer, enums for kind / provenance / source.kind / venv, exact key
+  sets, `published {gen, contentHash, at, snapshotHash}`) — so `"enabled": "false"` now refuses to
+  load (`manifest-invalid`; the daemon reports `skills.config`) instead of being published;
+  pre-release manifests without `published.snapshotHash` refuse to load — remove the skills root to
+  reseed. (H3) every content mutation commits ATOMICALLY with the manifest: park originals → stage →
+  swap → records/derived fields → validated `manifest.json.tmp-…` → rename → unpark; if the manifest
+  commit fails the content swap is rolled back from the parked originals (the single-file write and
+  the support write now go through the same transaction as replace/add/reset/refresh; a publish whose
+  manifest commit fails removes the generation it never came to own). (M1) the `.claude-plugin` half
+  of the bundle closure is an allowlist BY NAME — `plugin.json`, `archetypes.json`, `components.json`,
+  `specialist.json`, `stack-registry.json` (the runtime catalogs garden's scripts read, adjudicated on
+  the live 12.32.0 layout); `marketplace.json` and anything else are `outside-closure`; `scripts/`
+  excludes the `ci/` and `wg/` directories and `wg-*` tooling (spelling fixed everywhere). (M2)
+  `snapshot.json` is AUTHENTICATED and re-derived: publish records `published.snapshotHash` (sha256 of
+  the exact bytes it wrote); `current` verifies only the published generation with that metadata,
+  re-derives every row's `kind` (from its frontmatter) and `portable` (from its own files) inside the
+  generation, requires `nested` to be what the dir spells, rows sorted and unique, the copilot view to
+  name AND lay out EXACTLY the sorted portable set (no subset, no extra directory) and nothing else
+  under `views/`; a torn `current` (behind `published`) is finished by `ensureReady` from the
+  authenticated generation, never verified on trust.
+- **Skills keystone — design v3.4 (from the integrated functional test) + codex round-6 REJECT**
+  (PR #480). The trio's first publish against the LIVE wicked-garden 12.32.0 plugin was BLOCKED by
+  18 `unresolved-ref` findings in 7 skills (one of them core), so the skills seam shipped unusable
+  on day one; garden's own structural gate treats those as advisory (wicked-garden#1111 tracks the
+  content fixes). **Design v3.4 §1 — ref severity follows the TARGET:** an `unresolved-ref` that
+  ESCAPES the plugin root (`${CLAUDE_PLUGIN_ROOT}/../x`, a `../` climbing out) stays `blocking`; one
+  whose target is MISSING inside it (a file the bundle omits, a reference into a disabled skill) is a
+  `warning`, and a publish with only warnings answers `verdict: 'warnings'` WITH the findings and a
+  written snapshot (`current` flipped, the engine input exported); `analyze` mirrors it; the boot log
+  names the warnings once by file:line. **Design v3.4 §2 — exactly one engine input:**
+  `WICKED_CREW_STATE_HOME` is RETIRED as an engine input (reverses the round-4 "passed alongside"
+  decision) — crew exports only `WICKED_SKILLS_SNAPSHOT`, the realpath of
+  `<state home>/skills/snapshots/<gen>` with every component a real directory, and core#399 derives
+  the state home from that layout (parent `snapshots`, grandparent `skills`); `GET /diagnostics`
+  keeps reporting `skills.stateHome` for humans. **Codex round 6:** (C1) the `.venv` link
+  authorization no longer trusts `snapshot.json` — `gardenSource.baseline` must be a 64-hex content
+  hash that `manifest.json` knows, `venv` / `gardenSource.kind` are enum-validated, and the link is
+  verified INDEPENDENTLY of the metadata text: `baseline/<hash>/.venv` is lstat-walked from the root
+  (no link at any component), must be a real directory, and the link's canonical target must equal
+  that directory's canonical path inside the canonical root (a tampered manifest + retargeted link +
+  forged hash used to verify); (H1) `manifest.json` and every `snapshot.json` are read NO-FOLLOW — a
+  symlink standing in for either is refused by name (`isSeeded` is lstat-based, so the seed never
+  wipes `effective/` around a linked manifest); (H2) reset and refresh-baseline go through the SAME
+  park-and-rollback transaction as replace/add (`swapStaged`): every file a swap removes OR
+  overwrites is parked by rename before a single placement, and a mid-swap failure restores the tree
+  byte-for-byte with the revision unchanged (a refresh also reaps its unreferenced new baseline) —
+  both used to remove/overwrite in place, leaving partial content behind a 500; (H3) the plugin
+  SOURCE is ingested no-follow BELOW a once-resolved root (an operator's symlinked config dir still
+  reaches it): a symlinked `plugin.json`, catalog, root file, `skills/<x>` dir or any link inside a
+  bundle dir refuses the seed (`skills.config`, nothing created) or the refresh (a 2xx `blocked`
+  `path-invalid` naming the entry, nothing copied); (M1) the bundle closure is ONE allowlist
+  (`bundle.ts` `inBundleClosure`: the `.claude-plugin` catalogs, `skills/**`, `scripts/**` minus `ci/`,
+  `wg/` and `wg-*`, `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) shared by the seed, the support API
+  (a PUT outside it is a 2xx `blocked` `outside-closure` envelope — a new finding kind, api-types
+  0.28.0 — and a GET a 400) and publish/analyze (a file found under `effective/` outside it is
+  BLOCKING by path); (M2) the core-closure drift check is NON-skippable: the vendored
+  `tests/fixtures/core-workflow-skill-refs.json` records wicked-core's `workflows/*.json` skill_refs
+  at the pinned core-ts version, must equal the pin (else "refresh the fixture with the core-ts
+  bump") and be ⊆ `registeredSkillRefs(BUILTIN_WORKFLOWS)`; the runtime source stays
+  `adapter.listWorkflows()` (the engine has no separate catalog — core's JSON are drop-ins crew
+  registers) and the sibling-checkout comparison stays as the local extra; (M3) a launch-pin
+  listener failure FAILS the launch — the engine is never called, the other listeners see
+  `rejected`, and the listener's error surfaces as the launch error (it used to be swallowed).
+- **Skills keystone — codex round-5 hardening; the skills root is not a setting** (PR #480). Six
+  fixes to the crew-owned skills root: (1) the `skills_root` setting and the `WICKED_CREW_SKILLS_ROOT`
+  env override are RETIRED (coordinator decision) — a configurable root accepting any absolute path
+  let `PUT /settings {skills_root: "~/.codex/skills"}` aim the seed at the user's codex skills before
+  the runtime reported the location as incompatible (design v3.1 §1: one storage root; v3.2 §1:
+  never a user CLI directory). The root is `<state home>/skills`, full stop: a `skills_root` a client
+  sends is dropped and named in the audit entry's `ignored`, a hand-edited settings.json value is
+  dropped on read, `GET /settings` never shows it, `PUT /settings` no longer re-applies the skills
+  seam, and the daemon REFUSES TO START (`SkillsRootUnfencedError`, `src/skills/root-fence.ts`)
+  when the root's canonical path leaves the state home, lands inside a known user CLI directory
+  (`~/.codex`, `~/.pi`, `~/.copilot`, `~/.config/opencode`, `~/.claude`, `CLAUDE_CONFIG_DIR`), or
+  the root entry is a symlink; the store has no `reroot` any more (a new root is a new store), and
+  the test harness arms the daemon STATE HOME (`setCrewStateHome`) instead of a skills-root env;
+  (2) catalog recomputation is CONTAINED: every internal read (`recomputeDerived` — kind,
+  portability, the core closure's SKILL.md texts — and the catalog rebuild's name derivation) walks
+  every component from the skills root with lstat, so `effective/skills/gamma -> /outside` is
+  skipped and reported (a blocking `path-invalid` at publish/analyze, a warning on a mutation of
+  another skill), never read through — a leaf-only check used to derive metadata from the outside
+  bytes; (3) incompatible file-map paths are refused BEFORE mutation — a key that is a directory
+  prefix of another (`x` + `x/y`), a key naming an existing directory the swap cannot clear, a key
+  whose parent is an existing non-own file — and `replace`/`add` are STAGED: the replacement is
+  written in full under the root, the skill's own files are parked by rename, the staged files are
+  renamed into place, and any failure rolls back byte-for-byte (mode bits included) with the
+  revision unchanged — the old remove-then-write order destroyed the notes it could not replace and
+  left a partial replacement behind a 500; (4) snapshot verification SEES symlinks: the walk
+  enumerates link entries (`walkTree`), the content hash covers them (path + link text,
+  `hashTree`), and `current` refuses any link but the root-level `.venv`, which must be present iff
+  `snapshot.json` records the env as `synced`, carry exactly the link text publish wrote, and resolve
+  to this root's `baseline/<recorded baseline>/.venv` — an injected outside-pointing link used to
+  leave the verified hash unchanged; (5) route paths are decoded EXACTLY ONCE, by Fastify — the
+  store's second `decodeURIComponent` is gone, so `100%25.txt` is the filename `100%.txt` and the
+  literal `a%252Fb.txt` stays `a%2Fb.txt` instead of becoming the path `a/b.txt`; (6) portability
+  classification models interpreter options that take a SEPARATE value (`python -W x` / `-X x` /
+  `-m x` / `-c x`, `node --require x` / `-r x` / `--loader x` / `--import x` / `-e x`, `uv run
+  --python x` / `--with x` …), so the cwd-relative script after them is still non-portable
+  (`python3 -W ignore scripts/foo.py`, `node --require foo scripts/x.js` used to read as portable).
+  Plus two Copilot nits: `compareVersions` is a TOTAL order (a prerelease suffix sorts below its
+  release, prereleases compare the semver way, distinct strings never compare 0 — the live-plugin
+  pick no longer depends on `readdir` order), and refs.ts documents that glob metacharacters (`*`,
+  `?`) terminate a path token.
+- **Skills keystone — codex round-4 hardening** (PR #480). Six fixes to the crew-owned skills root:
+  (1) persisted skill KEYS are validated at manifest parse — a safe single segment in the skill-name
+  charset that IS the path-derived name of its `dir` (the copilot view lays a skill out under its
+  key) — and `copyFiles` preflights EVERY destination's shape (`..`, absolute, separator, NUL) and
+  symlink walk before the first byte moves, so a refused record writes nothing; (2) the skills root
+  ITSELF is checked before every read and mutation (`manifest`, every contained path, the manifest
+  commit, `current`, seed, provisioning, publish, reaping): a real directory, never a symlink, whose
+  canonical path is the one bound at boot — a root replaced by a link to a copied store (or an
+  ancestor swapped under the daemon) refuses every operation with a loud 503
+  (`SkillsRootInvalidError`), never redirects one; (3) provisioning validates `baseline/<hash>`
+  (content-hash charset, reached without crossing a link, a real directory), the `.venv` and marker
+  paths and the daemon's `.uv-cache` BEFORE `ensureVenv` removes, syncs, writes a marker or chmods
+  anything — a symlinked hash dir refuses the publish before uv runs; (4) refresh-baseline is ATOMIC
+  against refusal: the three-way merge is decided in memory, every destination (takes and removals)
+  is preflighted, then the baseline is captured, the takes are staged under the root and swapped —
+  a refused destination answers the normal 2xx `blocked` `path-invalid` envelope with nothing
+  changed (no file copied or removed, no baseline captured, revision unchanged) instead of a 500
+  after the files ahead of it had landed; (5) the core closure consumes DECLARED mandates from the
+  parsed YAML `mandates:` list (escaped scalars count, the Claude colon form is normalized, entries
+  must be non-empty strings, each positioned by its node's line) and scans prose over the BODY only —
+  the frontmatter block is never regex-scanned (verified over the live 12.32.0 catalog: the closure is
+  unchanged, 8 skills, 0 absent); (6) launch pins never expire by publish count: every launch the
+  daemon hands the engine (`CoreAdapter.onLaunch` — launchRun, resumeRun, confirmGate,
+  launchCampaign, resumeCampaign; a campaign's engine-launched node runs under the campaign's
+  umbrella pin) opens a pin at the exported generation BEFORE the engine call, accumulates every later
+  publish, and is released only by the engine's `skillsSnapshotHanded` report for that session, the
+  run's / campaign's terminal frame, or the engine rejecting the launch; reaping skips any generation
+  with an unreleased launch pin. Plus, from core#399's round 4: the atomic `current` relink creates
+  its transient link INSIDE `snapshots/` (`.tmp-current-<hex>`, a `snapshots/.tmp-*` entry core's
+  launch-time fence classifies) and renames it over `skills/current`, so no unclassified child ever
+  appears under `skills/` during a publish (the former `skills/current.tmp-<hex>` would have refused a
+  launch listing `skills/` in that window); `tests/fixtures/state-home-subtrees.json` mirrors core's
+  copy byte-for-byte (the v3.3 §1 sibling-generation fence and its residuals in the `$comment`).
+- **Skills keystone — codex round-3 hardening** (PR #480, on top of design v3.2). Nine fixes to the
+  crew-owned skills root: (1) every PERSISTED manifest path is validated at parse — a skill `dir`, a
+  baseline identifier or a file-record key carrying `..`/an absolute piece/a separator is a corrupt
+  manifest refused loudly, and `containedPath` re-checks the FINAL joined path lexically so a trusted
+  `dir` cannot escape the root either; (2) the structural storage dirs (root + `effective/`,
+  `baseline/`, `snapshots/`) are refused if a symlink stands in for one — before publish, baseline
+  capture, provisioning, reaping and `current` verification (which now judges containment against the
+  lstat-clean `snapshots/` path, not the realpath of a redirected one); (3) live-generation reaping
+  pins the EXACT generation the engine reports it handed each session (`skillsSnapshotHanded`), never
+  "current at event time", with a bounded launch pin bridging the spawn→event gap; (4) parent reset
+  excludes every path a nested `SKILL.md` owns in the EFFECTIVE tree (not only the baseline), so a
+  child added directly under a parent keeps its files; (5) reset preflights every destination and
+  STAGES the restore before removing anything, so a blocked reset (a symlinked child dir) mutates
+  nothing and answers the 2xx `blocked` envelope; (6) a baseline env whose read-only lock FAILS
+  leaves no ready marker (the partial env is removed) and a retry re-provisions and re-locks —
+  readiness is trusted only when the marker AND the read-only bits verify; (7) frontmatter is parsed
+  by a real YAML grammar (`yaml`) and anything it rejects blocks, with the strict subset
+  (single-document mapping, scalar `name`, list `mandates`) kept on top; (8) 409 is reserved for a
+  stale `expectedRevision` alone — a publish-in-flight or a root-changed refusal wrote nothing and
+  answers a 2xx `blocked` findings envelope (`publish-in-flight` / `root-changed`, new finding kinds
+  in api-types 0.28.0); (9) the route concurrency test is deterministic (provisioner-entered gates,
+  released in `finally`, no wall-clock deadlines). New dependency: `yaml` (the standard TS YAML
+  library).
 
 ### Added
 - **`GET /projects/:projectId/interactive/api/docs` stamps `projectId` on every row** (#472) — the
@@ -212,6 +455,109 @@ mentioned only where a daemon release depends on them.
   fault-proven detail-before-index ordering and queue recovery, torn/malformed/missing rows,
   `facet-only` + `rule_coverage` passthrough, the parsed snake_case guard, 501 parity, and the
   internal-corpus pin / samples / materialize / run semantics over a git fixture).
+- **Crew-owned skills root** (skills keystone, design v3; companion to wicked-core#396). The daemon
+  seeds `<state home>/skills` from the LIVE installed wicked-garden plugin (the marketplace cache's
+  highest version — never the hand-installed copy, never a repo checkout; `WICKED_CREW_SKILLS_SOURCE`
+  is the one explicit override) into a content-hash `baseline/<hash>/`, keeps the operator-edited
+  `effective/` root beside it, and PUBLISHES immutable `snapshots/<gen>/` (enabled skills only,
+  dependency closure, `snapshot.json`) behind an atomically flipped `current` link — handing the
+  engine `WICKED_SKILLS_SNAPSHOT=<resolved snapshot>` at every spawn. Publish is crash-safe and
+  idempotent on retry: the generation is allocated from the filesystem (max existing + 1), staged
+  under `.staging-*`, renamed — never over an existing generation — the manifest is committed
+  BEFORE `current` flips (an interrupted flip is finished at the next boot), and torn staging is
+  swept. The newest three generations are kept; older ones are reaped only once no live run pins
+  them (pins fold from the CoreEvent stream); a baseline (and its shared `.venv`) lives while any
+  generation on disk references it. `current` is never trusted: it is realpath-contained under
+  `snapshots/`, its `snapshot.json` validated, and the tree re-hashed against `contentHash` before
+  the path is exported (`SkillsCurrentInvalidError` otherwise). Publish validates the whole tree —
+  every `${CLAUDE_PLUGIN_ROOT}/…` and `../…` reference of an enabled skill must resolve INSIDE the
+  snapshot (`..` is an escape, `dir/` resolves; file:line on failure), the frontmatter `name` must
+  equal the path-derived name, malformed frontmatter (unterminated flow sequences / quotes) blocks,
+  `.claude-plugin/{plugin.json,archetypes.json,components.json}` are required
+  (`missing-plugin-manifest`) and must have the shape their readers expect — `plugin.json` names the
+  plugin, `archetypes.json` carries its `archetypes` collection (`catalog-invalid`) — a declared
+  frontmatter name that is ANOTHER catalog skill's key blocks whether or not the declaring skill is
+  enabled (`name-collision`), and the core-by-reference closure (every registered workflow
+  `skill_ref` + transitive SKILL.md mandates) must be COMPLETE: a missing registered skill or an
+  absent mandate is blocking, and disable recomputes membership from the live refs. Enable runs the
+  same content + containment guards a write gets (a missing, malformed, renamed or symlinked skill is
+  not enabled). The baseline's `.venv` is provisioned (`uv sync`, through the daemon's `execCapped`
+  chokepoint, `UV_CACHE_DIR` under the root; ONE provisioning per baseline hash — concurrent callers
+  await it) and AWAITED before a publish returns, marked complete on disk, locked read-only, and
+  linked from a snapshot only once it exists. The env is REQUIRED, not best-effort: a bundle with a
+  `pyproject.toml` whose env cannot be built (uv missing, sync error, lock failure) BLOCKS the
+  publish (`venv-failed`). Publish is SERIALIZED (one at a time; a concurrent one wrote nothing and
+  answers a 2xx `blocked` `publish-in-flight` envelope) and root-bound (a root whose canonical path
+  moves or vanishes under a running publish aborts it — a 2xx `blocked` `root-changed` envelope —
+  with nothing written); 409 is reserved for a stale `expectedRevision` alone. A published generation is
+  locked read-only, and `current` is re-verified
+  (`snapshot.json` shape — its rows may only name safe `skills/…` dirs deriving their own names —
+  and content hash) on EVERY read, so a snapshot modified under a running daemon is refused by that
+  daemon, not only after a restart. Ownership of a path follows the deepest `SKILL.md` ON DISK, so a
+  nested skill created by a direct edit is never reached through its parent's edit/reset/replace.
+- **`/api/v1/skills*` file manager** — `GET /skills`, `GET /skills/:name/files[/*path]`,
+  `PUT /skills/:name/files/*path`, `GET|PUT /skills/support/*path`, `POST /skills`,
+  `POST /skills/:name/{enable,disable,reset,replace}`, `POST /skills/{refresh-baseline,publish,analyze}`.
+  Every mutation is CAS-guarded (`expectedRevision`; 409 only on a stale one) and answers 2xx
+  `{verdict, findings[], revision}` — a `blocked` verdict is a normal response, and so is a
+  containment refusal on a write (`path-invalid`). Containment is no-follow everywhere, walked FROM
+  THE SKILLS ROOT: a skill directory replaced by a symlink, a symlinked CHILD directory inside it
+  (every replace/add destination is walked before a byte moves), and a symlinked BASELINE ancestor
+  (reset, `?side=baseline`, every baseline hash lookup) are refused, never followed; the names the
+  store itself owns (`snapshot.json`, `manifest.json`, `current`, `views/`, `.venv`) are refused as
+  support paths. Atomic writes open their temp file `O_EXCL` under an unpredictable name and
+  preserve mode bits (executable support scripts survive edit/replace); typed capped reads
+  (`content: null` on binary). `analyze` is a pure dry run (nothing persisted, revision unchanged);
+  a blocked publish persists nothing — not the drift it observed, not the provisioning state. Reset
+  restores content only, never enablement; refresh-baseline merges three-way per FILE — a user
+  deletion is a modification (kept; `conflict` when upstream changed). Frontmatter is a STRICT
+  subset: a plain scalar with `: ` (`description: hello: world`) or a flow collection continued on
+  indented lines is checked, not folded. Portability treats ANY cwd-relative script invocation
+  (`python3 -u scripts/x.py`, `./scripts/x`, `bash scripts/x`) as non-portable and never truncates
+  a reference at a legal filename character. api-types **0.28.0** (re-minted from this PR's 0.27.0
+  after #475 landed 0.27.0 first; the skills block itself is unchanged by the re-mint) carries the
+  `Skill*` contract,
+  `missing-plugin-manifest` / `catalog-invalid` / `venv-failed`, and the `skills` block of
+  `GET /diagnostics` — and NO skills setting (see the round-5 entry: the root is not configurable).
+- **One storage root, an explicit worker fence** (design v3.1 §1/§2). The skills root stays
+  `<state home>/skills` — the same storage root as every other crew store. The worker Read fence is
+  core's explicit denylist of state-home subtrees (the resolved `skills/snapshots/<gen>/` being the
+  one non-denied path); `packages/crew/tests/fixtures/state-home-subtrees.json` is the shared
+  registry of every top-level entry crew's stores create there, and a crew test asserts the daemon
+  never creates an entry outside it (a new store cannot appear unfenced). Crew hands the engine
+  exactly one SKILLS input, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL path of `snapshots/<gen>`
+  (`GET /skills` `current.path` and `POST /skills/publish` `snapshot.path` spell the same real
+  path); `WICKED_SKILLS_CURRENT` is never set. Beside it, on every apply, `WICKED_CREW_STATE_HOME` =
+  the canonical realpath of the daemon state home — core derives the worker fence from it (no more
+  literal `.wicked-crew` basename; core#399 round 3) and cross-checks the snapshot is
+  `<state home>/skills/snapshots/<gen>` — which holds by construction: the root IS
+  `<state home>/skills` (not a setting; round 5), and `GET /diagnostics` → `skills` reports
+  `stateHome` beside it. Every `snapshot.json` skill row carries a boolean
+  `portable` (validated when `current` is verified) and a `nested` flag (a dir deeper than
+  `skills/<dir>` — not invocable for a Claude seat).
+- **Degradation ladder, surfaced** — `GET /diagnostics` → `skills` reports `published` /
+  `fallback` / `blocked` / `config-error` with `skills.fallback` / `skills.blocked` /
+  `skills.config` findings. Only an ABSENT configuration (no garden installed) leaves the engine
+  input unset; a blocked first publish or a corrupt root points `WICKED_SKILLS_SNAPSHOT` at a
+  non-existent refusal path (`<root>/refused/skills.{blocked,config}`) so launches fail loudly
+  instead of falling back to the live cache past recorded disablement.
+- **No writes into the user's CLI directories — ever; the copilot view rides the snapshot**
+  (design v3.2). The daemon never writes to `~/.codex/skills`, `~/.pi/agent/skills`,
+  `~/.config/opencode/skills`, `~/.copilot/skills`, `~/.claude/plugins` or any other user-level CLI
+  location: the v3 additive mirror and its adoption ledger are withdrawn (nothing of the kind
+  shipped), and there is no `skills_mirror` setting — a client sending one has it dropped and named
+  in the audit entry like any unknown key. Skills reach non-Claude workers only through per-launch,
+  wicked-owned delivery core performs from the snapshot: each published generation now carries
+  `views/copilot/.github/skills/<name>/` — copies of the enabled PORTABLE skills' own files, part of
+  the snapshot's content hash, immutable — which core hands a copilot seat as `--add-dir
+  <snapshot>/views/copilot`; `snapshot.json` names the view (`views.copilot`). `portable` stays the
+  admission key for every non-Claude view. A CLI without a lever (codex today) runs without wicked
+  skills, and a unit on such a seat that requires one is REFUSED at launch by core — there is no
+  proceed-with-disclosure setting. A test drives the whole store lifecycle under a fake HOME with
+  populated CLI dirs and asserts they are byte-identical afterwards. `tests/fixtures/state-home-subtrees.json`
+  now carries core's machine-readable fence half (`read_slot` / `denied_children` on the `skills`
+  entry — byte-identical to core's embedded copy) and the crew test checks every child the daemon
+  creates under `skills/` is either the read slot or a denied child.
 
 ## [0.7.25] — 2026-09-08
 

@@ -19,6 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, defaultEvalStoreRoot, type RecordEvalRunInput } from '../src/api/eval-store.js';
+import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { removeScratch } from './setup/scratch.js';
 import type { GovernanceEvalResult, GovernanceEvalRuleCoverage } from '../src/core/types.js';
 
@@ -296,8 +297,17 @@ describe('EvalRunStore — concurrent writes are serialized (Copilot #467)', () 
 describe('EvalRunStore — root resolution', () => {
   it('defaultEvalStoreRoot honors the WICKED_CREW_EVAL_STORE override (the tests-pin precedent)', () => {
     expect(defaultEvalStoreRoot({ WICKED_CREW_EVAL_STORE: '/tmp/pinned/evals' })).toBe('/tmp/pinned/evals');
-    // No override → the state home's `evals/` (ends in the store's own segment).
-    expect(defaultEvalStoreRoot({}).endsWith(join('.wicked-crew', 'evals'))).toBe(true);
+    // No override → the state home's `evals/` (ends in the store's own segment). The harness arms
+    // the state home away from ~/.wicked-crew; this is about the UNCONFIGURED default, so
+    // unconfigure for the assertion and restore after.
+    const armed = crewStateHome();
+    setCrewStateHome(undefined);
+    try {
+      expect(defaultEvalStoreRoot({}).endsWith(join('.wicked-crew', 'evals'))).toBe(true);
+    } finally {
+      setCrewStateHome(armed);
+    }
+    expect(defaultEvalStoreRoot({})).toBe(join(armed, 'evals'));
   });
 
   it('writes a parseable one-object-per-line index and a detail file under the root', async () => {

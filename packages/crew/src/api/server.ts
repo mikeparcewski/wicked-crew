@@ -48,6 +48,12 @@ import { SeatHealthTracker } from './seat-health.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
+import { registeredSkillRefs } from '../skills/core-closure.js';
+import type { PluginSource } from '../skills/plugin-source.js';
+import { assertSkillsRootFenced } from '../skills/root-fence.js';
+import { SkillsRuntime } from '../skills/runtime.js';
+import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
+import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
   DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   DEFAULT_WORKER_STALL_MINUTES,
@@ -282,6 +288,24 @@ export interface CreateServerOptions {
     /** Sweep cadence, ms (tests shorten it). */
     sweepIntervalMs?: number;
   };
+  /**
+   * The skills seam (skills keystone): at boot the daemon seeds `<state home>/skills` — the ONE
+   * root, not a setting (codex round 5) — from the LIVE installed wicked-garden plugin, publishes a
+   * first immutable snapshot when none exists (its `views/copilot/` generated alongside), and
+   * exports `WICKED_SKILLS_SNAPSHOT` for the engine. It never writes into the user's own CLI
+   * directories (design v3.2 §1): the boot REFUSES (`SkillsRootUnfencedError`) a root whose
+   * canonical path leaves the state home or lands inside one. `disabled: true` registers the
+   * routes without a store (they answer 503) —
+   * the manifest collector and tests that must not touch a plugin cache use it. `source` /
+   * `provisionVenv` aim a test at a fixture plugin root and a provisioner that spawns nothing
+   * (`noVenv`) — a boot test must never run the host's `uv` or download anything; production omits
+   * both (live discovery, `uvSyncBaseline`).
+   */
+  skills?: {
+    disabled?: boolean;
+    source?: () => PluginSource | null;
+    provisionVenv?: VenvProvisioner;
+  };
 }
 
 export async function createServer(
@@ -342,7 +366,39 @@ export async function createServer(
   // unset/empty restores the env this process booted with (an operator-exported
   // WICKED_WORKER_HOME — or the test harness's hermetic arming, crew#396 — survives), falling
   // back to the engine default ~/.wicked-worker when the process booted without one.
-  applyWorkerConfigRoot((await adapter.getSettings()).worker_config_root);
+  const bootSettings = await adapter.getSettings();
+  applyWorkerConfigRoot(bootSettings.worker_config_root);
+
+  // The skills seam (skills keystone): boot-time only — there is NO skills setting to re-apply on
+  // PUT /settings (codex round 5: `skills_root` and its env override are retired). The store hangs
+  // off `<state home>/skills` (never a `~/.wicked-crew` literal, crew#353), and the boot ASSERTS the
+  // root is fenced before the store exists: canonically inside the state home, outside every user
+  // CLI directory, not a symlink — a violation is a daemon start error (`SkillsRootUnfencedError`,
+  // skills/root-fence.ts). The worker Read fence is core's explicit denylist of state-home subtrees
+  // (v3.1 §1; tests/fixtures/state-home-subtrees.json is the shared registry), with the resolved
+  // snapshot the one non-denied path; the core-by-reference closure is seeded from the workflow
+  // catalog the daemon serves (built-ins + user-registered), read at use time so a later
+  // registration counts at the next publish. `apply` never throws and never fails open: no
+  // installed plugin is the logged fallback (engine input unset); a blocked first publish or a
+  // corrupt root points the engine at a refusal path so launches fail loudly (skills/runtime.ts).
+  // Awaited: a first publish provisions the baseline env before it returns.
+  let skillsRuntime: SkillsRuntime | undefined;
+  if (options?.skills?.disabled !== true) {
+    const source = options?.skills?.source;
+    const skillsRoot = resolveSkillsRoot();
+    assertSkillsRootFenced(skillsRoot, { stateHome: crewStateHome() });
+    skillsRuntime = new SkillsRuntime({
+      store: new SkillsStore({
+        root: skillsRoot,
+        registeredSkillRefs: () => registeredSkillRefs(adapter.listWorkflows()),
+        provisionVenv: options?.skills?.provisionVenv ?? uvSyncBaseline,
+        ...(source !== undefined ? { source } : {}),
+        warn: (m) => app.log.warn(m),
+      }),
+      log: (m) => app.log.warn(m),
+    });
+    await skillsRuntime.apply();
+  }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
   // /ws activity bridge, and the run→project index that tags outbound frames (§5.2). Hydrated
@@ -880,6 +936,9 @@ export async function createServer(
     // (Copilot on #301).
     if (stallWatchdogArmed) stallWatchdog.ingest(event);
     terminals.route(event);
+    // Skills keystone: a live run pins the snapshot generation it may be reading; its terminal
+    // frame releases the pin and reaps generations no other live run holds (design v3 §1).
+    skillsRuntime?.observe(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
     broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
@@ -926,8 +985,16 @@ export async function createServer(
       })();
     }
   });
+  // Skills keystone (codex round 4): every launch the daemon hands the engine — run, resume, gate
+  // answer, campaign — opens a generation pin BEFORE the engine call, released only by the engine's
+  // `skillsSnapshotHanded` report or the terminal frame (live-generations.ts). Unregistered on
+  // close like the event listener.
+  const offLaunch = adapter.onLaunch((notice) => {
+    skillsRuntime?.launched(notice);
+  });
   app.addHook('onClose', async () => {
     offEvent();
+    offLaunch();
   });
 
   // (The seat-health `--version` recovery probe that armed here is retired — perf recon
@@ -1040,6 +1107,7 @@ export async function createServer(
       studioRoot,
       dropDocLedgerRows,
       evalStore,
+      ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
     },
   );
 

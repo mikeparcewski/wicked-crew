@@ -1,0 +1,8 @@
+{
+  "wicked-core-ts": "0.7.16",
+  "refs": [
+    "wicked-garden-domain",
+    "wicked-garden-domain-coverage",
+    "wicked-garden-domain-extractor"
+  ]
+}

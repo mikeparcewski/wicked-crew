@@ -1,0 +1,8 @@
+{
+  "archetypes": [
+    {
+      "id": "build",
+      "description": "fixture"
+    }
+  ]
+}

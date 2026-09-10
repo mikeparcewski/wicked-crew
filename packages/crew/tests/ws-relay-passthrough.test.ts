@@ -29,10 +29,11 @@ function emit(event: CoreEvent): void {
   for (const l of listeners) l(event);
 }
 
-/** The minimal adapter surface createServer touches at boot (settings, hydrate guard, onEvent). */
+/** The minimal adapter surface createServer touches at boot (settings, hydrate guard, onEvent, onLaunch). */
 const mockAdapter = {
   getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
   projectsSupported: (): boolean => false,
+  onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
   onEvent: (l: Listener): (() => void) => {
     listeners.add(l);
     return () => listeners.delete(l);

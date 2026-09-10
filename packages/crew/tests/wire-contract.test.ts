@@ -35,6 +35,14 @@ import type {
   TestingReconSchema,
 } from '../src/api/testing.js';
 import type { LaunchCampaignSchema } from '../src/campaigns/routes.js';
+import type {
+  AddSkillSchema,
+  PutSkillFileSchema,
+  ReplaceSkillSchema,
+  SkillRevisionSchema,
+} from '../src/api/skills.js';
+import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
+import type { SkillsHealth } from '../src/skills/runtime.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
@@ -342,8 +350,12 @@ respondsWith<
     stores: StoreFileEntry[];
     recentErrors: RecentError[];
     acp: { byCli: Record<string, AcpCliFold> };
+    skills: SkillsHealth;
   }
 >();
+// The skills seam's health block (api-types 0.28.0), both directions.
+respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
+respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();
@@ -394,6 +406,39 @@ respondsWith<
 >();
 respondsWith<Wire.RetireMemoryResponse, { erased: number }>();
 accepts<z.input<typeof RetireMemorySchema>, Wire.RetireMemoryBody>();
+
+// Skills keystone (api-types 0.28.0 — re-minted from this branch's 0.27.0 after #475 landed 0.27.0
+// first; Copilot on #480 had caught the earlier stale 0.26.0 label) — the daemon-owned garden plugin
+// root's file manager.
+// Response direction: every store answer the routes hand through must satisfy the contract.
+respondsWith<Wire.SkillManifest, ReturnType<SkillsStore['manifest']>>();
+respondsWith<Wire.SkillFileTree, ReturnType<SkillsStore['listFiles']>>();
+respondsWith<Wire.SkillReadResult, Awaited<ReturnType<SkillsStore['readFile']>>>();
+respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['enable']>>();
+respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['writeFile']>>();
+respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['add']>>();
+// publish is async (it awaits the baseline env provisioner) — pin what it RESOLVES to.
+respondsWith<Wire.SkillPublishResult, Awaited<ReturnType<SkillsStore['publish']>>>();
+respondsWith<Wire.SkillRefreshResult, ReturnType<SkillsStore['refreshBaseline']>>();
+respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
+respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();
+// snapshot.json is what the ENGINE reads — its skill rows reuse the contract's kind vocabulary.
+respondsWith<Wire.SkillKind, SnapshotManifest['skills'][number]['kind']>();
+// The finding kinds this branch adds (a blocked publish's reasons, and the 2xx-blocked refusals a
+// publish-in-flight / root-changed now answer instead of a 409 — codex round 3) are in the union.
+respondsWith<Wire.SkillFindingKind, 'catalog-invalid' | 'venv-failed' | 'missing-plugin-manifest' | 'publish-in-flight' | 'root-changed'>();
+// Request direction: every body the contract lets a client send parses.
+accepts<z.input<typeof SkillRevisionSchema>, Wire.SkillRevisionBody>();
+accepts<z.input<typeof PutSkillFileSchema>, Wire.PutSkillFileBody>();
+accepts<z.input<typeof AddSkillSchema>, Wire.AddSkillBody>();
+accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
+// NO skills setting is on the wire (codex round 5 / coordinator decision): the root is
+// `<state home>/skills`, full stop — `skills_root` is retired with its env override (a configurable
+// root let a PUT aim seeding at `~/.codex/skills`), and `skills_mirror` was withdrawn before it
+// (design v3.2 §1: the daemon never writes into the user's CLI directories, so a knob for either
+// would be a lie). Both must stay OFF the contract.
+respondsWith<'skills_root' extends keyof Wire.SystemSettings ? never : true, true>();
+respondsWith<'skills_mirror' extends keyof Wire.SystemSettings ? never : true, true>();
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {

@@ -54,6 +54,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { setCrewStateHome } from '../../src/projects/state-home.js';
+
 // One base dir and one exit listener per PROCESS, however many files the worker runs — the same
 // guard `isolate-workflow-overlay.ts` documents (vitest's forks pool usually means one file per
 // process, but that default is not ours to hold still).
@@ -88,3 +90,19 @@ process.env['WICKED_CREW_SYSTEM_SETTINGS'] = join(base, 'wicked-core-settings.js
 process.env['WICKED_CREW_AUDIT_LOG'] = join(base, 'audit.log');
 process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(base, 'project-graphs');
 process.env['WICKED_CREW_KNOWLEDGE_DB'] = join(base, 'knowledge.db');
+// The daemon STATE HOME itself (crew#353's seam): every durable store without a per-store override
+// — and the skills root, which has NO override by design (skills keystone, codex round 5: the root
+// is `<state home>/skills`, full stop; `WICKED_CREW_SKILLS_ROOT` is retired) — resolves under
+// `crewStateHome()`. The CLI configures it from `--db`; an in-process `createServer` test boot
+// never does, so un-armed it would be the operator's REAL `~/.wicked-crew` — and the skills seam
+// would seed, publish into or reap generations from the operator's real skills root. Armed here to
+// a temp dir, the same way the CLI arms it (`setCrewStateHome`); a test that needs the historical
+// homedir default unconfigures it for that assertion and restores the armed value after.
+setCrewStateHome(join(base, 'state-home'));
+// The skills seam's plugin SOURCE: every `createServer` boot seeds `<state home>/skills` from the
+// installed wicked-garden plugin. Un-armed, a test boot would copy the developer's real plugin cache
+// into the (armed) state home — slow, and coupled to what happens to be installed. Source → a path
+// that holds no plugin, so the seed says "no source" (fast, no copy) unless a test aims it at a
+// fixture. (The seam never writes into the user's CLI directories — design v3.2 §1 — so there is
+// no mirror home to arm; tests/skills-no-user-cli-writes.test.ts proves it against a fake HOME.)
+process.env['WICKED_CREW_SKILLS_SOURCE'] = join(base, 'no-plugin-source');

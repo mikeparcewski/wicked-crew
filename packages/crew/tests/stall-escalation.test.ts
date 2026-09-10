@@ -859,6 +859,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
           l({ type: 'unitReassigned', session: runId, ord, attempt: 1 } as unknown as CoreEvent);
         }
       },
+      onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
       onEvent: (l: Listener): (() => void) => {
         listeners.add(l);
         return () => listeners.delete(l);
@@ -983,6 +984,7 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
       reassignUnit: async (): Promise<void> => {
         reassignCalls++;
       },
+      onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
       onEvent: (l: Listener): (() => void) => {
         listeners.add(l);
         return () => listeners.delete(l);

@@ -888,10 +888,27 @@ export function humanGatePhaseIds(wf: WorkflowDef): string[] {
  * endpoint and the WS fan-out funnel through this stable API — so when the
  * in-flight core-ts subscribe/teardown signature lands, only this file changes.
  */
+/**
+ * A launch the daemon hands the engine — or one the engine refused. `handed` is notified BEFORE the
+ * engine call (the skills seam opens a generation pin for the launch, so no worker spawn can read
+ * `WICKED_SKILLS_SNAPSHOT` ahead of the pin — live-generations.ts); `rejected` follows a call that
+ * threw (nothing will ever spawn for it). Every path a spawn can originate from goes through here:
+ * `launchRun` (POST /runs, onboarding, testing, steering), `resumeRun`, `confirmGate`,
+ * `launchCampaign`, `resumeCampaign`.
+ */
+export interface LaunchNotice {
+  kind: 'run' | 'campaign';
+  /** The run's session id (`LaunchRunInput.sessionId` / the run id) or the campaign's `CampaignDef.id`. */
+  id: string;
+  status: 'handed' | 'rejected';
+}
+export type LaunchListener = (notice: LaunchNotice) => void;
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
+  private readonly launchListeners = new Set<LaunchListener>();
   private closed = false;
   /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
   private readonly _builtinOverlayWritten = new Set<string>();
@@ -982,6 +999,72 @@ export class CoreAdapter {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Register a launch listener (`LaunchNotice`). Returns an unsubscribe function. */
+  onLaunch(listener: LaunchListener): () => void {
+    this.launchListeners.add(listener);
+    return () => {
+      this.launchListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Deliver a launch notice to EVERY listener; a listener's failure PROPAGATES (codex round 6 on
+   * crew#480 — the notices used to be delivered under a swallowing try/catch). The `handed` notice is
+   * what pins the skills generation the launch is about to read (skills/runtime.ts →
+   * live-generations.ts): a pin that could not be recorded means the generation could be reaped
+   * under the spawn, so the launch must not proceed and the failure is the launch's failure. Every
+   * listener is still notified (a later one is not skipped because an earlier one threw); the FIRST
+   * error is what propagates.
+   */
+  private notifyLaunch(notice: LaunchNotice): void {
+    let failure: { err: unknown } | null = null;
+    for (const listener of this.launchListeners) {
+      try {
+        listener(notice);
+      } catch (err) {
+        if (failure === null) failure = { err };
+      }
+    }
+    if (failure !== null) throw failure.err instanceof Error ? failure.err : new Error(String(failure.err));
+  }
+
+  /**
+   * Hand a launch to the engine with its notices: `handed` BEFORE the call (the pin is open before
+   * any spawn can read the env), `rejected` when the call throws (nothing will spawn — the pin is
+   * released). The result and the error pass through untouched.
+   *
+   * A listener that FAILS on `handed` fails the launch: the engine is never called (nothing spawns
+   * against a generation nobody pinned), the other listeners get `rejected` so whatever they did
+   * record is released, and the listener's error surfaces to the caller as the launch error —
+   * never swallowed (codex round 6). A listener failing on `rejected` cannot un-launch anything;
+   * the primary error keeps precedence and the secondary one is logged, not lost.
+   */
+  private async handedToEngine<T>(kind: LaunchNotice['kind'], id: string, call: () => Promise<T>): Promise<T> {
+    try {
+      this.notifyLaunch({ kind, id, status: 'handed' });
+    } catch (err) {
+      this.releaseAfterFailure(kind, id, err);
+      throw err;
+    }
+    try {
+      return await call();
+    } catch (err) {
+      this.releaseAfterFailure(kind, id, err);
+      throw err;
+    }
+  }
+
+  /** Deliver `rejected` while a launch is already failing with `primary`: a secondary listener failure is logged, never masks the primary. */
+  private releaseAfterFailure(kind: LaunchNotice['kind'], id: string, primary: unknown): void {
+    try {
+      this.notifyLaunch({ kind, id, status: 'rejected' });
+    } catch (secondary) {
+      console.warn(
+        `[crew] launch ${kind}:${id} failed (${primary instanceof Error ? primary.message : String(primary)}) and a launch listener ALSO failed while releasing its pin: ${secondary instanceof Error ? secondary.message : String(secondary)} — the pin may be held until the run's terminal frame`,
+      );
+    }
   }
 
   /** The production council roster (static), parsed to seats. */
@@ -1178,17 +1261,17 @@ export class CoreAdapter {
           'deliverable floor to',
       );
     }
-    return this.core.launchRun(opts);
+    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts));
   }
 
   /** Resume a run from its persisted cursor → the status token. */
   resumeRun(runId: string): Promise<string> {
-    return this.core.resumeRun(runId);
+    return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
   /** Resolve a human gate: approve (optional amend) or reject → the status token. */
   confirmGate(runId: string, approve: boolean, amend?: string): Promise<string> {
-    return this.core.confirmGate(runId, approve, amend);
+    return this.handedToEngine('run', runId, () => this.core.confirmGate(runId, approve, amend));
   }
 
   /** Cancel a run → the status token. */
@@ -1236,7 +1319,9 @@ export class CoreAdapter {
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
-    return surface.launchCampaign(JSON.stringify(def));
+    // The campaign's DAG-node runs are launched INSIDE the engine (their ids are minted there), so
+    // the campaign is what the daemon can account for: pinned under `def.id` until its terminal frame.
+    return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(def)));
   }
 
   /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —
@@ -1258,7 +1343,8 @@ export class CoreAdapter {
 
   /** Resume a campaign from its persisted state → the campaign status token. */
   resumeCampaign(id: string): Promise<string> {
-    return this._campaigns('Resuming a campaign').resumeCampaign(id);
+    const surface = this._campaigns('Resuming a campaign');
+    return this.handedToEngine('campaign', id, () => surface.resumeCampaign(id));
   }
 
   /** Cancel a campaign (in-flight node Runs cancelled, the rest marked) → the status token. */
@@ -2325,6 +2411,12 @@ export class CoreAdapter {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
       }
+      // The skills root is NOT a setting (skills keystone, codex round 5): `<state home>/skills`,
+      // full stop. A `skills_root` left in a pre-release settings.json is dropped on read, never
+      // honored — like the v3 `skills_mirror` knob withdrawn before it (design v3.2 §1 — wicked
+      // never writes into the user's CLI directories).
+      if ('skills_root' in parsed) delete (parsed as Record<string, unknown>)['skills_root'];
+      if ('skills_mirror' in parsed) delete (parsed as Record<string, unknown>)['skills_mirror'];
       // deliverDefault (crew#393): 'pr' | 'none' only — same values PUT /settings admits. A
       // hand-edited anything-else falls back to the shipped default ('pr') rather than turning
       // the repo-scoped delivery default into an unparseable third state.
