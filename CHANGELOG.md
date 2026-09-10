@@ -17,7 +17,7 @@ Release train: ships the published `wicked-crew-api-types` 0.29.0 (workspace lin
 skin on the unchanged `wicked-core-ts` `^0.7.17` engine. What merged since 0.7.26 — the detailed
 entries follow under Added / Changed:
 
-- **#491 — skills design v3.6, the installer-copy bridge** (api-types 0.29.0): the
+- **#491 — skills design v3.6, the installer-copy bridge** (closes #490; api-types 0.29.0): the
   installer-managed garden copy becomes a LAST-resort skills source behind the marketplace cache,
   recorded as `source.kind: 'installer-copy'` with a persistent `skills.source` warning in
   `GET /diagnostics`; diagnostics fail closed on an unreadable skills manifest.
