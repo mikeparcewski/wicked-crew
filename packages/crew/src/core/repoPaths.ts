@@ -30,6 +30,15 @@ import type { RepoEntry } from './types.js';
 export function codeGraphDb(repo: RepoEntry): string {
   const db = repo.code_graph_db;
   if (typeof db !== 'string' || db === '') {
+    // Two defects share the empty shape and have different remedies. An engine that RESOLVED
+    // NOTHING (no `WICKED_ESTATE_REPO_GRAPH_ROOT`, no state home, no `HOME`) publishes an empty
+    // `code_graph_db` AND says so in `findings` (wicked-core#406); surface that diagnosis first,
+    // or it hides behind the stale-addon message below and sends the operator reinstalling an
+    // addon that is current.
+    const unresolvable = repo.findings?.find((f) => f.code === CODE_GRAPH_ROOT_UNRESOLVABLE);
+    if (unresolvable !== undefined) {
+      throw new Error(`repo ${repo.id} has no code graph: ${unresolvable.message}`);
+    }
     throw new Error(
       `repo ${repo.id} carries no code_graph_db — the wicked-core addon in use predates the field ` +
         `(wicked-core#170). Rebuild/reinstall wicked-core-ts; do not derive this path locally.`,
@@ -37,6 +46,9 @@ export function codeGraphDb(repo: RepoEntry): string {
   }
   return db;
 }
+
+/** The engine's finding code for "no repo-graph root resolves" (`RepoEntry.findings[]`, wicked-core#406). */
+export const CODE_GRAPH_ROOT_UNRESOLVABLE = 'code_graph_root_unresolvable';
 
 /**
  * The requirements artifacts a repo's domain extraction writes.

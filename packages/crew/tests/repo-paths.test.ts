@@ -13,7 +13,12 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { codeGraphDb, requirementsGraph, requirementsOverrides } from '../src/core/repoPaths.js';
+import {
+  CODE_GRAPH_ROOT_UNRESOLVABLE,
+  codeGraphDb,
+  requirementsGraph,
+  requirementsOverrides,
+} from '../src/core/repoPaths.js';
 import type { RepoEntry } from '../src/core/types.js';
 
 const DEFAULT_DB = '/repos/demo/.codegraph/estate.db';
@@ -61,6 +66,29 @@ describe('repoPaths', () => {
     // Named, so the operator knows which repo and what to do — a bare "path missing" sends them
     // reading source to find out that their addon is stale.
     expect(() => codeGraphDb(repoWithoutDb())).toThrow(/wicked-core#170/);
+  });
+
+  it("surfaces the engine's own diagnosis when it resolved no root, instead of blaming the addon", () => {
+    // wicked-core#406: an engine with no repo-graph root (no override, no state home, no HOME)
+    // publishes an EMPTY code_graph_db and a `code_graph_root_unresolvable` finding. The remedy is
+    // the environment, not a reinstall — so that message, not the stale-addon one, must reach the
+    // operator. Still a throw: nothing may fall back to a hand-joined path.
+    const message = 'no repo-graph root resolves for this daemon (no WICKED_ESTATE_REPO_GRAPH_ROOT override, no state home, no HOME)';
+    const unresolvable: RepoEntry = {
+      ...BASE,
+      code_graph_db: '',
+      findings: [{ code: CODE_GRAPH_ROOT_UNRESOLVABLE, message, path: null }],
+    };
+    expect(() => codeGraphDb(unresolvable)).toThrow(message);
+    expect(() => codeGraphDb(unresolvable)).not.toThrow(/wicked-core#170/);
+    // An unrelated finding does not change the diagnosis: empty with no root finding is still the
+    // stale-addon case.
+    const inTree: RepoEntry = {
+      ...BASE,
+      code_graph_db: '',
+      findings: [{ code: 'in_tree_code_graph_ignored', message: 'ignored', path: '/repos/demo/.codegraph' }],
+    };
+    expect(() => codeGraphDb(inTree)).toThrow(/wicked-core#170/);
   });
 
   it('derives the requirements artifacts, which the engine does not publish', () => {

@@ -23,7 +23,10 @@ mentioned only where a daemon release depends on them.
   keeps reading the engine's `code_graph_db` off the repo record (`repoPaths.ts`). The record now
   also carries an additive `findings` array (e.g. `in_tree_code_graph_ignored`) the repo card can
   show — declared in `wicked-crew-api-types` as `RepoEntry.findings?: RepoFinding[]` (additive; the
-  package version moves at its next release).
+  package version moves at its next release). `repoPaths.ts codeGraphDb()` reads it for the one case
+  that shares the empty-`code_graph_db` shape with a stale addon: an engine that resolved NO root
+  (`code_graph_root_unresolvable`) now surfaces its own diagnosis instead of the "reinstall
+  wicked-core-ts" error.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
