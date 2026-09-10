@@ -109,6 +109,13 @@ mentioned only where a daemon release depends on them.
   crew-private default (`<state home>/bus.db`) is unchanged. `GET /diagnostics.stores` lists the
   bus sidecar with the db's other sidecars. Upgrade note: a bridge started by an older crew keeps
   emitting to the old bus until it is stopped — the daemon logs the pid and the fix on adopt.
+  Recycling FAILS CLOSED: a refused signal (EPERM) or a pid still in the process table after
+  SIGTERM, the grace and SIGKILL refuses the start (503 naming the pid and the daemon that owned
+  it) with the sidecar untouched — no replacement beside a bridge that may still be running — and
+  the replacement must prove it is this daemon's before it is recorded as crew's: not the recycled
+  pid, and the spawned child or one of its descendants (`npx` → shell → node, read from the process
+  table); a bridge somebody else started under the lockfile meanwhile is refused, one whose lineage
+  cannot be read is used but never written into the sidecar (`interactive/bridge-pool.ts`).
   `wicked-interactive`'s own hard-coded `:7701` default is tracked separately in that repo.
 
 ## [0.7.27] — 2026-09-10
