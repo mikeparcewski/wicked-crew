@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { deliverPrScript } from '../core/deliver.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
 export interface DeliverScriptResult {
@@ -73,7 +74,7 @@ export const gitReprovisionWorktree: WorktreeReprovisioner = async (repoRoot, ru
   const branch = `wicked/${runId}`;
   const run = (args: string[]): Promise<void> =>
     new Promise((resolve, reject) => {
-      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true }, (err) =>
+      execFile('git', ['-C', repoRoot, ...args], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) =>
         err === null ? resolve() : reject(err),
       );
     });
@@ -129,7 +130,9 @@ export function runDeliverScript(
       ['-lc', deliverPrScript(intent)],
       {
         cwd: workdir,
-        env: { ...process.env, ...env },
+        // The daemon's governance-store variables never ride into the deliver shell: the helper is
+        // applied LAST, so a caller overlay that spreads `process.env` cannot put them back.
+        env: childEnvWithBootEstateDb({ ...process.env, ...env }),
         maxBuffer: OUTPUT_CAP_BYTES,
         timeout: SCRIPT_TIMEOUT_MS,
       },

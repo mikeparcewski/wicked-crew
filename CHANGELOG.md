@@ -32,6 +32,37 @@ under Fixed / Added / Changed:
   registration now requires.
 
 ### Fixed
+- **Governance records land in a state-home store; dead letters are visible and never under HOME
+  (crew#495, acceptance finding F-022).** The engine's emit seam writes every cross-product
+  governance event — conformance claims and decisions, phase transitions, the steering-rule
+  lifecycle — to the estate store named by `WICKED_ESTATE_DB`, and `serve` never set it: on EVERY
+  default install EVERY such event dead-lettered to `~/.something-wicked/wicked-apps/
+  emit-outbox.ndjson` under the operator's HOME (3,400+ entries on one host, shared by every daemon,
+  no timestamp, nothing on `/diagnostics` or the console) while the home board asserted "Governed
+  100%". Now: `serve` resolves the store — `--governance-db` / `WICKED_CREW_GOVERNANCE_DB`, else an
+  inherited `WICKED_ESTATE_DB`, else the daemon's OWN `<core db>.governance/governance.db` (a
+  sidecar for the same reason the bus is one, F-043: the state-home fence registry's `core.db`
+  prefix claim already covers it) — exports it to the in-process engine before it spawns, and logs
+  which rule won; a URL spec (`postgres://…`) is refused at boot — the emit seam is SQLite-only and
+  would dead-letter every event — as is the core db or the bus db (a second writer on a store another
+  process owns). The dead-letter outbox is `<core db>.governance/emit-outbox.ndjson` (an explicit
+  `WICKED_APPS_EMIT_DEADLETTER` is honoured), under the state home rather than HOME; the daemon stamps
+  `WICKED_APPS_EMIT_ORIGIN` so an engine carrying the companion change writes `ts` (epoch ms), `pid`
+  and `origin` on every spooled entry. `GET /diagnostics` gains `governance` — the store and its
+  source, EVENT records on it (total / since boot, via the engine's `eventStoreCount` binding; `null`
+  on an older addon, never a fabricated 0), the outbox folded (count, per-type, per-reason,
+  timestamp range, truncation) and findings: `governance.deadletter` (error) the moment the outbox
+  holds an entry, `governance.store` (error) when no store was resolved, `governance.legacy-outbox`
+  (warning) when the pre-fix HOME outbox still exists. New `wicked-crew governance replay <outbox>
+  [--governance-db | --db] [--dry-run]` drains an outbox into the store through the engine's
+  `replayEmitOutbox` binding (archive first, replay from the archive, failed lines back onto the
+  outbox; exit 2 with the outbox untouched on an older addon). Crew's own estate-MCP child gets the
+  boot-time `WICKED_ESTATE_DB` back, never the daemon's sidecar. The readiness line carries
+  `governanceDb`. Engine companion: wicked-core (spool-record stamps + the two `Core` statics).
+  Studio follow-up: the Health panel renders the new block.
+  - **wicked-crew-api-types 0.31.0** — additive `DiagnosticsResponse.governance` with
+    `DiagnosticsGovernance` / `DiagnosticsGovernanceStore(Source)` / `DiagnosticsGovernanceRecords`
+    / `DiagnosticsGovernanceDeadletters` / `DiagnosticsGovernanceFinding`.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /

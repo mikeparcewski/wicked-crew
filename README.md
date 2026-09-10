@@ -61,8 +61,17 @@ curl -X POST http://127.0.0.1:7701/api/v1/runs \
 wicked-crew start --problem "Fix the flaky retry test" --workflow bug
 ```
 
-The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp` — `mcp` runs a stdio MCP
-server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the terminal.
+The CLI surface is `wicked-crew serve|start|resume|gate|status|mcp|governance` — `mcp` runs a
+stdio MCP server (crew-as-a-tool for coding agents), `gate` answers a pending human gate from the
+terminal, `governance replay <outbox>` drains governance events the engine could not store.
+
+Governance evidence (conformance claims, phase transitions, rule lifecycle) lands in a store
+beside the core db — `<core db>.governance/governance.db` (`--governance-db` /
+`WICKED_CREW_GOVERNANCE_DB` override; an inherited `WICKED_ESTATE_DB` is honoured). Events the
+engine cannot store dead-letter to `<core db>.governance/emit-outbox.ndjson` by default — under the
+state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` is honoured);
+`GET /api/v1/diagnostics` → `governance` counts them and raises a
+`governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
 ## The idea
 

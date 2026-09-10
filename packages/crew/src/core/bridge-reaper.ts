@@ -51,6 +51,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /**
  * The bridge binaries the engine spawns by bare name on PATH. Mirrors the set audited
@@ -140,13 +141,14 @@ function listProcesses(): string | null {
               '-Command',
               "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
             ],
-            { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+            { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: childEnvWithBootEstateDb() },
           )
         : // POSIX keywords (`args`, not the BSD/procps-specific `command`): same spelling
           // works on macOS and Linux.
           spawnSync('ps', ['-A', '-o', 'pid=,ppid=,args='], {
             encoding: 'utf8',
             maxBuffer: 16 * 1024 * 1024,
+            env: childEnvWithBootEstateDb(),
           });
     if (out.error !== undefined || out.status !== 0 || typeof out.stdout !== 'string') return null;
     return out.stdout;
@@ -201,6 +203,7 @@ function pidRunsInRunWorktree(pid: number): boolean {
     const out = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
+      env: childEnvWithBootEstateDb(),
     });
     if (out.error !== undefined || out.status !== 0 || typeof out.stdout !== 'string') return false;
     const cwd = out.stdout.split('\n').find((l) => l.startsWith('n'))?.slice(1) ?? '';

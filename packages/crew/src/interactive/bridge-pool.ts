@@ -54,6 +54,7 @@ import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_pro
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 export const LOCK_NAME = '.wi-serve.json';
 /** Crew's sidecar beside the bridge's lockfile: which pid crew started, and with which env (F-042/F-043). */
@@ -267,9 +268,9 @@ export function parentPidOf(pid: number): number | null {
         ? spawnSync(
             'powershell',
             ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`],
-            { encoding: 'utf8', timeout: 5000, windowsHide: true },
+            { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb() },
           )
-        : spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000 });
+        : spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, env: childEnvWithBootEstateDb() });
     if (res.error || res.status !== 0) return null;
     const ppid = Number.parseInt(String(res.stdout).trim(), 10);
     return Number.isInteger(ppid) && ppid >= 0 ? ppid : null;
@@ -560,7 +561,9 @@ export class InteractiveBridgePool {
     // own env. The daemon's bound origin wins over an inherited WICKED_CREW_API — the bridge
     // validates project bindings against whatever it is told, and only this daemon has them.
     const bridgeEnv = bridgeEnvFor(this.io);
-    const env: NodeJS.ProcessEnv = { ...process.env, ...bridgeEnv };
+    // …with the engine-only store variables restored to their boot values: the daemon's governance
+    // store is the in-process engine's business, never the bridge's.
+    const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
     // Detached + unref: the bridge is a SHARED instance keyed by root, so it must outlive the
@@ -653,6 +656,8 @@ function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
     cwd: root,
     detached: true,
     stdio: 'ignore',
-    env,
+    // The pool already restored the engine-only store variables; re-applied here so THIS spawn is
+    // safe on its own terms too (idempotent — crew#495).
+    env: childEnvWithBootEstateDb(env),
   });
 }

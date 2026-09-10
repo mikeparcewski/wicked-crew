@@ -77,6 +77,8 @@ import {
   readStudioBundleVersion,
   type ErrorRing,
 } from './diagnostics.js';
+import { GovernanceDiagnostics } from './governance-health.js';
+import { legacyHomeOutboxPath } from '../core/governance-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
@@ -601,6 +603,10 @@ export interface RuntimeDeps {
   /** The daemon's in-process error-level log ring (diagnostics) — `createServer` tees the pino
    *  stream into one; a directly-driven route set (tests) gets an honestly-empty tail. */
   errorRing?: ErrorRing;
+  /** The pre-fix HOME dead-letter outbox `/diagnostics.governance` points at when it exists
+   *  (crew#495): `undefined` = the engine's own default under HOME; `null` = report none — a
+   *  directly-driven route set (tests) never has to `stat` the developer's real home. */
+  governanceLegacyOutboxPath?: string | null;
   /** The studio asset root `createServer` resolved (bundled or overridden) — diagnostics reads
    *  the bundle's shipped version manifest from it. Absent = headless = `studioBundle: null`. */
   studioRoot?: string;
@@ -780,6 +786,15 @@ export function registerRoutes(
   // can never turn this GET into an event-log re-reader or a `--version` spawner per request.
   const acpFoldCache = new AcpFoldCache();
   const engineVersionCache = new EngineVersionCache();
+  // The governance block (crew#495): the store the engine's emit seam writes to (as the adapter
+  // exported it — `null` on a boot that resolved none), its record count through the engine
+  // binding when the addon has one, and the dead-letter outbox folded on change. Built at boot so
+  // the record baseline is the boot baseline.
+  const governanceDiagnostics = new GovernanceDiagnostics(
+    adapter.governanceStore ?? null,
+    CoreAdapter.eventStoreCounter(),
+    runtime.governanceLegacyOutboxPath === undefined ? legacyHomeOutboxPath() : runtime.governanceLegacyOutboxPath,
+  );
   app.get(
     `${V}/diagnostics`,
     { config: { manifest: { responseType: 'DiagnosticsResponse', statusCodes: [200] } } },
@@ -787,12 +802,13 @@ export function registerRoutes(
       // `dbPath` is a readonly field of the real adapter; a stub-driven route set may lack it,
       // and diagnostics over an unknown store honestly reports no stores and no ACP record.
       const dbPath = typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null;
-      const [stores, byCli, engineBinaries] = await Promise.all([
+      const [stores, byCli, engineBinaries, governance] = await Promise.all([
         dbPath !== null ? listStoreFiles(dbPath) : Promise.resolve([]),
         dbPath !== null
           ? acpFoldCache.get(eventsDirOf(dbPath))
           : Promise.resolve<Awaited<ReturnType<AcpFoldCache['get']>>>({}),
         engineVersionCache.get(),
+        governanceDiagnostics.health(),
       ]);
       const uptimeMs = Math.round(process.uptime() * 1000);
       const addr = app.server.address();
@@ -813,6 +829,9 @@ export function registerRoutes(
         // config-error, with the `skills.*` findings the ladder produced — the operator's one
         // read-only answer to "why do launches refuse the snapshot".
         skills: runtime.skills?.health() ?? disabledSkillsHealth(),
+        // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
+        // letters — with a `governance.deadletter` finding the moment the outbox holds one.
+        governance,
       };
     },
   );
