@@ -21,10 +21,11 @@
 import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { execCapped } from '../core/exec.js';
+import { stateHomeOfDb } from '../projects/state-home.js';
 
 // ── ACP fold ─────────────────────────────────────────────────────────────────
 
@@ -437,15 +438,16 @@ export const REPO_GRAPH_ROOT_ENV = 'WICKED_ESTATE_REPO_GRAPH_ROOT';
 
 /**
  * Where this daemon's repo graphs live, spelled with the engine's precedence: the env override
- * when set, else `<state home>/repo-graphs` (the state home being the `--db` parent, exactly how
- * the engine derives it). The two remaining engine arms (a thread-bound state home; the default
- * `~/.wicked-crew`) collapse to the same answer here, because the daemon's state home IS
- * `dirname(--db)`.
+ * when set, else `<state home>/repo-graphs` — the state home through the ONE crew resolver
+ * (`stateHomeOfDb`: the parent of the ABSOLUTE `--db`, so a relative `--db ./scratch/core.db`
+ * still yields absolute paths that match the engine's canonical spelling). The two remaining
+ * engine arms (a thread-bound state home; the default `~/.wicked-crew`) collapse to the same
+ * answer here, because the daemon's state home IS the `--db` parent.
  */
 export function repoGraphRoot(dbPath: string, env: NodeJS.ProcessEnv = process.env): string {
   const override = env[REPO_GRAPH_ROOT_ENV];
   if (override !== undefined && override !== '') return override;
-  return join(dirname(dbPath), REPO_GRAPHS_DIRNAME);
+  return join(stateHomeOfDb(dbPath), REPO_GRAPHS_DIRNAME);
 }
 
 /**
@@ -459,13 +461,15 @@ export async function listStoreFiles(
   dbPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<StoreFileEntry[]> {
-  const home = dirname(dbPath);
+  const home = stateHomeOfDb(dbPath);
   const base = basename(dbPath);
   let names: string[];
   try {
     names = await fsp.readdir(home);
   } catch {
-    return [];
+    // No core-store directory ⇒ zero core entries — but the repo-graph root may live elsewhere
+    // (`WICKED_ESTATE_REPO_GRAPH_ROOT`), so the listing continues instead of returning early.
+    names = [];
   }
   const matches = names
     .filter((n) => n === base || n.startsWith(`${base}.`) || n.startsWith(`${base}-`))
@@ -486,7 +490,7 @@ export async function listStoreFiles(
 
 /**
  * One entry per `<key>/estate.db` under the repo-graphs root, key-sorted. Only the database
- * itself is listed — its `-wal`/`-shm` siblings are transient and a `estate.db.migrating-*` temp
+ * itself is listed — its `-wal`/`-shm` siblings are transient and an `estate.db.migrating-*` temp
  * is a copy in flight, neither of which is a store — and a key dir without an `estate.db` (a repo
  * registered but never indexed) is not a store either. A missing root lists nothing.
  */

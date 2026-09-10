@@ -49,6 +49,12 @@ describe('endpoint-manifest.json (TH-11)', () => {
     const gate = byKey.get('POST /api/v1/runs/:id/gate');
     expect(gate?.requestType).toBe('GateDecision');
     expect(gate?.statusCodes).toEqual([200, 400, 404, 409]);
+    // wicked-core#406 follow-up: the project-graph routes declare their refusal codes — 501 (addon
+    // predates code_graph_db), 503 (a current engine resolved no repo-graph root), 404/409/400.
+    expect(byKey.get('GET /api/v1/projects/:id/graph')?.statusCodes).toEqual([200, 404, 501, 503]);
+    expect(byKey.get('POST /api/v1/projects/:id/graph/refresh')?.statusCodes).toEqual([200, 400, 404, 409, 501, 503]);
+    expect(byKey.get('GET /api/v1/projects/:id/graph/blast-radius')?.statusCodes).toEqual([200, 400, 404, 501, 503]);
+    expect(byKey.get('GET /api/v1/projects/:id/graph/search')?.statusCodes).toEqual([200, 400, 404, 501, 503]);
     const guidance = byKey.get('PUT /api/v1/runs/:id/guidance');
     expect(guidance?.requestType).toBe('SetGuidanceBody');
     expect(guidance?.responseType).toBe('SetGuidanceResult');

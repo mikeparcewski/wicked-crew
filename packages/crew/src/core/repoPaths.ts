@@ -55,6 +55,18 @@ export function codeGraphDb(repo: RepoEntry): string {
 export const CODE_GRAPH_ROOT_UNRESOLVABLE = 'code_graph_root_unresolvable';
 
 /**
+ * The ONE HTTP mapping every code-graph consumer shares for a `codeGraphDb()` failure this daemon
+ * can classify: **503** for {@link CodeGraphRootUnresolvableError} — a CURRENT engine resolved no
+ * repo-graph root, a daemon-environment fault (neither a bad request nor Fastify's generic 500) —
+ * and `null` for anything else, which the caller maps itself (501 for the stale-addon case on the
+ * project routes; the default elsewhere). Applied on the project-graph routes, the repo surfaces
+ * (`/repos/:id/{graph,graph/blast-radius,domain-graph,requirements…}`) and nowhere else.
+ */
+export function codeGraphErrorStatus(err: unknown): number | null {
+  return err instanceof CodeGraphRootUnresolvableError ? 503 : null;
+}
+
+/**
  * A CURRENT engine resolved no repo-graph root for this repo (wicked-core#406) — see
  * {@link codeGraphDb}. Distinct from the stale-addon `Error` on purpose: `projects/graph.ts` turns
  * every other `codeGraphDb` throw into `ProjectGraphEngineTooOldError` (501, "reinstall the

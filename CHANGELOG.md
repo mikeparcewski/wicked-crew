@@ -10,28 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-## [0.7.28] — 2026-09-10
-
-Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
-`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
-merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
-worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
-the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
-under Fixed / Added / Changed:
-
-- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
-  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
-  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
-  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
-  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
-- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
-  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
-  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
-  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
-  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
-  registration now requires.
-
 ### Fixed
+- **Graph surfaces: a missing repo-graph root is 503 everywhere; the project-graph routes declare
+  their status codes (wicked-core#406 follow-up).** `codeGraphErrorStatus` in `repoPaths.ts` is the
+  ONE mapping every code-graph consumer shares: `/repos/:id/{graph,graph/blast-radius,domain-graph}`
+  and the requirements routes now answer **503** with the engine's own diagnosis when a current
+  engine resolved no repo-graph root (`CodeGraphRootUnresolvableError`) instead of Fastify's generic
+  500; the project-graph routes reuse it. `GET/POST /projects/:id/graph{,/refresh,/blast-radius,/search}`
+  declare `statusCodes` (200 · 400 · 404 · 409 · 501 · 503 as applicable) — `endpoint-manifest.json`
+  and the generated API tests are regenerated, and the graph route's "Always 200" note now separates
+  standings (200) from refusals (404 / 501 / 503). `listStoreFiles` spells the state home through
+  `stateHomeOfDb()` (absolute even for a relative `--db`) and keeps listing the repo-graph root when
+  the core-store directory is absent (the override can live elsewhere). `projects/graph.ts`'s
+  "Honest degradation" inventory names the fifth case. The two #406 bullets below were filed under
+  `[0.7.28]` by a merge that crossed the release cut; they are unreleased and now live here.
 - **State-home registry: `repo-graphs` is a registered subtree (wicked-core#406).** wicked-core now
   keeps every registered repo's code graph under the daemon state home —
   `<state home>/repo-graphs/<repo-dir-name>-<12-hex>/estate.db`, the `--db` parent, so `--db`
@@ -61,6 +53,29 @@ under Fixed / Added / Changed:
   the state home's `repo-graphs` (the `--db` parent, exactly how the engine derives it) — so no
   new engine export is needed; `-wal`/`-shm` siblings, in-flight `estate.db.migrating-*` temps and
   never-indexed key dirs are not stores and are not listed.
+
+## [0.7.28] — 2026-09-10
+
+Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
+`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
+merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
+worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
+the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
+under Fixed / Added / Changed:
+
+- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
+  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
+  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
+  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
+  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
+- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
+  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
+  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
+  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
+  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
+  registration now requires.
+
+### Fixed
 - **Governance records land in a state-home store; dead letters are visible and never under HOME
   (crew#495, acceptance finding F-022).** The engine's emit seam writes every cross-product
   governance event — conformance claims and decisions, phase transitions, the steering-rule

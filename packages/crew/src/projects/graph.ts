@@ -32,10 +32,11 @@
  * # Honest degradation
  *
  * Every path out of here names its cause. A project with no repo members, one whose graph was never
- * built, one whose member repo the registry no longer knows, and an addon too old to publish
- * `code_graph_db` are four different situations with four different remedies; collapsing them into
- * an empty result set is the failure estate's own R3 rule exists to prevent, and it is the failure
- * FINDING-069 actually shipped.
+ * built, one whose member repo the registry no longer knows, an addon too old to publish
+ * `code_graph_db`, and a CURRENT engine that resolved no repo-graph root at all
+ * (`CodeGraphRootUnresolvableError` → the routes' 503; wicked-core#406) are five different
+ * situations with five different remedies; collapsing them into an empty result set is the failure
+ * estate's own R3 rule exists to prevent, and it is the failure FINDING-069 actually shipped.
  */
 
 import { existsSync } from 'node:fs';
