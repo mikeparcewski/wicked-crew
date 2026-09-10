@@ -127,7 +127,13 @@ mentioned only where a daemon release depends on them.
   `typecheck`/`lint`/`test` scripts or `cargo test` in the worktree for the code-verifying unit —
   `checks[{name, argv, source, exitCode, timedOut, spawnError, durationMs, stdoutTail,
   stderrTail}]`, `skipped`, `passed`), plus `WorktreeChangedPath`, `RepoCheckRun` and the
-  `GateEvidenceEvent` union. Both are additive; the loose `CoreEvent` bag carries them unchanged.
+  `GateEvidenceEvent` union — as `type` aliases, so they satisfy `CoreEvent`'s index signature and
+  relay through the CoreEvent-typed broadcast seams (compile-time relay assertions in
+  `wire-contract.test.ts`). `GateEvaluatedEvent` gains `denial: UnitDenial | null` (the structured
+  twin of `denialReason`: `source` — a `UnitDenialSource` naming every engine layer, `worktree_guard`
+  and `repo_checks` included — `reason`, `claimId`, `ruleIds`, `deniedTool`, `phase`) and
+  `evaluatorPolicies`. Wire change ⇒ `wicked-crew-api-types` **0.31.0** (0.30.0 is the seams PR's);
+  the endpoint manifest and the generated API tests are regenerated against it.
 
 ### Changed
 - **The acceptance view treats an evaluator that rewrote the code as an enforcement failure.**

@@ -802,7 +802,49 @@ export interface DataUsedEvent {
   files: string[];
 }
 
-/** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. */
+/**
+ * The layer that denied a unit — a stable token (wicked-core `UnitDenial.source`):
+ * - `governance` — the unit's own gate; `input_governance` — the tool-call hook / boundary;
+ * - `pinned_validator` — the deterministic re-verify; `agent_validator` — the LLM judge;
+ *   `evaluator` — the evaluator≠creator second pass;
+ * - `worker_failure` — the CLI process failed; `substance` — no reviewable substance;
+ *   `deliverables` — declared deliverables missing; `elicitation` — ACP elicitation ended;
+ * - `worktree_guard` — an `executes_code: false` phase changed the worktree it was reviewing
+ *   (wicked-core F-036, see {@link EvaluatorMutatedWorktreeEvent});
+ * - `repo_checks` — the repository's own checks failed in the worktree (wicked-core F-039, see
+ *   {@link RepoChecksEvaluatedEvent}).
+ * Open-ended (`string & {}`) so a newer engine's source parses in an older studio.
+ */
+export type UnitDenialSource =
+  | 'governance'
+  | 'input_governance'
+  | 'pinned_validator'
+  | 'agent_validator'
+  | 'evaluator'
+  | 'worker_failure'
+  | 'substance'
+  | 'deliverables'
+  | 'elicitation'
+  | 'worktree_guard'
+  | 'repo_checks'
+  | (string & {});
+
+/** The MACHINE-READABLE twin of `gateEvaluated.denialReason` (wicked-core `UnitDenial`, camelCase on
+ *  the wire): which layer denied, the prose reason, and — when the layer recorded them — the
+ *  conformance claim id, the firing rule ids, the refused tool and the unit-phase token. `null`
+ *  fields are the engine's `Option::None`, never absent. */
+export interface UnitDenial {
+  source: UnitDenialSource;
+  reason: string;
+  claimId: string | null;
+  ruleIds: string[];
+  deniedTool: string | null;
+  phase: string | null;
+}
+
+/** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. `denial` is the structured
+ *  twin of `denialReason`: `null` when the gate approved, else the winning layer (deny-dominates) —
+ *  `worktree_guard` and `repo_checks` are the two wicked-core F-036/F-039 layers. */
 export interface GateEvaluatedEvent {
   type: 'gateEvaluated';
   session: string;
@@ -813,7 +855,10 @@ export interface GateEvaluatedEvent {
   agentVerdict: string | null;
   agentReasoning: string | null;
   evaluatorPass: boolean | null;
+  /** Policy ids the evaluator≠creator pass applied (empty = vacuous default-allow, FINDING-025). */
+  evaluatorPolicies: string[];
   denialReason: string | null;
+  denial: UnitDenial | null;
   combined: boolean;
 }
 
@@ -987,14 +1032,19 @@ export interface WorktreeChangedPath {
 }
 
 /** wicked-core F-036 — an `executes_code: false` phase (an evaluator, a recon rung, a review) CHANGED
- *  the worktree it was working in. The engine snapshots the tree at dispatch and re-snapshots when
- *  the seat's work ends, for EVERY seat and carrier regardless of governance adapter. `changed` are
- *  the paths that DENY the unit (its `gateEvaluated.denial.source` is `worktree_guard`); `exempted`
- *  are differing paths an exemption covers (documentation, the phase's declared deliverables, engine
- *  scratch) — disclosed, not denied. `headMoved`: the run branch was committed/amended/reset. Also
- *  emitted when only exempt paths changed (`changed: []`), so an operator always sees what an
- *  evaluator wrote. Evaluator ≠ creator is no longer a promise the seat keeps; it is a check. */
-export interface EvaluatorMutatedWorktreeEvent {
+ *  the worktree it was working in. The engine snapshots the tree at dispatch and takes the FINAL
+ *  snapshot after everything the phase owned has run (seat quiesced, judge rendered, repo checks
+ *  done), for EVERY seat and carrier regardless of governance adapter. `changed` are the paths that
+ *  DENY the unit (its `gateEvaluated.denial.source` is `worktree_guard`); `exempted` are differing
+ *  paths the phase DECLARED as `required_deliverables` — the one exemption, disclosed, not denied
+ *  (no documentation or tool-state exemption exists; the engine's own `tmp/` scratch is excluded from
+ *  the snapshot by construction). `headMoved`: the run branch was committed/amended/reset. Also
+ *  emitted when only declared deliverables changed (`changed: []`), so an operator always sees what
+ *  an evaluator wrote. Evaluator ≠ creator is no longer a promise the seat keeps; it is a check.
+ *
+ *  `type` alias on purpose, not `interface`: only anonymous object types satisfy `CoreEvent`'s index
+ *  signature, which is what lets the frame flow through CoreEvent-typed broadcast seams. */
+export type EvaluatorMutatedWorktreeEvent = {
   type: 'evaluatorMutatedWorktree';
   session: string;
   ord: number;
@@ -1008,7 +1058,7 @@ export interface EvaluatorMutatedWorktreeEvent {
   headMoved: boolean;
   changed: WorktreeChangedPath[];
   exempted: WorktreeChangedPath[];
-}
+};
 
 /** One repository check the engine ran in the run's worktree (wicked-core F-039). */
 export interface RepoCheckRun {
@@ -1035,9 +1085,12 @@ export interface RepoCheckRun {
  *  floor). `checks` is what actually ran, in order; `skipped` names detected checks not run because an
  *  earlier one failed. `passed: false` ⇒ the unit is denied (`denial.source` is `repo_checks`). An
  *  empty `checks` with `passed: true` means no checks were detected — disclosed as such, never
- *  silently. "Done" for a verify phase is now the exit code the engine observed, not the seat's
- *  account of having run the suite. */
-export interface RepoChecksEvaluatedEvent {
+ *  silently; a manifest that could not be read or trusted FAILS the floor (`passed: false`,
+ *  `checks: []`, the reason on the unit record). The checks run inside the engine's OS write
+ *  boundary with an isolated HOME and package caches, installs with `--ignore-scripts`. "Done" for a
+ *  verify phase is now the exit code the engine observed, not the seat's account of having run the
+ *  suite. `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
+export type RepoChecksEvaluatedEvent = {
   type: 'repoChecksEvaluated';
   session: string;
   ord: number;
@@ -1046,7 +1099,7 @@ export interface RepoChecksEvaluatedEvent {
   criterion: string;
   checks: RepoCheckRun[];
   skipped: string[];
-}
+};
 
 /** The gate-evidence events (wicked-core F-036/F-039) as a discriminated union for consumers that
  *  narrow on `type`; they also flow through the permissive {@link CoreEvent}. */
