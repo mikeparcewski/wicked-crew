@@ -113,8 +113,9 @@ const REPO_REF = /^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$/;
  *  non-strings stringified, capped), so the refusal can render exactly what was sent (Copilot, #506). */
 export type RepoRefsParse = { ok: true; refs: string[] } | { ok: false; error: string; requested: string[] };
 
-/** The raw spellings a body carried, for a refusal's `requested` — never used for matching. */
-function spelledRefs(body: Record<string, unknown>): string[] {
+/** The raw spellings a body carried, for a refusal's `requested` — never used for matching. Every
+ *  refusal carries them, project mismatches included (Copilot on crew#506). */
+export function spelledRefs(body: Record<string, unknown>): string[] {
   const out: string[] = [];
   const push = (v: unknown): void => {
     const text = typeof v === 'string' ? v : JSON.stringify(v) ?? String(v);

@@ -47,6 +47,7 @@ import {
   matchingRepos,
   parseRepoRefs,
   projectRepoCandidates,
+  spelledRefs,
   type DocGroundingStore,
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
@@ -195,11 +196,13 @@ export async function prepareDocCreate(
   // be the same project or absent. An omitted value is canonicalized from the route; a different
   // one is refused, never forwarded to file the doc somewhere else. The Unfiled mount creates
   // UNBOUND, so a `project` there is a mismatch too.
+  // Every refusal carries the refs AS SPELLED — the project mismatches too (Copilot on crew#506).
+  const requested = spelledRefs(body);
   // A non-string `project` is a mismatch too — never coerced, never forwarded.
   if (body['project'] !== undefined && body['project'] !== null && typeof body['project'] !== 'string') {
     return {
       ...passthrough,
-      refusal: { error: `the create's "project" must be the project id as a string`, code: 'project_mismatch', requested: [] },
+      refusal: { error: `the create's "project" must be the project id as a string`, code: 'project_mismatch', requested },
     };
   }
   const bodyProject = typeof body['project'] === 'string' ? body['project'].trim() : '';
@@ -210,7 +213,7 @@ export async function prepareDocCreate(
         refusal: {
           error: `this create is on the Unfiled mount but names project "${bodyProject}" — create it under /projects/${bodyProject}/interactive instead`,
           code: 'project_mismatch',
-          requested: [],
+          requested,
         },
       };
     }
@@ -221,7 +224,7 @@ export async function prepareDocCreate(
       refusal: {
         error: `the create names project "${bodyProject}" but was sent to project ${projectId} — one document, one project; nothing was created`,
         code: 'project_mismatch',
-        requested: [],
+        requested,
       },
     };
   } else {

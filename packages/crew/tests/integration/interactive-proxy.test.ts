@@ -444,12 +444,13 @@ describe('interactive proxy — doc create interception (F-046)', () => {
   it('canonicalizes the body\'s project from the ROUTE: omitted → filled in; conflicting → 400 project_mismatch; a project on the Unfiled mount → 400 (codex on #506)', async () => {
     const omitted = (await (await post('p-a', { name: 'no-project', kind: 'source', brief: 'x' })).json()) as { received: Record<string, unknown> };
     expect(omitted.received.project).toBe('p-a');
-    const conflicting = await post('p-a', { name: 'wrong', kind: 'source', brief: 'x', project: 'p-b' });
+    const conflicting = await post('p-a', { name: 'wrong', kind: 'source', brief: 'x', project: 'p-b', repo_ref: 'wicked-studio' });
     expect(conflicting.status).toBe(400);
-    const cbody = (await conflicting.json()) as { code: string; error: string };
+    const cbody = (await conflicting.json()) as { code: string; error: string; requested: string[] };
     expect(cbody.code).toBe('project_mismatch');
     expect(cbody.error).toContain('"p-b"');
     expect(cbody.error).toContain('p-a');
+    expect(cbody.requested, 'a project mismatch still reports the refs as spelled (Copilot)').toEqual(['wicked-studio']);
     const unfiled = await post('default', { name: 'loose', kind: 'source', brief: 'x', project: 'p-a' });
     expect(unfiled.status).toBe(400);
     expect(((await unfiled.json()) as { code: string }).code).toBe('project_mismatch');
@@ -459,9 +460,11 @@ describe('interactive proxy — doc create interception (F-046)', () => {
     expect(same.received.project).toBe('p-a');
     const padded = (await (await post('p-a', { name: 'padded', kind: 'source', brief: 'x', project: '  p-a  ' })).json()) as { received: Record<string, unknown> };
     expect(padded.received.project).toBe('p-a');
-    const numeric = await post('p-a', { name: 'num', kind: 'source', brief: 'x', project: 7 });
+    const numeric = await post('p-a', { name: 'num', kind: 'source', brief: 'x', project: 7, repo_refs: ['a', 'b'] });
     expect(numeric.status).toBe(400);
-    expect(((await numeric.json()) as { code: string }).code).toBe('project_mismatch');
+    const nbody = (await numeric.json()) as { code: string; requested: string[] };
+    expect(nbody.code).toBe('project_mismatch');
+    expect(nbody.requested).toEqual(['a', 'b']);
   }, 30_000);
 
   it('REFUSES an AMBIGUOUS alias — a name shared by two member repos — listing the candidates; the id resolves it (codex on #506)', async () => {
