@@ -962,7 +962,21 @@ export async function startInteractiveDraftSubscriber(
     // worker's extra write root, so a draft dir configured inside a checkout hands the unbound
     // worker write access to live source whatever the run is about — the per-repo dest-overlap
     // check below covers only the repo being snapshotted. Refuse BEFORE anything is created.
-    const inside = await runDirInsideRepo(adapter, runDir);
+    let inside: string | null;
+    try {
+      inside = await runDirInsideRepo(adapter, runDir);
+    } catch (err) {
+      // Unresolvable (EACCES/ELOOP — plain ENOENT is walked past) = unprovable = refused, WITH a
+      // user-facing status naming the cause before the frame dead-letters (Copilot on crew#506).
+      endFlight(runId);
+      const why = err instanceof Error ? err.message : String(err);
+      const message =
+        `Crew refused to draft this document: the configured draft directory (${draftDir}) could not be verified ` +
+        `against the registered repositories (${why}). Fix the path or its permissions, then replay the request.`;
+      emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+      log(`[interactive-draft] doc ${doc.documentId}: REFUSING launch — run dir ${runDir} unverifiable: ${why}`);
+      throw new Error(message);
+    }
     if (inside !== null) {
       endFlight(runId);
       const message =

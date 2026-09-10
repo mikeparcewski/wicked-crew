@@ -92,35 +92,6 @@ mentioned only where a daemon release depends on them.
   bus sidecar with the db's other sidecars. Upgrade note: a bridge started by an older crew keeps
   emitting to the old bus until it is stopped — the daemon logs the pid and the fix on adopt.
   `wicked-interactive`'s own hard-coded `:7701` default is tracked separately in that repo.
-- **`wicked-crew-api-types` 0.30.0** (additive): `InteractiveDocCreateRequest` (the create body
-  crew's proxy understands — the bridge's fields plus `repo_ref`/`repo_refs`; `InteractiveDemoStepDraft`
-  for `demo_steps`), `InteractiveDocCreateRefusal` (the proxy's 400), `InteractiveStatusPosted`
-  (`project_id` on crew's seam frames). wicked-studio types its create from this declaration instead
-  of a local mirror and pins `0.30.0` exactly; tag `api-types-v0.30.0` on merge.
-- **Bridge spawn env — the bridge talks to THIS daemon and emits on ITS bus (F-042 / F-043).** The
-  `wicked-interactive` bridge crew spawns validated and registered a doc's project against
-  `WICKED_CREW_API` — defaulting to `http://127.0.0.1:7701` when unset — so a daemon on any other port
-  could not create a single project-bound document (502 "project … not found on the crew daemon at
-  http://127.0.0.1:7701"), and with two daemons on one host the doc was registered on the WRONG one.
-  The spawn now exports `WICKED_CREW_API` = this daemon's own bound origin and `WICKED_BUS_DATA_DIR`
-  = the directory of the bus its interactive seams actually read (an explicit `--bus-db` /
-  `WICKED_BUS_DB`'s parent when the file is `bus.db`, else the dir wicked-bus itself resolves); the
-  pair is recorded beside the lockfile (`.wi-serve.crew.json`) so an adopted bridge crew started with
-  a DIFFERENT pair is recycled (SIGTERM, 3 s grace, restart with the right env) and one nobody recorded
-  (an operator's terminal `wicked-interactive serve`, a pre-upgrade bridge) is adopted with a warning
-  naming the fix. An explicit `--bus-db` / `WICKED_BUS_DB` now also reaches the /ws relay, which used
-  to open wicked-bus's default regardless (so a daemon on a custom bus relayed nothing). A `--bus-db`
-  whose file is not `bus.db` cannot be handed to the bridge (wicked-bus reaches a bus only through a
-  data directory) — the daemon says so at boot instead of pointing the bridge at a different database.
-  **F-043 residual, deliberately not done here:** the default bus is still wicked-bus's HOME-based
-  `~/.something-wicked/wicked-bus/bus.db`, so two daemons on one host share it unless the operator sets
-  `WICKED_BUS_DATA_DIR`. Moving it under the state home (`<state home>/bus/`, since wicked-bus keeps
-  `config.json`, `cas/`, `archive/`, `bus.sock`, `daemon.lock` beside `bus.db`) needs the entry
-  registered in the state-home fence registry wicked-core embeds (`tests/fixtures/state-home-subtrees.json`
-  → core `src/state_home.rs`), which refuses every launch that meets an unclassified entry — a
-  wicked-core release first, then crew. `wicked-interactive`'s own hard-coded `:7701` default is
-  tracked separately in that repo.
-
 
 ## [0.7.27] — 2026-09-10
 

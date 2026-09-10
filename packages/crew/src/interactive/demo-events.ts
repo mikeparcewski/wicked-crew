@@ -681,7 +681,21 @@ export async function startInteractiveDemoSubscriber(
    * fixed). `null` when clear.
    */
   async function refuseRunDirInsideRepo(runDir: string, documentId: string, projectId: string | undefined): Promise<void> {
-    const inside = await runDirInsideRepo(adapter, runDir);
+    let inside: string | null;
+    try {
+      inside = await runDirInsideRepo(adapter, runDir);
+    } catch (err) {
+      // A path that cannot be RESOLVED (EACCES/ELOOP on a component — never plain ENOENT, which
+      // the resolver walks past) cannot be proven clear of the registry either: fail closed WITH a
+      // user-facing status naming the cause, then dead-letter (Copilot on crew#506).
+      const why = err instanceof Error ? err.message : String(err);
+      const message =
+        `Crew refused to author this demo: the configured demo directory (${demoDir}) could not be verified ` +
+        `against the registered repositories (${why}). Fix the path or its permissions, then replay the request.`;
+      emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
+      log(`[interactive-demo] ${documentId}: REFUSING launch — run dir ${runDir} unverifiable: ${why}`);
+      throw new Error(message);
+    }
     if (inside === null) return;
     const message =
       `Crew refused to author this demo: the configured demo directory (${demoDir}) overlaps the ` +
