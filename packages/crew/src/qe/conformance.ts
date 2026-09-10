@@ -266,7 +266,10 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
               (headMoved ? ' — HEAD moved' : ''),
           });
         }
-        governedSignal = true;
+        // Gate EVIDENCE, not a governance signal (Copilot on #507): the guard runs for every
+        // seat whether or not input governance was armed, so this event must never be what
+        // flips an otherwise ungoverned run to `enforced`. A denying mutation lands above as
+        // `unenforced` on its own; an exempt-only one contributes nothing here.
         break;
       }
       case 'governanceContextArmed':

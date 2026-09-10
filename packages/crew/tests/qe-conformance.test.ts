@@ -389,6 +389,28 @@ describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', 
     expect(res.unenforced).toEqual([]);
   });
 
+  it('the event is gate evidence, not a governance signal: alone it never makes a run enforced (Copilot on #507)', () => {
+    // An UNGOVERNED run whose evaluator wrote only documentation: no armed signal anywhere, so the
+    // honest answer is `ungoverned` — never `enforced`, never guardrailed.
+    const res = resolveEnforcement([
+      ev({
+        type: 'evaluatorMutatedWorktree',
+        ord: 4,
+        attempt: 0,
+        cli: 'codex',
+        phase: 'verify',
+        changed: [],
+        exempted: [{ status: 'M', path: 'README.md' }],
+        headMoved: false,
+      }),
+    ]);
+    expect(res.status).toBe('ungoverned');
+    const view = resolveConformance({ runId: 'run-1', claims: [claim()], events: [
+      ev({ type: 'evaluatorMutatedWorktree', ord: 4, attempt: 0, cli: 'codex', phase: 'verify', changed: [], exempted: [], headMoved: false }),
+    ] });
+    expect(view.guardrailed).toBe(false);
+  });
+
   it('a moved HEAD with an identical tree is still a violation (the run branch is no longer the creator\'s)', () => {
     const res = resolveEnforcement([
       ev({
