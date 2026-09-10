@@ -27,15 +27,11 @@
 
 import {
   appendFileSync,
-  closeSync,
   createReadStream,
   createWriteStream,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
-  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -51,6 +47,7 @@ import {
   ESTATE_DB_ENGINE_ENV,
   GOVERNANCE_DB_ENV,
   GOVERNANCE_DB_FLAG,
+  GovernanceStoreError,
   isStoreSpec,
   resolveGovernanceStore,
   type GovernanceStoreLocation,
@@ -139,68 +136,55 @@ export function archiveNameFor(outbox: string, now: Date = new Date()): string {
   return `${outbox}.replayed-${now.toISOString().replace(/[:.]/g, '-')}`;
 }
 
-/** Whether an NDJSON file ends at a LINE BOUNDARY: missing or empty, or its last byte is `\n`. Used
- *  on the ARCHIVE (nobody else writes it) to decide whether its last record needs a terminator;
- *  never as a check-then-write on the live outbox, whose tail can tear at any instant. */
-export function endsWithNewline(path: string): boolean {
-  let fd: number;
-  try {
-    fd = openSync(path, 'r');
-  } catch {
-    return true; // no file — nothing to join onto
-  }
-  try {
-    const size = fstatSize(fd);
-    if (size === 0) return true;
-    const last = Buffer.alloc(1);
-    readSync(fd, last, 0, 1, size - 1);
-    return last[0] === 0x0a;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function fstatSize(fd: number): number {
-  return fstatSync(fd).size;
-}
+const NL = 0x0a;
 
 /**
- * Keep every NDJSON line boundary intact while streaming one file onto another that a concurrent
- * writer may also be appending to: a leading `\n` ALWAYS rides IN the first chunk (the live file
- * may gain a torn tail between any look and our first write — a check-then-write cannot close
- * that, an unconditional separator does; an empty NDJSON line is skipped by every reader), and a
- * trailing `\n` rides IN the last chunk when the source lacked one — never as a separate write,
- * because between two `O_APPEND` writes the other writer can land a record, and a separator
- * written after it would join the source's torn tail to that record (Copilot on #516). Each pushed
- * chunk is one `write()`; the last chunk is held back until the source ends so the trailing
- * separator and the data it terminates are the same write.
+ * Keep every NDJSON record whole while streaming one file onto another that a concurrent writer may
+ * also be appending to. Every chunk this transform emits is a whole number of records — it buffers
+ * up to the last `\n` it has seen and holds the partial tail until more arrives — so an `O_APPEND`
+ * write from the other writer landing between two of our writes can only ever sit BETWEEN records,
+ * never inside one (read-stream chunks are 64 KiB and not line-aligned; forwarding them raw would
+ * let a fresh record be spliced into the middle of an archived one). Two repairs ride INSIDE the
+ * data writes, never as separate writes a concurrent spool could slip in front of: a leading `\n`
+ * always opens the first emitted chunk (the live file may gain a torn tail between any look and
+ * our first write — a check-then-write cannot close that, an unconditional separator does; an
+ * empty NDJSON line is skipped by every reader), and a source whose last record lacks its newline
+ * gets one appended to that same final write.
  */
-class LineBoundaryGuard extends Transform {
-  private pending: Buffer | null = null;
+export class LineBoundaryGuard extends Transform {
+  private carry: Buffer = Buffer.alloc(0);
   private first = true;
 
-  constructor(
-    private readonly leading: boolean,
-    private readonly trailing: boolean,
-  ) {
+  constructor(private readonly leading: boolean) {
     super();
   }
 
-  override _transform(chunk: Buffer | string, _enc: BufferEncoding, cb: TransformCallback): void {
-    let c = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  /** Push one chunk of whole records, opening the very first with the leading separator. */
+  private pushRecords(data: Buffer): void {
+    let out = data;
     if (this.first) {
       this.first = false;
-      if (this.leading) c = Buffer.concat([Buffer.from('\n'), c]);
+      if (this.leading) out = Buffer.concat([Buffer.from('\n'), out]);
     }
-    if (this.pending !== null) this.push(this.pending);
-    this.pending = c;
+    this.push(out);
+  }
+
+  override _transform(chunk: Buffer | string, _enc: BufferEncoding, cb: TransformCallback): void {
+    const data = Buffer.concat([this.carry, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+    const lastNl = data.lastIndexOf(NL);
+    if (lastNl < 0) {
+      this.carry = data; // no complete record yet — hold everything
+    } else {
+      this.pushRecords(data.subarray(0, lastNl + 1)); // whole records only
+      this.carry = data.subarray(lastNl + 1); // the partial tail, if any
+    }
     cb();
   }
 
   override _flush(cb: TransformCallback): void {
-    if (this.pending !== null) {
-      this.push(this.trailing ? Buffer.concat([this.pending, Buffer.from('\n')]) : this.pending);
-      this.pending = null;
+    if (this.carry.length > 0) {
+      this.pushRecords(Buffer.concat([this.carry, Buffer.from('\n')])); // the torn last record, terminated in the same write
+      this.carry = Buffer.alloc(0);
     }
     cb();
   }
@@ -210,8 +194,8 @@ class LineBoundaryGuard extends Transform {
  * Append NDJSON lines to a live outbox a daemon may be writing — ONE `write()`, ALWAYS behind a
  * `\n`: the file may be absent, at a boundary, or mid-record at the instant of the write, and no
  * look beforehand can know which (the engine writes a record and its newline as two syscalls), so
- * an unconditional separator is the only race-free choice (Copilot on #516). At worst it is an
- * empty line, which every reader — the fold, the engine's replay — skips.
+ * an unconditional separator is the only race-free choice. At worst it is an empty line, which
+ * every reader — the fold, the engine's replay — skips.
  */
 export function appendLines(outbox: string, lines: string[]): void {
   if (lines.length === 0) return;
@@ -221,24 +205,17 @@ export function appendLines(outbox: string, lines: string[]): void {
 /**
  * Put an archived outbox back after a replay that threw — APPEND-ONLY, never a rename over the
  * live path: a daemon can create a fresh outbox at any instant, and an `exists`-then-`rename` would
- * replace it and lose what it had just spooled (Copilot on #516). Appending (`O_APPEND`, so a
- * concurrent spool is never clobbered — the file is created if absent) is loss-free in every
- * interleaving; the cost is the two batches' relative order when the daemon did spool meanwhile
- * (each entry carries its own `ts` on a stamping engine). Streamed, never the whole archive in
- * memory, through {@link LineBoundaryGuard} so both boundaries — the live tail before (always: it
- * may tear between any look and the write), a missing trailing newline after — are repaired INSIDE
- * the data writes, never by a separate write a concurrent spool could slip in front of. The archive
- * is removed only after its last byte is on the live outbox.
+ * replace it and lose what it had just spooled. Appending (`O_APPEND`, so a concurrent spool is
+ * never clobbered — the file is created if absent) is loss-free in every interleaving; the cost is
+ * the two batches' relative order when the daemon did spool meanwhile (each entry carries its own
+ * `ts` on a stamping engine). Streamed, never the whole archive in memory, through
+ * {@link LineBoundaryGuard}: whole records per write, the live tail separated first, a torn last
+ * record terminated in its own write. The archive is removed only after its last byte is on the
+ * live outbox.
  */
 export async function restoreOutbox(outbox: string, archive: string): Promise<void> {
-  const size = statSync(archive).size;
-  if (size > 0) {
-    const trailing = !endsWithNewline(archive);
-    await pipeline(
-      createReadStream(archive),
-      new LineBoundaryGuard(true, trailing),
-      createWriteStream(outbox, { flags: 'a' }),
-    );
+  if (statSync(archive).size > 0) {
+    await pipeline(createReadStream(archive), new LineBoundaryGuard(true), createWriteStream(outbox, { flags: 'a' }));
   }
   rmSync(archive);
 }
@@ -249,6 +226,8 @@ export interface ReplayOutcome {
   archive: string | null;
   read: number;
   replayed: number;
+  /** Entries an earlier replay had already landed (a re-replay is a no-op); `null` on an engine that does not report it. */
+  alreadyPresent: number | null;
   failed: number;
   dryRun: boolean;
   fold?: Awaited<ReturnType<typeof foldDeadletters>>;
@@ -281,6 +260,7 @@ export async function replayOutbox(
         archive: null,
         read: fold.count,
         replayed: 0,
+        alreadyPresent: null,
         failed: 0,
         dryRun: true,
         fold,
@@ -304,10 +284,10 @@ export async function replayOutbox(
   renameSync(outbox, archive);
   // 2. Replay from the archive. If the engine THROWS (a store it cannot open, an I/O error
   //    mid-file, a permission problem) the archive goes back where the daemon spools and
-  //    `/diagnostics` looks — an exception must never turn "not replayed" into "0 dead letters"
-  //    (Copilot on #516). Restored WHOLE: the engine may have landed some records before it threw,
-  //    so a later replay can duplicate those (visible on the store, auditable via `replayed`);
-  //    losing the rest would not be visible anywhere.
+  //    `/diagnostics` looks — an exception must never turn "not replayed" into "0 dead letters".
+  //    Restored WHOLE: the engine may have landed some records before it threw; a later replay of
+  //    those is a no-op (replay ids are deterministic per spool line), so nothing is duplicated and
+  //    nothing is lost.
   let report: EmitOutboxReplayReport;
   try {
     report = await CoreAdapter.replayEmitOutbox(archive, store.dbPath);
@@ -329,6 +309,7 @@ export async function replayOutbox(
       archive,
       read: report.read,
       replayed: report.replayed,
+      alreadyPresent: report.already_present ?? null,
       failed: report.failed.length,
       dryRun: false,
     },
@@ -351,7 +332,7 @@ export async function runGovernance(argv: string[]): Promise<void> {
     }
     process.exit(exitCode);
   } catch (err) {
-    if (err instanceof UsageError) {
+    if (err instanceof UsageError || err instanceof GovernanceStoreError) {
       console.error(`[governance] ${err.message}\n\n${GOVERNANCE_USAGE}`);
       process.exit(2);
     }

@@ -18,6 +18,7 @@ import {
   ESTATE_DB_ENGINE_ENV,
   GOVERNANCE_DB_ENV,
   GOVERNANCE_DB_FLAG,
+  GovernanceStoreError,
   legacyHomeOutboxPath,
   resolveGovernanceStore,
   type GovernanceStoreLocation,
@@ -151,13 +152,24 @@ function parseBootstrap(args: string[]): BootstrapOpts {
     console.error(`${GOVERNANCE_DB_FLAG} requires a value (got: ${governanceDbFlag ?? '(missing)'})`);
     process.exit(1);
   }
-  const governanceStore = resolveGovernanceStore({
-    flagDb: governanceDbFlag,
-    envCrewDb: process.env[GOVERNANCE_DB_ENV],
-    envEstateDb: process.env[ESTATE_DB_ENGINE_ENV],
-    envOutbox: process.env[EMIT_DEADLETTER_ENGINE_ENV],
-    coreDbPath: dbPath,
-  });
+  let governanceStore: GovernanceStoreLocation;
+  try {
+    governanceStore = resolveGovernanceStore({
+      flagDb: governanceDbFlag,
+      envCrewDb: process.env[GOVERNANCE_DB_ENV],
+      envEstateDb: process.env[ESTATE_DB_ENGINE_ENV],
+      envOutbox: process.env[EMIT_DEADLETTER_ENGINE_ENV],
+      coreDbPath: dbPath,
+      busDbPath: crewBus.dbPath,
+    });
+  } catch (err) {
+    // A store the engine cannot honour (a URL spec on the SQLite-only emit seam) or must not share
+    // (the core db, the bus db) is a CONFIG error — refuse to boot rather than run a daemon that
+    // dead-letters every governance event or puts a second writer on the actor's store.
+    if (!(err instanceof GovernanceStoreError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
   // governed `interactive-draft` run. The bus is already required for the project bridge.
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs

@@ -561,8 +561,8 @@ export class InteractiveBridgePool {
     // own env. The daemon's bound origin wins over an inherited WICKED_CREW_API — the bridge
     // validates project bindings against whatever it is told, and only this daemon has them.
     const bridgeEnv = bridgeEnvFor(this.io);
-    // …with the engine-only store variable restored to its boot value: a `postgres://user:password@…`
-    // governance store is the in-process engine's business, never the bridge's (Copilot on crew#516).
+    // …with the engine-only store variables restored to their boot values: the daemon's governance
+    // store is the in-process engine's business, never the bridge's.
     const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
@@ -656,8 +656,8 @@ function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
     cwd: root,
     detached: true,
     stdio: 'ignore',
-    // The pool already restored the engine-only store variable; re-applied here so THIS spawn is
-    // safe on its own terms too (idempotent — crew#495, Copilot on #516).
+    // The pool already restored the engine-only store variables; re-applied here so THIS spawn is
+    // safe on its own terms too (idempotent — crew#495).
     env: childEnvWithBootEstateDb(env),
   });
 }

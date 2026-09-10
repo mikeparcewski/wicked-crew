@@ -111,11 +111,11 @@ export async function execCapped(
   // overridable by ACCIDENT, only on purpose.
   const maxBuffer = resolveMaxBuffer(opts);
   try {
-    // Every crew child gets the process env with the engine-only store variable restored to its
-    // BOOT value (`childEnvWithBootEstateDb`): the daemon exports its governance store as
-    // WICKED_ESTATE_DB for the in-process engine, and a `postgres://user:password@…` spec must not
-    // ride into git, uv, the estate CLI or a version probe (Copilot on crew#516). An explicit
-    // `opts.env` is scrubbed the same way, so a caller that spreads `process.env` is covered too.
+    // Every crew child gets the process env with the engine-only store variables restored to their
+    // BOOT values (`childEnvWithBootEstateDb`): the daemon exports its governance store as
+    // WICKED_ESTATE_DB for the in-process engine, and that is nobody else's business — not git's,
+    // uv's, the estate CLI's or a version probe's. An explicit `opts.env` is scrubbed the same way,
+    // so a caller that spreads `process.env` is covered too.
     return await execFileAsync(file, args, {
       ...opts,
       maxBuffer,

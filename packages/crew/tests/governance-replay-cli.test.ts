@@ -15,17 +15,20 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+
 import {
   appendLines,
   archiveNameFor,
-  endsWithNewline,
   GOVERNANCE_USAGE,
+  LineBoundaryGuard,
   replayOutbox,
   replayTarget,
   restoreOutbox,
   UsageError,
 } from '../src/cli/governance.js';
-import { governanceSidecarDb, resolveGovernanceStore } from '../src/core/governance-store.js';
+import { GovernanceStoreError, governanceSidecarDb, resolveGovernanceStore } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -77,6 +80,9 @@ describe('replayTarget — the target store follows serve\'s rule', () => {
     });
     expect(() => replayTarget(['--db'], env)).toThrow(UsageError);
     expect(() => replayTarget(['--governance-db', '--dry-run'], env)).toThrow(/requires a value/);
+    // A URL spec is refused here exactly as `serve` refuses it (the emit seam is SQLite-only) — exit 2, no secret echoed.
+    expect(() => replayTarget(['--governance-db', 'postgres://u:s3cret@h/db'], env)).toThrow(GovernanceStoreError);
+    expect(() => replayTarget(['--governance-db', 'postgres://u:s3cret@h/db'], env)).not.toThrow(/s3cret/);
   });
 });
 
@@ -99,7 +105,7 @@ describe('replayOutbox (the command body)', () => {
     expect(readdirSync(scratch as string)).toEqual(['emit-outbox.ndjson']); // no archive, no store
   });
 
-  it('refuses a missing outbox, and a :memory: target for a REAL replay only — a dry run folds the file and touches no store (Copilot on #516)', async () => {
+  it('refuses a missing outbox, and a :memory: target for a REAL replay only — a dry run folds the file and touches no store', async () => {
     const { coreDb } = fixture();
     await expect(replayOutbox([join(scratch as string, 'nope.ndjson'), '--db', coreDb], {})).rejects.toThrow(/outbox not found/);
     const { outbox } = fixture();
@@ -108,9 +114,7 @@ describe('replayOutbox (the command body)', () => {
     expect(dry.exitCode).toBe(0);
     expect(dry.outcome.store).toEqual({ path: ':memory:', source: 'flag' });
     expect(dry.outcome.read).toBe(3);
-    // Operator-facing output never carries a URL spec's credentials — the dry run's store line is the display spelling.
-    const redacted = await replayOutbox([outbox, '--governance-db', 'postgres://user:s3cret@h/db', '--dry-run'], {});
-    expect(redacted.outcome.store.path).toBe('postgres://***@h/db');
+    expect(dry.outcome.alreadyPresent).toBeNull();
   });
 
   it('the archive name is the outbox plus a filesystem-safe timestamp', () => {
@@ -122,7 +126,29 @@ describe('replayOutbox (the command body)', () => {
   /** The NDJSON entries of a file — what every reader (the fold, the engine's replay) sees: blank lines are not entries. */
   const entries = (path: string): string[] => readFileSync(path, 'utf8').split('\n').filter((l) => l.trim() !== '');
 
-  it('a replay that THROWS after the archive rename puts the outbox back — append-only, never "0 dead letters", never a clobbered fresh spool, every boundary kept (Copilot on #516)', async () => {
+  it('LineBoundaryGuard emits WHOLE records per chunk: a record split across read chunks is never exposed half-written, the leading separator opens the first chunk, a torn last record is terminated in its own chunk', async () => {
+    const source = `${RECORD_A}\n${RECORD_B}\n${TORN}`; // no trailing newline
+    // Feed the stream in chunks that split records mid-line (as a 64 KiB read stream would).
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < source.length; i += 37) chunks.push(Buffer.from(source.slice(i, i + 37)));
+    const emitted: Buffer[] = [];
+    await pipeline(Readable.from(chunks), new LineBoundaryGuard(true), async function* (src) {
+      for await (const c of src) emitted.push(c as Buffer);
+    });
+    // Every emitted chunk is a whole number of NDJSON records (ends at a newline)…
+    for (const c of emitted) expect(c[c.length - 1]).toBe(0x0a);
+    // …the first one opens with the separator, and the concatenation is the source with its torn tail terminated.
+    expect(emitted[0]![0]).toBe(0x0a);
+    expect(Buffer.concat(emitted).toString('utf8')).toBe(`\n${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+    // Without a leading separator and with a terminated source, the output equals the input.
+    const emitted2: Buffer[] = [];
+    await pipeline(Readable.from([Buffer.from(`${RECORD_A}\n`)]), new LineBoundaryGuard(false), async function* (src) {
+      for await (const c of src) emitted2.push(c as Buffer);
+    });
+    expect(Buffer.concat(emitted2).toString('utf8')).toBe(`${RECORD_A}\n`);
+  });
+
+  it('a replay that THROWS after the archive rename puts the outbox back — append-only, never "0 dead letters", never a clobbered fresh spool, every boundary kept', async () => {
     // No live outbox appeared meanwhile → the live file is re-created with the archive's entries.
     // The leading separator is UNCONDITIONAL (a torn tail can appear between any look and the
     // write), so the raw file starts with one empty line every reader skips.
@@ -163,15 +189,9 @@ describe('replayOutbox (the command body)', () => {
     await restoreOutbox(outbox, archive);
     expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n${RECORD_B}\n`);
     expect(existsSync(archive)).toBe(false);
-    // `endsWithNewline` is the ARCHIVE-side check: boundary for a missing/empty/terminated file, not for a torn one.
-    expect(endsWithNewline(join(scratch as string, 'absent.ndjson'))).toBe(true);
-    expect(endsWithNewline(outbox)).toBe(true);
-    writeFileSync(archive, TORN, 'utf8');
-    expect(endsWithNewline(archive)).toBe(false);
-    rmSync(archive);
   });
 
-  it('appendLines keeps the failed batch on its own lines whatever the live outbox\'s tail is doing — one write, always behind a separator; a missing file is created (Copilot on #516)', () => {
+  it('appendLines keeps the failed batch on its own lines whatever the live outbox\'s tail is doing — one write, always behind a separator; a missing file is created', () => {
     fixture();
     const outbox = join(scratch as string, 'live.ndjson');
     appendLines(outbox, [RECORD_A]); // absent → created
@@ -198,14 +218,19 @@ describe('replayOutbox (the command body)', () => {
   );
 
   it.runIf(CoreAdapter.replayEmitOutboxSupported())(
-    'on an engine WITH the binding: archive first, replay into the sidecar store, torn lines go back onto the outbox',
+    'on an engine WITH the binding: archive first, replay into the sidecar store, torn lines go back onto the outbox; a re-replay of the archive lands nothing twice',
     async () => {
       const { outbox, coreDb } = fixture();
       const { outcome, exitCode } = await replayOutbox([outbox, '--db', coreDb], {});
       expect(outcome.read).toBe(3);
       expect(outcome.replayed).toBe(2);
+      expect(outcome.alreadyPresent).toBe(0);
       expect(outcome.failed).toBe(1);
       expect(exitCode).toBe(1);
+      // Idempotent: replaying the archive again reports both records already present and the store count is unchanged.
+      const again = await CoreAdapter.replayEmitOutbox(outcome.archive as string, resolveGovernanceStore({ coreDbPath: coreDb }).dbPath);
+      expect(again.replayed).toBe(0);
+      expect(again.already_present).toBe(2);
       // The archive holds everything that was attempted; the live outbox holds only what did not land.
       expect(outcome.archive).not.toBeNull();
       expect(existsSync(outcome.archive as string)).toBe(true);

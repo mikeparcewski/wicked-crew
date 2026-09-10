@@ -134,6 +134,33 @@ afterEach(async () => {
 });
 
 describe.runIf(existsSync(CLI))('governance store on a fresh --db daemon (crew#495)', () => {
+  it('C. a `postgres://` governance store is REFUSED at boot — the emit seam is SQLite-only — exit 1 before anything starts, and the credential is never echoed', async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'crew-gov-e2e-c-'));
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    delete env['WICKED_ESTATE_DB'];
+    delete env['WICKED_CREW_GOVERNANCE_DB'];
+    const dbPath = join(scratch, 'state', 'core.db');
+    const result = await new Promise<{ code: number | null; stderr: string; stdout: string }>((resolveResult) => {
+      const proc = spawn(process.execPath, [CLI, 'serve', '--stub', '--port', '0', '--db', dbPath, '--governance-db', 'postgres://user:s3cret@h/gov'], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout!.setEncoding('utf8');
+      proc.stderr!.setEncoding('utf8');
+      proc.stdout!.on('data', (c: string) => { stdout += c; });
+      proc.stderr!.on('data', (c: string) => { stderr += c; });
+      proc.on('exit', (code) => resolveResult({ code, stderr, stdout }));
+    });
+    expect(result.code).toBe(1);
+    expect(result.stdout).not.toContain('WICKED_CREW_READY');
+    expect(result.stderr).toMatch(/emit seam stores to SQLite/);
+    expect(result.stderr).toContain('postgres://***@h/gov');
+    expect(result.stderr).not.toContain('s3cret');
+    expect(existsSync(join(scratch, 'state', 'core.db.governance'))).toBe(false); // nothing was created
+  }, 60_000);
+
   it('A. records LAND in <core db>.governance/governance.db — no outbox, no EMIT-DEADLETTER, diagnostics clean', async () => {
     scratch = mkdtempSync(join(tmpdir(), 'crew-gov-e2e-a-'));
     const legacyBefore = legacyOutboxBytes();

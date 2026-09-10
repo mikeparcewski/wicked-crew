@@ -130,9 +130,9 @@ export function runDeliverScript(
       ['-lc', deliverPrScript(intent)],
       {
         cwd: workdir,
-        // The engine-only store variable (a `postgres://user:password@…` spec, possibly) never
-        // rides into the deliver shell (Copilot on crew#516): the boot value is restored.
-        env: { ...childEnvWithBootEstateDb(), ...env },
+        // The daemon's governance-store variables never ride into the deliver shell: the helper is
+        // applied LAST, so a caller overlay that spreads `process.env` cannot put them back.
+        env: childEnvWithBootEstateDb({ ...process.env, ...env }),
         maxBuffer: OUTPUT_CAP_BYTES,
         timeout: SCRIPT_TIMEOUT_MS,
       },

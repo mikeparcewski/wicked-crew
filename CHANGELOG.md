@@ -22,7 +22,9 @@ mentioned only where a daemon release depends on them.
   inherited `WICKED_ESTATE_DB`, else the daemon's OWN `<core db>.governance/governance.db` (a
   sidecar for the same reason the bus is one, F-043: the state-home fence registry's `core.db`
   prefix claim already covers it) — exports it to the in-process engine before it spawns, and logs
-  which rule won. The dead-letter outbox is `<core db>.governance/emit-outbox.ndjson` (an explicit
+  which rule won; a URL spec (`postgres://…`) is refused at boot — the emit seam is SQLite-only and
+  would dead-letter every event — as is the core db or the bus db (a second writer on a store another
+  process owns). The dead-letter outbox is `<core db>.governance/emit-outbox.ndjson` (an explicit
   `WICKED_APPS_EMIT_DEADLETTER` is honoured), under the state home rather than HOME; the daemon stamps
   `WICKED_APPS_EMIT_ORIGIN` so an engine carrying the companion change writes `ts` (epoch ms), `pid`
   and `origin` on every spooled entry. `GET /diagnostics` gains `governance` — the store and its

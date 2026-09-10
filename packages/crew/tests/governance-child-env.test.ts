@@ -1,4 +1,4 @@
-// The engine-only store variable never leaves the daemon process (crew#495; Copilot on #516).
+// The engine-only store variable never leaves the daemon process (crew#495).
 //
 // `serve` exports the governance store to the in-process engine as WICKED_ESTATE_DB — and an
 // explicit `--governance-db postgres://user:password@host/db` puts a credential in that variable.
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { execCapped } from '../src/core/exec.js';
-import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV } from '../src/core/governance-store.js';
+import { childEnvWithBootEstateDb, ESTATE_DB_ENGINE_ENV, GOVERNANCE_DB_ENV } from '../src/core/governance-store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '..', 'src');
@@ -33,26 +33,30 @@ function tsFiles(dir: string): string[] {
   });
 }
 
-describe('RUNTIME — execCapped children never inherit the daemon\'s exported governance store', () => {
+describe('RUNTIME — execCapped children never inherit the daemon\'s exported governance store, nor crew\'s own override', () => {
   const before = process.env[ESTATE_DB_ENGINE_ENV];
+  const beforeOverride = process.env[GOVERNANCE_DB_ENV];
   afterEach(() => {
     if (before === undefined) delete process.env[ESTATE_DB_ENGINE_ENV];
     else process.env[ESTATE_DB_ENGINE_ENV] = before;
+    if (beforeOverride === undefined) delete process.env[GOVERNANCE_DB_ENV];
+    else process.env[GOVERNANCE_DB_ENV] = beforeOverride;
   });
 
-  it('default env and a caller env that spreads process.env both carry the BOOT value, never the export', async () => {
+  it('default env and a caller env that spreads process.env both carry the BOOT value, never the export; the override is dropped', async () => {
     process.env[ESTATE_DB_ENGINE_ENV] = DAEMON_EXPORT;
-    const script = `process.stdout.write(String(process.env[${JSON.stringify(ESTATE_DB_ENGINE_ENV)}] ?? '<unset>') + '|' + String(process.env['X_CALLER'] ?? ''))`;
+    process.env[GOVERNANCE_DB_ENV] = '/opt/operator/gov.db';
+    const script = `process.stdout.write(String(process.env[${JSON.stringify(ESTATE_DB_ENGINE_ENV)}] ?? '<unset>') + '|' + String(process.env['X_CALLER'] ?? '') + '|' + String(process.env[${JSON.stringify(GOVERNANCE_DB_ENV)}] ?? '<unset>'))`;
     // The boot value in this process is whatever the harness started with (unset), so a child must see <unset>.
     const expectedBoot = childEnvWithBootEstateDb({})[ESTATE_DB_ENGINE_ENV] ?? '<unset>';
     const viaDefault = await execCapped(process.execPath, ['-e', script], { timeout: 20_000 });
-    expect(viaDefault.stdout).toBe(`${expectedBoot}|`);
+    expect(viaDefault.stdout).toBe(`${expectedBoot}||<unset>`);
     expect(viaDefault.stdout).not.toContain('s3cret');
     const viaCaller = await execCapped(process.execPath, ['-e', script], {
       timeout: 20_000,
       env: { ...process.env, X_CALLER: 'kept' },
     });
-    expect(viaCaller.stdout).toBe(`${expectedBoot}|kept`);
+    expect(viaCaller.stdout).toBe(`${expectedBoot}|kept|<unset>`);
     expect(viaCaller.stdout).not.toContain('s3cret');
   });
 });
@@ -94,7 +98,7 @@ describe('STATIC — every non-execCapped child-process call in src/ routes its 
     expect(
       uncovered,
       'these child-process calls do not route their env through childEnvWithBootEstateDb — a daemon-exported ' +
-        '`postgres://user:password@…` governance store would reach that child (crew#495; Copilot on #516)',
+        '`postgres://user:password@…` governance store would reach that child (crew#495)',
     ).toEqual([]);
   });
 });

@@ -17,6 +17,7 @@ import {
   probeLegacyOutbox,
   reasonBucket,
   replayCommand,
+  shellQuote,
 } from '../src/api/governance-health.js';
 import { resolveGovernanceStore } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
@@ -73,7 +74,22 @@ describe('foldDeadletters', () => {
     expect((await foldDeadletters(empty)).count).toBe(0);
   });
 
-  it('a `ts` outside Date\'s range (or negative) is UNTIMESTAMPED — never a RangeError that turns /diagnostics into a 500 (Copilot on #516)', async () => {
+  it('bucket keys are DATA: a spool `type` of __proto__ / constructor / toString gets its own bucket, never a prototype hit', async () => {
+    const hostile = ['__proto__', 'constructor', 'toString', 'hasOwnProperty'].map((t) =>
+      JSON.stringify({ ...JSON.parse(UNSTAMPED), type: t, deadletter_reason: t }),
+    );
+    const path = outboxWith([...hostile, UNSTAMPED]);
+    const fold = await foldDeadletters(path);
+    expect(fold.count).toBe(5);
+    expect(Object.keys(fold.byType).sort()).toEqual(['__proto__', 'constructor', 'hasOwnProperty', 'toString', 'wicked.crew.governance.conformance_recorded'].sort());
+    expect(fold.byType['constructor']).toBe(1);
+    expect(fold.byType['toString']).toBe(1);
+    expect(Object.getOwnPropertyDescriptor(fold.byType, '__proto__')?.value).toBe(1);
+    expect(Object.getPrototypeOf(fold.byType)).toBe(Object.prototype); // a plain, JSON-safe object at the end
+    expect(JSON.parse(JSON.stringify(fold.byReason))['constructor']).toBe(1);
+  });
+
+  it('a `ts` outside Date\'s range (or negative) is UNTIMESTAMPED — never a RangeError that turns /diagnostics into a 500', async () => {
     const huge = JSON.stringify({ ...JSON.parse(STAMPED), ts: 1e20 });
     const negative = JSON.stringify({ ...JSON.parse(STAMPED), ts: -5 });
     const asString = JSON.stringify({ ...JSON.parse(STAMPED), ts: '1757500000000' });
@@ -180,22 +196,27 @@ describe('governanceHealth (the findings)', () => {
     expect(msg).toContain('2 governance event(s) dead-lettered to');
     expect(msg).toContain('no shared store (WICKED_ESTATE_DB unset)');
     // The recipe names THIS daemon's target — the default sidecar through its core db — so following
-    // it on a custom --db daemon never replays into a different store (Copilot on #516).
-    expect(msg).toContain(`wicked-crew governance replay ${JSON.stringify(path)} --db ${JSON.stringify(resolve('/state/core.db'))}`);
+    // it on a custom --db daemon never replays into a different store.
+    expect(msg).toContain(`wicked-crew governance replay ${shellQuote(path)} --db ${shellQuote(resolve('/state/core.db'))}`);
     expect(msg).toContain(new Date(1_757_500_000_000).toISOString());
   });
 
-  it('replayCommand is target-specific: --db for the sidecar default, --governance-db (credentials redacted) for an explicit store, bare when no store is known', () => {
+  it('replayCommand is target-specific and shell-quoted per platform: --db for the sidecar default, --governance-db for an explicit store, bare when no store is known', () => {
     const sidecar = resolveGovernanceStore({ coreDbPath: '/state/core.db' });
-    expect(replayCommand('/o.ndjson', sidecar)).toBe(`wicked-crew governance replay "/o.ndjson" --db ${JSON.stringify(resolve('/state/core.db'))}`);
+    expect(replayCommand('/o.ndjson', sidecar)).toBe(`wicked-crew governance replay /o.ndjson --db ${resolve('/state/core.db')}`);
     const explicit = resolveGovernanceStore({ coreDbPath: '/state/core.db', flagDb: '/opt/gov.db' });
-    expect(replayCommand('/o.ndjson', explicit)).toBe(`wicked-crew governance replay "/o.ndjson" --governance-db ${JSON.stringify(resolve('/opt/gov.db'))}`);
-    const url = resolveGovernanceStore({ coreDbPath: '/state/core.db', envCrewDb: 'postgres://u:s3cret@h/db' });
-    const cmd = replayCommand('/o.ndjson', url);
-    expect(cmd).toContain('--governance-db "postgres://***@h/db"');
-    expect(cmd).toContain('credentials redacted');
-    expect(cmd).not.toContain('s3cret');
-    expect(replayCommand('/o.ndjson', null)).toBe('wicked-crew governance replay "/o.ndjson"');
+    expect(replayCommand('/o.ndjson', explicit)).toBe(`wicked-crew governance replay /o.ndjson --governance-db ${resolve('/opt/gov.db')}`);
+    expect(replayCommand('/o.ndjson', null)).toBe('wicked-crew governance replay /o.ndjson');
+    // Quoting is the SHELL's, not JSON's: a path with a space is quoted for the platform's shell.
+    const spaced = replayCommand('/tmp/my outbox.ndjson', null);
+    expect(spaced).toBe(
+      process.platform === 'win32'
+        ? 'wicked-crew governance replay "/tmp/my outbox.ndjson"'
+        : "wicked-crew governance replay '/tmp/my outbox.ndjson'",
+    );
+    expect(shellQuote('/plain/path.ndjson')).toBe('/plain/path.ndjson');
+    expect(shellQuote('<outbox.ndjson>')).toBe('<outbox.ndjson>');
+    if (process.platform !== 'win32') expect(shellQuote("it's.ndjson")).toBe("'it'\\''s.ndjson'");
   });
 
   it('no store resolved (a library boot) is governance.store (error): every emit dead-letters', () => {
@@ -211,7 +232,7 @@ describe('governanceHealth (the findings)', () => {
     expect(health.findings[0]!.severity).toBe('error');
     expect(health.findings[0]!.message).toContain('WICKED_ESTATE_DB');
     // Every governance finding carries a copyable recipe — with no store known, the bare dry-run one.
-    expect(health.findings[0]!.message).toContain('wicked-crew governance replay "<outbox.ndjson>" --dry-run');
+    expect(health.findings[0]!.message).toContain('wicked-crew governance replay <outbox.ndjson> --dry-run');
   });
 
   it('a pre-fix outbox under HOME is governance.legacy-outbox (warning) with the dry-run recipe', () => {
@@ -223,7 +244,9 @@ describe('governanceHealth (the findings)', () => {
     });
     expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'warning']]);
     expect(health.findings[0]!.message).toContain('--dry-run');
-    expect(health.findings[0]!.message).toContain(`--db ${JSON.stringify(resolve('/state/core.db'))}`);
+    expect(health.findings[0]!.message).toContain(`--db ${shellQuote(resolve('/state/core.db'))}`);
+    // W10: a replay of that file appends its failed lines back onto it — the warning persists until repaired.
+    expect(health.findings[0]!.message).toContain('persists until they are repaired');
     expect(health.deadletters.legacyOutbox).toEqual({ path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415 });
   });
 });

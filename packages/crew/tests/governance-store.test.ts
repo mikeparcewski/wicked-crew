@@ -21,10 +21,13 @@ import {
   EMIT_ORIGIN_ENGINE_ENV,
   emitOrigin,
   ESTATE_DB_ENGINE_ENV,
+  GOVERNANCE_DB_ENV,
+  GovernanceStoreError,
   governanceSidecarDb,
   governanceSidecarDir,
   governanceSidecarOutbox,
   isStoreSpec,
+  isUrlSpec,
   legacyHomeOutboxPath,
   redactStoreSpec,
   resolveGovernanceStore,
@@ -73,25 +76,59 @@ describe('resolveGovernanceStore (crew#495)', () => {
     });
     // Empty / whitespace-only values are "unset" at every rung.
     expect(resolveGovernanceStore({ ...core, flagDb: '', envCrewDb: '  ', envEstateDb: '' }).source).toBe('core-db-sidecar');
-    // A relative explicit store is spelled absolute; an engine SPEC is left exactly as written.
+    // A relative explicit store is spelled absolute; `:memory:` (the engine's own spec) is left exactly as written.
     expect(resolveGovernanceStore({ ...core, flagDb: 'rel/gov.db' }).dbPath).toBe(resolve('rel/gov.db'));
     expect(resolveGovernanceStore({ ...core, flagDb: ':memory:' }).dbPath).toBe(':memory:');
-    expect(resolveGovernanceStore({ ...core, envEstateDb: 'postgres://h/db' }).dbPath).toBe('postgres://h/db');
   });
 
-  it('isStoreSpec: engine specs are `:memory:` and real URL schemes — a Windows drive written with forward slashes is a PATH (Copilot on #516)', () => {
+  it('REFUSES a URL spec at every explicit rung — the emit seam is SQLite-only, so a postgres store would dead-letter 100 % — and the refusal never echoes a credential', () => {
+    const core = { coreDbPath: '/x/core.db' };
+    for (const input of [
+      { ...core, flagDb: 'postgres://user:s3cret@h:5432/gov' },
+      { ...core, envCrewDb: 'postgresql://user:s3cret@h/gov' },
+      { ...core, envEstateDb: 'postgres://h/gov' },
+    ]) {
+      let thrown: unknown;
+      try {
+        resolveGovernanceStore(input);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(GovernanceStoreError);
+      const msg = (thrown as Error).message;
+      expect(msg).toMatch(/emit seam stores to SQLite/);
+      expect(msg).toMatch(/not supported/);
+      expect(msg).not.toContain('s3cret');
+    }
+    expect(() => resolveGovernanceStore({ ...core, flagDb: 'postgres://user:s3cret@h/gov' })).toThrow(/postgres:\/\/\*\*\*@h\/gov/);
+    expect(isUrlSpec('postgres://h/db')).toBe(true);
+    expect(isUrlSpec('/x/gov.db')).toBe(false);
+  });
+
+  it('REFUSES the daemon\'s own core db and the bus db as the governance store — a second writer on a store another process owns', () => {
+    const core = { coreDbPath: '/state/core.db', busDbPath: '/state/core.db.bus/bus.db' };
+    expect(() => resolveGovernanceStore({ ...core, flagDb: '/state/core.db' })).toThrow(GovernanceStoreError);
+    expect(() => resolveGovernanceStore({ ...core, flagDb: '/state/core.db' })).toThrow(/own core db/);
+    expect(() => resolveGovernanceStore({ ...core, envEstateDb: '/state/../state/core.db' })).toThrow(/own core db/);
+    expect(() => resolveGovernanceStore({ ...core, envCrewDb: '/state/core.db.bus/bus.db' })).toThrow(/bus db/);
+    // …while a sibling file beside them is fine, and the sidecar default never collides.
+    expect(resolveGovernanceStore({ ...core, flagDb: '/state/other.db' }).source).toBe('flag');
+    expect(resolveGovernanceStore(core).dbPath).toBe(resolve('/state/core.db.governance/governance.db'));
+  });
+
+  it('isStoreSpec is `:memory:` and nothing else; a Windows drive written with forward slashes is a PATH, not a URL', () => {
     expect(isStoreSpec(':memory:')).toBe(true);
-    expect(isStoreSpec('postgres://h/db')).toBe(true);
-    expect(isStoreSpec('postgresql://h:5432/db')).toBe(true);
+    expect(isStoreSpec('postgres://h/db')).toBe(false); // a URL is refused, not a spec
     expect(isStoreSpec('C://tmp/gov.db')).toBe(false);
-    expect(isStoreSpec('C:\\tmp\\gov.db')).toBe(false);
     expect(isStoreSpec('/state/core.db.governance/governance.db')).toBe(false);
-    expect(isStoreSpec('rel/gov.db')).toBe(false);
+    expect(isUrlSpec('C://tmp/gov.db')).toBe(false);
+    expect(isUrlSpec('C:\\tmp\\gov.db')).toBe(false);
+    expect(isUrlSpec('postgresql://h:5432/db')).toBe(true);
     // …and a drive path resolves like any other path rather than riding through verbatim.
     expect(resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: 'C://tmp/gov.db' }).dbPath).toBe(resolve('C://tmp/gov.db'));
   });
 
-  it('a URL spec\'s credentials reach the engine and NOTHING else: displayPath is redacted, paths and :memory: are unchanged (Copilot on #516)', () => {
+  it('redactStoreSpec is defence in depth: a URL\'s credentials become ***, paths and :memory: are unchanged, and displayPath equals dbPath for every admitted value', () => {
     expect(redactStoreSpec('postgres://user:s3cret@db.internal:5432/gov')).toBe('postgres://***@db.internal:5432/gov');
     expect(redactStoreSpec('postgresql://user@h/db')).toBe('postgresql://***@h/db');
     expect(redactStoreSpec('postgres://h/db')).toBe('postgres://h/db');
@@ -99,10 +136,13 @@ describe('resolveGovernanceStore (crew#495)', () => {
     expect(redactStoreSpec('/state/core.db.governance/governance.db')).toBe('/state/core.db.governance/governance.db');
     // An `@` in a PATH is not userinfo.
     expect(redactStoreSpec('/homes/op@corp/gov.db')).toBe('/homes/op@corp/gov.db');
-    const loc = resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: 'postgres://user:s3cret@h/db' });
-    expect(loc.dbPath).toBe('postgres://user:s3cret@h/db'); // the engine handoff, verbatim
-    expect(loc.displayPath).toBe('postgres://***@h/db'); // every operator-facing surface
-    expect(loc.displayPath).not.toContain('s3cret');
+    for (const loc of [
+      resolveGovernanceStore({ coreDbPath: '/x/core.db' }),
+      resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: '/homes/op@corp/gov.db' }),
+      resolveGovernanceStore({ coreDbPath: '/x/core.db', flagDb: ':memory:' }),
+    ]) {
+      expect(loc.displayPath).toBe(loc.dbPath);
+    }
   });
 
   it('the outbox lives in the sidecar whichever store won — never under HOME — unless the engine\'s own override is set', () => {
@@ -166,10 +206,15 @@ describe('the engine handoff', () => {
     expect(env[EMIT_ORIGIN_ENGINE_ENV]).toBe(after);
   });
 
-  it('childEnvWithBootEstateDb hands a child the BOOT value of WICKED_ESTATE_DB back — the operator\'s instruction, not the daemon\'s sidecar', () => {
-    const daemonEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', [ESTATE_DB_ENGINE_ENV]: '/state/core.db.governance/governance.db' };
+  it('childEnvWithBootEstateDb hands a child the BOOT value of WICKED_ESTATE_DB back — the operator\'s instruction, not the daemon\'s sidecar — and drops crew\'s own override', () => {
+    const daemonEnv: NodeJS.ProcessEnv = {
+      PATH: '/usr/bin',
+      [ESTATE_DB_ENGINE_ENV]: '/state/core.db.governance/governance.db',
+      [GOVERNANCE_DB_ENV]: '/opt/operator/gov.db',
+    };
     const unsetAtBoot = childEnvWithBootEstateDb(daemonEnv, undefined);
     expect(unsetAtBoot[ESTATE_DB_ENGINE_ENV]).toBeUndefined();
+    expect(unsetAtBoot[GOVERNANCE_DB_ENV]).toBeUndefined(); // needed at resolution only — never a child's
     expect(unsetAtBoot['PATH']).toBe('/usr/bin');
     const operatorStore = childEnvWithBootEstateDb(daemonEnv, '/opt/estate/graph.db');
     expect(operatorStore[ESTATE_DB_ENGINE_ENV]).toBe('/opt/estate/graph.db');

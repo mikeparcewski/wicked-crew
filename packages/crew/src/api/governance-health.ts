@@ -39,6 +39,8 @@ export interface GovernanceStoreInfo {
 
 export interface GovernanceRecords {
   total: number | null;
+  /** Records landed since this daemon's API came up: the baseline is taken when the routes
+   *  register, AFTER the engine has booted, so the engine's own boot-time emits are in the baseline. */
   sinceBoot: number | null;
 }
 
@@ -119,14 +121,17 @@ const MAX_EPOCH_MS = 8.64e15;
 
 /** A usable `ts`: a finite, non-negative epoch-millisecond number inside `Date`'s range. Anything
  *  else on a spool line (a torn `1e20`, a negative, a string) is counted as untimestamped — never
- *  a `RangeError` that turns `/diagnostics` into a 500 (Copilot on #516). */
+ *  a `RangeError` that turns `/diagnostics` into a 500. */
 export function isEpochMs(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= MAX_EPOCH_MS;
 }
 
-function bump(counts: Record<string, number>, key: string, cap: number): void {
-  const k = key in counts || Object.keys(counts).length < cap ? key : 'other';
-  counts[k] = (counts[k] ?? 0) + 1;
+/** Buckets are `Map`s while folding — the keys come from file content, and a plain object keyed by
+ *  `constructor`, `toString` or `__proto__` (a torn or hostile line) would either inherit a value or
+ *  drop the bucket. Serialized to a plain object once, at the end. */
+function bump(counts: Map<string, number>, key: string, cap: number): void {
+  const k = counts.has(key) || counts.size < cap ? key : 'other';
+  counts.set(k, (counts.get(k) ?? 0) + 1);
 }
 
 /**
@@ -154,6 +159,8 @@ export async function foldDeadletters(path: string): Promise<DeadletterFold> {
   } catch {
     return fold;
   }
+  const byType = new Map<string, number>();
+  const byReason = new Map<string, number>();
   try {
     for await (const line of rl) {
       if (line.trim() === '') continue;
@@ -169,9 +176,9 @@ export async function foldDeadletters(path: string): Promise<DeadletterFold> {
         fold.untimestamped += 1;
         continue;
       }
-      bump(fold.byType, typeof record.type === 'string' ? record.type : 'unknown', MAX_TYPE_KEYS);
+      bump(byType, typeof record.type === 'string' ? record.type : 'unknown', MAX_TYPE_KEYS);
       bump(
-        fold.byReason,
+        byReason,
         typeof record.deadletter_reason === 'string' ? reasonBucket(record.deadletter_reason) : 'unknown',
         MAX_TYPE_KEYS,
       );
@@ -189,6 +196,8 @@ export async function foldDeadletters(path: string): Promise<DeadletterFold> {
     rl.close();
     stream.destroy();
   }
+  fold.byType = Object.fromEntries(byType);
+  fold.byReason = Object.fromEntries(byReason);
   return fold;
 }
 
@@ -287,24 +296,26 @@ export class GovernanceRecordCounter {
 
 // ── Assembly ─────────────────────────────────────────────────────────────────
 
+/** Quote one argument for the operator's shell: bare when it needs no quoting, otherwise
+ *  single-quoted on POSIX and double-quoted on Windows (JSON quoting is not shell quoting there). */
+export function shellQuote(arg: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,<>-]+$/.test(arg)) return arg;
+  return process.platform === 'win32' ? `"${arg.replace(/"/g, '\\"')}"` : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * The replay recipe every finding points at — one spelling, so the console and the log agree — and
  * TARGET-SPECIFIC: `replayTarget()` defaults to the state home's `core.db` sidecar, so a bare
  * recipe followed on a daemon booted with a custom `--db` or `--governance-db` would replay into a
- * different store than the one that dead-lettered (Copilot on #516). The default sidecar is named
- * through its core db (`--db`); an explicit store through `--governance-db` with credentials
- * redacted (the operator supplies the real spec). `null` target = no daemon store known: the bare
- * recipe, for a `--dry-run` inspection.
+ * different store than the one that dead-lettered. The default sidecar is named through its core db
+ * (`--db`); an explicit store through `--governance-db`. `null` target = no daemon store known: the
+ * bare recipe, for a `--dry-run` inspection.
  */
 export function replayCommand(outboxPath: string, target: GovernanceStoreLocation | null): string {
-  const base = `wicked-crew governance replay ${JSON.stringify(outboxPath)}`;
+  const base = `wicked-crew governance replay ${shellQuote(outboxPath)}`;
   if (target === null) return base;
-  if (target.source === 'core-db-sidecar') return `${base} --db ${JSON.stringify(target.coreDbPath)}`;
-  const redacted = target.displayPath !== target.dbPath;
-  return (
-    `${base} --governance-db ${JSON.stringify(target.displayPath)}` +
-    (redacted ? ' (credentials redacted — pass the real spec, or set WICKED_CREW_GOVERNANCE_DB)' : '')
-  );
+  if (target.source === 'core-db-sidecar') return `${base} --db ${shellQuote(target.coreDbPath)}`;
+  return `${base} --governance-db ${shellQuote(target.displayPath)}`;
 }
 
 export interface GovernanceHealthInputs {
@@ -355,7 +366,8 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
         `${recipe} --dry-run, then ` +
         (input.location !== null
           ? `replay it into this daemon's store with ${recipe}`
-          : 'replay it once this daemon resolves a store'),
+          : 'replay it once this daemon resolves a store') +
+        ' (a replay appends the lines that fail to land back onto that same file, so this warning persists until they are repaired)',
     });
   }
   return {

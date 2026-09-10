@@ -61,7 +61,7 @@
  */
 
 import { mkdirSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /** The `serve` / `governance` flag naming the store explicitly. */
 export const GOVERNANCE_DB_FLAG = '--governance-db';
@@ -97,12 +97,14 @@ export type GovernanceOutboxSource = 'env' | 'core-db-sidecar';
 
 export interface GovernanceStoreLocation {
   /** The estate store the engine's emit seam writes to — exported as `WICKED_ESTATE_DB`. An
-   *  absolute SQLite path, or a spec the engine parses itself (`:memory:`, `postgres://…`). RAW:
-   *  a URL spec may carry credentials, so this value is for the ENGINE HANDOFF only. */
+   *  absolute SQLite path, or `:memory:` (the engine's "no shared store"). The emit seam is
+   *  SQLite-only (`wicked-apps-core::emit::emit_event` → `open_store` → `SqliteStore::open`), so a
+   *  URL spec is REFUSED at resolution ({@link GovernanceStoreError}) — never handed to an engine
+   *  that would dead-letter every event and print the spec, credentials included, on stderr. */
   dbPath: string;
-  /** `dbPath` with any URL userinfo redacted (`postgres://***@host/db`; a path is unchanged) — the
-   *  ONLY spelling operator-facing surfaces print: the boot log, the readiness line,
-   *  `/diagnostics.governance.store.path`, `governance replay` output (Copilot on #516). */
+  /** What operator-facing surfaces print — the boot log, the readiness line,
+   *  `/diagnostics.governance.store.path`, `governance replay` output. Equal to `dbPath` for every
+   *  value the resolver admits; the userinfo redaction ({@link redactStoreSpec}) is defence in depth. */
   displayPath: string;
   source: GovernanceStoreSource;
   /** The dead-letter outbox — exported as `WICKED_APPS_EMIT_DEADLETTER`. */
@@ -125,6 +127,19 @@ export interface GovernanceStoreInput {
   envOutbox?: string | undefined;
   /** The daemon's core db path (`--db`, or the default under the state home). */
   coreDbPath: string;
+  /** The daemon's cross-product bus db (`resolveCrewBus().dbPath`) — refused as a governance store too. */
+  busDbPath?: string | undefined;
+}
+
+/** A governance store the engine could not honour — a boot error, not a warning: the alternative is a
+ *  daemon that dead-letters 100 % of its governance events (a URL spec on the SQLite-only emit seam)
+ *  or a second writer on the actor's `core.db` / the bus db (the race the single-writer design
+ *  exists to rule out). Same shape as `interactive/bus-location.ts`'s `CrewBusError`. */
+export class GovernanceStoreError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GovernanceStoreError';
+  }
 }
 
 /** The sidecar directory the daemon's governance store and outbox live in: `<core db>.governance`. */
@@ -144,23 +159,30 @@ export function governanceSidecarOutbox(coreDbPath: string): string {
 
 /** A URL scheme of two or more characters followed by `://` — `postgres://`, `postgresql://`. A
  *  single letter before `://` is a Windows drive written with forward slashes (`C://tmp/gov.db`),
- *  which is a PATH (Copilot on #516). */
+ *  which is a PATH. */
 const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]+:\/\//;
 
-/** A store spec the engine parses itself (`:memory:`, a `postgres://…` URL) rather than a filesystem
- *  path — left exactly as written, never resolved, never `mkdir`ed for. */
+/** Whether a store value is a URL spec (`postgres://…`) — something the emit seam cannot open. */
+export function isUrlSpec(value: string): boolean {
+  return URL_SCHEME_RE.test(value);
+}
+
+/** A store spec the engine parses itself rather than a filesystem path — `:memory:`, and nothing
+ *  else: the emit seam is SQLite-only, so a URL spec is refused before it gets this far. Left
+ *  exactly as written, never resolved, never `mkdir`ed for. */
 export function isStoreSpec(value: string): boolean {
-  return value === ':memory:' || URL_SCHEME_RE.test(value);
+  return value === ':memory:';
 }
 
 /** The userinfo of a URL spec — everything between `scheme://` and the first `@` before a `/`. */
 const URL_USERINFO_RE = /^([A-Za-z][A-Za-z0-9+.-]+:\/\/)[^/@]*@/;
 
-/** A store spec safe to print: a URL's credentials become `***` (`postgres://u:p@h/db` →
- *  `postgres://***@h/db`); `:memory:` and filesystem paths are returned unchanged. The raw value
- *  is exported to the engine and nowhere else. */
+/** DEFENCE IN DEPTH: a value safe to print — a URL's credentials become `***` (`postgres://u:p@h/db`
+ *  → `postgres://***@h/db`); `:memory:` and filesystem paths are returned unchanged. URL specs are
+ *  refused at resolution, so in practice this is the identity; it stays so that no future rung can
+ *  print a credential by accident (the refusal message itself uses it). */
 export function redactStoreSpec(value: string): string {
-  return isStoreSpec(value) ? value.replace(URL_USERINFO_RE, '$1***@') : value;
+  return isUrlSpec(value) ? value.replace(URL_USERINFO_RE, '$1***@') : value;
 }
 
 function present(value: string | undefined): string | undefined {
@@ -169,10 +191,11 @@ function present(value: string | undefined): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
-/** Spell an explicit store absolute (relative flags land next to the cwd the operator typed them
- *  in, not wherever a later `join` happens to run), leaving engine specs untouched. */
+/** Spell an explicit store absolute AND normalized (`resolve` also folds `..` segments, so the
+ *  core-db / bus-db refusals compare like with like); relative flags land next to the cwd the
+ *  operator typed them in, not wherever a later `join` happens to run. `:memory:` is untouched. */
 function absoluteStore(value: string): string {
-  return isStoreSpec(value) || isAbsolute(value) ? value : resolve(value);
+  return isStoreSpec(value) ? value : resolve(value);
 }
 
 /** Resolve the governance store and its outbox for one daemon — pure, so two `--db` inputs can be compared. */
@@ -184,21 +207,50 @@ export function resolveGovernanceStore(input: GovernanceStoreInput): GovernanceS
       ? { outboxPath: resolve(envOutbox), outboxSource: 'env' }
       : { outboxPath: join(sidecarDir, EMIT_OUTBOX_FILENAME), outboxSource: 'core-db-sidecar' };
 
+  const coreDbPath = resolve(input.coreDbPath);
+  const busDbPath = present(input.busDbPath) !== undefined ? resolve(input.busDbPath as string) : undefined;
   const at = (dbPath: string, source: GovernanceStoreSource): GovernanceStoreLocation => ({
     dbPath,
     displayPath: redactStoreSpec(dbPath),
     source,
     sidecarDir,
-    coreDbPath: resolve(input.coreDbPath),
+    coreDbPath,
     ...outbox,
   });
 
+  /** An explicit store (flag / env) must be one the engine can honour and must not be a store
+   *  another writer already owns — refused loudly at boot, never silently dead-lettered. */
+  const explicit = (raw: string, source: GovernanceStoreSource, how: string): GovernanceStoreLocation => {
+    if (isUrlSpec(raw)) {
+      throw new GovernanceStoreError(
+        `${how} names ${redactStoreSpec(raw)}, but the engine's emit seam stores to SQLite (wicked-apps-core ` +
+          '`open_store` → `SqliteStore::open`); a `postgres://` (or any URL) governance store is not supported — ' +
+          'every governance event would dead-letter. Name a SQLite file (default: <core db>.governance/governance.db) or `:memory:`.',
+      );
+    }
+    const dbPath = absoluteStore(raw);
+    if (dbPath === coreDbPath) {
+      throw new GovernanceStoreError(
+        `${how} names the daemon's own core db (${coreDbPath}); the single-writer actor holds that store and the emit ` +
+          'seam opens its own connection per emit — a second writer there is the race the design rules out. ' +
+          'Name a separate SQLite file (default: <core db>.governance/governance.db).',
+      );
+    }
+    if (busDbPath !== undefined && dbPath === busDbPath) {
+      throw new GovernanceStoreError(
+        `${how} names the cross-product bus db (${busDbPath}), which wicked-bus owns; name a separate SQLite file ` +
+          '(default: <core db>.governance/governance.db).',
+      );
+    }
+    return at(dbPath, source);
+  };
+
   const flagDb = present(input.flagDb);
-  if (flagDb !== undefined) return at(absoluteStore(flagDb), 'flag');
+  if (flagDb !== undefined) return explicit(flagDb, 'flag', GOVERNANCE_DB_FLAG);
   const envCrewDb = present(input.envCrewDb);
-  if (envCrewDb !== undefined) return at(absoluteStore(envCrewDb), 'env-crew');
+  if (envCrewDb !== undefined) return explicit(envCrewDb, 'env-crew', GOVERNANCE_DB_ENV);
   const envEstateDb = present(input.envEstateDb);
-  if (envEstateDb !== undefined) return at(absoluteStore(envEstateDb), 'env-estate');
+  if (envEstateDb !== undefined) return explicit(envEstateDb, 'env-estate', `an inherited ${ESTATE_DB_ENGINE_ENV}`);
   return at(join(sidecarDir, GOVERNANCE_DB_FILENAME), 'core-db-sidecar');
 }
 
@@ -238,12 +290,13 @@ export function applyEmitOrigin(origin: string, env: NodeJS.ProcessEnv = process
 }
 
 /**
- * A copy of `env` for a child that resolves ITS store from `WICKED_ESTATE_DB` (the estate MCP
- * server crew spawns for the operator proposal queue, an estate CLI without `--db`): the daemon's
- * exported governance store is the daemon's business, and the child gets back whatever the
- * process booted with — the operator's explicit store, or nothing. A newer estate binary handed the
+ * The environment for EVERY child crew spawns (git, uv, the estate CLI and MCP, the deliver shell,
+ * the interactive bridge, the OS opener, `ps`/`lsof`): the daemon's exported governance store is the
+ * in-process engine's business and nobody else's. `WICKED_ESTATE_DB` goes back to whatever the
+ * process booted with — the operator's explicit store, or nothing (a newer estate binary handed the
  * daemon's `governance.db` as its graph store could migrate the file's schema past what the engine's
- * vendored store opens; restoring the boot value closes that door.
+ * vendored store opens) — and crew's own override `WICKED_CREW_GOVERNANCE_DB`, needed only at
+ * resolution, is dropped outright. Governed workers are covered separately by core's `hardened()`.
  */
 export function childEnvWithBootEstateDb(
   env: NodeJS.ProcessEnv = process.env,
@@ -252,6 +305,7 @@ export function childEnvWithBootEstateDb(
   const out: NodeJS.ProcessEnv = { ...env };
   if (bootValue === undefined) delete out[ESTATE_DB_ENGINE_ENV];
   else out[ESTATE_DB_ENGINE_ENV] = bootValue;
+  delete out[GOVERNANCE_DB_ENV];
   return out;
 }
 

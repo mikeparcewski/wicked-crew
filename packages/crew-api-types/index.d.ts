@@ -3515,8 +3515,8 @@ export type DiagnosticsGovernanceStoreSource = 'flag' | 'env-crew' | 'env-estate
 
 /** The store the engine's emit seam writes governance events to. */
 export interface DiagnosticsGovernanceStore {
-  /** The store as exported to the engine — an absolute SQLite path, or an engine spec (`:memory:`, `postgres://…`)
-   *  with any URL credentials redacted (`postgres://***@host/db`); the raw value never rides this wire. */
+  /** The store as exported to the engine — an absolute SQLite path, or `:memory:`. The emit seam is SQLite-only,
+   *  so a URL spec (`postgres://…`) is refused at boot and never appears here. */
   path: string;
   source: DiagnosticsGovernanceStoreSource;
 }
@@ -3526,7 +3526,9 @@ export interface DiagnosticsGovernanceStore {
 export interface DiagnosticsGovernanceRecords {
   /** Event records on the store right now (short-TTL), or `null` when the engine cannot count. */
   total: number | null;
-  /** Records landed since this daemon booted (`total − boot baseline`), or `null` when either side is unknown. */
+  /** Records landed since this daemon's API came up (`total − baseline`; the baseline is taken when the routes
+   *  register, after the engine has booted, so its boot-time emits are in the baseline), or `null` when either
+   *  side is unknown. */
   sinceBoot: number | null;
 }
 

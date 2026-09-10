@@ -358,6 +358,9 @@ export interface EmitOutboxReplayReport {
   replayed: number;
   /** Entries that did not land — the ORIGINAL line verbatim (so the caller can keep it dead-lettered) and why. */
   failed: Array<{ line: string; reason: string }>;
+  /** Entries already on the store from an earlier replay (deterministic replay ids make a re-replay a
+   *  no-op); absent on an engine that predates the field. */
+  already_present?: number;
 }
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
@@ -1090,7 +1093,12 @@ export class CoreAdapter {
     ) {
       throw new Error(`replayEmitOutbox answered an unexpected report: ${raw.slice(0, 200)}`);
     }
-    return { read: parsed.read, replayed: parsed.replayed, failed: parsed.failed };
+    return {
+      read: parsed.read,
+      replayed: parsed.replayed,
+      failed: parsed.failed,
+      ...(typeof parsed.already_present === 'number' ? { already_present: parsed.already_present } : {}),
+    };
   }
 
   /** Register a CoreEvent listener. Returns an unsubscribe function. */
