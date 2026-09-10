@@ -135,6 +135,19 @@
  * that side is `coverage_reconciliation: 'unverified (malformed rule_coverage)'`
  * ({@link MALFORMED_RULE_COVERAGE}), a reconciliation error names the run and the defect, no
  * `rule_coverage_delta` is computed, and the comparison never throws over persisted data.
+ *
+ * # Malformed persisted result rows (Copilot on #475)
+ *
+ * The same store validates a detail's `results` only as "an array" (`EvalRunStore.get()`), so a row
+ * that is not the wire shape (`GovernanceEvalResult` — no `sample`, `sample.id` not a non-empty
+ * string, a `kind` or `verdict` outside its union, `fired` not an array of strings, a row that is no
+ * object at all) can reach the comparison from a corrupted or hand-edited file. Every row is checked
+ * ({@link resultRowProblem}) BEFORE it is indexed, tallied or iterated: a malformed one is ONE
+ * reconciliation error naming the run, the index and the defect, and is EXCLUDED from everything —
+ * the id index, the identity counts, the tally, the coverage `fired` set. The pair is then not
+ * comparable ({@link MALFORMED_RESULT_ROWS}), and that side's stored summary is NOT checked against a
+ * results list the comparison could not fully read (the shortfall is the excluded rows, not a summary
+ * defect — reporting it as one would misattribute it). Never a throw.
  */
 
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../core/types.js';
@@ -180,6 +193,12 @@ export type EvalRuleInventory = 'complete' | 'partial';
  *  shape — unverified, not reconciled, no delta computed over it (module doc, "Malformed persisted
  *  coverage"). */
 export const MALFORMED_RULE_COVERAGE = 'unverified (malformed rule_coverage)';
+
+/** The `comparable_reason` prefix of a pair one side of which persisted result rows that are not the
+ *  wire shape (api-types `GovernanceEvalResult`, module doc "Malformed persisted result rows"): each
+ *  is named in `reconciliation_errors` and EXCLUDED, never thrown over — and a comparison over a
+ *  record it could not fully read asserts nothing (Copilot on #475). */
+export const MALFORMED_RESULT_ROWS = 'unverified: malformed result row(s)';
 
 /**
  * How one record's `rule_coverage` was reconciled — which denominator its numbers were checked
@@ -301,8 +320,14 @@ export function classifyFlip(kind: EvalSampleKind, from: EvalVerdict, to: EvalVe
 /** Compare two recorded runs — A is the baseline, B the candidate. See the module doc. */
 export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComparison {
   const errors: string[] = [];
-  const mapA = indexById(a, 'a', errors);
-  const mapB = indexById(b, 'b', errors);
+  // Only WELL-FORMED rows take part (module doc, "Malformed persisted result rows"): the store
+  // validated `results` as an array and nothing more, so every row is checked here BEFORE it is
+  // indexed, tallied or iterated — a malformed one is named in `errors` and excluded, never thrown over.
+  const rowsA = wellFormedRows(a, 'a', errors);
+  const rowsB = wellFormedRows(b, 'b', errors);
+  const malformed_rows = { a: a.results.length - rowsA.length, b: b.results.length - rowsB.length };
+  const mapA = indexById(rowsA, a, 'a', errors);
+  const mapB = indexById(rowsB, b, 'b', errors);
 
   const only_in_a = [...mapA.keys()].filter((id) => !mapB.has(id)).sort(codepoint);
   const only_in_b = [...mapB.keys()].filter((id) => !mapA.has(id)).sort(codepoint);
@@ -342,17 +367,21 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
     }
   }
   const unverified_rows = {
-    a: a.results.filter((r) => identityOf(r) === null).length,
-    b: b.results.filter((r) => identityOf(r) === null).length,
+    a: rowsA.filter((r) => identityOf(r) === null).length,
+    b: rowsB.filter((r) => identityOf(r) === null).length,
   };
 
   // Each run's summary must be its own results' tally — a disagreement is a stored defect, and a
   // delta over a defective summary would attribute it to a flip.
-  for (const [run, label] of [
-    [a, 'a'],
-    [b, 'b'],
+  // A side whose results could not be FULLY read is not checked here: its tally over the well-formed
+  // rows is short by exactly the excluded (already named) rows, and reporting that shortfall as a
+  // summary defect would misattribute it. The record is already `reconciles: false`.
+  for (const [run, rows, label] of [
+    [a, rowsA, 'a'],
+    [b, rowsB, 'b'],
   ] as const) {
-    const own = tally(run.results);
+    if (rows.length !== run.results.length) continue;
+    const own = tally(rows);
     if (!sameSummary(own, run.summary)) {
       errors.push(`run ${label} (${run.id}): stored summary ${fmt(run.summary)} does not match its own results ${fmt(own)}`);
     }
@@ -372,7 +401,9 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
   }
   for (const id of only_in_b) expected[field(mapB.get(id)!.verdict)] += 1;
   for (const id of only_in_a) expected[field(mapA.get(id)!.verdict)] -= 1;
-  if (!sameSummary(expected, summary_delta)) {
+  // Withheld, for the same reason, when either side carries excluded rows: the stored summaries count
+  // rows the per-sample accounting could not read.
+  if (malformed_rows.a === 0 && malformed_rows.b === 0 && !sameSummary(expected, summary_delta)) {
     errors.push(`summary delta ${fmt(summary_delta)} does not reconcile to the per-sample accounting ${fmt(expected)}`);
   }
 
@@ -383,10 +414,13 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
     degraded: pair(a.degraded, b.degraded),
   };
 
-  // Why the pair is not comparable, in verification order: an unverified side first (nothing
-  // below can be asserted about actions whose identity is unknown), then the identity and content
-  // differences.
+  // Why the pair is not comparable, in verification order: a side with excluded (malformed) rows,
+  // then an unverified side, first (nothing below can be asserted about actions whose identity is
+  // unknown), then the identity and content differences.
   const reasons: string[] = [];
+  if (malformed_rows.a > 0 || malformed_rows.b > 0) {
+    reasons.push(`${MALFORMED_RESULT_ROWS} (${malformed_rows.a} result row(s) in a and ${malformed_rows.b} in b are not the wire shape — each named in reconciliation_errors and excluded)`);
+  }
   if (unverified_rows.a > 0 || unverified_rows.b > 0) {
     reasons.push(`${UNVERIFIED_NO_SAMPLE_IDENTITY} (${unverified_rows.a} result row(s) in a and ${unverified_rows.b} in b carry no well-formed sample.payload_hash)`);
   }
@@ -406,8 +440,8 @@ export function compareEvalRuns(a: EvalRunDetail, b: EvalRunDetail): EvalRunComp
   // contradicts itself is a defect whether or not the other side measured coverage. Coverage is
   // OPTIONAL on a record (a pre-#394 engine emits none: `undefined` here); a PRESENT value that is
   // not the wire shape is named as a defect and never thrown over (`null` here).
-  const covA = a.rule_coverage === undefined ? undefined : reconcileCoverage(a, 'a', errors);
-  const covB = b.rule_coverage === undefined ? undefined : reconcileCoverage(b, 'b', errors);
+  const covA = a.rule_coverage === undefined ? undefined : reconcileCoverage(a, rowsA, 'a', errors);
+  const covB = b.rule_coverage === undefined ? undefined : reconcileCoverage(b, rowsB, 'b', errors);
   const modeOf = (cov: CoverageFacts | null | undefined): EvalCoverageReconciliation | null => (cov === undefined ? null : cov === null ? MALFORMED_RULE_COVERAGE : cov.mode);
 
   const comparison: EvalRunComparison = {
@@ -458,11 +492,52 @@ function identityOf(r: GovernanceEvalResult): string | null {
   return typeof h === 'string' && PAYLOAD_HASH_RE.test(h) ? h : null;
 }
 
-/** Results by sample id. A duplicate id inside ONE run (the engine rejects them at import — an
- *  edited record could still carry one) is a reconciliation error, and the last row wins. */
-function indexById(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): Map<string, GovernanceEvalResult> {
+const RESULT_KINDS: ReadonlySet<string> = new Set(['good', 'bad']);
+const RESULT_VERDICTS: ReadonlySet<string> = new Set(['caught', 'gap', 'false_positive']);
+
+/**
+ * Why a persisted result row is not the wire shape (api-types `GovernanceEvalResult`) in the fields
+ * this comparison READS — `sample.id` (a non-empty string), `sample.kind` (`good|bad`), `verdict`
+ * (`caught|gap|false_positive`), `fired` (an array of rule ids) — or null when it is. Checked BEFORE
+ * any row is indexed, tallied or iterated: `EvalRunStore.get()` validates only that `results` is an
+ * array, so a corrupted or hand-edited detail file can carry a row without a `sample`, with
+ * `fired: null`, or with a verdict `field()` maps nowhere (Copilot on #475: `identityOf` / `indexById`
+ * threw, `tally` would count into an undefined field). `payload_hash` is not checked here —
+ * `identityOf` already treats anything malformed as no identity.
+ */
+function resultRowProblem(r: unknown): string | null {
+  if (!isPlainObject(r)) return `expected an object { sample, verdict, fired }, got ${JSON.stringify(r)}`;
+  const sample: unknown = r['sample'];
+  if (!isPlainObject(sample)) return `sample ${JSON.stringify(sample)} is not an object { id, kind }`;
+  if (typeof sample['id'] !== 'string' || sample['id'] === '') return `sample.id ${JSON.stringify(sample['id'])} is not a non-empty string`;
+  if (typeof sample['kind'] !== 'string' || !RESULT_KINDS.has(sample['kind'])) return `sample.kind ${JSON.stringify(sample['kind'])} is not good|bad`;
+  if (typeof r['verdict'] !== 'string' || !RESULT_VERDICTS.has(r['verdict'])) return `verdict ${JSON.stringify(r['verdict'])} is not caught|gap|false_positive`;
+  const fired: unknown = r['fired'];
+  if (!Array.isArray(fired) || !fired.every((id: unknown) => typeof id === 'string')) return `fired ${JSON.stringify(fired)} is not an array of rule ids`;
+  return null;
+}
+
+/** The run's WELL-FORMED result rows ({@link resultRowProblem}). Every other row is ONE reconciliation
+ *  error naming the run, the row's index and the defect, and takes no part in the comparison. */
+function wellFormedRows(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): GovernanceEvalResult[] {
+  const rows: GovernanceEvalResult[] = [];
+  for (const [i, r] of run.results.entries()) {
+    const problem = resultRowProblem(r);
+    if (problem === null) rows.push(r);
+    else {
+      errors.push(
+        `run ${label} (${run.id}): results[${i}] is malformed — ${problem} — not the wire shape (api-types GovernanceEvalResult), so it is excluded from the per-sample comparison, the identity counts, the tally and the coverage reconciliation`,
+      );
+    }
+  }
+  return rows;
+}
+
+/** The run's well-formed results by sample id. A duplicate id inside ONE run (the engine rejects them
+ *  at import — an edited record could still carry one) is a reconciliation error, and the last row wins. */
+function indexById(rows: GovernanceEvalResult[], run: EvalRunDetail, label: 'a' | 'b', errors: string[]): Map<string, GovernanceEvalResult> {
   const map = new Map<string, GovernanceEvalResult>();
-  for (const r of run.results) {
+  for (const r of rows) {
     if (map.has(r.sample.id)) errors.push(`run ${label} (${run.id}): duplicate sample id ${r.sample.id} in results`);
     map.set(r.sample.id, r);
   }
@@ -535,7 +610,7 @@ function coverageShapeProblem(rc: unknown): string | null {
  * total — the rows' fired ids may name rules of other types and are NOT a denominator check; without
  * `per_type` (`'n/a …'`) nothing more can be checked.
  */
-function reconcileCoverage(run: EvalRunDetail, label: 'a' | 'b', errors: string[]): CoverageFacts | null {
+function reconcileCoverage(run: EvalRunDetail, rows: GovernanceEvalResult[], label: 'a' | 'b', errors: string[]): CoverageFacts | null {
   const who = `run ${label} (${run.id})`;
   const malformed = coverageShapeProblem(run.rule_coverage);
   if (malformed !== null) {
@@ -545,7 +620,7 @@ function reconcileCoverage(run: EvalRunDetail, label: 'a' | 'b', errors: string[
   const rc = run.rule_coverage!;
   const filter = run.type_filter;
   const fired = new Set<string>();
-  for (const r of run.results) for (const id of r.fired) fired.add(id);
+  for (const r of rows) for (const id of r.fired) fired.add(id);
   const unexercised = new Set<string>();
   const listedByType = new Map<string, number>();
   for (const u of rc.unexercised) {

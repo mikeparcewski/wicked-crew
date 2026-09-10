@@ -60,6 +60,12 @@ mentioned only where a daemon release depends on them.
   wire-contract test pins the engine's COMPLETE report shape — the fixture is evals.rs's own
   pinned-serialization test — with key-exact pins in both directions, beside the pre-#394 report
   (no coverage) and a two-field record, which still validate.
+  Copilot on the rebased #475: a persisted RESULT ROW that is not the wire shape (`GovernanceEvalResult`
+  — no `sample`, `fired` not an array, a verdict outside its union, a row that is no object; the store
+  validates `results` only as an array) is likewise one reconciliation error naming the run, the index
+  and the defect, EXCLUDED from the comparison — which stays over the well-formed rows, is not
+  comparable, and withholds that side's summary-vs-results check rather than misattribute the
+  shortfall — and never thrown over.
 - **The INTERNAL evals corpus** — `e2e/corpus/wicked-internal-corpus.json` pins five wicked
   repos (estate v0.16.6 · garden v12.31.0 · crew v0.7.24 · studio v0.5.0 · interactive v0.8.1) to
   the commit each tag resolved to plus an ACTION window of ≥ 50 real commits behind it (walk

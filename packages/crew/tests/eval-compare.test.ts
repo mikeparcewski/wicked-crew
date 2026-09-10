@@ -33,7 +33,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EvalRunStore, type RecordEvalRunInput } from '../src/api/eval-store.js';
-import { classifyFlip, compareEvalRuns, DIFFERING_TYPE_FILTER, MALFORMED_RULE_COVERAGE, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
+import { classifyFlip, compareEvalRuns, DIFFERING_TYPE_FILTER, MALFORMED_RESULT_ROWS, MALFORMED_RULE_COVERAGE, UNVERIFIED_NO_SAMPLE_IDENTITY, type EvalRuleCoverageDelta } from '../src/api/eval-compare.js';
 import { PAYLOAD_HASH_RE, samplePayloadHash } from '../src/api/eval-sample.js';
 import { removeScratch } from './setup/scratch.js';
 import type { EvalRunDetail, GovernanceEvalResult, GovernanceEvalRuleCoverage, GovernanceEvalSignals, GovernanceEvalSummary, GovernanceEvalTypeCoverage, SteeringType } from '../src/core/types.js';
@@ -393,6 +393,44 @@ describe('compareEvalRuns — S17 over two recorded EvalRunDetails', () => {
     const d = compareEvalRuns(a, changed);
     expect(d.payload_changed).toEqual([CREW_A]);
     expect(d.unverified_rows).toEqual({ a: 0, b: 0 });
+  });
+
+  it('malformed persisted result rows (Copilot on #475) — a row without a `sample`, one with `fired: null`, one whose verdict is outside its union and one that is no object at all — are each ONE reconciliation error naming the run, the index and the defect; they are EXCLUDED (the well-formed rows are still compared, the summary and delta checks are withheld for that side), the pair is not comparable, and nothing throws', async () => {
+    const a = await recorded({ results: [row(CREW_A, 'bad', 'development', 'caught'), row(GARDEN_A, 'good', 'development', 'caught')] });
+    // Persist B as a corrupted / hand-edited detail file reads back: the store writes `results` verbatim
+    // and `get()` checks only that it is an array (the summary is written as given, too).
+    const corrupt = [
+      row(CREW_A, 'bad', 'development', 'caught'),
+      { expected: 'deny', fired: [], verdict: 'caught' }, // [1] no sample at all
+      { sample: { id: 'x@000000000000', description: 'd', kind: 'bad', steering_type: 'development' }, expected: 'deny', fired: null, verdict: 'caught' }, // [2] fired is not an array
+      { ...row(GARDEN_A, 'good', 'development', 'caught'), verdict: 'maybe' }, // [3] a verdict field() maps nowhere
+      'not a row', // [4] not an object
+    ] as unknown as GovernanceEvalResult[];
+    const b = await recorded({ results: corrupt, summary: { total: 5, caught: 4, gaps: 0, false_positives: 0 }, rule_coverage: { exercised: 0, unexercised: [] } });
+
+    expect(() => compareEvalRuns(a, b)).not.toThrow();
+    expect(() => compareEvalRuns(b, a)).not.toThrow();
+    const c = compareEvalRuns(a, b);
+    const tail = 'not the wire shape (api-types GovernanceEvalResult), so it is excluded from the per-sample comparison, the identity counts, the tally and the coverage reconciliation';
+    expect(c.reconciliation_errors).toEqual([
+      `run b (${b.id}): results[1] is malformed — sample undefined is not an object { id, kind } — ${tail}`,
+      `run b (${b.id}): results[2] is malformed — fired null is not an array of rule ids — ${tail}`,
+      `run b (${b.id}): results[3] is malformed — verdict "maybe" is not caught|gap|false_positive — ${tail}`,
+      `run b (${b.id}): results[4] is malformed — expected an object { sample, verdict, fired }, got "not a row" — ${tail}`,
+    ]); // and NOTHING else: B's summary counts rows the comparison could not read, so the summary-vs-results
+    //    and delta-accounting checks are withheld rather than misattributed to a summary defect
+    expect(c.reconciles).toBe(false);
+    expect(c.comparable).toBe(false);
+    expect(c.comparable_reason?.startsWith(`${MALFORMED_RESULT_ROWS} (0 result row(s) in a and 4 in b are not the wire shape`)).toBe(true);
+    // The well-formed rows ARE compared: CREW_A is shared and unchanged; GARDEN_A's corrupted B row is
+    // excluded, so the id is only in A. Nothing malformed is counted as "unverified" — that is a
+    // well-formed row without a payload_hash, a different finding.
+    expect(c.unchanged).toBe(1);
+    expect(c.only_in_a).toEqual([GARDEN_A]);
+    expect(c.only_in_b).toEqual([]);
+    expect(c.unverified_rows).toEqual({ a: 0, b: 0 });
+    // B's coverage is reconciled over its well-formed rows — the `fired: null` row never reaches the loop.
+    expect(c.coverage_reconciliation).toEqual({ a: null, b: 'rows' });
   });
 
   it('a stored summary that disagrees with its own results is a reconciliation error naming the run, never a flip', async () => {
