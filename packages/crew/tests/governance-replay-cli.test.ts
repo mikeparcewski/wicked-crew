@@ -119,15 +119,21 @@ describe('replayOutbox (the command body)', () => {
     );
   });
 
-  it('a replay that THROWS after the archive rename puts the outbox back — append-only, never "0 dead letters", never a clobbered fresh spool (Copilot on #516)', async () => {
-    // No live outbox appeared meanwhile → the live file is re-created with the archive's content.
+  /** The NDJSON entries of a file — what every reader (the fold, the engine's replay) sees: blank lines are not entries. */
+  const entries = (path: string): string[] => readFileSync(path, 'utf8').split('\n').filter((l) => l.trim() !== '');
+
+  it('a replay that THROWS after the archive rename puts the outbox back — append-only, never "0 dead letters", never a clobbered fresh spool, every boundary kept (Copilot on #516)', async () => {
+    // No live outbox appeared meanwhile → the live file is re-created with the archive's entries.
+    // The leading separator is UNCONDITIONAL (a torn tail can appear between any look and the
+    // write), so the raw file starts with one empty line every reader skips.
     const { outbox } = fixture();
     const archive = archiveNameFor(outbox);
     renameSync(outbox, archive);
     expect(existsSync(outbox)).toBe(false);
     await restoreOutbox(outbox, archive);
     expect(existsSync(archive)).toBe(false);
-    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+    expect(readFileSync(outbox, 'utf8')).toBe(`\n${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+    expect(entries(outbox)).toEqual([RECORD_A, RECORD_B, TORN]);
 
     // The daemon spooled a fresh entry while the replay ran → the archive is APPENDED to the live
     // file (the new entry is never clobbered — no rename ever targets the live path) and removed.
@@ -136,41 +142,49 @@ describe('replayOutbox (the command body)', () => {
     writeFileSync(outbox, `${fresh}\n`, 'utf8');
     await restoreOutbox(outbox, archive);
     expect(existsSync(archive)).toBe(false);
-    expect(readFileSync(outbox, 'utf8')).toBe(`${fresh}\n${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
+    expect(entries(outbox)).toEqual([fresh, RECORD_A, RECORD_B, TORN]);
 
     // An archive without a trailing newline (a torn tail) is repaired so a later spool never joins onto its last line.
     writeFileSync(archive, `${RECORD_A}\n${TORN}`, 'utf8');
     rmSync(outbox);
     await restoreOutbox(outbox, archive);
-    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n`);
+    expect(readFileSync(outbox, 'utf8')).toBe(`\n${RECORD_A}\n${TORN}\n`);
 
-    // The LIVE file is mid-record (the daemon is writing) → the restore lands behind a separator,
+    // The LIVE file is mid-record (the daemon is writing) → the restore lands behind the separator,
     // never concatenated onto the half-written record; both repairs ride inside the data writes.
     writeFileSync(archive, `${RECORD_B}`, 'utf8'); // no trailing newline either
     writeFileSync(outbox, `${TORN}`, 'utf8'); // torn live tail, no newline
     await restoreOutbox(outbox, archive);
     expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n${RECORD_B}\n`);
+    expect(entries(outbox)).toEqual([TORN, RECORD_B]);
     expect(existsSync(archive)).toBe(false);
     // An EMPTY archive restores nothing and is simply removed.
     writeFileSync(archive, '', 'utf8');
     await restoreOutbox(outbox, archive);
     expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n${RECORD_B}\n`);
     expect(existsSync(archive)).toBe(false);
+    // `endsWithNewline` is the ARCHIVE-side check: boundary for a missing/empty/terminated file, not for a torn one.
+    expect(endsWithNewline(join(scratch as string, 'absent.ndjson'))).toBe(true);
+    expect(endsWithNewline(outbox)).toBe(true);
+    writeFileSync(archive, TORN, 'utf8');
+    expect(endsWithNewline(archive)).toBe(false);
+    rmSync(archive);
   });
 
-  it('appendLines keeps the failed batch on its own lines even when the live outbox ends mid-record; a missing file is created (Copilot on #516)', () => {
+  it('appendLines keeps the failed batch on its own lines whatever the live outbox\'s tail is doing — one write, always behind a separator; a missing file is created (Copilot on #516)', () => {
     fixture();
     const outbox = join(scratch as string, 'live.ndjson');
-    expect(endsWithNewline(outbox)).toBe(true); // absent → nothing to join onto
-    appendLines(outbox, [RECORD_A]);
-    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n`);
-    expect(endsWithNewline(outbox)).toBe(true);
+    appendLines(outbox, [RECORD_A]); // absent → created
+    expect(readFileSync(outbox, 'utf8')).toBe(`\n${RECORD_A}\n`);
+    expect(entries(outbox)).toEqual([RECORD_A]);
     writeFileSync(outbox, `${RECORD_A}\n${TORN}`, 'utf8'); // the daemon is mid-record
-    expect(endsWithNewline(outbox)).toBe(false);
     appendLines(outbox, [RECORD_B, TORN]);
     expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n${RECORD_B}\n${TORN}\n`);
+    appendLines(outbox, [RECORD_A]); // at a boundary → the separator is an empty line, skipped by every reader
+    expect(entries(outbox)).toEqual([RECORD_A, TORN, RECORD_B, TORN, RECORD_A]);
+    const before = readFileSync(outbox, 'utf8');
     appendLines(outbox, []); // nothing to append → untouched
-    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n${RECORD_B}\n${TORN}\n`);
+    expect(readFileSync(outbox, 'utf8')).toBe(before);
   });
 
   it.runIf(!CoreAdapter.replayEmitOutboxSupported())(
@@ -196,7 +210,7 @@ describe('replayOutbox (the command body)', () => {
       expect(outcome.archive).not.toBeNull();
       expect(existsSync(outcome.archive as string)).toBe(true);
       expect(readFileSync(outcome.archive as string, 'utf8')).toBe(`${RECORD_A}\n${RECORD_B}\n${TORN}\n`);
-      expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n`);
+      expect(readFileSync(outbox, 'utf8')).toBe(`\n${TORN}\n`); // the failed batch, behind its unconditional separator
       // Both records are EVENT nodes on the store now — counted through the same engine binding.
       const count = CoreAdapter.eventStoreCounter();
       expect(count).not.toBeNull();

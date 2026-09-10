@@ -210,6 +210,8 @@ describe('governanceHealth (the findings)', () => {
     expect(health.findings.map((f) => f.kind)).toEqual(['governance.store']);
     expect(health.findings[0]!.severity).toBe('error');
     expect(health.findings[0]!.message).toContain('WICKED_ESTATE_DB');
+    // Every governance finding carries a copyable recipe — with no store known, the bare dry-run one.
+    expect(health.findings[0]!.message).toContain('wicked-crew governance replay "<outbox.ndjson>" --dry-run');
   });
 
   it('a pre-fix outbox under HOME is governance.legacy-outbox (warning) with the dry-run recipe', () => {

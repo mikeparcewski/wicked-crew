@@ -327,7 +327,8 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
       message:
         'this daemon resolved no governance store — WICKED_ESTATE_DB is not exported to the engine, so every ' +
         'governance event (conformance claims, phase transitions, rule lifecycle) dead-letters instead of landing; ' +
-        'boot through `wicked-crew serve` (which resolves <core db>.governance/governance.db) or pass --governance-db',
+        'boot through `wicked-crew serve` (which resolves <core db>.governance/governance.db) or pass --governance-db; ' +
+        `inspect any outbox meanwhile with ${replayCommand('<outbox.ndjson>', null)} --dry-run`,
     });
   }
   if (input.fold.count > 0) {

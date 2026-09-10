@@ -70,6 +70,7 @@ import { delimiter, join, resolve, sep } from 'node:path';
 import type { SkillSourceKind } from '../core/types.js';
 import { PLUGIN_NAME } from './frontmatter.js';
 import { readFileNoFollow } from './tree.js';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** Explicit plugin-source override — the seam tests and proof scripts aim at a fixture plugin. */
 export const SKILLS_SOURCE_ENV = 'WICKED_CREW_SKILLS_SOURCE';
@@ -502,12 +503,14 @@ export function gitStateOf(source: PluginSource): GitState {
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: childEnvWithBootEstateDb(),
     }).trim();
     const status = execFileSync('git', ['status', '--porcelain'], {
       cwd: source.path,
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: childEnvWithBootEstateDb(),
     });
     return { git_sha: sha, git_dirty: status.trim() !== '' };
   } catch (err) {

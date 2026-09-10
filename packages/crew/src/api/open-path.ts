@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /**
  * Is `target` inside `root` (or `root` itself), after normalization? Traversal-safe: the check is
@@ -96,7 +97,7 @@ export function platformOpenCommand(target: string): { cmd: string; args: string
 export function openWithSystemDefault(target: string): Promise<void> {
   const { cmd, args } = platformOpenCommand(target);
   return new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: childEnvWithBootEstateDb() });
     child.once('error', rejectPromise);
     child.once('spawn', () => {
       child.unref();

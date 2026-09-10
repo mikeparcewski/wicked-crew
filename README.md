@@ -68,8 +68,9 @@ terminal, `governance replay <outbox>` drains governance events the engine could
 Governance evidence (conformance claims, phase transitions, rule lifecycle) lands in a store
 beside the core db — `<core db>.governance/governance.db` (`--governance-db` /
 `WICKED_CREW_GOVERNANCE_DB` override; an inherited `WICKED_ESTATE_DB` is honoured). Events the
-engine cannot store dead-letter to `<core db>.governance/emit-outbox.ndjson`, never under your
-home directory; `GET /api/v1/diagnostics` → `governance` counts them and raises a
+engine cannot store dead-letter to `<core db>.governance/emit-outbox.ndjson` by default — under the
+state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` is honoured);
+`GET /api/v1/diagnostics` → `governance` counts them and raises a
 `governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
 ## The idea

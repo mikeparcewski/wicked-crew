@@ -384,7 +384,8 @@ async function main(): Promise<void> {
         '  --governance-db <path>          Governance store the engine writes conformance claims, phase transitions and\n' +
         '                                  rule-lifecycle events to (env: WICKED_CREW_GOVERNANCE_DB; an inherited\n' +
         '                                  WICKED_ESTATE_DB is honoured next; default <core db>.governance/governance.db).\n' +
-        '                                  Dead letters spool to <core db>.governance/emit-outbox.ndjson, never under HOME;\n' +
+        '                                  Dead letters spool to <core db>.governance/emit-outbox.ndjson by default — under the\n' +
+        '                                  state home, not HOME (an explicit WICKED_APPS_EMIT_DEADLETTER is honoured);\n' +
         '                                  see `wicked-crew governance replay`\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
