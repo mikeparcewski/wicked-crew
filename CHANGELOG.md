@@ -10,6 +10,47 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **#490 — the installer-managed garden copy is a LAST-resort skills source** (design amendment
+  v3.6; `wicked-crew-api-types` 0.29.0). Discovery order is now (1) the explicit
+  `WICKED_CREW_SKILLS_SOURCE` override; (2) the marketplace cache
+  `<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` of the FIRST config dir holding
+  a valid one — the dirs `CLAUDE_CONFIG_DIR` lists, in order, then `~/.claude` appended once (the
+  default when unset) — picking the version-DIRECTORY NAME of highest SemVer PRECEDENCE
+  (semver.org grammar and §11 precedence; build metadata ignored for ordering; equal precedence →
+  the plain name, else the lexicographically smallest) whose `plugin.json` version equals it — EVERY
+  SemVer-named dir is validated (a mismatch anywhere is a logged `version-mismatch` finding, an
+  invalid name a `non-semver-name` finding, a manifest that does not parse a `no-manifest` finding
+  — never a crash out of discovery; never `readdir` order); (3) LAST resort, the installer-managed copy
+  `<config dir>/plugins/wicked-garden` of the first of those dirs holding one (garden's
+  `install.mjs` hard-codes `~/.claude`), accepted only when its `.claude-plugin/plugin.json` parses
+  with a `version`. ANY cache beats ANY copy. Each config dir is resolved exactly once, at the top
+  of discovery; its canonical root is carried through both tiers, every level below it that
+  discovery touches (`plugins`, `cache`, the marketplace dir, the plugin dir, each version dir, the
+  copy dir) is lstat-walked on the canonical path and a symlink at any of them skips that candidate
+  with a finding — never followed — and a candidate's manifest is read only below that validated
+  canonical dir (a link retargeted mid-walk is never read); the recorded `source.path` is canonical.
+  A copy seed is recorded as `source.kind: 'installer-copy'` (new `SkillSourceKind` member)
+  and surfaces a persistent WARNING finding `skills.source` in `GET /diagnostics` →
+  `skills.findings` — "seeded from the installer copy at <path>; register the plugin with Claude
+  Code (marketplace) to receive marketplace updates" — judged live from the current baseline, so a
+  later refresh from the marketplace cache clears it: a byte-identical refresh now re-records the
+  baseline's provenance (kind, path, version, git state; revision bumped) instead of returning
+  early. So the daemon works on installer-only machines (`npx wicked-installer install
+  wicked-garden` never registers the marketplace) without hiding the difference. Every source kind
+  passes the same no-follow, closure and validation rules; `userCliDirs` fences every listed
+  `CLAUDE_CONFIG_DIR`.
+- **Diagnostics fail closed on an unreadable skills manifest.** `GET /diagnostics` → `skills` now
+  re-reads `manifest.json` on every read; when it cannot (corrupt, unreadable, or the root no
+  longer the one the store bound) it answers `config-error` with a new `skills.manifest` error
+  finding naming the cause — never the stale outcome recorded at boot. A read never touches the
+  engine input (the finding says what stays exported until restart).
+
+### Changed
+- `SkillsSourceUnavailableError` now says what to do: "install wicked-garden first —
+  `npx wicked-installer install wicked-garden`, or register the plugin with Claude Code"; the seed's
+  detail names both places it looked (the marketplace cache and the installer copy).
+
 ## [0.7.26] — 2026-09-09
 
 Release train: bundles the published `wicked-studio` 0.5.2 skin, pins the published

@@ -21,7 +21,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 
-import { claudeConfigDir } from './plugin-source.js';
+import { claudeConfigDirs } from './plugin-source.js';
 
 /** The skills root would lie outside the state home or inside a user CLI directory — the daemon does not start. */
 export class SkillsRootUnfencedError extends Error {
@@ -39,8 +39,8 @@ export class SkillsRootUnfencedError extends Error {
 
 /**
  * The user-level CLI configuration directories wicked must never write (design v3.2 §1), for `home`:
- * codex, pi, copilot, opencode, Claude Code — the literal `~/.claude` AND the daemon's own
- * `CLAUDE_CONFIG_DIR` when it points elsewhere (that is the config dir the user's Claude reads).
+ * codex, pi, copilot, opencode, Claude Code — the literal `~/.claude` AND every dir the daemon's own
+ * `CLAUDE_CONFIG_DIR` lists when it points elsewhere (those are the config dirs the user's Claude reads).
  */
 export function userCliDirs(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): string[] {
   const dirs = [
@@ -49,7 +49,7 @@ export function userCliDirs(home: string = homedir(), env: NodeJS.ProcessEnv = p
     join(home, '.copilot'),
     join(home, '.config', 'opencode'),
     join(home, '.claude'),
-    claudeConfigDir(env, home),
+    ...claudeConfigDirs(env, home),
   ];
   return [...new Set(dirs.map((d) => resolve(d)))];
 }

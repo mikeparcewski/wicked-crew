@@ -1328,6 +1328,11 @@ export interface SteeringLandingResult {
 
 // ── Skills — the daemon-owned garden plugin root, published as immutable snapshots (api-types 0.28.0) ──
 //
+// api-types 0.29.0 (design amendment v3.6, crew #490): the installer-managed copy
+// `<config dir>/plugins/wicked-garden` is a LAST-resort seed source — `SkillSourceKind` gains
+// `installer-copy`, and `DiagnosticsSkillsFinding.kind` gains the persistent `skills.source` warning
+// and the fail-closed `skills.manifest` error.
+//
 // Skills are files (skills keystone, design v3 + amendments v3.1/v3.2). The daemon owns ONE
 // effective `wicked-garden`-shaped plugin root — `<state home>/skills/effective/`, the dependency
 // closure of the installed plugin: `.claude-plugin/{plugin.json,archetypes.json,components.json}`,
@@ -1361,10 +1366,14 @@ export type SkillKind = 'router' | 'fork-worker' | 'module';
  *  it while the operator's edits were kept). */
 export type SkillProvenance = 'shipped' | 'override' | 'user-added';
 
-/** Where a baseline was captured from. `claude-plugin-cache` covers the marketplace cache AND the
- *  hand-installed `plugins/wicked-garden` copy (both are "the installed plugin"); `checkout` is a
- *  git working tree; `directory` any other explicit plugin-shaped directory. */
-export type SkillSourceKind = 'claude-plugin-cache' | 'checkout' | 'directory';
+/** Where a baseline was captured from. `claude-plugin-cache` is the marketplace cache
+ *  (`<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` — the plugin Claude Code
+ *  runs); `installer-copy` is the installer-managed `<config dir>/plugins/wicked-garden` copy
+ *  (`npx wicked-installer install wicked-garden`), accepted only as the LAST resort when no cache
+ *  exists (design v3.6, api-types 0.29.0) and flagged by the `skills.source` diagnostics finding
+ *  while it is the current baseline; `checkout` is a git working tree; `directory` any other
+ *  explicit plugin-shaped directory. */
+export type SkillSourceKind = 'claude-plugin-cache' | 'installer-copy' | 'checkout' | 'directory';
 
 /** The per-baseline `uv sync` state (`<baseline>/.venv`, provisioned once per content hash — the
  *  publish that needs it AWAITS it — and shared read-only by every snapshot that links it):
@@ -3376,8 +3385,17 @@ export interface DiagnosticsSkillsFinding {
    *  blocked (engine input points at a non-existent refusal path — launches fail loudly until the
    *  catalog is fixed); `skills.config` = the configured root is corrupt/unusable (same refusal;
    *  `error`), or — as a `warning` on the `published` state — the root lies OUTSIDE the daemon
-   *  state home, so core's fence cross-check (`WICKED_CREW_STATE_HOME`) refuses every launch. */
-  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config';
+   *  state home, so core's fence cross-check (`WICKED_CREW_STATE_HOME`) refuses every launch;
+   *  `skills.source` (`warning`, api-types 0.29.0, design v3.6) = the CURRENT baseline was seeded
+   *  from the installer-managed copy (`SkillSourceKind` `installer-copy`) — the daemon works, but
+   *  that copy receives no marketplace updates until the plugin is registered with Claude Code; it
+   *  persists (alongside the ladder's own finding, if any) until a refresh from the marketplace
+   *  cache re-records the baseline's provenance (byte-identical or not); `skills.manifest`
+   *  (`error`, api-types 0.29.0) = `manifest.json` could not be read when diagnostics were taken
+   *  (corrupt, unreadable, or the root no longer the one the store bound) — reported as
+   *  `config-error` with the cause instead of the stale boot outcome; the exported engine input is
+   *  unchanged until the daemon restarts. */
+  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest';
   severity: 'warning' | 'error';
   message: string;
 }

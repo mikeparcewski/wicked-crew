@@ -13,7 +13,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -27,7 +27,7 @@ import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
-import { pluginSourceAt } from '../src/skills/plugin-source.js';
+import { pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
 import { assertSkillsRootFenced, canonicalPath, SkillsRootUnfencedError, userCliDirs } from '../src/skills/root-fence.js';
 import { refusalPath, SkillsRuntime } from '../src/skills/runtime.js';
 import { COPILOT_VIEW_SKILLS_REL, resolveSkillsRoot, SKILLS_DIRNAME } from '../src/skills/store.js';
@@ -167,6 +167,84 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
     } finally {
       if (saved === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
       else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = saved;
+    }
+  });
+
+  it('the skills.source WARNING follows the CURRENT baseline live (design v3.6): present after an installer-copy seed (said once per boot); a refresh that finds the SAME bytes in the marketplace cache re-records the provenance (codex on #491) and the warning is gone — before any publish', async () => {
+    const warning = `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`;
+    let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' };
+    const sc = scaffold({ source: () => source });
+    try {
+      const lines: string[] = [];
+      const seeding = new SkillsRuntime({ store: sc.store, log: (m) => lines.push(m) });
+      const health = await seeding.apply();
+      // The copy seeds and publishes like any source — the ladder's outcome is `published`, the warning rides beside it.
+      expect(health.state).toBe('published');
+      expect(health.findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
+      expect(seeding.health().findings).toEqual([{ kind: 'skills.source', severity: 'warning', message: warning }]);
+      expect(lines.find((l) => l.startsWith('[skills] seeded '))).toBe(
+        `[skills] seeded ${sc.root} from the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache) at ${FIXTURE_PLUGIN}, plugin version 1.0.0, source kind installer-copy`,
+      );
+      expect(lines.filter((l) => l === `[skills] skills.source: ${warning}`)).toHaveLength(1);
+      // A second boot over the seeded root: the warning persists (the baseline is still the copy), said once again.
+      lines.length = 0;
+      expect((await seeding.apply()).findings.map((f) => f.kind)).toEqual(['skills.source']);
+      expect(lines.filter((l) => l.startsWith('[skills] skills.source: '))).toHaveLength(1);
+      // The operator registers the marketplace; the cache holds the SAME bytes (the scaffold's upstream
+      // is a byte-identical copy of the fixture). A refresh has nothing to merge — but the provenance
+      // moved, and the manifest records it: kind, path, revision; the baseline key (the content hash)
+      // is unchanged, no publish happened, and the warning is gone with the provenance.
+      const before = sc.store.revision();
+      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: '1.0.0' };
+      const refreshed = sc.store.refreshBaseline(before);
+      expect(refreshed.verdict).toBe('clear');
+      expect(refreshed.baseline).toBe(refreshed.previous_baseline);
+      expect(refreshed.revision).toBe(before + 1);
+      const m = sc.store.manifest();
+      expect(m.revision).toBe(before + 1);
+      expect(m.baselines[m.baseline]?.source).toEqual({ kind: 'claude-plugin-cache', path: sc.upstream });
+      expect(seeding.health()).toMatchObject({ state: 'published', current: { gen: 1 }, findings: [] });
+      // The same source again: a true no-op — nothing to record, the revision stands.
+      expect(sc.store.refreshBaseline(m.revision).revision).toBe(m.revision);
+      expect(sc.store.revision()).toBe(m.revision);
+    } finally {
+      removeScratch(sc.base);
+    }
+  });
+
+  it('diagnostics FAIL CLOSED (codex on #491): a manifest.json that cannot be read is reported as config-error with a skills.manifest finding naming the cause — never the stale published state; the engine input is untouched; readable again ⇒ published again', async () => {
+    const sc = scaffold();
+    try {
+      const runtime = new SkillsRuntime({ store: sc.store, log: () => undefined });
+      const published = await runtime.apply();
+      expect(published.state).toBe('published');
+      const manifestPath = join(sc.root, 'manifest.json');
+      const pristine = readFileSync(manifestPath);
+      writeFileSync(manifestPath, 'not a manifest');
+      const corrupt = runtime.health();
+      expect(corrupt).toMatchObject({ state: 'config-error', root: sc.root, current: null, engineInput: published.engineInput });
+      expect(corrupt.findings).toHaveLength(1);
+      expect(corrupt.findings[0]).toMatchObject({ kind: 'skills.manifest', severity: 'error' });
+      expect(corrupt.findings[0]?.message).toMatch(/^manifest\.json cannot be read: .*not a skills manifest/);
+      expect(corrupt.findings[0]?.message).toContain(`${SKILLS_SNAPSHOT_ENGINE_ENV} still exports what the last boot or publish set (${published.engineInput ?? 'unset'})`);
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(published.engineInput); // a READ never touches the engine input
+      writeFileSync(manifestPath, pristine);
+      expect(runtime.health()).toEqual(published);
+      // Unreadable (permissions), not merely corrupt — POSIX only, and root reads through 0o000.
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        chmodSync(manifestPath, 0o000);
+        try {
+          const unreadable = runtime.health();
+          expect(unreadable.state).toBe('config-error');
+          expect(unreadable.findings.map((f) => f.kind)).toEqual(['skills.manifest']);
+          expect(unreadable.findings[0]?.message).toMatch(/manifest\.json cannot be read: .*(EACCES|permission denied)/);
+        } finally {
+          chmodSync(manifestPath, 0o644);
+        }
+        expect(runtime.health()).toEqual(published);
+      }
+    } finally {
+      removeScratch(sc.base);
     }
   });
 
@@ -424,6 +502,37 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
     symlinkSync(target, join(dir, 'skills'));
     await expect(createServer(adapter, options({ source: () => pluginSourceAt(FIXTURE_PLUGIN) }))).rejects.toThrow(/a symlink stands in for the skills root/);
     expect(readdirSync(target)).toEqual([]);
+  });
+
+  it('seeded from the installer-managed copy (design v3.6): published and exported like any source, plus the persistent skills.source WARNING in GET /diagnostics naming the copy; the manifest carries kind installer-copy on the wire', async () => {
+    const root = join(dir, 'skills');
+    delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+    const app = await createServer(adapter, options({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' }) }));
+    try {
+      const real = realpathSync(join(root, 'snapshots', '000001'));
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // no degradation: the engine is handed a verified snapshot
+      const skills = await diagnostics(app);
+      expect(skills).toEqual({
+        state: 'published',
+        root,
+        current: { gen: 1, path: real },
+        engineInput: real,
+        stateHome: canonicalCrewStateHome(),
+        findings: [
+          {
+            kind: 'skills.source',
+            severity: 'warning',
+            message: `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`,
+          },
+        ],
+      });
+      const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
+      expect(res.statusCode).toBe(200);
+      const { manifest } = res.json() as SkillsManifestResponse;
+      expect(manifest.baselines[manifest.baseline]?.source).toEqual({ kind: 'installer-copy', path: FIXTURE_PLUGIN });
+    } finally {
+      await app.close();
+    }
   });
 
   it('ABSENT configuration (no plugin source) is the fallback: the boot-time env is restored and skills.fallback is reported', async () => {

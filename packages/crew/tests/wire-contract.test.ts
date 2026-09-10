@@ -42,7 +42,8 @@ import type {
   SkillRevisionSchema,
 } from '../src/api/skills.js';
 import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
-import type { SkillsHealth } from '../src/skills/runtime.js';
+import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
+import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
@@ -356,6 +357,16 @@ respondsWith<
 // The skills seam's health block (api-types 0.28.0), both directions.
 respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
+// Design v3.6 (api-types 0.29.0, crew #490): the LAST-resort installer copy is a source kind the
+// contract admits, and the persistent warning it raises is a finding kind the contract admits —
+// pinned both directions so neither side can grow a kind the other does not know.
+respondsWith<Wire.SkillSourceKind, PluginSource['kind']>();
+respondsWith<PluginSource['kind'], Wire.SkillSourceKind>();
+respondsWith<Wire.SkillSourceKind, 'installer-copy'>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], SkillsHealthFindingKind>();
+respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();

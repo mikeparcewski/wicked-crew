@@ -196,6 +196,52 @@ describe('seed (design v3 §1/§4/§5)', () => {
     }
   });
 
+  it('names the fix when no plugin is installed (design v3.6): the installer, or registering the plugin with Claude Code', () => {
+    const none = scaffold({ source: () => null });
+    try {
+      expect(() => none.store.seed()).toThrow(/install wicked-garden first — `npx wicked-installer install wicked-garden`, or register the plugin with Claude Code/);
+      expect(() => none.store.seed()).toThrow(/neither the marketplace cache .* nor the installer-managed copy/);
+    } finally {
+      removeScratch(none.base);
+    }
+  });
+
+  it('an installer-copy source (design v3.6) is held to the same rules as every kind: the baseline and the published snapshot record kind installer-copy (the persisted enums accept it), and a linked designated entry refuses the seed before the root exists', async () => {
+    const copy = scaffold({ source: () => ({ path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' }) });
+    try {
+      copy.store.seed();
+      const m = copy.store.manifest(); // the manifest validator re-reads the persisted kind — an unknown kind would refuse the whole manifest
+      expect(m.baselines[m.baseline]?.source).toEqual({ kind: 'installer-copy', path: FIXTURE_PLUGIN });
+      const result = await copy.store.publish(m.revision);
+      expect(result.verdict).toBe('clear');
+      const snap = result.snapshot as NonNullable<typeof result.snapshot>;
+      expect(snapshotManifest(snap.path).gardenSource).toMatchObject({ kind: 'installer-copy', path: FIXTURE_PLUGIN, plugin_version: '1.0.0', baseline: m.baseline });
+      expect(copy.store.currentSnapshot()).toEqual({ gen: 1, path: realpathSync(snap.path) }); // verifyCurrent validates gardenSource.kind against the known kinds
+    } finally {
+      removeScratch(copy.base);
+    }
+    // The no-follow rule (codex round 6) does not care which tier found the copy: a linked skill dir
+    // in a copy is refused by name and nothing is created.
+    const linked = scaffold();
+    try {
+      const outside = join(linked.base, 'outside-skill');
+      mkdirSync(outside);
+      writeFileSync(join(outside, 'SKILL.md'), '---\nname: wicked-garden-gamma\n---\n\noutside\n');
+      rmSync(join(linked.upstream, 'skills', 'gamma'), { recursive: true });
+      symlinkSync(outside, join(linked.upstream, 'skills', 'gamma'));
+      const asCopy = scaffold({ source: () => ({ path: linked.upstream, kind: 'installer-copy', plugin_version: '1.0.0' }) });
+      try {
+        expect(() => asCopy.store.seed()).toThrow(PluginSourceSymlinkError);
+        expect(() => asCopy.store.seed()).toThrow(/skills\/gamma is a symlink/);
+        expect(existsSync(asCopy.root)).toBe(false);
+      } finally {
+        removeScratch(asCopy.base);
+      }
+    } finally {
+      removeScratch(linked.base);
+    }
+  });
+
   it('keys a skill whose declared name differs from its path by the PATH, warns, and blocks publish with name-mismatch', async () => {
     mkdirSync(join(s.upstream, 'skills', 'zeta'), { recursive: true });
     writeFileSync(join(s.upstream, 'skills', 'zeta', 'SKILL.md'), '---\nname: wicked-garden-zzz\n---\n\nmisnamed\n');
