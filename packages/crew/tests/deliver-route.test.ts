@@ -1,6 +1,6 @@
 // crew#293 — POST /runs accepts deliver:"pr" and threads it to the adapter.
 // crew#393 — the deliver DEFAULT: a repo-scoped launch that names a CODE-WORK workflow (a def
-// with at least one code-writing CREATOR phase) delivers unless somebody said otherwise (per-launch
+// with at least one non-evaluator `executes_code` phase) delivers unless somebody said otherwise (per-launch
 // `deliver: 'none'`, or the daemon's `deliverDefault` setting); repo-less, free-text, and
 // read-only-workflow launches (chat and its kin — the deliver script fails a clean worktree
 // loudly, so defaulting it on would fail every repo-scoped chat) default to no deliver phase.
@@ -28,7 +28,7 @@ const CODE_WORK_DEF = {
 } as unknown as WorkflowDef;
 
 /** An EVALUATOR that executes code (domain-extraction's `coverage` writes its own report into the
- *  tree, wicked-core#414) with no code-writing creator anywhere — nothing to deliver. */
+ *  tree, wicked-core#414) and no other code phase anywhere — nothing to deliver. */
 const EVALUATOR_CODE_DEF = {
   id: 'domain-extraction',
   phases: [
@@ -246,9 +246,10 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     expect(mockAdapter.getSettings).not.toHaveBeenCalled();
   });
 
-  it('a CODE-EXECUTING EVALUATOR with no code-writing creator (domain-extraction) defaults to none', async () => {
-    // `coverage` executes code only to write its own report for its validator; no creator wrote
+  it('a def whose only code phase is an EVALUATOR (domain-extraction) defaults to none', async () => {
+    // `coverage` executes code only to write its own report for its validator; nothing else wrote
     // anything a PR could carry — defaulting deliver on would fail every domain-extraction run.
+    // (A neutral Tool phase that writes IS code work — the deliver e2e fixtures rely on that.)
     mockAdapter.getWorkflow.mockReturnValue(EVALUATOR_CODE_DEF);
     const res = await launch({
       problem: 'extract the domain',

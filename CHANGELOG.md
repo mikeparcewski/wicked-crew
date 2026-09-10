@@ -162,8 +162,9 @@ mentioned only where a daemon release depends on them.
   engine to arm its `verified_evidence` flag. The `domain-extraction` mirror's `coverage` phase is
   `executes_code: true` (it writes `coverage-report.json` into the worktree; an
   `executes_code: false` phase may write nothing there — the worktree guard exempts nothing), and
-  the `POST /runs` deliver default engages only on a def with a code-writing CREATOR phase
-  (`executes_code && role === 'creator'`), so domain-extraction does not default to a doomed PR.
+  the `POST /runs` deliver default engages only on a def with a NON-EVALUATOR `executes_code`
+  phase (`executes_code && role !== 'evaluator'`), so domain-extraction — whose only code phase
+  is that evaluator — does not default to a doomed PR.
   The read-only posture for non-claude evaluator seats (codex `--sandbox read-only`, pi
   `--exclude-tools edit,write`, refusal of a write-capable lever-less posture, recognised by the
   resolved binary's stem) lives in wicked-core's launcher and needs no crew config.
