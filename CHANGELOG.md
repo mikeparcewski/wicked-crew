@@ -10,6 +10,27 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.28] — 2026-09-10
+
+Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
+`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
+merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
+worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
+the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
+under Fixed / Added / Changed:
+
+- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
+  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
+  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
+  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
+  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
+- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
+  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
+  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
+  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
+  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
+  registration now requires.
+
 ### Fixed
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
@@ -1518,7 +1539,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...HEAD
+[0.7.28]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...v0.7.25
