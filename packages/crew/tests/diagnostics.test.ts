@@ -5,7 +5,7 @@
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -321,6 +321,21 @@ describe('listStoreFiles (core.db + sidecars + events-dir total)', () => {
       join(graphs, 'api-fedcba987654', 'estate.db'),
     );
     expect(byName['repo-graphs/wicked-ledger-0123456789ab/estate.db']?.bytes).toBe(21);
+  });
+
+  it('spells the default root through stateHomeOfDb — absolute even for a relative --db', async () => {
+    const rel = join('scratch-rel', 'core.db');
+    const root = repoGraphRoot(rel, {});
+    expect(root).toBe(join(resolve('scratch-rel'), 'repo-graphs'));
+    expect(isAbsolute(root)).toBe(true);
+  });
+
+  it('still lists the override root when the core-store directory does not exist', async () => {
+    const override = join(scratch(), 'graphs-elsewhere');
+    mkdirSync(join(override, 'solo-0123456789ab'), { recursive: true });
+    writeFileSync(join(override, 'solo-0123456789ab', 'estate.db'), 'x'.repeat(4), 'utf8');
+    const stores = await listStoreFiles(join(scratch(), 'nope', 'core.db'), { WICKED_ESTATE_REPO_GRAPH_ROOT: override });
+    expect(stores.map((s) => s.name)).toEqual(['repo-graphs/solo-0123456789ab/estate.db']);
   });
 
   it('a state home with no repo-graphs root lists only the core stores', async () => {

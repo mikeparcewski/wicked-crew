@@ -29,6 +29,7 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import { DEFAULT_SETTINGS, type DiagnosticsResponse } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { REPO_GRAPHS_DIRNAME } from '../src/api/diagnostics.js';
 import { pluginSourceAt } from '../src/skills/plugin-source.js';
 import {
   BASELINE_DIRNAME,
@@ -94,7 +95,7 @@ const STATE_HOME_JOIN_RE =
   /join\(\s*(?:crewStateHome\(\)|defaultStateDir\(\)|crewStateDir|stateHome\(\)|stateHomeOfDb\([^)]*\))\s*,\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 /** Identifiers a state-home join may name instead of a literal — resolved here so the audit stays exact. */
-const KNOWN_CONSTANTS: Record<string, string> = { SKILLS_DIRNAME };
+const KNOWN_CONSTANTS: Record<string, string> = { SKILLS_DIRNAME, REPO_GRAPHS_DIRNAME };
 
 describe('state-home-subtrees.json — the registry itself', () => {
   it('is well-formed: version 1, every entry has exactly one of name/prefix, an owner, a source and a worker_read verdict; names are unique', () => {
