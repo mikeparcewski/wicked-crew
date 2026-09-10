@@ -10,6 +10,39 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.26] — 2026-09-09
+
+Release train: bundles the published `wicked-studio` 0.5.2 skin, pins the published
+`wicked-core-ts` `^0.7.17` engine, and ships `wicked-crew-api-types` 0.28.0 (0.25.0 → 0.26.0 →
+0.27.0 → 0.28.0 across the three PRs below). What merged since 0.7.25 — the detailed entries
+follow under Fixed / Added:
+
+- **#474 — project-partitioned interactive root** (api-types 0.26.0): `/projects/:projectId/interactive/*`
+  resolves each project to its own `~/wicked-interactive/docs/projects/<projectId>` partition
+  (realpath-contained, fail-closed on links; the synthesized `default` project keeps the legacy
+  shared root), and `GET …/interactive/api/docs` stamps `projectId` on every row.
+- **#475 — evals `rule_coverage` + `effect` on the wire** (api-types 0.27.0): the core #394/#395
+  companion — `GovernanceEvalReport.rule_coverage` (`GovernanceEvalRuleCoverage`, per-type rows)
+  and `effect: 'warn'` on the eval contract, the internal 5-repo tag-pinned eval corpus
+  (`e2e/corpus/wicked-internal-corpus.json` + `scripts/evals-internal-corpus.mjs`),
+  `compareEvalRuns`, the revised evals test plan and the deterministic eval tests.
+- **#480 — crew-owned skills root** (api-types 0.28.0; design v3.1–v3.5, the core #396 companion):
+  content-hash baselines, immutable published snapshots handed to the engine as
+  `WICKED_SKILLS_SNAPSHOT`, the `/api/v1/skills*` CAS file manager with skill-scoped containment,
+  one storage root with an explicit worker fence, the degradation ladder in `GET /diagnostics`
+  → `skills`, and no writes into the user's CLI directories.
+
+### Changed
+- **Re-bundle the studio skin at 0.5.2.** Bumps the bundled `wicked-studio` devDependency
+  `^0.5.1` → `^0.5.2` (lockfile re-resolved) so `build:with-studio` ships studio #208 (the
+  Repositories section on the project page — attach / detach `crew.repo` members), #209 (the
+  `/skills` section: the file manager over the crew-owned skills root of #480, plus the engine line
+  from `GET /diagnostics` → `skills`) and #210 (the Tests-feature deterministic test layer).
+- **Pin `wicked-core-ts` `^0.7.17`** (was `^0.7.16`) — the published engine carrying the skills
+  snapshot input (core #399, `WICKED_SKILLS_SNAPSHOT` on both carriers, the degradation ladder),
+  seat routing that honours skill portability (core #402), and the evals lane's operator-authored
+  `effect` + `EvalReport.rule_coverage` (core #398) that #475 and #480 above consume.
+
 ### Fixed
 - **Interactive docs are no longer shared across projects (#472).** `/projects/:projectId/interactive/*`
   honored `:projectId` only to look up a per-project root setting no project ever had, so every
@@ -1270,7 +1303,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...HEAD
+[0.7.26]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.24...v0.7.25
 [0.7.24]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.23...v0.7.24
 [0.7.23]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.22...v0.7.23
