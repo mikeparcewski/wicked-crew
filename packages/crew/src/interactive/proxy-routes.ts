@@ -34,6 +34,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { InteractiveDocCreateRequest } from 'wicked-crew-api-types';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { API_PREFIX } from '../api/api-prefix.js';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -107,6 +108,10 @@ export interface InteractiveProxyDeps {
   grounding?: DocGroundingStore;
   log?: (msg: string) => void;
 }
+
+/** The create body as `prepareDocCreate` reads it — the published `InteractiveDocCreateRequest`
+ *  (wire-contract.test.ts pins the two against each other). */
+export type DocCreateBody = InteractiveDocCreateRequest;
 
 /** Crew's 400 on a create that names a repository the document cannot be grounded on (F-046);
  *  wire: crew-api-types `InteractiveDocCreateRefusal`. */
@@ -190,6 +195,13 @@ export async function prepareDocCreate(
   // be the same project or absent. An omitted value is canonicalized from the route; a different
   // one is refused, never forwarded to file the doc somewhere else. The Unfiled mount creates
   // UNBOUND, so a `project` there is a mismatch too.
+  // A non-string `project` is a mismatch too — never coerced, never forwarded.
+  if (body['project'] !== undefined && body['project'] !== null && typeof body['project'] !== 'string') {
+    return {
+      ...passthrough,
+      refusal: { error: `the create's "project" must be the project id as a string`, code: 'project_mismatch', requested: [] },
+    };
+  }
   const bodyProject = typeof body['project'] === 'string' ? body['project'].trim() : '';
   if (projectId === DEFAULT_PROJECT_ID) {
     if (bodyProject !== '') {
@@ -203,9 +215,7 @@ export async function prepareDocCreate(
       };
     }
     delete body['project'];
-  } else if (bodyProject === '') {
-    body['project'] = projectId;
-  } else if (bodyProject !== projectId) {
+  } else if (bodyProject !== '' && bodyProject !== projectId) {
     return {
       ...passthrough,
       refusal: {
@@ -214,6 +224,10 @@ export async function prepareDocCreate(
         requested: [],
       },
     };
+  } else {
+    // Always the EXACT route id — a matching-but-untrimmed spelling (" p-a ") is never forwarded
+    // as sent (codex on crew#506).
+    body['project'] = projectId;
   }
 
   const refs = parseRepoRefs(body);
@@ -325,7 +339,8 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       done(null, payload);
     });
 
-    scope.all(`${API_PREFIX}/projects/:projectId/interactive/*`, async (req, reply) => {
+    /** One proxied request — the wildcard and the typed create route share it. */
+    const serve = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
       const { projectId } = req.params as { projectId: string };
       const prefix = `${API_PREFIX}/projects/${encodeURIComponent(projectId)}/interactive`;
 
@@ -388,7 +403,27 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         if (createToken !== undefined) grounding?.settleCreate(createToken);
       }
       return reply;
-    });
+    };
+
+    // The doc CREATE is the one bridge route crew reads (F-046), so it is PUBLISHED as a typed
+    // endpoint (endpoint-manifest.json: request `InteractiveDocCreateRequest`, answer the bridge's
+    // `InteractiveDocCreateResult`, crew's own 400 `InteractiveDocCreateRefusal` / 502
+    // `InteractiveDocCreateUndetermined`) instead of hiding behind the untyped wildcard. Fastify
+    // prefers the static route over the wildcard; both run the same `serve`.
+    scope.post(
+      `${API_PREFIX}/projects/:projectId/interactive/api/docs`,
+      {
+        config: {
+          manifest: {
+            requestType: 'InteractiveDocCreateRequest',
+            responseType: 'InteractiveDocCreateResult',
+            statusCodes: [200, 400, 404, 409, 413, 502, 503],
+          },
+        },
+      },
+      serve,
+    );
+    scope.all(`${API_PREFIX}/projects/:projectId/interactive/*`, serve);
   });
 }
 

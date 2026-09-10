@@ -36,7 +36,9 @@ mentioned only where a daemon release depends on them.
   embeds crew's state-home registry as the worker Read fence and refuses every launch that meets an
   unregistered entry, so a new store there needs a core release first; a retired doc keeps its
   reserved name, so no sweep is needed). The sidecar is read and written under the REAL docs root
-  only — a symlinked document directory or sidecar is refused, never followed. The proxy also
+  only — a symlinked document directory or sidecar is refused, never followed, the read goes through
+  a no-follow descriptor whose identity (dev/ino) must match what was checked, and the write is an
+  exclusive random temp + rename. The proxy also
   canonicalizes the body's `project` from the route (omitted → filled in; a different one →
   400 `project_mismatch`), refuses a name/basename shared by several member repos
   (400 `ambiguous_repo_ref` listing the candidates — name it by id), and never replays a create
@@ -52,8 +54,11 @@ mentioned only where a daemon release depends on them.
   still inspected). Both seams refuse a run directory that sits inside ANY registered repository
   BEFORE creating it (the inbox is the worker's write root; a draft/demo dir configured inside a
   checkout would hand the worker live source) — error status, no run, no ledger row, the frame
-  dead-lettered; the demo seam registers its flight before the pre-launch awaits so a replayed
-  `doc.created` never double-launches and `stop()` sweeps a half-made snapshot.
+  dead-lettered — and FAIL CLOSED: a registry that cannot be listed, or a root that cannot be
+  resolved, is a refusal with a status naming the cause, never read as "clear"; the demo seam
+  registers its flight before the pre-launch awaits so a replayed `doc.created` never
+  double-launches and `stop()` sweeps a half-made snapshot. The create endpoint is published typed
+  in `endpoint-manifest.json` (`InteractiveDocCreateRequest` → `InteractiveDocCreateResult`).
 - **Interactive create — the requested format reaches the bridge (F-046, style).** A create body's
   `style` passes through as before; when it is ABSENT the proxy infers it from the brief's format
   words (print-ready / A4 / brochure → `brochure`; slides / deck → `ppt`; memo / whitepaper →
@@ -83,11 +88,15 @@ mentioned only where a daemon release depends on them.
   `archive/`, `bus.sock`, `daemon.lock` beside its `bus.db`, hence a directory of its own;
   `interactive/bus-location.ts`). The spawn exports `WICKED_CREW_API` = this daemon's own bound
   origin and `WICKED_BUS_DATA_DIR` = that directory; the pair is recorded beside the lockfile
-  (`.wi-serve.crew.json`) so an adopted bridge crew started with a DIFFERENT pair is recycled
-  (SIGTERM, 3 s grace, restart with the right env) and one nobody recorded (an operator's terminal
-  `wicked-interactive serve`, a pre-upgrade bridge) is adopted with a warning naming the fix. A
-  `--bus-db` whose file is not `bus.db` cannot be handed to the bridge (wicked-bus reaches a bus
-  only through a data directory) — the daemon says so at boot. The `--engine-exec` seam's
+  (`.wi-serve.crew.json`, with the owning daemon's pid) so an adopted bridge crew started with a
+  DIFFERENT pair is recycled (SIGTERM, 3 s grace, restart with the right env) ONLY when its owning
+  daemon is gone — a bridge another LIVE daemon owns is never killed (two daemons sharing one
+  interactive docs root get a 503 `bridge_unavailable` naming the owner and the fix: give this daemon
+  its own interactive root) — and one nobody recorded (an operator's terminal `wicked-interactive
+  serve`, a pre-upgrade bridge) is adopted with a warning naming the fix. A `--bus-db` /
+  `WICKED_BUS_DB` whose file is not `bus.db` cannot be shared with the bridge (wicked-bus reaches a
+  bus only through a data directory) — the daemon refuses to boot with the fix named, rather than
+  run itself and its bridge on two buses. The `--engine-exec` seam's
   crew-private default (`<state home>/bus.db`) is unchanged. `GET /diagnostics.stores` lists the
   bus sidecar with the db's other sidecars. Upgrade note: a bridge started by an older crew keeps
   emitting to the old bus until it is stopped — the daemon logs the pid and the fix on adopt.

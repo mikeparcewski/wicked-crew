@@ -10,7 +10,7 @@ import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
-import { resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
+import { CrewBusError, resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
 
@@ -107,11 +107,20 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // ONE db: an explicit --bus-db / WICKED_BUS_DB, else WICKED_BUS_DATA_DIR, else the daemon's OWN
   // `<core db>.bus/bus.db` — a sidecar of the core db, so two daemons on one host never share a
   // bus by default. `interactive/bus-location.ts` says why a sidecar and not `<state home>/bus/`.
-  const crewBus = resolveCrewBus({
-    explicitDb: qeBusDbPath,
-    envDataDir: process.env['WICKED_BUS_DATA_DIR'],
-    coreDbPath: dbPath,
-  });
+  let crewBus: CrewBusLocation;
+  try {
+    crewBus = resolveCrewBus({
+      explicitDb: qeBusDbPath,
+      envDataDir: process.env['WICKED_BUS_DATA_DIR'],
+      coreDbPath: dbPath,
+    });
+  } catch (err) {
+    // An explicit bus db the bridge could never share is a CONFIG error — refuse to boot rather
+    // than run a daemon and its bridge on two buses (codex on crew#506).
+    if (!(err instanceof CrewBusError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
   // governed `interactive-draft` run. The bus is already required for the project bridge.
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
@@ -169,16 +178,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // (WICKED_CREW_PROJECT_GRAPH_ROOT, WICKED_CREW_PROJECT_SETTINGS) still outrank this.
   setCrewStateHome(stateHomeOfDb(opts.dbPath));
   const { crewBus } = opts;
-  if (crewBus.dataDir === null) {
-    console.error(
-      `[crew] the bus db ${crewBus.dbPath} is not named bus.db, so the wicked-interactive bridge crew spawns ` +
-        `cannot be pointed at it (wicked-bus reads a data DIRECTORY holding bus.db, WICKED_BUS_DATA_DIR); the ` +
-        `bridge will use its own default bus and its documents will not reach this daemon's seams — name the ` +
-        `file bus.db or set WICKED_BUS_DATA_DIR instead of --bus-db.`,
-    );
-  } else {
-    console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
-  }
+  console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
   // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —
   // or an explicit dir — must exist before the seams open the db, or every seam disables itself.
   mkdirSync(dirname(crewBus.dbPath), { recursive: true });

@@ -115,10 +115,14 @@ export interface BridgeEnv {
 
 /** What crew writes beside the lockfile after IT starts a bridge. */
 export interface CrewSidecar {
+  /** The bridge's pid (the lockfile's). */
   pid: number;
   env: BridgeEnv;
   startedBy: 'wicked-crew';
   startedAt: string;
+  /** The DAEMON that spawned it. A bridge whose owner is still alive is that daemon's to stop —
+   *  never this one's (codex on crew#506). */
+  ownerPid?: number;
 }
 
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
@@ -178,6 +182,7 @@ export function readCrewSidecar(root: string): CrewSidecar | null {
       env,
       startedBy: 'wicked-crew',
       startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
+      ...(typeof raw.ownerPid === 'number' ? { ownerPid: raw.ownerPid } : {}),
     };
   } catch {
     return null;
@@ -301,10 +306,12 @@ export class InteractiveBridgePool {
   /**
    * A live bridge was found through the lockfile. Is it one THIS daemon can use (F-042/F-043)?
    *  - crew's sidecar names this pid and its env matches ours → adopt silently;
-   *  - the sidecar names this pid with a DIFFERENT env → a crew daemon (this one before a
-   *    reconfiguration, or a sibling on another port/bus) started it for another bus or crew API,
-   *    so its events would never reach this daemon: recycle it — SIGTERM, grace, SIGKILL — and
-   *    start one with the right env;
+   *  - the sidecar names this pid with a DIFFERENT env: if the daemon that spawned it (`ownerPid`)
+   *    is STILL ALIVE, the bridge is that daemon's — two daemons sharing one docs root — and this
+   *    one must not kill it mid-create (codex on crew#506): refuse with a `BridgeUnavailableError`
+   *    naming the owner and the fix (give this daemon its own interactive root). Only a bridge
+   *    whose owner is gone (a previous daemon that exited, or this very process after a
+   *    reconfiguration) is recycled — SIGTERM, grace, SIGKILL — and restarted with the right env;
    *  - no sidecar (or another pid) → nobody recorded how it was started (an operator's terminal
    *    `wicked-interactive serve`, a pre-upgrade bridge): adopt it, but say what it may be missing
    *    and how to fix it. Killing a process crew did not start is not crew's call.
@@ -314,9 +321,24 @@ export class InteractiveBridgePool {
     const sidecar = readCrewSidecar(root);
     if (sidecar !== null && sidecar.pid === live.pid) {
       if (bridgeEnvMatches(sidecar.env, expected)) return live;
+      const owner = sidecar.ownerPid;
+      if (owner !== undefined && owner !== process.pid && pidAlive(owner)) {
+        const ownerOrigin = sidecar.env.WICKED_CREW_API ?? '(unknown origin)';
+        this.io.log?.(
+          `interactive bridge pid ${live.pid} for ${root} belongs to another live crew daemon (pid ${owner}, ` +
+            `${ownerOrigin}) with ${describeEnv(sidecar.env)}; this daemon needs ${describeEnv(expected)} — NOT ` +
+            `recycling a bridge another daemon owns`,
+        );
+        throw new BridgeUnavailableError(
+          `the interactive bridge for ${root} is owned by another running crew daemon (pid ${owner}, ${ownerOrigin}) ` +
+            `on a different bus or crew API — two daemons cannot share one interactive docs root`,
+          `give this daemon its own interactive root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot ` +
+            `setting) or stop the other daemon (pid ${owner}); the next request starts a bridge for this one`,
+        );
+      }
       this.io.log?.(
-        `interactive bridge pid ${live.pid} for ${root} was started by crew with ${describeEnv(sidecar.env)}, ` +
-          `but this daemon needs ${describeEnv(expected)} — recycling it so its events reach this daemon`,
+        `interactive bridge pid ${live.pid} for ${root} was started by crew${owner !== undefined ? ` (daemon pid ${owner}, gone)` : ''} ` +
+          `with ${describeEnv(sidecar.env)}, but this daemon needs ${describeEnv(expected)} — recycling it so its events reach this daemon`,
       );
       await this.terminate(live.pid);
       return this.start(root);
@@ -458,7 +480,7 @@ export class InteractiveBridgePool {
    *  sibling daemon's (see {@link adoptOrRecycle}). Best-effort: an unwritable sidecar only costs
    *  the adopt-time check, never the start. */
   private writeSidecar(root: string, pid: number, env: BridgeEnv): void {
-    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString() };
+    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ownerPid: process.pid };
     try {
       writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(sidecar, null, 2), 'utf8');
     } catch (err) {

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { busDataDirOf, busSidecarDir, resolveCrewBus } from '../src/interactive/bus-location.js';
+import { CrewBusError, busDataDirOf, busSidecarDir, resolveCrewBus } from '../src/interactive/bus-location.js';
 import { DOC_CREATED, startInteractiveDraftSubscriber } from '../src/interactive/draft-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput, WorkflowDef } from '../src/core/types.js';
@@ -39,9 +39,11 @@ describe('resolveCrewBus (F-043)', () => {
       dataDir: resolve('/opt/shared'),
       source: 'flag-or-env-db',
     });
-    const odd = resolveCrewBus({ explicitDb: '/opt/shared/custom.db', coreDbPath: '/x/core.db' });
-    expect(odd.dataDir).toBeNull(); // wicked-bus cannot be pointed at it through a data dir
-    expect(odd.source).toBe('flag-or-env-db');
+    // An explicit db wicked-bus cannot share with the bridge is a BOOT ERROR, not a warning (codex on #506).
+    expect(() => resolveCrewBus({ explicitDb: '/opt/shared/custom.db', coreDbPath: '/x/core.db' })).toThrow(CrewBusError);
+    expect(() => resolveCrewBus({ explicitDb: '/opt/shared/custom.db', coreDbPath: '/x/core.db' })).toThrow(
+      /reaches a bus only through a data DIRECTORY.*Name the file .*bus\.db/s,
+    );
     expect(busDataDirOf('/state/bus/bus.db')).toBe(resolve('/state/bus'));
     expect(busDataDirOf('/state/custom.db')).toBeNull();
   });
@@ -79,6 +81,7 @@ function fakeEngine(): FakeEngine {
           return input.sessionId;
         },
         onEvent: () => () => undefined,
+        listRepos: async () => [], // the run-dir guard fails closed on an unlistable registry
       }) as unknown as CoreAdapter,
   };
   return state;

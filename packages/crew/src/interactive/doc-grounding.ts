@@ -31,7 +31,21 @@
  *     finds no binding but sees an unsettled create for the same project waits, bounded, for it.
  */
 
-import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeSync,
+  type Stats,
+} from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
 
@@ -395,9 +409,24 @@ export class GroundingPathRefusedError extends Error {
   }
 }
 
+/** Test seams into the containment sequence (never wired in production): `afterLstat` runs after
+ *  the path checks and before the descriptor is opened — the swap window the fd discipline closes. */
+export interface DocGroundingStoreHooks {
+  afterLstat?: (path: string) => void;
+}
+
+/** `O_NOFOLLOW` where the platform has it (POSIX); 0 elsewhere — the fstat identity check below
+ *  still refuses a swapped path there. */
+const O_NOFOLLOW: number = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+
 export class DocGroundingStore {
   private readonly pending = new Map<number, PendingCreate>();
   private nextToken = 1;
+  private readonly hooks: DocGroundingStoreHooks;
+
+  constructor(hooks: DocGroundingStoreHooks = {}) {
+    this.hooks = hooks;
+  }
 
   /** `<docsRoot>/<documentId>/crew-grounding.json`, or null for an id that is not a safe segment.
    *  LEXICAL only — see {@link DocGroundingStore.verifiedSidecar} for the containment-checked path. */
@@ -413,7 +442,10 @@ export class DocGroundingStore {
    * Returns `{ path, docDir, docDirExists }`; throws {@link GroundingPathRefusedError} on a link or
    * a non-directory; throws the fs error when the root itself does not resolve.
    */
-  static verifiedSidecar(docsRoot: string, documentId: string): { path: string; docDir: string; docDirExists: boolean } {
+  static verifiedSidecar(
+    docsRoot: string,
+    documentId: string,
+  ): { path: string; docDir: string; docDirExists: boolean; sidecar: Stats | null } {
     if (!SAFE_DOC.test(documentId)) throw new GroundingPathRefusedError(`document id "${documentId}" cannot name a workspace path`);
     const realRoot = realpathSync(docsRoot);
     const docDir = join(realRoot, documentId);
@@ -428,15 +460,16 @@ export class DocGroundingStore {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
     const path = join(docDir, CREW_GROUNDING_FILE);
-    for (const p of [path, `${path}.tmp-${process.pid}`]) {
-      try {
-        if (lstatSync(p).isSymbolicLink()) throw new GroundingPathRefusedError(`refusing ${p}: the sidecar path is a symlink`);
-      } catch (err) {
-        if (err instanceof GroundingPathRefusedError) throw err;
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      }
+    let sidecar: Stats | null = null;
+    try {
+      sidecar = lstatSync(path);
+      if (sidecar.isSymbolicLink()) throw new GroundingPathRefusedError(`refusing ${path}: the sidecar path is a symlink`);
+      if (!sidecar.isFile()) throw new GroundingPathRefusedError(`refusing ${path}: the sidecar path is not a regular file`);
+    } catch (err) {
+      if (err instanceof GroundingPathRefusedError) throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
-    return { path, docDir, docDirExists };
+    return { path, docDir, docDirExists, sidecar };
   }
 
   /** The binding beside the doc, or `undefined` when absent, malformed, or REFUSED (a symlinked
@@ -444,13 +477,27 @@ export class DocGroundingStore {
    *  never dies over it, and nothing outside the docs root is ever read). */
   get(docsRoot: string, documentId: string): DocGroundingBinding | undefined {
     let path: string;
+    let expected: Stats | null;
     try {
-      ({ path } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
+      ({ path, sidecar: expected } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
+    } catch {
+      return undefined;
+    }
+    if (expected === null) return undefined;
+    this.hooks.afterLstat?.(path);
+    // The lstat → open window (codex on crew#506): open WITHOUT following links and read through
+    // the descriptor only after fstat proves it is the very inode lstat saw — a path swapped for
+    // a link (or another file) in between is refused, never read.
+    let fd: number;
+    try {
+      fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
     } catch {
       return undefined;
     }
     try {
-      const row = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      const actual = fstatSync(fd);
+      if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino) return undefined;
+      const row = JSON.parse(readFileSync(fd, 'utf8')) as Record<string, unknown>;
       if (typeof row !== 'object' || row === null) return undefined;
       if (typeof row['project_id'] !== 'string' || row['project_id'].length === 0) return undefined;
       const refs = Array.isArray(row['repo_refs'])
@@ -464,6 +511,8 @@ export class DocGroundingStore {
       };
     } catch {
       return undefined;
+    } finally {
+      closeSync(fd);
     }
   }
 
@@ -480,9 +529,24 @@ export class DocGroundingStore {
     const { path, docDir, docDirExists } = DocGroundingStore.verifiedSidecar(docsRoot, documentId);
     const row: DocGroundingBinding = { ...binding, recorded_at: binding.recorded_at ?? new Date().toISOString() };
     if (!docDirExists) mkdirSync(docDir);
-    const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(row, null, 2), 'utf8');
-    renameSync(tmp, path);
+    this.hooks.afterLstat?.(path);
+    // The temp name is RANDOM and created EXCLUSIVELY without following links (codex on
+    // crew#506): a pre-planted file or link at a predictable name can neither be opened nor
+    // followed; the rename then replaces the sidecar path atomically (a link planted there in the
+    // meantime is replaced as a link — its target is never written).
+    const tmp = join(docDir, `.${CREW_GROUNDING_FILE}.${randomBytes(8).toString('hex')}.tmp`);
+    const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, 0o600);
+    try {
+      writeSync(fd, JSON.stringify(row, null, 2), null, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      renameSync(tmp, path);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      throw err;
+    }
   }
 
   /** Drop a document's sidecar. `true` when one was removed; a refused path removes nothing. */

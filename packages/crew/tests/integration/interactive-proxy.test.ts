@@ -453,9 +453,15 @@ describe('interactive proxy — doc create interception (F-046)', () => {
     const unfiled = await post('default', { name: 'loose', kind: 'source', brief: 'x', project: 'p-a' });
     expect(unfiled.status).toBe(400);
     expect(((await unfiled.json()) as { code: string }).code).toBe('project_mismatch');
-    // …and a matching project passes through untouched.
+    // …a matching project passes through as the EXACT route id — an untrimmed spelling is never
+    // forwarded as sent, and a non-string is a mismatch (codex on #506).
     const same = (await (await post('p-a', { name: 'same', kind: 'source', brief: 'x', project: 'p-a' })).json()) as { received: Record<string, unknown> };
     expect(same.received.project).toBe('p-a');
+    const padded = (await (await post('p-a', { name: 'padded', kind: 'source', brief: 'x', project: '  p-a  ' })).json()) as { received: Record<string, unknown> };
+    expect(padded.received.project).toBe('p-a');
+    const numeric = await post('p-a', { name: 'num', kind: 'source', brief: 'x', project: 7 });
+    expect(numeric.status).toBe(400);
+    expect(((await numeric.json()) as { code: string }).code).toBe('project_mismatch');
   }, 30_000);
 
   it('REFUSES an AMBIGUOUS alias — a name shared by two member repos — listing the candidates; the id resolves it (codex on #506)', async () => {

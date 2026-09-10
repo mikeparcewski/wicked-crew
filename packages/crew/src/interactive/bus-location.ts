@@ -33,12 +33,22 @@ import { basename, dirname, resolve } from 'node:path';
 export type CrewBusSource = 'flag-or-env-db' | 'env-data-dir' | 'core-db-sidecar';
 
 export interface CrewBusLocation {
-  /** The bus db every cross-product seam opens. */
+  /** The bus db every cross-product seam opens — always `<dataDir>/bus.db`. */
   dbPath: string;
-  /** The directory handed to the spawned bridge as `WICKED_BUS_DATA_DIR`; `null` when the explicit
-   *  db file is not named `bus.db` (wicked-bus cannot be pointed at it through a data dir). */
-  dataDir: string | null;
+  /** The directory handed to the spawned bridge as `WICKED_BUS_DATA_DIR` — the SAME database the
+   *  seams open, by construction (an explicit db not named `bus.db` is refused, see {@link CrewBusError}). */
+  dataDir: string;
   source: CrewBusSource;
+}
+
+/** An explicit bus db wicked-bus cannot share with the bridge (its file is not `bus.db`) — a boot
+ *  error, not a warning: the alternative is a daemon and a bridge on two different buses (codex on
+ *  crew#506). */
+export class CrewBusError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CrewBusError';
+  }
 }
 
 export interface CrewBusInput {
@@ -67,11 +77,21 @@ export function busDataDirOf(busDbPath: string): string | null {
   return basename(abs) === 'bus.db' ? dirname(abs) : null;
 }
 
-/** Resolve the cross-product bus for one daemon — pure, so two `--db` inputs can be compared. */
+/** Resolve the cross-product bus for one daemon — pure, so two `--db` inputs can be compared.
+ *  Throws {@link CrewBusError} for an explicit db whose file is not `bus.db`. */
 export function resolveCrewBus(input: CrewBusInput): CrewBusLocation {
   if (input.explicitDb !== undefined && input.explicitDb !== '') {
     const dbPath = resolve(input.explicitDb);
-    return { dbPath, dataDir: busDataDirOf(dbPath), source: 'flag-or-env-db' };
+    const dataDir = busDataDirOf(dbPath);
+    if (dataDir === null) {
+      throw new CrewBusError(
+        `--bus-db / WICKED_BUS_DB names ${dbPath}, but wicked-bus reaches a bus only through a data DIRECTORY ` +
+          `whose file is always bus.db (WICKED_BUS_DATA_DIR), so the wicked-interactive bridge could never be ` +
+          `pointed at this database and the daemon and its bridge would sit on two different buses. Name the ` +
+          `file ${resolve(dirname(dbPath), 'bus.db')} (or set WICKED_BUS_DATA_DIR=${dirname(dbPath)}) instead.`,
+      );
+    }
+    return { dbPath, dataDir, source: 'flag-or-env-db' };
   }
   if (input.envDataDir !== undefined && input.envDataDir !== '') {
     const dataDir = resolve(input.envDataDir);

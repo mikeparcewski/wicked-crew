@@ -47,7 +47,8 @@ import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
-import type { CREATE_UNDETERMINED, DocCreateRefusal } from '../src/interactive/proxy-routes.js';
+import type { CREATE_UNDETERMINED, DocCreateBody, DocCreateRefusal } from '../src/interactive/proxy-routes.js';
+import type { SeamStatusPayload } from '../src/interactive/draft-events.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -79,6 +80,14 @@ respondsWith<DocCreateRefusal['code'], Wire.InteractiveDocCreateRefusal['code']>
 respondsWith<Wire.InteractiveDocCreateRefusal['code'], DocCreateRefusal['code']>();
 respondsWith<string[], DocCreateRefusal['requested']>();
 respondsWith<Wire.InteractiveDocCreateUndetermined, typeof CREATE_UNDETERMINED>();
+// The REQUEST the proxy reads IS the published create body (both directions), and every frame the
+// four seams emit on `status.posted` satisfies the published `InteractiveStatusPosted` once
+// `emitInteractive` stamps `ts` (codex on #506: request/frame mappings, not just refusals).
+respondsWith<Wire.InteractiveDocCreateRequest, DocCreateBody>();
+respondsWith<DocCreateBody, Wire.InteractiveDocCreateRequest>();
+respondsWith<Wire.InteractiveStatusPosted, SeamStatusPayload & { ts: string }>();
+respondsWith<Wire.InteractiveStatusPosted['state'], SeamStatusPayload['state']>();
+respondsWith<SeamStatusPayload['state'], Wire.InteractiveStatusPosted['state']>();
 
 // GET /runs and GET /runs/:id — the run list / run detail payloads.
 respondsWith<Wire.SessionView[], Awaited<ReturnType<CoreAdapter['sessionsDetail']>>>();

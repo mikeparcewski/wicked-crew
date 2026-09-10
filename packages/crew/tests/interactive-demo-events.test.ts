@@ -365,6 +365,9 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        // The registry can always be LISTED (a core adapter method) — the run-dir guard fails
+        // closed on an unlistable registry (codex on #506). Tests that need repos override it.
+        listRepos: async () => [],
       } as unknown as CoreAdapter;
     },
   };
@@ -697,6 +700,51 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     // The error frame carries project_id like every other (F-045).
     const error = probeEvents.find((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')!;
     expect((error.payload as { project_id?: string }).project_id).toBe('proj-7');
+  });
+
+  it('FAILS CLOSED when the registry cannot be listed — refused with a status before anything is created, the live tree byte-identical (codex CRITICAL on #506)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = join(dir, 'app-repo-2');
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'app.ts'), 'export const app = 2;\n', 'utf8');
+    const before = JSON.stringify(readdirDeep(repoRoot));
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-app' }],
+      listRepos: async () => {
+        throw new Error('engine hiccup: registry unavailable');
+      },
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const demoDir = join(repoRoot, 'inbox');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir,
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('could not be verified against the registered repositories'),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    expect(engine.launches.length).toBe(0);
+    expect(sub!.ledger.has('checkout-demo')).toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(fileExists(demoDir)).toBe(false);
+    expect(JSON.stringify(readdirDeep(repoRoot))).toBe(before);
   });
 
   it('marks the doc BUSY across the whole pre-launch window — a replayed doc.created during the registry/snapshot awaits never double-launches, and stop() sweeps a half-made snapshot (Copilot on #506)', async () => {

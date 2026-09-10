@@ -453,11 +453,13 @@ function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        // The registry can always be LISTED (the real adapter's `listRepos` is a core method) — the
+        // run-dir guard fails closed on an unlistable registry (codex on #506), so a fake that
+        // cannot list would refuse every launch. Membership stays optional: no repo world = a
+        // project the engine cannot answer members for (the pre-existing degradation path).
+        listRepos: async () => repoWorld?.repos ?? [],
         ...(repoWorld !== undefined
-          ? {
-              projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [],
-              listRepos: async () => repoWorld.repos ?? [],
-            }
+          ? { projectMembers: async (projectId: string) => repoWorld.members?.[projectId] ?? [] }
           : {}),
       } as unknown as CoreAdapter;
     },
@@ -1556,6 +1558,44 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     // The live checkout is byte-for-byte what it was.
     expect(JSON.stringify(readdirDeep(other))).toBe(before);
     expect(logged.some((m) => m.includes('REFUSING launch'))).toBe(true);
+  });
+
+  it('FAILS CLOSED when the registry cannot be listed — a launch whose inbox cannot be PROVEN clear of every repo is refused, with a status, nothing created (codex CRITICAL on #506)', async () => {
+    const bus = await import('wicked-bus');
+    const checkout = seedRepoFixture('some-checkout');
+    const before = JSON.stringify(readdirDeep(checkout));
+    const engine = fakeAdapter({ members: { 'proj-bare': [{ member_kind: 'crew.run', member_ref: 'run-1' }] }, repos: [] });
+    const adapter = engine.asAdapter();
+    (adapter as unknown as { listRepos: unknown }).listRepos = async () => {
+      throw new Error('engine hiccup: registry unavailable');
+    };
+    const draftDir = join(checkout, 'inbox'); // would be inside a live checkout — and cannot be checked
+    const sub = await startInteractiveDraftSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'ledger.json'),
+      draftDir,
+      clisJson: SEATS,
+      log: () => {},
+    });
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus, 'unverifiable', { project_id: 'proj-bare' });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('could not be verified against the registered repositories'),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    expect(engine.launches.length).toBe(0);
+    expect(sub!.ledger.has('unverifiable')).toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(existsSync(draftDir)).toBe(false);
+    expect(JSON.stringify(readdirDeep(checkout))).toBe(before);
   });
 
   it('F-046: the seam WAITS for an in-flight create to record its binding — the bus can beat the create answer by a few ms', async () => {

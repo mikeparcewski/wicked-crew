@@ -98,6 +98,16 @@ export function docScope(
   return projectId !== undefined ? { document_id: documentId, project_id: projectId } : { document_id: documentId };
 }
 
+/** What every seam's `status.posted` payload carries (before `emitInteractive` stamps `ts`) — the
+ *  produced side of the published `InteractiveStatusPosted` frame (wire-contract.test.ts). */
+export interface SeamStatusPayload {
+  document_id: string;
+  project_id?: string;
+  state: 'processing' | 'working' | 'asking' | 'complete' | 'error';
+  message?: string;
+  version?: number;
+}
+
 /** How long a seam waits for the proxy to record a document's create-time grounding binding when
  *  a create for the same project is still in flight (doc-grounding.ts `waitFor`): the bridge emits
  *  `doc.created` before it answers the create, so the bus can beat the record by a few ms. */

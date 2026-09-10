@@ -2762,6 +2762,21 @@ export interface InteractiveDocCreateRequest {
 }
 
 /**
+ * The bridge's answer to a successful `POST /projects/:projectId/interactive/api/docs`, relayed
+ * verbatim by crew's proxy (api-types 0.30.0): interactive's `{ name, head, … }` — `generating`
+ * for a `kind: "source"` doc whose first draft a governed run now produces, `learning` for a demo,
+ * `project_id` echoed for a project-bound doc.
+ */
+export interface InteractiveDocCreateResult {
+  name: string;
+  head: number;
+  kind?: 'doc' | 'demo';
+  generating?: boolean;
+  learning?: boolean;
+  project_id?: string;
+}
+
+/**
  * Crew's 400 on `POST /projects/:projectId/interactive/api/docs` when the request names a
  * repository the document cannot be grounded on (F-046; api-types 0.30.0). Nothing was created
  * on the bridge.

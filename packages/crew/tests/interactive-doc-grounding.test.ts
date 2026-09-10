@@ -10,7 +10,7 @@
 //    `waitFor` closes the bus-beats-create window without ever hanging.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -251,6 +251,14 @@ describe('groundingNarration (the thread line — F-046 follow-up) + snapshotDir
   });
 });
 
+function readdirSyncSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create window)', () => {
   let dir: string;
   let root: string;
@@ -314,6 +322,63 @@ describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create wi
     store.record(join(dir, 'root-link'), 'plain-doc', { project_id: 'p', repo_refs: ['r'] });
     expect(existsSync(join(root, 'plain-doc', CREW_GROUNDING_FILE))).toBe(true);
     expect(store.get(join(dir, 'root-link'), 'plain-doc')?.repo_refs).toEqual(['r']);
+  });
+
+  it('the lstat→open window is closed (codex on #506): a sidecar swapped for a link between the checks and the open is never read, never followed', () => {
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.json'), JSON.stringify({ project_id: 'evil', repo_refs: ['stolen'] }), 'utf8');
+    mkdirSync(join(root, 'doc'), { recursive: true });
+    const sidecar = join(root, 'doc', CREW_GROUNDING_FILE);
+    writeFileSync(sidecar, JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    // The race, made deterministic: between the path checks and the descriptor open, an attacker
+    // replaces the regular file with a link out of the root.
+    const swapping = new DocGroundingStore({
+      afterLstat: (path) => {
+        rmSync(path);
+        symlinkSync(join(outside, 'secret.json'), path);
+      },
+    });
+    expect(swapping.get(root, 'doc')).toBeUndefined(); // O_NOFOLLOW refuses the link; nothing outside is read
+    // …and a swap for a DIFFERENT regular file is caught by the dev/ino identity check.
+    writeFileSync(join(root, 'doc', 'other.json'), JSON.stringify({ project_id: 'p2', repo_refs: ['r2'] }), 'utf8');
+    rmSync(sidecar);
+    writeFileSync(sidecar, JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    const replacing = new DocGroundingStore({
+      afterLstat: (path) => {
+        renameSync(join(root, 'doc', 'other.json'), path);
+      },
+    });
+    expect(replacing.get(root, 'doc')).toBeUndefined();
+    // A quiet store reads it fine.
+    expect(new DocGroundingStore().get(root, 'doc')?.repo_refs).toEqual(['r2']);
+  });
+
+  it('writes go through an EXCLUSIVE random temp and a rename: a pre-planted link at the old predictable temp name, or at the sidecar path itself, is never written through (codex on #506)', () => {
+    const outside = join(dir, 'outside2');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'target.json'), 'pristine', 'utf8');
+    mkdirSync(join(root, 'doc2'), { recursive: true });
+    const sidecar = join(root, 'doc2', CREW_GROUNDING_FILE);
+    // The old predictable temp spelling, planted as a link out of the root.
+    symlinkSync(join(outside, 'target.json'), `${sidecar}.tmp-${process.pid}`);
+    new DocGroundingStore().record(root, 'doc2', { project_id: 'p', repo_refs: ['r'] });
+    expect(readFileSync(join(outside, 'target.json'), 'utf8')).toBe('pristine');
+    expect(new DocGroundingStore().get(root, 'doc2')?.repo_refs).toEqual(['r']);
+    // A link planted at the SIDECAR PATH after the checks: the rename replaces the link itself;
+    // its target is never written.
+    const planting = new DocGroundingStore({
+      afterLstat: (path) => {
+        rmSync(path, { force: true });
+        symlinkSync(join(outside, 'target.json'), path);
+      },
+    });
+    planting.record(root, 'doc2', { project_id: 'p', repo_refs: ['r3'] });
+    expect(readFileSync(join(outside, 'target.json'), 'utf8')).toBe('pristine');
+    expect(new DocGroundingStore().get(root, 'doc2')?.repo_refs).toEqual(['r3']);
+    // No RANDOM temp lingers (the planted link at the old predictable name is the test's own fixture).
+    expect(readdirSyncSafe(join(root, 'doc2')).filter((n) => n.startsWith(`.${CREW_GROUNDING_FILE}.`) && n.endsWith('.tmp'))).toEqual([]);
+    expect(readdirSyncSafe(join(root, 'doc2')).sort()).toEqual([CREW_GROUNDING_FILE, `${CREW_GROUNDING_FILE}.tmp-${process.pid}`]);
   });
 
   it('never names a path for an id outside the doc grammar, and reads a malformed sidecar as "nothing named"', () => {

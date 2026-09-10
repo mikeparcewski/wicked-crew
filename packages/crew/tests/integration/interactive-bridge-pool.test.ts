@@ -11,11 +11,12 @@
 //   - `busDataDirOf` maps a bus.db path to its directory and any other spelling to null.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  BridgeUnavailableError,
   CREW_SIDECAR_NAME,
   InteractiveBridgePool,
   LOCK_NAME,
@@ -150,11 +151,12 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(existsSync(join(root, CREW_SIDECAR_NAME))).toBe(true);
   }, 30_000);
 
-  it('ADOPTS a crew-started bridge whose recorded pair matches (no spawn), and RECYCLES one recorded with a DIFFERENT pair — killed, restarted with the right env, sidecar rewritten', async () => {
+  it('ADOPTS a crew-started bridge whose recorded pair matches (no spawn); a DIFFERENT pair whose owner daemon is GONE is recycled — killed, restarted with the right env, sidecar rewritten', async () => {
     const root = join(dir, 'root-b');
     const first = poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') });
     const b1 = await first.ensure(root);
     const spawnsAfterFirst = spawns.length;
+    expect(readCrewSidecar(root)?.ownerPid).toBe(process.pid);
 
     // A second daemon with the SAME pair (a restart of this one) adopts silently.
     const logged: string[] = [];
@@ -164,10 +166,14 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(spawns.length).toBe(spawnsAfterFirst);
     expect(logged).toEqual([]);
 
-    // A daemon on ANOTHER port with ANOTHER bus (F-043's two-daemon host) must not share it:
-    // the pool recycles the bridge instead of adopting a bridge that emits elsewhere.
-    const sibling = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, (m) => logged.push(m));
-    const b3 = await sibling.ensure(root);
+    // The owning daemon EXITED (a previous daemon on this root): its bridge, recorded with a
+    // different pair, is nobody's — recycle it so the new daemon's events reach the new daemon.
+    const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
+    const sidecar = readCrewSidecar(root)!;
+    writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...sidecar, ownerPid: deadOwner }), 'utf8');
+    expect(pidAlive(deadOwner)).toBe(false);
+    const successor = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, (m) => logged.push(m));
+    const b3 = await successor.ensure(root);
     expect(b3.pid).not.toBe(b1.pid);
     expect(spawns.length).toBe(spawnsAfterFirst + 1);
     await waitFor(() => !pidAlive(b1.pid));
@@ -175,6 +181,31 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(await envSeenBy(root)).toEqual({ crew: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') });
     expect(readCrewSidecar(root)?.pid).toBe(b3.pid);
     expect(readCrewSidecar(root)?.env.WICKED_CREW_API).toBe('http://127.0.0.1:7701');
+  }, 60_000);
+
+  it('NEVER kills a bridge another LIVE daemon owns (codex on #506): a foreign healthy bridge is left running and this daemon is refused with the fix named', async () => {
+    const root = join(dir, 'root-d');
+    const owner = poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') });
+    const theirs = await owner.ensure(root);
+    // The sidecar names a DIFFERENT daemon that is still alive (this very test process stands in
+    // for it — any live pid that is not `process.pid` of the adopting daemon would do; we spoof
+    // the owner as a live helper process).
+    const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    children.push(helper);
+    const sidecar = readCrewSidecar(root)!;
+    writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...sidecar, ownerPid: helper.pid }), 'utf8');
+    const logged: string[] = [];
+    const spawnsBefore = spawns.length;
+    const intruder = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, (m) => logged.push(m));
+    await expect(intruder.ensure(root)).rejects.toBeInstanceOf(BridgeUnavailableError);
+    await expect(intruder.ensure(root)).rejects.toThrow(/owned by another running crew daemon/);
+    expect(pidAlive(theirs.pid), 'the foreign bridge must still be running').toBe(true);
+    expect(spawns.length).toBe(spawnsBefore);
+    expect(logged.some((m) => m.includes('NOT recycling'))).toBe(true);
+    const hint = await intruder.ensure(root).catch((e: BridgeUnavailableError) => e.hint);
+    expect(String(hint)).toContain('WICKED_INTERACTIVE_ROOT');
+    expect(readCrewSidecar(root)?.pid).toBe(theirs.pid); // untouched
+    helper.kill('SIGKILL');
   }, 60_000);
 
   it('ADOPTS a bridge nobody recorded (operator-run / pre-upgrade) with a warning that names the pid and the fix — never kills it', async () => {

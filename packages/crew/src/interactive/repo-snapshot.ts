@@ -333,31 +333,52 @@ export async function snapshotRepo(
   }
 }
 
+/** The registry could not be enumerated or a registered root could not be resolved — the inbox
+ *  cannot be PROVEN clear, so the caller refuses the launch (codex on crew#506: fail closed). */
+export class RunDirUnverifiableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunDirUnverifiableError';
+  }
+}
+
 /**
  * The registered repository whose root a run's inbox would sit INSIDE (or contain), or `null` when
- * the inbox is clear of every registered repo (codex on crew#506, CRITICAL). A seam declares its
- * per-run directory as the worker's extra write root, so an inbox configured inside a live
- * repository — `--interactive-*-dir` pointing into a checkout, or a repo registered AT the inbox —
- * would hand the unbound worker write access to live source no matter what the run is about. The
- * per-repo snapshot check catches only the repo being snapshotted; this walks the whole registry
- * BEFORE anything is created. Realpath'd both sides (symlinked parents cannot hide an overlap);
- * a repo root that cannot be resolved is skipped (it cannot be written through either). An
- * adapter that cannot list repos yields `null` — the seams' own snapshot check still stands.
+ * the inbox is PROVABLY clear of every registered repo (codex on crew#506, CRITICAL). A seam
+ * declares its per-run directory as the worker's extra write root, so an inbox configured inside a
+ * live repository — `--interactive-*-dir` pointing into a checkout, or a repo registered AT the
+ * inbox — would hand the unbound worker write access to live source no matter what the run is
+ * about. The per-repo snapshot check catches only the repo being snapshotted; this walks the WHOLE
+ * registry BEFORE anything is created, realpath'd both sides (symlinked parents cannot hide an
+ * overlap).
+ *
+ * FAIL CLOSED: a registry that cannot be listed (engine/addon hiccup) or a root that cannot be
+ * resolved for any reason but plain ENOENT THROWS {@link RunDirUnverifiableError} — "could not
+ * check" is never read as "clear". A root that does not exist (ENOENT — a stale registration) is
+ * compared by its resolved spelling instead: a directory that is not there cannot be written
+ * through, but a lexical overlap still counts.
  */
 export async function runDirInsideRepo(adapter: CoreAdapter, runDir: string): Promise<string | null> {
-  let repos: Array<{ root_path: string }>;
+  let repos: Array<{ id?: string; root_path: string }>;
   try {
     repos = await adapter.listRepos();
-  } catch {
-    return null;
+  } catch (err) {
+    throw new RunDirUnverifiableError(
+      `the repository registry could not be listed (${err instanceof Error ? err.message : String(err)})`,
+    );
   }
   const realRun = await realpathNearest(runDir);
   for (const repo of repos) {
     let realRoot: string;
     try {
       realRoot = await realpath(repo.root_path);
-    } catch {
-      continue;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new RunDirUnverifiableError(
+          `registered repository ${repo.root_path} could not be resolved (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+      realRoot = resolve(repo.root_path);
     }
     if (pathsOverlap(realRoot, realRun)) return repo.root_path;
   }
