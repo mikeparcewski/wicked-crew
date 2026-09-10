@@ -155,6 +155,24 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env: { [SKILLS_SOURCE_ENV]: join(livePluginCacheDir(otherCfg), '1.0.0') }, home })?.kind).toBe('claude-plugin-cache');
   });
 
+  it('two cache dirs declaring the SAME plugin version tie on version and the higher-NAMED dir wins — by the total order, never readdir order (Copilot on #491)', () => {
+    // A rebuilt/backup dir beside the release, both declaring 12.32.0: `12.32.0-rebuild` sorts BELOW
+    // `12.32.0` as a dir name, so the release-named dir is the pick — whichever the filesystem lists first.
+    plugin(join(livePluginCacheDir(cfg), '12.32.0-rebuild'), '12.32.0');
+    plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
+    expect(discoverLivePlugin({ env: {}, home })).toEqual({ path: join(livePluginCacheDir(cfg), '12.32.0'), kind: 'claude-plugin-cache', plugin_version: '12.32.0' });
+    // Created in the opposite order in a second home: the same pick.
+    const otherHome = mkdtempSync(join(tmpdir(), 'skills-source-tie-'));
+    extraHomes.push(otherHome);
+    const otherCfg = join(otherHome, '.claude');
+    plugin(join(livePluginCacheDir(otherCfg), '12.32.0'), '12.32.0');
+    plugin(join(livePluginCacheDir(otherCfg), '12.32.0-rebuild'), '12.32.0');
+    expect(discoverLivePlugin({ env: {}, home: otherHome })?.path).toBe(join(livePluginCacheDir(otherCfg), '12.32.0'));
+    // The declared version still decides first: a lower-named dir declaring a HIGHER version wins over both.
+    plugin(join(livePluginCacheDir(cfg), '0-staging'), '12.33.0');
+    expect(discoverLivePlugin({ env: {}, home })?.path).toBe(join(livePluginCacheDir(cfg), '0-staging'));
+  });
+
   it('a prerelease never outranks its release, and the pick among prereleases is deterministic (never readdir order — Copilot on #480)', () => {
     plugin(join(livePluginCacheDir(cfg), '12.32.0-beta.2'), '12.32.0-beta.2');
     plugin(join(livePluginCacheDir(cfg), '12.32.0-alpha'), '12.32.0-alpha');

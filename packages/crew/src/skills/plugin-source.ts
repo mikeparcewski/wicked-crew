@@ -259,12 +259,17 @@ interface Candidate {
   plugin_version: string;
 }
 
-/** Every version dir of a config dir's marketplace cache that is a plugin root (no-follow below each). */
+/**
+ * Every version dir of a config dir's marketplace cache that is a plugin root (no-follow below each),
+ * in DESCENDING dir-name order by the same total order the pick uses — never `readdir` order (Copilot
+ * on #480 and #491): two dirs whose `plugin.json` declares the same version tie on that version, and
+ * `highest` keeps the earlier candidate, so the tie goes to the higher-named dir, reproducibly.
+ */
 function cacheCandidates(configDir: string): Candidate[] {
   const cache = livePluginCacheDir(configDir);
   if (!existsSync(cache)) return [];
   const found: Candidate[] = [];
-  for (const entry of readdirSync(cache)) {
+  for (const entry of readdirSync(cache).sort((a, b) => compareVersions(b, a))) {
     const dir = join(cache, entry);
     const version = pluginVersionAt(dir);
     if (version !== null) found.push({ path: dir, plugin_version: version });
@@ -279,7 +284,12 @@ function copyCandidate(configDir: string): Candidate | null {
   return version === null ? null : { path: dir, plugin_version: version };
 }
 
-/** The highest plugin version among a tier's candidates (`compareVersions`); an equal version keeps the earlier candidate. */
+/**
+ * The highest declared plugin version among a tier's candidates (`compareVersions`). An EQUAL version
+ * keeps the earlier candidate — and every candidate list here is built in a deterministic order (a
+ * cache's dirs by descending name, config dirs as listed, then `~/.claude`), so the pick never
+ * depends on the filesystem.
+ */
 function highest(candidates: ReadonlyArray<Candidate>): Candidate | null {
   let best: Candidate | null = null;
   for (const c of candidates) if (best === null || compareVersions(c.plugin_version, best.plugin_version) > 0) best = c;
