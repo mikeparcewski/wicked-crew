@@ -65,6 +65,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Read by the `probe` job below (#514).
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      published: ${{ steps.publish.outputs.published }}
     defaults:
       run:
         working-directory: packages/agent-acp-bridges
@@ -104,6 +108,7 @@ jobs:
       # silently would let `bridges-v9.9.9` publish whatever the manifest happens to say — the
       # tag would then describe a release that does not exist. Compare instead, and fail loudly.
       - name: Tag and manifest must agree
+        id: version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#bridges-v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
@@ -113,23 +118,96 @@ jobs:
             echo "::error::tag ${GITHUB_REF_NAME} implies ${TAG_VERSION} but package.json says ${PKG_VERSION}. Bump the manifest and re-tag rather than publishing a version the tag does not name."
             exit 1
           fi
+          echo "version=${TAG_VERSION}" >> "$GITHUB_OUTPUT"
 
+      # The log is kept so the `probe` job can tell "published, registry still processing" apart
+      # from "never published": npm ends a successful publish with the line `+ <pkg>@<ver>` (#514).
+      # `pipefail` so a failed publish still fails this step through the tee.
       - name: Publish to npm (trusted publisher + provenance)
-        run: npm publish --access public --provenance
-
-      # Prove the thing that FINDING-096 is actually about: not "publish exited 0", but "an
-      # operator can now obtain it". The registry is eventually consistent, so retry briefly.
-      - name: The registry can actually serve it
-        working-directory: .
+        id: publish
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#bridges-v}"
-          for i in 1 2 3 4 5 6; do
-            if npm view "agent-acp-bridges@${TAG_VERSION}" version; then
-              echo "  ok — obtainable from the registry"
+          set -o pipefail
+          npm publish --access public --provenance 2>&1 | tee "$RUNNER_TEMP/npm-publish.log"
+          if grep -Fq -- "+ agent-acp-bridges@${VERSION}" "$RUNNER_TEMP/npm-publish.log"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Prove the registry can actually serve the package — not just that publish exited 0 ──────────
+  #
+  # A separate JOB rather than a step of `release` (#514): npm processes a publish asynchronously
+  # and its own notice says "may take a few minutes"; 0.31.0 took ~8 min to become resolvable (run
+  # 34524261398), so the old in-job 6 × 10 s probe reported a successful release as a failed run —
+  # and "Re-run failed jobs" would have re-run `npm publish` too (EPUBLISHCONFLICT). As its own job
+  # the probe can be re-run alone, with the release job's outputs telling it whether the publish
+  # step actually reported `+ <pkg>@<ver>`, so the failure names the real cause.
+  # release-api-types.yml carries the identical probe job (it mirrored this one, FINDING-096): keep
+  # the two shell blocks identical — only the job `env` differs.
+  probe:
+    name: The registry can actually serve it
+    needs: release
+    # Runs even when `release` FAILED (Copilot on #520): under the default success condition a failed
+    # `npm publish` would leave this job skipped, and the message naming the real publish failure
+    # would never print. Guarded on the version output so a failure before the tag check (nothing to
+    # probe for) still skips; `!cancelled()` rather than `always()` so a cancelled run stays cancelled.
+    if: ${{ !cancelled() && needs.release.outputs.version != '' }}
+    runs-on: ubuntu-latest
+    # No checkout and no OIDC: `npm view` against the public registry needs neither.
+    permissions: {}
+    env:
+      PACKAGE: agent-acp-bridges
+      VERSION: ${{ needs.release.outputs.version }}
+      PUBLISHED: ${{ needs.release.outputs.published }}
+      PROBE_MAX_MINUTES: '10'
+      PROBE_INTERVAL_SECONDS: '30'
+    steps:
+      - name: Poll until the registry resolves the version (up to 10 min)
+        run: |
+          # `timeout 60` on every lookup: npm's own fetch timeout is 5 min with retries, so an
+          # unbounded `npm view` could outlive the deadline below (Copilot on #520).
+          #
+          # PUBLISHED is empty when the publish step failed or never ran. One look at the registry
+          # tells the two failures apart: a re-run of an already-published tag fails `npm publish`
+          # with EPUBLISHCONFLICT although the version is obtainable — the very re-run #514 warns
+          # against — whereas a real publish failure leaves nothing to poll for.
+          if [ -z "$PUBLISHED" ]; then
+            if served="$(timeout 60 npm view --prefer-online "${PACKAGE}@${VERSION}" version)" \
+               && [ "$served" = "$VERSION" ]; then
+              echo "::warning::the release job's publish step failed, yet the registry already serves ${PACKAGE}@${VERSION}: a re-run of an already-published tag (npm refuses to publish over an existing version, EPUBLISHCONFLICT). The release is fine; the failed publish step belongs to the re-run, not to the release."
               exit 0
             fi
-            echo "  not visible yet (attempt $i), waiting…"
-            sleep 10
+            echo "::error::the release job's publish step failed or did not run, and the registry does not serve ${PACKAGE}@${VERSION}: a REAL publish failure. Nothing to poll for — read the release job's publish step log; re-running this probe cannot fix it."
+            exit 1
+          fi
+          # `--prefer-online`: the registry serves packuments with `cache-control: max-age=300`, so
+          # without it a 30 s poll can keep re-reading the stale, pre-publish packument from npm's
+          # local cache for five minutes after the registry has caught up.
+          started="$(date +%s)"
+          deadline=$(( started + PROBE_MAX_MINUTES * 60 ))
+          attempt=0
+          while :; do
+            attempt=$(( attempt + 1 ))
+            if served="$(timeout 60 npm view --prefer-online "${PACKAGE}@${VERSION}" version)" \
+               && [ "$served" = "$VERSION" ]; then
+              echo "  ok — ${PACKAGE}@${VERSION} is obtainable from the registry after $(( $(date +%s) - started ))s (attempt ${attempt})"
+              if [ "$PUBLISHED" != "true" ]; then
+                echo "::warning::npm publish exited 0 without printing '+ ${PACKAGE}@${VERSION}', yet the registry serves that version. Check the release job's publish log — the success marker this probe keys on may have changed shape."
+              fi
+              exit 0
+            fi
+            now="$(date +%s)"
+            if [ "$now" -ge "$deadline" ]; then
+              break
+            fi
+            echo "  not visible yet — attempt ${attempt}, $(( now - started ))s elapsed of ${PROBE_MAX_MINUTES} min; next check in ${PROBE_INTERVAL_SECONDS}s"
+            sleep "$PROBE_INTERVAL_SECONDS"
           done
-          echo "::error::agent-acp-bridges@${TAG_VERSION} is still not resolvable after publish. This is the exact failure mode FINDING-096 describes: a green publish for something no operator can install."
+          if [ "$PUBLISHED" = "true" ]; then
+            echo "::error::${PACKAGE}@${VERSION} WAS published (npm publish reported '+ ${PACKAGE}@${VERSION}') but the registry has not finished processing it after ${PROBE_MAX_MINUTES} minutes. Re-run ONLY this job (Re-run failed jobs) — never the release job: a second npm publish of the same version fails with EPUBLISHCONFLICT."
+          else
+            echo "::error::npm publish did not report '+ ${PACKAGE}@${VERSION}' and the registry does not serve it after ${PROBE_MAX_MINUTES} minutes: a REAL publish failure. Read the release job's publish step log; re-running this probe cannot fix it."
+          fi
           exit 1
