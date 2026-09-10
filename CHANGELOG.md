@@ -20,8 +20,10 @@ mentioned only where a daemon release depends on them.
   `tests/fixtures/state-home-subtrees.json`) gains the `repo-graphs` entry (owner `engine`,
   `worker_read: none`) so the worker Read fence classifies and denies the subtree rather than
   refusing every governed launch on a daemon that has indexed a repo. Crew spells no new path: it
-  keeps reading the engine's `code_graph_db` off the repo record (`repoPaths.ts`), which now also
-  carries an additive `findings` array (e.g. `in_tree_code_graph_ignored`) the repo card can show.
+  keeps reading the engine's `code_graph_db` off the repo record (`repoPaths.ts`). The record now
+  also carries an additive `findings` array (e.g. `in_tree_code_graph_ignored`) the repo card can
+  show — declared in `wicked-crew-api-types` as `RepoEntry.findings?: RepoFinding[]` (additive; the
+  package version moves at its next release).
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
