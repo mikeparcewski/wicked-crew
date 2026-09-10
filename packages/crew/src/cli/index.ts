@@ -233,8 +233,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   if (legacyOutbox !== null && legacyOutbox.path !== governanceStore.outboxPath) {
     console.warn(
       `[crew] a pre-fix dead-letter outbox exists under HOME at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
-        `governance events earlier daemons could not store; inspect with ${replayCommand(legacyOutbox.path)} --dry-run, ` +
-        'then replay it into this daemon\'s store',
+        `governance events earlier daemons could not store; inspect with ${replayCommand(legacyOutbox.path, governanceStore)} --dry-run, ` +
+        'then replay it into this daemon\'s store with the same command',
     );
   }
   const adapter = new CoreAdapter({

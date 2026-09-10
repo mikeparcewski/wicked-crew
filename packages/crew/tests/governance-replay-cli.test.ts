@@ -15,7 +15,16 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CoreAdapter } from '../src/core/adapter.js';
-import { archiveNameFor, GOVERNANCE_USAGE, replayOutbox, replayTarget, restoreOutbox, UsageError } from '../src/cli/governance.js';
+import {
+  appendLines,
+  archiveNameFor,
+  endsWithNewline,
+  GOVERNANCE_USAGE,
+  replayOutbox,
+  replayTarget,
+  restoreOutbox,
+  UsageError,
+} from '../src/cli/governance.js';
 import { governanceSidecarDb, resolveGovernanceStore } from '../src/core/governance-store.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -134,6 +143,34 @@ describe('replayOutbox (the command body)', () => {
     rmSync(outbox);
     await restoreOutbox(outbox, archive);
     expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n`);
+
+    // The LIVE file is mid-record (the daemon is writing) → the restore lands behind a separator,
+    // never concatenated onto the half-written record; both repairs ride inside the data writes.
+    writeFileSync(archive, `${RECORD_B}`, 'utf8'); // no trailing newline either
+    writeFileSync(outbox, `${TORN}`, 'utf8'); // torn live tail, no newline
+    await restoreOutbox(outbox, archive);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n${RECORD_B}\n`);
+    expect(existsSync(archive)).toBe(false);
+    // An EMPTY archive restores nothing and is simply removed.
+    writeFileSync(archive, '', 'utf8');
+    await restoreOutbox(outbox, archive);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${TORN}\n${RECORD_B}\n`);
+    expect(existsSync(archive)).toBe(false);
+  });
+
+  it('appendLines keeps the failed batch on its own lines even when the live outbox ends mid-record; a missing file is created (Copilot on #516)', () => {
+    fixture();
+    const outbox = join(scratch as string, 'live.ndjson');
+    expect(endsWithNewline(outbox)).toBe(true); // absent → nothing to join onto
+    appendLines(outbox, [RECORD_A]);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n`);
+    expect(endsWithNewline(outbox)).toBe(true);
+    writeFileSync(outbox, `${RECORD_A}\n${TORN}`, 'utf8'); // the daemon is mid-record
+    expect(endsWithNewline(outbox)).toBe(false);
+    appendLines(outbox, [RECORD_B, TORN]);
+    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n${RECORD_B}\n${TORN}\n`);
+    appendLines(outbox, []); // nothing to append → untouched
+    expect(readFileSync(outbox, 'utf8')).toBe(`${RECORD_A}\n${TORN}\n${RECORD_B}\n${TORN}\n`);
   });
 
   it.runIf(!CoreAdapter.replayEmitOutboxSupported())(

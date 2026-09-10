@@ -110,6 +110,8 @@ export interface GovernanceStoreLocation {
   outboxSource: GovernanceOutboxSource;
   /** `<core db>.governance` — created at boot so the engine's first write never fails on a missing parent. */
   sidecarDir: string;
+  /** The daemon's core db, absolute — what `governance replay --db` names to reach the SAME sidecar. */
+  coreDbPath: string;
 }
 
 export interface GovernanceStoreInput {
@@ -187,6 +189,7 @@ export function resolveGovernanceStore(input: GovernanceStoreInput): GovernanceS
     displayPath: redactStoreSpec(dbPath),
     source,
     sidecarDir,
+    coreDbPath: resolve(input.coreDbPath),
     ...outbox,
   });
 

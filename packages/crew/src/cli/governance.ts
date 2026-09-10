@@ -31,6 +31,7 @@ import {
   createReadStream,
   createWriteStream,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -40,6 +41,7 @@ import {
   statSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -137,6 +139,82 @@ export function archiveNameFor(outbox: string, now: Date = new Date()): string {
   return `${outbox}.replayed-${now.toISOString().replace(/[:.]/g, '-')}`;
 }
 
+/** Whether an NDJSON file is at a LINE BOUNDARY: missing or empty, or its last byte is `\n`. A file
+ *  a daemon is mid-write on (a torn tail) is not, and anything appended to it would join that line. */
+export function endsWithNewline(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return true; // no file — nothing to join onto
+  }
+  try {
+    const size = fstatSize(fd);
+    if (size === 0) return true;
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    return last[0] === 0x0a;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fstatSize(fd: number): number {
+  return fstatSync(fd).size;
+}
+
+/**
+ * Keep every NDJSON line boundary intact while streaming one file onto another that a concurrent
+ * writer may also be appending to: a leading `\n` rides IN the first chunk (the live file's tail was
+ * torn when we looked), a trailing `\n` rides IN the last chunk (the source lacked one) — never as a
+ * separate write, because between two `O_APPEND` writes the other writer can land a record, and a
+ * separator written after it would join the source's torn tail to that record (Copilot on #516).
+ * Each pushed chunk is one `write()`; the last chunk is held back until the source ends so the
+ * trailing separator and the data it terminates are the same write.
+ */
+class LineBoundaryGuard extends Transform {
+  private pending: Buffer | null = null;
+  private first = true;
+
+  constructor(
+    private readonly leading: boolean,
+    private readonly trailing: boolean,
+  ) {
+    super();
+  }
+
+  override _transform(chunk: Buffer | string, _enc: BufferEncoding, cb: TransformCallback): void {
+    let c = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (this.first) {
+      this.first = false;
+      if (this.leading) c = Buffer.concat([Buffer.from('\n'), c]);
+    }
+    if (this.pending !== null) this.push(this.pending);
+    this.pending = c;
+    cb();
+  }
+
+  override _flush(cb: TransformCallback): void {
+    if (this.pending !== null) {
+      this.push(this.trailing ? Buffer.concat([this.pending, Buffer.from('\n')]) : this.pending);
+      this.pending = null;
+    }
+    cb();
+  }
+}
+
+/**
+ * Append NDJSON lines to a live outbox a daemon may be writing — one `write()`, and behind a `\n`
+ * when the file's tail is torn, so the first line never concatenates onto a half-written record
+ * (Copilot on #516). If the daemon completes its record between the look and the write, the
+ * separator becomes an empty line, which every reader skips.
+ */
+export function appendLines(outbox: string, lines: string[]): void {
+  if (lines.length === 0) return;
+  const prefix = endsWithNewline(outbox) ? '' : '\n';
+  appendFileSync(outbox, `${prefix}${lines.join('\n')}\n`, 'utf8');
+}
+
 /**
  * Put an archived outbox back after a replay that threw — APPEND-ONLY, never a rename over the
  * live path: a daemon can create a fresh outbox at any instant, and an `exists`-then-`rename` would
@@ -144,21 +222,21 @@ export function archiveNameFor(outbox: string, now: Date = new Date()): string {
  * concurrent spool is never clobbered — the file is created if absent) is loss-free in every
  * interleaving; the cost is the two batches' relative order when the daemon did spool meanwhile
  * (each entry carries its own `ts` on a stamping engine). Streamed, never the whole archive in
- * memory; the archive is removed only after its last byte is on the live outbox, and a missing
- * trailing newline is repaired so a later spool never joins onto the last restored line.
+ * memory, through {@link LineBoundaryGuard} so both boundaries — a torn live tail before, a
+ * missing trailing newline after — are repaired INSIDE the data writes, never by a separate write a
+ * concurrent spool could slip in front of. The archive is removed only after its last byte is on
+ * the live outbox.
  */
 export async function restoreOutbox(outbox: string, archive: string): Promise<void> {
   const size = statSync(archive).size;
-  await pipeline(createReadStream(archive), createWriteStream(outbox, { flags: 'a' }));
   if (size > 0) {
-    const fd = openSync(archive, 'r');
-    try {
-      const last = Buffer.alloc(1);
-      readSync(fd, last, 0, 1, size - 1);
-      if (last[0] !== 0x0a) appendFileSync(outbox, '\n', 'utf8');
-    } finally {
-      closeSync(fd);
-    }
+    const leading = !endsWithNewline(outbox);
+    const trailing = !endsWithNewline(archive);
+    await pipeline(
+      createReadStream(archive),
+      new LineBoundaryGuard(leading, trailing),
+      createWriteStream(outbox, { flags: 'a' }),
+    );
   }
   rmSync(archive);
 }
@@ -237,10 +315,11 @@ export async function replayOutbox(
     throw new Error(`replay failed and the outbox was restored to ${outbox} (nothing is lost): ${reason}`);
   }
   // 3. What did not land stays a dead letter on the live outbox (append: the daemon may have
-  //    started a fresh file already).
-  if (report.failed.length > 0) {
-    appendFileSync(outbox, `${report.failed.map((f) => f.line).join('\n')}\n`, 'utf8');
-  }
+  //    started a fresh file already — and may be mid-record on it, hence the boundary-safe append).
+  appendLines(
+    outbox,
+    report.failed.map((f) => f.line),
+  );
   return {
     outcome: {
       outbox,

@@ -41,6 +41,7 @@ describe('resolveGovernanceStore (crew#495)', () => {
       dbPath: resolve('/homes/a/.wicked-crew/core.db.governance/governance.db'),
       displayPath: resolve('/homes/a/.wicked-crew/core.db.governance/governance.db'),
       source: 'core-db-sidecar',
+      coreDbPath: resolve('/homes/a/.wicked-crew/core.db'),
       outboxPath: resolve('/homes/a/.wicked-crew/core.db.governance/emit-outbox.ndjson'),
       outboxSource: 'core-db-sidecar',
       sidecarDir: resolve('/homes/a/.wicked-crew/core.db.governance'),

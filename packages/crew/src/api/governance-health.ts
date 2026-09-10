@@ -114,6 +114,16 @@ export function reasonBucket(reason: string): string {
   return (idx >= 0 ? reason.slice(0, idx) : reason).trim();
 }
 
+/** ECMAScript `Date`'s valid range: ±8.64e15 ms around the epoch (`toISOString` THROWS outside it). */
+const MAX_EPOCH_MS = 8.64e15;
+
+/** A usable `ts`: a finite, non-negative epoch-millisecond number inside `Date`'s range. Anything
+ *  else on a spool line (a torn `1e20`, a negative, a string) is counted as untimestamped — never
+ *  a `RangeError` that turns `/diagnostics` into a 500 (Copilot on #516). */
+export function isEpochMs(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= MAX_EPOCH_MS;
+}
+
 function bump(counts: Record<string, number>, key: string, cap: number): void {
   const k = key in counts || Object.keys(counts).length < cap ? key : 'other';
   counts[k] = (counts[k] ?? 0) + 1;
@@ -165,7 +175,7 @@ export async function foldDeadletters(path: string): Promise<DeadletterFold> {
         typeof record.deadletter_reason === 'string' ? reasonBucket(record.deadletter_reason) : 'unknown',
         MAX_TYPE_KEYS,
       );
-      if (typeof record.ts === 'number' && Number.isFinite(record.ts)) {
+      if (isEpochMs(record.ts)) {
         fold.timestamped += 1;
         if (fold.oldestTs === null || record.ts < fold.oldestTs) fold.oldestTs = record.ts;
         if (fold.newestTs === null || record.ts > fold.newestTs) fold.newestTs = record.ts;
@@ -277,9 +287,24 @@ export class GovernanceRecordCounter {
 
 // ── Assembly ─────────────────────────────────────────────────────────────────
 
-/** The replay recipe every finding points at — one spelling, so the console and the log agree. */
-export function replayCommand(outboxPath: string): string {
-  return `wicked-crew governance replay ${JSON.stringify(outboxPath)}`;
+/**
+ * The replay recipe every finding points at — one spelling, so the console and the log agree — and
+ * TARGET-SPECIFIC: `replayTarget()` defaults to the state home's `core.db` sidecar, so a bare
+ * recipe followed on a daemon booted with a custom `--db` or `--governance-db` would replay into a
+ * different store than the one that dead-lettered (Copilot on #516). The default sidecar is named
+ * through its core db (`--db`); an explicit store through `--governance-db` with credentials
+ * redacted (the operator supplies the real spec). `null` target = no daemon store known: the bare
+ * recipe, for a `--dry-run` inspection.
+ */
+export function replayCommand(outboxPath: string, target: GovernanceStoreLocation | null): string {
+  const base = `wicked-crew governance replay ${JSON.stringify(outboxPath)}`;
+  if (target === null) return base;
+  if (target.source === 'core-db-sidecar') return `${base} --db ${JSON.stringify(target.coreDbPath)}`;
+  const redacted = target.displayPath !== target.dbPath;
+  return (
+    `${base} --governance-db ${JSON.stringify(target.displayPath)}` +
+    (redacted ? ' (credentials redacted — pass the real spec, or set WICKED_CREW_GOVERNANCE_DB)' : '')
+  );
 }
 
 export interface GovernanceHealthInputs {
@@ -315,17 +340,21 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
       message:
         `${input.fold.count} governance event(s) dead-lettered to ${path}${floor}${newest} — the store refused or was ` +
         `unset when they were emitted (${Object.keys(input.fold.byReason).join('; ') || 'reason unknown'}); ` +
-        `replay them with ${replayCommand(path)}`,
+        `replay them with ${replayCommand(path, input.location)}`,
     });
   }
   if (input.legacyOutbox !== null) {
+    const recipe = replayCommand(input.legacyOutbox.path, input.location);
     findings.push({
       kind: 'governance.legacy-outbox',
       severity: 'warning',
       message:
         `a pre-fix dead-letter outbox exists under HOME at ${input.legacyOutbox.path} (${input.legacyOutbox.bytes} bytes) — ` +
         `events every earlier daemon on this host spooled there instead of storing; inspect it with ` +
-        `${replayCommand(input.legacyOutbox.path)} --dry-run, then replay it into this daemon's store`,
+        `${recipe} --dry-run, then ` +
+        (input.location !== null
+          ? `replay it into this daemon's store with ${recipe}`
+          : 'replay it once this daemon resolves a store'),
     });
   }
   return {

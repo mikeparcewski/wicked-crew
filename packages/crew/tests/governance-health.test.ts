@@ -3,7 +3,7 @@
 
 import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -13,6 +13,7 @@ import {
   GovernanceDiagnostics,
   GovernanceRecordCounter,
   governanceHealth,
+  isEpochMs,
   probeLegacyOutbox,
   reasonBucket,
   replayCommand,
@@ -70,6 +71,27 @@ describe('foldDeadletters', () => {
     const empty = join(scratch, 'empty.ndjson');
     writeFileSync(empty, '', 'utf8');
     expect((await foldDeadletters(empty)).count).toBe(0);
+  });
+
+  it('a `ts` outside Date\'s range (or negative) is UNTIMESTAMPED — never a RangeError that turns /diagnostics into a 500 (Copilot on #516)', async () => {
+    const huge = JSON.stringify({ ...JSON.parse(STAMPED), ts: 1e20 });
+    const negative = JSON.stringify({ ...JSON.parse(STAMPED), ts: -5 });
+    const asString = JSON.stringify({ ...JSON.parse(STAMPED), ts: '1757500000000' });
+    const path = outboxWith([huge, negative, asString, STAMPED]);
+    const fold = await foldDeadletters(path);
+    expect(fold.count).toBe(4);
+    expect(fold.timestamped).toBe(1);
+    expect(fold.untimestamped).toBe(3);
+    expect(fold.newestTs).toBe(1_757_500_000_000);
+    expect(isEpochMs(1e20)).toBe(false);
+    expect(isEpochMs(8.64e15)).toBe(true);
+    expect(isEpochMs(8.64e15 + 1)).toBe(false);
+    expect(isEpochMs(Number.NaN)).toBe(false);
+    // The finding renders the newest timestamp without throwing.
+    const location = resolveGovernanceStore({ coreDbPath: '/state/core.db' });
+    expect(() =>
+      governanceHealth({ location: { ...location, outboxPath: path }, records: { total: null, sinceBoot: null }, fold, legacyOutbox: null }),
+    ).not.toThrow();
   });
 
   it('counts every entry, buckets by type and reason prefix, and reports the timestamp range ONLY over entries that carry one', async () => {
@@ -157,8 +179,23 @@ describe('governanceHealth (the findings)', () => {
     const msg = health.findings[0]!.message;
     expect(msg).toContain('2 governance event(s) dead-lettered to');
     expect(msg).toContain('no shared store (WICKED_ESTATE_DB unset)');
-    expect(msg).toContain(replayCommand(path));
+    // The recipe names THIS daemon's target — the default sidecar through its core db — so following
+    // it on a custom --db daemon never replays into a different store (Copilot on #516).
+    expect(msg).toContain(`wicked-crew governance replay ${JSON.stringify(path)} --db ${JSON.stringify(resolve('/state/core.db'))}`);
     expect(msg).toContain(new Date(1_757_500_000_000).toISOString());
+  });
+
+  it('replayCommand is target-specific: --db for the sidecar default, --governance-db (credentials redacted) for an explicit store, bare when no store is known', () => {
+    const sidecar = resolveGovernanceStore({ coreDbPath: '/state/core.db' });
+    expect(replayCommand('/o.ndjson', sidecar)).toBe(`wicked-crew governance replay "/o.ndjson" --db ${JSON.stringify(resolve('/state/core.db'))}`);
+    const explicit = resolveGovernanceStore({ coreDbPath: '/state/core.db', flagDb: '/opt/gov.db' });
+    expect(replayCommand('/o.ndjson', explicit)).toBe(`wicked-crew governance replay "/o.ndjson" --governance-db ${JSON.stringify(resolve('/opt/gov.db'))}`);
+    const url = resolveGovernanceStore({ coreDbPath: '/state/core.db', envCrewDb: 'postgres://u:s3cret@h/db' });
+    const cmd = replayCommand('/o.ndjson', url);
+    expect(cmd).toContain('--governance-db "postgres://***@h/db"');
+    expect(cmd).toContain('credentials redacted');
+    expect(cmd).not.toContain('s3cret');
+    expect(replayCommand('/o.ndjson', null)).toBe('wicked-crew governance replay "/o.ndjson"');
   });
 
   it('no store resolved (a library boot) is governance.store (error): every emit dead-letters', () => {
@@ -184,6 +221,7 @@ describe('governanceHealth (the findings)', () => {
     });
     expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'warning']]);
     expect(health.findings[0]!.message).toContain('--dry-run');
+    expect(health.findings[0]!.message).toContain(`--db ${JSON.stringify(resolve('/state/core.db'))}`);
     expect(health.deadletters.legacyOutbox).toEqual({ path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415 });
   });
 });
