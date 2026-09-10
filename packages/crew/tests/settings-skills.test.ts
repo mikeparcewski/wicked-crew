@@ -13,7 +13,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -170,7 +170,7 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
     }
   });
 
-  it('the skills.source WARNING follows the CURRENT baseline live (design v3.6): present after an installer-copy seed (and said once at boot), gone after a refresh from the marketplace cache — before any publish', async () => {
+  it('the skills.source WARNING follows the CURRENT baseline live (design v3.6): present after an installer-copy seed (said once per boot); a refresh that finds the SAME bytes in the marketplace cache re-records the provenance (codex on #491) and the warning is gone — before any publish', async () => {
     const warning = `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`;
     let source: PluginSource = { path: FIXTURE_PLUGIN, kind: 'installer-copy', plugin_version: '1.0.0' };
     const sc = scaffold({ source: () => source });
@@ -190,17 +190,59 @@ describe('skills_root is NOT a setting (PUT/GET /settings)', () => {
       lines.length = 0;
       expect((await seeding.apply()).findings.map((f) => f.kind)).toEqual(['skills.source']);
       expect(lines.filter((l) => l.startsWith('[skills] skills.source: '))).toHaveLength(1);
-      // The operator registers the marketplace: the cache (a moved-on garden) is the source now. A
-      // refresh re-keys the CURRENT baseline without publishing — and the warning is gone with it,
-      // while the health is still `published` at gen 1.
-      const gamma = join(sc.upstream, 'skills', 'gamma', 'SKILL.md');
-      writeFileSync(gamma, `${readFileSync(gamma, 'utf8')}\nupstream moved on\n`);
-      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: '1.1.0' };
-      const refreshed = sc.store.refreshBaseline(sc.store.revision());
-      expect(refreshed.baseline).not.toBe(refreshed.previous_baseline);
+      // The operator registers the marketplace; the cache holds the SAME bytes (the scaffold's upstream
+      // is a byte-identical copy of the fixture). A refresh has nothing to merge — but the provenance
+      // moved, and the manifest records it: kind, path, revision; the baseline key (the content hash)
+      // is unchanged, no publish happened, and the warning is gone with the provenance.
+      const before = sc.store.revision();
+      source = { path: sc.upstream, kind: 'claude-plugin-cache', plugin_version: '1.0.0' };
+      const refreshed = sc.store.refreshBaseline(before);
+      expect(refreshed.verdict).toBe('clear');
+      expect(refreshed.baseline).toBe(refreshed.previous_baseline);
+      expect(refreshed.revision).toBe(before + 1);
       const m = sc.store.manifest();
-      expect(m.baselines[m.baseline]?.source.kind).toBe('claude-plugin-cache');
+      expect(m.revision).toBe(before + 1);
+      expect(m.baselines[m.baseline]?.source).toEqual({ kind: 'claude-plugin-cache', path: sc.upstream });
       expect(seeding.health()).toMatchObject({ state: 'published', current: { gen: 1 }, findings: [] });
+      // The same source again: a true no-op — nothing to record, the revision stands.
+      expect(sc.store.refreshBaseline(m.revision).revision).toBe(m.revision);
+      expect(sc.store.revision()).toBe(m.revision);
+    } finally {
+      removeScratch(sc.base);
+    }
+  });
+
+  it('diagnostics FAIL CLOSED (codex on #491): a manifest.json that cannot be read is reported as config-error with a skills.manifest finding naming the cause — never the stale published state; the engine input is untouched; readable again ⇒ published again', async () => {
+    const sc = scaffold();
+    try {
+      const runtime = new SkillsRuntime({ store: sc.store, log: () => undefined });
+      const published = await runtime.apply();
+      expect(published.state).toBe('published');
+      const manifestPath = join(sc.root, 'manifest.json');
+      const pristine = readFileSync(manifestPath);
+      writeFileSync(manifestPath, 'not a manifest');
+      const corrupt = runtime.health();
+      expect(corrupt).toMatchObject({ state: 'config-error', root: sc.root, current: null, engineInput: published.engineInput });
+      expect(corrupt.findings).toHaveLength(1);
+      expect(corrupt.findings[0]).toMatchObject({ kind: 'skills.manifest', severity: 'error' });
+      expect(corrupt.findings[0]?.message).toMatch(/^manifest\.json cannot be read: .*not a skills manifest/);
+      expect(corrupt.findings[0]?.message).toContain(`${SKILLS_SNAPSHOT_ENGINE_ENV} still exports what the last boot or publish set (${published.engineInput ?? 'unset'})`);
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(published.engineInput); // a READ never touches the engine input
+      writeFileSync(manifestPath, pristine);
+      expect(runtime.health()).toEqual(published);
+      // Unreadable (permissions), not merely corrupt — POSIX only, and root reads through 0o000.
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        chmodSync(manifestPath, 0o000);
+        try {
+          const unreadable = runtime.health();
+          expect(unreadable.state).toBe('config-error');
+          expect(unreadable.findings.map((f) => f.kind)).toEqual(['skills.manifest']);
+          expect(unreadable.findings[0]?.message).toMatch(/manifest\.json cannot be read: .*(EACCES|permission denied)/);
+        } finally {
+          chmodSync(manifestPath, 0o644);
+        }
+        expect(runtime.health()).toEqual(published);
+      }
     } finally {
       removeScratch(sc.base);
     }

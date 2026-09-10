@@ -366,6 +366,7 @@ respondsWith<Wire.SkillSourceKind, 'installer-copy'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], SkillsHealthFindingKind>();
 respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
 respondsWith<AcpCliFold, Wire.AcpCliDiagnostics>();
 respondsWith<Wire.DiagnosticsRecentError, RecentError>();

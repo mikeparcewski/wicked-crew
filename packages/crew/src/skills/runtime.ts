@@ -38,7 +38,10 @@
  * (`source.kind: 'installer-copy'` — plugin-source.ts tier 3): the daemon works on an installer-only
  * machine, but that copy receives no marketplace updates until the plugin is registered with Claude
  * Code. It is judged live from the manifest on every `health()` read, so it appears with the seed
- * and disappears with the first refresh from the marketplace cache.
+ * and disappears with the first refresh from the marketplace cache (a byte-identical refresh
+ * re-records the provenance too). That read FAILS CLOSED (codex on #491): a manifest that cannot be
+ * read now is reported as `config-error` with a `skills.manifest` error finding naming the cause —
+ * never the stale outcome the ladder recorded at boot. A read never touches the engine input.
  *
  * What the engine is handed is EXACTLY ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL
  * path of `snapshots/<gen>` (v3.1 §2, v3.4 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set,
@@ -61,7 +64,7 @@
 import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
-import type { CoreEvent, SkillBaselineRecord } from '../core/types.js';
+import type { CoreEvent, SkillManifest } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
@@ -91,17 +94,10 @@ function describeSeedSource(source: PluginSource): string {
  * no marketplace updates until the plugin is registered with Claude Code. Judged LIVE from the
  * manifest, never frozen at publish: a refresh from the marketplace cache re-keys the current
  * baseline WITHOUT a publish, and the warning must follow the baseline. `null` when the manifest
- * cannot be read — an unseeded or corrupt root is the store's own error to raise on its next
- * operation (and the ladder's `skills.config`), never a diagnostics read's.
+ * baseline. `health()` reads the manifest and fails closed when it cannot.
  */
-function sourceFinding(store: SkillsStore): SkillsHealthFinding | null {
-  let current: SkillBaselineRecord | undefined;
-  try {
-    const m = store.manifest();
-    current = m.baselines[m.baseline];
-  } catch {
-    return null;
-  }
+function sourceFinding(m: SkillManifest): SkillsHealthFinding | null {
+  const current = m.baselines[m.baseline];
   if (current === undefined || current.source.kind !== 'installer-copy') return null;
   return {
     kind: 'skills.source',
@@ -115,7 +111,7 @@ export { REFUSED_DIRNAME };
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source';
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -180,7 +176,31 @@ export class SkillsRuntime {
   health(): SkillsHealth {
     const base = this.lastHealth;
     if (base.state !== 'published' && base.state !== 'blocked') return base;
-    const source = sourceFinding(this.store);
+    let manifest: SkillManifest;
+    try {
+      manifest = this.store.manifest();
+    } catch (err) {
+      // FAIL CLOSED (codex on #491): a manifest that cannot be read NOW is not the outcome the ladder
+      // recorded at boot — report `config-error` with the cause instead of that stale state. A read
+      // never touches the engine input: whatever is exported stays exported until a restart re-runs
+      // the ladder, and the finding says so.
+      const cause = err instanceof Error ? err.message : String(err);
+      return {
+        state: 'config-error',
+        root: base.root,
+        current: null,
+        engineInput: base.engineInput,
+        stateHome: base.stateHome,
+        findings: [
+          {
+            kind: 'skills.manifest',
+            severity: 'error',
+            message: `manifest.json cannot be read: ${cause} — the skills store is unusable (every /skills request fails) until it is fixed; ${SKILLS_SNAPSHOT_ENGINE_ENV} still exports what the last boot or publish set (${base.engineInput ?? 'unset'}) until the daemon restarts`,
+          },
+        ],
+      };
+    }
+    const source = sourceFinding(manifest);
     return source === null ? base : { ...base, findings: [...base.findings, source] };
   }
 

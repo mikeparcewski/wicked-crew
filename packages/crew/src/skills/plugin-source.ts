@@ -24,13 +24,24 @@
  * cache wins regardless of version; the copy is never preferred. Every source kind passes the same
  * no-follow, closure and validation rules."
  *
- * Within a tier the highest plugin version wins (`compareVersions`, a total order — never `readdir`
- * order); the tiers never mix. `CLAUDE_CONFIG_DIR` is split on the platform path delimiter. NEVER a
- * repo checkout by default. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override — for tests,
- * and for an operator who deliberately wants a checkout or some other plugin root. A machine with
- * neither a cache nor a copy has no source at all: crew does not vendor garden — the seed says
- * "install garden first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine
- * input unset.
+ * How the automatic tiers walk (codex on #491): the config dirs are `CLAUDE_CONFIG_DIR`'s entries in
+ * the order listed (platform path delimiter) with the literal `~/.claude` appended once unless already
+ * listed — the default when the variable is unset. Tier (2) visits every dir in that order and the
+ * FIRST dir holding a valid cache wins; inside a cache the highest SEMVER version-DIRECTORY NAME wins
+ * (`compareVersions`, a total order — never `readdir` order), a dir whose `plugin.json` version does
+ * not equal its name is skipped with a finding, a non-semver name is ignored with a finding. Tier (3)
+ * visits the same dirs in the same order; ANY cache beats ANY copy — a `~/.claude` cache beats a
+ * `$CLAUDE_CONFIG_DIR/plugins/wicked-garden` copy. Each config dir is resolved ONCE (`realpath` — the
+ * one link the automatic tiers follow: operators symlink `~/.claude`); every level below it that
+ * discovery touches — `plugins`, `cache`, the marketplace dir, the plugin dir, each version dir, the
+ * copy dir — is lstat-walked, and a symlink at any of them skips that candidate with a `symlink`
+ * finding, never followed; the chosen root is then re-checked to lie canonically inside the resolved
+ * config dir. What was passed over rides beside the answer as `DiscoveryFinding`s (the daemon logs
+ * them). NEVER a repo checkout by default. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override
+ * — for tests, and for an operator who deliberately wants a checkout or some other plugin root. A
+ * machine with neither a cache nor a copy has no source at all: crew does not vendor garden — the
+ * seed says "install garden first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves
+ * the engine input unset.
  *
  * # No-follow BELOW the root (codex round 6 on #480)
  *
@@ -69,13 +80,23 @@ export interface PluginSource {
 }
 
 /**
- * The Claude Code config dirs the plugin cache (and the installer copy) live under: every non-empty
- * entry of `CLAUDE_CONFIG_DIR` (it may list several, separated by the platform path delimiter), in
- * the order listed; `~/.claude` when it is unset or lists nothing (design v3.6).
+ * The Claude Code config dirs discovery walks, IN ORDER: every non-empty entry of `CLAUDE_CONFIG_DIR`
+ * (it may list several, separated by the platform path delimiter) as listed, then the literal
+ * `~/.claude` appended once unless already listed — the default when the variable is unset, and the
+ * dir garden's `install.mjs` hard-codes (design v3.6; codex on #491). Spelled as given (the walk
+ * resolves each dir once); a dir listed twice is walked once.
  */
 export function claudeConfigDirs(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
-  const listed = (env['CLAUDE_CONFIG_DIR'] ?? '').split(delimiter).filter((dir) => dir !== '');
-  return listed.length > 0 ? listed : [join(home, '.claude')];
+  const dirs: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of [...(env['CLAUDE_CONFIG_DIR'] ?? '').split(delimiter), join(home, '.claude')]) {
+    if (dir === '') continue;
+    const key = resolve(dir);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dirs.push(dir);
+  }
+  return dirs;
 }
 
 /**
@@ -253,80 +274,155 @@ export function installerCopyDir(configDir: string): string {
   return join(configDir, 'plugins', PLUGIN_NAME);
 }
 
-/** One plugin root a discovery tier found, before the tier's highest-version pick. */
-interface Candidate {
+/** Why discovery passed over something that EXISTS (an absent path is never a finding) — logged by the daemon, asserted by tests. */
+export type DiscoveryFindingKind = 'symlink' | 'non-semver-name' | 'version-mismatch' | 'no-manifest' | 'outside-config-dir';
+
+export interface DiscoveryFinding {
+  kind: DiscoveryFindingKind;
+  /** The entry judged, spelled under the config dir as the operator spelled it. */
   path: string;
-  plugin_version: string;
+  message: string;
 }
 
+/** What discovery answered and what it passed over on the way (design v3.6; codex on #491). */
+export interface Discovery {
+  source: PluginSource | null;
+  findings: DiscoveryFinding[];
+}
+
+/** A marketplace-cache version DIRECTORY name: a semver release with an optional prerelease / build suffix. */
+const SEMVER_DIR_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+const CACHE_SEGMENTS: ReadonlyArray<string> = ['plugins', 'cache', PLUGIN_NAME, PLUGIN_NAME];
+const COPY_SEGMENTS: ReadonlyArray<string> = ['plugins', PLUGIN_NAME];
+
 /**
- * Every version dir of a config dir's marketplace cache that is a plugin root (no-follow below each),
- * in DESCENDING dir-name order by the same total order the pick uses — never `readdir` order (Copilot
- * on #480 and #491): two dirs whose `plugin.json` declares the same version tie on that version, and
- * `highest` keeps the earlier candidate, so the tie goes to the higher-named dir, reproducibly.
+ * `noFollowEntry` from a once-resolved config dir, for the automatic tiers: a symlink among the walked
+ * segments becomes a `symlink` finding and the candidate is skipped — never followed; `null` also when
+ * the entry does not exist. Only a symlinked designated entry INSIDE a plugin root stays a thrown
+ * `PluginSourceSymlinkError` (`pluginVersionAt`): that refusal is loud by design (codex round 6 on #480).
  */
-function cacheCandidates(configDir: string): Candidate[] {
-  const cache = livePluginCacheDir(configDir);
-  if (!existsSync(cache)) return [];
-  const found: Candidate[] = [];
-  for (const entry of readdirSync(cache).sort((a, b) => compareVersions(b, a))) {
-    const dir = join(cache, entry);
-    const version = pluginVersionAt(dir);
-    if (version !== null) found.push({ path: dir, plugin_version: version });
+function noFollowBelow(realRoot: string, segments: ReadonlyArray<string>, spelling: string, findings: DiscoveryFinding[]): string | null {
+  try {
+    return noFollowEntry(realRoot, segments, spelling);
+  } catch (err) {
+    if (!(err instanceof PluginSourceSymlinkError)) throw err;
+    const path = join(spelling, ...err.entry.split('/'));
+    findings.push({ kind: 'symlink', path, message: `${path} is a symlink (-> ${err.target}); discovery never follows a link below the config dir — skipped` });
+    return null;
   }
-  return found;
-}
-
-/** The installer copy at a config dir, when its `plugin.json` parses with a `version` (design v3.6 tier 3). */
-function copyCandidate(configDir: string): Candidate | null {
-  const dir = installerCopyDir(configDir);
-  const version = pluginVersionAt(dir);
-  return version === null ? null : { path: dir, plugin_version: version };
 }
 
 /**
- * The highest declared plugin version among a tier's candidates (`compareVersions`). An EQUAL version
- * keeps the earlier candidate — and every candidate list here is built in a deterministic order (a
- * cache's dirs by descending name, config dirs as listed, then `~/.claude`), so the pick never
- * depends on the filesystem.
+ * The chosen root must lie canonically inside the resolved config dir — re-derived from the spelled
+ * path after the walk, never assumed from it (codex on #491): a link that appeared between the walk
+ * and the pick, or a spelling that resolves elsewhere, is a finding, not a source.
  */
-function highest(candidates: ReadonlyArray<Candidate>): Candidate | null {
-  let best: Candidate | null = null;
-  for (const c of candidates) if (best === null || compareVersions(c.plugin_version, best.plugin_version) > 0) best = c;
-  return best;
+function containedInConfigDir(spelled: string, realRoot: string, findings: DiscoveryFinding[]): boolean {
+  let real: string;
+  try {
+    real = realpathSync(spelled);
+  } catch (err) {
+    findings.push({ kind: 'outside-config-dir', path: spelled, message: `${spelled} cannot be resolved (${(err as NodeJS.ErrnoException).code ?? String(err)}); skipped` });
+    return false;
+  }
+  if (real.startsWith(realRoot + sep)) return true;
+  findings.push({ kind: 'outside-config-dir', path: spelled, message: `${spelled} resolves to ${real}, outside the config dir ${realRoot}; skipped` });
+  return false;
 }
 
 /**
- * Discover the installed plugin in the order design amendment v3.6 fixes (module header): (1) the
- * explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the highest version across the marketplace
- * caches of every listed config dir; (3) LAST resort, the highest-versioned installer-managed
- * `plugins/wicked-garden` copy under those dirs and `~/.claude`. A cache beats a copy regardless of
- * version; a copy is accepted only when its `plugin.json` parses with a `version`. `env`/`home` are
- * injectable so tests never read the developer's real config dir. Returns `null` when nothing is
- * installed — the caller says "install garden first" loudly.
+ * Tier (2) for ONE config dir: the highest semver version-DIRECTORY NAME in its marketplace cache
+ * whose `plugin.json` version equals that name. Two passes over the entries in descending
+ * `compareVersions` order (a total order over distinct names — the pick never depends on `readdir`):
+ * first every name is judged by shape and by lstat (a non-semver name is ignored, a link skipped,
+ * each with a finding); then the surviving dirs are inspected highest-first and the first one whose
+ * manifest agrees with its name, and which resolves inside the config dir, is the pick — a
+ * manifest-less or mismatching dir above it is skipped with a finding, dirs below it are not read.
  */
-export function discoverLivePlugin(
-  opts: { env?: NodeJS.ProcessEnv; home?: string } = {},
-): PluginSource | null {
+function cacheCandidate(configDir: string, findings: DiscoveryFinding[]): PluginSource | null {
+  const root = realPluginRoot(configDir); // the ONE link the automatic tiers follow: the config dir itself
+  if (root === null) return null;
+  const cache = noFollowBelow(root, CACHE_SEGMENTS, configDir, findings);
+  if (cache === null || !lstatSync(cache).isDirectory()) return null;
+  const spelledCache = livePluginCacheDir(configDir);
+  const names: string[] = [];
+  for (const name of readdirSync(cache).sort((a, b) => compareVersions(b, a))) {
+    if (!SEMVER_DIR_RE.test(name)) {
+      findings.push({ kind: 'non-semver-name', path: join(spelledCache, name), message: `${join(spelledCache, name)}: the cache entry's name is not a semver version; ignored` });
+      continue;
+    }
+    if (noFollowBelow(root, [...CACHE_SEGMENTS, name], configDir, findings) !== null) names.push(name);
+  }
+  for (const name of names) {
+    const spelled = join(spelledCache, name);
+    const version = pluginVersionAt(spelled); // a linked `.claude-plugin/` or `plugin.json` throws — loud, never a silent skip to another version
+    if (version === null) {
+      findings.push({ kind: 'no-manifest', path: spelled, message: `${spelled}: no .claude-plugin/plugin.json with a version; skipped` });
+      continue;
+    }
+    if (version !== name) {
+      findings.push({ kind: 'version-mismatch', path: spelled, message: `${spelled}: plugin.json declares version ${version} but the directory is named ${name}; skipped` });
+      continue;
+    }
+    if (!containedInConfigDir(spelled, root, findings)) continue;
+    return { path: spelled, kind: 'claude-plugin-cache', plugin_version: version };
+  }
+  return null;
+}
+
+/** Tier (3) for ONE config dir: its installer-managed copy — `plugins/wicked-garden` exists, is no link, and its `plugin.json` parses with a `version`. */
+function copyCandidate(configDir: string, findings: DiscoveryFinding[]): PluginSource | null {
+  const root = realPluginRoot(configDir);
+  if (root === null) return null;
+  const dir = noFollowBelow(root, COPY_SEGMENTS, configDir, findings);
+  if (dir === null || !lstatSync(dir).isDirectory()) return null;
+  const spelled = installerCopyDir(configDir);
+  const version = pluginVersionAt(spelled);
+  if (version === null) {
+    findings.push({ kind: 'no-manifest', path: spelled, message: `${spelled} exists but has no .claude-plugin/plugin.json with a version — not a plugin root; skipped` });
+    return null;
+  }
+  if (!containedInConfigDir(spelled, root, findings)) return null;
+  return { path: spelled, kind: 'installer-copy', plugin_version: version };
+}
+
+/**
+ * Discover the installed plugin in the order design amendment v3.6 fixes (module header), with what
+ * was passed over: (1) the explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the FIRST config dir
+ * (as listed, `~/.claude` appended) holding a valid marketplace cache — the highest version-dir name
+ * inside it; (3) LAST resort, the first of those dirs holding a valid installer copy. ANY cache beats
+ * ANY copy. `env`/`home` are injectable so tests never read the developer's real config dir. `source`
+ * is `null` when nothing is installed — the caller says "install garden first" loudly. A finding is
+ * reported once per entry even when both tiers meet it (a linked `plugins/`, say).
+ */
+export function discoverLivePluginDetailed(opts: { env?: NodeJS.ProcessEnv; home?: string } = {}): Discovery {
   const env = opts.env ?? process.env;
   const home = opts.home ?? homedir();
+  const findings: DiscoveryFinding[] = [];
   const override = env[SKILLS_SOURCE_ENV];
-  if (override !== undefined && override !== '') return pluginSourceAt(override);
-
-  const configDirs = claudeConfigDirs(env, home);
-  const cache = highest(configDirs.flatMap(cacheCandidates));
-  if (cache !== null) return { ...cache, kind: 'claude-plugin-cache' };
-
-  // Tier 3: the listed config dirs AND the literal `~/.claude` (garden's `install.mjs` hard-codes
-  // homedir, whatever CLAUDE_CONFIG_DIR says) — each once.
-  const copyDirs = [...new Set([...configDirs, join(home, '.claude')].map((dir) => resolve(dir)))];
-  const copies: Candidate[] = [];
-  for (const dir of copyDirs) {
-    const copy = copyCandidate(dir);
-    if (copy !== null) copies.push(copy);
+  if (override !== undefined && override !== '') return { source: pluginSourceAt(override), findings };
+  const dirs = claudeConfigDirs(env, home);
+  let source: PluginSource | null = null;
+  for (const dir of dirs) {
+    source = cacheCandidate(dir, findings);
+    if (source !== null) break;
   }
-  const copy = highest(copies);
-  return copy === null ? null : { ...copy, kind: 'installer-copy' };
+  if (source === null) {
+    for (const dir of dirs) {
+      source = copyCandidate(dir, findings);
+      if (source !== null) break;
+    }
+  }
+  const seen = new Set<string>();
+  return { source, findings: findings.filter((f) => !seen.has(`${f.kind}\0${f.path}`) && seen.add(`${f.kind}\0${f.path}`) !== undefined) };
+}
+
+/** `discoverLivePluginDetailed` answering the source alone; pass `findings` to collect what was passed over. */
+export function discoverLivePlugin(opts: { env?: NodeJS.ProcessEnv; home?: string; findings?: DiscoveryFinding[] } = {}): PluginSource | null {
+  const { source, findings } = discoverLivePluginDetailed(opts);
+  opts.findings?.push(...findings);
+  return source;
 }
 
 export interface GitState {

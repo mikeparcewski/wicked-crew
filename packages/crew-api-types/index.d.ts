@@ -1330,7 +1330,8 @@ export interface SteeringLandingResult {
 //
 // api-types 0.29.0 (design amendment v3.6, crew #490): the installer-managed copy
 // `<config dir>/plugins/wicked-garden` is a LAST-resort seed source — `SkillSourceKind` gains
-// `installer-copy`, and `DiagnosticsSkillsFinding.kind` gains the persistent `skills.source` warning.
+// `installer-copy`, and `DiagnosticsSkillsFinding.kind` gains the persistent `skills.source` warning
+// and the fail-closed `skills.manifest` error.
 //
 // Skills are files (skills keystone, design v3 + amendments v3.1/v3.2). The daemon owns ONE
 // effective `wicked-garden`-shaped plugin root — `<state home>/skills/effective/`, the dependency
@@ -3389,8 +3390,12 @@ export interface DiagnosticsSkillsFinding {
    *  from the installer-managed copy (`SkillSourceKind` `installer-copy`) — the daemon works, but
    *  that copy receives no marketplace updates until the plugin is registered with Claude Code; it
    *  persists (alongside the ladder's own finding, if any) until a refresh from the marketplace
-   *  cache re-keys the baseline. */
-  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source';
+   *  cache re-records the baseline's provenance (byte-identical or not); `skills.manifest`
+   *  (`error`, api-types 0.29.0) = `manifest.json` could not be read when diagnostics were taken
+   *  (corrupt, unreadable, or the root no longer the one the store bound) — reported as
+   *  `config-error` with the cause instead of the stale boot outcome; the exported engine input is
+   *  unchanged until the daemon restarts. */
+  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest';
   severity: 'warning' | 'error';
   message: string;
 }

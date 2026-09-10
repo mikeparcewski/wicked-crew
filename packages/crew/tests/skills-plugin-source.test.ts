@@ -1,9 +1,11 @@
-// Plugin-source discovery (design v3 §3/§8, amended v3.6 — crew #490): (1) the explicit
-// `WICKED_CREW_SKILLS_SOURCE` override; (2) the LIVE marketplace cache (highest version) under every
-// dir `CLAUDE_CONFIG_DIR` lists, else `~/.claude`; (3) LAST resort, the installer-managed
-// `plugins/wicked-garden` copy under those dirs AND `~/.claude` — recorded as `installer-copy`, never
-// preferred over a cache whatever the versions say, and held to the same no-follow rule. Every test
-// runs against a temp HOME with an injected env — the developer's real config dir is never read.
+// Plugin-source discovery (design v3 §3/§8, amended v3.6 — crew #490, hardened by codex on #491):
+// (1) the explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the marketplace cache of the FIRST config
+// dir holding a valid one — the dirs `CLAUDE_CONFIG_DIR` lists, in order, then `~/.claude` appended
+// once — with the highest semver version-DIRECTORY NAME inside it whose `plugin.json` agrees; (3) LAST
+// resort, the installer-managed `plugins/wicked-garden` copy of the first of those dirs holding one —
+// recorded as `installer-copy`, never preferred over any cache. Each config dir is resolved once; every
+// level below it is lstat-walked and a link is skipped with a finding, never followed. Every test runs
+// against a temp HOME with an injected env — the developer's real config dir is never read.
 
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,11 +16,13 @@ import {
   claudeConfigDirs,
   compareVersions,
   discoverLivePlugin,
+  discoverLivePluginDetailed,
   installerCopyDir,
   livePluginCacheDir,
   PluginSourceSymlinkError,
   pluginSourceAt,
   SKILLS_SOURCE_ENV,
+  type DiscoveryFinding,
 } from '../src/skills/plugin-source.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -32,8 +36,10 @@ function plugin(dir: string, version: string): void {
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wicked-garden', version }));
 }
 
-/** The v3.6 warning text names this path; the tests spell the expectation through the same helper the code uses. */
+/** Expectations spelled through the same helpers the code uses. */
+const cacheAt = (configDir: string, name: string) => ({ path: join(livePluginCacheDir(configDir), name), kind: 'claude-plugin-cache' as const, plugin_version: name });
 const copyAt = (configDir: string, version: string) => ({ path: installerCopyDir(configDir), kind: 'installer-copy' as const, plugin_version: version });
+const judged = (findings: DiscoveryFinding[]): Array<[string, string]> => findings.map((f) => [f.kind, f.path]);
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'skills-source-'));
@@ -45,57 +51,59 @@ afterEach(() => {
   for (const extra of extraHomes.splice(0)) removeScratch(extra);
 });
 
-describe('claudeConfigDirs (design v3.6: CLAUDE_CONFIG_DIR may list several)', () => {
-  it('is ~/.claude when CLAUDE_CONFIG_DIR is unset or lists nothing; else every non-empty entry, in the order listed', () => {
-    expect(claudeConfigDirs({}, home)).toEqual([join(home, '.claude')]);
-    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: '' }, home)).toEqual([join(home, '.claude')]);
-    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: delimiter }, home)).toEqual([join(home, '.claude')]);
+describe('claudeConfigDirs (design v3.6; codex on #491)', () => {
+  it('is the CLAUDE_CONFIG_DIR entries in order with ~/.claude appended once unless listed; ~/.claude alone when unset or empty', () => {
+    const dot = join(home, '.claude');
+    expect(claudeConfigDirs({}, home)).toEqual([dot]);
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: '' }, home)).toEqual([dot]);
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: delimiter }, home)).toEqual([dot]);
     const a = join(home, 'cfg-a');
     const b = join(home, 'cfg-b');
-    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: a }, home)).toEqual([a]);
-    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: [a, '', b].join(delimiter) }, home)).toEqual([a, b]);
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: a }, home)).toEqual([a, dot]);
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: [a, '', b].join(delimiter) }, home)).toEqual([a, b, dot]);
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: [a, dot].join(delimiter) }, home)).toEqual([a, dot]); // listed: not appended again
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: [dot, a].join(delimiter) }, home)).toEqual([dot, a]); // listed first: stays first
+    expect(claudeConfigDirs({ CLAUDE_CONFIG_DIR: [a, a].join(delimiter) }, home)).toEqual([a, dot]); // listed twice is walked once
   });
 });
 
 describe('discoverLivePlugin', () => {
-  it('LAST resort (v3.6): only the installer-managed plugins/wicked-garden copy in the config dir ⇒ that copy, kind installer-copy', () => {
+  it('LAST resort (v3.6): only the installer-managed plugins/wicked-garden copy ⇒ that copy, kind installer-copy, nothing passed over', () => {
     plugin(installerCopyDir(cfg), '12.28.1');
-    expect(discoverLivePlugin({ env: {}, home })).toEqual(copyAt(cfg, '12.28.1'));
+    expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: copyAt(cfg, '12.28.1'), findings: [] });
   });
 
-  it('the cache wins over the copy REGARDLESS of version — a newer copy beside it is never preferred; the highest cached version wins, non-plugin entries are ignored', () => {
+  it('the cache wins over the copy REGARDLESS of version — a newer copy beside it is never preferred; inside the cache the highest semver DIRECTORY NAME wins; a non-semver entry is ignored with a finding', () => {
     plugin(installerCopyDir(cfg), '12.40.0'); // newer than anything cached — still the last resort
     plugin(join(livePluginCacheDir(cfg), '12.9.0'), '12.9.0');
     plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
     mkdirSync(join(livePluginCacheDir(cfg), 'not-a-plugin'));
-    expect(discoverLivePlugin({ env: {}, home })).toEqual({
-      path: join(livePluginCacheDir(cfg), '12.32.0'),
-      kind: 'claude-plugin-cache',
-      plugin_version: '12.32.0',
-    });
+    const d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
+    expect(d.findings).toEqual([{ kind: 'non-semver-name', path: join(livePluginCacheDir(cfg), 'not-a-plugin'), message: expect.stringContaining('not a semver version') }]);
   });
 
-  it('only a copy under the literal ~/.claude while CLAUDE_CONFIG_DIR points elsewhere ⇒ that copy (garden\'s install.mjs hard-codes homedir); the cache tier stays the configured dir\'s', () => {
+  it('~/.claude is walked AFTER the listed CLAUDE_CONFIG_DIR entries (appended once): a copy only under ~/.claude is found; a ~/.claude CACHE beats a $CLAUDE_CONFIG_DIR COPY (any cache beats any copy); the listed dir\'s cache beats the ~/.claude cache (first dir with a valid cache wins)', () => {
     const otherCfg = join(home, 'other-config');
     mkdirSync(otherCfg, { recursive: true });
+    const env = { CLAUDE_CONFIG_DIR: otherCfg };
     plugin(installerCopyDir(cfg), '12.30.0');
-    expect(discoverLivePlugin({ env: { CLAUDE_CONFIG_DIR: otherCfg }, home })).toEqual(copyAt(cfg, '12.30.0'));
-    // The cache under ~/.claude is NOT the configured Claude's cache: tier 2 is CLAUDE_CONFIG_DIR's, else ~/.claude — never both.
-    plugin(join(livePluginCacheDir(cfg), '12.50.0'), '12.50.0');
-    expect(discoverLivePlugin({ env: { CLAUDE_CONFIG_DIR: otherCfg }, home })).toEqual(copyAt(cfg, '12.30.0'));
-    // A cache in the configured dir — any version — beats the ~/.claude copy.
-    plugin(join(livePluginCacheDir(otherCfg), '1.0.0'), '1.0.0');
-    expect(discoverLivePlugin({ env: { CLAUDE_CONFIG_DIR: otherCfg }, home })).toEqual({
-      path: join(livePluginCacheDir(otherCfg), '1.0.0'),
-      kind: 'claude-plugin-cache',
-      plugin_version: '1.0.0',
-    });
+    expect(discoverLivePlugin({ env, home })).toEqual(copyAt(cfg, '12.30.0'));
+    plugin(installerCopyDir(otherCfg), '12.45.0'); // the listed dir's copy is walked first among copies
+    expect(discoverLivePlugin({ env, home })).toEqual(copyAt(otherCfg, '12.45.0'));
+    plugin(join(livePluginCacheDir(cfg), '12.1.0'), '12.1.0'); // a ~/.claude CACHE — older than both copies — beats them
+    expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(cfg, '12.1.0'));
+    plugin(join(livePluginCacheDir(otherCfg), '1.0.0'), '1.0.0'); // the listed dir's cache — any version — is the first valid cache
+    expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(otherCfg, '1.0.0'));
   });
 
-  it('a copy without .claude-plugin/plugin.json, or whose plugin.json carries no version, is not a source ⇒ null (the seed says "install garden first")', () => {
+  it('a copy dir without .claude-plugin/plugin.json, or whose plugin.json has no version, is not a source ⇒ null with a no-manifest finding (an ABSENT copy is no finding at all)', () => {
+    expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: null, findings: [] });
     mkdirSync(join(installerCopyDir(cfg), 'skills', 'alpha'), { recursive: true });
     writeFileSync(join(installerCopyDir(cfg), 'skills', 'alpha', 'SKILL.md'), '---\nname: wicked-garden-alpha\n---\n');
-    expect(discoverLivePlugin({ env: {}, home })).toBeNull();
+    const d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toBeNull();
+    expect(d.findings).toEqual([{ kind: 'no-manifest', path: installerCopyDir(cfg), message: expect.stringContaining('not a plugin root') }]);
     mkdirSync(join(installerCopyDir(cfg), '.claude-plugin'));
     writeFileSync(join(installerCopyDir(cfg), '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wicked-garden' }));
     expect(discoverLivePlugin({ env: {}, home })).toBeNull();
@@ -103,7 +111,7 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env: {}, home })).toBeNull();
   });
 
-  it('a copy whose designated entry is a symlink is REFUSED by name (the existing no-follow rule applies to every kind) — never accepted, never silently skipped', () => {
+  it('a copy whose DESIGNATED entry is a symlink is REFUSED by name (the existing no-follow rule inside a plugin root) — never accepted, never silently skipped', () => {
     writeFileSync(join(home, 'outside.json'), JSON.stringify({ name: 'wicked-garden', version: '4.0.0' }));
     mkdirSync(join(installerCopyDir(cfg), '.claude-plugin'), { recursive: true });
     symlinkSync(join(home, 'outside.json'), join(installerCopyDir(cfg), '.claude-plugin', 'plugin.json'));
@@ -118,27 +126,105 @@ describe('discoverLivePlugin', () => {
     expect(() => discoverLivePlugin({ env: {}, home: linkedHome })).toThrow(/\.claude-plugin is a symlink/);
   });
 
-  it('CLAUDE_CONFIG_DIR may list several dirs: the highest cached version ACROSS them wins; copies are searched under each of them and under ~/.claude, highest version first', () => {
+  it('a symlink at ANY level below the config dir — plugins/, cache/, the marketplace dir, the plugin dir, a version dir, the copy dir — is never followed: skipped with one symlink finding (codex on #491); the config dir ITSELF may be a link', () => {
+    // A real, valid tree elsewhere for the links to point at — never a config dir itself.
+    const elsewhere = join(home, 'elsewhere');
+    plugin(join(livePluginCacheDir(elsewhere), '12.0.0'), '12.0.0');
+    plugin(installerCopyDir(elsewhere), '12.0.0');
+    const levels: Array<[string, string[], string]> = [
+      ['plugins/', ['plugins'], join(elsewhere, 'plugins')],
+      ['plugins/cache/', ['plugins', 'cache'], join(elsewhere, 'plugins', 'cache')],
+      ['the marketplace dir', ['plugins', 'cache', 'wicked-garden'], join(elsewhere, 'plugins', 'cache', 'wicked-garden')],
+      ['the plugin dir', ['plugins', 'cache', 'wicked-garden', 'wicked-garden'], livePluginCacheDir(elsewhere)],
+      ['a version dir', ['plugins', 'cache', 'wicked-garden', 'wicked-garden', '12.0.0'], join(livePluginCacheDir(elsewhere), '12.0.0')],
+      ['the copy dir', ['plugins', 'wicked-garden'], installerCopyDir(elsewhere)],
+    ];
+    for (const [label, rel, target] of levels) {
+      const c = join(home, `cfg-${rel.length}-${rel[rel.length - 1] as string}`);
+      mkdirSync(join(c, ...rel.slice(0, -1)), { recursive: true });
+      symlinkSync(target, join(c, ...rel));
+      const d = discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: c }, home });
+      expect(d.source, label).toBeNull();
+      expect(judged(d.findings), label).toEqual([['symlink', join(c, ...rel)]]); // once, even where both tiers meet the link
+    }
+    // A linked version dir BESIDE a real one: the real one is the pick, the link is recorded, not followed — even when it names a higher version.
+    const mixed = join(home, 'cfg-mixed');
+    plugin(join(livePluginCacheDir(mixed), '11.0.0'), '11.0.0');
+    symlinkSync(join(livePluginCacheDir(elsewhere), '12.0.0'), join(livePluginCacheDir(mixed), '12.0.0'));
+    const d = discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: mixed }, home });
+    expect(d.source).toEqual(cacheAt(mixed, '11.0.0'));
+    expect(judged(d.findings)).toEqual([['symlink', join(livePluginCacheDir(mixed), '12.0.0')]]);
+    // The config dir ITSELF may be a link (operators symlink ~/.claude): resolved once, its real contents accepted, spelled as configured.
+    const linkedCfg = join(home, 'cfg-linked');
+    symlinkSync(elsewhere, linkedCfg);
+    expect(discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: linkedCfg }, home })).toEqual({ source: cacheAt(linkedCfg, '12.0.0'), findings: [] });
+  });
+
+  it('CLAUDE_CONFIG_DIR lists several dirs: walked in order — the FIRST dir with a valid cache wins whatever the versions; a cache in a LATER dir beats a copy in an EARLIER dir; among copies the first dir wins', () => {
     const a = join(home, 'cfg-a');
     const b = join(home, 'cfg-b');
     mkdirSync(a, { recursive: true });
     mkdirSync(b, { recursive: true });
     const env = { CLAUDE_CONFIG_DIR: [a, b].join(delimiter) };
-    expect(discoverLivePlugin({ env, home })).toBeNull();
+    expect(discoverLivePluginDetailed({ env, home })).toEqual({ source: null, findings: [] });
     plugin(installerCopyDir(b), '12.1.0');
     expect(discoverLivePlugin({ env, home })).toEqual(copyAt(b, '12.1.0'));
-    plugin(installerCopyDir(cfg), '12.2.0'); // ~/.claude's copy — a higher version wins WITHIN the tier
-    expect(discoverLivePlugin({ env, home })).toEqual(copyAt(cfg, '12.2.0'));
-    plugin(join(livePluginCacheDir(a), '12.0.0'), '12.0.0'); // a cache of ANY version beats every copy
-    expect(discoverLivePlugin({ env, home })).toEqual({ path: join(livePluginCacheDir(a), '12.0.0'), kind: 'claude-plugin-cache', plugin_version: '12.0.0' });
-    plugin(join(livePluginCacheDir(b), '12.5.0'), '12.5.0'); // highest across the listed dirs, not first-listed
-    expect(discoverLivePlugin({ env, home })).toEqual({ path: join(livePluginCacheDir(b), '12.5.0'), kind: 'claude-plugin-cache', plugin_version: '12.5.0' });
+    plugin(installerCopyDir(cfg), '12.9.0'); // ~/.claude's copy (appended last): a HIGHER version does not jump the order
+    expect(discoverLivePlugin({ env, home })).toEqual(copyAt(b, '12.1.0'));
+    plugin(installerCopyDir(a), '12.0.0'); // the first listed dir's copy wins among copies
+    expect(discoverLivePlugin({ env, home })).toEqual(copyAt(a, '12.0.0'));
+    plugin(join(livePluginCacheDir(b), '12.5.0'), '12.5.0'); // a cache in the LATER dir beats the copy in the EARLIER dir
+    expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(b, '12.5.0'));
+    plugin(join(livePluginCacheDir(a), '12.0.0'), '12.0.0'); // the FIRST dir with a valid cache wins — not the highest version across dirs
+    expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(a, '12.0.0'));
   });
 
-  it('honours CLAUDE_CONFIG_DIR and the explicit WICKED_CREW_SKILLS_SOURCE override — which is classified by what it IS: a plugins/wicked-garden copy is installer-copy, a cache dir is claude-plugin-cache', () => {
+  it('the version DIRECTORY NAME decides (semver total order, never readdir order) and the plugin.json version must equal it: a mismatching dir is skipped with a finding — equal declared versions under two names, a higher-named dir declaring a lower version, a lower-named dir declaring a higher version, reverse creation order (codex on #491)', () => {
+    // Two dirs both declaring 12.32.0: only the dir NAMED 12.32.0 is the plugin it says it is. The other
+    // sorts below the pick (a prerelease name) and is never read — nothing to report.
+    plugin(join(livePluginCacheDir(cfg), '12.32.0-rebuild'), '12.32.0');
+    plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
+    let d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
+    expect(d.findings).toEqual([]);
+    // A HIGHER-named dir whose manifest says otherwise is skipped with a finding; the honest 12.32.0 wins.
+    plugin(join(livePluginCacheDir(cfg), '12.33.0'), '12.32.0');
+    d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
+    expect(judged(d.findings)).toEqual([['version-mismatch', join(livePluginCacheDir(cfg), '12.33.0')]]);
+    expect(d.findings[0]?.message).toContain('declares version 12.32.0 but the directory is named 12.33.0');
+    // A LOWER-named dir declaring a HIGHER version never outranks the pick: the name orders, the manifest must agree.
+    plugin(join(livePluginCacheDir(cfg), '1.0.0'), '99.0.0');
+    expect(discoverLivePlugin({ env: {}, home })).toEqual(cacheAt(cfg, '12.32.0'));
+    // The same dirs created in REVERSE order in a second home: the same pick, the same findings.
+    const reversed = mkdtempSync(join(tmpdir(), 'skills-source-reversed-'));
+    extraHomes.push(reversed);
+    const reversedCfg = join(reversed, '.claude');
+    plugin(join(livePluginCacheDir(reversedCfg), '1.0.0'), '99.0.0');
+    plugin(join(livePluginCacheDir(reversedCfg), '12.33.0'), '12.32.0');
+    plugin(join(livePluginCacheDir(reversedCfg), '12.32.0'), '12.32.0');
+    plugin(join(livePluginCacheDir(reversedCfg), '12.32.0-rebuild'), '12.32.0');
+    const r = discoverLivePluginDetailed({ env: {}, home: reversed });
+    expect(r.source).toEqual(cacheAt(reversedCfg, '12.32.0'));
+    expect(judged(r.findings)).toEqual([['version-mismatch', join(livePluginCacheDir(reversedCfg), '12.33.0')]]);
+    // When EVERY dir mismatches, nothing is picked — a finding each, never a guess.
+    const bad = mkdtempSync(join(tmpdir(), 'skills-source-mismatch-'));
+    extraHomes.push(bad);
+    const badCfg = join(bad, '.claude');
+    plugin(join(livePluginCacheDir(badCfg), '2.0.0'), '2.0.1');
+    plugin(join(livePluginCacheDir(badCfg), '1.0.0'), '1.0.1');
+    const none = discoverLivePluginDetailed({ env: {}, home: bad });
+    expect(none.source).toBeNull();
+    expect(judged(none.findings)).toEqual([
+      ['version-mismatch', join(livePluginCacheDir(badCfg), '2.0.0')],
+      ['version-mismatch', join(livePluginCacheDir(badCfg), '1.0.0')],
+    ]);
+  });
+
+  it('honours the explicit WICKED_CREW_SKILLS_SOURCE override — classified by what it IS: a plugins/wicked-garden copy is installer-copy, a cache dir is claude-plugin-cache; not a plugin root ⇒ null, never a fall-through', () => {
     const otherCfg = join(home, 'other-config');
     plugin(join(livePluginCacheDir(otherCfg), '1.0.0'), '1.0.0');
-    expect(discoverLivePlugin({ env: { CLAUDE_CONFIG_DIR: otherCfg }, home })?.plugin_version).toBe('1.0.0');
+    expect(discoverLivePlugin({ env: { CLAUDE_CONFIG_DIR: otherCfg }, home })).toEqual(cacheAt(otherCfg, '1.0.0'));
     const explicit = join(home, 'checkout');
     plugin(explicit, '0.0.1-dev');
     expect(discoverLivePlugin({ env: { [SKILLS_SOURCE_ENV]: explicit }, home })).toEqual({
@@ -155,24 +241,6 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env: { [SKILLS_SOURCE_ENV]: join(livePluginCacheDir(otherCfg), '1.0.0') }, home })?.kind).toBe('claude-plugin-cache');
   });
 
-  it('two cache dirs declaring the SAME plugin version tie on version and the higher-NAMED dir wins — by the total order, never readdir order (Copilot on #491)', () => {
-    // A rebuilt/backup dir beside the release, both declaring 12.32.0: `12.32.0-rebuild` sorts BELOW
-    // `12.32.0` as a dir name, so the release-named dir is the pick — whichever the filesystem lists first.
-    plugin(join(livePluginCacheDir(cfg), '12.32.0-rebuild'), '12.32.0');
-    plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
-    expect(discoverLivePlugin({ env: {}, home })).toEqual({ path: join(livePluginCacheDir(cfg), '12.32.0'), kind: 'claude-plugin-cache', plugin_version: '12.32.0' });
-    // Created in the opposite order in a second home: the same pick.
-    const otherHome = mkdtempSync(join(tmpdir(), 'skills-source-tie-'));
-    extraHomes.push(otherHome);
-    const otherCfg = join(otherHome, '.claude');
-    plugin(join(livePluginCacheDir(otherCfg), '12.32.0'), '12.32.0');
-    plugin(join(livePluginCacheDir(otherCfg), '12.32.0-rebuild'), '12.32.0');
-    expect(discoverLivePlugin({ env: {}, home: otherHome })?.path).toBe(join(livePluginCacheDir(otherCfg), '12.32.0'));
-    // The declared version still decides first: a lower-named dir declaring a HIGHER version wins over both.
-    plugin(join(livePluginCacheDir(cfg), '0-staging'), '12.33.0');
-    expect(discoverLivePlugin({ env: {}, home })?.path).toBe(join(livePluginCacheDir(cfg), '0-staging'));
-  });
-
   it('a prerelease never outranks its release, and the pick among prereleases is deterministic (never readdir order — Copilot on #480)', () => {
     plugin(join(livePluginCacheDir(cfg), '12.32.0-beta.2'), '12.32.0-beta.2');
     plugin(join(livePluginCacheDir(cfg), '12.32.0-alpha'), '12.32.0-alpha');
@@ -187,7 +255,7 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env: {}, home: preHome })?.plugin_version).toBe('12.0.0-rc.1');
   });
 
-  it('reads plugin.json NO-FOLLOW below a once-resolved root (codex round 6): a symlinked source ROOT is accepted; a symlinked `.claude-plugin/` or `plugin.json` throws PluginSourceSymlinkError naming it — in the live cache too, never a silent skip to another version', () => {
+  it('reads plugin.json NO-FOLLOW below a once-resolved root (codex round 6): a symlinked source ROOT is accepted for the override; a symlinked `.claude-plugin/` or `plugin.json` throws PluginSourceSymlinkError naming it — in the live cache too, never a silent skip to another version', () => {
     plugin(join(home, 'real-plugin'), '3.0.0');
     const link = join(home, 'linked-plugin');
     symlinkSync(join(home, 'real-plugin'), link);

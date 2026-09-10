@@ -13,20 +13,33 @@ mentioned only where a daemon release depends on them.
 ### Added
 - **#490 — the installer-managed garden copy is a LAST-resort skills source** (design amendment
   v3.6; `wicked-crew-api-types` 0.29.0). Discovery order is now (1) the explicit
-  `WICKED_CREW_SKILLS_SOURCE` override, (2) the marketplace cache
-  `<config dir>/plugins/cache/wicked-garden/wicked-garden/<highest version>` for each dir
-  `CLAUDE_CONFIG_DIR` lists (it may list several) else `~/.claude`, (3) LAST resort, the
-  installer-managed copy `<config dir>/plugins/wicked-garden` for each of those dirs AND
-  `~/.claude/plugins/wicked-garden` (garden's `install.mjs` hard-codes homedir), accepted only when
-  its `.claude-plugin/plugin.json` parses with a `version`. A cache beats a copy regardless of
-  version; within a tier the highest version wins. A copy seed is recorded as
-  `source.kind: 'installer-copy'` (new `SkillSourceKind` member) and surfaces a persistent WARNING
-  finding `skills.source` in `GET /diagnostics` → `skills.findings` — "seeded from the installer copy
-  at <path>; register the plugin with Claude Code (marketplace) to receive marketplace updates" —
-  judged live from the current baseline, so a later refresh from the marketplace cache clears it. So
-  the daemon works on installer-only machines (`npx wicked-installer install wicked-garden` never
-  registers the marketplace) without hiding the difference. Every source kind passes the same
-  no-follow, closure and validation rules; `userCliDirs` fences every listed `CLAUDE_CONFIG_DIR`.
+  `WICKED_CREW_SKILLS_SOURCE` override; (2) the marketplace cache
+  `<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` of the FIRST config dir holding
+  a valid one — the dirs `CLAUDE_CONFIG_DIR` lists, in order, then `~/.claude` appended once (the
+  default when unset) — picking the highest semver version-DIRECTORY NAME whose `plugin.json`
+  version equals it (a mismatching dir is skipped, a non-semver name ignored, each with a logged
+  discovery finding; never `readdir` order); (3) LAST resort, the installer-managed copy
+  `<config dir>/plugins/wicked-garden` of the first of those dirs holding one (garden's
+  `install.mjs` hard-codes `~/.claude`), accepted only when its `.claude-plugin/plugin.json` parses
+  with a `version`. ANY cache beats ANY copy. Each config dir is resolved once; every level below it
+  that discovery touches (`plugins`, `cache`, the marketplace dir, the plugin dir, each version
+  dir, the copy dir) is lstat-walked and a symlink at any of them skips that candidate with a
+  finding — never followed — and the chosen root is re-checked to lie inside the resolved config
+  dir. A copy seed is recorded as `source.kind: 'installer-copy'` (new `SkillSourceKind` member)
+  and surfaces a persistent WARNING finding `skills.source` in `GET /diagnostics` →
+  `skills.findings` — "seeded from the installer copy at <path>; register the plugin with Claude
+  Code (marketplace) to receive marketplace updates" — judged live from the current baseline, so a
+  later refresh from the marketplace cache clears it: a byte-identical refresh now re-records the
+  baseline's provenance (kind, path, version, git state; revision bumped) instead of returning
+  early. So the daemon works on installer-only machines (`npx wicked-installer install
+  wicked-garden` never registers the marketplace) without hiding the difference. Every source kind
+  passes the same no-follow, closure and validation rules; `userCliDirs` fences every listed
+  `CLAUDE_CONFIG_DIR`.
+- **Diagnostics fail closed on an unreadable skills manifest.** `GET /diagnostics` → `skills` now
+  re-reads `manifest.json` on every read; when it cannot (corrupt, unreadable, or the root no
+  longer the one the store bound) it answers `config-error` with a new `skills.manifest` error
+  finding naming the cause — never the stale outcome recorded at boot. A read never touches the
+  engine input (the finding says what stays exported until restart).
 
 ### Changed
 - `SkillsSourceUnavailableError` now says what to do: "install wicked-garden first —

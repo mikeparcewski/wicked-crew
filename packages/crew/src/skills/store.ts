@@ -185,7 +185,7 @@ import {
   type CatalogView,
 } from './guards.js';
 import { LiveGenerations } from './live-generations.js';
-import { discoverLivePlugin, gitStateOf, PluginSourceSymlinkError, type PluginSource } from './plugin-source.js';
+import { discoverLivePluginDetailed, gitStateOf, PluginSourceSymlinkError, type PluginSource } from './plugin-source.js';
 import {
   extractPluginRootRefs,
   extractRelativeRefs,
@@ -509,7 +509,7 @@ export interface SkillsStoreOptions {
   registeredSkillRefs: () => ReadonlySet<string>;
   /** Per-baseline `uv sync` (venv.ts), AWAITED by publish. Tests pass `noVenv`; the daemon passes `uvSyncBaseline`. */
   provisionVenv: VenvProvisioner;
-  /** Plugin-source discovery; defaults to the live installed plugin. */
+  /** Plugin-source discovery; defaults to the installed plugin (plugin-source.ts, design v3.6), whose discovery findings the default logs through `warn`. */
   source?: () => PluginSource | null;
   /** Clock, ISO-8601 (tests pin it). */
   now?: () => string;
@@ -642,7 +642,13 @@ export class SkillsStore {
     this.rootDir = opts.root;
     this.registeredRefs = opts.registeredSkillRefs;
     this.provisionVenv = opts.provisionVenv;
-    this.sourceFn = opts.source ?? (() => discoverLivePlugin());
+    this.sourceFn =
+      opts.source ??
+      (() => {
+        const { source, findings } = discoverLivePluginDetailed();
+        for (const f of findings) this.warn(`[skills] skills.discovery ${f.kind}: ${f.message}`);
+        return source;
+      });
     this.now = opts.now ?? (() => new Date().toISOString());
     this.warn = opts.warn ?? ((m) => console.warn(m));
   }
@@ -2809,7 +2815,22 @@ export class SkillsStore {
       conflicts: [],
       ...extra,
     });
-    if (newHash === previous) return base(); // byte-identical upstream: nothing to merge
+    if (newHash === previous) {
+      // Byte-identical upstream: nothing to merge. The PROVENANCE may still have moved (codex on
+      // #491): a copy seed followed by the marketplace registration discovers the same bytes in the
+      // cache — record where the current baseline is sourced from NOW (kind, path, declared version,
+      // git state; `captured_at` and `venv` stay: the bytes did not change) so the runtime's
+      // `skills.source` warning follows the truth. The revision moves with the manifest commit; the
+      // same source again is a no-op and the revision stands.
+      const record = m.baselines[previous];
+      if (record !== undefined && (record.source.kind !== source.kind || record.source.path !== source.path)) {
+        const now = this.baselineRecord(source);
+        m.baselines[previous] = { ...record, plugin_version: now.plugin_version, source: now.source, git_sha: now.git_sha };
+        this.commit(m);
+        return base({ revision: m.revision });
+      }
+      return base();
+    }
 
     // ── Decide (in memory — nothing on disk moves until the preflight below has passed) ─────
     const newFiles = new Map(bundle.map((f) => [f.rel, sha256Hex(readFileNoFollow(f.abs))])); // the source entries the bundle walk judged, read no-follow
