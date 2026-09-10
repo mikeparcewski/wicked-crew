@@ -11,6 +11,17 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **State-home registry: `repo-graphs` is a registered subtree (wicked-core#406).** wicked-core now
+  keeps every registered repo's code graph under the daemon state home —
+  `<state home>/repo-graphs/<repo-dir-name>-<12-hex>/estate.db`, the `--db` parent, so `--db`
+  relocates the graphs with the rest of the durable state and a checkout's in-tree `.codegraph/` is
+  never adopted — instead of the operator's `~/.wicked-estate/repo-graphs`. The shared fence fixture
+  (`packages/crew/tests/fixtures/state-home-subtrees.json`, byte-identical to core's
+  `tests/fixtures/state-home-subtrees.json`) gains the `repo-graphs` entry (owner `engine`,
+  `worker_read: none`) so the worker Read fence classifies and denies the subtree rather than
+  refusing every governed launch on a daemon that has indexed a repo. Crew spells no new path: it
+  keeps reading the engine's `code_graph_db` off the repo record (`repoPaths.ts`), which now also
+  carries an additive `findings` array (e.g. `in_tree_code_graph_ignored`) the repo card can show.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
