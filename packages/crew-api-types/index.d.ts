@@ -3070,13 +3070,105 @@ export interface ProjectPrompts {
   prompts: InteractionRequest[];
 }
 
-/** `POST /chats` body (gains `projectId` with DES-PROJECT-001). */
+/**
+ * `POST /chats` body (gains `projectId` with DES-PROJECT-001; `repoRefs` and the SCOPE semantics
+ * with crew#502).
+ *
+ * A chat is SCOPED (crew#502, F-067): its seats run in a private scratch root — never a repo and
+ * never the daemon's working directory — with the scoped repositories as read roots and, where a
+ * graph can be bound, a READ-ONLY wicked-estate MCP over it (the grounding governed runs get). The
+ * scope is: the explicit `repoRefs` (plus the legacy single `repoRef`, merged in) when given, else
+ * ALL of `projectId`'s registered `crew.repo` members, else nothing (the seats see only their
+ * scratch root). The resolved scope comes back as {@link ChatOpenResponse.scope}.
+ */
 export interface ChatOpenBody {
   chatId?: string;
   clis?: string[];
+  /** One repo in scope — the legacy spelling; merged into `repoRefs`. */
   repoRef?: string;
-  /** File the chat into a project (`crew.chat` membership, attached on open). */
+  /** The repos in scope, by registry id or name (1–32). With `projectId` the PROJECT graph grounds
+   *  them; without it a single repo's own graph does, and several repos get no graph. */
+  repoRefs?: string[];
+  /** File the chat into a project (`crew.chat` membership, attached on open) — and, when no
+   *  `repoRefs` are given, scope it to every registered `crew.repo` member of that project. */
   projectId?: string;
+}
+
+/** How a chat's scope was chosen (crew#502). */
+export type ChatScopeKind = 'project' | 'repos' | 'none';
+
+/** One repository a chat's seats may read. */
+export interface ChatScopeRepo {
+  id: string;
+  name: string;
+  /** The registered root path — the read root the seats are pointed at. */
+  rootPath: string;
+}
+
+/**
+ * What a chat's seats can see — decided at `POST /chats`, stated to the seats in their scratch
+ * root's `AGENTS.md` / `CLAUDE.md`, and returned to the caller so the UI can show it. Additive:
+ * older skins ignore it.
+ */
+export interface ChatScope {
+  kind: ChatScopeKind;
+  /** The project the chat is filed into, when any. */
+  projectId?: string;
+  /** The repositories in scope (read-only). Empty for `kind: 'none'`. */
+  repos: ChatScopeRepo[];
+  /** The seats' working directory: the chat's private scratch root under the OS temp dir. */
+  cwd: string;
+  /** Whether a READ-ONLY estate MCP over a code graph is attached, and why / why not. `repoLabel`
+   *  is the estate label the project graph indexes the (single) scoped repo under, when the
+   *  binding was repo-bound — informational; the engine binds by graph path. */
+  graph: { bound: boolean; reason: string; repoLabel?: string };
+  /** `crew.repo` members of the project whose registry record is gone — named, not readable. */
+  dangling: string[];
+}
+
+/** One seat's warm-up outcome on `POST /chats`. */
+export interface ChatSeatOutcome {
+  cliKey: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** `POST /chats` → 201. */
+export interface ChatOpenResponse {
+  chatId: string;
+  seats: ChatSeatOutcome[];
+  /** The resolved scope (crew#502). */
+  scope: ChatScope;
+  /** Present when the chat opened but its `crew.chat` filing into `projectId` failed. */
+  projectAttachError?: string;
+}
+
+/** One live chat on `GET /chats` (FINDING-027 gap 4; scope fields with crew#502). */
+export interface ChatSummary {
+  chatId: string;
+  /** The seats currently warm, sorted. */
+  seats: string[];
+  /** Seconds since the chat's last open/ensure/turn; `null` when it has no activity stamp. */
+  idleSecs: number | null;
+  /** The seats' working directory as the engine recorded it; absent on an engine predating scope. */
+  cwd?: string | null;
+  /** The estate graph the seats' read-only estate MCP is bound to; `null` ⇒ none. */
+  codeGraphDb?: string | null;
+  /** The repository roots in scope. */
+  readRoots?: string[];
+}
+
+/** `GET /chats` → 200. */
+export interface ChatListResponse {
+  chats: ChatSummary[];
+}
+
+/** `GET /chats/:id` → 200. */
+export interface ChatDetailResponse {
+  chatId: string;
+  seats: string[];
+  /** The scope recorded at open; `null` for a chat this daemon did not open (or after a restart). */
+  scope: ChatScope | null;
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────

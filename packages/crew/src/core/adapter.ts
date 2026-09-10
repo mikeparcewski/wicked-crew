@@ -248,7 +248,11 @@ type GovernanceMethods = {
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
 type ChatMethods = {
-  chatOpen(chatId: string, clisJson: string, cwd?: string | null): Promise<string>;
+  /** `scopeJson` (`{codeGraphDb, readRoots}`, wicked-core#410 / crew#502) is IGNORED by an addon
+   *  predating it — napi drops undeclared trailing args — which `chatScopeApplied` detects. */
+  chatOpen(chatId: string, clisJson: string, cwd?: string | null, scopeJson?: string | null): Promise<string>;
+  /** `cwd` is accepted for wire compatibility and ignored since wicked-core#410: every turn runs in
+   *  the scope recorded at `chatOpen`. */
   chatSend(chatId: string, text: string, targetsJson?: string | null, cwd?: string | null): Promise<string>;
   chatSeats(chatId: string): Promise<string>;
   chatClose(chatId: string): Promise<string>;
@@ -814,6 +818,20 @@ export interface ChatSummary {
   seats: string[];
   /** Seconds since the chat's last open/ensure/turn; `null` when it has no activity stamp. */
   idleSecs: number | null;
+  /** The scope the engine recorded at open (wicked-core#410 / crew#502): where the seats run, the
+   *  graph their read-only estate MCP is bound to, the roots in scope. ABSENT (not null) on an
+   *  engine predating chat scope — `chatScopeApplied` reads exactly that difference. */
+  cwd?: string | null;
+  codeGraphDb?: string | null;
+  readRoots?: string[];
+}
+
+/** What the daemon hands the engine as a chat's scope — `chatOpen`'s `scopeJson`, parsed. */
+export interface ChatScopeJson {
+  /** The estate graph the seats' READ-ONLY estate MCP is bound to; `null` ⇒ no estate MCP. */
+  codeGraphDb: string | null;
+  /** The repository roots in scope, absolute. */
+  readRoots: string[];
 }
 
 /** A parsed-CoreEvent listener. */
@@ -1719,13 +1737,44 @@ export class CoreAdapter {
 
   // ── Chat sessions (core#134 / crew#165) ────────────────────────────────────
 
+  /**
+   * Open a chat in a SCOPE (wicked-core#410 / crew#502): `cwd` is the seats' working directory
+   * (the chat's scratch root — the route never passes a repo or the daemon's cwd), `scope` the
+   * graph and read roots. An addon predating chat scope honours `cwd` and silently drops `scope`;
+   * callers that promise grounding confirm it with {@link chatScopeApplied} rather than assume.
+   */
   async chatOpen(
     chatId: string,
     clis: string[],
     cwd?: string,
+    scope?: ChatScopeJson,
   ): Promise<{ cliKey: string; ok: boolean; error?: string }[]> {
-    const raw = await this.core.chatOpen(chatId, JSON.stringify(clis), cwd ?? null);
+    const raw = await this.core.chatOpen(
+      chatId,
+      JSON.stringify(clis),
+      cwd ?? null,
+      scope === undefined ? null : JSON.stringify(scope),
+    );
     return JSON.parse(raw) as { cliKey: string; ok: boolean; error?: string }[];
+  }
+
+  /**
+   * Did the engine RECORD a scope for `chatId` (wicked-core#410)? `true` when its `chatList` row
+   * carries the scope fields, `false` when the row exists without them (an addon that ignored
+   * `scopeJson` — the chat runs in its cwd but with no estate MCP and no advertised roots), `null`
+   * when it cannot be told (no enumerate surface, or no row). Read, never inferred from a version
+   * pin: the field's presence IS the capability.
+   */
+  async chatScopeApplied(chatId: string): Promise<boolean | null> {
+    let chats: ChatSummary[];
+    try {
+      chats = await this.chatList();
+    } catch {
+      return null;
+    }
+    const row = chats.find((c) => c.chatId === chatId);
+    if (row === undefined) return null;
+    return 'readRoots' in row;
   }
 
   async chatSend(

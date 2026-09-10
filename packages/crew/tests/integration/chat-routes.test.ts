@@ -59,6 +59,60 @@ describe('chat routes (stub engine)', () => {
     expect(body.error ?? '').toMatch(/chat unsupported|ACP/i);
   });
 
+  // crew#502: the scope is resolved and validated BEFORE any seat warms — so these reach a
+  // verdict on the stub engine (which cannot open chats at all) exactly because nothing was opened.
+  it('POST /chats with an unknown repoRef is a 404 naming EVERY missing ref, before any seat warms', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'scoped-404', repoRefs: ['no-such-repo', 'nor-this-one'] }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string; missing?: string[] };
+    expect(body.missing).toEqual(['no-such-repo', 'nor-this-one']);
+    expect(body.error ?? '').toContain("'no-such-repo'");
+    expect(body.error ?? '').toContain("'nor-this-one'");
+  });
+
+  it('POST /chats with the legacy single repoRef is validated the same way', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'legacy-404', repoRef: 'no-such-repo' }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { missing?: string[] };
+    expect(body.missing).toEqual(['no-such-repo']);
+  });
+
+  it('POST /chats refuses an empty repoRefs list (400) and a chat id that cannot name a scratch directory (400)', async () => {
+    const empty = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'c-empty', repoRefs: [] }),
+    });
+    expect(empty.status).toBe(400);
+    // `..` passes the id's character class; the scope resolver refuses it before creating anything.
+    const dotdot = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: '..', clis: ['claude'] }),
+    });
+    expect(dotdot.status).toBe(400);
+    const body = (await dotdot.json()) as { error?: string };
+    expect(body.error ?? '').toMatch(/scratch directory/);
+  });
+
+  it('GET /chats/:id carries `scope` (null for a chat this daemon never opened) beside the seats', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats/never-opened`);
+    expect([200, 400]).toContain(res.status);
+    if (res.status === 200) {
+      const body = (await res.json()) as { chatId?: string; seats?: unknown; scope?: unknown };
+      expect(body.chatId).toBe('never-opened');
+      expect(body.scope).toBeNull();
+    }
+  });
+
   it('POST /chats/:id/messages on an unopened chat is a 4xx, not a hang', async () => {
     const res = await fetch(`${baseUrl}/api/v1/chats/never-opened/messages`, {
       method: 'POST',

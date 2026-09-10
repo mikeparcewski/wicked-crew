@@ -26,6 +26,24 @@ function probe(seat: string, workerConfigRoot?: string): boolean | null {
   return signedInHeuristic(seat, workerConfigRoot, { home, env: NO_ENV });
 }
 
+/** The probe under the operator's inherit hatch: the seats run on the operator's own CLI homes. */
+function probeInherit(seat: string): boolean | null {
+  return signedInHeuristic(seat, undefined, {
+    home,
+    env: { WICKED_WORKER_INHERIT_OPERATOR_CONFIG: '1' },
+  });
+}
+
+/** `<home>/.wicked-worker/<seat>` — the engine's default per-seat root (wicked-core#410). */
+function seatRoot(seat: string, ...rest: string[]): string {
+  return join(home, '.wicked-worker', seat, ...rest);
+}
+
+function writeFile(path: string, content: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, content);
+}
+
 describe('claude — worker-home .claude.json with oauthAccount', () => {
   const write = (dir: string, content: string): void => {
     mkdirSync(join(dir, 'claude'), { recursive: true });
@@ -65,12 +83,29 @@ describe('claude — worker-home .claude.json with oauthAccount', () => {
   });
 });
 
-describe('codex — ~/.codex/auth.json presence', () => {
-  it('false without the file, true with it', () => {
+// wicked-core#410 (F-010): every known seat is probed under ITS OWN root in the worker home — the
+// directory the engine now points the CLI at (`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `COPILOT_HOME`,
+// opencode's XDG bases) — never the operator's own CLI home. The finding: a fresh worker home
+// reported claude `signed_in:false` but codex/pi/copilot/opencode `true`, off the OPERATOR's logins.
+describe('codex — <worker home>/codex/auth.json presence (CODEX_HOME)', () => {
+  it('false without the file, true with it — and the OPERATOR\'s ~/.codex/auth.json does not count', () => {
+    writeFile(join(home, '.codex', 'auth.json'), '{}');
     expect(probe('codex')).toBe(false);
-    mkdirSync(join(home, '.codex'), { recursive: true });
-    writeFileSync(join(home, '.codex', 'auth.json'), '{}');
+    writeFile(seatRoot('codex', 'auth.json'), '{}');
     expect(probe('codex')).toBe(true);
+  });
+
+  it('honours an explicit workerConfigRoot', () => {
+    const custom = join(home, 'custom-root');
+    writeFile(join(custom, 'codex', 'auth.json'), '{}');
+    expect(probe('codex')).toBe(false);
+    expect(probe('codex', custom)).toBe(true);
+  });
+
+  it('under the inherit hatch the seat runs on the operator\'s ~/.codex, so that is what is probed', () => {
+    expect(probeInherit('codex')).toBe(false);
+    writeFile(join(home, '.codex', 'auth.json'), '{}');
+    expect(probeInherit('codex')).toBe(true);
   });
 });
 
@@ -83,75 +118,85 @@ describe('copilot — env token, else keychain-unknowable', () => {
     expect(signedInHeuristic('copilot', undefined, { home, env: { GH_TOKEN: '' } })).toBe(false);
   });
 
+  // The seat's config home is `COPILOT_HOME=<worker home>/copilot` (wicked-core#410).
+  const copilotConfig = (): string => seatRoot('copilot', 'config.json');
+
   it('null (NOT false) when installed but no recorded user — the keychain state is unknowable cheaply', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(join(home, '.copilot', 'config.json'), '{}');
+    writeFile(copilotConfig(), '{}');
     expect(probe('copilot')).toBeNull();
   });
 
   it('TRUE when config.json records a logged-in user (JSONC with comment header, field shape)', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(
-      join(home, '.copilot', 'config.json'),
+    writeFile(
+      copilotConfig(),
       '// User settings belong in settings.json\n{"lastLoggedInUser": "octocat", "loggedInUsers": ["octocat"], "trustedFolders": []}',
     );
     expect(probe('copilot')).toBe(true);
   });
 
   it('an EMPTY loggedInUsers array does not count as signed in', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(
-      join(home, '.copilot', 'config.json'),
-      '{"loggedInUsers": [], "lastLoggedInUser": ""}',
-    );
+    writeFile(copilotConfig(), '{"loggedInUsers": [], "lastLoggedInUser": ""}');
     expect(probe('copilot')).toBeNull();
   });
 
   it('TRUE when the recorded user is an OBJECT ({host, login}) — the live macOS shape', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(
-      join(home, '.copilot', 'config.json'),
+    writeFile(
+      copilotConfig(),
       '// comment\n{"loggedInUsers": [{"host": "github.com", "login": "octocat"}], "lastLoggedInUser": {"host": "github.com", "login": "octocat"}}',
     );
     expect(probe('copilot')).toBe(true);
   });
 
   it('an unrelated "login" string OUTSIDE the user containers does not count', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(
-      join(home, '.copilot', 'config.json'),
+    writeFile(
+      copilotConfig(),
       '{"someFeature": {"login": "banner-text"}, "loggedInUsers": [], "lastLoggedInUser": null}',
     );
     expect(probe('copilot')).toBeNull();
   });
 
   it('an array of EMPTY STRINGS does not count as signed in either', () => {
-    mkdirSync(join(home, '.copilot'), { recursive: true });
-    writeFileSync(
-      join(home, '.copilot', 'config.json'),
-      '{"loggedInUsers": [""], "lastLoggedInUser": ""}',
-    );
+    writeFile(copilotConfig(), '{"loggedInUsers": [""], "lastLoggedInUser": ""}');
     expect(probe('copilot')).toBeNull();
   });
 
   it('false when there is no env token and no config dir at all', () => {
     expect(probe('copilot')).toBe(false);
   });
+
+  it('the OPERATOR\'s ~/.copilot/config.json does not count for the seat — unless the inherit hatch is set', () => {
+    writeFile(join(home, '.copilot', 'config.json'), '{"lastLoggedInUser": "octocat"}');
+    expect(probe('copilot')).toBe(false);
+    expect(probeInherit('copilot')).toBe(true);
+  });
 });
 
-describe('opencode / pi — credential-file presence', () => {
-  it('opencode: ~/.local/share/opencode/auth.json', () => {
+describe('opencode / pi — credential-file presence under their seat roots', () => {
+  it('opencode: <worker home>/opencode/data/opencode/auth.json (XDG_DATA_HOME=<root>/opencode/data)', () => {
+    writeFile(join(home, '.local', 'share', 'opencode', 'auth.json'), '{}');
     expect(probe('opencode')).toBe(false);
-    mkdirSync(join(home, '.local', 'share', 'opencode'), { recursive: true });
-    writeFileSync(join(home, '.local', 'share', 'opencode', 'auth.json'), '{}');
+    writeFile(seatRoot('opencode', 'data', 'opencode', 'auth.json'), '{}');
     expect(probe('opencode')).toBe(true);
+    // Under the hatch the operator's own store is the seat's.
+    expect(probeInherit('opencode')).toBe(true);
   });
 
-  it('pi: ~/.pi/agent/auth.json', () => {
+  it('pi: <worker home>/pi/auth.json (PI_CODING_AGENT_DIR=<root>/pi)', () => {
+    writeFile(join(home, '.pi', 'agent', 'auth.json'), '{}');
     expect(probe('pi')).toBe(false);
-    mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
-    writeFileSync(join(home, '.pi', 'agent', 'auth.json'), '{}');
+    writeFile(seatRoot('pi', 'auth.json'), '{}');
     expect(probe('pi')).toBe(true);
+    expect(probeInherit('pi')).toBe(true);
+  });
+
+  it('an explicit workerConfigRoot relocates every seat root together', () => {
+    const custom = join(home, 'elsewhere');
+    writeFile(join(custom, 'pi', 'auth.json'), '{}');
+    writeFile(join(custom, 'opencode', 'data', 'opencode', 'auth.json'), '{}');
+    expect(probe('pi', custom)).toBe(true);
+    expect(probe('opencode', custom)).toBe(true);
+    expect(probe('pi')).toBe(false);
+    expect(probe('opencode')).toBe(false);
   });
 });
 
