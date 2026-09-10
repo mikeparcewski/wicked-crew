@@ -166,10 +166,20 @@ jobs:
     steps:
       - name: Poll until the registry resolves the version (up to 10 min)
         run: |
-          # PUBLISHED is empty when the publish step failed or never ran: nothing to poll for, and
-          # the release job's publish log already holds the reason.
+          # `timeout 60` on every lookup: npm's own fetch timeout is 5 min with retries, so an
+          # unbounded `npm view` could outlive the deadline below (Copilot on #520).
+          #
+          # PUBLISHED is empty when the publish step failed or never ran. One look at the registry
+          # tells the two failures apart: a re-run of an already-published tag fails `npm publish`
+          # with EPUBLISHCONFLICT although the version is obtainable — the very re-run #514 warns
+          # against — whereas a real publish failure leaves nothing to poll for.
           if [ -z "$PUBLISHED" ]; then
-            echo "::error::the release job's publish step failed or did not run, so ${PACKAGE}@${VERSION} was never published: a REAL publish failure. Nothing to probe — read the release job's publish step log; re-running this probe cannot fix it."
+            if served="$(timeout 60 npm view --prefer-online "${PACKAGE}@${VERSION}" version)" \
+               && [ "$served" = "$VERSION" ]; then
+              echo "::warning::the release job's publish step failed, yet the registry already serves ${PACKAGE}@${VERSION}: a re-run of an already-published tag (npm refuses to publish over an existing version, EPUBLISHCONFLICT). The release is fine; the failed publish step belongs to the re-run, not to the release."
+              exit 0
+            fi
+            echo "::error::the release job's publish step failed or did not run, and the registry does not serve ${PACKAGE}@${VERSION}: a REAL publish failure. Nothing to poll for — read the release job's publish step log; re-running this probe cannot fix it."
             exit 1
           fi
           # `--prefer-online`: the registry serves packuments with `cache-control: max-age=300`, so
@@ -180,7 +190,7 @@ jobs:
           attempt=0
           while :; do
             attempt=$(( attempt + 1 ))
-            if served="$(npm view --prefer-online "${PACKAGE}@${VERSION}" version)" \
+            if served="$(timeout 60 npm view --prefer-online "${PACKAGE}@${VERSION}" version)" \
                && [ "$served" = "$VERSION" ]; then
               echo "  ok — ${PACKAGE}@${VERSION} is obtainable from the registry after $(( $(date +%s) - started ))s (attempt ${attempt})"
               if [ "$PUBLISHED" != "true" ]; then
