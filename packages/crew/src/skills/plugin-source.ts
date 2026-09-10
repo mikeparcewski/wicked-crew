@@ -200,11 +200,17 @@ export function manifestVersionBelow(root: string, spelling: string = root): str
   return typeof version === 'string' && version !== '' ? version : null;
 }
 
-/** A parsed SemVer 2.0.0 version (semver.org). */
+/**
+ * A parsed SemVer 2.0.0 version (semver.org). Numeric identifiers are kept as DIGIT STRINGS, never
+ * converted to `number`: above `Number.MAX_SAFE_INTEGER` adjacent values would collapse into one
+ * (`9007199254740992` == `9007199254740993` as doubles) and the tie-break would pick the lower dir
+ * (codex on #491). SemVer forbids leading zeros, so digit strings compare losslessly by length,
+ * then lexically (`compareNumeric`).
+ */
 export interface Semver {
-  major: number;
-  minor: number;
-  patch: number;
+  major: string;
+  minor: string;
+  patch: string;
   /** Dot-separated pre-release identifiers; empty for a release. */
   prerelease: string[];
   /** Build metadata after `+`, or `null`; ignored by precedence. */
@@ -225,19 +231,26 @@ export function parseSemver(v: string): Semver | null {
   const m = SEMVER_RE.exec(v);
   if (m === null) return null;
   return {
-    major: Number(m[1]),
-    minor: Number(m[2]),
-    patch: Number(m[3]),
+    major: m[1] as string,
+    minor: m[2] as string,
+    patch: m[3] as string,
     prerelease: m[4] === undefined ? [] : m[4].split('.'),
     build: m[5] ?? null,
   };
 }
 
+/** Two non-negative integers as digit strings without leading zeros (the SemVer grammar guarantees it): shorter is smaller, equal length compares lexically — exact at any magnitude. */
+function compareNumeric(a: string, b: string): number {
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
  * SemVer PRECEDENCE (semver.org §11): major, minor, patch numerically; a pre-release version has
  * LOWER precedence than its release; pre-release identifiers compare left to right — numeric ones
- * numerically, numeric before alphanumeric, alphanumeric ones in ASCII order, a shorter set lower
- * when every preceding identifier is equal. Build metadata is IGNORED: `1.0.1` and `1.0.1+build`
+ * numerically (losslessly — digit strings, never `number`), numeric before alphanumeric,
+ * alphanumeric ones in ASCII order, a shorter set lower when every preceding identifier is equal.
+ * Build metadata is IGNORED: `1.0.1` and `1.0.1+build`
  * have equal precedence (0). Throws for a string that is not a SemVer version — callers validate
  * names first (`parseSemver`).
  */
@@ -246,7 +259,8 @@ export function compareSemver(a: string, b: string): number {
   const pb = parseSemver(b);
   if (pa === null || pb === null) throw new TypeError(`compareSemver: not a SemVer version: ${pa === null ? a : b}`);
   for (const part of ['major', 'minor', 'patch'] as const) {
-    if (pa[part] !== pb[part]) return pa[part] < pb[part] ? -1 : 1;
+    const c = compareNumeric(pa[part], pb[part]);
+    if (c !== 0) return c;
   }
   if (pa.prerelease.length === 0 || pb.prerelease.length === 0) {
     if (pa.prerelease.length === pb.prerelease.length) return 0;
@@ -261,7 +275,8 @@ export function compareSemver(a: string, b: string): number {
     const numA = /^\d+$/.test(ia);
     const numB = /^\d+$/.test(ib);
     if (numA && numB) {
-      if (Number(ia) !== Number(ib)) return Number(ia) < Number(ib) ? -1 : 1;
+      const c = compareNumeric(ia, ib);
+      if (c !== 0) return c;
       continue;
     }
     if (numA !== numB) return numA ? -1 : 1;

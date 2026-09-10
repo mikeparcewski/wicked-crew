@@ -328,6 +328,25 @@ describe('discoverLivePlugin', () => {
     for (const f of d.findings) expect(f.message).toContain('not a valid SemVer version');
   });
 
+  it('two version dirs above Number.MAX_SAFE_INTEGER, one apart: the HIGHER wins, under either creation order (codex on #491)', () => {
+    const lo = '9007199254740992.0.0';
+    const hi = '9007199254740993.0.0';
+    plugin(join(livePluginCacheDir(cfg), lo), lo);
+    plugin(join(livePluginCacheDir(cfg), hi), hi);
+    expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: cacheAt(cfg, hi), findings: [] });
+    const other = newHome('skills-source-big-');
+    const otherCfg = join(other, '.claude');
+    plugin(join(livePluginCacheDir(otherCfg), hi), hi);
+    plugin(join(livePluginCacheDir(otherCfg), lo), lo);
+    expect(discoverLivePluginDetailed({ env: {}, home: other })).toEqual({ source: cacheAt(otherCfg, hi), findings: [] });
+    // …and in a numeric pre-release identifier.
+    const pre = newHome('skills-source-bigpre-');
+    const preCfg = join(pre, '.claude');
+    plugin(join(livePluginCacheDir(preCfg), '1.0.0-9007199254740992'), '1.0.0-9007199254740992');
+    plugin(join(livePluginCacheDir(preCfg), '1.0.0-9007199254740993'), '1.0.0-9007199254740993');
+    expect(discoverLivePlugin({ env: {}, home: pre })).toEqual(cacheAt(preCfg, '1.0.0-9007199254740993'));
+  });
+
   it('SemVer PRECEDENCE orders the pick — build metadata is ignored for ordering (`1.0.1+build` sorts above `1.0.0`) — and equal precedence has a deterministic tie-break: the plain name, else the lexicographically smallest, under either creation order (codex on #491)', () => {
     plugin(join(livePluginCacheDir(cfg), '1.0.0'), '1.0.0');
     plugin(join(livePluginCacheDir(cfg), '1.0.1+build'), '1.0.1+build');
@@ -414,8 +433,9 @@ describe('discoverLivePlugin', () => {
 
 describe('parseSemver / compareSemver / cacheDirOrder — semver.org grammar and precedence (codex on #491)', () => {
   it('parses by the official grammar and rejects what it forbids', () => {
-    expect(parseSemver('1.0.0')).toEqual({ major: 1, minor: 0, patch: 0, prerelease: [], build: null });
-    expect(parseSemver('1.0.0-beta+exp.sha.5114f85')).toEqual({ major: 1, minor: 0, patch: 0, prerelease: ['beta'], build: 'exp.sha.5114f85' });
+    expect(parseSemver('1.0.0')).toEqual({ major: '1', minor: '0', patch: '0', prerelease: [], build: null });
+    expect(parseSemver('1.0.0-beta+exp.sha.5114f85')).toEqual({ major: '1', minor: '0', patch: '0', prerelease: ['beta'], build: 'exp.sha.5114f85' });
+    expect(parseSemver('9007199254740993.0.0')?.major).toBe('9007199254740993'); // kept as a digit string — never a lossy double
     expect(parseSemver('1.0.0-x.7.z.92')?.prerelease).toEqual(['x', '7', 'z', '92']);
     expect(parseSemver('1.0.0-0.3.7')?.prerelease).toEqual(['0', '3', '7']);
     expect(parseSemver('1.0.0+20130313144700')?.build).toBe('20130313144700');
@@ -441,6 +461,22 @@ describe('parseSemver / compareSemver / cacheDirOrder — semver.org grammar and
     expect(compareSemver('1.0.1+build', '1.0.0')).toBe(1); // build metadata never lowers a version
     expect(compareSemver('1.0.1', '1.0.1+build')).toBe(0); // …and never orders it either
     expect(() => compareSemver('weird', '1.0.0')).toThrow(TypeError);
+  });
+
+  it('numeric identifiers compare LOSSLESSLY above Number.MAX_SAFE_INTEGER — adjacent values in every core position and in a numeric pre-release identifier are distinct and ordered (codex on #491)', () => {
+    const lo = '9007199254740992'; // 2^53 — where doubles stop being exact
+    const hi = '9007199254740993';
+    expect(compareSemver(`${hi}.0.0`, `${lo}.0.0`)).toBe(1);
+    expect(compareSemver(`${lo}.0.0`, `${hi}.0.0`)).toBe(-1);
+    expect(compareSemver(`1.${hi}.0`, `1.${lo}.0`)).toBe(1);
+    expect(compareSemver(`1.0.${hi}`, `1.0.${lo}`)).toBe(1);
+    expect(compareSemver(`1.0.0-${hi}`, `1.0.0-${lo}`)).toBe(1);
+    expect(compareSemver(`1.0.0-rc.${hi}`, `1.0.0-rc.${lo}`)).toBe(1);
+    expect(compareSemver(`1.0.0-${lo}`, `1.0.0-${hi}`)).toBe(-1);
+    // Length decides before digits (no leading zeros in SemVer): a 17-digit major beats any 16-digit one.
+    expect(compareSemver('10000000000000000.0.0', '9999999999999999.0.0')).toBe(1);
+    expect(compareSemver(`${hi}.0.0`, `${hi}.0.0`)).toBe(0);
+    expect(cacheDirOrder(`${hi}.0.0`, `${lo}.0.0`)).toBe(-1); // the pick order agrees: the higher first
   });
 
   it('cacheDirOrder: highest precedence first; equal precedence → the plain name, else the lexicographically smallest — a total order, the same from any starting order', () => {
