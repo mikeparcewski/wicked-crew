@@ -11,7 +11,8 @@
 // `bug.verify` and `migration.verify` — every gate floor core ships, removed by a file write, on a
 // run that still reported the right workflow and the right phases.
 //
-// Two halves fix it. Core carries a shadowed pin forward as a backstop (`carry_shadowed_pins`).
+// Two halves fix it. Core REFUSES a shadow that drops a gate (registration judges the def as
+// authored — wicked-core#414; the earlier `carry_shadowed_pins` backstop is gone).
 // This is the other half, and it is the one that stops the shadowing: the write is now scoped to
 // the ids core does NOT seed, which is the only reason the write existed.
 //
@@ -167,10 +168,12 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
       const def = adapter.listWorkflows().find((w) => w.id === id)!;
       return [id, def.phases.filter((p) => p.validator_pin !== null).map((p) => p.id)];
     });
+    // wicked-core F-039: the code-writing Creator phases carry the floor too — the `fix` gate
+    // (and `build`/`execute`) must evaluate something, never fold `combined: true` over nothing.
     expect(gated).toEqual([
-      ['feature', ['adversarial-review', 'test']],
-      ['bug', ['verify']],
-      ['migration', ['verify']],
+      ['feature', ['build', 'adversarial-review', 'test']],
+      ['bug', ['fix', 'verify']],
+      ['migration', ['execute', 'verify']],
     ]);
   });
 });

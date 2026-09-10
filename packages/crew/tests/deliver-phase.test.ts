@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
+  EVIDENCE_FLOOR_PIN,
   composeDeliverWorkflow,
   deliverPrPhase,
   deliverPrScript,
@@ -200,15 +201,16 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
   });
 
   // crew#317 — the delivering phase was the one phase nothing re-derived (`verified_evidence:
-  // false`, `validator_pin: null`, `governed=false`). It now declares verified_evidence, which
-  // core's `enforce_verified_evidence` arms AT REGISTRATION with the built-in evidence floor
-  // (EVIDENCE_FLOOR_PIN — "the run left a change in its worktree"). The pin stays null on OUR
-  // side deliberately: `attach_pinned_validators` is fail-closed on a pin that is not vaulted,
-  // and crew has no provision/approve surface, so a crew-minted pin would bail every run.
-  it('declares verified_evidence so the engine floors it, and mints no pin of its own', () => {
+  // false`, `validator_pin: null`, `governed=false`). It declares verified_evidence AND pins the
+  // built-in evidence floor explicitly (EVIDENCE_FLOOR_PIN — "the run left a change in its
+  // worktree"): since wicked-core#414 the engine judges a def as authored and REFUSES a flagged
+  // phase with no pin, and the floor is the one pin that always resolves (seeded on core's plan
+  // path) — crew still mints no pin of its own.
+  it('declares verified_evidence and pins the built-in evidence floor explicitly', () => {
     const phase = deliverPrPhase(['review']);
     expect(phase.verified_evidence).toBe(true);
-    expect(phase.validator_pin).toBeNull();
+    expect(phase.validator_pin).toBe(EVIDENCE_FLOOR_PIN);
+    expect(EVIDENCE_FLOOR_PIN).toBe('e2e7af1db9e48454');
   });
 
   it('threads the run intent into the script it carries', () => {
@@ -277,18 +279,18 @@ describe('deliver review follow-ups (#303)', () => {
   });
 });
 
-// crew#317 — the deliver phase's governance is a CROSS-REPO claim: crew sets a flag and relies on
-// wicked-core to turn it into a real gate. Transcribing that belief into a comment is the drift
+// crew#317 → wicked-core#414 — the deliver phase's governance is a CROSS-REPO claim: crew pins a
+// floor and relies on wicked-core to run it. Transcribing that belief into a comment is the drift
 // this repo keeps paying for (FINDING-049/-084/-088), so it is DERIVED from core's own source, in
 // the established style of the sibling drift guards.
 //
 // The mechanism, in core's `workflow.rs`: `WorkflowRegistry::register` — the choke point every def
-// crosses, including crew's per-run `registerWorkflow` — calls `enforce_verified_evidence`, which
-// pins `builtin_floors::EVIDENCE_FLOOR_PIN` onto any `verified_evidence` phase that names no
-// validator of its own. That is why `deliverPrPhase` can declare the flag and leave the pin null:
-// crew cannot mint a pin (`attach_pinned_validators` is fail-closed on one that is not vaulted,
-// and crew has no provision/approve surface), but it can declare the requirement.
-describe.skipIf(SKIP_CORE_CHECKS)('the engine really arms verified_evidence (cross-repo)', () => {
+// crosses, including crew's per-run `registerWorkflow` — judges the def AS AUTHORED and REFUSES a
+// `verified_evidence` phase that names no validator (`refuse_unpinned_verified_evidence`). Nothing
+// is armed on crew's behalf any more (the old `enforce_verified_evidence` is gone), which is why
+// `deliverPrPhase` pins `EVIDENCE_FLOOR_PIN` itself — the one pin that always resolves — and why
+// that pin must equal core's constant.
+describe.skipIf(SKIP_CORE_CHECKS)('the engine refuses an unpinned verified_evidence phase as authored (cross-repo)', () => {
   const workflowRs = (): string => {
     const path = join(requireCoreDir(), 'src', 'workflow.rs');
     try {
@@ -296,21 +298,27 @@ describe.skipIf(SKIP_CORE_CHECKS)('the engine really arms verified_evidence (cro
     } catch (e) {
       throw new Error(
         `cannot read core's src/workflow.rs at ${path}: ${e instanceof Error ? e.message : String(e)}\n` +
-          "  The deliver phase's ONLY governance is core arming its verified_evidence flag with " +
-          'the built-in evidence floor. If that moved, follow it — do not delete this guard.',
+          "  The deliver phase's ONLY governance is the evidence floor it pins, which core runs " +
+          'because it is pinned. If registration moved, follow it — do not delete this guard.',
       );
     }
   };
 
-  it('register() runs enforce_verified_evidence, which floors an unpinned flagged phase', () => {
+  it('register() refuses a flagged phase with no pin — and no longer arms one', () => {
     const src = workflowRs();
-    expect(src).toContain('let def = enforce_verified_evidence(def);');
-    expect(src).toContain('fn enforce_verified_evidence(mut def: WorkflowDef) -> WorkflowDef {');
-    // Flagged AND unpinned is exactly the shape deliverPrPhase ships.
-    expect(src).toContain('if !phase.verified_evidence || phase.validator_pin.is_some() {');
+    expect(src).toContain('refuse_unpinned_verified_evidence(&def)?;');
     expect(src).toContain(
-      'phase.validator_pin = Some(crate::builtin_floors::EVIDENCE_FLOOR_PIN.to_string());',
+      'fn refuse_unpinned_verified_evidence(def: &WorkflowDef) -> Result<(), WorkflowDefError> {',
     );
+    expect(src).toContain('.find(|p| p.verified_evidence && p.validator_pin.is_none())');
+    // The arming pass is gone: a def is what it says it is.
+    expect(src).not.toContain('fn enforce_verified_evidence(');
+    expect(src).not.toContain('fn carry_shadowed_pins(');
+  });
+
+  it("crew's pin IS core's built-in evidence floor", () => {
+    const floors = readFileSync(join(requireCoreDir(), 'src', 'builtin_floors.rs'), 'utf8');
+    expect(floors).toContain(`pub const EVIDENCE_FLOOR_PIN: &str = "${EVIDENCE_FLOOR_PIN}";`);
   });
 
   it('the floor it arms re-derives done from the worktree, committed work included', () => {

@@ -1,6 +1,6 @@
 // crew#293 — POST /runs accepts deliver:"pr" and threads it to the adapter.
 // crew#393 — the deliver DEFAULT: a repo-scoped launch that names a CODE-WORK workflow (a def
-// with at least one `executes_code` phase) delivers unless somebody said otherwise (per-launch
+// with at least one non-evaluator `executes_code` phase) delivers unless somebody said otherwise (per-launch
 // `deliver: 'none'`, or the daemon's `deliverDefault` setting); repo-less, free-text, and
 // read-only-workflow launches (chat and its kin — the deliver script fails a clean worktree
 // loudly, so defaulting it on would fail every repo-scoped chat) default to no deliver phase.
@@ -24,6 +24,16 @@ const CODE_WORK_DEF = {
   id: 'feature',
   phases: [
     { id: 'build', kind: 'build', gate_type: null, gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+  ],
+} as unknown as WorkflowDef;
+
+/** An EVALUATOR that executes code (domain-extraction's `coverage` writes its own report into the
+ *  tree, wicked-core#414) and no other code phase anywhere — nothing to deliver. */
+const EVALUATOR_CODE_DEF = {
+  id: 'domain-extraction',
+  phases: [
+    { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
   ],
 } as unknown as WorkflowDef;
 
@@ -233,6 +243,23 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect('deliver' in input).toBe(false);
     // The setting is not even consulted — a read-only def can never default on.
+    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+  });
+
+  it('a def whose only code phase is an EVALUATOR (domain-extraction) defaults to none', async () => {
+    // `coverage` executes code only to write its own report for its validator; nothing else wrote
+    // anything a PR could carry — defaulting deliver on would fail every domain-extraction run.
+    // (A neutral Tool phase that writes IS code work — the deliver e2e fixtures rely on that.)
+    mockAdapter.getWorkflow.mockReturnValue(EVALUATOR_CODE_DEF);
+    const res = await launch({
+      problem: 'extract the domain',
+      clisJson: '[]',
+      workflow: 'domain-extraction',
+      repoRef: 'repo-1',
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect('deliver' in input).toBe(false);
     expect(mockAdapter.getSettings).not.toHaveBeenCalled();
   });
 

@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
+import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
 
@@ -38,7 +39,10 @@ const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
 ]);
 
-/** One-phase governed workflow: `accept` declares the acceptance requirement. */
+/** One-phase governed workflow: `accept` declares the acceptance requirement — and PINS the
+ *  built-in evidence floor explicitly: since wicked-core#414 the engine judges a def as authored
+ *  and REFUSES a `verified_evidence` phase with no `validator_pin` at registration (400 from
+ *  `POST /workflows`), where it used to arm the floor itself. */
 const ACCEPT_WORKFLOW = {
   id: 'qe-accept-functional',
   phases: [
@@ -54,7 +58,7 @@ const ACCEPT_WORKFLOW = {
       role: 'evaluator',
       skill_ref: null,
       allowed_skills: [],
-      validator_pin: null,
+      validator_pin: EVIDENCE_FLOOR_PIN,
     },
   ],
 } as const;
@@ -120,8 +124,8 @@ beforeAll(async () => {
   expect(launchRes.status).toBe(201);
   runId = ((await launchRes.json()) as { runId: string }).runId;
 
-  // Wait for the run to reach a terminal state (the stub unit is denied by the
-  // engine's auto-pinned evidence floor, so `failed` is the expected terminus).
+  // Wait for the run to reach a terminal state (the stub unit is denied by the explicitly
+  // pinned evidence floor, so `failed` is the expected terminus).
   let status = '';
   for (let i = 0; i < 300 && !TERMINAL.has(status); i++) {
     const { body } = await getJson(`/api/v1/runs/${runId}`);

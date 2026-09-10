@@ -69,6 +69,63 @@ function accepts<SchemaInput, ContractBody extends SchemaInput>(): ContractBody 
   /* the assertion is the `extends` constraint; nothing to do at runtime */
 }
 
+// ── Gate-evidence frames (wicked-core F-036/F-039; api-types 0.31.0) ─────────────────────────
+// The two new variants are `type` aliases so they satisfy CoreEvent's index signature and relay
+// through the CoreEvent-typed broadcast seams unchanged (codex on #507) …
+respondsWith<Wire.CoreEvent, Wire.EvaluatorMutatedWorktreeEvent>();
+respondsWith<Wire.CoreEvent, Wire.RepoChecksEvaluatedEvent>();
+respondsWith<Wire.CoreEvent, Wire.GateEvidenceEvent>();
+// … and `gateEvaluated.denial` names both new layers alongside the established ones. The literals
+// are SHAPED like wicked-core's `denial_json` output (camelCase, every key present, `null` never
+// absent); the `reason` wording and `phase` values are illustrative, not core's exact strings.
+const WORKTREE_GUARD_DENIAL = {
+  source: 'worktree_guard' as const,
+  reason: 'evaluator≠creator: phase `verify` declares `executes_code: false` but changed the worktree',
+  claimId: null,
+  ruleIds: [] as string[],
+  deniedTool: null,
+  phase: 'unit-4',
+};
+const REPO_CHECKS_DENIAL = {
+  source: 'repo_checks' as const,
+  reason: 'repo checks floor failed: cargo-test: exit 101',
+  claimId: null,
+  ruleIds: [] as string[],
+  deniedTool: null,
+  phase: null,
+};
+respondsWith<Wire.UnitDenial, typeof WORKTREE_GUARD_DENIAL>();
+respondsWith<Wire.UnitDenial, typeof REPO_CHECKS_DENIAL>();
+respondsWith<Wire.UnitDenialSource, 'worktree_guard' | 'repo_checks' | 'pinned_validator'>();
+const GATE_DENIED_BY_GUARD = {
+  type: 'gateEvaluated' as const,
+  session: 'run-1',
+  ord: 4,
+  criterion: null,
+  hasDeterministicFloor: true,
+  deterministicPass: true,
+  agentVerdict: null,
+  agentReasoning: null,
+  evaluatorPass: true,
+  evaluatorPolicies: [] as string[],
+  denialReason: WORKTREE_GUARD_DENIAL.reason,
+  denial: WORKTREE_GUARD_DENIAL,
+  combined: false,
+};
+const GATE_DENIED_BY_CHECKS = { ...GATE_DENIED_BY_GUARD, denialReason: REPO_CHECKS_DENIAL.reason, denial: REPO_CHECKS_DENIAL };
+respondsWith<Wire.GateEvaluatedEvent, typeof GATE_DENIED_BY_GUARD>();
+respondsWith<Wire.GateEvaluatedEvent, typeof GATE_DENIED_BY_CHECKS>();
+
+describe('gate-evidence wire shapes (wicked-core F-036/F-039)', () => {
+  it('names both new denial layers exactly as the engine spells them', () => {
+    // The teeth are the compile-time assertions above; this keeps the literals live and the guard
+    // visible in the test run.
+    expect(GATE_DENIED_BY_GUARD.denial.source).toBe('worktree_guard');
+    expect(GATE_DENIED_BY_CHECKS.denial.source).toBe('repo_checks');
+    expect(GATE_DENIED_BY_CHECKS.denialReason).toBe(REPO_CHECKS_DENIAL.reason);
+  });
+});
+
 // ── Response direction: daemon → client ────────────────────────────────────────
 
 // F-046 (api-types 0.30.0) — the interactive create proxy's refusals satisfy the published shapes,

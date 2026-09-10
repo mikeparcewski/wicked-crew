@@ -118,6 +118,60 @@ mentioned only where a daemon release depends on them.
   cannot be read is used but never written into the sidecar (`interactive/bridge-pool.ts`).
   `wicked-interactive`'s own hard-coded `:7701` default is tracked separately in that repo.
 
+### Added
+- **Gate-evidence events on the wire (wicked-core F-036 / F-039).** `wicked-crew-api-types` declares
+  `EvaluatorMutatedWorktreeEvent` (`evaluatorMutatedWorktree`: an `executes_code: false` phase —
+  an evaluator, a recon rung — CHANGED the worktree it was reviewing; `changed[{status,path}]` is
+  EVERY differing path and every one denies the unit — the engine has no exemptions, not
+  documentation, not a declared deliverable — plus `headMoved`; the event fires exactly when the
+  unit is denied) and
+  `RepoChecksEvaluatedEvent` (`repoChecksEvaluated`: the engine ran the repository's own
+  `typecheck`/`lint`/`test` scripts or `cargo test` in the worktree for the code-verifying unit —
+  `checks[{name, argv, source, exitCode, timedOut, spawnError, durationMs, stdoutTail,
+  stderrTail}]`, `skipped`, `passed`; the doc states the engine's contract exactly: checks run
+  ONLY inside an OS write boundary with an isolated HOME/caches and `--ignore-scripts` installs,
+  the floor FAILS when no boundary can be armed or a manifest cannot be read or trusted — probed
+  without following links — only a repo with no DETECTABLE check (no manifest, or a manifest with
+  no `typecheck`/`lint`/`test` script and no `Cargo.toml`) is a disclosed vacuous pass, and a check
+  process gets a MINIMAL environment — `PATH`, locale, `TERM`, `RUSTUP_HOME` and the isolation
+  overrides, never the daemon's tokens), plus
+  `WorktreeChangedPath`, `RepoCheckRun` and the
+  `GateEvidenceEvent` union — as `type` aliases, so they satisfy `CoreEvent`'s index signature and
+  relay through the CoreEvent-typed broadcast seams (compile-time relay assertions in
+  `wire-contract.test.ts`). `GateEvaluatedEvent` gains `denial: UnitDenial | null` (the structured
+  twin of `denialReason`: `source` — a `UnitDenialSource` naming every engine layer, `worktree_guard`
+  and `repo_checks` included — `reason`, `claimId`, `ruleIds`, `deniedTool`, `phase`) and
+  `evaluatorPolicies`. Wire change ⇒ `wicked-crew-api-types` **0.31.0** (0.30.0 is the seams PR's);
+  the endpoint manifest and the generated API tests are regenerated against it.
+
+### Changed
+- **The acceptance view treats an evaluator that rewrote the code as an enforcement failure.**
+  `resolveEnforcement` folds a DENYING `evaluatorMutatedWorktree` (non-empty `changed`, or
+  `headMoved`) into `enforcement.unenforced` beside the unchecked-tool-call units — reason
+  "evaluator≠creator violated: phase `verify` (executes_code: false) changed the worktree it was
+  reviewing — N path(s): …" — so `guardrailed` is never claimed for a run whose evaluator
+  self-graded its own edit (deny-dominates, arch-R16). The `unenforced` headline now names the
+  two classes separately (`UnenforcedUnit.kind`: `unchecked_tool_calls` | `worktree_mutation`);
+  a documentation-only write is a violation like any other — the engine has no exemptions.
+- **The served `feature`/`bug`/`migration` mirrors report the evidence floor on their code-writing
+  Creator phases** (`build`/`fix`/`execute` now carry `validator_pin: e2e7af1db9e48454`, matching
+  wicked-core's compiled defs and `workflows/*.json`): the `fix` gate re-derives the diff and a
+  distinct seat judges it, instead of folding `combined: true` over nothing evaluated. This is
+  part of the contract with the engine, not display: since wicked-core#414 registration judges a
+  def AS AUTHORED and REFUSES a code phase whose gate evaluates nothing or a `verified_evidence`
+  phase with no pin — nothing is armed or carried forward on crew's behalf — so a mirror that lags
+  is refused, and the `deliver-pr` phase crew composes onto every delivering run now pins the
+  built-in evidence floor EXPLICITLY (`validator_pin: e2e7af1db9e48454`) instead of relying on the
+  engine to arm its `verified_evidence` flag. The `domain-extraction` mirror's `coverage` phase is
+  `executes_code: true` (it writes `coverage-report.json` into the worktree; an
+  `executes_code: false` phase may write nothing there — the worktree guard exempts nothing), and
+  the `POST /runs` deliver default engages only on a def with a NON-EVALUATOR `executes_code`
+  phase (`executes_code && role !== 'evaluator'`), so domain-extraction — whose only code phase
+  is that evaluator — does not default to a doomed PR.
+  The read-only posture for non-claude evaluator seats (codex `--sandbox read-only`, pi
+  `--exclude-tools edit,write`, refusal of a write-capable lever-less posture, recognised by the
+  resolved binary's stem) lives in wicked-core's launcher and needs no crew config.
+
 ## [0.7.27] — 2026-09-10
 
 Release train: ships the published `wicked-crew-api-types` 0.29.0 (workspace link; tagged

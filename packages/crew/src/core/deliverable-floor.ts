@@ -197,10 +197,11 @@ export function deliverableFloorPhase(
     gate_type: 'execution',
     gate: 'auto',
     executes_code: false,
-    // NOT `verified_evidence: true`: wicked-core arms any `verified_evidence` phase that names no
-    // pin of its own with the worktree-DIFF floor (FINDING-055), which is fail-closed on the
-    // repo-less runs this phase exists to serve — it would deny every one of them for the wrong
-    // reason. This phase carries its own re-verification in its exit code.
+    // NOT `verified_evidence: true`: the flag means "re-verified by the pinned validator", and the
+    // only floor crew could pin is the worktree-DIFF floor (FINDING-055), which is fail-closed on
+    // the repo-less runs this phase exists to serve — it would deny every one of them for the
+    // wrong reason (and since wicked-core#414 a flag with no pin is REFUSED at registration, not
+    // armed). This phase carries its own re-verification in its exit code.
     verified_evidence: false,
     // NOT the declared paths either: core checks `required_deliverables` relative to the unit's
     // cwd and counts every absolute path as missing (see the module doc; wicked-core#297).

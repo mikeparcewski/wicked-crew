@@ -61,6 +61,22 @@
 
 import type { PhaseDef, WorkflowDef } from './types.js';
 
+/**
+ * The content-address of wicked-core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`,
+ * criterion "the run left a change in its worktree (done is re-derived from the diff, never
+ * asserted)"). Carried explicitly on every phase crew composes or mirrors that declares
+ * `verified_evidence` or writes code: since wicked-core#414 the engine judges a def AS AUTHORED at
+ * registration — it REFUSES an `executes_code` agent phase with no pin and no human gate, and a
+ * `verified_evidence` phase with no pin — so nothing is armed on crew's behalf any more.
+ *
+ * Duplicating a hash is a real cost, paid because the alternative is worse: a `null` here would
+ * be a refused registration for every deliver-composed run. The floor is seeded on core's plan
+ * path (`pre_distribute`), so this pin always resolves without a provision/approve step. The drift
+ * guards in `tests/armed-workflow-served.test.ts` and `tests/deliver-phase.test.ts` fail loudly on
+ * a developer machine the moment core's value moves.
+ */
+export const EVIDENCE_FLOOR_PIN = 'e2e7af1db9e48454';
+
 /** The id of the appended phase — also the collision probe when a def already delivers. */
 export const DELIVER_PHASE_ID = 'deliver';
 
@@ -324,22 +340,23 @@ export function deliverPrScript(intent?: string): string {
  * not governed agent work — its failure surface is the exit code + output, which core reports as
  * a failed unit.
  *
- * ## Why `verified_evidence: true` and `validator_pin: null` (crew#317)
+ * ## Why `verified_evidence: true` AND `validator_pin: EVIDENCE_FLOOR_PIN` (crew#317, core#414)
  *
  * The phase that touches the remote was the one phase nothing re-derived. The engine's phase model
- * DOES let a Tool-executor phase carry a deterministic floor, and the mechanism is the flag rather
- * than a pin crew mints itself:
+ * DOES let a Tool-executor phase carry a deterministic floor: the flag says the phase's evidence is
+ * re-verified, the pin says by what.
  *
  *  - a pin is a CONTENT ADDRESS into core's validator vault, and `attach_pinned_validators` is
  *    fail-closed on one that does not resolve — it BAILS the run at plan time. Authoring and
  *    approving a validator is `wicked-core provision-validator` + `approve-validator`, neither of
- *    which is exposed through the napi surface crew drives, so a pin invented here would fail
- *    every run of every deliver-composed workflow on a machine that had not been seeded by hand;
- *  - `verified_evidence: true` with no pin of its own is armed AT REGISTRATION by
- *    `enforce_verified_evidence` with the built-in evidence floor (`EVIDENCE_FLOOR_PIN`,
- *    criterion: "the run left a change in its worktree (done is re-derived from the diff, never
- *    asserted)"), which `pre_distribute` seeds on the plan path so it always resolves. Same
- *    mechanism `feature/test`, `bug/verify` and `migration/verify` reach it by.
+ *    which is exposed through the napi surface crew drives, so a pin crew INVENTED would fail
+ *    every run on a machine nobody seeded by hand;
+ *  - the built-in evidence floor is different: `pre_distribute` seeds it on the plan path so it
+ *    ALWAYS resolves — it is the same pin core's own `feature/test`, `bug/verify` and
+ *    `migration/verify` carry;
+ *  - and since wicked-core#414 (codex review) the engine no longer arms a flagged phase that names
+ *    no pin — registration judges the def AS AUTHORED and REFUSES it ("verified_evidence declared
+ *    but nothing pinned: deliver-pr"). A `null` pin here would refuse every deliver-composed run.
  *
  * The floor then re-runs against the run's worktree at the gate, INDEPENDENTLY of anything this
  * script printed, and denies the phase when the run left no change. Layer 2 (the agent judge)
@@ -361,7 +378,7 @@ export function deliverPrPhase(dependsOn: string[] = [], intent?: string): Phase
     role: 'neutral',
     skill_ref: null,
     allowed_skills: [],
-    validator_pin: null,
+    validator_pin: EVIDENCE_FLOOR_PIN,
   };
 }
 
