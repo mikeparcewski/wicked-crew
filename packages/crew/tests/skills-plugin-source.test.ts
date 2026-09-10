@@ -1,24 +1,29 @@
 // Plugin-source discovery (design v3 §3/§8, amended v3.6 — crew #490, hardened by codex on #491):
 // (1) the explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the marketplace cache of the FIRST config
 // dir holding a valid one — the dirs `CLAUDE_CONFIG_DIR` lists, in order, then `~/.claude` appended
-// once — with the highest semver version-DIRECTORY NAME inside it whose `plugin.json` agrees; (3) LAST
-// resort, the installer-managed `plugins/wicked-garden` copy of the first of those dirs holding one —
-// recorded as `installer-copy`, never preferred over any cache. Each config dir is resolved once; every
-// level below it is lstat-walked and a link is skipped with a finding, never followed. Every test runs
-// against a temp HOME with an injected env — the developer's real config dir is never read.
+// once — with the highest-PRECEDENCE SemVer version-DIRECTORY NAME inside it whose `plugin.json`
+// agrees (every dir validated); (3) LAST resort, the installer-managed `plugins/wicked-garden` copy of
+// the first of those dirs holding one — recorded as `installer-copy`, never preferred over any cache.
+// Each config dir is resolved exactly once; every level below it is lstat-walked on the canonical
+// path and a link is skipped with a finding, never followed; manifests are read only below the
+// validated canonical dir. Every test runs against a temp HOME with an injected env — the developer's
+// real config dir is never read. Homes are realpath'd so spelled == canonical except where a test
+// links a config dir deliberately.
 
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  cacheDirOrder,
   claudeConfigDirs,
-  compareVersions,
+  compareSemver,
   discoverLivePlugin,
   discoverLivePluginDetailed,
   installerCopyDir,
   livePluginCacheDir,
+  parseSemver,
   PluginSourceSymlinkError,
   pluginSourceAt,
   SKILLS_SOURCE_ENV,
@@ -31,6 +36,13 @@ let cfg: string;
 /** Extra temp homes a test creates beside `home` — removed with it (Copilot on #480: reassigning `home` leaked the first one). */
 const extraHomes: string[] = [];
 
+/** A fresh, CANONICAL temp home (tmpdir may itself sit behind a link — macOS `/var` → `/private/var`). */
+function newHome(prefix: string): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  extraHomes.push(dir);
+  return dir;
+}
+
 function plugin(dir: string, version: string): void {
   mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wicked-garden', version }));
@@ -42,7 +54,7 @@ const copyAt = (configDir: string, version: string) => ({ path: installerCopyDir
 const judged = (findings: DiscoveryFinding[]): Array<[string, string]> => findings.map((f) => [f.kind, f.path]);
 
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), 'skills-source-'));
+  home = realpathSync(mkdtempSync(join(tmpdir(), 'skills-source-')));
   cfg = join(home, '.claude');
 });
 
@@ -73,14 +85,14 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: copyAt(cfg, '12.28.1'), findings: [] });
   });
 
-  it('the cache wins over the copy REGARDLESS of version — a newer copy beside it is never preferred; inside the cache the highest semver DIRECTORY NAME wins; a non-semver entry is ignored with a finding', () => {
+  it('the cache wins over the copy REGARDLESS of version — a newer copy beside it is never preferred; inside the cache the highest-precedence DIRECTORY NAME wins; a non-SemVer entry is ignored with a finding', () => {
     plugin(installerCopyDir(cfg), '12.40.0'); // newer than anything cached — still the last resort
     plugin(join(livePluginCacheDir(cfg), '12.9.0'), '12.9.0');
     plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
     mkdirSync(join(livePluginCacheDir(cfg), 'not-a-plugin'));
     const d = discoverLivePluginDetailed({ env: {}, home });
     expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
-    expect(d.findings).toEqual([{ kind: 'non-semver-name', path: join(livePluginCacheDir(cfg), 'not-a-plugin'), message: expect.stringContaining('not a semver version') }]);
+    expect(d.findings).toEqual([{ kind: 'non-semver-name', path: join(livePluginCacheDir(cfg), 'not-a-plugin'), message: expect.stringContaining('not a valid SemVer version') }]);
   });
 
   it('~/.claude is walked AFTER the listed CLAUDE_CONFIG_DIR entries (appended once): a copy only under ~/.claude is found; a ~/.claude CACHE beats a $CLAUDE_CONFIG_DIR COPY (any cache beats any copy); the listed dir\'s cache beats the ~/.claude cache (first dir with a valid cache wins)', () => {
@@ -118,15 +130,14 @@ describe('discoverLivePlugin', () => {
     expect(() => discoverLivePlugin({ env: {}, home })).toThrow(PluginSourceSymlinkError);
     expect(() => discoverLivePlugin({ env: {}, home })).toThrow(/\.claude-plugin\/plugin\.json is a symlink/);
     // A linked manifest DIR in a second home.
-    const linkedHome = mkdtempSync(join(tmpdir(), 'skills-source-linked-'));
-    extraHomes.push(linkedHome);
+    const linkedHome = newHome('skills-source-linked-');
     plugin(join(linkedHome, 'real-plugin'), '4.0.0');
     mkdirSync(installerCopyDir(join(linkedHome, '.claude')), { recursive: true });
     symlinkSync(join(linkedHome, 'real-plugin', '.claude-plugin'), join(installerCopyDir(join(linkedHome, '.claude')), '.claude-plugin'));
     expect(() => discoverLivePlugin({ env: {}, home: linkedHome })).toThrow(/\.claude-plugin is a symlink/);
   });
 
-  it('a symlink at ANY level below the config dir — plugins/, cache/, the marketplace dir, the plugin dir, a version dir, the copy dir — is never followed: skipped with one symlink finding (codex on #491); the config dir ITSELF may be a link', () => {
+  it('a symlink at ANY level below the config dir — plugins/, cache/, the marketplace dir, the plugin dir, a version dir, the copy dir — is never followed: skipped with one symlink finding (codex on #491); the config dir ITSELF may be a link and the pick is recorded at its CANONICAL path', () => {
     // A real, valid tree elsewhere for the links to point at — never a config dir itself.
     const elsewhere = join(home, 'elsewhere');
     plugin(join(livePluginCacheDir(elsewhere), '12.0.0'), '12.0.0');
@@ -154,10 +165,66 @@ describe('discoverLivePlugin', () => {
     const d = discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: mixed }, home });
     expect(d.source).toEqual(cacheAt(mixed, '11.0.0'));
     expect(judged(d.findings)).toEqual([['symlink', join(livePluginCacheDir(mixed), '12.0.0')]]);
-    // The config dir ITSELF may be a link (operators symlink ~/.claude): resolved once, its real contents accepted, spelled as configured.
+    // The config dir ITSELF may be a link (operators symlink ~/.claude): resolved exactly once, its real
+    // contents accepted, and the pick recorded at the CANONICAL path — the bytes' real location.
     const linkedCfg = join(home, 'cfg-linked');
     symlinkSync(elsewhere, linkedCfg);
-    expect(discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: linkedCfg }, home })).toEqual({ source: cacheAt(linkedCfg, '12.0.0'), findings: [] });
+    expect(discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: linkedCfg }, home })).toEqual({ source: cacheAt(elsewhere, '12.0.0'), findings: [] });
+    // Two spellings of one dir (the link and its target) walk once.
+    expect(discoverLivePluginDetailed({ env: { CLAUDE_CONFIG_DIR: [linkedCfg, elsewhere].join(delimiter) }, home })).toEqual({ source: cacheAt(elsewhere, '12.0.0'), findings: [] });
+  });
+
+  it('TOCTOU (codex confirmation pass on #491): the config dir is resolved exactly ONCE — a config-dir link retargeted between the cache walk and the manifest read never has its manifest read; the pick is the pinned root\'s, at its canonical path', () => {
+    // Tree A: the honest cache. Tree B: the same version dir declaring something else — reading it
+    // through the retargeted link would surface as a version-mismatch finding and no pick.
+    const treeA = join(home, 'tree-a');
+    const treeB = join(home, 'tree-b');
+    plugin(join(livePluginCacheDir(treeA), '12.0.0'), '12.0.0');
+    plugin(join(livePluginCacheDir(treeB), '12.0.0'), '99.0.0');
+    plugin(installerCopyDir(treeB), '77.0.0'); // and a copy only the retargeted tree has
+    const link = join(home, 'cfg-retarget');
+    symlinkSync(treeA, link);
+    const reads: string[] = [];
+    let retargeted = false;
+    const d = discoverLivePluginDetailed({
+      env: { CLAUDE_CONFIG_DIR: link },
+      home,
+      hooks: {
+        beforeManifestRead: (dir) => {
+          reads.push(dir);
+          if (!retargeted) {
+            retargeted = true;
+            rmSync(link);
+            symlinkSync(treeB, link); // the link now points at tree B — after the walk pinned tree A
+          }
+        },
+      },
+    });
+    expect(retargeted).toBe(true);
+    expect(realpathSync(link)).toBe(treeB); // the retarget really happened…
+    expect(d).toEqual({ source: cacheAt(treeA, '12.0.0'), findings: [] }); // …and was never read: tree A's manifest, at tree A's canonical path
+    expect(reads).toEqual([join(livePluginCacheDir(treeA), '12.0.0')]); // every manifest read went below the pinned canonical root
+    // The copy tier pins the same root: with no cache anywhere, a retarget before the copy's manifest read is not read either.
+    const link2 = join(home, 'cfg-retarget-copy');
+    const treeC = join(home, 'tree-c');
+    plugin(installerCopyDir(treeC), '1.0.0');
+    symlinkSync(treeC, link2);
+    let swapped = false;
+    const d2 = discoverLivePluginDetailed({
+      env: { CLAUDE_CONFIG_DIR: link2 },
+      home,
+      hooks: {
+        beforeManifestRead: () => {
+          if (!swapped) {
+            swapped = true;
+            rmSync(link2);
+            symlinkSync(treeB, link2);
+          }
+        },
+      },
+    });
+    expect(swapped).toBe(true);
+    expect(d2).toEqual({ source: copyAt(treeC, '1.0.0'), findings: [] });
   });
 
   it('CLAUDE_CONFIG_DIR lists several dirs: walked in order — the FIRST dir with a valid cache wins whatever the versions; a cache in a LATER dir beats a copy in an EARLIER dir; among copies the first dir wins', () => {
@@ -179,26 +246,34 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(a, '12.0.0'));
   });
 
-  it('the version DIRECTORY NAME decides (semver total order, never readdir order) and the plugin.json version must equal it: a mismatching dir is skipped with a finding — equal declared versions under two names, a higher-named dir declaring a lower version, a lower-named dir declaring a higher version, reverse creation order (codex on #491)', () => {
-    // Two dirs both declaring 12.32.0: only the dir NAMED 12.32.0 is the plugin it says it is. The other
-    // sorts below the pick (a prerelease name) and is never read — nothing to report.
+  it('EVERY SemVer-named cache dir is validated and the plugin.json version must equal the name: a mismatch ANYWHERE is a version-mismatch finding (not only above the winner); the winner is the highest-precedence agreeing name whatever the creation order (codex on #491)', () => {
+    // Two dirs both declaring 12.32.0: only the dir NAMED 12.32.0 is the plugin it says it is; the
+    // other is BELOW the pick and still validated — a finding.
     plugin(join(livePluginCacheDir(cfg), '12.32.0-rebuild'), '12.32.0');
     plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
     let d = discoverLivePluginDetailed({ env: {}, home });
     expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
-    expect(d.findings).toEqual([]);
+    expect(judged(d.findings)).toEqual([['version-mismatch', join(livePluginCacheDir(cfg), '12.32.0-rebuild')]]);
     // A HIGHER-named dir whose manifest says otherwise is skipped with a finding; the honest 12.32.0 wins.
     plugin(join(livePluginCacheDir(cfg), '12.33.0'), '12.32.0');
     d = discoverLivePluginDetailed({ env: {}, home });
     expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
-    expect(judged(d.findings)).toEqual([['version-mismatch', join(livePluginCacheDir(cfg), '12.33.0')]]);
+    expect(judged(d.findings)).toEqual([
+      ['version-mismatch', join(livePluginCacheDir(cfg), '12.33.0')],
+      ['version-mismatch', join(livePluginCacheDir(cfg), '12.32.0-rebuild')],
+    ]);
     expect(d.findings[0]?.message).toContain('declares version 12.32.0 but the directory is named 12.33.0');
-    // A LOWER-named dir declaring a HIGHER version never outranks the pick: the name orders, the manifest must agree.
+    // A LOWER-named dir declaring a HIGHER version never outranks the pick — and is reported.
     plugin(join(livePluginCacheDir(cfg), '1.0.0'), '99.0.0');
-    expect(discoverLivePlugin({ env: {}, home })).toEqual(cacheAt(cfg, '12.32.0'));
-    // The same dirs created in REVERSE order in a second home: the same pick, the same findings.
-    const reversed = mkdtempSync(join(tmpdir(), 'skills-source-reversed-'));
-    extraHomes.push(reversed);
+    d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
+    expect(judged(d.findings)).toEqual([
+      ['version-mismatch', join(livePluginCacheDir(cfg), '12.33.0')],
+      ['version-mismatch', join(livePluginCacheDir(cfg), '12.32.0-rebuild')],
+      ['version-mismatch', join(livePluginCacheDir(cfg), '1.0.0')],
+    ]);
+    // The same dirs created in REVERSE order in a second home: the same pick, the same findings in the same order.
+    const reversed = newHome('skills-source-reversed-');
     const reversedCfg = join(reversed, '.claude');
     plugin(join(livePluginCacheDir(reversedCfg), '1.0.0'), '99.0.0');
     plugin(join(livePluginCacheDir(reversedCfg), '12.33.0'), '12.32.0');
@@ -206,10 +281,13 @@ describe('discoverLivePlugin', () => {
     plugin(join(livePluginCacheDir(reversedCfg), '12.32.0-rebuild'), '12.32.0');
     const r = discoverLivePluginDetailed({ env: {}, home: reversed });
     expect(r.source).toEqual(cacheAt(reversedCfg, '12.32.0'));
-    expect(judged(r.findings)).toEqual([['version-mismatch', join(livePluginCacheDir(reversedCfg), '12.33.0')]]);
+    expect(judged(r.findings)).toEqual([
+      ['version-mismatch', join(livePluginCacheDir(reversedCfg), '12.33.0')],
+      ['version-mismatch', join(livePluginCacheDir(reversedCfg), '12.32.0-rebuild')],
+      ['version-mismatch', join(livePluginCacheDir(reversedCfg), '1.0.0')],
+    ]);
     // When EVERY dir mismatches, nothing is picked — a finding each, never a guess.
-    const bad = mkdtempSync(join(tmpdir(), 'skills-source-mismatch-'));
-    extraHomes.push(bad);
+    const bad = newHome('skills-source-mismatch-');
     const badCfg = join(bad, '.claude');
     plugin(join(livePluginCacheDir(badCfg), '2.0.0'), '2.0.1');
     plugin(join(livePluginCacheDir(badCfg), '1.0.0'), '1.0.1');
@@ -219,6 +297,43 @@ describe('discoverLivePlugin', () => {
       ['version-mismatch', join(livePluginCacheDir(badCfg), '2.0.0')],
       ['version-mismatch', join(livePluginCacheDir(badCfg), '1.0.0')],
     ]);
+  });
+
+  it('version-dir names are validated by the official SemVer grammar: `01.0.0`, `1.0.0-alpha..1`, `1.0.0-01`, `1.0`, `v1.0.0` are rejected with a finding each; a valid sibling is still the pick (codex on #491)', () => {
+    for (const bad of ['01.0.0', '1.0.0-alpha..1', '1.0.0-01', '1.0', 'v1.0.0', '1.0.0+']) plugin(join(livePluginCacheDir(cfg), bad), bad);
+    plugin(join(livePluginCacheDir(cfg), '1.0.0-alpha.1'), '1.0.0-alpha.1');
+    const d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '1.0.0-alpha.1'));
+    expect(d.findings.map((f) => f.kind)).toEqual(['non-semver-name', 'non-semver-name', 'non-semver-name', 'non-semver-name', 'non-semver-name', 'non-semver-name']);
+    expect(d.findings.map((f) => f.path).sort()).toEqual(['01.0.0', '1.0', '1.0.0+', '1.0.0-01', '1.0.0-alpha..1', 'v1.0.0'].map((n) => join(livePluginCacheDir(cfg), n)).sort());
+    for (const f of d.findings) expect(f.message).toContain('not a valid SemVer version');
+  });
+
+  it('SemVer PRECEDENCE orders the pick — build metadata is ignored for ordering (`1.0.1+build` sorts above `1.0.0`) — and equal precedence has a deterministic tie-break: the plain name, else the lexicographically smallest, under either creation order (codex on #491)', () => {
+    plugin(join(livePluginCacheDir(cfg), '1.0.0'), '1.0.0');
+    plugin(join(livePluginCacheDir(cfg), '1.0.1+build'), '1.0.1+build');
+    expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: cacheAt(cfg, '1.0.1+build'), findings: [] });
+    // Equal precedence: the plain release name wins over its build-metadata twin…
+    plugin(join(livePluginCacheDir(cfg), '1.0.1'), '1.0.1');
+    expect(discoverLivePlugin({ env: {}, home })).toEqual(cacheAt(cfg, '1.0.1'));
+    // …created in the other order too.
+    const other = newHome('skills-source-tie-');
+    const otherCfg = join(other, '.claude');
+    plugin(join(livePluginCacheDir(otherCfg), '1.0.1'), '1.0.1');
+    plugin(join(livePluginCacheDir(otherCfg), '1.0.1+build'), '1.0.1+build');
+    plugin(join(livePluginCacheDir(otherCfg), '1.0.0'), '1.0.0');
+    expect(discoverLivePluginDetailed({ env: {}, home: other })).toEqual({ source: cacheAt(otherCfg, '1.0.1'), findings: [] });
+    // No plain name among equals: the lexicographically smallest full name, whatever the creation order.
+    const builds = newHome('skills-source-builds-');
+    const buildsCfg = join(builds, '.claude');
+    plugin(join(livePluginCacheDir(buildsCfg), '1.0.1+b'), '1.0.1+b');
+    plugin(join(livePluginCacheDir(buildsCfg), '1.0.1+a'), '1.0.1+a');
+    expect(discoverLivePlugin({ env: {}, home: builds })).toEqual(cacheAt(buildsCfg, '1.0.1+a'));
+    const builds2 = newHome('skills-source-builds2-');
+    const builds2Cfg = join(builds2, '.claude');
+    plugin(join(livePluginCacheDir(builds2Cfg), '1.0.1+a'), '1.0.1+a');
+    plugin(join(livePluginCacheDir(builds2Cfg), '1.0.1+b'), '1.0.1+b');
+    expect(discoverLivePlugin({ env: {}, home: builds2 })).toEqual(cacheAt(builds2Cfg, '1.0.1+a'));
   });
 
   it('honours the explicit WICKED_CREW_SKILLS_SOURCE override — classified by what it IS: a plugins/wicked-garden copy is installer-copy, a cache dir is claude-plugin-cache; not a plugin root ⇒ null, never a fall-through', () => {
@@ -246,10 +361,8 @@ describe('discoverLivePlugin', () => {
     plugin(join(livePluginCacheDir(cfg), '12.32.0-alpha'), '12.32.0-alpha');
     plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
     expect(discoverLivePlugin({ env: {}, home })?.plugin_version).toBe('12.32.0');
-    // Only prereleases installed: the highest one, by the total order, whatever the listing order —
-    // in a SECOND home (tracked for cleanup; the first stays `home` so afterEach removes both).
-    const preHome = mkdtempSync(join(tmpdir(), 'skills-source-pre-'));
-    extraHomes.push(preHome);
+    // Only prereleases installed: the highest one, by precedence, whatever the listing order — in a SECOND home.
+    const preHome = newHome('skills-source-pre-');
     const preCfg = join(preHome, '.claude');
     for (const v of ['12.0.0-beta', '12.0.0-alpha', '12.0.0-beta.1', '12.0.0-rc.1']) plugin(join(livePluginCacheDir(preCfg), v), v);
     expect(discoverLivePlugin({ env: {}, home: preHome })?.plugin_version).toBe('12.0.0-rc.1');
@@ -280,14 +393,24 @@ describe('discoverLivePlugin', () => {
   });
 });
 
-describe('compareVersions — a TOTAL order (Copilot on #480)', () => {
-  const sorted = (versions: string[]): string[] => [...versions].sort(compareVersions);
+describe('parseSemver / compareSemver / cacheDirOrder — semver.org grammar and precedence (codex on #491)', () => {
+  it('parses by the official grammar and rejects what it forbids', () => {
+    expect(parseSemver('1.0.0')).toEqual({ major: 1, minor: 0, patch: 0, prerelease: [], build: null });
+    expect(parseSemver('1.0.0-beta+exp.sha.5114f85')).toEqual({ major: 1, minor: 0, patch: 0, prerelease: ['beta'], build: 'exp.sha.5114f85' });
+    expect(parseSemver('1.0.0-x.7.z.92')?.prerelease).toEqual(['x', '7', 'z', '92']);
+    expect(parseSemver('1.0.0-0.3.7')?.prerelease).toEqual(['0', '3', '7']);
+    expect(parseSemver('1.0.0+20130313144700')?.build).toBe('20130313144700');
+    for (const bad of ['01.0.0', '1.0.0-alpha..1', '1.0.0-01', '1.0', 'v1.0.0', '1.0.0+', '1.0.0-', '1.0.0-alpha_1', '', 'weird', '12.00.0']) {
+      expect(parseSemver(bad), bad).toBeNull();
+    }
+  });
 
-  it('numeric dotted order first; a prerelease sorts BELOW its release; prereleases compare the semver way', () => {
+  it('precedence: numeric parts, then prerelease below release, identifiers numeric-before-alphanumeric and numeric-numerically, shorter first; build metadata ignored', () => {
+    const sorted = (versions: string[]): string[] => [...versions].sort(compareSemver);
     expect(sorted(['12.32.0', '12.9.0', '12.0.0', '2.0.0'])).toEqual(['2.0.0', '12.0.0', '12.9.0', '12.32.0']);
-    expect(compareVersions('12.0.0-beta', '12.0.0')).toBe(-1);
-    expect(compareVersions('12.0.0', '12.0.0-beta')).toBe(1);
-    expect(compareVersions('12.0.0-beta', '12.0.1')).toBe(-1); // a prerelease of an OLDER release still sorts below the newer release
+    expect(compareSemver('12.0.0-beta', '12.0.0')).toBe(-1);
+    expect(compareSemver('12.0.0', '12.0.0-beta')).toBe(1);
+    expect(compareSemver('12.0.0-beta', '12.0.1')).toBe(-1); // a prerelease of an OLDER release still sorts below the newer release
     expect(sorted(['12.0.0-beta.11', '12.0.0-beta.2', '12.0.0-alpha', '12.0.0-beta', '12.0.0-1', '12.0.0-rc.1'])).toEqual([
       '12.0.0-1', // numeric identifiers first
       '12.0.0-alpha',
@@ -296,16 +419,19 @@ describe('compareVersions — a TOTAL order (Copilot on #480)', () => {
       '12.0.0-beta.11', // numerically, not lexically
       '12.0.0-rc.1',
     ]);
-    expect(sorted(['12.0.0', '12.0'])).toEqual(['12.0', '12.0.0']); // shorter-first on a shared prefix
+    expect(compareSemver('1.0.1+build', '1.0.0')).toBe(1); // build metadata never lowers a version
+    expect(compareSemver('1.0.1', '1.0.1+build')).toBe(0); // …and never orders it either
+    expect(() => compareSemver('weird', '1.0.0')).toThrow(TypeError);
   });
 
-  it('distinct strings NEVER compare 0 — the same array sorts the same from any starting order', () => {
-    expect(compareVersions('12.0.0-alpha', '12.0.0-beta')).not.toBe(0);
-    expect(compareVersions('12.00.0', '12.0.0')).not.toBe(0);
-    expect(compareVersions('12.0.0-alpha', '12.0.0-alpha')).toBe(0); // only identical strings tie
-    const a = ['12.0.0-beta', '12.00.0', '12.0.0', '12.0.0-alpha', 'weird', '12.0.0-beta.1'];
-    const b = [...a].reverse();
-    expect(sorted(a)).toEqual(sorted(b));
-    expect(Math.sign(compareVersions('12.00.0', '12.0.0'))).toBe(-Math.sign(compareVersions('12.0.0', '12.00.0'))); // antisymmetric
+  it('cacheDirOrder: highest precedence first; equal precedence → the plain name, else the lexicographically smallest — a total order, the same from any starting order', () => {
+    const pick = (names: string[]): string[] => [...names].sort(cacheDirOrder);
+    expect(pick(['1.0.0', '1.0.1+build', '1.0.1', '1.0.1+a', '1.0.1-rc.1'])).toEqual(['1.0.1', '1.0.1+a', '1.0.1+build', '1.0.1-rc.1', '1.0.0']);
+    const a = ['1.0.1+b', '1.0.1', '1.0.1+a', '1.0.0', '2.0.0-alpha', '1.0.1-beta'];
+    expect(pick([...a].reverse())).toEqual(pick(a));
+    expect(cacheDirOrder('1.0.1', '1.0.1+build')).toBe(-1);
+    expect(cacheDirOrder('1.0.1+a', '1.0.1+b')).toBe(-1);
+    expect(cacheDirOrder('1.0.1+a', '1.0.1+a')).toBe(0); // only identical names tie
+    expect(Math.sign(cacheDirOrder('1.0.1+a', '1.0.1'))).toBe(-Math.sign(cacheDirOrder('1.0.1', '1.0.1+a'))); // antisymmetric
   });
 });

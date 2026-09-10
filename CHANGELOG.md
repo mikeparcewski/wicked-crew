@@ -16,16 +16,20 @@ mentioned only where a daemon release depends on them.
   `WICKED_CREW_SKILLS_SOURCE` override; (2) the marketplace cache
   `<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>` of the FIRST config dir holding
   a valid one — the dirs `CLAUDE_CONFIG_DIR` lists, in order, then `~/.claude` appended once (the
-  default when unset) — picking the highest semver version-DIRECTORY NAME whose `plugin.json`
-  version equals it (a mismatching dir is skipped, a non-semver name ignored, each with a logged
-  discovery finding; never `readdir` order); (3) LAST resort, the installer-managed copy
+  default when unset) — picking the version-DIRECTORY NAME of highest SemVer PRECEDENCE
+  (semver.org grammar and §11 precedence; build metadata ignored for ordering; equal precedence →
+  the plain name, else the lexicographically smallest) whose `plugin.json` version equals it — EVERY
+  SemVer-named dir is validated (a mismatch anywhere is a logged `version-mismatch` finding, an
+  invalid name a `non-semver-name` finding; never `readdir` order); (3) LAST resort, the installer-managed copy
   `<config dir>/plugins/wicked-garden` of the first of those dirs holding one (garden's
   `install.mjs` hard-codes `~/.claude`), accepted only when its `.claude-plugin/plugin.json` parses
-  with a `version`. ANY cache beats ANY copy. Each config dir is resolved once; every level below it
-  that discovery touches (`plugins`, `cache`, the marketplace dir, the plugin dir, each version
-  dir, the copy dir) is lstat-walked and a symlink at any of them skips that candidate with a
-  finding — never followed — and the chosen root is re-checked to lie inside the resolved config
-  dir. A copy seed is recorded as `source.kind: 'installer-copy'` (new `SkillSourceKind` member)
+  with a `version`. ANY cache beats ANY copy. Each config dir is resolved exactly once, at the top
+  of discovery; its canonical root is carried through both tiers, every level below it that
+  discovery touches (`plugins`, `cache`, the marketplace dir, the plugin dir, each version dir, the
+  copy dir) is lstat-walked on the canonical path and a symlink at any of them skips that candidate
+  with a finding — never followed — and a candidate's manifest is read only below that validated
+  canonical dir (a link retargeted mid-walk is never read); the recorded `source.path` is canonical.
+  A copy seed is recorded as `source.kind: 'installer-copy'` (new `SkillSourceKind` member)
   and surfaces a persistent WARNING finding `skills.source` in `GET /diagnostics` →
   `skills.findings` — "seeded from the installer copy at <path>; register the plugin with Claude
   Code (marketplace) to receive marketplace updates" — judged live from the current baseline, so a
