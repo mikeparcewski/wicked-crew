@@ -3661,7 +3661,9 @@ export interface AcpDiagnostics {
 export interface DiagnosticsResponse {
   components: DiagnosticsComponents;
   daemon: DiagnosticsDaemon;
-  /** `core.db` + sidecars + the events dir (as a total), sorted by name. */
+  /** `core.db` + sidecars + the events dir (as a total), sorted by name, followed by one entry per
+   *  repo code graph under the state home (`repo-graphs/<key>/estate.db`, key-sorted;
+   *  wicked-core#406). */
   stores: DiagnosticsStoreFile[];
   /** Bounded tail of the daemon's own error-level log lines, newest first. */
   recentErrors: DiagnosticsRecentError[];

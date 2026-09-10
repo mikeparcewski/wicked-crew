@@ -292,6 +292,43 @@ describe('listStoreFiles (core.db + sidecars + events-dir total)', () => {
     expect(await listStoreFiles(join(scratch(), 'nope', 'core.db'))).toEqual([]);
   });
 
+  it("lists the engine's repo graphs under <state home>/repo-graphs, one entry per <key>/estate.db (wicked-core#406)", async () => {
+    const home = scratch();
+    const db = join(home, 'core.db');
+    writeFileSync(db, 'x'.repeat(10), 'utf8');
+    const graphs = join(home, 'repo-graphs');
+    // Two indexed repos (key = <dir-name>-<12 hex>), with the WAL siblings a live graph carries.
+    mkdirSync(join(graphs, 'wicked-ledger-0123456789ab'), { recursive: true });
+    writeFileSync(join(graphs, 'wicked-ledger-0123456789ab', 'estate.db'), 'x'.repeat(21), 'utf8');
+    writeFileSync(join(graphs, 'wicked-ledger-0123456789ab', 'estate.db-wal'), 'x'.repeat(5), 'utf8');
+    mkdirSync(join(graphs, 'api-fedcba987654'), { recursive: true });
+    writeFileSync(join(graphs, 'api-fedcba987654', 'estate.db'), 'x'.repeat(8), 'utf8');
+    // A copy in flight (a migration temp) is not a store; a key dir with no estate.db (registered,
+    // never indexed) is not a store either.
+    writeFileSync(join(graphs, 'api-fedcba987654', 'estate.db.migrating-4242'), 'x', 'utf8');
+    mkdirSync(join(graphs, 'never-indexed-000000000000'));
+
+    const stores = await listStoreFiles(db);
+    expect(stores.map((s) => s.name)).toEqual([
+      'core.db',
+      'repo-graphs/api-fedcba987654/estate.db',
+      'repo-graphs/wicked-ledger-0123456789ab/estate.db',
+    ]);
+    const byName = Object.fromEntries(stores.map((s) => [s.name, s]));
+    expect(byName['repo-graphs/api-fedcba987654/estate.db']?.bytes).toBe(8);
+    expect(byName['repo-graphs/api-fedcba987654/estate.db']?.path).toBe(
+      join(graphs, 'api-fedcba987654', 'estate.db'),
+    );
+    expect(byName['repo-graphs/wicked-ledger-0123456789ab/estate.db']?.bytes).toBe(21);
+  });
+
+  it('a state home with no repo-graphs root lists only the core stores', async () => {
+    const home = scratch();
+    const db = join(home, 'core.db');
+    writeFileSync(db, 'x', 'utf8');
+    expect((await listStoreFiles(db)).map((s) => s.name)).toEqual(['core.db']);
+  });
+
   it('eventsDirOf follows the engine convention <db>.events', () => {
     expect(eventsDirOf('/home/x/.wicked-crew/core.db')).toBe('/home/x/.wicked-crew/core.db.events');
   });

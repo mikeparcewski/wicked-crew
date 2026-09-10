@@ -414,9 +414,25 @@ async function dirBytes(path: string): Promise<number> {
 }
 
 /**
+ * The engine's per-repo code graphs live under the state home since wicked-core#406 —
+ * `<state home>/repo-graphs/<repo-dir-name>-<12-hex>/estate.db` — and are listed here as one
+ * store entry per graph (`repo-graphs/<key>/estate.db`), so the operator can see where every
+ * registered repo's graph is and how big it is. The root is spelled from the state home directly
+ * (the parent of `--db`, exactly how the engine derives it); crew keeps spelling no graph path of
+ * its own beyond this listing. The directory name is the one registered in
+ * `tests/fixtures/state-home-subtrees.json` (owner `engine`).
+ */
+export const REPO_GRAPHS_DIRNAME = 'repo-graphs';
+
+/** The database file every repo graph carries (`<key>/estate.db`). */
+const REPO_GRAPH_DB_FILE = 'estate.db';
+
+/**
  * `core.db` and every sidecar sharing its basename (`core.db-wal`, `core.db.knowledge`,
  * `core.db.mem*`, …), plus the events dir (`core.db.events`) sized as a TOTAL of its
- * contents. Paths and sizes only — no file contents ever ride this wire.
+ * contents, followed by one entry per repo graph under `<state home>/repo-graphs/<key>/estate.db`
+ * (wicked-core#406 — the store issue #406 asked this surface to list). Paths and sizes only — no
+ * file contents ever ride this wire.
  */
 export async function listStoreFiles(dbPath: string): Promise<StoreFileEntry[]> {
   const home = dirname(dbPath);
@@ -438,6 +454,34 @@ export async function listStoreFiles(dbPath: string): Promise<StoreFileEntry[]> 
       out.push({ name, path, bytes: st.isDirectory() ? await dirBytes(path) : st.size });
     } catch {
       /* raced deletion — skip */
+    }
+  }
+  out.push(...(await listRepoGraphStores(join(home, REPO_GRAPHS_DIRNAME))));
+  return out;
+}
+
+/**
+ * One entry per `<key>/estate.db` under the repo-graphs root, key-sorted. Only the database
+ * itself is listed — its `-wal`/`-shm` siblings are transient and a `estate.db.migrating-*` temp
+ * is a copy in flight, neither of which is a store — and a key dir without an `estate.db` (a repo
+ * registered but never indexed) is not a store either. A missing root lists nothing.
+ */
+async function listRepoGraphStores(root: string): Promise<StoreFileEntry[]> {
+  let keys: string[];
+  try {
+    keys = (await fsp.readdir(root)).sort();
+  } catch {
+    return [];
+  }
+  const out: StoreFileEntry[] = [];
+  for (const key of keys) {
+    const path = join(root, key, REPO_GRAPH_DB_FILE);
+    try {
+      const st = await fsp.stat(path);
+      if (!st.isFile()) continue;
+      out.push({ name: `${REPO_GRAPHS_DIRNAME}/${key}/${REPO_GRAPH_DB_FILE}`, path, bytes: st.size });
+    } catch {
+      /* no estate.db under this key (never indexed), or a raced deletion — skip */
     }
   }
   return out;

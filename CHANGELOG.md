@@ -33,6 +33,12 @@ mentioned only where a daemon release depends on them.
   `resolveProjectGraphBinding()` records the same truth on a launch: with no repo-graph root there
   is no per-repo graph to degrade to, so its reason names the environment fault and says the run
   gets no code graph — never "uses its own repo's code graph".
+- **`GET /diagnostics` `stores` lists the engine's repo graphs** (wicked-core#406 asked for it):
+  after `core.db` and its sidecars, one entry per `<state home>/repo-graphs/<key>/estate.db`
+  (`name: "repo-graphs/<key>/estate.db"`, path + bytes like every other store; key-sorted). The
+  root is spelled from the state home — the `--db` parent, exactly how the engine derives it —
+  so no new engine export is needed; `-wal`/`-shm` siblings, in-flight `estate.db.migrating-*`
+  temps and never-indexed key dirs are not stores and are not listed.
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
