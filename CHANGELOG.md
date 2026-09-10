@@ -10,6 +10,29 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **#490 — the installer-managed garden copy is a LAST-resort skills source** (design amendment
+  v3.6; `wicked-crew-api-types` 0.29.0). Discovery order is now (1) the explicit
+  `WICKED_CREW_SKILLS_SOURCE` override, (2) the marketplace cache
+  `<config dir>/plugins/cache/wicked-garden/wicked-garden/<highest version>` for each dir
+  `CLAUDE_CONFIG_DIR` lists (it may list several) else `~/.claude`, (3) LAST resort, the
+  installer-managed copy `<config dir>/plugins/wicked-garden` for each of those dirs AND
+  `~/.claude/plugins/wicked-garden` (garden's `install.mjs` hard-codes homedir), accepted only when
+  its `.claude-plugin/plugin.json` parses with a `version`. A cache beats a copy regardless of
+  version; within a tier the highest version wins. A copy seed is recorded as
+  `source.kind: 'installer-copy'` (new `SkillSourceKind` member) and surfaces a persistent WARNING
+  finding `skills.source` in `GET /diagnostics` → `skills.findings` — "seeded from the installer copy
+  at <path>; register the plugin with Claude Code (marketplace) to receive marketplace updates" —
+  judged live from the current baseline, so a later refresh from the marketplace cache clears it. So
+  the daemon works on installer-only machines (`npx wicked-installer install wicked-garden` never
+  registers the marketplace) without hiding the difference. Every source kind passes the same
+  no-follow, closure and validation rules; `userCliDirs` fences every listed `CLAUDE_CONFIG_DIR`.
+
+### Changed
+- `SkillsSourceUnavailableError` now says what to do: "install wicked-garden first —
+  `npx wicked-installer install wicked-garden`, or register the plugin with Claude Code"; the seed's
+  detail names both places it looked (the marketplace cache and the installer copy).
+
 ## [0.7.26] — 2026-09-09
 
 Release train: bundles the published `wicked-studio` 0.5.2 skin, pins the published

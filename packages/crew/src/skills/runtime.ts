@@ -33,6 +33,13 @@
  *                  (`<root>/refused/skills.config`), same loud launch failure: recorded disablement
  *                  is never bypassed by "restoring" the live cache. Finding `skills.config` (error).
  *
+ * Orthogonal to the ladder, one persistent WARNING (design v3.6, #490): finding `skills.source` is
+ * present while the CURRENT baseline was captured from the installer-managed copy
+ * (`source.kind: 'installer-copy'` — plugin-source.ts tier 3): the daemon works on an installer-only
+ * machine, but that copy receives no marketplace updates until the plugin is registered with Claude
+ * Code. It is judged live from the manifest on every `health()` read, so it appears with the seed
+ * and disappears with the first refresh from the marketplace cache.
+ *
  * What the engine is handed is EXACTLY ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL
  * path of `snapshots/<gen>` (v3.1 §2, v3.4 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set,
  * and `WICKED_CREW_STATE_HOME` is RETIRED as an engine input (v3.4 §2): core derives the state home
@@ -54,7 +61,7 @@
 import { join } from 'node:path';
 
 import type { LaunchNotice } from '../core/adapter.js';
-import type { CoreEvent } from '../core/types.js';
+import type { CoreEvent, SkillBaselineRecord } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
@@ -70,10 +77,37 @@ function describeSeedSource(source: PluginSource): string {
   const what =
     source.kind === 'claude-plugin-cache'
       ? 'the installed wicked-garden plugin (Claude plugin cache)'
-      : source.kind === 'checkout'
-        ? `a wicked-garden git checkout (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`
-        : `a plugin directory (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`;
+      : source.kind === 'installer-copy'
+        ? 'the installer-managed wicked-garden copy (plugins/wicked-garden — the LAST-resort source, design v3.6; not the marketplace cache)'
+        : source.kind === 'checkout'
+          ? `a wicked-garden git checkout (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`
+          : `a plugin directory (an explicit plugin root — ${SKILLS_SOURCE_ENV} or the configured source)`;
   return `${what} at ${source.path}, plugin version ${source.plugin_version}, source kind ${source.kind}`;
+}
+
+/**
+ * The persistent `skills.source` WARNING (design v3.6): the CURRENT baseline was captured from the
+ * installer-managed copy (`source.kind: 'installer-copy'`) — the daemon works, but that copy receives
+ * no marketplace updates until the plugin is registered with Claude Code. Judged LIVE from the
+ * manifest, never frozen at publish: a refresh from the marketplace cache re-keys the current
+ * baseline WITHOUT a publish, and the warning must follow the baseline. `null` when the manifest
+ * cannot be read — an unseeded or corrupt root is the store's own error to raise on its next
+ * operation (and the ladder's `skills.config`), never a diagnostics read's.
+ */
+function sourceFinding(store: SkillsStore): SkillsHealthFinding | null {
+  let current: SkillBaselineRecord | undefined;
+  try {
+    const m = store.manifest();
+    current = m.baselines[m.baseline];
+  } catch {
+    return null;
+  }
+  if (current === undefined || current.source.kind !== 'installer-copy') return null;
+  return {
+    kind: 'skills.source',
+    severity: 'warning',
+    message: `seeded from the installer copy at ${current.source.path}; register the plugin with Claude Code (marketplace) to receive marketplace updates`,
+  };
 }
 
 /** The refusal sentinel directory name — from the ONE table of root names (design v3.5 §2); re-exported for the tests. */
@@ -81,7 +115,7 @@ export { REFUSED_DIRNAME };
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config';
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -138,9 +172,16 @@ export class SkillsRuntime {
     this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
   }
 
-  /** The seam's last outcome (diagnostics). */
+  /**
+   * The seam's last outcome (diagnostics) — plus the live `skills.source` warning when the current
+   * baseline is the installer copy (design v3.6). Only a seeded root (`published` / `blocked`) has a
+   * current baseline to judge; the other rungs have no manifest, or one their own finding condemns.
+   */
   health(): SkillsHealth {
-    return this.lastHealth;
+    const base = this.lastHealth;
+    if (base.state !== 'published' && base.state !== 'blocked') return base;
+    const source = sourceFinding(this.store);
+    return source === null ? base : { ...base, findings: [...base.findings, source] };
   }
 
   /** Boot entry point. Never throws; never fails open (module header). Idempotent: a seeded, published root is only re-verified. */
@@ -208,7 +249,7 @@ export class SkillsRuntime {
       this.store.live.exported(null);
       const message = `first publish BLOCKED — no snapshot: ${named}`;
       this.log(`[skills] skills.blocked: ${message}; ${SKILLS_SNAPSHOT_ENGINE_ENV}=${refusal} so every launch fails loudly until the catalog is fixed and published`);
-      return this.record({
+      const blocked = this.record({
         state: 'blocked',
         root,
         current: null,
@@ -216,6 +257,8 @@ export class SkillsRuntime {
         stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.blocked', severity: 'error', message }],
       });
+      this.logSourceWarning(blocked);
+      return blocked;
     }
     if (ready.published !== null && ready.published.verdict === 'warnings') {
       // A first publish WITH warnings landed (design v3.4 §1): the snapshot is written and handed
@@ -225,7 +268,15 @@ export class SkillsRuntime {
       this.log(`[skills] first publish landed with ${ready.published.findings.length} warning(s) (published as found; fix in the editor or upstream): ${named}`);
     }
     this.afterPublish();
-    return this.lastHealth;
+    const health = this.health();
+    this.logSourceWarning(health);
+    return health;
+  }
+
+  /** Say once, at boot, that the current baseline is the installer copy (design v3.6) — the finding itself persists in `health()`. */
+  private logSourceWarning(health: SkillsHealth): void {
+    const source = health.findings.find((f) => f.kind === 'skills.source');
+    if (source !== undefined) this.log(`[skills] skills.source: ${source.message}`);
   }
 
   /**
@@ -285,8 +336,9 @@ export class SkillsRuntime {
     return this.record({ state: 'published', root: this.store.root, current, engineInput: current.path, stateHome: canonicalCrewStateHome(), findings: [] });
   }
 
+  /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */
   private record(health: SkillsHealth): SkillsHealth {
     this.lastHealth = health;
-    return health;
+    return this.health();
   }
 }

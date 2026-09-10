@@ -286,10 +286,12 @@ export class SkillsUnseededError extends Error {
   }
 }
 
-/** No plugin source could be found to seed or refresh from — crew does not vendor garden (v3 §8). */
+/** No plugin source could be found to seed or refresh from — crew does not vendor garden (v3 §8; the discovery order is design v3.6, plugin-source.ts). */
 export class SkillsSourceUnavailableError extends Error {
   constructor(detail: string) {
-    super(`no wicked-garden plugin source: ${detail} — install wicked-garden first`);
+    super(
+      `no wicked-garden plugin source: ${detail} — install wicked-garden first — \`npx wicked-installer install wicked-garden\`, or register the plugin with Claude Code`,
+    );
     this.name = 'SkillsSourceUnavailableError';
   }
 }
@@ -579,7 +581,7 @@ export function generationDirName(gen: number): string {
 const GENERATION_DIR_RE = /^\d{6}$/;
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 /** The persisted enums `snapshot.json` may carry — validated on read, never trusted as free text (codex round 6). */
-const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'checkout', 'directory']);
+const SOURCE_KINDS: ReadonlySet<string> = new Set<SkillSourceKind>(['claude-plugin-cache', 'installer-copy', 'checkout', 'directory']);
 const VENV_STATES: ReadonlySet<string> = new Set<SkillVenvState>(['pending', 'synced', 'failed', 'skipped']);
 /** The persisted enums `manifest.json` may carry — the schema validator refuses anything else (codex round 7). */
 const SKILL_KINDS: ReadonlySet<string> = new Set<SkillKind>(['router', 'fork-worker', 'module']);
@@ -1273,7 +1275,9 @@ export class SkillsStore {
    */
   seed(): SeedResult {
     if (this.isSeeded()) return { seeded: false, baseline: null, source: null };
-    const source = this.requireSource('no installed wicked-garden plugin found in the Claude plugin cache (plugins/cache/wicked-garden); set WICKED_CREW_SKILLS_SOURCE to use another plugin root deliberately');
+    const source = this.requireSource(
+      'no installed wicked-garden plugin found: neither the marketplace cache (<config dir>/plugins/cache/wicked-garden/wicked-garden/<version>) nor the installer-managed copy (<config dir>/plugins/wicked-garden, ~/.claude/plugins/wicked-garden) holds a .claude-plugin/plugin.json with a version; set WICKED_CREW_SKILLS_SOURCE to use another plugin root deliberately',
+    );
     const bundle = pluginBundleFiles(source.path);
     const hash = hashFileSet(bundle);
     mkdirSync(this.rootDir, { recursive: true });
@@ -2767,7 +2771,7 @@ export class SkillsStore {
   refreshBaseline(expectedRevision: number): SkillRefreshResult {
     const m = this.manifest();
     this.assertRevision(m, expectedRevision);
-    const source = this.requireSource('no installed wicked-garden plugin found to refresh from');
+    const source = this.requireSource('no installed wicked-garden plugin found to refresh from (neither the marketplace cache nor the installer-managed copy)');
     const previous = m.baseline;
     let bundle: FileRecord[];
     try {

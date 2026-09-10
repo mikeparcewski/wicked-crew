@@ -1,16 +1,36 @@
 /**
- * Where the shipped baseline comes from: the LIVE installed wicked-garden plugin.
+ * Where the shipped baseline comes from: the installed wicked-garden plugin.
  *
  * The daemon seeds (and refreshes) its skills root from the plugin Claude Code actually runs —
  * the marketplace cache under `<CLAUDE_CONFIG_DIR|~/.claude>/plugins/cache/wicked-garden/
- * wicked-garden/<version>` (highest version wins). That is the ONLY automatic source (design v3
- * §3/§8; codex review of #480): the hand-installed `<config dir>/plugins/wicked-garden` copy is the
- * exact stale artifact the operator's `clis.toml` hack pointed workers at (12.28.1 while the live
- * cache was 12.32.0 — design v3 §"Verified mechanics"), so it is never a fallback. NEVER a repo
- * checkout by default either. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override — for
- * tests, and for an operator who deliberately wants a checkout or that hand copy. A machine without
- * the cache has no source at all: crew does not vendor garden — the seed says "install garden
- * first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine input unset.
+ * wicked-garden/<version>` (highest version wins). Design v3 §3/§8 (codex review of #480) made that
+ * the ONLY automatic source, because the hand-installed `<config dir>/plugins/wicked-garden` copy
+ * was the exact stale artifact the operator's `clis.toml` hack pointed workers at (12.28.1 while the
+ * live cache was 12.32.0 — design v3 §"Verified mechanics"). Amendment v3.6 (#490) admits that copy
+ * as a LAST resort — `npx wicked-installer install wicked-garden` lays it down without registering
+ * the marketplace, so an installer-only machine had no source at all — without hiding the difference:
+ *
+ * Design amendment v3.6 (verbatim):
+ * "Discovery order: (1) `WICKED_CREW_SKILLS_SOURCE` explicit override; (2) the marketplace cache
+ * `<config dir>/plugins/cache/wicked-garden/wicked-garden/<highest version>` for each dir in
+ * `CLAUDE_CONFIG_DIR` (may list several) else `~/.claude`; (3) LAST resort, the installer-managed
+ * copy `<config dir>/plugins/wicked-garden` for each of those dirs AND `~/.claude/plugins/wicked-garden`
+ * (garden's `install.mjs` hard-codes homedir), accepted only when its `.claude-plugin/plugin.json`
+ * parses with a `version`. A source of kind (3) is recorded in the baseline as `source.kind:
+ * 'installer-copy'` and surfaces a persistent WARNING finding `skills.source` in
+ * `GET /diagnostics.skills.findings` — 'seeded from the installer copy at <path>; register the plugin
+ * with Claude Code (marketplace) to receive marketplace updates' — so the daemon works on
+ * installer-only machines without hiding the difference. When BOTH a cache and a copy exist, the
+ * cache wins regardless of version; the copy is never preferred. Every source kind passes the same
+ * no-follow, closure and validation rules."
+ *
+ * Within a tier the highest plugin version wins (`compareVersions`, a total order — never `readdir`
+ * order); the tiers never mix. `CLAUDE_CONFIG_DIR` is split on the platform path delimiter. NEVER a
+ * repo checkout by default. `WICKED_CREW_SKILLS_SOURCE` is the one explicit override — for tests,
+ * and for an operator who deliberately wants a checkout or some other plugin root. A machine with
+ * neither a cache nor a copy has no source at all: crew does not vendor garden — the seed says
+ * "install garden first" loudly (`SkillsSourceUnavailableError`) and the runtime leaves the engine
+ * input unset.
  *
  * # No-follow BELOW the root (codex round 6 on #480)
  *
@@ -28,7 +48,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, sep } from 'node:path';
+import { delimiter, join, resolve, sep } from 'node:path';
 
 import type { SkillSourceKind } from '../core/types.js';
 import { PLUGIN_NAME } from './frontmatter.js';
@@ -48,10 +68,14 @@ export interface PluginSource {
   plugin_version: string;
 }
 
-/** The Claude Code config dir the plugin cache lives under: `CLAUDE_CONFIG_DIR`, else `~/.claude`. */
-export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
-  const configured = env['CLAUDE_CONFIG_DIR'];
-  return configured !== undefined && configured !== '' ? configured : join(home, '.claude');
+/**
+ * The Claude Code config dirs the plugin cache (and the installer copy) live under: every non-empty
+ * entry of `CLAUDE_CONFIG_DIR` (it may list several, separated by the platform path delimiter), in
+ * the order listed; `~/.claude` when it is unset or lists nothing (design v3.6).
+ */
+export function claudeConfigDirs(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
+  const listed = (env['CLAUDE_CONFIG_DIR'] ?? '').split(delimiter).filter((dir) => dir !== '');
+  return listed.length > 0 ? listed : [join(home, '.claude')];
 }
 
 /**
@@ -198,14 +222,19 @@ function comparePrerelease(a: string, b: string): number {
 }
 
 /**
- * Classify a plugin root: a git checkout when it carries `.git`; the installed plugin when it
- * sits under a `plugins/` directory (the marketplace cache or the hand-installed copy); anything
- * else is an explicit plugin-shaped directory (an unpacked tarball, a test fixture).
+ * Classify a plugin root by what it IS: a git checkout when it carries `.git`; the installer-managed
+ * copy when it is a `plugins/wicked-garden` directory (garden's `install.mjs` layout — design v3.6,
+ * so an explicit override aimed at that copy is recorded, and warned about, as the copy it is); the
+ * installed plugin when it sits anywhere else under a `plugins/` directory (the marketplace cache);
+ * anything else is an explicit plugin-shaped directory (an unpacked tarball, a test fixture).
  */
 export function classifySource(dir: string): SkillSourceKind {
   if (existsSync(join(dir, '.git'))) return 'checkout';
-  if (dir.split(sep).includes('plugins')) return 'claude-plugin-cache';
-  return 'directory';
+  const segments = resolve(dir).split(sep);
+  if (!segments.includes('plugins')) return 'directory';
+  const last = segments.length - 1;
+  if (segments[last] === PLUGIN_NAME && segments[last - 1] === 'plugins') return 'installer-copy';
+  return 'claude-plugin-cache';
 }
 
 /** A `PluginSource` for an explicit plugin root, or `null` when it is not a plugin root. */
@@ -219,12 +248,52 @@ export function livePluginCacheDir(configDir: string): string {
   return join(configDir, 'plugins', 'cache', PLUGIN_NAME, PLUGIN_NAME);
 }
 
+/** The installer-managed copy (`npx wicked-installer install wicked-garden`, garden's `install.mjs`), for a config dir. */
+export function installerCopyDir(configDir: string): string {
+  return join(configDir, 'plugins', PLUGIN_NAME);
+}
+
+/** One plugin root a discovery tier found, before the tier's highest-version pick. */
+interface Candidate {
+  path: string;
+  plugin_version: string;
+}
+
+/** Every version dir of a config dir's marketplace cache that is a plugin root (no-follow below each). */
+function cacheCandidates(configDir: string): Candidate[] {
+  const cache = livePluginCacheDir(configDir);
+  if (!existsSync(cache)) return [];
+  const found: Candidate[] = [];
+  for (const entry of readdirSync(cache)) {
+    const dir = join(cache, entry);
+    const version = pluginVersionAt(dir);
+    if (version !== null) found.push({ path: dir, plugin_version: version });
+  }
+  return found;
+}
+
+/** The installer copy at a config dir, when its `plugin.json` parses with a `version` (design v3.6 tier 3). */
+function copyCandidate(configDir: string): Candidate | null {
+  const dir = installerCopyDir(configDir);
+  const version = pluginVersionAt(dir);
+  return version === null ? null : { path: dir, plugin_version: version };
+}
+
+/** The highest plugin version among a tier's candidates (`compareVersions`); an equal version keeps the earlier candidate. */
+function highest(candidates: ReadonlyArray<Candidate>): Candidate | null {
+  let best: Candidate | null = null;
+  for (const c of candidates) if (best === null || compareVersions(c.plugin_version, best.plugin_version) > 0) best = c;
+  return best;
+}
+
 /**
- * Discover the live installed plugin: the explicit `WICKED_CREW_SKILLS_SOURCE` override, else the
- * highest version in the marketplace cache. NOTHING else — in particular not the hand-installed
- * `plugins/wicked-garden` copy (see the module header). `env`/`home` are injectable so tests never
- * read the developer's real config dir. Returns `null` when nothing is installed — the caller says
- * "install garden first" loudly.
+ * Discover the installed plugin in the order design amendment v3.6 fixes (module header): (1) the
+ * explicit `WICKED_CREW_SKILLS_SOURCE` override; (2) the highest version across the marketplace
+ * caches of every listed config dir; (3) LAST resort, the highest-versioned installer-managed
+ * `plugins/wicked-garden` copy under those dirs and `~/.claude`. A cache beats a copy regardless of
+ * version; a copy is accepted only when its `plugin.json` parses with a `version`. `env`/`home` are
+ * injectable so tests never read the developer's real config dir. Returns `null` when nothing is
+ * installed — the caller says "install garden first" loudly.
  */
 export function discoverLivePlugin(
   opts: { env?: NodeJS.ProcessEnv; home?: string } = {},
@@ -234,15 +303,20 @@ export function discoverLivePlugin(
   const override = env[SKILLS_SOURCE_ENV];
   if (override !== undefined && override !== '') return pluginSourceAt(override);
 
-  const cache = livePluginCacheDir(claudeConfigDir(env, home));
-  if (!existsSync(cache)) return null;
-  const versions = readdirSync(cache)
-    .filter((entry) => pluginVersionAt(join(cache, entry)) !== null)
-    .sort(compareVersions);
-  const top = versions[versions.length - 1];
-  if (top === undefined) return null;
-  const dir = join(cache, top);
-  return { path: dir, kind: 'claude-plugin-cache', plugin_version: pluginVersionAt(dir) ?? top };
+  const configDirs = claudeConfigDirs(env, home);
+  const cache = highest(configDirs.flatMap(cacheCandidates));
+  if (cache !== null) return { ...cache, kind: 'claude-plugin-cache' };
+
+  // Tier 3: the listed config dirs AND the literal `~/.claude` (garden's `install.mjs` hard-codes
+  // homedir, whatever CLAUDE_CONFIG_DIR says) — each once.
+  const copyDirs = [...new Set([...configDirs, join(home, '.claude')].map((dir) => resolve(dir)))];
+  const copies: Candidate[] = [];
+  for (const dir of copyDirs) {
+    const copy = copyCandidate(dir);
+    if (copy !== null) copies.push(copy);
+  }
+  const copy = highest(copies);
+  return copy === null ? null : { ...copy, kind: 'installer-copy' };
 }
 
 export interface GitState {
