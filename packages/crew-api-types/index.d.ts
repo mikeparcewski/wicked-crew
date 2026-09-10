@@ -2710,11 +2710,20 @@ export interface InteractiveDocDeleteResponse {
   ledger: InteractiveDocDeleteLedgerReport;
 }
 
+/** One hand-pinned demo step on a `kind: "demo"` create (api-types 0.30.0): the wizard's ordered
+ *  steps the governed run authors the spec from (ADR-0018: the agent authors, the service records). */
+export interface InteractiveDemoStepDraft {
+  index: number;
+  subject: string;
+  action: string;
+}
+
 /**
  * The body of `POST /projects/:projectId/interactive/api/docs` as crew's proxy understands it
- * (acceptance finding F-046). The bridge's own fields (`name`, `kind`, `brief`, `source_paths`,
- * `url`, `style`, `project`, `source_message_id`) are relayed as-is — this type documents the two
- * things CREW adds at the proxy before forwarding:
+ * (acceptance finding F-046; api-types 0.30.0 — the studio types its create from THIS declaration,
+ * no local mirror). The bridge's own fields (`name`, `kind`, `html`, `brief`, `source_paths`,
+ * `url`, `demo_steps`, `style`, `project`, `source_message_id`) are relayed as-is — this type
+ * documents the two things CREW adds at the proxy before forwarding:
  *
  *  - `repo_ref` / `repo_refs` — the repository (or repositories) this document is ABOUT, each a
  *    registered repo id, its registry name, or its root directory's basename. Crew validates them
@@ -2729,13 +2738,22 @@ export interface InteractiveDocDeleteResponse {
  *    bridge's `web` default.
  */
 export interface InteractiveDocCreateRequest {
+  /** The doc name; the bridge slugifies it (409 when taken or retired). */
   name?: string;
+  /** Omitted = a plain html doc (`html` required); `source` = generated from brief/sources; `demo` = a recording. */
   kind?: 'source' | 'demo';
+  /** A plain html doc's content (or a `source` doc's seed). */
+  html?: string;
   brief?: string;
   source_paths?: string[];
+  /** `kind: "demo"` — the live app URL to record against. */
   url?: string;
+  /** `kind: "demo"` — hand-pinned steps; omitted = the run authors them from the brief. */
+  demo_steps?: InteractiveDemoStepDraft[];
   style?: 'web' | 'ppt' | 'brochure' | 'doc';
+  /** Crew project binding (DES-PROJECT-001 §2.3): registration is the authority. */
   project?: string;
+  /** The thread message this generation came from (§7.6). */
   source_message_id?: string;
   /** ONE subject repository: a repo id, its name, or its root basename. */
   repo_ref?: string;
@@ -2745,23 +2763,43 @@ export interface InteractiveDocCreateRequest {
 
 /**
  * Crew's 400 on `POST /projects/:projectId/interactive/api/docs` when the request names a
- * repository the document cannot be grounded on (F-046). Nothing was created on the bridge.
+ * repository the document cannot be grounded on (F-046; api-types 0.30.0). Nothing was created
+ * on the bridge.
  */
 export interface InteractiveDocCreateRefusal {
-  /** Human-readable, names the fix (attach the repo, or pick one of `available`). */
+  /** Human-readable, names the fix (attach the repo, pick one of `available`, name it by id, …). */
   error: string;
-  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref';
-  /** The refs the request named, as spelled. */
+  /**
+   * `repo_not_in_project` — a ref matched no member repo; `unfiled_doc_repo` — a repo named on the
+   * Unfiled mount; `invalid_repo_ref` — junk spelling / shape / over the cap; `ambiguous_repo_ref`
+   * — a name or basename shared by several member repos (name it by id); `project_mismatch` — the
+   * body's `project` is not the route's project (or is present on the Unfiled mount). The proxy
+   * canonicalizes an OMITTED `project` from the route.
+   */
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch';
+  /** The refs the request named, as spelled (best-effort stringified when malformed). */
   requested: string[];
   /** The subset of `requested` that matched no member repo (`repo_not_in_project` only). */
   missing?: string[];
+  /** `ambiguous_repo_ref`: each ambiguous ref with the member repos it names. */
+  ambiguous?: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }>;
   /** The project's `crew.repo` members the request could have named. */
   available?: Array<{ id: string; name: string }>;
 }
 
 /**
+ * The 502 the create earns when the bridge dropped the connection AFTER the request had reached it
+ * (api-types 0.30.0): the document may already exist, so the proxy never replays the POST — list the
+ * project's documents before creating again.
+ */
+export interface InteractiveDocCreateUndetermined {
+  code: 'create_undetermined';
+  error: string;
+}
+
+/**
  * The payload of `wicked.interactive.status.posted` as crew's own seams emit it (`producer_id:
- * "wi-crew"`, relayed on `/ws` inside an `interactiveEvent` frame). Acceptance finding F-045: every
+ * "wi-crew"`, relayed on `/ws` inside an `interactiveEvent` frame; api-types 0.30.0). Acceptance finding F-045: every
  * seam emit — status narration, the terminal error/complete lines, and the closing
  * `draft.completed` / `edit.completed` / `demo.requested` — now carries `project_id` for a
  * project-bound document (omitted for an Unfiled one), exactly like the bridge's own emits, so a

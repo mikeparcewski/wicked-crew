@@ -47,6 +47,7 @@ import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
+import type { CREATE_UNDETERMINED, DocCreateRefusal } from '../src/interactive/proxy-routes.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
 import type {
@@ -68,6 +69,16 @@ function accepts<SchemaInput, ContractBody extends SchemaInput>(): ContractBody 
 }
 
 // ── Response direction: daemon → client ────────────────────────────────────────
+
+// F-046 (api-types 0.30.0) — the interactive create proxy's refusals satisfy the published shapes,
+// both directions on the code union so a code added or dropped on either side breaks this file;
+// `requested` is REQUIRED (the refs as spelled — codex on #506), and the post-dispatch 502 is its
+// own published shape.
+respondsWith<Wire.InteractiveDocCreateRefusal, DocCreateRefusal>();
+respondsWith<DocCreateRefusal['code'], Wire.InteractiveDocCreateRefusal['code']>();
+respondsWith<Wire.InteractiveDocCreateRefusal['code'], DocCreateRefusal['code']>();
+respondsWith<string[], DocCreateRefusal['requested']>();
+respondsWith<Wire.InteractiveDocCreateUndetermined, typeof CREATE_UNDETERMINED>();
 
 // GET /runs and GET /runs/:id — the run list / run detail payloads.
 respondsWith<Wire.SessionView[], Awaited<ReturnType<CoreAdapter['sessionsDetail']>>>();

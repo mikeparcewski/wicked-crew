@@ -35,15 +35,25 @@ mentioned only where a daemon release depends on them.
   the project's docs root (new `interactive/doc-grounding.ts` — NOT under the state home: wicked-core
   embeds crew's state-home registry as the worker Read fence and refuses every launch that meets an
   unregistered entry, so a new store there needs a core release first; a retired doc keeps its
-  reserved name, so no sweep is needed); when `doc.created` arrives the seam grounds on THOSE
-  repositories (one offline snapshot each under `<run dir>/repos/<name>`, plus
+  reserved name, so no sweep is needed). The sidecar is read and written under the REAL docs root
+  only — a symlinked document directory or sidecar is refused, never followed. The proxy also
+  canonicalizes the body's `project` from the route (omitted → filled in; a different one →
+  400 `project_mismatch`), refuses a name/basename shared by several member repos
+  (400 `ambiguous_repo_ref` listing the candidates — name it by id), and never replays a create
+  the bridge already received (a connection dropped after dispatch is 502 `create_undetermined`,
+  not a duplicate POST). When `doc.created` arrives the seam grounds on THOSE
+  repositories (one offline snapshot each under `<run dir>/repos/<repo id>`, plus
   the project graph when built), else on the member repos the BRIEF names by name, else on the
   project's sole repo, else on none — never a first-member substitution: a multi-repo project whose
   document named nothing gets an honest thread line saying so and how to name one. The worker's
   problem statement states the subject ("This document is ABOUT the repository wicked-studio …"),
   and the thread shows "Grounded on wicked-studio (named in your request) …". The demo seam gets the
   same grounding for its first-spec run (local reads of the app's source snapshot; the live page is
-  still inspected).
+  still inspected). Both seams refuse a run directory that sits inside ANY registered repository
+  BEFORE creating it (the inbox is the worker's write root; a draft/demo dir configured inside a
+  checkout would hand the worker live source) — error status, no run, no ledger row, the frame
+  dead-lettered; the demo seam registers its flight before the pre-launch awaits so a replayed
+  `doc.created` never double-launches and `stop()` sweeps a half-made snapshot.
 - **Interactive create — the requested format reaches the bridge (F-046, style).** A create body's
   `style` passes through as before; when it is ABSENT the proxy infers it from the brief's format
   words (print-ready / A4 / brochure → `brochure`; slides / deck → `ppt`; memo / whitepaper →
@@ -51,6 +61,42 @@ mentioned only where a daemon release depends on them.
   the draft worker's problem statement now carries the style's one-line format contract (a brochure
   is PRINT pages with page breaks — never fixed slide pages with `overflow:hidden`, the F-050/F-053
   clipping).
+- **`wicked-crew-api-types` 0.30.0** (additive): `InteractiveDocCreateRequest` (the create body
+  crew's proxy understands — the bridge's fields plus `repo_ref`/`repo_refs`; `InteractiveDemoStepDraft`
+  for `demo_steps`), `InteractiveDocCreateRefusal` (the proxy's 400), `InteractiveStatusPosted`
+  (`project_id` on crew's seam frames). wicked-studio types its create from this declaration instead
+  of a local mirror and pins `0.30.0` exactly; tag `api-types-v0.30.0` on merge.
+- **Bridge spawn env + one bus per daemon (F-042 / F-043).** The `wicked-interactive` bridge crew
+  spawns validated and registered a doc's project against `WICKED_CREW_API` — defaulting to
+  `http://127.0.0.1:7701` when unset — so a daemon on any other port could not create a single
+  project-bound document (502 "project … not found on the crew daemon at http://127.0.0.1:7701"),
+  and with two daemons on one host the doc was registered on the WRONG one; and the interactive
+  seams, the project bus and the bridge all defaulted to wicked-bus's HOME-based
+  `~/.something-wicked/wicked-bus/bus.db`, so two daemons (an isolated `--db` one beside the
+  operator's) shared ONE bus, armed the SAME durable cursor names and raced for each other's
+  `doc.created`. Now: the cross-product bus (interactive seams, project bus, /ws relay — which used
+  to open wicked-bus's default regardless of `--bus-db`) resolves as explicit `--bus-db` /
+  `WICKED_BUS_DB` › `$WICKED_BUS_DATA_DIR/bus.db` › **`<core db>.bus/bus.db`** — the daemon's OWN
+  bus, a sidecar of its core db (`core.db.bus/` beside `core.db-wal` and `core.db.events/`), which
+  the state-home fence wicked-core embeds already classifies through the registry's `core.db` prefix
+  entry, so no fence change and no core release is needed (wicked-bus keeps `config.json`, `cas/`,
+  `archive/`, `bus.sock`, `daemon.lock` beside its `bus.db`, hence a directory of its own;
+  `interactive/bus-location.ts`). The spawn exports `WICKED_CREW_API` = this daemon's own bound
+  origin and `WICKED_BUS_DATA_DIR` = that directory; the pair is recorded beside the lockfile
+  (`.wi-serve.crew.json`) so an adopted bridge crew started with a DIFFERENT pair is recycled
+  (SIGTERM, 3 s grace, restart with the right env) and one nobody recorded (an operator's terminal
+  `wicked-interactive serve`, a pre-upgrade bridge) is adopted with a warning naming the fix. A
+  `--bus-db` whose file is not `bus.db` cannot be handed to the bridge (wicked-bus reaches a bus
+  only through a data directory) — the daemon says so at boot. The `--engine-exec` seam's
+  crew-private default (`<state home>/bus.db`) is unchanged. `GET /diagnostics.stores` lists the
+  bus sidecar with the db's other sidecars. Upgrade note: a bridge started by an older crew keeps
+  emitting to the old bus until it is stopped — the daemon logs the pid and the fix on adopt.
+  `wicked-interactive`'s own hard-coded `:7701` default is tracked separately in that repo.
+- **`wicked-crew-api-types` 0.30.0** (additive): `InteractiveDocCreateRequest` (the create body
+  crew's proxy understands — the bridge's fields plus `repo_ref`/`repo_refs`; `InteractiveDemoStepDraft`
+  for `demo_steps`), `InteractiveDocCreateRefusal` (the proxy's 400), `InteractiveStatusPosted`
+  (`project_id` on crew's seam frames). wicked-studio types its create from this declaration instead
+  of a local mirror and pins `0.30.0` exactly; tag `api-types-v0.30.0` on merge.
 - **Bridge spawn env — the bridge talks to THIS daemon and emits on ITS bus (F-042 / F-043).** The
   `wicked-interactive` bridge crew spawns validated and registered a doc's project against
   `WICKED_CREW_API` — defaulting to `http://127.0.0.1:7701` when unset — so a daemon on any other port

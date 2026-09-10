@@ -31,8 +31,8 @@
  *     finds no binding but sees an unsettled create for the same project waits, bounded, for it.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
 
 // ── Styles ───────────────────────────────────────────────────────────────────────────────────
@@ -160,6 +160,9 @@ export interface GroundingDecision {
   source: GroundingSource;
   /** Named refs that resolve to no member repo (detached since the create, or never attached). */
   missing: string[];
+  /** Named refs that resolve to SEVERAL member repos (two repos sharing a name/basename): never
+   *  guessed — reported, so the user names the id (codex on crew#506). */
+  ambiguous: string[];
   /** How many member repos the project has — the honest "none of N was named" note needs it. */
   memberCount: number;
 }
@@ -215,6 +218,18 @@ export function matchRepoRef(ref: string, repo: GroundingRepo): boolean {
   return lower === repo.name.toLowerCase() || lower === basename(repo.rootPath).toLowerCase();
 }
 
+/**
+ * EVERY candidate a ref names. An exact registry id is unique by construction and wins alone; a
+ * human spelling (name / root basename) can name several repos — two checkouts of `wicked-studio`
+ * under different parents share a basename — and the caller must treat >1 as AMBIGUOUS, never
+ * pick the first (codex on crew#506).
+ */
+export function matchingRepos(ref: string, candidates: readonly GroundingRepo[]): GroundingRepo[] {
+  const byId = candidates.find((c) => c.repoRef === ref);
+  if (byId !== undefined) return [byId];
+  return candidates.filter((c) => matchRepoRef(ref, c));
+}
+
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -258,26 +273,37 @@ export async function resolveGroundingRepos(
   if (namedRefs !== undefined && namedRefs.length > 0) {
     const repos: GroundingRepo[] = [];
     const missing: string[] = [];
+    const ambiguous: string[] = [];
     for (const ref of namedRefs) {
-      const hit = candidates.find((c) => matchRepoRef(ref, c));
-      if (hit === undefined) missing.push(ref);
-      else if (!repos.includes(hit)) repos.push(hit);
+      const hits = matchingRepos(ref, candidates);
+      if (hits.length === 0) missing.push(ref);
+      else if (hits.length > 1) ambiguous.push(ref);
+      else if (!repos.includes(hits[0]!)) repos.push(hits[0]!);
     }
-    return { repos, source: 'named', missing, memberCount };
+    return { repos, source: 'named', missing, ambiguous, memberCount };
   }
-  if (candidates.length === 0) return { repos: [], source: 'none', missing: [], memberCount };
-  if (candidates.length === 1) return { repos: candidates, source: 'sole-member', missing: [], memberCount };
+  if (candidates.length === 0) return { repos: [], source: 'none', missing: [], ambiguous: [], memberCount };
+  if (candidates.length === 1) return { repos: candidates, source: 'sole-member', missing: [], ambiguous: [], memberCount };
   const fromBrief = reposNamedInBrief(brief, candidates);
-  if (fromBrief.length > 0) return { repos: fromBrief, source: 'brief', missing: [], memberCount };
-  return { repos: [], source: 'none', missing: [], memberCount };
+  if (fromBrief.length > 0) return { repos: fromBrief, source: 'brief', missing: [], ambiguous: [], memberCount };
+  return { repos: [], source: 'none', missing: [], ambiguous: [], memberCount };
 }
 
-/** A safe directory name for a repo's snapshot under `<runDir>/repos/` — the repo NAME (what the
- *  thread and the problem statement call it), reduced to the slug charset; the id when nothing
- *  survives. Never a free bus string on disk. */
-export function snapshotDirName(repo: GroundingRepo): string {
-  const slug = repo.name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
-  return slug.length > 0 ? slug : repo.repoRef.toLowerCase().replace(/[^a-z0-9._-]+/g, '-') || 'repo';
+/**
+ * A safe directory name for a repo's snapshot under `<runDir>/repos/` — derived from the CANONICAL
+ * registry id (unique by construction; names and basenames collide — codex on crew#506), reduced
+ * to a path-safe charset with its case kept, and made unique among `taken` CASE-INSENSITIVELY so
+ * ids `Foo` and `foo` never overwrite each other on a case-insensitive filesystem. The problem
+ * statement still calls the repo by its NAME beside the path. Adds the result to `taken`.
+ */
+export function snapshotDirName(repo: GroundingRepo, taken: Set<string> = new Set()): string {
+  const base = repo.repoRef.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'repo';
+  let candidate = base;
+  for (let n = 2; [...taken].some((t) => t.toLowerCase() === candidate.toLowerCase()); n += 1) {
+    candidate = `${base}-${n}`;
+  }
+  taken.add(candidate);
+  return candidate;
 }
 
 /** The thread line that says WHERE a launch is grounded and WHY (F-046 follow-up: the worker's
@@ -306,6 +332,14 @@ export function groundingNarration(
       `Requested ${decision.missing.length === 1 ? 'repository' : 'repositories'} ${decision.missing
         .map((m) => `"${m}"`)
         .join(', ')} ${decision.missing.length === 1 ? 'is' : 'are'} not a member of this project — skipped.`,
+    );
+  }
+  if (decision.ambiguous.length > 0) {
+    parts.push(
+      `Requested ${decision.ambiguous.length === 1 ? 'repository' : 'repositories'} ${decision.ambiguous
+        .map((m) => `"${m}"`)
+        .join(', ')} ${decision.ambiguous.length === 1 ? 'names' : 'name'} several repositories in this project — name ` +
+        `${decision.ambiguous.length === 1 ? 'it' : 'them'} by repository id; skipped.`,
     );
   }
   if (snapshotted.length === 0 && decision.source === 'none' && decision.memberCount > 1) {
@@ -353,20 +387,68 @@ interface PendingCreate {
   settle: () => void;
 }
 
+/** Why a sidecar path was refused — each is a containment failure, never a "not found". */
+export class GroundingPathRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GroundingPathRefusedError';
+  }
+}
+
 export class DocGroundingStore {
   private readonly pending = new Map<number, PendingCreate>();
   private nextToken = 1;
 
-  /** `<docsRoot>/<documentId>/crew-grounding.json`, or null for an id that is not a safe segment. */
+  /** `<docsRoot>/<documentId>/crew-grounding.json`, or null for an id that is not a safe segment.
+   *  LEXICAL only — see {@link DocGroundingStore.verifiedSidecar} for the containment-checked path. */
   static sidecarPath(docsRoot: string, documentId: string): string | null {
     return SAFE_DOC.test(documentId) ? join(docsRoot, documentId, CREW_GROUNDING_FILE) : null;
   }
 
-  /** The binding beside the doc, or `undefined` when absent or malformed (a malformed sidecar is
-   *  read as "nothing named" — the thread narrates the fallback, the daemon never dies over it). */
+  /**
+   * The sidecar path anchored to the REAL docs root, every component below it checked (codex on
+   * crew#506): the docs root must resolve (`realpath`); the doc directory, when present, must be a
+   * real directory — a symlink there would let a planted `<docs root>/<doc>` → elsewhere read or
+   * write a sidecar outside the root — and the sidecar (and its rename temp) must not be a link.
+   * Returns `{ path, docDir, docDirExists }`; throws {@link GroundingPathRefusedError} on a link or
+   * a non-directory; throws the fs error when the root itself does not resolve.
+   */
+  static verifiedSidecar(docsRoot: string, documentId: string): { path: string; docDir: string; docDirExists: boolean } {
+    if (!SAFE_DOC.test(documentId)) throw new GroundingPathRefusedError(`document id "${documentId}" cannot name a workspace path`);
+    const realRoot = realpathSync(docsRoot);
+    const docDir = join(realRoot, documentId);
+    let docDirExists = false;
+    try {
+      const st = lstatSync(docDir);
+      if (st.isSymbolicLink()) throw new GroundingPathRefusedError(`refusing ${docDir}: the document directory is a symlink`);
+      if (!st.isDirectory()) throw new GroundingPathRefusedError(`refusing ${docDir}: not a directory`);
+      docDirExists = true;
+    } catch (err) {
+      if (err instanceof GroundingPathRefusedError) throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    const path = join(docDir, CREW_GROUNDING_FILE);
+    for (const p of [path, `${path}.tmp-${process.pid}`]) {
+      try {
+        if (lstatSync(p).isSymbolicLink()) throw new GroundingPathRefusedError(`refusing ${p}: the sidecar path is a symlink`);
+      } catch (err) {
+        if (err instanceof GroundingPathRefusedError) throw err;
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+    return { path, docDir, docDirExists };
+  }
+
+  /** The binding beside the doc, or `undefined` when absent, malformed, or REFUSED (a symlinked
+   *  doc dir / sidecar is read as "nothing named" — the thread narrates the fallback, the daemon
+   *  never dies over it, and nothing outside the docs root is ever read). */
   get(docsRoot: string, documentId: string): DocGroundingBinding | undefined {
-    const path = DocGroundingStore.sidecarPath(docsRoot, documentId);
-    if (path === null) return undefined;
+    let path: string;
+    try {
+      ({ path } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
+    } catch {
+      return undefined;
+    }
     try {
       const row = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
       if (typeof row !== 'object' || row === null) return undefined;
@@ -385,29 +467,30 @@ export class DocGroundingStore {
     }
   }
 
-  /** Write the sidecar atomically. The doc directory normally exists by now (the bridge created it
-   *  before answering the create); it is created when it does not, so a record never fails on
-   *  ordering alone. Throws on an unwritable root — the caller logs and the doc stays unbound. */
+  /** Write the sidecar atomically under the VERIFIED real docs root. The doc directory normally
+   *  exists by now (the bridge created it before answering the create); it is created — as a plain
+   *  directory directly under the real root, never through a link — when it does not, so a record
+   *  never fails on ordering alone. Throws ({@link GroundingPathRefusedError} on containment, the
+   *  fs error otherwise) — the caller logs and the doc stays unbound. */
   record(
     docsRoot: string,
     documentId: string,
     binding: Omit<DocGroundingBinding, 'recorded_at'> & { recorded_at?: string },
   ): void {
-    const path = DocGroundingStore.sidecarPath(docsRoot, documentId);
-    if (path === null) throw new Error(`document id "${documentId}" cannot name a workspace path`);
+    const { path, docDir, docDirExists } = DocGroundingStore.verifiedSidecar(docsRoot, documentId);
     const row: DocGroundingBinding = { ...binding, recorded_at: binding.recorded_at ?? new Date().toISOString() };
-    mkdirSync(dirname(path), { recursive: true });
+    if (!docDirExists) mkdirSync(docDir);
     const tmp = `${path}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(row, null, 2), 'utf8');
     renameSync(tmp, path);
   }
 
-  /** Drop a document's sidecar. `true` when one was removed. */
+  /** Drop a document's sidecar. `true` when one was removed; a refused path removes nothing. */
   remove(docsRoot: string, documentId: string): boolean {
-    const path = DocGroundingStore.sidecarPath(docsRoot, documentId);
-    if (path === null) return false;
+    let path: string;
     try {
-      readFileSync(path);
+      ({ path } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
+      lstatSync(path);
     } catch {
       return false;
     }

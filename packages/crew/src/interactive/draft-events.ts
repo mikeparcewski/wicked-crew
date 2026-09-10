@@ -42,7 +42,7 @@ import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
-import { snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
+import { runDirInsideRepo, snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
 import {
   groundingNarration,
@@ -958,10 +958,27 @@ export async function startInteractiveDraftSubscriber(
     // and NO OTHER run can (per-run isolation, Copilot crew#313). An unsnapshotable repo (over
     // budget, unreadable, clone+copy failed) degrades HONESTLY: the subject is still NAMED in the
     // task, a visible per-cause note lands on the thread, and the full reason in the log.
+    // The inbox must never sit inside ANY registered repository (codex on crew#506): it is the
+    // worker's extra write root, so a draft dir configured inside a checkout hands the unbound
+    // worker write access to live source whatever the run is about — the per-repo dest-overlap
+    // check below covers only the repo being snapshotted. Refuse BEFORE anything is created.
+    const inside = await runDirInsideRepo(adapter, runDir);
+    if (inside !== null) {
+      endFlight(runId);
+      const message =
+        `Crew refused to draft this document: the configured draft directory (${draftDir}) overlaps the ` +
+        `registered repository ${inside}, so launching would give the worker write access inside live source. ` +
+        `Point the crew draft directory outside every registered repository, then replay the request.`;
+      emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+      log(`[interactive-draft] doc ${doc.documentId}: REFUSING launch — run dir ${runDir} is inside repo ${inside}`);
+      throw new Error(message);
+    }
+
     const snapshotted: GroundingRepo[] = [];
     const subjects: DraftGrounding['subjects'] = [];
+    const taken = new Set<string>();
     for (const repo of decision?.repos ?? []) {
-      const dest = join(runDir, 'repos', snapshotDirName(repo));
+      const dest = join(runDir, 'repos', snapshotDirName(repo, taken));
       if (!groundablePath(dest)) {
         // The PATH itself cannot ride the grounding clause (too long for the PTY prompt
         // budget, or multi-line) — and a truncated spelling would name a nonexistent dir, so

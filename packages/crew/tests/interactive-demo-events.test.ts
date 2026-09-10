@@ -50,7 +50,7 @@ import {
 } from '../src/interactive/demo-events.js';
 import { DOC_CREATED, STATUS_POSTED, INTERACTIVE_PRODUCER, parseSourceDocCreated } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
-import { existsSync as fileExists } from 'node:fs';
+import { existsSync as fileExists, readdirSync, statSync, readFileSync as readText } from 'node:fs';
 import type { CoreAdapter as CoreAdapterType } from '../src/core/adapter.js';
 import { FEEDBACK_PROCESSED, EDIT_COMPLETED, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
@@ -601,10 +601,10 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     await waitFor(() => engine.launches.length === 1);
     const launch = engine.launches[0]!;
     const runDir = join(dir, 'demos', 'checkout-demo');
-    const snap = join(runDir, 'repos', 'wicked-studio');
+    const snap = join(runDir, 'repos', 'repo-studio'); // dir = repo id (unique); the task names it wicked-studio
     // THE named repo, not the first member; inside the run's own write root; named in the task.
     expect(fileExists(join(snap, 'src', 'routes.ts'))).toBe(true);
-    expect(fileExists(join(runDir, 'repos', 'wicked-engine'))).toBe(false);
+    expect(fileExists(join(runDir, 'repos', 'repo-core'))).toBe(false);
     expect(launch.extraWriteRoots).toEqual([runDir]);
     expect(launch.problem).toContain(`The application's source is the repository wicked-studio (offline snapshot at ${snap})`);
     expect(launch.problem).not.toContain(studio); // the live root never reaches the worker
@@ -633,13 +633,29 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     expect(fileExists(snap), 'the launch-scoped snapshot must not outlive the run').toBe(false);
   });
 
-  it('REFUSES the launch when the configured demo dir overlaps the app repository — fail closed, no run, no ledger row, snapshots swept (Copilot on #506)', async () => {
+  /** Every path under `root` with its contents — a byte-level fingerprint of a live checkout. */
+  function readdirDeep(root: string): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    const walk = (d: string): void => {
+      for (const name of readdirSync(d).sort()) {
+        const p = join(d, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else out.push([p.slice(root.length), readText(p, 'utf8')]);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  it('REFUSES the launch when the configured demo dir sits inside the app repository — BEFORE anything is created: no dir, no run, no ledger row, the live tree byte-identical (codex CRITICAL on #506)', async () => {
     const bus = await import('wicked-bus');
     // The repo is the sole member — and the demo dir is INSIDE it, so the run's write root would
     // hand the worker write access inside the live repository.
     const repoRoot = join(dir, 'app-repo');
     mkdirSync(join(repoRoot, 'src'), { recursive: true });
     writeFileSync(join(repoRoot, 'src', 'app.ts'), 'export const app = 1;\n', 'utf8');
+    writeFileSync(join(repoRoot, 'README.md'), '# the app\n', 'utf8');
+    const before = JSON.stringify(readdirDeep(repoRoot));
     const engine = fakeAdapter();
     const adapter = Object.assign(engine.asAdapter(), {
       projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-app' }],
@@ -667,17 +683,69 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
         (e) =>
           e.event_type === STATUS_POSTED &&
           (e.payload as { state?: string }).state === 'error' &&
-          String((e.payload as { message?: string }).message).includes('overlaps the application\'s repository'),
+          String((e.payload as { message?: string }).message).includes('overlaps the registered repository'),
       ),
     );
     await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length, 'a refused launch must not start a run').toBe(0);
     expect(sub!.ledger.has('checkout-demo'), 'a refused launch earns no ledger row — a replay must retry').toBe(false);
     expect(sub!.inFlightDocs()).toEqual([]);
-    expect(fileExists(join(demoDir, 'checkout-demo', 'repos'))).toBe(false);
+    // NOTHING was created inside the live repository — not the run dir, not a snapshot — and every
+    // file is byte-for-byte what it was.
+    expect(fileExists(demoDir)).toBe(false);
+    expect(JSON.stringify(readdirDeep(repoRoot))).toBe(before);
     // The error frame carries project_id like every other (F-045).
     const error = probeEvents.find((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')!;
     expect((error.payload as { project_id?: string }).project_id).toBe('proj-7');
+  });
+
+  it('marks the doc BUSY across the whole pre-launch window — a replayed doc.created during the registry/snapshot awaits never double-launches, and stop() sweeps a half-made snapshot (Copilot on #506)', async () => {
+    const bus = await import('wicked-bus');
+    const appRepo = join(dir, 'wicked-studio');
+    mkdirSync(join(appRepo, 'src'), { recursive: true });
+    writeFileSync(join(appRepo, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }],
+      // The registry read is what the pre-launch window waits on here.
+      listRepos: async () => {
+        await gate;
+        return [{ id: 'repo-studio', root_path: appRepo }];
+      },
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() => sub!.inFlightDocs().includes('checkout-demo')); // busy BEFORE any launch
+    expect(engine.launches.length).toBe(0);
+    // A replayed doc.created while the first is still resolving: dropped, not a second flight.
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sub!.inFlightDocs()).toEqual(['checkout-demo']);
+    release();
+    await waitFor(() => engine.launches.length === 1);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(engine.launches.length, 'the replay must not double-launch').toBe(1);
+    expect(fileExists(join(dir, 'demos', 'checkout-demo', 'repos', 'repo-studio', 'src', 'a.ts'))).toBe(true);
+    // stop() with the run in flight sweeps its snapshot.
+    await sub!.stop();
+    expect(fileExists(join(dir, 'demos', 'checkout-demo', 'repos'))).toBe(false);
   });
 
   it('finalize is copy-THEN-emit: installs the spec into the doc workspace, then demo.requested, then complete', async () => {

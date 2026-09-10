@@ -43,7 +43,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export const LOCK_NAME = '.wi-serve.json';
 /** Crew's sidecar beside the bridge's lockfile: which pid crew started, and with which env (F-042/F-043). */
@@ -157,16 +157,7 @@ export function bridgeEnvFor(io: Pick<BridgePoolIo, 'studioOrigin' | 'busDataDir
   };
 }
 
-/**
- * The `WICKED_BUS_DATA_DIR` a bus db path implies (F-043): wicked-bus resolves ONLY a data
- * directory (the file under it is always `bus.db`), so a db whose file is `bus.db` maps to its
- * parent and any other spelling maps to `null` — the bridge cannot be pointed at it, and the CLI
- * says so instead of handing the bridge a directory whose `bus.db` is a different database.
- */
-export function busDataDirOf(busDbPath: string): string | null {
-  const abs = resolve(busDbPath);
-  return basename(abs) === 'bus.db' ? dirname(abs) : null;
-}
+export { busDataDirOf } from './bus-location.js';
 
 /** `true` when two bridge envs agree on every variable either one sets. */
 export function bridgeEnvMatches(a: BridgeEnv, b: BridgeEnv): boolean {

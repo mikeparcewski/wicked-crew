@@ -50,6 +50,7 @@ import { cp, lstat, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises'
 import path, { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execCapped } from '../core/exec.js';
+import type { CoreAdapter } from '../core/adapter.js';
 
 /** Default snapshot budget (~200MB). A repo whose working tree exceeds this is not
  *  snapshotted — the launch proceeds ungrounded, honestly narrated. */
@@ -146,7 +147,7 @@ async function sweepSnapshot(root: string): Promise<void> {
  *  error (EACCES, ELOOP, …) means an EXISTING component could not be resolved — a lexical
  *  reconstruction there could miss an overlap through the unresolved link, so it THROWS and
  *  the caller's overlap-check catch fails closed (no snapshot, degrade). */
-async function realpathNearest(p: string): Promise<string> {
+export async function realpathNearest(p: string): Promise<string> {
   let existing = resolve(p);
   const tail: string[] = [];
   // Walk up until something exists; dirname() at the root returns itself, which always exists.
@@ -330,4 +331,35 @@ export async function snapshotRepo(
     await rm(dest, { recursive: true, force: true }).catch(() => {}); // never leave a partial snapshot
     return { ok: false, reason: 'copy-failed' };
   }
+}
+
+/**
+ * The registered repository whose root a run's inbox would sit INSIDE (or contain), or `null` when
+ * the inbox is clear of every registered repo (codex on crew#506, CRITICAL). A seam declares its
+ * per-run directory as the worker's extra write root, so an inbox configured inside a live
+ * repository — `--interactive-*-dir` pointing into a checkout, or a repo registered AT the inbox —
+ * would hand the unbound worker write access to live source no matter what the run is about. The
+ * per-repo snapshot check catches only the repo being snapshotted; this walks the whole registry
+ * BEFORE anything is created. Realpath'd both sides (symlinked parents cannot hide an overlap);
+ * a repo root that cannot be resolved is skipped (it cannot be written through either). An
+ * adapter that cannot list repos yields `null` — the seams' own snapshot check still stands.
+ */
+export async function runDirInsideRepo(adapter: CoreAdapter, runDir: string): Promise<string | null> {
+  let repos: Array<{ root_path: string }>;
+  try {
+    repos = await adapter.listRepos();
+  } catch {
+    return null;
+  }
+  const realRun = await realpathNearest(runDir);
+  for (const repo of repos) {
+    let realRoot: string;
+    try {
+      realRoot = await realpath(repo.root_path);
+    } catch {
+      continue;
+    }
+    if (pathsOverlap(realRoot, realRun)) return repo.root_path;
+  }
+  return null;
 }

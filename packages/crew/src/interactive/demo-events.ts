@@ -90,7 +90,7 @@ import {
   groundablePath,
   oneLine,
 } from './draft-events.js';
-import { snapshotRepo } from './repo-snapshot.js';
+import { runDirInsideRepo, snapshotRepo } from './repo-snapshot.js';
 import {
   groundingNarration,
   resolveGroundingRepos,
@@ -507,7 +507,10 @@ interface InFlight {
   agentPhaseCount: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
-  heartbeat: ReturnType<typeof setInterval>;
+  /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot/launch
+   *  awaits so `docBusy` reports the doc busy and `stop()` can sweep a half-made snapshot — Copilot
+   *  on crew#506); set once the launch resolves. */
+  heartbeat?: ReturnType<typeof setInterval> | undefined;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
    *  which says the spec path that was expected and what was found. */
@@ -591,7 +594,8 @@ export async function startInteractiveDemoSubscriber(
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   const groundingStore = opts.groundingStore;
-  const inFlight = new Map<string, InFlight>(); // runId → live state
+  const inFlight = new Map<string, InFlight>(); // runId → live state (pre-launch placeholders included)
+  let closed = false; // set by stop(): a handler mid-snapshot must never launch after shutdown
 
   /** Best-effort removal of a run's app-source snapshots (F-046) — a leftover is a disk-space
    *  wart, never a correctness one. Empties the array it is handed. */
@@ -662,10 +666,30 @@ export async function startInteractiveDemoSubscriber(
   function endFlight(runId: string): InFlight | undefined {
     const flight = inFlight.get(runId);
     if (flight) {
-      clearInterval(flight.heartbeat);
+      if (flight.heartbeat !== undefined) clearInterval(flight.heartbeat);
       inFlight.delete(runId);
     }
     return flight;
+  }
+
+  /**
+   * The inbox must never sit inside a registered repository (codex on crew#506, CRITICAL): the
+   * run declares it as the worker's extra write root, so a demo dir configured inside a checkout
+   * would hand the unbound worker write access to live source whatever the run is about. Checked
+   * against the WHOLE registry before anything is created; a hit refuses the launch — error status,
+   * no directory, no run, no ledger row, the frame dead-lettered (replayable once the config is
+   * fixed). `null` when clear.
+   */
+  async function refuseRunDirInsideRepo(runDir: string, documentId: string, projectId: string | undefined): Promise<void> {
+    const inside = await runDirInsideRepo(adapter, runDir);
+    if (inside === null) return;
+    const message =
+      `Crew refused to author this demo: the configured demo directory (${demoDir}) overlaps the ` +
+      `registered repository ${inside}, so launching would give the worker write access inside live ` +
+      `source. Point the crew demo directory outside every registered repository, then replay the request.`;
+    emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
+    log(`[interactive-demo] ${documentId}: REFUSING launch — run dir ${runDir} is inside repo ${inside}`);
+    throw new Error(message);
   }
 
   /** Terminal-event fold: turn the governed run's own events into interactive narration, and
@@ -900,12 +924,21 @@ export async function startInteractiveDemoSubscriber(
       runDir: string;
       outPath: string;
       agentPhaseCount: number;
-      /** App-source snapshots already landed under `runDir` (F-046); owned by the flight from here. */
-      snapshotDirs?: string[];
+      /** The pre-registered placeholder's run id — the flight `handle*` put in `inFlight` BEFORE its
+       *  awaits, so the doc reads busy throughout and `stop()` sweeps its snapshots. */
+      runId: string;
     },
   ): Promise<void> {
-    const runId = randomUUID();
-    const snapshotDirs = input.snapshotDirs ?? [];
+    const { runId } = input;
+    const placeholder = inFlight.get(runId);
+    const snapshotDirs = placeholder?.snapshotDirs ?? [];
+    if (closed) {
+      // stop() ran during the caller's awaits: never launch after the subscriber detached.
+      endFlight(runId);
+      removeSnapshots(snapshotDirs);
+      log(`[interactive-demo] ${input.key}: subscriber stopped before launch — abandoned (a replay retries)`);
+      return;
+    }
     // Resolved BEFORE the launch and never indexing — a refresh is `wicked-estate index` per
     // member at up to 600s EACH, so doing it here would turn "record a demo" into an
     // unannounced multi-repo job. Missing or stale degrades to no binding; the run is unaffected.
@@ -961,8 +994,15 @@ export async function startInteractiveDemoSubscriber(
         // delivery retries. The crash window between launch and this write is the reason the
         // demo.requested emit ALSO carries a deterministic idempotency key.
         ledger.recordLaunch(input.key, runId);
+        if (closed) {
+          // stop() ran while the engine was accepting the launch: its sweep already dropped the
+          // placeholder and the snapshots; the ledger row keeps a post-restart redelivery from
+          // double-launching, and the engine's workers die with the daemon.
+          return;
+        }
         if (input.projectId !== undefined) opts.onRunFiled?.(runId, input.projectId);
-        const flight: InFlight = {
+        // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
+        const flight: InFlight = placeholder ?? {
           key: input.key,
           leg: input.leg,
           documentId: input.documentId,
@@ -971,27 +1011,28 @@ export async function startInteractiveDemoSubscriber(
           outPath: input.outPath,
           snapshotDirs,
           agentPhaseCount: input.agentPhaseCount,
-          narration:
-            input.leg === 'spec'
-              ? 'Crew run launched — authoring your demo…'
-              : 'Crew run launched — re-authoring your demo…',
-          heartbeat: setInterval(() => {
-            // Repeat the last real narration so the ~20s status.requested window is always
-            // fed, even mid-phase when the engine is quiet.
-            emitInteractive(STATUS_POSTED, {
-              ...docScope(flight.documentId, flight.projectId),
-              state: 'working',
-              message: flight.narration,
-            });
-          }, heartbeatMs),
+          narration: '',
         };
+        flight.narration =
+          input.leg === 'spec' ? 'Crew run launched — authoring your demo…' : 'Crew run launched — re-authoring your demo…';
+        flight.heartbeat = setInterval(() => {
+          // Repeat the last real narration so the ~20s status.requested window is always
+          // fed, even mid-phase when the engine is quiet.
+          emitInteractive(STATUS_POSTED, {
+            ...docScope(flight.documentId, flight.projectId),
+            state: 'working',
+            message: flight.narration,
+          });
+        }, heartbeatMs);
         // Do not keep the daemon alive for narration alone.
         flight.heartbeat.unref?.();
         inFlight.set(runId, flight);
         log(`[interactive-demo] ${input.key} → governed run ${runId} (${input.leg}, spec → ${input.outPath})`);
       })
       .catch((err: unknown) => {
-        // A launch that never happened keeps no snapshot (a replayed frame re-snapshots fresh).
+        // A launch that never happened keeps no flight and no snapshot (a replayed frame
+        // re-registers and re-snapshots fresh).
+        endFlight(runId);
         removeSnapshots(snapshotDirs);
         // The 'processing' status is already on the thread — close it out honestly so the
         // canvas never sits in an in-between state on a launch that went nowhere.
@@ -1026,6 +1067,31 @@ export async function startInteractiveDemoSubscriber(
 
     const runDir = join(demoDir, doc.documentId);
     const outPath = join(runDir, DEMO_SPEC_FILE);
+    const runId = randomUUID();
+
+    // PRE-LAUNCH placeholder (Copilot on crew#506): the awaits below (registry check, grounding,
+    // snapshots) open a window in which this doc has no `inFlight` entry — a replayed doc.created
+    // could start a second snapshot+launch, and stop()'s sweep could not find a half-made clone.
+    // Register the flight FIRST; every exit path below must endFlight() it.
+    const placeholder: InFlight = {
+      key: doc.documentId,
+      leg: 'spec',
+      documentId: doc.documentId,
+      projectId: doc.projectId,
+      version: undefined,
+      outPath,
+      snapshotDirs: [],
+      agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      narration: 'Crew run launched — authoring your demo…',
+    };
+    inFlight.set(runId, placeholder);
+    try {
+      // NOTHING is created before the inbox is known to be clear of every registered repository.
+      await refuseRunDirInsideRepo(runDir, doc.documentId, doc.projectId);
+    } catch (err) {
+      endFlight(runId);
+      throw err;
+    }
     mkdirSync(runDir, { recursive: true });
 
     emitInteractive(STATUS_POSTED, {
@@ -1040,28 +1106,37 @@ export async function startInteractiveDemoSubscriber(
     // snapshotted into the run's own inbox (readable by the unbound worker, wicked-core#259) and
     // named in the task; the thread hears where the demo is grounded and why.
     const subjects: DemoGrounding['subjects'] = [];
-    const snapshotDirs: string[] = [];
+    const snapshotDirs = placeholder.snapshotDirs; // tracked on the flight so stop() sweeps them
     if (doc.projectId !== undefined) {
-      const binding =
-        groundingStore !== undefined
-          ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
-          : undefined;
-      const decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+      let binding;
+      let decision;
+      try {
+        binding =
+          groundingStore !== undefined
+            ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
+            : undefined;
+        decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+      } catch (err) {
+        endFlight(runId);
+        throw err;
+      }
       const snapshotted: GroundingRepo[] = [];
+      const taken = new Set<string>();
       for (const repo of decision.repos) {
-        const dest = join(runDir, 'repos', snapshotDirName(repo));
+        const dest = join(runDir, 'repos', snapshotDirName(repo, taken));
         if (!groundablePath(dest)) {
           log(`[interactive-demo] ${doc.documentId}: snapshot dest ${dest} cannot ride the problem — no snapshot for ${repo.repoRef}`);
           subjects.push({ name: repo.name });
           continue;
         }
+        snapshotDirs.push(dest); // BEFORE the await: a stop() mid-clone must find it
         const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
         if (snap.ok) {
-          snapshotDirs.push(dest);
           snapshotted.push(repo);
           subjects.push({ name: repo.name, snapshotDir: dest });
           continue;
         }
+        snapshotDirs.splice(snapshotDirs.indexOf(dest), 1); // nothing landed — snapshotRepo cleans its partials
         if (snap.reason === 'dest-overlap') {
           // FAIL CLOSED, exactly like the draft seam (Copilot on #506): the configured demo dir places
           // this run's write root inside the live application repository (or the repo is registered
@@ -1069,6 +1144,7 @@ export async function startInteractiveDemoSubscriber(
           // still hand the unbound worker write access INSIDE the live repo — so the launch is
           // refused outright: sibling snapshots removed, no run, no ledger row. The status names the
           // CONFIG problem; the thrown error dead-letters the frame, replayable once it is fixed.
+          endFlight(runId);
           removeSnapshots(snapshotDirs);
           const message =
             `Crew refused to author this demo: the configured demo directory (${demoDir}) overlaps the ` +
@@ -1099,7 +1175,7 @@ export async function startInteractiveDemoSubscriber(
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
-      snapshotDirs,
+      runId,
     });
   }
 
@@ -1156,6 +1232,24 @@ export async function startInteractiveDemoSubscriber(
 
     const runDir = join(demoDir, key.replace(':', '-'));
     const outPath = join(runDir, DEMO_SPEC_FILE);
+    const runId = randomUUID();
+    inFlight.set(runId, {
+      key,
+      leg: 'reauthor',
+      documentId: handoff.documentId,
+      projectId: handoff.projectId,
+      version: handoff.version,
+      outPath,
+      snapshotDirs: [],
+      agentPhaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
+      narration: 'Crew run launched — re-authoring your demo…',
+    });
+    try {
+      await refuseRunDirInsideRepo(runDir, handoff.documentId, handoff.projectId);
+    } catch (err) {
+      endFlight(runId);
+      throw err;
+    }
     mkdirSync(runDir, { recursive: true });
     const currentSpecPath = join(runDir, 'current.spec.mjs');
     copyFileSync(srcSpec, currentSpecPath);
@@ -1189,6 +1283,7 @@ export async function startInteractiveDemoSubscriber(
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_REAUTHOR_WORKFLOW_DEF.phases.length,
+      runId,
     });
   }
 
@@ -1230,6 +1325,7 @@ export async function startInteractiveDemoSubscriber(
     ledger,
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
+      closed = true; // a handler mid-snapshot sees this and never launches
       offCoreEvents();
       for (const runId of [...inFlight.keys()]) {
         const flight = endFlight(runId);

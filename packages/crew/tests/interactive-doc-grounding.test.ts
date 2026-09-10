@@ -10,17 +10,19 @@
 //    `waitFor` closes the bus-beats-create window without ever hanging.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CREW_GROUNDING_FILE,
   DocGroundingStore,
+  GroundingPathRefusedError,
   REPO_REFS_MAX,
   groundingNarration,
   inferDocStyle,
   isDocStyle,
   matchRepoRef,
+  matchingRepos,
   parseRepoRefs,
   projectRepoCandidates,
   reposNamedInBrief,
@@ -99,6 +101,8 @@ describe('style: inference + the format contract (F-046, F-050/F-053)', () => {
 const STUDIO: GroundingRepo = { repoRef: 'repo-studio', name: 'wicked-studio', rootPath: '/src/wicked-studio' };
 const CORE: GroundingRepo = { repoRef: 'repo-core', name: 'wicked-engine', rootPath: '/src/wicked-engine' };
 const ARCHIVED: GroundingRepo = { repoRef: 'repo-arch', name: 'wicked-studio-archived', rootPath: '/src/wicked-studio-archived' };
+/** A SECOND checkout of wicked-studio under another parent — the same name and basename (codex on #506). */
+const STUDIO_TWIN: GroundingRepo = { repoRef: 'repo-studio-twin', name: 'wicked-studio', rootPath: '/elsewhere/wicked-studio' };
 
 function adapterWith(
   members: Record<string, Array<{ member_kind: string; member_ref: string }>>,
@@ -116,6 +120,14 @@ describe('matchRepoRef / reposNamedInBrief', () => {
     expect(matchRepoRef('Wicked-Studio', STUDIO)).toBe(true);
     expect(matchRepoRef('REPO-STUDIO', STUDIO)).toBe(false); // ids are exact
     expect(matchRepoRef('wicked-engine', STUDIO)).toBe(false);
+  });
+
+  it('matchingRepos: an exact id is unique by construction; a human spelling shared by two repos is AMBIGUOUS, never first-match (codex on #506)', () => {
+    expect(matchingRepos('repo-studio', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO]);
+    expect(matchingRepos('repo-studio-twin', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO_TWIN]);
+    expect(matchingRepos('wicked-studio', [CORE, STUDIO, STUDIO_TWIN])).toEqual([STUDIO, STUDIO_TWIN]);
+    expect(matchingRepos('wicked-studio', [CORE, STUDIO])).toEqual([STUDIO]);
+    expect(matchingRepos('nope', [CORE, STUDIO])).toEqual([]);
   });
 
   it('finds the member repos a brief names OUTRIGHT — whole tokens only, so a longer sibling name never matches', () => {
@@ -158,7 +170,26 @@ describe('projectRepoCandidates + resolveGroundingRepos (the rule, in order)', (
     expect(d.source).toBe('named');
     expect(d.repos.map((r) => r.repoRef)).toEqual(['repo-studio']);
     expect(d.missing).toEqual(['repo-gone']);
+    expect(d.ambiguous).toEqual([]);
     expect(d.memberCount).toBe(2);
+  });
+
+  it('a NAMED ref shared by two member repos is reported as AMBIGUOUS and grounds nothing — the id disambiguates (codex on #506)', async () => {
+    const twins = adapterWith(
+      { 'proj-twins': [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }, { member_kind: 'crew.repo', member_ref: 'repo-studio-twin' }] },
+      [
+        { id: 'repo-studio', root_path: '/src/wicked-studio' },
+        { id: 'repo-studio-twin', root_path: '/elsewhere/wicked-studio' },
+      ],
+    );
+    const d = await resolveGroundingRepos(twins, 'proj-twins', 'anything', ['wicked-studio']);
+    expect(d).toMatchObject({ source: 'named', repos: [], missing: [], ambiguous: ['wicked-studio'], memberCount: 2 });
+    const byId = await resolveGroundingRepos(twins, 'proj-twins', 'anything', ['repo-studio-twin']);
+    expect(byId.repos.map((r) => r.repoRef)).toEqual(['repo-studio-twin']);
+    expect(byId.ambiguous).toEqual([]);
+    expect(groundingNarration(d, [], 'draft')).toBe(
+      'Requested repository "wicked-studio" names several repositories in this project — name it by repository id; skipped.',
+    );
   });
 
   it('else the BRIEF-named members', async () => {
@@ -179,37 +210,44 @@ describe('projectRepoCandidates + resolveGroundingRepos (the rule, in order)', (
     expect(d.repos).toEqual([]);
     expect(d.memberCount).toBe(2);
     const bare = await resolveGroundingRepos(adapter, 'proj-bare', 'anything', undefined);
-    expect(bare).toEqual({ repos: [], source: 'none', missing: [], memberCount: 0 });
+    expect(bare).toEqual({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 0 });
   });
 });
 
 describe('groundingNarration (the thread line — F-046 follow-up) + snapshotDirName', () => {
   it('says WHERE and WHY, reports missing named repos, and explains a none-of-N project', () => {
-    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], memberCount: 2 }, [STUDIO], 'draft')).toMatch(
+    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], ambiguous: [], memberCount: 2 }, [STUDIO], 'draft')).toMatch(
       /^Grounded on wicked-studio \(named in your request\)/,
     );
-    expect(groundingNarration({ repos: [STUDIO], source: 'brief', missing: [], memberCount: 2 }, [STUDIO], 'draft')).toContain(
+    expect(groundingNarration({ repos: [STUDIO], source: 'brief', missing: [], ambiguous: [], memberCount: 2 }, [STUDIO], 'draft')).toContain(
       'named in your brief',
     );
-    expect(groundingNarration({ repos: [CORE], source: 'sole-member', missing: [], memberCount: 1 }, [CORE], 'demo')).toContain(
+    expect(groundingNarration({ repos: [CORE], source: 'sole-member', missing: [], ambiguous: [], memberCount: 1 }, [CORE], 'demo')).toContain(
       "the project's only repository",
     );
-    expect(groundingNarration({ repos: [], source: 'named', missing: ['repo-gone'], memberCount: 2 }, [], 'draft')).toBe(
+    expect(groundingNarration({ repos: [], source: 'named', missing: ['repo-gone'], ambiguous: [], memberCount: 2 }, [], 'draft')).toBe(
       'Requested repository "repo-gone" is not a member of this project — skipped.',
     );
-    expect(groundingNarration({ repos: [], source: 'none', missing: [], memberCount: 3 }, [], 'draft')).toContain(
+    expect(groundingNarration({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 3 }, [], 'draft')).toContain(
       'This project has 3 repositories and none was named for this draft',
     );
     // Nothing to say: a repo-less project.
-    expect(groundingNarration({ repos: [], source: 'none', missing: [], memberCount: 0 }, [], 'draft')).toBeNull();
+    expect(groundingNarration({ repos: [], source: 'none', missing: [], ambiguous: [], memberCount: 0 }, [], 'draft')).toBeNull();
     // A named repo whose snapshot failed: no "Grounded on" claim, nothing false said.
-    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], memberCount: 2 }, [], 'draft')).toBeNull();
+    expect(groundingNarration({ repos: [STUDIO], source: 'named', missing: [], ambiguous: [], memberCount: 2 }, [], 'draft')).toBeNull();
   });
 
-  it('derives a slug-safe snapshot directory from the repo NAME, never from free bus text', () => {
-    expect(snapshotDirName(STUDIO)).toBe('wicked-studio');
-    expect(snapshotDirName({ repoRef: 'r1', name: 'My Repo (v2)!', rootPath: '/x' })).toBe('my-repo-v2');
-    expect(snapshotDirName({ repoRef: 'r1', name: '///', rootPath: '/x' })).toBe('r1');
+  it('derives the snapshot directory from the CANONICAL repo id (names and basenames collide), path-safe, unique case-insensitively per launch (codex on #506)', () => {
+    expect(snapshotDirName(STUDIO)).toBe('repo-studio');
+    expect(snapshotDirName(STUDIO_TWIN)).toBe('repo-studio-twin');
+    expect(snapshotDirName({ repoRef: 'a b/c', name: 'x', rootPath: '/x' })).toBe('a-b-c');
+    expect(snapshotDirName({ repoRef: '///', name: 'x', rootPath: '/x' })).toBe('repo');
+    // Two ids differing only by case never overwrite each other on a case-insensitive filesystem.
+    const taken = new Set<string>();
+    expect(snapshotDirName({ repoRef: 'Foo', name: 'Foo', rootPath: '/a' }, taken)).toBe('Foo');
+    expect(snapshotDirName({ repoRef: 'foo', name: 'foo', rootPath: '/b' }, taken)).toBe('foo-2');
+    expect(snapshotDirName({ repoRef: 'FOO', name: 'FOO', rootPath: '/c' }, taken)).toBe('FOO-3');
+    expect([...taken]).toEqual(['Foo', 'foo-2', 'FOO-3']);
   });
 });
 
@@ -245,9 +283,43 @@ describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create wi
     expect(readFileSync(join(root, 'brochure', 'versions.json'), 'utf8')).toBe('{"head":0}');
   });
 
+  it('CONTAINMENT (codex on #506): a symlinked doc dir or sidecar is refused for read, write and remove — nothing outside the real docs root is ever touched', () => {
+    const store = new DocGroundingStore();
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'evil', repo_refs: ['x'] }), 'utf8');
+    mkdirSync(root, { recursive: true });
+    // A planted `<docs root>/<doc>` → elsewhere: read yields nothing, write refuses, remove touches nothing.
+    symlinkSync(outside, join(root, 'linked-doc'), 'dir');
+    expect(store.get(root, 'linked-doc')).toBeUndefined();
+    expect(() => store.record(root, 'linked-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    expect(store.remove(root, 'linked-doc')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    expect(readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8')).toContain('evil'); // untouched
+    // A real doc dir whose SIDECAR is a link out: same refusals.
+    mkdirSync(join(root, 'real-doc'));
+    symlinkSync(join(outside, CREW_GROUNDING_FILE), join(root, 'real-doc', CREW_GROUNDING_FILE));
+    expect(store.get(root, 'real-doc')).toBeUndefined();
+    expect(() => store.record(root, 'real-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    expect(store.remove(root, 'real-doc')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    // A doc path that is a FILE, not a directory: refused too.
+    writeFileSync(join(root, 'file-doc'), 'not a dir', 'utf8');
+    expect(() => store.record(root, 'file-doc', { project_id: 'p', repo_refs: ['r'] })).toThrow(GroundingPathRefusedError);
+    // A docs root that does not exist: nothing to read, nothing to write.
+    expect(store.get(join(dir, 'missing-root'), 'doc')).toBeUndefined();
+    expect(() => store.record(join(dir, 'missing-root'), 'doc', { project_id: 'p', repo_refs: [] })).toThrow();
+    // …while a plain doc dir under a symlinked ROOT works — the root is realpath'd, the doc dir checked beneath it.
+    symlinkSync(root, join(dir, 'root-link'), 'dir');
+    store.record(join(dir, 'root-link'), 'plain-doc', { project_id: 'p', repo_refs: ['r'] });
+    expect(existsSync(join(root, 'plain-doc', CREW_GROUNDING_FILE))).toBe(true);
+    expect(store.get(join(dir, 'root-link'), 'plain-doc')?.repo_refs).toEqual(['r']);
+  });
+
   it('never names a path for an id outside the doc grammar, and reads a malformed sidecar as "nothing named"', () => {
     const store = new DocGroundingStore();
     expect(DocGroundingStore.sidecarPath(root, '../escape')).toBeNull();
+    mkdirSync(root, { recursive: true });
     expect(store.get(root, '../escape')).toBeUndefined();
     expect(() => store.record(root, 'Nope Caps', { project_id: 'p', repo_refs: [] })).toThrow(/cannot name/);
     mkdirSync(join(root, 'bad'), { recursive: true });
@@ -259,6 +331,7 @@ describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create wi
 
   it('waitFor: immediate when the binding exists or nothing is pending; waits for an in-flight create; never past the timeout', async () => {
     const store = new DocGroundingStore();
+    mkdirSync(root, { recursive: true });
     expect(await store.waitFor(root, 'doc-a', 'proj-1', 1000)).toBeUndefined(); // nothing pending → immediate
     store.record(root, 'doc-b', { project_id: 'proj-1', repo_refs: ['r'] });
     expect((await store.waitFor(root, 'doc-b', 'proj-1', 1000))?.repo_refs).toEqual(['r']);

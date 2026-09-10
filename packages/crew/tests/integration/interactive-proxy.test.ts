@@ -40,8 +40,12 @@ const { createServer } = require('node:http');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const root = process.argv[1];  // under \`node -e\`, the first script arg is argv[1]
+let created = 0;               // how many creates REACHED this bridge (replay detection)
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/api/create-count') {
+    return res.writeHead(200, {'content-type':'application/json'}).end(JSON.stringify({ created }));
+  }
   if (url.pathname === '/api/health') {
     return res.writeHead(200, {'content-type':'application/json'})
       .end(JSON.stringify({ ok: true, root, pid: process.pid }));
@@ -50,6 +54,9 @@ const server = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     return req.on('end', () => {
+      created += 1;
+      // A bridge that created + emitted the doc and then died before answering (codex on #506).
+      if (req.headers['x-fake-reset']) { req.socket.destroy(); return; }
       let received = {};
       try { received = JSON.parse(body); } catch { received = { unparsed: body }; }
       res.writeHead(200, {'content-type':'application/json'})
@@ -325,15 +332,24 @@ describe('interactive proxy — doc create interception (F-046)', () => {
     mkdirp(studioRoot(), { recursive: true });
     grounding = new DocGroundingStore();
     // The adapter knows p-a's members and the registry — what the proxy validates a repo_ref against.
-    const adapter = Object.assign(stubAdapter(new Set(['p-a'])), {
+    // p-twins has TWO checkouts of wicked-studio (same name/basename) — the ambiguity case.
+    const adapter = Object.assign(stubAdapter(new Set(['p-a', 'p-twins'])), {
       projectMembers: async (id: string) =>
         id === 'p-a'
           ? [
               { member_kind: 'crew.repo', member_ref: 'repo-studio' },
               { member_kind: 'crew.run', member_ref: 'run-1' },
             ]
-          : [],
-      listRepos: async () => [{ id: 'repo-studio', name: 'wicked-studio', root_path: studioRoot() }],
+          : id === 'p-twins'
+            ? [
+                { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+                { member_kind: 'crew.repo', member_ref: 'repo-studio-twin' },
+              ]
+            : [],
+      listRepos: async () => [
+        { id: 'repo-studio', name: 'wicked-studio', root_path: studioRoot() },
+        { id: 'repo-studio-twin', name: 'wicked-studio', root_path: join(dir, 'elsewhere', 'wicked-studio') },
+      ],
     }) as CoreAdapter;
     createApp = Fastify({ logger: false });
     registerInteractiveProxy(createApp, adapter, {
@@ -423,6 +439,57 @@ describe('interactive proxy — doc create interception (F-046)', () => {
     const res = await post('p-a', 'not json at all', true);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { received: { unparsed?: string } }).received.unparsed).toBe('not json at all');
+  }, 30_000);
+
+  it('canonicalizes the body\'s project from the ROUTE: omitted → filled in; conflicting → 400 project_mismatch; a project on the Unfiled mount → 400 (codex on #506)', async () => {
+    const omitted = (await (await post('p-a', { name: 'no-project', kind: 'source', brief: 'x' })).json()) as { received: Record<string, unknown> };
+    expect(omitted.received.project).toBe('p-a');
+    const conflicting = await post('p-a', { name: 'wrong', kind: 'source', brief: 'x', project: 'p-b' });
+    expect(conflicting.status).toBe(400);
+    const cbody = (await conflicting.json()) as { code: string; error: string };
+    expect(cbody.code).toBe('project_mismatch');
+    expect(cbody.error).toContain('"p-b"');
+    expect(cbody.error).toContain('p-a');
+    const unfiled = await post('default', { name: 'loose', kind: 'source', brief: 'x', project: 'p-a' });
+    expect(unfiled.status).toBe(400);
+    expect(((await unfiled.json()) as { code: string }).code).toBe('project_mismatch');
+    // …and a matching project passes through untouched.
+    const same = (await (await post('p-a', { name: 'same', kind: 'source', brief: 'x', project: 'p-a' })).json()) as { received: Record<string, unknown> };
+    expect(same.received.project).toBe('p-a');
+  }, 30_000);
+
+  it('REFUSES an AMBIGUOUS alias — a name shared by two member repos — listing the candidates; the id resolves it (codex on #506)', async () => {
+    const res = await post('p-twins', { name: 'which', kind: 'source', brief: 'x', repo_ref: 'wicked-studio' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; requested: string[]; ambiguous: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }>; error: string };
+    expect(body.code).toBe('ambiguous_repo_ref');
+    expect(body.requested).toEqual(['wicked-studio']);
+    expect(body.ambiguous).toEqual([
+      { ref: 'wicked-studio', candidates: [{ id: 'repo-studio', name: 'wicked-studio' }, { id: 'repo-studio-twin', name: 'wicked-studio' }] },
+    ]);
+    expect(body.error).toContain('name the repository by id');
+    expect(existsSync(join(dir, 'shared-docs', 'which'))).toBe(false);
+    // By id: unambiguous, forwarded, recorded.
+    const byId = await post('p-twins', { name: 'which-id', kind: 'source', brief: 'x', repo_ref: 'repo-studio-twin' });
+    expect(byId.status).toBe(200);
+    expect(grounding.get(join(dir, 'shared-docs'), 'which-id')?.repo_refs).toEqual(['repo-studio-twin']);
+  }, 30_000);
+
+  it('NEVER replays a create the bridge already received: a connection dropped after dispatch is a 502 create_undetermined, and the bridge saw exactly ONE create (codex on #506)', async () => {
+    const countUrl = `${createBase}/api/v1/projects/p-a/interactive/api/create-count`;
+    const before = ((await (await fetch(countUrl)).json()) as { created: number }).created;
+    const res = await fetch(`${createBase}/api/v1/projects/p-a/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fake-reset': '1' },
+      body: JSON.stringify({ name: 'dropped', kind: 'source', brief: 'x', project: 'p-a', repo_ref: 'wicked-studio' }),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; error: string };
+    expect(body.code).toBe('create_undetermined');
+    expect(body.error).toContain('may already exist');
+    const after = ((await (await fetch(countUrl)).json()) as { created: number }).created;
+    expect(after - before, 'the create must reach the bridge exactly once — no replay').toBe(1);
+    expect(grounding.pendingCount('p-a')).toBe(0);
   }, 30_000);
 
   it('WITHOUT a grounding store the create is untouched transport — repo_ref reaches the bridge as sent', async () => {

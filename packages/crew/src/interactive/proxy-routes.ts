@@ -43,7 +43,7 @@ import { BridgeUnavailableError, InteractiveBridgePool, type LiveBridge } from '
 import {
   inferDocStyle,
   isDocStyle,
-  matchRepoRef,
+  matchingRepos,
   parseRepoRefs,
   projectRepoCandidates,
   type DocGroundingStore,
@@ -112,10 +112,26 @@ export interface InteractiveProxyDeps {
  *  wire: crew-api-types `InteractiveDocCreateRefusal`. */
 export interface DocCreateRefusal {
   error: string;
-  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref';
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref' | 'ambiguous_repo_ref' | 'project_mismatch';
   requested: string[];
   missing?: string[];
+  /** `ambiguous_repo_ref`: the refs that name several repos, each with its candidates. */
+  ambiguous?: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }>;
   available?: Array<{ id: string; name: string }>;
+}
+
+/** The 502 a create earns when the bridge dropped the connection AFTER the request was sent: the
+ *  doc may or may not exist, so the proxy never replays a non-idempotent POST (codex on crew#506). */
+export const CREATE_UNDETERMINED = {
+  code: 'create_undetermined',
+  error:
+    'the interactive bridge dropped the connection after the create was sent — the document may already ' +
+    'exist; list the project\'s documents before creating it again',
+} as const;
+
+/** Thrown by `forwardCreate` — carries whether the request had already reached the bridge. */
+interface CreateForwardError extends Error {
+  createDispatched?: boolean;
 }
 
 /** A create read and validated at the daemon, ready to forward (or to refuse). */
@@ -169,6 +185,37 @@ export async function prepareDocCreate(
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return passthrough;
   const body = { ...(parsed as Record<string, unknown>) };
 
+  // THE PROJECT IS THE ROUTE'S (codex on crew#506): the proxy validates and records the binding
+  // against `projectId`, so the body's `project` — which the bridge registers the doc under — must
+  // be the same project or absent. An omitted value is canonicalized from the route; a different
+  // one is refused, never forwarded to file the doc somewhere else. The Unfiled mount creates
+  // UNBOUND, so a `project` there is a mismatch too.
+  const bodyProject = typeof body['project'] === 'string' ? body['project'].trim() : '';
+  if (projectId === DEFAULT_PROJECT_ID) {
+    if (bodyProject !== '') {
+      return {
+        ...passthrough,
+        refusal: {
+          error: `this create is on the Unfiled mount but names project "${bodyProject}" — create it under /projects/${bodyProject}/interactive instead`,
+          code: 'project_mismatch',
+          requested: [],
+        },
+      };
+    }
+    delete body['project'];
+  } else if (bodyProject === '') {
+    body['project'] = projectId;
+  } else if (bodyProject !== projectId) {
+    return {
+      ...passthrough,
+      refusal: {
+        error: `the create names project "${bodyProject}" but was sent to project ${projectId} — one document, one project; nothing was created`,
+        code: 'project_mismatch',
+        requested: [],
+      },
+    };
+  }
+
   const refs = parseRepoRefs(body);
   if (!refs.ok) {
     return { ...passthrough, refusal: { error: refs.error, code: 'invalid_repo_ref', requested: refs.requested } };
@@ -189,10 +236,29 @@ export async function prepareDocCreate(
     }
     const candidates = await projectRepoCandidates(adapter, projectId, log);
     const missing: string[] = [];
+    const ambiguous: Array<{ ref: string; candidates: Array<{ id: string; name: string }> }> = [];
     for (const ref of refs.refs) {
-      const hit = candidates.find((c) => matchRepoRef(ref, c));
-      if (hit === undefined) missing.push(ref);
-      else if (!repoRefs.includes(hit.repoRef)) repoRefs.push(hit.repoRef);
+      const hits = matchingRepos(ref, candidates);
+      if (hits.length === 0) missing.push(ref);
+      else if (hits.length > 1) ambiguous.push({ ref, candidates: hits.map((h) => ({ id: h.repoRef, name: h.name })) });
+      else if (!repoRefs.includes(hits[0]!.repoRef)) repoRefs.push(hits[0]!.repoRef);
+    }
+    if (ambiguous.length > 0) {
+      // Two member repos share the spelling (two checkouts of one name under different parents):
+      // never the first match — the request must say which, by id (codex on crew#506).
+      return {
+        ...passthrough,
+        refusal: {
+          error:
+            ambiguous
+              .map((a) => `"${a.ref}" names ${a.candidates.length} repositories in project ${projectId} (${a.candidates.map((c) => `${c.name} = ${c.id}`).join(', ')})`)
+              .join('; ') + ' — name the repository by id. Nothing was created.',
+          code: 'ambiguous_repo_ref',
+          requested: refs.refs,
+          ambiguous,
+          available: candidates.map((c) => ({ id: c.repoRef, name: c.name })),
+        },
+      };
     }
     if (missing.length > 0) {
       const available = candidates.map((c) => ({ id: c.repoRef, name: c.name }));
@@ -298,6 +364,14 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         try {
           await send(bridge);
         } catch (err) {
+          // A create that already REACHED the bridge is never replayed (codex on crew#506): the
+          // bridge may have created and announced the doc before the connection dropped, and a
+          // second POST would 409 (or mint a duplicate) while the first doc carries no sidecar.
+          // Say what is known — the outcome is undetermined — and let the client look.
+          if (create !== null && (err as CreateForwardError).createDispatched === true && !reply.raw.headersSent) {
+            deps.log?.(`interactive create for project ${projectId} was dispatched but the bridge dropped the connection: ${(err as Error).message}`);
+            return reply.code(502).send(CREATE_UNDETERMINED);
+          }
           // The cached bridge died between the pid check and the connect (an operator killed it,
           // a crash). Invalidate and let `ensure` restart it — ONE retry, so a genuinely broken
           // bridge fails fast to a 503 instead of looping.
@@ -339,12 +413,20 @@ function forwardCreate(
     headers['content-type'] = create.contentType;
     headers['content-length'] = String(create.body.length);
     delete headers['transfer-encoding'];
+    // Once the request body has been flushed to the socket the bridge may have acted on it: from
+    // here on a failure is UNDETERMINED, not retryable (see the route's catch).
+    let dispatched = false;
+    const fail = (err: Error): void => {
+      (err as CreateForwardError).createDispatched = dispatched;
+      rejectPromise(err);
+    };
     const upstream = httpRequest(
       { host: bridge.host, port: bridge.port, method: 'POST', path: target, headers },
       (res) => {
+        dispatched = true;
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('error', (err) => rejectPromise(err));
+        res.on('error', (err) => fail(err));
         res.on('end', () => {
           const body = Buffer.concat(chunks);
           const status = res.statusCode ?? 502;
@@ -384,9 +466,12 @@ function forwardCreate(
         });
       },
     );
+    upstream.on('finish', () => {
+      dispatched = true;
+    });
     upstream.on('error', (err) => {
       if (reply.raw.headersSent) reply.raw.destroy();
-      rejectPromise(err);
+      fail(err);
     });
     upstream.end(create.body);
   });
