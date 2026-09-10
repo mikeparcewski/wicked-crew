@@ -979,6 +979,79 @@ export interface GovernanceUnenforcedEvent {
   reason: string;
 }
 
+/** One path an `executes_code: false` phase changed, with git's one-letter status
+ *  (`A`dded, `M`odified, `D`eleted, `T`ype-changed). */
+export interface WorktreeChangedPath {
+  status: string;
+  path: string;
+}
+
+/** wicked-core F-036 — an `executes_code: false` phase (an evaluator, a recon rung, a review) CHANGED
+ *  the worktree it was working in. The engine snapshots the tree at dispatch and re-snapshots when
+ *  the seat's work ends, for EVERY seat and carrier regardless of governance adapter. `changed` are
+ *  the paths that DENY the unit (its `gateEvaluated.denial.source` is `worktree_guard`); `exempted`
+ *  are differing paths an exemption covers (documentation, the phase's declared deliverables, engine
+ *  scratch) — disclosed, not denied. `headMoved`: the run branch was committed/amended/reset. Also
+ *  emitted when only exempt paths changed (`changed: []`), so an operator always sees what an
+ *  evaluator wrote. Evaluator ≠ creator is no longer a promise the seat keeps; it is a check. */
+export interface EvaluatorMutatedWorktreeEvent {
+  type: 'evaluatorMutatedWorktree';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The seat that ran the unit (`assigned_cli`; `''` when unassigned). */
+  cli: string;
+  /** The workflow phase id (`verify`, `adversarial-review`, …). */
+  phase: string;
+  beforeTree: string;
+  afterTree: string;
+  headMoved: boolean;
+  changed: WorktreeChangedPath[];
+  exempted: WorktreeChangedPath[];
+}
+
+/** One repository check the engine ran in the run's worktree (wicked-core F-039). */
+export interface RepoCheckRun {
+  /** `install` | `typecheck` | `lint` | `test` | `cargo-test`. */
+  name: string;
+  argv: string[];
+  /** Provenance an operator can verify: `package.json scripts.test`, `Cargo.toml`, … */
+  source: string;
+  /** The process exit code; `null` when it produced none (timed out / could not spawn). */
+  exitCode: number | null;
+  timedOut: boolean;
+  /** The OS error when the command could not be started (binary not on PATH, …). */
+  spawnError?: string | null;
+  durationMs: number;
+  /** The last 4 KiB of each stream — the evidence, verbatim. */
+  stdoutTail: string;
+  stderrTail: string;
+}
+
+/** wicked-core F-039 — the engine ran the repository's OWN checks in the worktree for the def's
+ *  code-verifying unit (`verified_evidence` with an `executes_code` creator upstream: `bug/verify`,
+ *  `feature/test`, `migration/verify`) and folded them into the gate as a deterministic floor. Fires
+ *  once per fold, just before `gateEvaluated` (whose `hasDeterministicFloor`/`criterion` include this
+ *  floor). `checks` is what actually ran, in order; `skipped` names detected checks not run because an
+ *  earlier one failed. `passed: false` ⇒ the unit is denied (`denial.source` is `repo_checks`). An
+ *  empty `checks` with `passed: true` means no checks were detected — disclosed as such, never
+ *  silently. "Done" for a verify phase is now the exit code the engine observed, not the seat's
+ *  account of having run the suite. */
+export interface RepoChecksEvaluatedEvent {
+  type: 'repoChecksEvaluated';
+  session: string;
+  ord: number;
+  attempt: number;
+  passed: boolean;
+  criterion: string;
+  checks: RepoCheckRun[];
+  skipped: string[];
+}
+
+/** The gate-evidence events (wicked-core F-036/F-039) as a discriminated union for consumers that
+ *  narrow on `type`; they also flow through the permissive {@link CoreEvent}. */
+export type GateEvidenceEvent = EvaluatorMutatedWorktreeEvent | RepoChecksEvaluatedEvent;
+
 // ── P2 decisions-full observability events (wicked-core EVT-001/012/013) ────
 
 /** P2 — a structured workflow def was selected; fires once per session, after SessionStarted and before

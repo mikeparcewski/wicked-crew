@@ -118,6 +118,35 @@ mentioned only where a daemon release depends on them.
   cannot be read is used but never written into the sidecar (`interactive/bridge-pool.ts`).
   `wicked-interactive`'s own hard-coded `:7701` default is tracked separately in that repo.
 
+### Added
+- **Gate-evidence events on the wire (wicked-core F-036 / F-039).** `wicked-crew-api-types` declares
+  `EvaluatorMutatedWorktreeEvent` (`evaluatorMutatedWorktree`: an `executes_code: false` phase —
+  an evaluator, a recon rung — CHANGED the worktree it was reviewing; `changed[{status,path}]`
+  deny the unit, `exempted[…]` are disclosed documentation/deliverable writes, `headMoved`) and
+  `RepoChecksEvaluatedEvent` (`repoChecksEvaluated`: the engine ran the repository's own
+  `typecheck`/`lint`/`test` scripts or `cargo test` in the worktree for the code-verifying unit —
+  `checks[{name, argv, source, exitCode, timedOut, spawnError, durationMs, stdoutTail,
+  stderrTail}]`, `skipped`, `passed`), plus `WorktreeChangedPath`, `RepoCheckRun` and the
+  `GateEvidenceEvent` union. Both are additive; the loose `CoreEvent` bag carries them unchanged.
+
+### Changed
+- **The acceptance view treats an evaluator that rewrote the code as an enforcement failure.**
+  `resolveEnforcement` folds a DENYING `evaluatorMutatedWorktree` (non-empty `changed`, or
+  `headMoved`) into `enforcement.unenforced` beside the unchecked-tool-call units — reason
+  "evaluator≠creator violated: phase `verify` (executes_code: false) changed the worktree it was
+  reviewing — N path(s): …" — so `guardrailed` is never claimed for a run whose evaluator
+  self-graded its own edit (deny-dominates, arch-R16). The `unenforced` headline now names the
+  two classes separately; an exempt-only mutation (`changed: []`) is disclosed by the engine and is
+  NOT a violation here.
+- **The served `feature`/`bug`/`migration` mirrors report the evidence floor on their code-writing
+  Creator phases** (`build`/`fix`/`execute` now carry `validator_pin: e2e7af1db9e48454`, matching
+  wicked-core's compiled defs and `workflows/*.json`): the `fix` gate re-derives the diff and a
+  distinct seat judges it, instead of folding `combined: true` over nothing evaluated. Display and
+  per-run composition only — the engine arms a missing pin at registration regardless, so a mirror
+  that lags is repaired, not refused. The read-only posture for non-claude evaluator seats (codex
+  `--sandbox read-only`, pi `--exclude-tools edit,write`, refusal of a write-capable lever-less
+  posture) lives in wicked-core's launcher (the crew#427 posture path) and needs no crew config.
+
 ## [0.7.27] — 2026-09-10
 
 Release train: ships the published `wicked-crew-api-types` 0.29.0 (workspace link; tagged

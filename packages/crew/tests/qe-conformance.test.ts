@@ -320,3 +320,89 @@ describe('buildAcceptanceView — the conformance section rides the acceptance b
     expect(view.conformance.guardrailed).toBe(false);
   });
 });
+
+describe('resolveEnforcement — evaluatorMutatedWorktree (wicked-core F-036)', () => {
+  it('a DENYING mutation is an enforcement failure: unenforced, named by phase and path, never guardrailed', () => {
+    const res = resolveEnforcement([
+      ev({ type: 'governanceContextArmed', ord: 3, attempt: 0, path: 'acp' }),
+      ev({
+        type: 'evaluatorMutatedWorktree',
+        ord: 4,
+        attempt: 0,
+        cli: 'codex',
+        phase: 'verify',
+        beforeTree: 'aaaa',
+        afterTree: 'bbbb',
+        headMoved: false,
+        changed: [
+          { status: 'M', path: 'src/components/WorkPage.tsx' },
+          { status: 'M', path: 'e2e/seed_surfaces_test.py' },
+        ],
+        exempted: [],
+      }),
+    ]);
+    expect(res.status).toBe('unenforced');
+    expect(res.unenforced).toHaveLength(1);
+    expect(res.unenforced[0]).toMatchObject({ ord: 4, attempt: 0, cli: 'codex' });
+    expect(res.unenforced[0]!.reason).toMatch(/evaluator≠creator violated/);
+    expect(res.unenforced[0]!.reason).toMatch(/`verify`/);
+    expect(res.unenforced[0]!.reason).toMatch(/M src\/components\/WorkPage\.tsx/);
+    expect(res.reason).toMatch(/CHANGED the worktree under review/);
+    expect(res.reason).not.toMatch(/UNCHECKED tool calls/);
+    expect(res.armedUnits).toEqual([3]);
+
+    const view = resolveConformance({
+      runId: 'run-1',
+      claims: [claim()],
+      events: [
+        ev({
+          type: 'evaluatorMutatedWorktree',
+          ord: 4,
+          attempt: 0,
+          cli: 'codex',
+          phase: 'verify',
+          changed: [{ status: 'D', path: 'src/fix.ts' }],
+          exempted: [],
+          headMoved: false,
+        }),
+      ],
+    });
+    expect(view.guardrailed).toBe(false);
+    expect(view.enforcement.status).toBe('unenforced');
+  });
+
+  it('an exempt-only mutation (documentation, declared deliverables) is disclosed, not a violation', () => {
+    const res = resolveEnforcement([
+      ev({ type: 'governanceContextArmed', ord: 4, attempt: 0, path: 'wrapped_cli' }),
+      ev({
+        type: 'evaluatorMutatedWorktree',
+        ord: 4,
+        attempt: 0,
+        cli: 'claude',
+        phase: 'adversarial-review',
+        changed: [],
+        exempted: [{ status: 'A', path: 'docs/review.md' }],
+        headMoved: false,
+      }),
+    ]);
+    expect(res.status).toBe('enforced');
+    expect(res.unenforced).toEqual([]);
+  });
+
+  it('a moved HEAD with an identical tree is still a violation (the run branch is no longer the creator\'s)', () => {
+    const res = resolveEnforcement([
+      ev({
+        type: 'evaluatorMutatedWorktree',
+        ord: 4,
+        attempt: 1,
+        cli: 'pi',
+        phase: 'verify',
+        changed: [],
+        exempted: [],
+        headMoved: true,
+      }),
+    ]);
+    expect(res.status).toBe('unenforced');
+    expect(res.unenforced[0]!.reason).toMatch(/HEAD moved/);
+  });
+});

@@ -19,7 +19,8 @@
  *
  * 2. **"Guardrailed" is a verified claim, never a default.** A run whose
  *    workflow declared governed units but whose CLI has no gate-hook adapter
- *    runs with UNCHECKED tool calls and only leaves a `governanceUnenforced`
+ *    runs with UNCHECKED tool calls and only leaves a `governanceUnenforced` (or an
+ *    `evaluatorMutatedWorktree` — an evaluator that rewrote the code it was reviewing, F-036)
  *    event behind (gate-hook injection is claude-only — FINDING-063,
  *    `execute_wrapped.rs`). This section reads the run's durable event log and
  *    reports `enforcement.status` accordingly; `guardrailed` is true ONLY when
@@ -238,6 +239,36 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
           reason: str(ev['reason']),
         });
         break;
+      case 'evaluatorMutatedWorktree': {
+        // wicked-core F-036: an `executes_code: false` phase (an evaluator, a recon rung) CHANGED
+        // the worktree it was reviewing. The engine denied its gate; for the acceptance view it is
+        // the same class of fact as an unchecked unit — evaluator ≠ creator did not hold for this
+        // unit, so the run cannot be called guardrailed. Only a DENYING mutation counts: exempt-only
+        // changes (documentation, declared deliverables) arrive with `changed: []` and are not a
+        // separation failure.
+        const changed = Array.isArray(ev['changed']) ? (ev['changed'] as unknown[]) : [];
+        const headMoved = ev['headMoved'] === true;
+        if (changed.length > 0 || headMoved) {
+          const paths = changed
+            .map((c) => {
+              const r = c as Record<string, unknown>;
+              return `${str(r['status'])} ${str(r['path'])}`;
+            })
+            .join(', ');
+          unenforced.push({
+            ord: num(ev['ord']),
+            attempt: num(ev['attempt']),
+            cli: str(ev['cli']),
+            reason:
+              `evaluator≠creator violated: phase \`${str(ev['phase'])}\` (executes_code: false) ` +
+              `changed the worktree it was reviewing` +
+              (paths.length > 0 ? ` — ${changed.length} path(s): ${paths}` : '') +
+              (headMoved ? ' — HEAD moved' : ''),
+          });
+        }
+        governedSignal = true;
+        break;
+      }
       case 'governanceContextArmed':
         armed.add(num(ev['ord']));
         governedSignal = true;
@@ -258,14 +289,28 @@ export function resolveEnforcement(events: RecordedEvent[] | null): GovernanceEn
   if (unenforced.length > 0) {
     // Deny-dominates: ONE unchecked governed unit breaks the whole run's guardrail claim, even
     // when every other unit was armed — a chain with a named missing link.
-    const clis = [...new Set(unenforced.map((u) => u.cli))].join(', ');
+    const clis = [...new Set(unenforced.map((u) => u.cli).filter((c) => c.length > 0))].join(', ');
+    const mutated = unenforced.filter((u) => u.reason.startsWith('evaluator≠creator violated'));
+    const unchecked = unenforced.length - mutated.length;
+    const parts: string[] = [];
+    if (unchecked > 0) {
+      parts.push(
+        `${unchecked} governed unit(s) ran with UNCHECKED tool calls` +
+          (clis.length > 0 ? ` on ${clis}` : '') +
+          ' (gate-hook injection is claude-only; phase-boundary output gating still applied)',
+      );
+    }
+    if (mutated.length > 0) {
+      parts.push(
+        `${mutated.length} executes_code:false unit(s) CHANGED the worktree under review ` +
+          '(evaluator≠creator violated; the engine denied the gate — wicked-core F-036)',
+      );
+    }
     return {
       status: 'unenforced',
       unenforced,
       armedUnits,
-      reason:
-        `${unenforced.length} governed unit(s) ran with UNCHECKED tool calls on ${clis} ` +
-        '(gate-hook injection is claude-only; phase-boundary output gating still applied)',
+      reason: parts.join('; '),
     };
   }
   if (governedSignal) {

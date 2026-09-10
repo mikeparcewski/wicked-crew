@@ -167,10 +167,12 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
       const def = adapter.listWorkflows().find((w) => w.id === id)!;
       return [id, def.phases.filter((p) => p.validator_pin !== null).map((p) => p.id)];
     });
+    // wicked-core F-039: the code-writing Creator phases carry the floor too — the `fix` gate
+    // (and `build`/`execute`) must evaluate something, never fold `combined: true` over nothing.
     expect(gated).toEqual([
-      ['feature', ['adversarial-review', 'test']],
-      ['bug', ['verify']],
-      ['migration', ['verify']],
+      ['feature', ['build', 'adversarial-review', 'test']],
+      ['bug', ['fix', 'verify']],
+      ['migration', ['execute', 'verify']],
     ]);
   });
 });
