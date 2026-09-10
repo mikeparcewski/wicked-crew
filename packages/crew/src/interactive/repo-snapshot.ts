@@ -355,8 +355,9 @@ export class RunDirUnverifiableError extends Error {
  * FAIL CLOSED: a registry that cannot be listed (engine/addon hiccup) or a root that cannot be
  * resolved for any reason but plain ENOENT THROWS {@link RunDirUnverifiableError} — "could not
  * check" is never read as "clear". A root that does not exist (ENOENT — a stale registration) is
- * compared by its resolved spelling instead: a directory that is not there cannot be written
- * through, but a lexical overlap still counts.
+ * CANONICALIZED through its nearest existing ancestor (`realpathNearest`, codex on crew#506): a
+ * missing root beneath a symlinked ancestor then compares in the same namespace as the run dir,
+ * so an inbox configured inside the registered path is still caught.
  */
 export async function runDirInsideRepo(adapter: CoreAdapter, runDir: string): Promise<string | null> {
   let repos: Array<{ id?: string; root_path: string }>;
@@ -378,7 +379,15 @@ export async function runDirInsideRepo(adapter: CoreAdapter, runDir: string): Pr
           `registered repository ${repo.root_path} could not be resolved (${err instanceof Error ? err.message : String(err)})`,
         );
       }
-      realRoot = resolve(repo.root_path);
+      try {
+        realRoot = await realpathNearest(repo.root_path);
+      } catch (nearest) {
+        throw new RunDirUnverifiableError(
+          `registered repository ${repo.root_path} could not be resolved through its ancestors (${
+            nearest instanceof Error ? nearest.message : String(nearest)
+          })`,
+        );
+      }
     }
     if (pathsOverlap(realRoot, realRun)) return repo.root_path;
   }

@@ -47,7 +47,7 @@ import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
 import type { AcpCliFold, RecentError, StoreFileEntry } from '../src/api/diagnostics.js';
-import type { CREATE_UNDETERMINED, DocCreateBody, DocCreateRefusal } from '../src/interactive/proxy-routes.js';
+import type { CREATE_UNDETERMINED, DocCreateBody, DocCreateRefusal, PreparedCreate } from '../src/interactive/proxy-routes.js';
 import type { SeamStatusPayload } from '../src/interactive/draft-events.js';
 import type { LOCAL_ACTOR } from '../src/api/auth.js';
 import type { AuditLog } from '../src/api/audit.js';
@@ -85,6 +85,9 @@ respondsWith<Wire.InteractiveDocCreateUndetermined, typeof CREATE_UNDETERMINED>(
 // `emitInteractive` stamps `ts` (codex on #506: request/frame mappings, not just refusals).
 respondsWith<Wire.InteractiveDocCreateRequest, DocCreateBody>();
 respondsWith<DocCreateBody, Wire.InteractiveDocCreateRequest>();
+// …and the proxy's ACTUAL normalization output (what the bridge receives) is that published body —
+// not a detached alias (codex r3 on #506).
+respondsWith<Wire.InteractiveDocCreateRequest, NonNullable<PreparedCreate['normalized']>>();
 respondsWith<Wire.InteractiveStatusPosted, SeamStatusPayload & { ts: string }>();
 respondsWith<Wire.InteractiveStatusPosted['state'], SeamStatusPayload['state']>();
 respondsWith<SeamStatusPayload['state'], Wire.InteractiveStatusPosted['state']>();

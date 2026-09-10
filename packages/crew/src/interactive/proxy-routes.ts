@@ -142,9 +142,14 @@ interface CreateForwardError extends Error {
 
 /** A create read and validated at the daemon, ready to forward (or to refuse). */
 export interface PreparedCreate {
-  /** The bytes to forward — the rewritten JSON, or the original bytes when they were not a JSON object. */
+  /** The bytes to forward — `normalized` serialized, or the original bytes when they were not a JSON object. */
   body: Buffer;
   contentType: string;
+  /** The create as the bridge receives it — EXACTLY the published `InteractiveDocCreateRequest`
+   *  (codex on crew#506: the wire type at the real boundary). Fields the contract does not know
+   *  are not forwarded; `repo_ref`/`repo_refs` are consumed here and never ride. Absent when the
+   *  body was not a JSON object (pure passthrough — the bridge answers its own 400). */
+  normalized?: DocCreateBody;
   /** Recorded under the doc name the bridge answers with, when the request named repositories. */
   binding?: { projectId: string; repoRefs: string[]; style?: string | undefined };
   refusal?: DocCreateRefusal;
@@ -299,27 +304,57 @@ export async function prepareDocCreate(
       };
     }
   }
-  delete body['repo_ref'];
-  delete body['repo_refs'];
-
   // Style: pass a valid one through; infer an absent/unknown one from the brief's format words so
   // a print brief reaches the bridge's print instructions instead of its `web` default.
-  let style: string | undefined = isDocStyle(body['style']) ? body['style'] : undefined;
+  const brief = typeof body['brief'] === 'string' ? body['brief'] : undefined;
+  let style: DocCreateBody['style'] = isDocStyle(body['style']) ? body['style'] : undefined;
   if (style === undefined) {
-    const brief = typeof body['brief'] === 'string' ? body['brief'] : '';
-    const inferred = inferDocStyle(brief);
+    const inferred = inferDocStyle(brief ?? '');
     if (inferred !== undefined) {
       style = inferred;
-      body['style'] = inferred;
       log?.(`interactive create for project ${projectId}: no style given — inferred "${inferred}" from the brief's format words`);
-    } else {
-      delete body['style'];
     }
   }
 
+  // The forwarded create IS the published contract — built field by field from what validated,
+  // never by spreading the untrusted body: `repo_ref`/`repo_refs` were consumed above, and a field
+  // the contract does not know is not forwarded.
+  const str = (k: string): string | undefined => (typeof body[k] === 'string' ? (body[k] as string) : undefined);
+  const name = str('name');
+  const html = str('html');
+  const url = str('url');
+  const sourceMessageId = str('source_message_id');
+  const kind = body['kind'] === 'source' || body['kind'] === 'demo' ? body['kind'] : undefined;
+  const sourcePaths = Array.isArray(body['source_paths'])
+    ? body['source_paths'].filter((p): p is string => typeof p === 'string')
+    : undefined;
+  const demoSteps = Array.isArray(body['demo_steps'])
+    ? body['demo_steps'].flatMap((d) => {
+        if (typeof d !== 'object' || d === null) return [];
+        const r = d as Record<string, unknown>;
+        return typeof r['index'] === 'number' && typeof r['subject'] === 'string' && typeof r['action'] === 'string'
+          ? [{ index: r['index'], subject: r['subject'], action: r['action'] }]
+          : [];
+      })
+    : undefined;
+  const project = typeof body['project'] === 'string' ? body['project'] : undefined;
+  const normalized: DocCreateBody = {
+    ...(name !== undefined ? { name } : {}),
+    ...(kind !== undefined ? { kind } : {}),
+    ...(html !== undefined ? { html } : {}),
+    ...(brief !== undefined ? { brief } : {}),
+    ...(sourcePaths !== undefined ? { source_paths: sourcePaths } : {}),
+    ...(url !== undefined ? { url } : {}),
+    ...(demoSteps !== undefined ? { demo_steps: demoSteps } : {}),
+    ...(style !== undefined ? { style } : {}),
+    ...(project !== undefined ? { project } : {}),
+    ...(sourceMessageId !== undefined ? { source_message_id: sourceMessageId } : {}),
+  };
+
   return {
-    body: Buffer.from(JSON.stringify(body), 'utf8'),
+    body: Buffer.from(JSON.stringify(normalized), 'utf8'),
     contentType: 'application/json',
+    normalized,
     ...(repoRefs.length > 0 ? { binding: { projectId, repoRefs, style } } : {}),
   };
 }

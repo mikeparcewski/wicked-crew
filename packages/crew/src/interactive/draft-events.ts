@@ -674,9 +674,15 @@ export async function startInteractiveDraftSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
@@ -836,7 +842,7 @@ export async function startInteractiveDraftSubscriber(
       ledger.recordFailure(flight.documentId);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
@@ -859,7 +865,7 @@ export async function startInteractiveDraftSubscriber(
     }
     if (!ok) {
       ledger.recordFailure(documentId);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no draft file at ${outPath} (run ${runId}).`,
@@ -879,7 +885,7 @@ export async function startInteractiveDraftSubscriber(
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this doc (the launch gate is `ledger.has`).
       ledger.recordFailure(documentId);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message:
@@ -890,7 +896,7 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
     ledger.recordEmitted(documentId);
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
       message: 'First draft is in — landing it on the canvas now. Click any block to refine it.',
@@ -955,7 +961,7 @@ export async function startInteractiveDraftSubscriber(
       decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
     }
 
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(doc.documentId, doc.projectId),
       state: 'processing',
       message: 'A governed crew picked up your brief — planning the draft…',
@@ -983,7 +989,7 @@ export async function startInteractiveDraftSubscriber(
       const message =
         `Crew refused to draft this document: the configured draft directory (${draftDir}) could not be verified ` +
         `against the registered repositories (${why}). Fix the path or its permissions, then replay the request.`;
-      emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+      emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message });
       log(`[interactive-draft] doc ${doc.documentId}: REFUSING launch — run dir ${runDir} unverifiable: ${why}`);
       throw new Error(message);
     }
@@ -993,7 +999,7 @@ export async function startInteractiveDraftSubscriber(
         `Crew refused to draft this document: the configured draft directory (${draftDir}) overlaps the ` +
         `registered repository ${inside}, so launching would give the worker write access inside live source. ` +
         `Point the crew draft directory outside every registered repository, then replay the request.`;
-      emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+      emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message });
       log(`[interactive-draft] doc ${doc.documentId}: REFUSING launch — run dir ${runDir} is inside repo ${inside}`);
       throw new Error(message);
     }
@@ -1007,7 +1013,7 @@ export async function startInteractiveDraftSubscriber(
         // The PATH itself cannot ride the grounding clause (too long for the PTY prompt
         // budget, or multi-line) — and a truncated spelling would name a nonexistent dir, so
         // the snapshot is SKIPPED before any clone happens (Copilot, crew#313).
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(doc.documentId, doc.projectId),
           state: 'working',
           message: `snapshot path for ${repo.name} too long to hand to the worker — drafting without its snapshot`,
@@ -1042,7 +1048,7 @@ export async function startInteractiveDraftSubscriber(
           `overlaps the project's repository (${repo.rootPath}), so launching would give the ` +
           `worker write access inside the live repo. Point the crew draft directory outside ` +
           `every registered repository, then replay the request.`;
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(doc.documentId, doc.projectId),
           state: 'error',
           message,
@@ -1061,7 +1067,7 @@ export async function startInteractiveDraftSubscriber(
         'dest-unclearable': 'a stale snapshot could not be cleared',
         'copy-failed': 'repository snapshot failed (clone and copy both errored)',
       };
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(doc.documentId, doc.projectId),
         state: 'working',
         message: `${because[snap.reason]} (${repo.name}) — drafting without its snapshot`,
@@ -1076,7 +1082,7 @@ export async function startInteractiveDraftSubscriber(
     if (decision !== undefined) {
       const line = groundingNarration(decision, snapshotted, 'draft');
       if (line !== null) {
-        emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
+        emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
       }
     }
 
@@ -1179,7 +1185,7 @@ export async function startInteractiveDraftSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(doc.documentId, doc.projectId),
         state: 'error',
         message: `Crew could not start a run for this document: ${reason}. The assist loop can still take over.`,
@@ -1206,7 +1212,7 @@ export async function startInteractiveDraftSubscriber(
     flight.heartbeat = setInterval(() => {
       // Repeat the last real narration so the ~20s status.requested window is always fed,
       // even mid-phase when the engine is quiet.
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         state: 'working',
         message: flight.narration,

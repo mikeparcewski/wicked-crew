@@ -3,7 +3,7 @@
  * Regenerate: npm run generate:api-tests -w packages/crew
  *
  * Manifest: 125 endpoints, wicked-crew-api-types 0.30.0.
- * Sampled: 7 endpoints; negative cases (400/404/409) derived from each route's
+ * Sampled: 8 endpoints; negative cases (400/404/409) derived from each route's
  * declared statusCodes. Fixture state comes from ./harness.ts (hand-written).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -114,6 +114,27 @@ describe('generated API suite (endpoint-manifest sample)', () => {
       const res = await app.inject({ method: "PUT", url: "/api/v1/runs/no-such-id/guidance", payload: {"text":"generated note"} });
       expect(res.statusCode).toBe(404);
     });
+  });
+
+  describe('POST /api/v1/projects/:projectId/interactive/api/docs', () => {
+    it('POST /api/v1/projects/:projectId/interactive/api/docs — positive (200)', async () => {
+      const res = await app.inject({ method: "POST", url: "/api/v1/projects/proj-fixture/interactive/api/docs", payload: {"name":"generated-doc","kind":"source","brief":"a generated-suite brief","repo_ref":"repo-fixture"} });
+      expect(res.statusCode).toBe(200);
+      // The manifest declares this route's codes — the positive must be one of them.
+      expect([200,400,404,409,413,502,503]).toContain(res.statusCode);
+    });
+
+    it('POST /api/v1/projects/:projectId/interactive/api/docs — 400 on a body the schema refuses', async () => {
+      const res = await app.inject({ method: "POST", url: "/api/v1/projects/proj-fixture/interactive/api/docs", payload: {"__unexpected_field__":true} });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('POST /api/v1/projects/:projectId/interactive/api/docs — 404 for a resource that exists nowhere', async () => {
+      const res = await app.inject({ method: "POST", url: "/api/v1/projects/no-such-projectId/interactive/api/docs", payload: {"name":"generated-doc","kind":"source","brief":"a generated-suite brief","repo_ref":"repo-fixture"} });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it.todo('POST /api/v1/projects/:projectId/interactive/api/docs — 409 is declared but needs state no fixture provides yet (add a conflict hint to SAMPLES)');
   });
 
   describe('POST /api/v1/runs/:id/deliver', () => {

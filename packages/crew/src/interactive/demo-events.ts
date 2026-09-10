@@ -89,6 +89,7 @@ import {
   docScope,
   groundablePath,
   oneLine,
+  type SeamStatusPayload,
 } from './draft-events.js';
 import { runDirInsideRepo, snapshotRepo } from './repo-snapshot.js';
 import {
@@ -654,9 +655,15 @@ export async function startInteractiveDemoSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
@@ -692,7 +699,7 @@ export async function startInteractiveDemoSubscriber(
       const message =
         `Crew refused to author this demo: the configured demo directory (${demoDir}) could not be verified ` +
         `against the registered repositories (${why}). Fix the path or its permissions, then replay the request.`;
-      emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
+      emitStatus({ ...docScope(documentId, projectId), state: 'error', message });
       log(`[interactive-demo] ${documentId}: REFUSING launch — run dir ${runDir} unverifiable: ${why}`);
       throw new Error(message);
     }
@@ -701,7 +708,7 @@ export async function startInteractiveDemoSubscriber(
       `Crew refused to author this demo: the configured demo directory (${demoDir}) overlaps the ` +
       `registered repository ${inside}, so launching would give the worker write access inside live ` +
       `source. Point the crew demo directory outside every registered repository, then replay the request.`;
-    emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
+    emitStatus({ ...docScope(documentId, projectId), state: 'error', message });
     log(`[interactive-demo] ${documentId}: REFUSING launch — run dir ${runDir} is inside repo ${inside}`);
     throw new Error(message);
   }
@@ -808,7 +815,7 @@ export async function startInteractiveDemoSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
@@ -833,7 +840,7 @@ export async function startInteractiveDemoSubscriber(
     const { documentId, projectId, outPath, key } = flight;
     const fail = (message: string): void => {
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
+      emitStatus({ ...docScope(documentId, projectId), state: 'error', message });
       log(`[interactive-demo] run ${runId} for ${key} failed at finalize: ${message}`);
     };
 
@@ -896,7 +903,7 @@ export async function startInteractiveDemoSubscriber(
       // never requested. Fail HONEST — and say exactly where things stand, because unlike the
       // sibling seams the doc is half-advanced (spec on disk, no video).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message:
@@ -908,7 +915,7 @@ export async function startInteractiveDemoSubscriber(
       return;
     }
     ledger.recordEmitted(key);
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
       message:
@@ -1032,7 +1039,7 @@ export async function startInteractiveDemoSubscriber(
         flight.heartbeat = setInterval(() => {
           // Repeat the last real narration so the ~20s status.requested window is always
           // fed, even mid-phase when the engine is quiet.
-          emitInteractive(STATUS_POSTED, {
+          emitStatus({
             ...docScope(flight.documentId, flight.projectId),
             state: 'working',
             message: flight.narration,
@@ -1051,7 +1058,7 @@ export async function startInteractiveDemoSubscriber(
         // The 'processing' status is already on the thread — close it out honestly so the
         // canvas never sits in an in-between state on a launch that went nowhere.
         const reason = err instanceof Error ? err.message : String(err);
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(input.documentId, input.projectId),
           state: 'error',
           message: `Crew could not start a run for this demo: ${reason}.`,
@@ -1108,7 +1115,7 @@ export async function startInteractiveDemoSubscriber(
     }
     mkdirSync(runDir, { recursive: true });
 
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(doc.documentId, doc.projectId),
       state: 'processing',
       message: 'A governed crew picked up your demo brief — planning the scenes and authoring the click-path…',
@@ -1165,7 +1172,7 @@ export async function startInteractiveDemoSubscriber(
             `application's repository (${repo.rootPath}), so launching would give the worker write access ` +
             `inside the live repo. Point the crew demo directory outside every registered repository, then ` +
             `replay the request.`;
-          emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'error', message });
+          emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'error', message });
           log(`[interactive-demo] ${doc.documentId}: REFUSING launch — demo dir ${demoDir} overlaps repo ${repo.rootPath} (dest-overlap)`);
           throw new Error(message);
         }
@@ -1175,7 +1182,7 @@ export async function startInteractiveDemoSubscriber(
         subjects.push({ name: repo.name });
       }
       const line = groundingNarration(decision, snapshotted, 'demo');
-      if (line !== null) emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
+      if (line !== null) emitStatus({ ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
     }
 
     await launchFlight({
@@ -1224,7 +1231,7 @@ export async function startInteractiveDemoSubscriber(
       const message =
         `Crew is still authoring this demo's spec — your step feedback was set aside; ` +
         `replay it (or resubmit) once the current run lands.`;
-      emitInteractive(STATUS_POSTED, { ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
+      emitStatus({ ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
       log(`[interactive-demo] handoff ${key} arrived while doc ${handoff.documentId} is busy — dead-lettered`);
       throw new Error(message);
     }
@@ -1239,7 +1246,7 @@ export async function startInteractiveDemoSubscriber(
       const message =
         `This demo has no ${DEMO_SPEC_FILE} to revise yet — the step feedback was set aside; ` +
         `replay it once the first spec is authored.`;
-      emitInteractive(STATUS_POSTED, { ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
+      emitStatus({ ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
       log(`[interactive-demo] handoff ${key}: no spec at ${srcSpec} — dead-lettered`);
       throw new Error(message);
     }
@@ -1280,7 +1287,7 @@ export async function startInteractiveDemoSubscriber(
       'utf8',
     );
 
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(handoff.documentId, handoff.projectId),
       state: 'processing',
       message: `A governed crew picked up your demo feedback — re-authoring the click-path (${handoff.items.length} change${handoff.items.length === 1 ? '' : 's'})…`,

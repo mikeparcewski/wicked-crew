@@ -322,8 +322,22 @@ export class InteractiveBridgePool {
     if (sidecar !== null && sidecar.pid === live.pid) {
       if (bridgeEnvMatches(sidecar.env, expected)) return live;
       const owner = sidecar.ownerPid;
-      if (owner !== undefined && owner !== process.pid && pidAlive(owner)) {
-        const ownerOrigin = sidecar.env.WICKED_CREW_API ?? '(unknown origin)';
+      const ownerOrigin = sidecar.env.WICKED_CREW_API ?? '(unknown origin)';
+      if (owner === undefined || !Number.isInteger(owner) || owner <= 0) {
+        // No PROVEN owner (a pre-upgrade sidecar): not this daemon's to kill, and not adoptable
+        // either — its events go elsewhere. Refuse and name the fix (codex on crew#506).
+        this.io.log?.(
+          `interactive bridge pid ${live.pid} for ${root} was recorded without an owning daemon and with ` +
+            `${describeEnv(sidecar.env)}; this daemon needs ${describeEnv(expected)} — NOT recycling a bridge of unproven ownership`,
+        );
+        throw new BridgeUnavailableError(
+          `the interactive bridge for ${root} (pid ${live.pid}) was started for a different bus or crew API ` +
+            `(${ownerOrigin}) by a daemon this one cannot identify`,
+          `stop it yourself (kill ${live.pid}) if no other crew daemon is using it, or give this daemon its own ` +
+            `interactive root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot setting); the next request starts a bridge for this one`,
+        );
+      }
+      if (owner !== process.pid && pidAlive(owner)) {
         this.io.log?.(
           `interactive bridge pid ${live.pid} for ${root} belongs to another live crew daemon (pid ${owner}, ` +
             `${ownerOrigin}) with ${describeEnv(sidecar.env)}; this daemon needs ${describeEnv(expected)} — NOT ` +

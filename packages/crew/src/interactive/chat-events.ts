@@ -64,6 +64,7 @@ import {
   recallClause,
   type RecallIntent,
   docScope,
+  type SeamStatusPayload,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -509,9 +510,15 @@ export async function startInteractiveChatSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
@@ -647,7 +654,7 @@ export async function startInteractiveChatSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
@@ -671,7 +678,7 @@ export async function startInteractiveChatSubscriber(
     }
     if (!ok) {
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no revised document at ${outPath} (run ${runId}). Resend the message to retry.`,
@@ -692,7 +699,7 @@ export async function startInteractiveChatSubscriber(
       // reached the service. Fail HONEST — leaving the row launched-but-never-closed would
       // silently eat a redelivery of this ask (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         state: 'error',
         message:
@@ -711,7 +718,7 @@ export async function startInteractiveChatSubscriber(
       minHead: flight.headAtLaunch + 1,
       until: Date.now() + landingGateMs,
     });
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(documentId, projectId),
       state: 'complete',
       message: 'Revision is in — landing the new version on the canvas now.',
@@ -743,7 +750,7 @@ export async function startInteractiveChatSubscriber(
       headOk = false;
     }
     if (!headOk) {
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not read the document's current version (missing ${doc.headHtmlPath}) — the ask was not answered.`,
@@ -768,7 +775,7 @@ export async function startInteractiveChatSubscriber(
 
     // The studio's 90s silence budget: this pickup line is what keeps the thread honest, so
     // it fires BEFORE the launch resolves.
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(ask.documentId, ask.projectId),
       state: 'processing',
       message: 'A governed crew picked up your ask — revising the document…',
@@ -849,7 +856,7 @@ export async function startInteractiveChatSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(ask.documentId, ask.projectId),
         state: 'error',
         message: `Crew could not start a run for your ask: ${reason}. Resend the message to retry.`,
@@ -874,7 +881,7 @@ export async function startInteractiveChatSubscriber(
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(flight.documentId, flight.projectId),
           state: 'working',
           message: flight.narration,
@@ -997,7 +1004,7 @@ export async function startInteractiveChatSubscriber(
       const queue = queues.get(ask.documentId) ?? [];
       queue.push(queued);
       queues.set(ask.documentId, queue);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(ask.documentId, ask.projectId),
         state: 'processing',
         message:

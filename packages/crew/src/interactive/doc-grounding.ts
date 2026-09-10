@@ -416,9 +416,80 @@ export interface DocGroundingStoreHooks {
   afterLstat?: (path: string) => void;
 }
 
-/** `O_NOFOLLOW` where the platform has it (POSIX); 0 elsewhere — the fstat identity check below
- *  still refuses a swapped path there. */
+/** `O_NOFOLLOW` / `O_DIRECTORY` where the platform has them (POSIX); 0 elsewhere — the lstat/fstat
+ *  identity checks below still refuse a swapped path there. */
 const O_NOFOLLOW: number = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const O_DIRECTORY: number = (fsConstants as { O_DIRECTORY?: number }).O_DIRECTORY ?? 0;
+
+/**
+ * A HELD handle on the verified document directory (codex on crew#506, CRITICAL). `O_NOFOLLOW` on
+ * the final component protects only that component: replacing the PARENT directory with a symlink
+ * after validation would redirect every later read, temp create, rename and unlink through the
+ * pathname. Node has no `openat`/`renameat`, so the discipline is: open the directory itself
+ * (`O_DIRECTORY|O_NOFOLLOW`), remember its identity (dev/ino), and IMMEDIATELY before every path
+ * operation re-`lstat` the directory path and require the same identity — a swap is refused.
+ *
+ * RESIDUAL (documented, the core v3.5 TOCTOU discipline): the re-check and the operation are two
+ * syscalls, so a swap landing between them is a kernel-level window this process cannot close
+ * without `*at` syscalls; the exposure is one scheduler slice, the blast radius one sidecar under a
+ * docs root only the daemon's own user can write. Platforms that cannot open a directory
+ * descriptor (Windows) keep the identity from `lstat` and run the same re-check.
+ */
+class DocDirHandle {
+  private constructor(
+    readonly path: string,
+    private readonly fd: number | null,
+    private readonly dev: number,
+    private readonly ino: number,
+  ) {}
+
+  static open(docDir: string): DocDirHandle {
+    let fd: number | null = null;
+    let st: Stats;
+    try {
+      fd = openSync(docDir, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+      st = fstatSync(fd);
+    } catch (err) {
+      if (fd !== null) closeSync(fd);
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw new GroundingPathRefusedError(`refusing ${docDir}: the document directory is a symlink`);
+      }
+      // No directory descriptors on this platform (Windows) — identity from lstat instead.
+      fd = null;
+      st = lstatSync(docDir);
+    }
+    if (!st.isDirectory()) {
+      if (fd !== null) closeSync(fd);
+      throw new GroundingPathRefusedError(`refusing ${docDir}: not a directory`);
+    }
+    return new DocDirHandle(docDir, fd, st.dev, st.ino);
+  }
+
+  /** Immediately before EVERY path operation: the path must still name the held directory. */
+  assertIntact(): void {
+    let st: Stats;
+    try {
+      st = lstatSync(this.path);
+    } catch (err) {
+      throw new GroundingPathRefusedError(
+        `refusing ${this.path}: the document directory vanished (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+    if (st.isSymbolicLink() || !st.isDirectory() || st.dev !== this.dev || st.ino !== this.ino) {
+      throw new GroundingPathRefusedError(`refusing ${this.path}: the document directory was replaced under the sidecar`);
+    }
+  }
+
+  close(): void {
+    if (this.fd !== null) {
+      try {
+        closeSync(this.fd);
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
 
 export class DocGroundingStore {
   private readonly pending = new Map<number, PendingCreate>();
@@ -485,17 +556,20 @@ export class DocGroundingStore {
       return undefined;
     }
     if (expected === null) return undefined;
-    this.hooks.afterLstat?.(path);
-    // The lstat → open window (codex on crew#506): open WITHOUT following links and read through
-    // the descriptor only after fstat proves it is the very inode lstat saw — a path swapped for
-    // a link (or another file) in between is refused, never read.
-    let fd: number;
+    let dir: DocDirHandle;
     try {
-      fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
+      dir = DocDirHandle.open(join(path, '..'));
     } catch {
       return undefined;
     }
+    let fd: number | null = null;
     try {
+      this.hooks.afterLstat?.(path);
+      // The lstat → open window (codex on crew#506): the PARENT must still be the held directory,
+      // then open WITHOUT following links and read through the descriptor only after fstat proves
+      // it is the very inode lstat saw — a path swapped for a link (or another file) is refused.
+      dir.assertIntact();
+      fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
       const actual = fstatSync(fd);
       if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino) return undefined;
       const row = JSON.parse(readFileSync(fd, 'utf8')) as Record<string, unknown>;
@@ -513,7 +587,8 @@ export class DocGroundingStore {
     } catch {
       return undefined;
     } finally {
-      closeSync(fd);
+      if (fd !== null) closeSync(fd);
+      dir.close();
     }
   }
 
@@ -530,37 +605,66 @@ export class DocGroundingStore {
     const { path, docDir, docDirExists } = DocGroundingStore.verifiedSidecar(docsRoot, documentId);
     const row: DocGroundingBinding = { ...binding, recorded_at: binding.recorded_at ?? new Date().toISOString() };
     if (!docDirExists) mkdirSync(docDir);
-    this.hooks.afterLstat?.(path);
-    // The temp name is RANDOM and created EXCLUSIVELY without following links (codex on
-    // crew#506): a pre-planted file or link at a predictable name can neither be opened nor
-    // followed; the rename then replaces the sidecar path atomically (a link planted there in the
-    // meantime is replaced as a link — its target is never written).
-    const tmp = join(docDir, `.${CREW_GROUNDING_FILE}.${randomBytes(8).toString('hex')}.tmp`);
-    const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, 0o600);
+    // Hold the directory for the whole write: every path operation below re-checks it first.
+    const dir = DocDirHandle.open(docDir);
     try {
-      writeSync(fd, JSON.stringify(row, null, 2), null, 'utf8');
+      this.hooks.afterLstat?.(path);
+      // The temp name is RANDOM and created EXCLUSIVELY without following links (codex on
+      // crew#506): a pre-planted file or link at a predictable name can neither be opened nor
+      // followed; the rename then replaces the sidecar path atomically (a link planted there in the
+      // meantime is replaced as a link — its target is never written).
+      const tmp = join(docDir, `.${CREW_GROUNDING_FILE}.${randomBytes(8).toString('hex')}.tmp`);
+      dir.assertIntact();
+      const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, 0o600);
+      try {
+        writeSync(fd, JSON.stringify(row, null, 2), null, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+      try {
+        dir.assertIntact();
+        renameSync(tmp, path);
+      } catch (err) {
+        try {
+          dir.assertIntact();
+          rmSync(tmp, { force: true });
+        } catch {
+          /* the directory is gone or replaced — nothing of ours to clean through that path */
+        }
+        throw err;
+      }
     } finally {
-      closeSync(fd);
-    }
-    try {
-      renameSync(tmp, path);
-    } catch (err) {
-      rmSync(tmp, { force: true });
-      throw err;
+      dir.close();
     }
   }
 
   /** Drop a document's sidecar. `true` when one was removed; a refused path removes nothing. */
   remove(docsRoot: string, documentId: string): boolean {
     let path: string;
+    let docDir: string;
+    let sidecar: Stats | null;
     try {
-      ({ path } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
-      lstatSync(path);
+      ({ path, docDir, sidecar } = DocGroundingStore.verifiedSidecar(docsRoot, documentId));
     } catch {
       return false;
     }
-    rmSync(path, { force: true });
-    return true;
+    if (sidecar === null) return false;
+    let dir: DocDirHandle;
+    try {
+      dir = DocDirHandle.open(docDir);
+    } catch {
+      return false;
+    }
+    try {
+      this.hooks.afterLstat?.(path);
+      dir.assertIntact();
+      rmSync(path, { force: true });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      dir.close();
+    }
   }
 
   /** The proxy is about to forward a create for `projectId` that WILL record a binding. */

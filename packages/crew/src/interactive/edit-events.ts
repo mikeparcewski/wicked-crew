@@ -46,6 +46,7 @@ import {
   recallClause,
   type RecallIntent,
   docScope,
+  type SeamStatusPayload,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -464,9 +465,15 @@ export async function startInteractiveEditSubscriber(
     }
   }
 
+  /** Every `status.posted` this seam emits is typed as the published frame's payload (codex on
+   *  crew#506: the wire type at the real boundary, not a detached alias) — `emitInteractive` adds `ts`. */
+  function emitStatus(payload: SeamStatusPayload): boolean {
+    return emitInteractive(STATUS_POSTED, { ...payload });
+  }
+
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(flight.documentId, flight.projectId),
       version: flight.version,
       state: 'working',
@@ -577,7 +584,7 @@ export async function startInteractiveEditSubscriber(
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(flight.documentId, flight.projectId),
         version: flight.version,
         state: 'error',
@@ -598,7 +605,7 @@ export async function startInteractiveEditSubscriber(
     if (violations.length > 0) {
       ledger.recordFailure(key);
       const detail = violations.map((v) => `${v.selector}: ${v.reason}`).join('; ');
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         version,
         state: 'error',
@@ -621,7 +628,7 @@ export async function startInteractiveEditSubscriber(
       // the service. Fail HONEST — leaving the ledger row launched-but-never-closed would
       // silently eat every replay of this handoff (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(documentId, projectId),
         version,
         state: 'error',
@@ -633,7 +640,7 @@ export async function startInteractiveEditSubscriber(
       return;
     }
     ledger.recordEmitted(key);
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(documentId, projectId),
       version,
       state: 'complete',
@@ -660,7 +667,7 @@ export async function startInteractiveEditSubscriber(
       // …but ONLY when the demo seam is actually there to take it. Skipping into a seam that
       // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
       if (!(opts.demoSeamArmed ?? (() => false))()) {
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(handoff.documentId, handoff.projectId),
           version: handoff.version,
           state: 'error',
@@ -719,7 +726,7 @@ export async function startInteractiveEditSubscriber(
     );
     const runId = randomUUID();
 
-    emitInteractive(STATUS_POSTED, {
+    emitStatus({
       ...docScope(handoff.documentId, handoff.projectId),
       version: handoff.version,
       state: 'processing',
@@ -793,7 +800,7 @@ export async function startInteractiveEditSubscriber(
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
-      emitInteractive(STATUS_POSTED, {
+      emitStatus({
         ...docScope(handoff.documentId, handoff.projectId),
         version: handoff.version,
         state: 'error',
@@ -821,7 +828,7 @@ export async function startInteractiveEditSubscriber(
       heartbeat: setInterval(() => {
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
-        emitInteractive(STATUS_POSTED, {
+        emitStatus({
           ...docScope(flight.documentId, flight.projectId),
           version: flight.version,
           state: 'working',

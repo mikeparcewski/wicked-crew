@@ -183,6 +183,27 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(readCrewSidecar(root)?.env.WICKED_CREW_API).toBe('http://127.0.0.1:7701');
   }, 60_000);
 
+  it('NEVER recycles a mismatched bridge of UNPROVEN ownership — a pre-upgrade sidecar without ownerPid is refused, the bridge left running (codex r3 on #506)', async () => {
+    const root = join(dir, 'root-e');
+    const owner = poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') });
+    const theirs = await owner.ensure(root);
+    const sidecar = readCrewSidecar(root)!;
+    const { ownerPid: _dropped, ...legacy } = sidecar as typeof sidecar & { ownerPid?: number };
+    void _dropped;
+    writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(legacy), 'utf8');
+    expect(readCrewSidecar(root)?.ownerPid).toBeUndefined();
+    const logged: string[] = [];
+    const spawnsBefore = spawns.length;
+    const other = poolWith({ origin: 'http://127.0.0.1:7701', bus: join(dir, 'other', 'bus') }, (m) => logged.push(m));
+    await expect(other.ensure(root)).rejects.toBeInstanceOf(BridgeUnavailableError);
+    await expect(other.ensure(root)).rejects.toThrow(/cannot identify/);
+    expect(pidAlive(theirs.pid), 'a bridge of unproven ownership must never be killed').toBe(true);
+    expect(spawns.length).toBe(spawnsBefore);
+    expect(logged.some((m) => m.includes('unproven ownership'))).toBe(true);
+    const hint = await other.ensure(root).catch((e: BridgeUnavailableError) => e.hint);
+    expect(String(hint)).toContain(`kill ${theirs.pid}`);
+  }, 60_000);
+
   it('NEVER kills a bridge another LIVE daemon owns (codex on #506): a foreign healthy bridge is left running and this daemon is refused with the fix named', async () => {
     const root = join(dir, 'root-d');
     const owner = poolWith({ origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') });

@@ -381,6 +381,41 @@ describe('DocGroundingStore (the sidecar beside the doc; the bus-beats-create wi
     expect(readdirSyncSafe(join(root, 'doc2')).sort()).toEqual([CREW_GROUNDING_FILE, `${CREW_GROUNDING_FILE}.tmp-${process.pid}`]);
   });
 
+  it('the PARENT-swap window is closed (codex r3 on #506): the doc dir replaced by a link after validation is refused for read, write and remove — the external target untouched', () => {
+    const outside = join(dir, 'outside3');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'evil', repo_refs: ['stolen'] }), 'utf8');
+    const pristine = readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8');
+    mkdirSync(join(root, 'doc3'), { recursive: true });
+    writeFileSync(join(root, 'doc3', CREW_GROUNDING_FILE), JSON.stringify({ project_id: 'p', repo_refs: ['r'] }), 'utf8');
+    // After validation (and the held directory handle), the WHOLE doc dir is swapped for a link out.
+    const swapParent = (path: string): void => {
+      const docDir = join(path, '..');
+      renameSync(docDir, `${docDir}.moved`);
+      symlinkSync(outside, docDir, 'dir');
+    };
+    const restore = (): void => {
+      rmSync(join(root, 'doc3'), { force: true });
+      renameSync(join(root, 'doc3.moved'), join(root, 'doc3'));
+    };
+    // read: refused — the external sidecar is never read.
+    expect(new DocGroundingStore({ afterLstat: swapParent }).get(root, 'doc3')).toBeUndefined();
+    restore();
+    // write: refused — nothing is created or renamed through the link; the target is byte-identical.
+    expect(() => new DocGroundingStore({ afterLstat: swapParent }).record(root, 'doc3', { project_id: 'p', repo_refs: ['r9'] })).toThrow(
+      GroundingPathRefusedError,
+    );
+    expect(readFileSync(join(outside, CREW_GROUNDING_FILE), 'utf8')).toBe(pristine);
+    expect(readdirSyncSafe(outside)).toEqual([CREW_GROUNDING_FILE]); // no temp landed outside either
+    restore();
+    // remove: refused — the target survives.
+    expect(new DocGroundingStore({ afterLstat: swapParent }).remove(root, 'doc3')).toBe(false);
+    expect(existsSync(join(outside, CREW_GROUNDING_FILE))).toBe(true);
+    restore();
+    // The real doc dir is intact and readable once nothing tampers.
+    expect(new DocGroundingStore().get(root, 'doc3')?.repo_refs).toEqual(['r']);
+  });
+
   it('never names a path for an id outside the doc grammar, and reads a malformed sidecar as "nothing named"', () => {
     const store = new DocGroundingStore();
     expect(DocGroundingStore.sidecarPath(root, '../escape')).toBeNull();
