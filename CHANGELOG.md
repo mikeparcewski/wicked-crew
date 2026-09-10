@@ -20,7 +20,8 @@ mentioned only where a daemon release depends on them.
   (semver.org grammar and §11 precedence; build metadata ignored for ordering; equal precedence →
   the plain name, else the lexicographically smallest) whose `plugin.json` version equals it — EVERY
   SemVer-named dir is validated (a mismatch anywhere is a logged `version-mismatch` finding, an
-  invalid name a `non-semver-name` finding; never `readdir` order); (3) LAST resort, the installer-managed copy
+  invalid name a `non-semver-name` finding, a manifest that does not parse a `no-manifest` finding
+  — never a crash out of discovery; never `readdir` order); (3) LAST resort, the installer-managed copy
   `<config dir>/plugins/wicked-garden` of the first of those dirs holding one (garden's
   `install.mjs` hard-codes `~/.claude`), accepted only when its `.claude-plugin/plugin.json` parses
   with a `version`. ANY cache beats ANY copy. Each config dir is resolved exactly once, at the top

@@ -109,7 +109,7 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env, home })).toEqual(cacheAt(otherCfg, '1.0.0'));
   });
 
-  it('a copy dir without .claude-plugin/plugin.json, or whose plugin.json has no version, is not a source ⇒ null with a no-manifest finding (an ABSENT copy is no finding at all)', () => {
+  it('a copy dir without .claude-plugin/plugin.json, or whose plugin.json has no version or is not JSON, is not a source ⇒ null with a no-manifest finding (an ABSENT copy is no finding at all)', () => {
     expect(discoverLivePluginDetailed({ env: {}, home })).toEqual({ source: null, findings: [] });
     mkdirSync(join(installerCopyDir(cfg), 'skills', 'alpha'), { recursive: true });
     writeFileSync(join(installerCopyDir(cfg), 'skills', 'alpha', 'SKILL.md'), '---\nname: wicked-garden-alpha\n---\n');
@@ -121,6 +121,25 @@ describe('discoverLivePlugin', () => {
     expect(discoverLivePlugin({ env: {}, home })).toBeNull();
     writeFileSync(join(installerCopyDir(cfg), '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'wicked-garden', version: '' }));
     expect(discoverLivePlugin({ env: {}, home })).toBeNull();
+    // Not JSON at all (Copilot on #491): skipped with the finding, never a crash out of discovery.
+    writeFileSync(join(installerCopyDir(cfg), '.claude-plugin', 'plugin.json'), '{ not json');
+    const corrupt = discoverLivePluginDetailed({ env: {}, home });
+    expect(corrupt.source).toBeNull();
+    expect(corrupt.findings).toEqual([{ kind: 'no-manifest', path: installerCopyDir(cfg), message: expect.stringContaining('parses with a version') }]);
+  });
+
+  it('a CORRUPT plugin.json in one cache dir skips that dir with a no-manifest finding and never takes discovery down — the honest sibling is the pick (Copilot on #491)', () => {
+    plugin(join(livePluginCacheDir(cfg), '12.32.0'), '12.32.0');
+    mkdirSync(join(livePluginCacheDir(cfg), '12.33.0', '.claude-plugin'), { recursive: true });
+    writeFileSync(join(livePluginCacheDir(cfg), '12.33.0', '.claude-plugin', 'plugin.json'), '{ "name": "wicked-garden", "version": ');
+    mkdirSync(join(livePluginCacheDir(cfg), '12.31.0', '.claude-plugin'), { recursive: true }); // a manifest DIR with no plugin.json
+    const d = discoverLivePluginDetailed({ env: {}, home });
+    expect(d.source).toEqual(cacheAt(cfg, '12.32.0'));
+    expect(judged(d.findings)).toEqual([
+      ['no-manifest', join(livePluginCacheDir(cfg), '12.33.0')],
+      ['no-manifest', join(livePluginCacheDir(cfg), '12.31.0')],
+    ]);
+    for (const f of d.findings) expect(f.message).toContain('parses with a version');
   });
 
   it('a copy whose DESIGNATED entry is a symlink is REFUSED by name (the existing no-follow rule inside a plugin root) — never accepted, never silently skipped', () => {

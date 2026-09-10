@@ -38,7 +38,8 @@
  * must be a SemVer version by the semver.org grammar (no leading zeros in numeric identifiers, legal
  * pre-release / build identifiers — else ignored with a finding), EVERY such dir's `plugin.json`
  * version must equal its name (else skipped with a finding — every dir is validated, not only the
- * winner), and the pick is the highest by SemVer PRECEDENCE (build metadata ignored for ordering,
+ * winner; a manifest that does not parse is a `no-manifest` finding, never a crash), and the pick is
+ * the highest by SemVer PRECEDENCE (build metadata ignored for ordering,
  * pre-release below release, numeric identifiers before alphanumeric) with a documented tie-break
  * (`cacheDirOrder`). Tier (3) visits the same dirs in the same order; ANY cache beats ANY copy — a
  * `~/.claude` cache beats a `$CLAUDE_CONFIG_DIR/plugins/wicked-garden` copy. What was passed over
@@ -174,15 +175,26 @@ export function pluginVersionAt(dir: string): string | null {
 
 /**
  * The manifest `version` below an already-canonical plugin dir, or `null` when there is no
- * `.claude-plugin/plugin.json` with a non-empty string `version`. NO-FOLLOW below the root and no
+ * `.claude-plugin/plugin.json` that PARSES with a non-empty string `version` — missing, not a
+ * regular file, not JSON, not an object, or versionless are all "not a plugin root" (design v3.6:
+ * "accepted only when its plugin.json parses with a version"; Copilot on #491: one corrupt manifest
+ * in a cache must skip that candidate, not take discovery down). NO-FOLLOW below the root and no
  * re-resolution of the root itself: a symlinked `.claude-plugin/` or `plugin.json` throws
- * `PluginSourceSymlinkError` — never a version read through a link (codex round 6). `spelling` is
- * the root as the caller spelled it, for that error.
+ * `PluginSourceSymlinkError` — never a version read through a link (codex round 6) — and an I/O
+ * error reading the file stays an error. `spelling` is the root as the caller spelled it, for the
+ * symlink error.
  */
 export function manifestVersionBelow(root: string, spelling: string = root): string | null {
   const manifest = noFollowEntry(root, PLUGIN_MANIFEST_REL.split(sep), spelling);
   if (manifest === null || !lstatSync(manifest).isFile()) return null;
-  const parsed: unknown = JSON.parse(readFileNoFollow(manifest).toString('utf8')); // the entry the walk judged is the one read (v3.5 §3)
+  const text = readFileNoFollow(manifest).toString('utf8'); // the entry the walk judged is the one read (v3.5 §3)
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
   if (typeof parsed !== 'object' || parsed === null) return null;
   const version = (parsed as { version?: unknown }).version;
   return typeof version === 'string' && version !== '' ? version : null;
@@ -380,7 +392,7 @@ function cacheCandidate(root: string, findings: DiscoveryFinding[], hooks: Disco
     hooks.beforeManifestRead?.(dir);
     const version = manifestVersionBelow(dir); // a linked `.claude-plugin/` or `plugin.json` throws — loud, never a silent skip to another version
     if (version === null) {
-      findings.push({ kind: 'no-manifest', path: dir, message: `${dir}: no .claude-plugin/plugin.json with a version; skipped` });
+      findings.push({ kind: 'no-manifest', path: dir, message: `${dir}: no .claude-plugin/plugin.json that parses with a version; skipped` });
       continue;
     }
     if (version !== name) {
@@ -399,7 +411,7 @@ function copyCandidate(root: string, findings: DiscoveryFinding[], hooks: Discov
   hooks.beforeManifestRead?.(dir);
   const version = manifestVersionBelow(dir);
   if (version === null) {
-    findings.push({ kind: 'no-manifest', path: dir, message: `${dir} exists but has no .claude-plugin/plugin.json with a version — not a plugin root; skipped` });
+    findings.push({ kind: 'no-manifest', path: dir, message: `${dir} exists but has no .claude-plugin/plugin.json that parses with a version — not a plugin root; skipped` });
     return null;
   }
   return { path: dir, kind: 'installer-copy', plugin_version: version };
