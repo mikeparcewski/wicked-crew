@@ -22,7 +22,9 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InteractiveBridgePool, INTERACTIVE_SPEC, LOCK_NAME } from '../../src/interactive/bridge-pool.js';
+import { CREW_GROUNDING_FILE, DocGroundingStore } from '../../src/interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js';
+import { mkdirSync as mkdirp } from 'node:fs';
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project } from '../../src/core/types.js';
@@ -43,6 +45,16 @@ const server = createServer((req, res) => {
   if (url.pathname === '/api/health') {
     return res.writeHead(200, {'content-type':'application/json'})
       .end(JSON.stringify({ ok: true, root, pid: process.pid }));
+  }
+  if (url.pathname === '/api/docs' && req.method === 'POST') {  // the create: echoes what arrived
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    return req.on('end', () => {
+      let received = {};
+      try { received = JSON.parse(body); } catch { received = { unparsed: body }; }
+      res.writeHead(200, {'content-type':'application/json'})
+        .end(JSON.stringify({ name: received.name || 'made-doc', head: 0, generating: true, received }));
+    });
   }
   if (url.pathname === '/api/docs') {
     return res.writeHead(200, {'content-type':'application/json'})
@@ -300,5 +312,124 @@ describe('interactive proxy — transport semantics', () => {
       rest += new TextDecoder().decode(next.value);
     }
     expect(rest).toContain('data: last');
+  }, 30_000);
+});
+
+describe('interactive proxy — doc create interception (F-046)', () => {
+  let createApp: FastifyInstance;
+  let createBase: string;
+  let grounding: DocGroundingStore;
+  const studioRoot = (): string => join(dir, 'repos', 'wicked-studio');
+
+  beforeAll(async () => {
+    mkdirp(studioRoot(), { recursive: true });
+    grounding = new DocGroundingStore();
+    // The adapter knows p-a's members and the registry — what the proxy validates a repo_ref against.
+    const adapter = Object.assign(stubAdapter(new Set(['p-a'])), {
+      projectMembers: async (id: string) =>
+        id === 'p-a'
+          ? [
+              { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+              { member_kind: 'crew.run', member_ref: 'run-1' },
+            ]
+          : [],
+      listRepos: async () => [{ id: 'repo-studio', name: 'wicked-studio', root_path: studioRoot() }],
+    }) as CoreAdapter;
+    createApp = Fastify({ logger: false });
+    registerInteractiveProxy(createApp, adapter, {
+      settings: new ProjectSettingsStore(settingsPath),
+      pool,
+      env: { WICKED_INTERACTIVE_ROOT: join(dir, 'shared-docs') },
+      grounding,
+    });
+    await createApp.listen({ port: 0, host: '127.0.0.1' });
+    const addr = createApp.server.address();
+    createBase = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  }, 30_000);
+
+  afterAll(async () => {
+    await createApp.close();
+  });
+
+  const post = (project: string, body: unknown, raw = false): Promise<Response> =>
+    fetch(`${createBase}/api/v1/projects/${project}/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': raw ? 'text/plain' : 'application/json' },
+      body: raw ? String(body) : JSON.stringify(body),
+    });
+
+  it('REFUSES a repo the project does not have — 400 repo_not_in_project naming the fix, nothing forwarded, nothing recorded', async () => {
+    const res = await post('p-a', { name: 'brochure', kind: 'source', brief: 'x', project: 'p-a', repo_ref: 'wicked-crew' });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string; requested: string[]; missing: string[]; available: Array<{ id: string; name: string }>; error: string };
+    expect(body.code).toBe('repo_not_in_project');
+    expect(body.requested).toEqual(['wicked-crew']);
+    expect(body.missing).toEqual(['wicked-crew']);
+    expect(body.available).toEqual([{ id: 'repo-studio', name: 'wicked-studio' }]);
+    expect(body.error).toContain('pick one of: wicked-studio');
+    expect(existsSync(join(dir, 'shared-docs', 'brochure'))).toBe(false); // nothing recorded, nothing created
+    expect(grounding.pendingCount('p-a')).toBe(0);
+  }, 30_000);
+
+  it('REFUSES a repo on the Unfiled mount — an unbound doc cannot be about a project repository', async () => {
+    const res = await post('default', { name: 'loose', kind: 'source', brief: 'x', repo_refs: ['wicked-studio'] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('unfiled_doc_repo');
+  }, 30_000);
+
+  it('REFUSES junk refs before touching the project', async () => {
+    const res = await post('p-a', { name: 'd', kind: 'source', brief: 'x', repo_refs: 'not-an-array' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('invalid_repo_ref');
+  }, 30_000);
+
+  it('forwards a valid create with repo_ref STRIPPED and style INFERRED from the brief, and records the binding under the doc name the bridge answered with', async () => {
+    const res = await post('p-a', {
+      name: 'brochure',
+      kind: 'source',
+      brief: 'A high-end product brochure. Print-ready A4, two pages.',
+      project: 'p-a',
+      repo_ref: 'wicked-studio', // by NAME — canonicalized to the registry id below
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; received: Record<string, unknown> };
+    expect(body.name).toBe('brochure');
+    expect('repo_ref' in body.received).toBe(false);
+    expect('repo_refs' in body.received).toBe(false);
+    expect(body.received.style).toBe('brochure');
+    expect(body.received.brief).toBe('A high-end product brochure. Print-ready A4, two pages.');
+    // Recorded as a sidecar BESIDE THE DOC under the project's docs root — never under the state home.
+    const sidecar = join(dir, 'shared-docs', 'brochure', CREW_GROUNDING_FILE);
+    expect(existsSync(sidecar)).toBe(true);
+    expect(grounding.get(join(dir, 'shared-docs'), 'brochure')).toMatchObject({ project_id: 'p-a', repo_refs: ['repo-studio'], style: 'brochure' });
+    expect(grounding.pendingCount('p-a')).toBe(0);
+  }, 30_000);
+
+  it('passes a client style through untouched, and leaves a brief with no format words style-less', async () => {
+    const kept = (await (await post('p-a', { name: 'deck', kind: 'source', brief: 'notes', style: 'ppt', project: 'p-a' })).json()) as {
+      received: Record<string, unknown>;
+    };
+    expect(kept.received.style).toBe('ppt');
+    const bare = (await (await post('p-a', { name: 'plain', kind: 'source', brief: 'notes for the team', project: 'p-a' })).json()) as {
+      received: Record<string, unknown>;
+    };
+    expect('style' in bare.received).toBe(false);
+    expect(grounding.get(join(dir, 'shared-docs'), 'plain')).toBeUndefined(); // nothing named → nothing recorded
+  }, 30_000);
+
+  it('is pure transport for a create body that is not a JSON object', async () => {
+    const res = await post('p-a', 'not json at all', true);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { received: { unparsed?: string } }).received.unparsed).toBe('not json at all');
+  }, 30_000);
+
+  it('WITHOUT a grounding store the create is untouched transport — repo_ref reaches the bridge as sent', async () => {
+    const res = await fetch(`${base}/api/v1/projects/p-a/interactive/api/docs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'raw', kind: 'source', brief: 'x', repo_ref: 'wicked-studio' }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { received: Record<string, unknown> }).received.repo_ref).toBe('wicked-studio');
   }, 30_000);
 });

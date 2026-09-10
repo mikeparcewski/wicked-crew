@@ -75,18 +75,29 @@
  */
 
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import {
   DOC_CREATED,
   DOC_NAME,
+  GROUNDING_BINDING_WAIT_MS,
   INTERACTIVE_DOMAIN,
   INTERACTIVE_PRODUCER,
   STATUS_POSTED,
+  docScope,
+  groundablePath,
   oneLine,
 } from './draft-events.js';
+import { snapshotRepo } from './repo-snapshot.js';
+import {
+  groundingNarration,
+  resolveGroundingRepos,
+  snapshotDirName,
+  type DocGroundingStore,
+  type GroundingRepo,
+} from './doc-grounding.js';
 import {
   FEEDBACK_PROCESSED,
   handoffKey,
@@ -318,16 +329,35 @@ export function parseDemoDocCreated(eventType: string, payload: unknown): DemoDo
  * must land at. Deliberately NO doc-workspace path: the unbound worker could not read or
  * write it anyway (wicked-core#294) — crew installs the spec at finalize.
  */
-export function demoProblem(doc: DemoDocCreated, outPath: string): string {
+export function demoProblem(doc: DemoDocCreated, outPath: string, grounding?: DemoGrounding): string {
   const brief =
     doc.brief.trim().length > 0
       ? oneLine(doc.brief, 2000)
       : "(no brief provided — demonstrate the app's core flow)";
+  // F-046: the demo's SUBJECT — the application's own source, snapshotted into the inbox. LOCAL
+  // reads only (the re-author leg's Read+Read+Write shape lands green; it is the NETWORK fetch
+  // that costs the following write, wicked-core#293), and offered as context for routes and
+  // selectors, never as a substitute for inspecting the live page.
+  const subjects = grounding?.subjects ?? [];
+  const source =
+    subjects.length > 0
+      ? `The application's source is the ${subjects.length === 1 ? 'repository' : 'repositories'} ` +
+        `${subjects.map((s) => (s.snapshotDir !== undefined ? `${s.name} (offline snapshot at ${s.snapshotDir})` : s.name)).join(', ')}` +
+        ` — you may read ${subjects.some((s) => s.snapshotDir !== undefined) ? 'the snapshot files locally' : 'it through the estate tools'} ` +
+        `to learn its routes and stable selectors before you inspect the live page; never treat a sibling ` +
+        `repository in the same project as this app. `
+      : '';
   return (
     `Author the Playwright demo spec for the wicked-interactive demo document "${doc.documentId}". ` +
-    `Target application URL: ${doc.url} The user's brief: ${brief} ` +
+    `Target application URL: ${doc.url} The user's brief: ${brief} ${source}` +
     `The finished spec MUST be written to exactly this absolute file path: ${outPath}`
   );
+}
+
+/** The subject-repo grounding a demo launch resolved (F-046): the app's repositories and where
+ *  their offline snapshots landed, when they did. */
+export interface DemoGrounding {
+  subjects: Array<{ name: string; snapshotDir?: string | undefined }>;
 }
 
 /**
@@ -437,6 +467,12 @@ export interface InteractiveDemoOptions {
   /** Called after a launch that FILED the run into a project (the trigger carried
    *  `project_id`). Same wiring as the sibling seams. */
   onRunFiled?: (runId: string, projectId: string) => void;
+  /** The create-time doc → subject-repo bindings the proxy recorded (F-046, `doc-grounding.ts` — a
+   *  `crew-grounding.json` sidecar beside the doc's `versions.json`, read under `resolveDocsRoot`);
+   *  the server wires the daemon's shared instance. */
+  groundingStore?: DocGroundingStore;
+  /** Repo-snapshot size budget in bytes (default ~200MB — see `snapshotRepo`); tests shrink it. */
+  repoSnapshotMaxBytes?: number;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
 }
@@ -461,6 +497,9 @@ interface InFlight {
   version?: number | undefined;
   /** Where the worker must leave the spec (inside the per-run inbox). */
   outPath: string;
+  /** The launch-scoped app-source snapshots grounding a first-spec run (F-046); removed on every
+   *  terminal path so the inbox never accretes dead clones. */
+  snapshotDirs: string[];
   /** The def's OWN phase count. The run executes one MORE unit — the crew#311 deliverable
    *  floor `launchRun` appends per-run from `requireDeliverables` — so this is what the
    *  "is this the writing phase" branches key on, and `agentPhaseCount + 1` is the run's
@@ -551,7 +590,32 @@ export async function startInteractiveDemoSubscriber(
   const demoDir = opts.demoDir ?? join(defaultStateDir(), 'interactive-demos');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
+  const groundingStore = opts.groundingStore;
   const inFlight = new Map<string, InFlight>(); // runId → live state
+
+  /** Best-effort removal of a run's app-source snapshots (F-046) — a leftover is a disk-space
+   *  wart, never a correctness one. Empties the array it is handed. */
+  function removeSnapshots(dirs: string[]): void {
+    const parents = new Set<string>();
+    for (const dir of dirs.splice(0)) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        log(`[interactive-demo] removed repo snapshot ${dir}`);
+        parents.add(dirname(dir));
+      } catch (err) {
+        log(`[interactive-demo] could not remove repo snapshot ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // The per-run `repos/` parent held nothing but this run's snapshots — it goes too.
+    for (const parent of parents) {
+      if (basename(parent) !== 'repos') continue;
+      try {
+        rmSync(parent, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 
   /** Emit onto interactive's vocabulary as the `wi-crew` producer. Never throws into the
    *  caller: narration/announce failures are logged — a lost status line must not kill the
@@ -589,7 +653,7 @@ export async function startInteractiveDemoSubscriber(
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
     emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+      ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
     });
@@ -702,11 +766,12 @@ export async function startInteractiveDemoSubscriber(
 
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
+      removeSnapshots(flight.snapshotDirs);
       ledger.recordFailure(flight.key);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+        ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
           `The crew run authoring this demo's spec ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
@@ -725,10 +790,12 @@ export async function startInteractiveDemoSubscriber(
    * service throwing "no demo.spec.mjs authored yet" at a request crew knew was hollow.
    */
   function finalize(flight: InFlight, runId: string): void {
-    const { documentId, outPath, key } = flight;
+    // The run is terminal — its app-source snapshots are done serving reads, on every branch below.
+    removeSnapshots(flight.snapshotDirs);
+    const { documentId, projectId, outPath, key } = flight;
     const fail = (message: string): void => {
       ledger.recordFailure(key);
-      emitInteractive(STATUS_POSTED, { document_id: documentId, state: 'error', message });
+      emitInteractive(STATUS_POSTED, { ...docScope(documentId, projectId), state: 'error', message });
       log(`[interactive-demo] run ${runId} for ${key} failed at finalize: ${message}`);
     };
 
@@ -785,14 +852,14 @@ export async function startInteractiveDemoSubscriber(
       flight.leg === 'spec'
         ? demoIdempotencyKey(documentId)
         : demoReauthorIdempotencyKey(documentId, flight.version ?? 0);
-    const emitted = emitInteractive(DEMO_REQUESTED, { document_id: documentId }, idemKey);
+    const emitted = emitInteractive(DEMO_REQUESTED, docScope(documentId, projectId), idemKey);
     if (!emitted) {
       // The bus refused the announce (non-WB-002): the spec IS installed but the recording was
       // never requested. Fail HONEST — and say exactly where things stand, because unlike the
       // sibling seams the doc is half-advanced (spec on disk, no video).
       ledger.recordFailure(key);
       emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+        ...docScope(documentId, projectId),
         state: 'error',
         message:
           `Crew installed the demo spec at ${join(docDir, DEMO_SPEC_FILE)} but could not request ` +
@@ -804,7 +871,7 @@ export async function startInteractiveDemoSubscriber(
     }
     ledger.recordEmitted(key);
     emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+      ...docScope(documentId, projectId),
       state: 'complete',
       message:
         flight.leg === 'spec'
@@ -833,9 +900,12 @@ export async function startInteractiveDemoSubscriber(
       runDir: string;
       outPath: string;
       agentPhaseCount: number;
+      /** App-source snapshots already landed under `runDir` (F-046); owned by the flight from here. */
+      snapshotDirs?: string[];
     },
   ): Promise<void> {
     const runId = randomUUID();
+    const snapshotDirs = input.snapshotDirs ?? [];
     // Resolved BEFORE the launch and never indexing — a refresh is `wicked-estate index` per
     // member at up to 600s EACH, so doing it here would turn "record a demo" into an
     // unannounced multi-repo job. Missing or stale degrades to no binding; the run is unaffected.
@@ -899,6 +969,7 @@ export async function startInteractiveDemoSubscriber(
           projectId: input.projectId,
           version: input.version,
           outPath: input.outPath,
+          snapshotDirs,
           agentPhaseCount: input.agentPhaseCount,
           narration:
             input.leg === 'spec'
@@ -908,7 +979,7 @@ export async function startInteractiveDemoSubscriber(
             // Repeat the last real narration so the ~20s status.requested window is always
             // fed, even mid-phase when the engine is quiet.
             emitInteractive(STATUS_POSTED, {
-              document_id: flight.documentId,
+              ...docScope(flight.documentId, flight.projectId),
               state: 'working',
               message: flight.narration,
             });
@@ -920,11 +991,13 @@ export async function startInteractiveDemoSubscriber(
         log(`[interactive-demo] ${input.key} → governed run ${runId} (${input.leg}, spec → ${input.outPath})`);
       })
       .catch((err: unknown) => {
+        // A launch that never happened keeps no snapshot (a replayed frame re-snapshots fresh).
+        removeSnapshots(snapshotDirs);
         // The 'processing' status is already on the thread — close it out honestly so the
         // canvas never sits in an in-between state on a launch that went nowhere.
         const reason = err instanceof Error ? err.message : String(err);
         emitInteractive(STATUS_POSTED, {
-          document_id: input.documentId,
+          ...docScope(input.documentId, input.projectId),
           state: 'error',
           message: `Crew could not start a run for this demo: ${reason}.`,
         });
@@ -956,10 +1029,47 @@ export async function startInteractiveDemoSubscriber(
     mkdirSync(runDir, { recursive: true });
 
     emitInteractive(STATUS_POSTED, {
-      document_id: doc.documentId,
+      ...docScope(doc.documentId, doc.projectId),
       state: 'processing',
       message: 'A governed crew picked up your demo brief — planning the scenes and authoring the click-path…',
     });
+
+    // F-046: WHICH repository is this app? The create request's `repo_ref(s)` (recorded by the
+    // proxy, waited for while the create is still answering), else the ones the brief names, else
+    // the project's sole repo, else none — never the project's first member. Each resolved repo is
+    // snapshotted into the run's own inbox (readable by the unbound worker, wicked-core#259) and
+    // named in the task; the thread hears where the demo is grounded and why.
+    const subjects: DemoGrounding['subjects'] = [];
+    const snapshotDirs: string[] = [];
+    if (doc.projectId !== undefined) {
+      const binding =
+        groundingStore !== undefined
+          ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
+          : undefined;
+      const decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+      const snapshotted: GroundingRepo[] = [];
+      for (const repo of decision.repos) {
+        const dest = join(runDir, 'repos', snapshotDirName(repo));
+        if (!groundablePath(dest)) {
+          log(`[interactive-demo] ${doc.documentId}: snapshot dest ${dest} cannot ride the problem — no snapshot for ${repo.repoRef}`);
+          subjects.push({ name: repo.name });
+          continue;
+        }
+        const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
+        if (snap.ok) {
+          snapshotDirs.push(dest);
+          snapshotted.push(repo);
+          subjects.push({ name: repo.name, snapshotDir: dest });
+        } else {
+          // A demo's deliverable never lands inside the repo (the spec goes to the inbox), so even a
+          // dest-overlap degrades here instead of refusing: the app is still inspected live.
+          log(`[interactive-demo] ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — no snapshot for ${repo.repoRef}`);
+          subjects.push({ name: repo.name });
+        }
+      }
+      const line = groundingNarration(decision, snapshotted, 'demo');
+      if (line !== null) emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
+    }
 
     await launchFlight({
       key: doc.documentId,
@@ -967,11 +1077,12 @@ export async function startInteractiveDemoSubscriber(
       documentId: doc.documentId,
       projectId: doc.projectId,
       version: undefined,
-      problem: demoProblem(doc, outPath),
+      problem: demoProblem(doc, outPath, subjects.length > 0 ? { subjects } : undefined),
       workflow: INTERACTIVE_DEMO_WORKFLOW,
       runDir,
       outPath,
       agentPhaseCount: INTERACTIVE_DEMO_WORKFLOW_DEF.phases.length,
+      snapshotDirs,
     });
   }
 
@@ -1006,7 +1117,7 @@ export async function startInteractiveDemoSubscriber(
       const message =
         `Crew is still authoring this demo's spec — your step feedback was set aside; ` +
         `replay it (or resubmit) once the current run lands.`;
-      emitInteractive(STATUS_POSTED, { document_id: handoff.documentId, state: 'error', message });
+      emitInteractive(STATUS_POSTED, { ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
       log(`[interactive-demo] handoff ${key} arrived while doc ${handoff.documentId} is busy — dead-lettered`);
       throw new Error(message);
     }
@@ -1021,7 +1132,7 @@ export async function startInteractiveDemoSubscriber(
       const message =
         `This demo has no ${DEMO_SPEC_FILE} to revise yet — the step feedback was set aside; ` +
         `replay it once the first spec is authored.`;
-      emitInteractive(STATUS_POSTED, { document_id: handoff.documentId, state: 'error', message });
+      emitInteractive(STATUS_POSTED, { ...docScope(handoff.documentId, handoff.projectId), state: 'error', message });
       log(`[interactive-demo] handoff ${key}: no spec at ${srcSpec} — dead-lettered`);
       throw new Error(message);
     }
@@ -1045,7 +1156,7 @@ export async function startInteractiveDemoSubscriber(
     );
 
     emitInteractive(STATUS_POSTED, {
-      document_id: handoff.documentId,
+      ...docScope(handoff.documentId, handoff.projectId),
       state: 'processing',
       message: `A governed crew picked up your demo feedback — re-authoring the click-path (${handoff.items.length} change${handoff.items.length === 1 ? '' : 's'})…`,
     });
@@ -1103,7 +1214,10 @@ export async function startInteractiveDemoSubscriber(
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
     stop: async () => {
       offCoreEvents();
-      for (const runId of [...inFlight.keys()]) endFlight(runId);
+      for (const runId of [...inFlight.keys()]) {
+        const flight = endFlight(runId);
+        if (flight !== undefined) removeSnapshots(flight.snapshotDirs);
+      }
       await subCreated.stop();
       await subFeedback.stop();
     },

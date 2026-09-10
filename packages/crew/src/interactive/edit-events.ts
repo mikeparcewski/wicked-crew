@@ -45,6 +45,7 @@ import {
   proposeClause,
   recallClause,
   type RecallIntent,
+  docScope,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -340,6 +341,8 @@ export interface InteractiveEditSubscription {
 interface InFlight {
   key: string;
   documentId: string;
+  /** The doc's project binding — stamped on every emit (F-045). Undefined = unfiled. */
+  projectId?: string | undefined;
   version: number;
   items: HandoffFileItem[];
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
@@ -464,7 +467,7 @@ export async function startInteractiveEditSubscriber(
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
     emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+      ...docScope(flight.documentId, flight.projectId),
       version: flight.version,
       state: 'working',
       message,
@@ -575,7 +578,7 @@ export async function startInteractiveEditSubscriber(
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+        ...docScope(flight.documentId, flight.projectId),
         version: flight.version,
         state: 'error',
         message:
@@ -587,7 +590,7 @@ export async function startInteractiveEditSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
-    const { documentId, version, key, items } = flight;
+    const { documentId, projectId, version, key, items } = flight;
     // The deterministic pre-emit self-check (INV-2 at scale): a violating fragment would be
     // rejected SILENTLY by the service (regenerate.js Inv2Error) — the user's edit would just
     // die. Fail honest here instead: error status, failure row, no emit.
@@ -596,7 +599,7 @@ export async function startInteractiveEditSubscriber(
       ledger.recordFailure(key);
       const detail = violations.map((v) => `${v.selector}: ${v.reason}`).join('; ');
       emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+        ...docScope(documentId, projectId),
         version,
         state: 'error',
         message:
@@ -610,7 +613,7 @@ export async function startInteractiveEditSubscriber(
     // deterministic doc+version key — a re-announce is a WB-002 no-op.
     const emitted = emitInteractive(
       EDIT_COMPLETED,
-      { document_id: documentId, version, results },
+      { ...docScope(documentId, projectId), version, results },
       editIdempotencyKey(documentId, version),
     );
     if (!emitted) {
@@ -619,7 +622,7 @@ export async function startInteractiveEditSubscriber(
       // silently eat every replay of this handoff (the launch gate is `ledger.has`).
       ledger.recordFailure(key);
       emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+        ...docScope(documentId, projectId),
         version,
         state: 'error',
         message:
@@ -631,7 +634,7 @@ export async function startInteractiveEditSubscriber(
     }
     ledger.recordEmitted(key);
     emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+      ...docScope(documentId, projectId),
       version,
       state: 'complete',
       message: 'Edit is in — landing the new version on the canvas now.',
@@ -658,7 +661,7 @@ export async function startInteractiveEditSubscriber(
       // never armed is a silent drop: no run, no status, a canvas that waits forever. Say so.
       if (!(opts.demoSeamArmed ?? (() => false))()) {
         emitInteractive(STATUS_POSTED, {
-          document_id: handoff.documentId,
+          ...docScope(handoff.documentId, handoff.projectId),
           version: handoff.version,
           state: 'error',
           message:
@@ -717,7 +720,7 @@ export async function startInteractiveEditSubscriber(
     const runId = randomUUID();
 
     emitInteractive(STATUS_POSTED, {
-      document_id: handoff.documentId,
+      ...docScope(handoff.documentId, handoff.projectId),
       version: handoff.version,
       state: 'processing',
       message: `A governed crew picked up your edit — reworking ${items.length === 1 ? 'the block' : `${items.length} blocks`}…`,
@@ -791,7 +794,7 @@ export async function startInteractiveEditSubscriber(
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
       emitInteractive(STATUS_POSTED, {
-        document_id: handoff.documentId,
+        ...docScope(handoff.documentId, handoff.projectId),
         version: handoff.version,
         state: 'error',
         message: `Crew could not start a run for this edit: ${reason}. The assist loop can still take over.`,
@@ -811,6 +814,7 @@ export async function startInteractiveEditSubscriber(
     const flight: InFlight = {
       key,
       documentId: handoff.documentId,
+      projectId: handoff.projectId,
       version: handoff.version,
       items,
       narration: 'Crew run launched — working on your edit…',
@@ -818,7 +822,7 @@ export async function startInteractiveEditSubscriber(
         // Repeat the last real narration so the ~20s status.requested window is always fed,
         // even mid-phase when the engine is quiet.
         emitInteractive(STATUS_POSTED, {
-          document_id: flight.documentId,
+          ...docScope(flight.documentId, flight.projectId),
           version: flight.version,
           state: 'working',
           message: flight.narration,

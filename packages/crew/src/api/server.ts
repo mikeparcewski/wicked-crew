@@ -35,6 +35,7 @@ import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
 import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
+import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
@@ -113,6 +114,9 @@ export interface CreateServerOptions {
     draftDir?: string;
     /** Seat roster override (JSON array); omit for the production council roster. */
     clisJson?: string;
+    /** Docs-root resolver override (tests); default = per-project `interactiveRoot` setting. Used
+     *  to READ the create-time grounding sidecar (F-046). */
+    resolveDocsRoot?: (projectId: string | undefined) => string;
   };
   /**
    * Opt-in governed answering of wicked-interactive STRUCTURAL edits (task #86, Phase 7c final
@@ -214,6 +218,16 @@ export interface CreateServerOptions {
     dbPath?: string;
     /** Poll cadence for the /ws activity bridge, ms (tests shorten it). */
     pollIntervalMs?: number;
+  };
+  /**
+   * F-042/F-043 — what the spawned wicked-interactive bridge is told about THIS daemon. The pool
+   * always exports `WICKED_CREW_API` (the daemon's bound origin); `busDataDir` is the directory of
+   * the bus db the interactive seams read, exported as `WICKED_BUS_DATA_DIR` so the bridge emits
+   * where the seams read. `null`/omitted = not exported (the CLI passes null only when `--bus-db`
+   * names a file wicked-bus cannot be pointed at through a data dir).
+   */
+  interactiveBridge?: {
+    busDataDir?: string | null;
   };
   /**
    * DES-MERGE-001 §5.4/§6.1 (slice 3) — the interactive /ws relay. DEFAULT-ON: every
@@ -555,6 +569,11 @@ export async function createServer(
    *  crewStateHome() default each seam resolves — under `--db` the sweep must follow the
    *  override, crew#353/#398). Never throws — the report says what happened. */
   const crewStateDir = crewStateHome();
+  // F-046: the create-time doc → subject-repo bindings, shared by the proxy (records) and the
+  // draft/demo seams (read). The store keeps NO file of its own — each binding is a
+  // `crew-grounding.json` sidecar beside the doc's `versions.json` under the project's docs root
+  // (doc-grounding.ts says why not the state home: core's fence refuses unregistered entries).
+  const docGrounding = new DocGroundingStore();
   const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
     sweepDocLedgers(documentId, [
       {
@@ -731,6 +750,10 @@ export async function createServer(
       ...(o.draftDir !== undefined ? { draftDir: o.draftDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       onRunFiled: fileRun,
+      // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
+      // proxy recorded it in.
+      groundingStore: docGrounding,
+      resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
     });
     if (draftSub !== null) {
@@ -791,6 +814,7 @@ export async function createServer(
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       onRunFiled: fileRun,
+      groundingStore: docGrounding,
       log: (m) => app.log.warn(m),
     });
     if (demoSub !== null) {
@@ -1107,6 +1131,9 @@ export async function createServer(
       studioRoot,
       dropDocLedgerRows,
       evalStore,
+      // F-043/F-046: the bridge's bus dir and the create-time grounding store reach the proxy.
+      interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
+      docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
     },
   );

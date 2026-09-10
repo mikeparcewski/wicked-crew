@@ -2711,6 +2711,75 @@ export interface InteractiveDocDeleteResponse {
 }
 
 /**
+ * The body of `POST /projects/:projectId/interactive/api/docs` as crew's proxy understands it
+ * (acceptance finding F-046). The bridge's own fields (`name`, `kind`, `brief`, `source_paths`,
+ * `url`, `style`, `project`, `source_message_id`) are relayed as-is — this type documents the two
+ * things CREW adds at the proxy before forwarding:
+ *
+ *  - `repo_ref` / `repo_refs` — the repository (or repositories) this document is ABOUT, each a
+ *    registered repo id, its registry name, or its root directory's basename. Crew validates them
+ *    against the project's `crew.repo` members BEFORE the bridge sees the request (a miss is the
+ *    400 {@link InteractiveDocCreateRefusal}, nothing created), strips them from the forwarded
+ *    body, and remembers the binding so the governed draft/demo run is grounded on THOSE repos
+ *    (offline snapshot + the project graph) — never on the project's first member. Unfiled
+ *    (`default` mount) documents cannot name a repository.
+ *  - `style` — passed through when given; when ABSENT crew infers it from the brief's format
+ *    words (print-ready / A4 / brochure → `brochure`; slides / deck → `ppt`; memo / whitepaper →
+ *    `doc`) so the bridge's own print instructions apply to a print brief. No format words → the
+ *    bridge's `web` default.
+ */
+export interface InteractiveDocCreateRequest {
+  name?: string;
+  kind?: 'source' | 'demo';
+  brief?: string;
+  source_paths?: string[];
+  url?: string;
+  style?: 'web' | 'ppt' | 'brochure' | 'doc';
+  project?: string;
+  source_message_id?: string;
+  /** ONE subject repository: a repo id, its name, or its root basename. */
+  repo_ref?: string;
+  /** SEVERAL subject repositories (at most 8); the union with `repo_ref`, de-duplicated. */
+  repo_refs?: string[];
+}
+
+/**
+ * Crew's 400 on `POST /projects/:projectId/interactive/api/docs` when the request names a
+ * repository the document cannot be grounded on (F-046). Nothing was created on the bridge.
+ */
+export interface InteractiveDocCreateRefusal {
+  /** Human-readable, names the fix (attach the repo, or pick one of `available`). */
+  error: string;
+  code: 'repo_not_in_project' | 'unfiled_doc_repo' | 'invalid_repo_ref';
+  /** The refs the request named, as spelled. */
+  requested: string[];
+  /** The subset of `requested` that matched no member repo (`repo_not_in_project` only). */
+  missing?: string[];
+  /** The project's `crew.repo` members the request could have named. */
+  available?: Array<{ id: string; name: string }>;
+}
+
+/**
+ * The payload of `wicked.interactive.status.posted` as crew's own seams emit it (`producer_id:
+ * "wi-crew"`, relayed on `/ws` inside an `interactiveEvent` frame). Acceptance finding F-045: every
+ * seam emit — status narration, the terminal error/complete lines, and the closing
+ * `draft.completed` / `edit.completed` / `demo.requested` — now carries `project_id` for a
+ * project-bound document (omitted for an Unfiled one), exactly like the bridge's own emits, so a
+ * skin can file the frame under the right thread. A skin should ALSO match frames by
+ * `document_id` alone when the doc is open under exactly one mount (belt and braces).
+ */
+export interface InteractiveStatusPosted {
+  ts: string;
+  document_id: string;
+  /** Present for a project-bound document. */
+  project_id?: string;
+  state: 'processing' | 'working' | 'asking' | 'complete' | 'error';
+  message?: string;
+  /** The edit seam stamps the handoff version it is answering. */
+  version?: number;
+}
+
+/**
  * One row of `GET /projects/:projectId/interactive/api/docs` (crew#472) — the bridge's own
  * `GET /api/docs` row (interactive's `listDocs` shape, relayed field-for-field) stamped with the
  * project whose mount it was listed under. Docs roots are partitioned per project (the `default`

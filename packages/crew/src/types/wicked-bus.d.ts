@@ -76,4 +76,6 @@ declare module 'wicked-bus' {
 
   /** The bus SQLite file a config resolves to (`config.db_path` or `<dataDir>/bus.db`). */
   export function resolveDbPath(config?: Record<string, unknown>): string;
+  /** The bus DATA DIRECTORY wicked-bus resolves (`WICKED_BUS_DATA_DIR`, else its HOME default) — no side effects. */
+  export function resolveDataDir(): string;
 }

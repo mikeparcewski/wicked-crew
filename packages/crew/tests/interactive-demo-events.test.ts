@@ -49,6 +49,9 @@ import {
   startInteractiveDemoSubscriber,
 } from '../src/interactive/demo-events.js';
 import { DOC_CREATED, STATUS_POSTED, INTERACTIVE_PRODUCER, parseSourceDocCreated } from '../src/interactive/draft-events.js';
+import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
+import { existsSync as fileExists } from 'node:fs';
+import type { CoreAdapter as CoreAdapterType } from '../src/core/adapter.js';
 import { FEEDBACK_PROCESSED, EDIT_COMPLETED, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
@@ -553,6 +556,81 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length).toBe(1);
     expect(sub.inFlightDocs()).toEqual(['checkout-demo']);
+  });
+
+  it('F-045/F-046: every frame carries project_id, and a repository NAMED at create time grounds the spec run on the app\'s own source — snapshotted into the inbox, named in the task, gone at finalize', async () => {
+    const bus = await import('wicked-bus');
+    // A two-repo project: the app's repo is NOT the first member.
+    const core = join(dir, 'wicked-engine');
+    const studio = join(dir, 'wicked-studio');
+    mkdirSync(join(core, 'src'), { recursive: true });
+    mkdirSync(join(studio, 'src'), { recursive: true });
+    writeFileSync(join(core, 'src', 'lib.rs'), 'fn main() {}\n', 'utf8');
+    writeFileSync(join(studio, 'src', 'routes.ts'), "export const routes = ['/runs/new'];\n", 'utf8');
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [
+        { member_kind: 'crew.repo', member_ref: 'repo-core' },
+        { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+      ],
+      listRepos: async () => [
+        { id: 'repo-core', root_path: core },
+        { id: 'repo-studio', root_path: studio },
+      ],
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    // The proxy recorded the binding as a sidecar beside the doc's versions.json.
+    const grounding = new DocGroundingStore();
+    grounding.record(docsRoot, 'checkout-demo', { project_id: 'proj-7', repo_refs: ['repo-studio'] });
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      groundingStore: grounding,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const runDir = join(dir, 'demos', 'checkout-demo');
+    const snap = join(runDir, 'repos', 'wicked-studio');
+    // THE named repo, not the first member; inside the run's own write root; named in the task.
+    expect(fileExists(join(snap, 'src', 'routes.ts'))).toBe(true);
+    expect(fileExists(join(runDir, 'repos', 'wicked-engine'))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([runDir]);
+    expect(launch.problem).toContain(`The application's source is the repository wicked-studio (offline snapshot at ${snap})`);
+    expect(launch.problem).not.toContain(studio); // the live root never reaches the worker
+    expect(launch.problem).not.toMatch(/[\n\r]/);
+
+    // F-045: pickup, the grounding line, and the heartbeats all carry project_id.
+    const frames = () =>
+      probeEvents.filter((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER);
+    await waitFor(() => frames().length >= 4);
+    for (const e of frames()) expect((e.payload as { project_id?: string }).project_id).toBe('proj-7');
+    expect(frames().some((e) => String((e.payload as { message?: string }).message).startsWith('Grounded on wicked-studio (named in your request)'))).toBe(true);
+
+    // Finalize: the spec lands, demo.requested carries project_id, and the snapshot is gone.
+    writeFileSync(
+      join(runDir, DEMO_SPEC_FILE),
+      "export const meta = { url: 'https://staging.example.com/app', title: 'Checkout' };\n" +
+        "export async function run({ page, step, meta }) { await page.goto(meta.url); await step('Sign in', async () => {}, { say: 'Sign in' }); }\n",
+      'utf8',
+    );
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === 'wicked.interactive.demo.requested'));
+    const requested = probeEvents.find((e) => e.event_type === 'wicked.interactive.demo.requested')!;
+    expect((requested.payload as { project_id?: string }).project_id).toBe('proj-7');
+    await waitFor(() => frames().some((e) => (e.payload as { state?: string }).state === 'complete'));
+    expect(frames().every((e) => (e.payload as { project_id?: string }).project_id === 'proj-7')).toBe(true);
+    expect(fileExists(snap), 'the launch-scoped snapshot must not outlive the run').toBe(false);
   });
 
   it('finalize is copy-THEN-emit: installs the spec into the doc workspace, then demo.requested, then complete', async () => {

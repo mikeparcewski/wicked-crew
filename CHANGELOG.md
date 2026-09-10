@@ -10,6 +10,72 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
+  event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
+  15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
+  `edit.completed` / `demo.requested` — now carries `project_id` for a project-bound document,
+  exactly like the bridge's own emits (DES-PROJECT-001 enrichment). The studio files frames by
+  `project_id`, so crew's heartbeats (which carried `document_id` only) landed under the Unfiled
+  mount while the project-bound thread heard nothing and, 90 s into a LIVE governed run, told the
+  user "no worker has picked this up — the generation service may be down" with a Retry that would
+  have injected a duplicate; the demo thread never showed one crew line at all. Wire: additive
+  (`InteractiveStatusPosted` documents the payload in `wicked-crew-api-types`). The studio's own
+  half (file status frames by `document_id` regardless — belt and braces) lands separately in
+  wicked-studio.
+- **Interactive seams — grounded on the NAMED repository (F-046 + follow-up).** The draft and demo
+  seams grounded a project-bound document on the project's FIRST `crew.repo` member — a brochure
+  about wicked-studio was drafted against a wicked-core snapshot and the thread never said so. The
+  create request (`POST /projects/:id/interactive/api/docs`) now accepts `repo_ref` (one) or
+  `repo_refs` (several; a repo id, its registry name, or its root basename), validated at the proxy
+  against the project's members BEFORE the bridge sees the request — a repo the project does not
+  have is a 400 `{code:"repo_not_in_project", requested, missing, available}` with nothing created;
+  an Unfiled document cannot name one (`unfiled_doc_repo`). The refs are stripped from the forwarded
+  body and remembered as a `crew-grounding.json` sidecar beside the new doc's `versions.json` under
+  the project's docs root (new `interactive/doc-grounding.ts` — NOT under the state home: wicked-core
+  embeds crew's state-home registry as the worker Read fence and refuses every launch that meets an
+  unregistered entry, so a new store there needs a core release first; a retired doc keeps its
+  reserved name, so no sweep is needed); when `doc.created` arrives the seam grounds on THOSE
+  repositories (one offline snapshot each under `<run dir>/repos/<name>`, plus
+  the project graph when built), else on the member repos the BRIEF names by name, else on the
+  project's sole repo, else on none — never a first-member substitution: a multi-repo project whose
+  document named nothing gets an honest thread line saying so and how to name one. The worker's
+  problem statement states the subject ("This document is ABOUT the repository wicked-studio …"),
+  and the thread shows "Grounded on wicked-studio (named in your request) …". The demo seam gets the
+  same grounding for its first-spec run (local reads of the app's source snapshot; the live page is
+  still inspected).
+- **Interactive create — the requested format reaches the bridge (F-046, style).** A create body's
+  `style` passes through as before; when it is ABSENT the proxy infers it from the brief's format
+  words (print-ready / A4 / brochure → `brochure`; slides / deck → `ppt`; memo / whitepaper →
+  `doc`) so a print brief reaches the bridge's print instructions instead of its `web` default, and
+  the draft worker's problem statement now carries the style's one-line format contract (a brochure
+  is PRINT pages with page breaks — never fixed slide pages with `overflow:hidden`, the F-050/F-053
+  clipping).
+- **Bridge spawn env — the bridge talks to THIS daemon and emits on ITS bus (F-042 / F-043).** The
+  `wicked-interactive` bridge crew spawns validated and registered a doc's project against
+  `WICKED_CREW_API` — defaulting to `http://127.0.0.1:7701` when unset — so a daemon on any other port
+  could not create a single project-bound document (502 "project … not found on the crew daemon at
+  http://127.0.0.1:7701"), and with two daemons on one host the doc was registered on the WRONG one.
+  The spawn now exports `WICKED_CREW_API` = this daemon's own bound origin and `WICKED_BUS_DATA_DIR`
+  = the directory of the bus its interactive seams actually read (an explicit `--bus-db` /
+  `WICKED_BUS_DB`'s parent when the file is `bus.db`, else the dir wicked-bus itself resolves); the
+  pair is recorded beside the lockfile (`.wi-serve.crew.json`) so an adopted bridge crew started with
+  a DIFFERENT pair is recycled (SIGTERM, 3 s grace, restart with the right env) and one nobody recorded
+  (an operator's terminal `wicked-interactive serve`, a pre-upgrade bridge) is adopted with a warning
+  naming the fix. An explicit `--bus-db` / `WICKED_BUS_DB` now also reaches the /ws relay, which used
+  to open wicked-bus's default regardless (so a daemon on a custom bus relayed nothing). A `--bus-db`
+  whose file is not `bus.db` cannot be handed to the bridge (wicked-bus reaches a bus only through a
+  data directory) — the daemon says so at boot instead of pointing the bridge at a different database.
+  **F-043 residual, deliberately not done here:** the default bus is still wicked-bus's HOME-based
+  `~/.something-wicked/wicked-bus/bus.db`, so two daemons on one host share it unless the operator sets
+  `WICKED_BUS_DATA_DIR`. Moving it under the state home (`<state home>/bus/`, since wicked-bus keeps
+  `config.json`, `cas/`, `archive/`, `bus.sock`, `daemon.lock` beside `bus.db`) needs the entry
+  registered in the state-home fence registry wicked-core embeds (`tests/fixtures/state-home-subtrees.json`
+  → core `src/state_home.rs`), which refuses every launch that meets an unclassified entry — a
+  wicked-core release first, then crew. `wicked-interactive`'s own hard-coded `:7701` default is
+  tracked separately in that repo.
+
+
 ## [0.7.27] — 2026-09-10
 
 Release train: ships the published `wicked-crew-api-types` 0.29.0 (workspace link; tagged

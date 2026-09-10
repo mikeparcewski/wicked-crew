@@ -24,14 +24,32 @@
  * `POST /api/studio-origin`, interactive ≥ 0.8.0) so the bridge's `GET /` redirects a direct
  * visitor into studio instead of its API-only fallback page. Fire-and-forget, once per pooled
  * bridge: recording can never fail — or slow down — a proxied request.
+ *
+ * THE SPAWN ENV (acceptance findings F-042 + F-043). The bridge validates and registers a doc's
+ * project against `WICKED_CREW_API` — defaulting to `http://127.0.0.1:7701` when unset — and emits
+ * onto the wicked-bus at `WICKED_BUS_DATA_DIR` — defaulting to `~/.something-wicked/wicked-bus`.
+ * A bridge spawned with the daemon's bare env therefore talked to whatever daemon owned :7701 (a
+ * daemon on any other port could not create a single project-bound document) and shared ONE bus
+ * with every other daemon on the host (two daemons' durable cursors racing for one `doc.created`).
+ * So the spawn now exports BOTH: `WICKED_CREW_API` = this daemon's own bound origin, and
+ * `WICKED_BUS_DATA_DIR` = the directory of the bus this daemon's interactive seams read. The pair
+ * is written beside the lockfile (`.wi-serve.crew.json`) so an ADOPTED bridge can be checked: one
+ * this daemon (or a sibling) started with a DIFFERENT pair is recycled — restarted with the right
+ * env — and one nobody recorded (an operator-run `wicked-interactive serve`, a pre-upgrade bridge)
+ * is adopted with a warning that names the fix. A bridge is only useful to the daemon whose bus it
+ * emits to; sharing one across daemons is exactly the isolation break F-043 recorded.
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export const LOCK_NAME = '.wi-serve.json';
+/** Crew's sidecar beside the bridge's lockfile: which pid crew started, and with which env (F-042/F-043). */
+export const CREW_SIDECAR_NAME = '.wi-serve.crew.json';
+/** How long a recycled bridge gets to exit on SIGTERM before SIGKILL. */
+export const RECYCLE_GRACE_MS = 3000;
 
 /**
  * The wicked-interactive range crew will start, as an npm spec.
@@ -86,9 +104,27 @@ function serveCommand(root: string): string {
   return `npx ${INTERACTIVE_SPEC} serve --root ${root}`;
 }
 
+/** The two variables crew hands the bridge it spawns (F-042/F-043). Absent = not set — the bridge
+ *  falls back to its own defaults, which is exactly the pre-fix behavior this exists to end. */
+export interface BridgeEnv {
+  /** The daemon's own origin — where the bridge validates/registers project bindings. */
+  WICKED_CREW_API?: string;
+  /** The directory holding the `bus.db` this daemon's interactive seams read. */
+  WICKED_BUS_DATA_DIR?: string;
+}
+
+/** What crew writes beside the lockfile after IT starts a bridge. */
+export interface CrewSidecar {
+  pid: number;
+  env: BridgeEnv;
+  startedBy: 'wicked-crew';
+  startedAt: string;
+}
+
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
 export interface BridgePoolIo {
-  spawn?: (root: string) => ChildProcess;
+  /** The spawn; the second argument is the FULL child env (the daemon's, plus {@link BridgeEnv}). */
+  spawn?: (root: string, env: NodeJS.ProcessEnv) => ChildProcess;
   startTimeoutMs?: number;
   healthTimeoutMs?: number;
   log?: (msg: string) => void;
@@ -97,9 +133,69 @@ export interface BridgePoolIo {
   /**
    * The daemon's own origin (`http://<bound host>:<bound port>`), resolved LAZILY — the pool is
    * built before `listen`, but only consulted while serving a request, i.e. after the address is
-   * bound. Null (or absent) means "nothing to record" and the pool never POSTs (#298).
+   * bound. Null (or absent) means "nothing to record" and the pool never POSTs (#298). It is also
+   * the `WICKED_CREW_API` the spawned bridge gets (F-042) — the bridge must talk to THIS daemon.
    */
   studioOrigin?: () => string | null;
+  /**
+   * The directory of the bus db this daemon's interactive seams read — exported to the spawned
+   * bridge as `WICKED_BUS_DATA_DIR` so both meet on one bus (F-043), and recorded in the sidecar so
+   * an adopted bridge can be checked against it. Null/absent = not exported (the bridge keeps
+   * wicked-bus's own default): the CLI passes null only when `--bus-db` names a file wicked-bus
+   * cannot be pointed at through a data dir, or wicked-bus is not importable at all.
+   */
+  busDataDir?: string | null;
+}
+
+/** The {@link BridgeEnv} this pool hands a bridge it starts, from its io. Only DEFINED values ride. */
+export function bridgeEnvFor(io: Pick<BridgePoolIo, 'studioOrigin' | 'busDataDir'>): BridgeEnv {
+  const origin = io.studioOrigin?.() ?? null;
+  const busDir = io.busDataDir ?? null;
+  return {
+    ...(origin !== null ? { WICKED_CREW_API: origin } : {}),
+    ...(busDir !== null ? { WICKED_BUS_DATA_DIR: busDir } : {}),
+  };
+}
+
+/**
+ * The `WICKED_BUS_DATA_DIR` a bus db path implies (F-043): wicked-bus resolves ONLY a data
+ * directory (the file under it is always `bus.db`), so a db whose file is `bus.db` maps to its
+ * parent and any other spelling maps to `null` — the bridge cannot be pointed at it, and the CLI
+ * says so instead of handing the bridge a directory whose `bus.db` is a different database.
+ */
+export function busDataDirOf(busDbPath: string): string | null {
+  const abs = resolve(busDbPath);
+  return basename(abs) === 'bus.db' ? dirname(abs) : null;
+}
+
+/** `true` when two bridge envs agree on every variable either one sets. */
+export function bridgeEnvMatches(a: BridgeEnv, b: BridgeEnv): boolean {
+  return a.WICKED_CREW_API === b.WICKED_CREW_API && a.WICKED_BUS_DATA_DIR === b.WICKED_BUS_DATA_DIR;
+}
+
+/** `<root>/.wi-serve.crew.json`, or null when absent/unparseable/incomplete. */
+export function readCrewSidecar(root: string): CrewSidecar | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(root, CREW_SIDECAR_NAME), 'utf8')) as Partial<CrewSidecar>;
+    if (typeof raw.pid !== 'number' || typeof raw.env !== 'object' || raw.env === null) return null;
+    const env: BridgeEnv = {
+      ...(typeof raw.env.WICKED_CREW_API === 'string' ? { WICKED_CREW_API: raw.env.WICKED_CREW_API } : {}),
+      ...(typeof raw.env.WICKED_BUS_DATA_DIR === 'string' ? { WICKED_BUS_DATA_DIR: raw.env.WICKED_BUS_DATA_DIR } : {}),
+    };
+    return {
+      pid: raw.pid,
+      env,
+      startedBy: 'wicked-crew',
+      startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function describeEnv(env: BridgeEnv): string {
+  const parts = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+  return parts.length > 0 ? parts.join(' ') : '(no env)';
 }
 
 /**
@@ -203,11 +299,67 @@ export class InteractiveBridgePool {
     // Adopt-or-start; either way the bridge just answered `/api/health` for this root, which is
     // exactly the moment #298 wants the studio origin recorded — fire-and-forget, so recording
     // can never delay (let alone fail) the proxied request that triggered the resolution.
-    const bridge = (await this.healthy(root)) ?? (await this.start(root));
+    const adopted = await this.healthy(root);
+    const bridge = adopted !== null ? await this.adoptOrRecycle(root, adopted) : await this.start(root);
     const entry: PooledBridge = { bridge, originRecorded: false };
     this.live.set(root, entry);
     this.recordStudioOrigin(entry);
     return bridge;
+  }
+
+  /**
+   * A live bridge was found through the lockfile. Is it one THIS daemon can use (F-042/F-043)?
+   *  - crew's sidecar names this pid and its env matches ours → adopt silently;
+   *  - the sidecar names this pid with a DIFFERENT env → a crew daemon (this one before a
+   *    reconfiguration, or a sibling on another port/bus) started it for another bus or crew API,
+   *    so its events would never reach this daemon: recycle it — SIGTERM, grace, SIGKILL — and
+   *    start one with the right env;
+   *  - no sidecar (or another pid) → nobody recorded how it was started (an operator's terminal
+   *    `wicked-interactive serve`, a pre-upgrade bridge): adopt it, but say what it may be missing
+   *    and how to fix it. Killing a process crew did not start is not crew's call.
+   */
+  private async adoptOrRecycle(root: string, live: LiveBridge): Promise<LiveBridge> {
+    const expected = bridgeEnvFor(this.io);
+    const sidecar = readCrewSidecar(root);
+    if (sidecar !== null && sidecar.pid === live.pid) {
+      if (bridgeEnvMatches(sidecar.env, expected)) return live;
+      this.io.log?.(
+        `interactive bridge pid ${live.pid} for ${root} was started by crew with ${describeEnv(sidecar.env)}, ` +
+          `but this daemon needs ${describeEnv(expected)} — recycling it so its events reach this daemon`,
+      );
+      await this.terminate(live.pid);
+      return this.start(root);
+    }
+    if (Object.keys(expected).length > 0) {
+      this.io.log?.(
+        `adopting interactive bridge pid ${live.pid} for ${root}, which this daemon did not start: it may not ` +
+          `share this daemon's bus or crew API (expected ${describeEnv(expected)}). If documents created ` +
+          `through this project stay on their placeholder, stop it (kill ${live.pid}) — the next request ` +
+          `restarts it with this daemon's env.`,
+      );
+    }
+    return live;
+  }
+
+  /** SIGTERM, wait up to {@link RECYCLE_GRACE_MS} for exit, SIGKILL whatever ignored it. */
+  private async terminate(pid: number): Promise<void> {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      return; // already gone (or not ours to signal — the start below will surface a stale lock)
+    }
+    const deadline = Date.now() + RECYCLE_GRACE_MS;
+    while (Date.now() < deadline) {
+      if (!pidAlive(pid)) return;
+      await sleep(50);
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* exited between the check and the kill */
+    }
+    const hardDeadline = Date.now() + 1000;
+    while (pidAlive(pid) && Date.now() < hardDeadline) await sleep(25);
   }
 
   /**
@@ -276,7 +428,12 @@ export class InteractiveBridgePool {
     }
 
     let spawnFailure: string | null = null;
-    const child = (this.io.spawn ?? defaultSpawn)(root);
+    // F-042/F-043: the bridge gets THIS daemon's crew API and bus location on top of the daemon's
+    // own env. The daemon's bound origin wins over an inherited WICKED_CREW_API — the bridge
+    // validates project bindings against whatever it is told, and only this daemon has them.
+    const bridgeEnv = bridgeEnvFor(this.io);
+    const env: NodeJS.ProcessEnv = { ...process.env, ...bridgeEnv };
+    const child = (this.io.spawn ?? defaultSpawn)(root, env);
     // Detached + unref: the bridge is a SHARED instance keyed by root, so it must outlive the
     // daemon that happened to start it (and be adoptable by the next one via the lockfile).
     child.on('error', (err) => {
@@ -293,7 +450,10 @@ export class InteractiveBridgePool {
         );
       }
       const healthy = await this.healthy(root);
-      if (healthy) return healthy;
+      if (healthy) {
+        this.writeSidecar(root, healthy.pid, bridgeEnv);
+        return healthy;
+      }
       await sleep(150);
     }
     this.io.log?.(`interactive bridge for ${root} did not come up within the start budget`);
@@ -302,15 +462,29 @@ export class InteractiveBridgePool {
       `run \`${serveCommand(root)}\` in a terminal to see the failure (or check ${join(root, '.wi-serve.log')})`,
     );
   }
+
+  /** Record which pid crew started and with which env, so a later adopt can tell ours from a
+   *  sibling daemon's (see {@link adoptOrRecycle}). Best-effort: an unwritable sidecar only costs
+   *  the adopt-time check, never the start. */
+  private writeSidecar(root: string, pid: number, env: BridgeEnv): void {
+    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString() };
+    try {
+      writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(sidecar, null, 2), 'utf8');
+    } catch (err) {
+      this.io.debug?.(`could not write ${CREW_SIDECAR_NAME} in ${root}: ${(err as Error).message}`);
+    }
+  }
 }
 
-/** `npx wicked-interactive serve` in `<root>`, detached, output to the bridge's own log. */
-function defaultSpawn(root: string): ChildProcess {
+/** `npx wicked-interactive serve` in `<root>`, detached, output to the bridge's own log, with the
+ *  env the pool computed (the daemon's own plus {@link BridgeEnv}). */
+function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
   // `--yes` is load-bearing: without it npx PROMPTS when the package is not installed, and a
   // daemon has no tty to answer with — the request would hang instead of failing to a 503.
   return nodeSpawn('npx', ['--yes', INTERACTIVE_SPEC, 'serve', '--root', root], {
     cwd: root,
     detached: true,
     stdio: 'ignore',
+    env,
   });
 }

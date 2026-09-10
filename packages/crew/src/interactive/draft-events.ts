@@ -37,12 +37,22 @@
 
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
+import { resolveInteractiveRoot } from './bridge-root.js';
+import {
+  groundingNarration,
+  resolveGroundingRepos,
+  snapshotDirName,
+  styleContract,
+  type DocGroundingStore,
+  type GroundingDecision,
+  type GroundingRepo,
+} from './doc-grounding.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
@@ -71,6 +81,27 @@ export const INTERACTIVE_PRODUCER = 'wi-crew';
  *  malformed document_id can't name a ledger key or a draft file path. Shared with the
  *  structural-edit seam (edit-events.ts), which guards the same identity. */
 export const DOC_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * The doc-identity half of EVERY payload crew's interactive seams emit (acceptance finding F-045):
+ * `document_id`, plus `project_id` when the document is project-bound. The bridge stamps
+ * `project_id` on its own emits (DES-PROJECT-001 enrichment) and the studio files frames by it —
+ * so a crew heartbeat carrying `document_id` alone was filed under the Unfiled mount while the
+ * project-bound thread heard nothing and, 90 s later, told the user "the generation service may
+ * be down" over a run that was executing. Shared by all four seams (draft/edit/chat/demo); an
+ * unfiled doc keeps the field OFF — never a fabricated 'default'.
+ */
+export function docScope(
+  documentId: string,
+  projectId?: string | undefined,
+): { document_id: string; project_id?: string } {
+  return projectId !== undefined ? { document_id: documentId, project_id: projectId } : { document_id: documentId };
+}
+
+/** How long a seam waits for the proxy to record a document's create-time grounding binding when
+ *  a create for the same project is still in flight (doc-grounding.ts `waitFor`): the bridge emits
+ *  `doc.created` before it answers the create, so the bus can beat the record by a few ms. */
+export const GROUNDING_BINDING_WAIT_MS = 3000;
 
 // ── The workflow (workflows-as-data) ─────────────────────────────────────────────────────────
 
@@ -201,6 +232,12 @@ export interface ProjectRepo {
  * grounds the task in a path the registry no longer vouches for. `undefined` when the project
  * has no repo member, the registry no longer knows the ref, or the adapter cannot answer (old
  * addon, engine hiccup) — every one of those degrades to today's behavior: an ungrounded launch.
+ *
+ * NO LONGER THE SEAM'S GROUNDING RULE (acceptance finding F-046): "the first member" grounded a
+ * brochure about wicked-studio on wicked-core. The draft and demo seams now resolve through
+ * `doc-grounding.ts` `resolveGroundingRepos` — the repos NAMED on the create request, else the
+ * ones the brief names, else the project's sole repo, else none (narrated). Kept exported for
+ * diagnostics and its callers.
  *
  * WHY: a doc created under a repo-backed project used to launch its governed draft/revision
  * run with NO repo context at all, so the worker could not read the project's actual code and
@@ -359,29 +396,66 @@ export function draftProblem(
   outPath: string,
   snapshotDir?: string,
   intent?: RecallIntent,
+  grounding?: DraftGrounding,
 ): string {
   const sources =
     doc.sourcePaths.length > 0
       ? `Source materials to read: ${doc.sourcePaths.join(', ')}.`
       : 'There are no source files — the brief alone is the spec.';
   const brief = doc.brief.length > 0 ? oneLine(doc.brief, 2000) : '(no brief provided)';
-  const grounding =
+  // F-046: the SUBJECT — which repositories the document is about, stated before any tool clause,
+  // so the worker never substitutes a sibling repository (the brochure-about-studio-drafted-from-
+  // core outcome). Absent for an unfiled doc or a repo-less project.
+  const subjects = grounding?.subjects ?? [];
+  const subjectClause =
+    subjects.length > 0
+      ? `This document is ABOUT the ${subjects.length === 1 ? 'repository' : 'repositories'} ` +
+        `${subjects.map((s) => s.name).join(', ')} — ground every product claim in ` +
+        `${subjects.length === 1 ? 'that repository' : 'those repositories'} (never a sibling repository ` +
+        `that happens to share the project), and say in the draft's notes when something you need is not in reach. `
+      : grounding?.unnamedAmong !== undefined && grounding.unnamedAmong > 1
+        ? `The project has ${grounding.unnamedAmong} repositories and none was named for this document — do not ` +
+          `present details from an arbitrary one as the subject's; where the brief refers to a specific ` +
+          `repository, say in the draft's notes that its source was not in reach. `
+        : '';
+  // The offline fallback: the subjects' snapshots when grounding resolved them (F-046), else the
+  // legacy single snapshot dir a caller passed. Paths ride VERBATIM (Copilot, crew#313).
+  const snapshots: Array<{ name: string | undefined; dir: string }> = subjects.flatMap((s) =>
+    s.snapshotDir !== undefined ? [{ name: s.name, dir: s.snapshotDir }] : [],
+  );
+  if (snapshots.length === 0 && snapshotDir !== undefined) snapshots.push({ name: undefined, dir: snapshotDir });
+  const fallback =
+    snapshots.length === 0
+      ? ''
+      : snapshots.length === 1
+        ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshots[0]!.dir}` +
+          `${snapshots[0]!.name !== undefined ? ` (${snapshots[0]!.name})` : ''} instead. `
+        : `If the estate tools are unavailable, fall back to the offline repository snapshots at ` +
+          `${snapshots.map((s) => `${s.dir} (${s.name})`).join(' and ')} instead. `;
+  const groundingClause =
     `Ground every claim in the indexed repositories via the wicked-estate MCP tools: ` +
     `SearchEntity to find relevant code and docs, FetchContent to read them, ContextBundle to gather ` +
     `related material, and RetrieveEntity/TraverseGraph to follow references — research across all ` +
     `bound repos and use what those tools return, never placeholders. ` +
-    (snapshotDir !== undefined
-      ? `If the estate tools are unavailable, fall back to the offline repository snapshot at ${snapshotDir} instead. `
-      : '');
+    fallback;
   // The recall clause (DES-MEM-FACETED-001 Phase 3) sits right beside grounding; `''` when the
   // intent carries no axis, so an unfiled draft reads exactly as it did before this phase.
   const recall = recallClause(intent);
   const propose = proposeClause();
   return (
     `Produce the first draft of the wicked-interactive document "${doc.documentId}" ` +
-    `(requested style: ${doc.style}). The user's brief: ${brief} ${sources} ${grounding}${recall}${propose}` +
+    `(requested style: ${doc.style} — ${styleContract(doc.style)}). The user's brief: ${brief} ${sources} ` +
+    `${subjectClause}${groundingClause}${recall}${propose}` +
     `The finished draft MUST be written to exactly this absolute file path: ${outPath}`
   );
+}
+
+/** The subject-repo grounding a draft launch resolved (F-046): the repositories the document is
+ *  about — each with the offline snapshot that landed for it, when one did — or, when the project
+ *  has several repos and none was named, how many there were (the worker must not guess). */
+export interface DraftGrounding {
+  subjects: Array<{ name: string; snapshotDir?: string | undefined }>;
+  unnamedAmong?: number | undefined;
 }
 
 /** Deterministic bus idempotency key for the one draft this seam may land per document. */
@@ -429,6 +503,16 @@ export interface InteractiveDraftOptions {
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
    *  (the engine already attached the crew.run membership atomically with the launch). */
   onRunFiled?: (runId: string, projectId: string) => void;
+  /** The create-time doc → subject-repo bindings the proxy recorded (F-046, `doc-grounding.ts` —
+   *  a `crew-grounding.json` sidecar beside the doc's `versions.json`); the server wires the
+   *  daemon's shared instance. Absent = nothing was ever named on a create request: grounding falls
+   *  back to the brief / sole-member rules. */
+  groundingStore?: DocGroundingStore;
+  /** The docs root a doc's workspace lives under — where the grounding sidecar is READ (F-046).
+   *  Default: the shared-default resolution (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`);
+   *  the server wires the per-project `interactiveRoot` setting through here, like the sibling seams.
+   *  Only consulted when a `groundingStore` is wired. */
+  resolveDocsRoot?: (projectId: string | undefined) => string;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
 }
@@ -445,11 +529,14 @@ export interface InteractiveDraftSubscription {
 
 interface InFlight {
   documentId: string;
+  /** The doc's project binding — stamped on every emit (F-045). Undefined = unfiled. */
+  projectId?: string | undefined;
   outPath: string;
-  /** The launch-scoped repo snapshot grounding this run (CREW-UX-8 v4): set BEFORE the snapshot
-   *  materializes (so a shutdown sweep can clear a half-made clone — Copilot round 2), cleared
-   *  when the snapshot is refused/degraded, removed on EVERY terminal path. */
-  snapshotDir?: string | undefined;
+  /** The launch-scoped repo snapshots grounding this run (CREW-UX-8 v4; one per subject repo since
+   *  F-046): each dest is tracked BEFORE its snapshot materializes (so a shutdown sweep can clear a
+   *  half-made clone — Copilot round 2), dropped again when refused/degraded, and every one is
+   *  removed on EVERY terminal path. */
+  snapshotDirs: string[];
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
   /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
@@ -535,6 +622,8 @@ export async function startInteractiveDraftSubscriber(
   );
   const draftDir = opts.draftDir ?? join(defaultStateDir(), 'interactive-drafts');
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
+  const groundingStore = opts.groundingStore;
+  const resolveDocsRoot = opts.resolveDocsRoot ?? (() => resolveInteractiveRoot(null));
   // The run executes ONE MORE unit than the def declares: the crew#311 deliverable floor,
   // appended per-run by `launchRun` from `requireDeliverables`. `agentPhaseCount` is what the
   // council-and-worker narration branches key on (unchanged); `phaseCount` is the run's real
@@ -578,7 +667,7 @@ export async function startInteractiveDraftSubscriber(
   function narrate(flight: InFlight, message: string): void {
     flight.narration = message;
     emitInteractive(STATUS_POSTED, {
-      document_id: flight.documentId,
+      ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
     });
@@ -593,22 +682,35 @@ export async function startInteractiveDraftSubscriber(
     return flight;
   }
 
-  /** CREW-UX-8 v4: the repo snapshot is launch-scoped — remove it on EVERY terminal path
+  /** CREW-UX-8 v4: the repo snapshots are launch-scoped — remove them on EVERY terminal path
    *  (success, no-file, emit-failure, run failure/cancel) so the inbox never accretes dead
    *  clones. Best-effort: a leftover snapshot is a disk-space wart, never a correctness one. */
-  function removeSnapshot(flight: InFlight): void {
-    const dir = flight.snapshotDir;
-    if (dir === undefined) return;
-    flight.snapshotDir = undefined;
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      log(`[interactive-draft] removed repo snapshot ${dir}`);
-    } catch (err) {
-      log(
-        `[interactive-draft] could not remove repo snapshot ${dir}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+  function removeSnapshots(flight: InFlight): void {
+    const dirs = flight.snapshotDirs;
+    flight.snapshotDirs = [];
+    const parents = new Set<string>();
+    for (const dir of dirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        log(`[interactive-draft] removed repo snapshot ${dir}`);
+        parents.add(dirname(dir));
+      } catch (err) {
+        log(
+          `[interactive-draft] could not remove repo snapshot ${dir}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    // The per-run `repos/` parent held nothing but this run's snapshots — it goes too, so the
+    // inbox never accretes empty shells.
+    for (const parent of parents) {
+      if (basename(parent) !== 'repos') continue;
+      try {
+        rmSync(parent, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -720,12 +822,12 @@ export async function startInteractiveDraftSubscriber(
 
     if (event.type === 'sessionFailed' || event.type === 'runCancelled') {
       endFlight(runId);
-      removeSnapshot(flight); // the failure path cleans its snapshot too (CREW-UX-8 v4)
+      removeSnapshots(flight); // the failure path cleans its snapshots too (CREW-UX-8 v4)
       ledger.recordFailure(flight.documentId);
       const why =
         flight.failureDetail !== undefined ? ` Reason: ${oneLine(flight.failureDetail, 600)}` : '';
       emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+        ...docScope(flight.documentId, flight.projectId),
         state: 'error',
         message:
           `The crew run answering this document ${event.type === 'runCancelled' ? 'was cancelled' : 'failed'} ` +
@@ -736,9 +838,9 @@ export async function startInteractiveDraftSubscriber(
   });
 
   function finalize(flight: InFlight, runId: string): void {
-    // The run is terminal — its grounding snapshot is done serving reads, on every branch below.
-    removeSnapshot(flight);
-    const { documentId, outPath } = flight;
+    // The run is terminal — its grounding snapshots are done serving reads, on every branch below.
+    removeSnapshots(flight);
+    const { documentId, projectId, outPath } = flight;
     let ok = false;
     try {
       ok = existsSync(outPath) && statSync(outPath).size > 0;
@@ -748,7 +850,7 @@ export async function startInteractiveDraftSubscriber(
     if (!ok) {
       ledger.recordFailure(documentId);
       emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+        ...docScope(documentId, projectId),
         state: 'error',
         message: `The crew run completed but produced no draft file at ${outPath} (run ${runId}).`,
       });
@@ -759,7 +861,7 @@ export async function startInteractiveDraftSubscriber(
     // never rides the bus payload. The deterministic key makes a re-announce a WB-002 no-op.
     const emitted = emitInteractive(
       DRAFT_COMPLETED,
-      { document_id: documentId, html_path: outPath },
+      { ...docScope(documentId, projectId), html_path: outPath },
       draftIdempotencyKey(documentId),
     );
     if (!emitted) {
@@ -768,7 +870,7 @@ export async function startInteractiveDraftSubscriber(
       // silently eat every replay of this doc (the launch gate is `ledger.has`).
       ledger.recordFailure(documentId);
       emitInteractive(STATUS_POSTED, {
-        document_id: documentId,
+        ...docScope(documentId, projectId),
         state: 'error',
         message:
           `Crew finished the draft but could not announce it on the bus (run ${runId}); ` +
@@ -779,7 +881,7 @@ export async function startInteractiveDraftSubscriber(
     }
     ledger.recordEmitted(documentId);
     emitInteractive(STATUS_POSTED, {
-      document_id: documentId,
+      ...docScope(documentId, projectId),
       state: 'complete',
       message: 'First draft is in — landing it on the canvas now. Click any block to refine it.',
     });
@@ -820,97 +922,120 @@ export async function startInteractiveDraftSubscriber(
     // must endFlight() it.
     const flight: InFlight = {
       documentId: doc.documentId,
+      projectId: doc.projectId,
       outPath,
+      snapshotDirs: [],
       narration: 'Crew run launched — working on your draft…',
     };
     inFlight.set(runId, flight);
 
-    // CREW-UX-8 v4: a repo-bound project's doc is grounded in a REPO SNAPSHOT — resolve the
-    // binding BEFORE the launch. Unbound docs and repo-less projects resolve to `undefined`
-    // and launch exactly as before.
-    const repo =
-      doc.projectId !== undefined ? await resolveProjectRepo(adapter, doc.projectId, log) : undefined;
+    // F-046: WHICH repositories is this document about? The create request's `repo_ref(s)` (the
+    // proxy recorded them, keyed by this doc — waited for, bounded, when the create is still
+    // answering), else the ones the brief names, else the project's sole repo, else NONE. Never
+    // the project's first member: that grounded a brochure about wicked-studio on wicked-core.
+    // Unbound docs skip this entirely and launch exactly as before.
+    let decision: GroundingDecision | undefined;
+    if (doc.projectId !== undefined) {
+      // The sidecar sits beside the doc; a refused partition (bridge-root.ts) throws here and the
+      // frame goes unanswered — fail closed, like the sibling seams' docs-root reads.
+      const binding =
+        groundingStore !== undefined
+          ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
+          : undefined;
+      decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+    }
 
     emitInteractive(STATUS_POSTED, {
-      document_id: doc.documentId,
+      ...docScope(doc.documentId, doc.projectId),
       state: 'processing',
       message: 'A governed crew picked up your brief — planning the draft…',
     });
 
-    // The snapshot happens crew-side, AFTER the pickup narration (a big clone must not starve
-    // the UI's silence budget) and BEFORE launchRun: <runDir>/repo sits inside the run's OWN
-    // declared extra write root, so the unbound worker can read it (write roots are readable,
+    // The snapshots happen crew-side, AFTER the pickup narration (a big clone must not starve
+    // the UI's silence budget) and BEFORE launchRun: <runDir>/repos/<name> sits inside the run's
+    // OWN declared extra write root, so the unbound worker can read it (write roots are readable,
     // wicked-core#259) even though the live repo root is boundary-denied (wicked-core#294) —
     // and NO OTHER run can (per-run isolation, Copilot crew#313). An unsnapshotable repo (over
-    // budget, unreadable, clone+copy failed) degrades HONESTLY: ungrounded launch, a visible
-    // per-cause note on the thread, and the full reason in the log.
-    let snapshotDir: string | undefined;
-    let snapshotDest: string | undefined; // where a snapshot was ATTEMPTED (shutdown cleanup)
-    if (repo !== undefined) {
-      const dest = join(runDir, 'repo');
+    // budget, unreadable, clone+copy failed) degrades HONESTLY: the subject is still NAMED in the
+    // task, a visible per-cause note lands on the thread, and the full reason in the log.
+    const snapshotted: GroundingRepo[] = [];
+    const subjects: DraftGrounding['subjects'] = [];
+    for (const repo of decision?.repos ?? []) {
+      const dest = join(runDir, 'repos', snapshotDirName(repo));
       if (!groundablePath(dest)) {
         // The PATH itself cannot ride the grounding clause (too long for the PTY prompt
         // budget, or multi-line) — and a truncated spelling would name a nonexistent dir, so
-        // grounding is SKIPPED before any clone happens (Copilot, crew#313).
+        // the snapshot is SKIPPED before any clone happens (Copilot, crew#313).
         emitInteractive(STATUS_POSTED, {
-          document_id: doc.documentId,
+          ...docScope(doc.documentId, doc.projectId),
           state: 'working',
-          message: 'snapshot path too long to hand to the worker — drafting without repo grounding',
+          message: `snapshot path for ${repo.name} too long to hand to the worker — drafting without its snapshot`,
         });
         log(
-          `[interactive-draft] doc ${doc.documentId}: snapshot dest ${dest} cannot ride the grounding clause — launching ungrounded`,
+          `[interactive-draft] doc ${doc.documentId}: snapshot dest ${dest} cannot ride the grounding clause — no snapshot for ${repo.repoRef}`,
         );
-      } else {
-        // Track the dest BEFORE the await (Copilot round 2): stop() during the clone must be
-        // able to sweep the half-made snapshot through the placeholder flight.
-        snapshotDest = dest;
-        flight.snapshotDir = dest;
-        const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
-        if (snap.ok) {
-          snapshotDir = dest;
-        } else {
-          flight.snapshotDir = undefined; // nothing landed — snapshotRepo cleans its partials
-          if (snap.reason === 'dest-overlap') {
-            // FAIL CLOSED (Copilot round 2): the configured draft dir places this run's write
-            // root inside the live repository (or the repo is registered at the inbox). An
-            // "ungrounded" launch would still hand the unbound worker read/write access to
-            // live repo content through `extraWriteRoots: [runDir]` — so the launch is REFUSED
-            // outright: no mkdir, no run, no ledger row. The status names the CONFIG problem;
-            // the thrown error dead-letters the frame, replayable after the config is fixed.
-            endFlight(runId);
-            const message =
-              `Crew refused to draft this document: the configured draft directory (${draftDir}) ` +
-              `overlaps the project's repository (${repo.rootPath}), so launching would give the ` +
-              `worker write access inside the live repo. Point the crew draft directory outside ` +
-              `every registered repository, then replay the request.`;
-            emitInteractive(STATUS_POSTED, {
-              document_id: doc.documentId,
-              state: 'error',
-              message,
-            });
-            log(
-              `[interactive-draft] doc ${doc.documentId}: REFUSING launch — draft dir ${draftDir} overlaps repo ${repo.rootPath} (dest-overlap)`,
-            );
-            throw new Error(message);
-          }
-          // Per-cause operator message (Copilot, crew#313): "too large" was previously
-          // claimed for EVERY failure — a deleted repo is not a large one. (`dest-overlap`
-          // is handled above: it refuses the launch instead of degrading.)
-          const because: Record<Exclude<SnapshotFailureReason, 'dest-overlap'>, string> = {
-            'too-large': 'repository too large to snapshot',
-            'root-unreadable': 'repository path is missing or unreadable',
-            'dest-unclearable': 'a stale snapshot could not be cleared',
-            'copy-failed': 'repository snapshot failed (clone and copy both errored)',
-          };
-          emitInteractive(STATUS_POSTED, {
-            document_id: doc.documentId,
-            state: 'working',
-            message: `${because[snap.reason]} — drafting without repo grounding`,
-          });
-          log(
-            `[interactive-draft] doc ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — launching ungrounded`,
-          );
-        }
+        subjects.push({ name: repo.name });
+        continue;
+      }
+      // Track the dest BEFORE the await (Copilot round 2): stop() during the clone must be able
+      // to sweep the half-made snapshot through the placeholder flight.
+      flight.snapshotDirs.push(dest);
+      const snap = await snapshotRepo(repo.rootPath, dest, { maxBytes: opts.repoSnapshotMaxBytes, log });
+      if (snap.ok) {
+        snapshotted.push(repo);
+        subjects.push({ name: repo.name, snapshotDir: dest });
+        continue;
+      }
+      flight.snapshotDirs = flight.snapshotDirs.filter((d) => d !== dest); // nothing landed — snapshotRepo cleans its partials
+      if (snap.reason === 'dest-overlap') {
+        // FAIL CLOSED (Copilot round 2): the configured draft dir places this run's write
+        // root inside the live repository (or the repo is registered at the inbox). An
+        // "ungrounded" launch would still hand the unbound worker read/write access to
+        // live repo content through `extraWriteRoots: [runDir]` — so the launch is REFUSED
+        // outright: no mkdir, no run, no ledger row. The status names the CONFIG problem;
+        // the thrown error dead-letters the frame, replayable after the config is fixed.
+        endFlight(runId);
+        removeSnapshots(flight); // whatever sibling subjects already landed
+        const message =
+          `Crew refused to draft this document: the configured draft directory (${draftDir}) ` +
+          `overlaps the project's repository (${repo.rootPath}), so launching would give the ` +
+          `worker write access inside the live repo. Point the crew draft directory outside ` +
+          `every registered repository, then replay the request.`;
+        emitInteractive(STATUS_POSTED, {
+          ...docScope(doc.documentId, doc.projectId),
+          state: 'error',
+          message,
+        });
+        log(
+          `[interactive-draft] doc ${doc.documentId}: REFUSING launch — draft dir ${draftDir} overlaps repo ${repo.rootPath} (dest-overlap)`,
+        );
+        throw new Error(message);
+      }
+      // Per-cause operator message (Copilot, crew#313): "too large" was previously
+      // claimed for EVERY failure — a deleted repo is not a large one. (`dest-overlap`
+      // is handled above: it refuses the launch instead of degrading.)
+      const because: Record<Exclude<SnapshotFailureReason, 'dest-overlap'>, string> = {
+        'too-large': 'repository too large to snapshot',
+        'root-unreadable': 'repository path is missing or unreadable',
+        'dest-unclearable': 'a stale snapshot could not be cleared',
+        'copy-failed': 'repository snapshot failed (clone and copy both errored)',
+      };
+      emitInteractive(STATUS_POSTED, {
+        ...docScope(doc.documentId, doc.projectId),
+        state: 'working',
+        message: `${because[snap.reason]} (${repo.name}) — drafting without its snapshot`,
+      });
+      log(
+        `[interactive-draft] doc ${doc.documentId}: repo ${repo.rootPath} could not be snapshotted (${snap.reason}) — no snapshot for ${repo.repoRef}`,
+      );
+      subjects.push({ name: repo.name });
+    }
+    // The thread hears WHERE this draft is grounded and WHY (F-046 follow-up) — or, for a
+    // multi-repo project whose document named nothing, how to name one next time.
+    if (decision !== undefined) {
+      const line = groundingNarration(decision, snapshotted, 'draft');
+      if (line !== null) {
+        emitInteractive(STATUS_POSTED, { ...docScope(doc.documentId, doc.projectId), state: 'working', message: line });
       }
     }
 
@@ -919,14 +1044,7 @@ export async function startInteractiveDraftSubscriber(
     // a launch must never start once the subscriber detached from the engine's events.
     if (closed) {
       endFlight(runId);
-      flight.snapshotDir = undefined;
-      if (snapshotDest !== undefined) {
-        try {
-          rmSync(snapshotDest, { recursive: true, force: true });
-        } catch {
-          // best-effort — a leftover snapshot is a disk-space wart, never a correctness one
-        }
-      }
+      removeSnapshots(flight);
       log(`[interactive-draft] doc ${doc.documentId}: subscriber stopped before launch — abandoned (a replay retries)`);
       return;
     }
@@ -968,8 +1086,14 @@ export async function startInteractiveDraftSubscriber(
         problem: draftProblem(
           doc,
           outPath,
-          snapshotDir,
+          undefined,
           doc.projectId !== undefined ? { project: doc.projectId } : undefined,
+          decision !== undefined
+            ? {
+                subjects,
+                ...(decision.source === 'none' ? { unnamedAmong: decision.memberCount } : {}),
+              }
+            : undefined,
         ),
         sessionId: runId,
         clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
@@ -1010,12 +1134,12 @@ export async function startInteractiveDraftSubscriber(
       // A launch that never happened keeps no flight and no snapshot (a replayed frame
       // re-registers and re-snapshots fresh).
       endFlight(runId);
-      removeSnapshot(flight);
+      removeSnapshots(flight);
       // The 'processing' status is already on the thread — close it out honestly so the
       // canvas never sits in an in-between state on a launch that went nowhere.
       const reason = err instanceof Error ? err.message : String(err);
       emitInteractive(STATUS_POSTED, {
-        document_id: doc.documentId,
+        ...docScope(doc.documentId, doc.projectId),
         state: 'error',
         message: `Crew could not start a run for this document: ${reason}. The assist loop can still take over.`,
       });
@@ -1042,7 +1166,7 @@ export async function startInteractiveDraftSubscriber(
       // Repeat the last real narration so the ~20s status.requested window is always fed,
       // even mid-phase when the engine is quiet.
       emitInteractive(STATUS_POSTED, {
-        document_id: flight.documentId,
+        ...docScope(flight.documentId, flight.projectId),
         state: 'working',
         message: flight.narration,
       });
@@ -1086,7 +1210,7 @@ export async function startInteractiveDraftSubscriber(
         // materializing is swept as well — and the handler's own closed-gate re-sweeps
         // whatever the in-flight clone re-materializes after this rm. The engine's workers
         // die with the daemon, so nothing is still reading the snapshot.
-        if (flight !== undefined) removeSnapshot(flight);
+        if (flight !== undefined) removeSnapshots(flight);
       }
       await sub.stop();
     },
