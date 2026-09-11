@@ -63,6 +63,8 @@
 import { mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
+import { defaultStateHome } from '../projects/state-home.js';
+
 /** The `serve` / `governance` flag naming the store explicitly. */
 export const GOVERNANCE_DB_FLAG = '--governance-db';
 /** The crew-side env override — the flag's environment spelling. */
@@ -348,4 +350,28 @@ export function legacyHomeOutboxPath(env: NodeJS.ProcessEnv = process.env): stri
   const home = present(env['HOME']) ?? present(env['USERPROFILE']);
   if (home === undefined) return null;
   return join(home, '.something-wicked', 'wicked-apps', EMIT_OUTBOX_FILENAME);
+}
+
+/**
+ * Whose dead letters the HOME outbox holds, as far as THIS daemon can tell (F-2R2-006).
+ *
+ *  - `'own'`  — this daemon runs in the DEFAULT state home of the HOME the outbox was found under
+ *               (`<HOME>/.wicked-crew`), so the pre-fix daemons that spooled there were its own
+ *               earlier versions: the outbox is its prior outbox, and replaying it into this
+ *               daemon's store is the repair.
+ *  - `'host'` — this daemon runs in an ISOLATED state home (`--db` elsewhere, a fresh rig, a test
+ *               harness). A pre-fix engine wrote under HOME regardless of which daemon it served,
+ *               so the file holds OTHER daemons' dead letters and this daemon has no legacy of its
+ *               own (its only outbox is the sidecar, already folded). Reporting it as a warning with
+ *               a replay recipe would import a stranger's governance events into this store.
+ *
+ * `coreDbPath` `null` (no store resolved) is `'host'`: with no state home there is nothing to
+ * attribute the file to. Pure — the HOME is read off the outbox path itself
+ * (`<HOME>/.something-wicked/wicked-apps/<file>`), never off the process environment.
+ */
+export type LegacyOutboxScope = 'own' | 'host';
+export function legacyOutboxScope(coreDbPath: string | null, legacyOutboxPath: string): LegacyOutboxScope {
+  if (coreDbPath === null) return 'host';
+  const home = dirname(dirname(dirname(resolve(legacyOutboxPath))));
+  return dirname(resolve(coreDbPath)) === resolve(defaultStateHome(home)) ? 'own' : 'host';
 }

@@ -56,6 +56,7 @@ import {
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
+import { councilAgreementPct, councilOutcomeSuffix } from './council-outcome.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -772,8 +773,10 @@ export async function startInteractiveDraftSubscriber(
       if (isFloorOrd(event)) return;
       const ord = typeof event.ord === 'number' ? event.ord : 0;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
-      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}…`);
+      const agreement = councilAgreementPct(event);
+      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
+      // Honest about a council that held on a fraction of its seats (F-4R2-007).
+      narrate(flight, `Council picked ${who} for ${phaseName(ord)}${pct}${councilOutcomeSuffix(event)}…`);
       return;
     }
 

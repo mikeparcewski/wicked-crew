@@ -358,16 +358,21 @@ export function existsIn(files: ReadonlySet<string>, pluginRel: string): boolean
 
 /**
  * Per line: `true` when the line sits inside a fenced code block whose language the cwd-script
- * rule does NOT scan. The fence algorithm — spelled as data in the parity fixture
- * (`semantics.fence`) so garden's lint walks the same way:
+ * rule does NOT scan. The fence algorithm is spelled as DATA in the parity fixture's `fences`
+ * block (`PORTABILITY_RULES.fences` → `tests/fixtures/portability_rules.json`, vendored by
+ * garden's lint so both walk the same way) — this is the prose of that block:
  *
- *   - a fence OPENS only at a line start (`FENCE_RE`): ≥ 3 backticks or tildes, the language is
- *     the trimmed, lowercased first word of the info string; a backtick opener whose remainder
- *     contains another backtick is a one-line code span, not a fence;
- *   - it CLOSES at the next line-start fence of the SAME character, at least as long, with
- *     nothing but whitespace after the run; a shorter run, or one with text after it, is content;
- *   - the opening and closing lines themselves are scanned (they are not inside);
- *   - an unclosed fence runs to the end of the text.
+ *   - `open` / `open_rule`: a fence OPENS only at a line start (`FENCE_RE`): ≥ 3 backticks or
+ *     tildes, the language is the trimmed, lowercased first word of the info string;
+ *   - `inline_span_rule`: a backtick opener whose remainder contains another backtick is a
+ *     one-line code span, not a fence (tilde fences have no such restriction);
+ *   - `close_rule`: it CLOSES at the next line-start fence of the SAME character, at least as
+ *     long, with nothing but whitespace after the run; a shorter run, or one with text after it,
+ *     is content;
+ *   - `shell_langs` / `skip_non_shell`: only a fence whose language is outside the shell set is
+ *     skipped (`applies_to: cwd-script` — the marker rules scan fences too);
+ *   - `boundary_lines_scanned`: the opening and closing lines themselves are scanned;
+ *   - `unclosed_runs_to_eof`: an unclosed fence runs to the end of the text.
  */
 function skippedFenceMask(lines: readonly string[]): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);

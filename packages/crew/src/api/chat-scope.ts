@@ -199,7 +199,10 @@ export function chatScopeDeps(adapter: CoreAdapter): ChatScopeDeps {
       (await adapter.projectMembers(projectId))
         .filter((m) => m.member_kind === 'crew.repo')
         .map((m) => m.member_ref),
-    bindProjectGraph: (projectId, repoRef) => resolveProjectGraphBinding(adapter, projectId, repoRef),
+    // A CHAT is asking (F-2R2-008): the degraded sentence says what a chat falls back to — it keeps
+    // reading the scoped roots — never "this repo-less run gets no code graph".
+    bindProjectGraph: (projectId, repoRef) =>
+      resolveProjectGraphBinding(adapter, projectId, repoRef, process.env, { subject: 'chat' }),
   };
 }
 
@@ -383,6 +386,8 @@ function graphWire(decision: ProjectGraphBindingDecision): ChatScope['graph'] {
     bound: decision.binding !== null,
     reason: decision.reason,
     ...(decision.binding?.repoLabel !== undefined ? { repoLabel: decision.binding.repoLabel } : {}),
+    // The UI action that would change an unbound outcome (F-2R2-008) — only while unbound.
+    ...(decision.binding === null && decision.action !== undefined ? { action: decision.action } : {}),
   };
 }
 

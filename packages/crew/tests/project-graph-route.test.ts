@@ -167,8 +167,11 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     expect(res.statusCode).toBe(200);
     const { status } = res.json() as { status: Record<string, unknown> };
     expect(status['state']).toBe('not-indexed');
-    expect(status['detail']).toMatch(/2 repo member\(s\) but no code graph yet/);
-    expect(status['detail']).toMatch(/graph\/refresh/);
+    // Customer copy (F-2R2-008): the page action, the member count — never the raw route, which
+    // rides on `action` for the UI to wire.
+    expect(status['detail']).toMatch(/has not been built yet — build it from the project page \(2 member repositories\)/);
+    expect(status['detail']).not.toMatch(/POST/);
+    expect(status['action']).toBe('projects.graph.refresh');
     expect(status['missingRepos']).toEqual(['wicked-ledger', 'wicked-vault']);
     // Every member is listed with the label its rows WILL carry, so an operator can predict the
     // provenance strings before the first refresh.

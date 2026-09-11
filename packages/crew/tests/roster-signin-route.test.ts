@@ -118,6 +118,31 @@ describe('GET /roster with seat sign-in (seat sign-in)', () => {
     expect(seen).toEqual([undefined, undefined]);
   });
 
+  it('every seat carries its STANDING — auth re-reads signed_in for what it means, council_eligible says what a council would do (F-2R2-009)', async () => {
+    vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', display_name: 'Claude Code', binary: 'claude', enabled_for_council: true },
+      { key: 'codex', display_name: 'Codex', binary: 'codex', enabled_for_council: true },
+      { key: 'opencode', display_name: 'opencode', binary: 'opencode', enabled_for_council: true },
+      { key: 'agy', display_name: 'Antigravity', binary: 'agy', enabled_for_council: false },
+    ]);
+    // The fresh rig: claude signed in; codex / opencode / agy not observable as signed in.
+    app = buildApp((seatKey) => (seatKey === 'claude' ? true : seatKey === 'agy' ? null : false));
+    await app.ready();
+
+    const { roster } = (await app.inject({ method: 'GET', url: '/api/v1/roster' })).json() as { roster: RosterSeat[] };
+    const by = new Map(roster.map((s) => [s.key, s]));
+    expect(by.get('claude')).toMatchObject({ signed_in: true, auth: 'signed_in', council_eligible: true });
+    expect(by.get('claude')?.council_ineligible_reason).toBeUndefined();
+    // codex needs a credential: "signed out" means a council benches it.
+    expect(by.get('codex')).toMatchObject({ signed_in: false, auth: 'signed_out', council_eligible: false });
+    expect(by.get('codex')?.council_ineligible_reason).toMatch(/signed out.*bench/);
+    // opencode answers on its free tier: the SAME signed_in:false reads not_required, and it is eligible.
+    expect(by.get('opencode')).toMatchObject({ signed_in: false, auth: 'not_required', council_eligible: true });
+    expect(by.get('opencode')?.free_tier).toMatch(/OpenCode Zen/);
+    // unknown auth is eligible; a seat disabled for council is not, and says so.
+    expect(by.get('agy')).toMatchObject({ signed_in: null, auth: 'unknown', council_eligible: false, council_ineligible_reason: 'not enabled for council' });
+  });
+
   it('existing seat fields stay untouched (the seat still round-trips into clisJson on launch)', async () => {
     app = buildApp(() => null);
     await app.ready();

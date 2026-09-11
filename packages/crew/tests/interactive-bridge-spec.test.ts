@@ -12,7 +12,14 @@
 // DIFFERENT thing — which is worse than no hint, because it looks authoritative.
 
 import { describe, expect, it } from 'vitest';
-import { INTERACTIVE_SPEC } from '../src/interactive/bridge-pool.js';
+import {
+  INTERACTIVE_DEFAULT_RANGE,
+  INTERACTIVE_SPEC,
+  INTERACTIVE_SPEC_ENV,
+  interactiveSpec,
+  resolveInteractiveSpec,
+  validInteractiveRange,
+} from '../src/interactive/bridge-pool.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -28,13 +35,31 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(INTERACTIVE_SPEC).not.toBe('wicked-interactive');
   });
 
-  it('floors at 0.8.1 — the release that carries the learned-theme readback crew depends on', () => {
+  it('floors at 0.9.1 — the exporter honours the author\'s page geometry (F-050) and DELETE /api/docs/:doc retire exists (F-081)', () => {
     const range = INTERACTIVE_SPEC.split('@')[1] ?? '';
+    expect(range).toBe(INTERACTIVE_DEFAULT_RANGE);
     const m = /^\^?(\d+)\.(\d+)\.(\d+)/.exec(range);
     expect(m, `unparseable range: ${range}`).not.toBeNull();
     const [maj, min, pat] = [Number(m![1]), Number(m![2]), Number(m![3])];
-    // 0.8.0 lacks GET /d/:docId/api/theme/learned (interactive#181/#182).
-    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 8 * 1_000 + 1);
+    // 0.8.x never picked up 0.9.0 (F-081: the caret was a compiled constant — a silent freeze).
+    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 1);
+  });
+
+  it('WICKED_INTERACTIVE_SPEC overrides the RANGE when it is a semver range; anything else is ignored and NAMED (F-081)', () => {
+    expect(resolveInteractiveSpec({})).toEqual({ spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default' });
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '  ' })).toEqual({ spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default' });
+    for (const range of ['^0.9.1', '0.9.1', '~0.9.1', '>=0.9.1 <1.0.0', '0.10.0-rc.1', ' ^0.9.2 ']) {
+      const r = resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: range });
+      expect(r.source, range).toBe('env');
+      expect(r.spec, range).toBe(`wicked-interactive@${range.trim()}`);
+      expect(interactiveSpec({ [INTERACTIVE_SPEC_ENV]: range })).toBe(r.spec);
+    }
+    // A tag, an x-range, a union, a path, a different package, a whole spec: not a floor within the package.
+    for (const bad of ['latest', 'next', '0.9', '0.9.x', '*', '^0.9.1 || ^1.0.0', '/srv/interactive', 'wicked-interactive@^0.9.1', 'other-pkg']) {
+      expect(validInteractiveRange(bad), bad).toBe(false);
+      const r = resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: bad });
+      expect(r, bad).toEqual({ spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default', rejected: bad });
+    }
   });
 
   it('names the package in CODE exactly once — so the hint cannot drift from the spawn', () => {
@@ -49,10 +74,10 @@ describe('the wicked-interactive spec crew resolves', () => {
     ).toBe(1);
   });
 
-  it('spawns and reproduces with the SAME spec', () => {
-    // The spawn argv and the operator hint must both interpolate the constant.
-    expect(SOURCE).toMatch(/nodeSpawn\('npx',\s*\['--yes',\s*INTERACTIVE_SPEC,/);
-    expect(SOURCE).toMatch(/return `npx \$\{INTERACTIVE_SPEC\} serve --root \$\{root\}`;/);
+  it('spawns and reproduces with the SAME spec — both resolved from the live env', () => {
+    // The spawn argv and the operator hint must both go through the one resolver.
+    expect(SOURCE).toMatch(/nodeSpawn\('npx',\s*\['--yes',\s*interactiveSpec\(\),/);
+    expect(SOURCE).toMatch(/return `npx \$\{interactiveSpec\(\)\} serve --root \$\{root\}`;/);
   });
 
   it('keeps --yes: a daemon has no tty to answer npx’s install prompt with', () => {

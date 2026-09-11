@@ -95,18 +95,31 @@ describe('resolveChatScope — project scope (the default)', () => {
     expect(res.scope.cwd).toBe(join(base, 'c1'));
   });
 
-  it('a project whose graph cannot be bound still scopes the repos and SAYS why there is no graph', async () => {
+  it('a project whose graph cannot be bound still scopes the repos and SAYS why there is no graph — with the UI action that would build it (F-2R2-008)', async () => {
     const d = deps({
-      bindProjectGraph: async () => ({ binding: null, reason: 'the project graph has not been built yet. This repo-less run gets no code graph.' }),
+      bindProjectGraph: async () => ({
+        binding: null,
+        reason: "This project's code graph has not been built yet — build it from the project page. Chat still reads the repositories directly.",
+        action: 'projects.graph.refresh',
+      }),
     });
     const res = await resolveChatScope({ chatId: 'c1', projectId: 'p1', repoRefs: [] }, d);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.scope.repos).toHaveLength(2);
-    expect(res.scope.graph.bound).toBe(false);
-    expect(res.scope.graph.reason).toMatch(/not been built/);
+    expect(res.scope.graph).toEqual({
+      bound: false,
+      reason: "This project's code graph has not been built yet — build it from the project page. Chat still reads the repositories directly.",
+      action: 'projects.graph.refresh',
+    });
     expect(res.engine.codeGraphDb).toBeNull();
     expect(res.engine.readRoots).toHaveLength(2);
+    // A BOUND decision never carries an action, even if the resolver set one.
+    const bound = deps({
+      bindProjectGraph: async () => ({ binding: { dbPath: '/g.db' }, reason: 'bound.', action: 'projects.graph.refresh' }),
+    });
+    const ok = await resolveChatScope({ chatId: 'c2', projectId: 'p1', repoRefs: [] }, bound);
+    expect(ok.ok && ok.scope.graph).toEqual({ bound: true, reason: 'bound.' });
   });
 
   it('a binding that THROWS degrades to no graph with the cause, never a failed open', async () => {

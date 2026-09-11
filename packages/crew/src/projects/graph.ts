@@ -48,6 +48,7 @@ import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
 import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
   ProjectBlastRadius,
+  ProjectGraphAction,
   ProjectGraphHit,
   ProjectGraphRefreshResult,
   ProjectGraphRepo,
@@ -398,13 +399,18 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
     };
   }
   if (!dbExists || indexedCount === 0) {
+    // Customer copy (F-2R2-008): this sentence is what a chat's scope card and the project page
+    // show a person, so it names the page action, not the route — the route rides on `action` for
+    // the UI to wire. The member count says how big the build is.
+    const n = members.repos.length;
     return {
       ...base,
       state: 'not-indexed',
       detail:
-        `Project ${projectId} has ${members.repos.length} repo member(s) but no code graph yet. ` +
-        `Build it with POST /api/v1/projects/${projectId}/graph/refresh.` +
-        (dangling === '' ? '' : ` (${dangling} is a member the repo registry does not know.)`),
+        `This project's code graph has not been built yet — build it from the project page ` +
+        `(${n} member repositor${n === 1 ? 'y' : 'ies'}).` +
+        (dangling === '' ? '' : ` (${dangling} is listed as a member but is no longer a registered repository.)`),
+      action: 'projects.graph.refresh',
     };
   }
   if (indexedCount === 1) {
@@ -759,6 +765,9 @@ export interface ProjectGraphBindingDecision {
   binding: ProjectGraphBinding | null;
   /** One sentence: what the run got, and what would change it. */
   reason: string;
+  /** The UI action that would change a `binding: null` outcome, when one would (F-2R2-008):
+   *  `projects.graph.refresh` = build/refresh the project graph from the project page. */
+  action?: ProjectGraphAction;
 }
 
 /**
@@ -785,10 +794,23 @@ function labelList(labels: string[]): string {
  * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
  * exist and sends whoever is debugging it looking for one.
  */
-function degradedTo(repoRef: string | undefined): string {
+function degradedTo(repoRef: string | undefined, subject: BindingSubject): string {
+  if (subject === 'chat') return 'Chat still reads the repositories directly.';
   return repoRef === undefined
     ? 'This repo-less run gets no code graph.'
     : "This run uses its own repo's code graph in the meantime.";
+}
+
+/**
+ * WHO is asking for the binding — a governed run or a chat. The two degrade to different things
+ * (a chat has no worktree and no "own repo", it keeps reading the scoped roots directly), and
+ * F-2R2-008 recorded a 9-repo project chat being told "this repo-less run gets no code graph".
+ */
+export type BindingSubject = 'run' | 'chat';
+
+export interface ResolveBindingOptions {
+  /** Default `'run'`. */
+  subject?: BindingSubject;
 }
 
 /**
@@ -821,7 +843,9 @@ export async function resolveProjectGraphBinding(
   projectId: string,
   repoRef: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  opts: ResolveBindingOptions = {},
 ): Promise<ProjectGraphBindingDecision> {
+  const subject: BindingSubject = opts.subject ?? 'run';
   let status: ProjectGraphStatus;
   try {
     status = await projectGraphStatus(adapter, projectId, env);
@@ -843,14 +867,15 @@ export async function resolveProjectGraphBinding(
     // the run is still perfectly launchable against its own repo's graph.
     return {
       binding: null,
-      reason: `the project graph could not be read (${message(err)}). ${degradedTo(repoRef)}`,
+      reason: `the project graph could not be read (${message(err)}). ${degradedTo(repoRef, subject)}`,
     };
   }
 
   if (status.dbPath === null) {
     return {
       binding: null,
-      reason: `${status.detail} ${degradedTo(repoRef)}`,
+      reason: `${status.detail} ${degradedTo(repoRef, subject)}`,
+      ...(status.action !== undefined ? { action: status.action } : {}),
     };
   }
 
@@ -861,7 +886,8 @@ export async function resolveProjectGraphBinding(
     if (indexed.length === 0) {
       return {
         binding: null,
-        reason: `${status.detail} ${degradedTo(repoRef)}`,
+        reason: `${status.detail} ${degradedTo(repoRef, subject)}`,
+        ...(status.action !== undefined ? { action: status.action } : {}),
       };
     }
     // The COUNT is exact; the label list is capped. This string is a log line on every repo-less

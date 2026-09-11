@@ -2017,16 +2017,41 @@ export class CoreAdapter {
     await this.launchRun({
       problem: `Onboard repository: ${repoName}`,
       sessionId: runId,
-      clisJson: JSON.stringify(CoreAdapter.roster()),
+      // The run's seat pool is the seats the WORKFLOW can use (F-2R2-010): onboarding is two tool
+      // phases routed to the `wicked-estate` executor, so its pool is empty — not the whole roster
+      // dressed up as a 5-seat run with four signed-out seats.
+      clisJson: JSON.stringify(this.seatsForWorkflow('onboarding')),
       workflow: 'onboarding',
       repoRef: repoId,
     });
     this.repoOnboardRunIds.set(repoId, runId);
   }
 
+  /**
+   * The roster a run of `workflowId` should carry as its seat pool. A workflow whose every phase
+   * runs a TOOL executor convenes no council and dispatches no seat, so its pool is `[]` — the
+   * engine routes each unit `tool` without consulting the pool (verified against the engine: an
+   * onboarding launch with `clis: []` distributes both units to `wicked-estate`). Any workflow
+   * with an agent phase — or one this daemon cannot read — gets the full roster, as before.
+   */
+  seatsForWorkflow(workflowId: string): unknown[] {
+    const def = this.getWorkflow(workflowId);
+    if (def === null || def.phases.length === 0) return CoreAdapter.roster();
+    const toolOnly = def.phases.every((p) => p.executor?.type === 'tool');
+    return toolOnly ? [] : CoreAdapter.roster();
+  }
+
   /** Return the onboarding run id for a repo (undefined if not launched this session). */
   getOnboardRunId(repoId: string): string | undefined {
     return this.repoOnboardRunIds.get(repoId);
+  }
+
+  /** The repo an onboarding run launched by THIS daemon process was for (undefined for any other run). */
+  onboardedRepoOf(runId: string): string | undefined {
+    for (const [repoId, id] of this.repoOnboardRunIds) {
+      if (id === runId) return repoId;
+    }
+    return undefined;
   }
 
   /** List every registered repo. */
