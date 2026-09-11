@@ -106,7 +106,11 @@ rl.on('line', (line) => {
   } else if (msg.id === 'elicit-1' && msg.method === undefined) {
     const r = msg.result ?? {};
     const answer = r.action === 'accept' ? String((r.content ?? {}).response ?? '') : '(' + String(r.action) + ')';
-    w({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'stub-elicit-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ELICIT-ANSWER:' + answer } } } });
+    // A short REPORT around the echo: an admitted seat's unit is governed, and the engine's
+    // substance floor rejects a clean-worktree phase whose whole transcript is under 200 chars
+    // ("phase produced no reviewable substance") — a real agent narrates what it did; so does this one.
+    const report = 'Asked the operator whether to ship the release through an ACP elicitation with an enum-constrained schema (ship-it / hold-off), blocked the turn until the human resolved it through the daemon, and recorded the resolution below so the transcript shows the answer that actually reached this worker. No files were touched; the phase declares executes_code:false.';
+    w({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'stub-elicit-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: report + '\\n' + 'ELICIT-ANSWER:' + answer } } } });
     w({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
   }
 });
