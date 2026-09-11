@@ -2029,7 +2029,11 @@ export class SkillsStore {
     for (const rel of present) {
       const owner = owningSkillDir(rel, skillDirs);
       if (owner === null) {
-        if (inBundleClosure(rel)) visible.add(rel);
+        // EXACTLY validate's selection of support files (review of #532, F-1): an owner-less file
+        // under `skills/` (a `skills/README.md`, a dir whose SKILL.md never registered) is never
+        // shipped, so it must not count as existing here either — or recompute would derive a
+        // reason verify cannot re-derive from the generation, and `current` would be refused.
+        if (!rel.startsWith(`${SKILLS_SUBDIR}/`) && inBundleClosure(rel)) visible.add(rel);
         continue;
       }
       if (enabledDirs.has(owner)) visible.add(rel);
@@ -2798,7 +2802,12 @@ export class SkillsStore {
     const out: SkillConflictFinding[] = [];
     if (rel === 'SKILL.md') out.push(...frontmatterGuard(content, name, { isCore: entry.core, file: `${entry.dir}/SKILL.md` }));
     out.push(...compact([nestedSkillCreateGuard(rel, name), supportFileGuard(rel, name)]));
-    if (entry.portable) out.push(...nonPortableGuard({ [rel]: content }, name, this.writeContext(m, entry.dir, { [rel]: content })));
+    // Warn on every reason this write INTRODUCES — one the skill does not already carry (review
+    // of #532, F-7): an author fixing a non-portable skill file by file still hears about a new
+    // reason, while a reason the skill already has is not repeated on every edit. An entry with
+    // no `portability` yet (an older manifest) knows no reasons, so everything is new.
+    const known = new Set<string>(entry.portability?.reasons ?? []);
+    out.push(...nonPortableGuard({ [rel]: content }, name, this.writeContext(m, entry.dir, { [rel]: content })).filter((f) => f.portabilityReason === undefined || !known.has(f.portabilityReason)));
     return out;
   }
 

@@ -87,7 +87,11 @@ const RELATIVE_RE = new RegExp(`(?<![A-Za-z0-9_./-])((?:\\.\\.\\/)+${PATH_CHARS}
 // The bare `./seg` alternative of the earlier rule is GONE (W4 §5.1): `./dist`, `./out.png`,
 // `import x from './y'` are not invocations of a plugin script — a `./`-prefixed path still counts
 // when an interpreter precedes it and the file exists at the plugin root.
-const INTERPRETER = '(?:python3?|uv\\s+run|bash|sh|zsh|node|npx|tsx|deno\\s+run)';
+// The interpreter may be written as a PATH (`/usr/bin/python3`, `.venv/bin/python`,
+// `./node_modules/.bin/tsx`, `~/bin/node`) — review of #532, F-4: an optional absolute / dot /
+// home prefix and any number of `seg/` before the bare interpreter name.
+const INTERPRETER_PREFIX = '(?:\\/|\\.{1,2}\\/)?(?:[A-Za-z0-9_.+@%=,:~-]+\\/)*';
+const INTERPRETER = `${INTERPRETER_PREFIX}(?:python3?|uv\\s+run|bash|sh|zsh|node|npx|tsx|deno\\s+run)`;
 const VALUED_OPTION =
   '(?:-[WXmcQrepCo]|--(?:require|loader|experimental-loader|import|eval|print|env-file|conditions|input-type|python|with|directory|project|config|import-map))';
 // The bare-flag alternative must NOT be able to match a value-taking option that has a value (the
@@ -109,29 +113,113 @@ const LAUNCHER_RE = new RegExp(
   `(?<![A-Za-z0-9_./-])wicked-garden(?:@[A-Za-z0-9_.^~<>=-]+)?\\s+(?:run|python|path)\\s+${PATH_CHARS}+`,
   'g',
 );
-// A fence line: three or more backticks or tildes, then the info string's first word (the language).
-const FENCE_RE = /^\s*(`{3,}|~{3,})\s*([^\s`{]*)/;
+// A fence line (CommonMark §4.5): at line start, three or more backticks or tildes, then the info
+// string — its first word is the language. A BACKTICK fence's info string may not contain a
+// backtick, so a one-line span like ```` ```ts const x = 1 ``` ```` is a code span, not an opener
+// (review of #532, F-2: it used to open a fence that swallowed the rest of the file). Tilde fences
+// have no such restriction. Group 1 = the marker run, group 2 = the language word.
+const FENCE_RE = /^\s*(?:(`{3,})(?![^`]*`)|(~{3,}))\s*([^\s`{]*)/;
+/** The marker run and language word of a fence line, or `null` when `line` is not a fence line. */
+function fenceLine(line: string): { marker: string; lang: string } | null {
+  const m = FENCE_RE.exec(line);
+  if (m === null) return null;
+  return { marker: m[1] ?? m[2] ?? '', lang: (m[3] ?? '').toLowerCase() };
+}
 /** Fence languages the cwd-script rule DOES scan — shells and prose; anything else (`ts`, `js`, `python`, `yaml`, …) is code the rule ignores. */
 export const SCANNED_FENCE_LANGUAGES: readonly string[] = ['', 'sh', 'bash', 'zsh', 'shell', 'console', 'text'];
 
 /**
- * The rule table both lints share (design W4 §5.3): regex SOURCE strings and markers, spelled once
- * here, vendored as data by garden. `tests/skills-refs.test.ts` asserts the committed fixture equals
- * this object — a drift between the two lints is a failing test, not a surprise at publish.
+ * The NORMATIVE rule table both lints share (design W4 §5.3; review of #532 addendum): every regex
+ * SOURCE string, the markers, the interpreter list, the option-skipping rule, the interpreter
+ * path-prefix rule, the fence walk, the existence and `../` resolution semantics and the
+ * frontmatter key — spelled once here, vendored BYTE-FOR-BYTE by garden as
+ * `tests/portability_rules.json` (crew keeps the canonical copy at
+ * `packages/crew/tests/fixtures/portability_rules.json`, which adds `cases[]` and a
+ * `sha256_of_rules` over exactly this object). `tests/skills-refs.test.ts` asserts the committed
+ * fixture equals this object and re-derives every case — a drift between the two lints is a
+ * failing test, not a surprise at publish. Every regex is valid in BOTH ECMAScript and Python
+ * `re`: fixed-width lookbehinds only, no named groups, no `\h`.
  */
 export const PORTABILITY_RULES = {
-  version: 1,
   markers: { 'plugin-root': PLUGIN_ROOT_MARKER, 'skill-dir-var': SKILL_DIR_MARKER },
+  path_chars: PATH_CHARS,
   regex: {
-    path_chars: PATH_CHARS,
     plugin_root_ref: PLUGIN_ROOT_RE.source,
     relative_ref: RELATIVE_RE.source,
     cwd_script: CWD_SCRIPT_RE.source,
     launcher_call: LAUNCHER_RE.source,
     fence_line: FENCE_RE.source,
   },
-  fence_scanned_languages: [...SCANNED_FENCE_LANGUAGES],
+  /** The rules, one per token: what fires it and which regex source(s) it uses. */
+  rules: [
+    {
+      token: 'plugin-root',
+      description: 'the text contains the marker `${CLAUDE_PLUGIN_ROOT}` (only Claude Code substitutes it); every occurrence is a hit — fences included; regex.plugin_root_ref extracts the path after it',
+      regex: [PLUGIN_ROOT_RE.source],
+    },
+    {
+      token: 'skill-dir-var',
+      description: 'the text contains `${CLAUDE_SKILL_DIR}` (a Claude-only substitution); every occurrence is a hit — fences included',
+      regex: [],
+    },
+    {
+      token: 'cwd-script',
+      description:
+        'an interpreter (bare, or written as a path — see interpreters + interpreter_path_prefix), then options per the option rule, then a relative path token (regex.cwd_script group 1) that, normalized against the PLUGIN ROOT (the worktree cwd), names a file or directory the bundle carries. NOT a hit: a target that exists nowhere in the bundle; a target that exists only inside the skill\'s own directory (base-directory relative — portable); any span matched by regex.launcher_call (masked first); a line inside a fenced code block whose language is not in fences.shell_langs',
+      regex: [LAUNCHER_RE.source, CWD_SCRIPT_RE.source],
+    },
+    {
+      token: 'relative-link',
+      description:
+        'a `../` token (regex.relative_ref) resolved from the referencing file\'s directory that lands INSIDE the plugin root on a path the bundle carries AND whose deepest owning skill directory is not the referencing skill\'s own (a link that stays inside the skill\'s tree survives every layout). An escaping or non-existent target is not a hit',
+      regex: [RELATIVE_RE.source],
+    },
+    {
+      token: 'cross-skill-path',
+      description:
+        'a plugin-root target (regex.plugin_root_ref, resolved against the plugin root) or a resolved `../` target (regex.relative_ref) that exists in the bundle and whose deepest owning skill directory is ANOTHER skill (a nested module\'s parent counts). Reported in addition to plugin-root / relative-link',
+      regex: [PLUGIN_ROOT_RE.source, RELATIVE_RE.source],
+    },
+    {
+      token: 'requires-harness:claude',
+      description:
+        'the skill-root SKILL.md (file == skill_dir + "/SKILL.md") has YAML frontmatter with `metadata.requires-harness` whose value, trimmed and lowercased, is `claude`. Only the skill-root SKILL.md counts (a nested skill\'s own SKILL.md is its skill root)',
+      regex: [],
+    },
+  ],
+  interpreters: ['python', 'python3', 'uv run', 'bash', 'sh', 'zsh', 'node', 'npx', 'tsx', 'deno run'],
+  interpreter_path_prefix: {
+    regex: INTERPRETER_PREFIX,
+    rule: 'the interpreter may be written as a path: an optional leading `/`, `./` or `../`, then any number of `segment/`; the whole token must not be glued to a preceding path character (regex.cwd_script starts with the fixed-width lookbehind)',
+  },
+  options: {
+    valued: ['-W', '-X', '-m', '-c', '-Q', '-r', '-e', '-p', '-C', '-o', '--require', '--loader', '--experimental-loader', '--import', '--eval', '--print', '--env-file', '--conditions', '--input-type', '--python', '--with', '--directory', '--project', '--config', '--import-map'],
+    rule: 'between the interpreter and the path token any number of options is skipped: a bare flag (`-u`, `--frozen`, `--require=x`), or a VALUED option consumed together with its next token (`-W ignore`, `--loader ts-node/esm`); a valued option with no path after it is not an invocation, and its value is never read as the path',
+  },
+  fences: {
+    open: FENCE_RE.source,
+    open_rule: 'a fence opens only at a line start matching fences.open: >= 3 backticks or tildes; the language is the trimmed, lowercased first word of the info string (group 3)',
+    inline_span_is_not_fence: true,
+    inline_span_rule: 'a backtick opener whose remainder contains another backtick (```` ```ts x = 1 ``` ````) is a one-line code span, not a fence — fences.open refuses it with a lookahead; tilde fences have no such restriction',
+    close_rule: 'the fence closes at the next line-start fence of the SAME character whose run is at least as long as the opener and is followed by nothing but whitespace; a shorter run, or a run followed by text, is content',
+    shell_langs: [...SCANNED_FENCE_LANGUAGES],
+    skip_non_shell: true,
+    boundary_lines_scanned: true,
+    unclosed_runs_to_eof: true,
+    applies_to: ['cwd-script'],
+  },
+  existence: {
+    exists: 'a normalized plugin-relative path exists when it is a file the bundle carries, or a directory some carried file sits under; the empty path (the bare root) exists',
+    bundle_universe: 'the files the next publish carries: support files inside the bundle closure OUTSIDE skills/ (`.claude-plugin/**`, `scripts/**` minus ci/ and wg/, `schemas/**`, `docs/examples/**`, `pyproject.toml`, `uv.lock`) plus ENABLED skills\' own files; an owner-less file under skills/ (a `skills/README.md`) is never in it; the judged skill\'s own files are always visible to it',
+    cwd_script_target: 'the path token normalized as if the cwd were the plugin root (`./scripts/x.py` → `scripts/x.py`); one that climbs out (`../x`) is not a plugin file. It is a hit only when it exists AT THE PLUGIN ROOT; existing only inside the skill directory (`<skill_dir>/<token>`) is the base-directory idiom and portable; existing at both is ambiguous and a hit',
+    skill_dirs: 'every directory holding a SKILL.md under skills/; a path\'s owner is the DEEPEST such directory that prefixes it (or none)',
+  },
+  relative_resolution: {
+    plugin_root_ref: 'the path after `${CLAUDE_PLUGIN_ROOT}/`, trailing sentence punctuation (`.`, `,`, `:`) trimmed, posix-normalized, trailing `/` dropped; `..` at the top escapes (never the root); the bare marker is the root',
+    relative_ref: 'the `../…` token, trailing sentence punctuation trimmed, joined onto the referencing file\'s directory and posix-normalized; a result that climbs out of the plugin root escapes (not a link the bundle can carry)',
+  },
   frontmatter: { requires_harness_key: 'metadata.requires-harness', requires_harness_value: 'claude' },
+  evidence: { reasons_sorted_unique: true, anchor_format: '<plugin-relative file>:<line>', cap: 5, portable: 'reasons.length === 0' },
 } as const;
 
 /**
@@ -270,20 +358,28 @@ export function existsIn(files: ReadonlySet<string>, pluginRel: string): boolean
 
 /**
  * Per line: `true` when the line sits inside a fenced code block whose language the cwd-script
- * rule does NOT scan. The opening fence line itself and the closing one are not inside.
+ * rule does NOT scan. The fence algorithm — spelled as data in the parity fixture
+ * (`semantics.fence`) so garden's lint walks the same way:
+ *
+ *   - a fence OPENS only at a line start (`FENCE_RE`): ≥ 3 backticks or tildes, the language is
+ *     the trimmed, lowercased first word of the info string; a backtick opener whose remainder
+ *     contains another backtick is a one-line code span, not a fence;
+ *   - it CLOSES at the next line-start fence of the SAME character, at least as long, with
+ *     nothing but whitespace after the run; a shorter run, or one with text after it, is content;
+ *   - the opening and closing lines themselves are scanned (they are not inside);
+ *   - an unclosed fence runs to the end of the text.
  */
 function skippedFenceMask(lines: readonly string[]): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
   let open: { marker: string; skipped: boolean } | null = null;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
-    const m = FENCE_RE.exec(line);
+    const fence = fenceLine(line);
     if (open === null) {
-      if (m !== null) open = { marker: m[1] ?? '', skipped: !SCANNED_FENCE_LANGUAGES.includes((m[2] ?? '').toLowerCase()) };
+      if (fence !== null) open = { marker: fence.marker, skipped: !SCANNED_FENCE_LANGUAGES.includes(fence.lang) };
       continue;
     }
-    // A closing fence: the same character, at least as long, nothing but whitespace after it.
-    if (m !== null && (m[1] ?? '').charAt(0) === open.marker.charAt(0) && (m[1] ?? '').length >= open.marker.length && (m[2] ?? '') === '' && /^\s*(`{3,}|~{3,})\s*$/.test(line)) {
+    if (fence !== null && fence.marker.charAt(0) === open.marker.charAt(0) && fence.marker.length >= open.marker.length && /^\s*(`{3,}|~{3,})\s*$/.test(line)) {
       open = null;
       continue;
     }

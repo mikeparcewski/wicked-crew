@@ -2988,6 +2988,51 @@ describe('portability per reason (F-079, wicked-crew#531)', () => {
     expect(s.store.manifest().skills['wicked-garden-alpha-nested']?.portability?.reasons).toEqual(['cross-skill-path', 'relative-link']);
   });
 
+  it('recompute and verify judge ONE universe (review of #532, F-1): an owner-less file under skills/ (a `skills/README.md`) is never in the bundle — a `../README.md` link to it derives NO reason at recompute, publish lands, and `current` verifies', async () => {
+    // Upstream ships a top-level `skills/README.md` (no skill owns it — validate never ships it) and
+    // beta links it. Before the fix recompute saw the file (it is inside the closure) and stamped
+    // `relative-link`; verify, judging the generation, derived nothing → `current` was refused
+    // and no re-publish could repair it.
+    writeFileSync(join(s.upstream, 'skills', 'README.md'), '# skills\n\nAn index nobody owns.\n');
+    const beta = join(s.upstream, 'skills', 'beta', 'SKILL.md');
+    writeFileSync(beta, `${readFileSync(beta, 'utf8')}\nSee ../README.md for the index.\n`);
+    s.store.seed();
+    const m = s.store.manifest();
+    expect(Object.keys(m.files)).toContain('skills/README.md'); // recorded — it is in the closure…
+    expect(m.skills['wicked-garden-beta']?.portability).toEqual({ portable: true, reasons: [], evidence: [] }); // …but not in the validator's universe
+    expect(m.skills['wicked-garden-beta']?.portable).toBe(true);
+    const r = await s.store.publish(1);
+    expect(r.snapshot).not.toBeNull();
+    // The link IS broken in the generation — publish says so as unresolved-ref (v3.4 §1) — and the row says portable.
+    expect(r.findings.some((f) => f.kind === 'unresolved-ref' && f.skill === 'wicked-garden-beta')).toBe(true);
+    const snapPath = (r.snapshot as NonNullable<typeof r.snapshot>).path;
+    expect(rels(snapPath)).not.toContain('skills/README.md');
+    expect(snapshotManifest(snapPath).skills.find((x) => x.name === 'wicked-garden-beta')?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    // The whole point: the generation verifies — from this store and from a fresh one.
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
+    // And a second publish is a clean no-drama gen 2, not a repair loop.
+    const again = await s.store.publish(r.revision);
+    expect(again.snapshot?.gen).toBe(2);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(2);
+  });
+
+  it('a write warns on every reason it INTRODUCES, not on ones the skill already carries (review of #532, F-7): editing a non-portable skill still names a NEW reason', () => {
+    s.store.seed();
+    // alpha is non-portable (plugin-root). A file adding skill-dir-var → ONE finding, for the new reason only.
+    const w1 = s.store.writeFile('wicked-garden-alpha', 'refs/more.md', 'ls ${CLAUDE_SKILL_DIR}\nand ${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh\n', 1);
+    expect(w1.verdict).toBe('warnings');
+    expect(w1.findings.filter((f) => f.kind === 'non-portable').map((f) => [f.portabilityReason, f.line])).toEqual([['skill-dir-var', 1]]);
+    expect(w1.skill?.portability?.reasons).toEqual(['plugin-root', 'skill-dir-var']);
+    // The same reasons again in another file → nothing new to say.
+    const w2 = s.store.writeFile('wicked-garden-alpha', 'refs/again.md', '${CLAUDE_PLUGIN_ROOT} and ${CLAUDE_SKILL_DIR}\n', w1.revision);
+    expect(w2.verdict).toBe('clear');
+    expect(w2.findings.filter((f) => f.kind === 'non-portable')).toEqual([]);
+    // A portable skill hears about every reason (nothing is known yet).
+    const w3 = s.store.writeFile('wicked-garden-gamma', 'refs/x.md', 'run `python3 scripts/alpha/run.py`\n', w2.revision);
+    expect(w3.findings.filter((f) => f.kind === 'non-portable').map((f) => f.portabilityReason)).toEqual(['cwd-script']);
+  });
+
   it('an older `portable`-only manifest (written before 0.7.30) still loads; the next recompute fills `portability` in', () => {
     s.store.seed();
     const manifestPath = join(s.root, 'manifest.json');

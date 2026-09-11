@@ -3,6 +3,7 @@
 // the `portable` flag with its `portability.reasons`; the parity fixture wicked-garden vendors; the
 // strict frontmatter subset; the qualified-name token rules the core closure reads mandates with.
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -87,21 +88,48 @@ describe('extractRelativeRefs + resolveRelativeRef', () => {
 
 // ── The portability validator (F-079) ──────────────────────────────────────────────────────────
 
-/** The committed parity fixture — the rule table garden vendors verbatim, plus the shared corpus. */
-const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/portability_rules.json', import.meta.url), 'utf8')) as {
-  rules: unknown;
+/**
+ * The committed parity fixture — the CANONICAL artifact garden vendors verbatim
+ * (`tests/portability_rules.json` there): every normative member equals `PORTABILITY_RULES`, a
+ * sha256 over them detects drift, and `cases[]` is what BOTH lints must derive.
+ */
+interface FixtureCase {
+  name: string;
+  kind: string;
+  file: string;
+  skill_dir: string;
+  text: string;
+  exists?: string[];
+  expected: string[];
+  first_line?: Record<string, number>;
+}
+const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/portability_rules.json', import.meta.url), 'utf8')) as Record<string, unknown> & {
+  version: number;
+  sha256_covers: string[];
+  sha256_of_rules: string;
   bundle: { files: string[]; skill_dirs: string[] };
-  corpus: Array<{ name: string; file: string; text: string; expect: string[]; first_line?: Record<string, number> }>;
+  cases: FixtureCase[];
 };
+/** Canonical JSON: keys sorted recursively, no whitespace — what `sha256_algorithm` prescribes (Python: `json.dumps(sort_keys=True, separators=(',',':'), ensure_ascii=False)`). */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+const skillDirsOfFiles = (files: readonly string[]): Set<string> => new Set(files.filter((f) => f.startsWith('skills/') && f.endsWith('/SKILL.md')).map((f) => f.slice(0, -'/SKILL.md'.length)));
+/** A context over the fixture bundle (or a case's own `exists`) for the file at `fileRel`. */
+const ctxOver = (fileRel: string, files: readonly string[], skillDir?: string): PortabilityContext => {
+  const set = new Set(files);
+  const dirs = skillDirsOfFiles(files);
+  const own = skillDir ?? owningSkillDir(fileRel, dirs) ?? fileRel.split('/').slice(0, 2).join('/');
+  dirs.add(own);
+  return { fileRel, skillDir: own, skillDirs: dirs, exists: (p) => existsIn(set, p) };
+};
+const ctxFor = (fileRel: string): PortabilityContext => ctxOver(fileRel, FIXTURE.bundle.files);
 const BUNDLE = new Set(FIXTURE.bundle.files);
-const SKILL_DIRS = new Set(FIXTURE.bundle.skill_dirs);
-/** A context over the fixture bundle for the file at `fileRel` — its owner is the deepest skill dir prefixing it. */
-const ctxFor = (fileRel: string): PortabilityContext => ({
-  fileRel,
-  skillDir: owningSkillDir(fileRel, SKILL_DIRS) ?? fileRel.split('/').slice(0, 2).join('/'),
-  skillDirs: SKILL_DIRS,
-  exists: (p) => existsIn(BUNDLE, p),
-});
 const reasons = (text: string, fileRel = 'skills/qe/SKILL.md'): string[] => portabilityReasonsOf(portabilityIssuesOf(text, ctxFor(fileRel)));
 const hits = (text: string, fileRel = 'skills/qe/SKILL.md'): Array<[string, number]> => portabilityIssuesOf(text, ctxFor(fileRel)).map((h) => [h.reason, h.line]);
 
@@ -150,6 +178,15 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
     expect(portabilityIssuesOf('run `python3 -u scripts/alpha/run.py` now', ctxFor('skills/domain/SKILL.md'))[0]?.evidence).toBe('python3 -u scripts/alpha/run.py');
   });
 
+  it('cwd-script: an interpreter written as a PATH counts too (review of #532, F-4) — absolute, venv, `./node_modules/.bin`, `~/bin`; the script must still be a root-relative plugin file', () => {
+    for (const t of ['`/usr/bin/python3 scripts/x.py`', '`.venv/bin/python scripts/x.py`', '`./node_modules/.bin/tsx scripts/x.ts`', '`~/bin/node lib/x.mjs`', '`../tools/bash scripts/_python.sh`']) {
+      expect(reasons(t, 'skills/domain/SKILL.md'), t).toEqual(['cwd-script']);
+    }
+    expect(reasons('`/usr/bin/python3 /abs/x.py`', 'skills/domain/SKILL.md')).toEqual([]);
+    expect(reasons('`/usr/bin/python3 -m pytest`', 'skills/domain/SKILL.md')).toEqual([]);
+    expect(portabilityIssuesOf('`/usr/bin/python3 scripts/x.py`', ctxFor('skills/domain/SKILL.md'))[0]?.evidence).toBe('/usr/bin/python3 scripts/x.py');
+  });
+
   it('cwd-script is NOT: a target that exists nowhere in the bundle (the §3 false positives), absolute / `~` / `$` paths, a module or inline program, a value-taking option with no path after it, a bare `./seg` without an interpreter', () => {
     for (const t of [
       'Run `go test ./...` before pushing.',
@@ -180,26 +217,29 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
   it('cwd-script: a relative script that exists only INSIDE the skill\'s own directory is the base-directory idiom — portable; one that also exists at the root is ambiguous — flagged', () => {
     expect(reasons('Run `python3 scripts/local.py diagnose` from this skill\'s base directory.')).toEqual([]);
     // Both `skills/qe/scripts/x.py` (own) and `scripts/x.py` (root) would exist here: the worktree reading is possible.
-    const both = new Set([...BUNDLE, 'skills/qe/scripts/x.py']);
-    const ctx: PortabilityContext = { ...ctxFor('skills/qe/SKILL.md'), exists: (p) => existsIn(both, p) };
+    const ctx = ctxOver('skills/qe/SKILL.md', [...BUNDLE, 'skills/qe/scripts/x.py']);
     expect(portabilityReasonsOf(portabilityIssuesOf('`python3 scripts/x.py`', ctx))).toEqual(['cwd-script']);
   });
 
-  it('cwd-script: the launcher forms are portable — `wicked-garden run|python|path`, `$(…)`, `npx wicked-garden@12 …`', () => {
+  it('cwd-script: the launcher forms are portable — `wicked-garden run|python|path`, `$(…)`, `npx wicked-garden@12 …`, `cd "$WICKED_GARDEN_ROOT" && …`; `cd "${CLAUDE_PLUGIN_ROOT}" && uv run python scripts/x` is both reasons', () => {
     expect(reasons('Run `wicked-garden run scripts/qe/campaign_dispatch.py <name>` first.')).toEqual([]);
     expect(reasons('WT_LIB="$(wicked-garden path scripts/qe/lib)"')).toEqual([]);
     expect(reasons('`wicked-garden python scripts/x.py --check`')).toEqual([]);
     expect(reasons('`npx wicked-garden@12 run scripts/qe/lib/x.mjs --help`')).toEqual([]);
+    expect(reasons('cd "$WICKED_GARDEN_ROOT" && wicked-garden run scripts/_run.py --help')).toEqual([]);
+    expect(reasons('cd "${CLAUDE_PLUGIN_ROOT}" && uv run python scripts/_run.py --help', 'skills/domain/SKILL.md')).toEqual(['cwd-script', 'plugin-root']);
     // …and masking the launcher does not hide a SECOND, genuine invocation on the same line.
     expect(reasons('`wicked-garden run scripts/x.py` or `python3 scripts/x.py`', 'skills/domain/SKILL.md')).toEqual(['cwd-script']);
   });
 
-  it('cwd-script ignores fenced code whose language is not a shell (ts, js, python, yaml, …) and scans sh/bash/zsh/shell/console/text and bare fences; an unclosed fence runs to EOF', () => {
+  it('cwd-script ignores fenced code whose language is not a shell (ts, js, python, yaml, json …) and scans sh/bash/zsh/shell/console/text and bare fences; an unclosed fence runs to EOF; the language compares case-insensitively', () => {
     expect(reasons('```ts\nnode scripts/qe/lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([]);
     expect(reasons('~~~python\npython3 scripts/x.py\n~~~', 'skills/domain/SKILL.md')).toEqual([]);
     expect(reasons('```js\nnode scripts/qe/lib/x.mjs', 'skills/domain/SKILL.md')).toEqual([]);
     expect(reasons('```yaml\nrun: python3 scripts/x.py\n```', 'skills/domain/SKILL.md')).toEqual([]);
+    expect(reasons('```json\n{"cmd": "python3 scripts/x.py"}\n```', 'skills/domain/SKILL.md')).toEqual([]);
     expect(hits('```bash\nnode scripts/qe/lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 2]]);
+    expect(hits('```Bash\nnode scripts/qe/lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 2]]);
     expect(reasons('```\npython3 scripts/x.py\n```', 'skills/domain/SKILL.md')).toEqual(['cwd-script']);
     expect(reasons('```console\n$ python3 -u scripts/alpha/run.py\n```', 'skills/domain/SKILL.md')).toEqual(['cwd-script']);
     expect(reasons('```sh title=run.sh\nnode lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual(['cwd-script']);
@@ -207,8 +247,19 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
     // four-backtick ts fence does not close it (scanning stays off); a longer run does.
     expect(reasons('````ts\n```\nnode lib/x.mjs\n````', 'skills/domain/SKILL.md')).toEqual([]);
     expect(hits('```ts\n````\nnode lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 3]]);
+    // A run followed by text is content, not a closer.
+    expect(reasons('```ts\n``` not a closer\nnode lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([]);
     // After the fence closes, scanning resumes.
     expect(hits('```ts\nx\n```\nnode lib/x.mjs', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 4]]);
+  });
+
+  it('a ONE-LINE ```` ```lang … ``` ```` span is a code span, not a fence opener (review of #532, F-2): the rest of the file is still scanned; a tilde one-liner has no such rule', () => {
+    expect(hits('```ts const x = 1 ```\nnode scripts/qe/lib/x.mjs', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 2]]);
+    expect(hits('Inline ```js require("x")``` in prose.\n`python3 scripts/x.py`', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 2]]);
+    // The opener line itself is scanned when it is a span: an invocation on it counts.
+    expect(hits('```sh python3 scripts/x.py ```', 'skills/domain/SKILL.md')).toEqual([['cwd-script', 1]]);
+    // A genuine opener with an info string but no second backtick still opens.
+    expect(reasons('```ts title="x"\nnode lib/x.mjs\n```', 'skills/domain/SKILL.md')).toEqual([]);
   });
 
   it('relative-link: a `../` whose resolved target EXISTS in the bundle and lies outside the skill\'s own tree; an unresolvable or escaping one is not a link the flat layout could break', () => {
@@ -225,6 +276,7 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
     expect(reasons('See ../search/refs/hotspots.md for ranking.', 'skills/domain/SKILL.md')).toEqual(['cross-skill-path', 'relative-link']);
     expect(reasons('Read `${CLAUDE_PLUGIN_ROOT}/skills/domain/refs/x.md`.')).toEqual(['cross-skill-path', 'plugin-root']);
     expect(reasons('Follow the parent contract in [search](../SKILL.md).', 'skills/search/codebase-narrator/SKILL.md')).toEqual(['cross-skill-path', 'relative-link']);
+    expect(reasons('See [narrator](../codebase-narrator/SKILL.md).', 'skills/search/refs/hotspots.md')).toEqual(['cross-skill-path', 'relative-link']);
     // A plugin-root ref into the skill's OWN dir, or into a shared dir, is plugin-root alone.
     expect(reasons('Read("${CLAUDE_PLUGIN_ROOT}/skills/qe/refs/plan.md")')).toEqual(['plugin-root']);
     expect(reasons('${CLAUDE_PLUGIN_ROOT}/schemas/evidence.json')).toEqual(['plugin-root']);
@@ -233,11 +285,12 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
     expect(reasons('../domain/refs/missing.md')).toEqual([]);
   });
 
-  it('requires-harness:claude: declared in the skill-root SKILL.md frontmatter under `metadata`, value `claude` (trimmed, case-insensitive); anything else is nothing', () => {
+  it('requires-harness:claude: declared in the skill-root SKILL.md frontmatter under `metadata`, value `claude` (trimmed, case-insensitive); a nested skill\'s own SKILL.md is its root; anything else is nothing', () => {
     const declared = '---\nname: wicked-garden-qe\nmetadata:\n  requires-harness: claude\n---\n\n# qe\n';
     expect(hits(declared)).toEqual([['requires-harness:claude', 4]]);
     expect(portabilityIssuesOf(declared, ctxFor('skills/qe/SKILL.md'))[0]?.evidence).toBe('metadata.requires-harness: claude');
     expect(reasons('---\nname: wicked-garden-qe\nmetadata:\n  requires-harness: Claude \n---\n')).toEqual(['requires-harness:claude']);
+    expect(reasons(declared.replace('wicked-garden-qe', 'wicked-garden-search-codebase-narrator'), 'skills/search/codebase-narrator/SKILL.md')).toEqual(['requires-harness:claude']);
     expect(reasons('---\nname: wicked-garden-qe\nmetadata:\n  requires-harness: codex\n---\n')).toEqual([]);
     expect(reasons('---\nname: wicked-garden-qe\nrequires-harness: claude\n---\n')).toEqual([]); // not under metadata
     expect(reasons('---\nname: wicked-garden-qe\nmetadata: claude\n---\n')).toEqual([]); // not a mapping
@@ -261,34 +314,56 @@ describe('portabilityIssuesOf — every reason, with lines (F-079)', () => {
   });
 });
 
-describe('the parity fixture (tests/fixtures/portability_rules.json) — what garden vendors', () => {
-  it('carries EXACTLY the live rule table: markers, regex sources, fence languages, the frontmatter key — a drift between the two lints fails here, not at publish', () => {
-    // Regenerate the `rules` block when a rule changes (then re-vendor in garden):
-    //   npx tsx -e "import {PORTABILITY_RULES} from './src/skills/refs.ts'; console.log(JSON.stringify(PORTABILITY_RULES, null, 2))"
-    expect(FIXTURE.rules).toEqual(JSON.parse(JSON.stringify(PORTABILITY_RULES)));
+describe('the CANONICAL parity fixture (tests/fixtures/portability_rules.json) — what garden vendors verbatim', () => {
+  it('every normative member equals the live rule table, the covered set is exactly PORTABILITY_RULES, and sha256_of_rules re-derives — a drift between the two lints fails here, not at publish', () => {
+    // Regenerate when a rule changes (then re-vendor in garden): dump PORTABILITY_RULES with
+    //   npx tsx -e "import {PORTABILITY_RULES} from './src/skills/refs.ts'; process.stdout.write(JSON.stringify(PORTABILITY_RULES))"
+    // and rebuild the fixture from it (the sha256 below is over the canonical JSON of the covered members).
+    expect(FIXTURE.version).toBe(2);
+    expect([...FIXTURE.sha256_covers].sort()).toEqual(Object.keys(PORTABILITY_RULES).sort());
+    const normative: Record<string, unknown> = {};
+    for (const k of FIXTURE.sha256_covers) normative[k] = FIXTURE[k];
+    expect(normative).toEqual(JSON.parse(JSON.stringify(PORTABILITY_RULES)));
+    expect(createHash('sha256').update(canonicalJson(normative), 'utf8').digest('hex')).toBe(FIXTURE.sha256_of_rules);
+    expect(FIXTURE.sha256_of_rules).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('every regex source is ALSO a valid pattern under the constraints Python\'s `re` shares — fixed-width lookbehinds only, no named groups', () => {
-    const rules = PORTABILITY_RULES.regex;
-    for (const [name, source] of Object.entries(rules)) {
+  it('every regex source (the named table, each rule\'s list, the fence opener, the interpreter prefix) is a valid pattern under the constraints Python\'s `re` shares — fixed-width lookbehinds only, no named groups, no \\h', () => {
+    const sources: Array<[string, string]> = [
+      ...Object.entries(PORTABILITY_RULES.regex),
+      ...PORTABILITY_RULES.rules.flatMap((r) => r.regex.map((src, i): [string, string] => [`${r.token}[${i}]`, src])),
+      ['fences.open', PORTABILITY_RULES.fences.open],
+      ['interpreter_path_prefix', PORTABILITY_RULES.interpreter_path_prefix.regex],
+    ];
+    for (const [name, source] of sources) {
       expect(() => new RegExp(source), name).not.toThrow();
-      // Every lookbehind body is a single character class or literal (fixed width one).
       for (const m of source.matchAll(/\(\?<[=!]([^)]*)\)/g)) {
         expect(m[1], `${name}: lookbehind ${m[0]} must be fixed-width`).toMatch(/^(\[[^\]]+\]|\\?.)$/);
       }
       expect(source, `${name}: no named groups`).not.toMatch(/\(\?<[A-Za-z]/);
+      expect(source, `${name}: no \\h`).not.toMatch(/\\h/);
     }
+    // The rule entries name the same sources the table holds — no third spelling.
+    const table = new Set(Object.values(PORTABILITY_RULES.regex));
+    for (const r of PORTABILITY_RULES.rules) for (const src of r.regex) expect(table.has(src), `${r.token} uses a regex not in the table`).toBe(true);
+    expect(PORTABILITY_RULES.fences.open).toBe(PORTABILITY_RULES.regex.fence_line);
+    expect(PORTABILITY_RULES.rules.map((r) => r.token)).toEqual([...PORTABILITY_REASONS]);
   });
 
-  it('the shared corpus derives its expected reasons (and first lines) through refs.ts', () => {
-    expect(FIXTURE.corpus.length).toBeGreaterThan(40);
-    for (const entry of FIXTURE.corpus) {
-      const got = portabilityIssuesOf(entry.text, ctxFor(entry.file));
-      expect(portabilityReasonsOf(got), entry.name).toEqual(entry.expect);
-      for (const [reason, line] of Object.entries(entry.first_line ?? {})) {
-        expect(got.find((h) => h.reason === reason)?.line, `${entry.name}: first line of ${reason}`).toBe(line);
+  it('every case derives EXACTLY its expected reasons (and first lines) through refs.ts — the contract both lints must meet', () => {
+    expect(FIXTURE.cases.length).toBeGreaterThan(80);
+    expect(new Set(FIXTURE.cases.map((c) => c.name)).size).toBe(FIXTURE.cases.length);
+    for (const c of FIXTURE.cases) {
+      const got = portabilityIssuesOf(c.text, ctxOver(c.file, c.exists ?? FIXTURE.bundle.files, c.skill_dir));
+      expect(portabilityReasonsOf(got), c.name).toEqual(c.expected);
+      expect([...c.expected], `${c.name}: expected is sorted+unique`).toEqual([...new Set(c.expected)].sort());
+      for (const [reason, line] of Object.entries(c.first_line ?? {})) {
+        expect(got.find((h) => h.reason === reason)?.line, `${c.name}: first line of ${reason}`).toBe(line);
       }
     }
+    // The coordinator's required categories are all present.
+    const kinds = new Set(FIXTURE.cases.map((c) => c.kind));
+    for (const k of ['false-positive', 'launcher', 'base-dir', 'fence', 'path-prefix', 'plugin-root', 'skill-dir-var', 'cwd-script', 'relative-link', 'cross-skill-path', 'requires-harness', 'mixed']) expect(kinds.has(k), k).toBe(true);
   });
 });
 

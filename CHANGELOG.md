@@ -35,11 +35,15 @@ mentioned only where a daemon release depends on them.
     `SkillEntry.portability?`, `SkillConflictFinding.portabilityReason?`; endpoint manifest +
     generated API tests re-stamped.
 - **A pi seat receives the skills snapshot over the ACP carrier (`WICKED_PI_SKILL_DIRS`).**
-  `agent-acp-bridges` honours the variable wicked-core#441 sets — the snapshot's deliverable
-  portable skill dirs, OS-path-delimited — as `--no-skills --skill <dir>…` ahead of pi's own
-  arguments: in `runBridge` for any bridge that spawns `pi`, and through the new `wicked-pi`
-  launcher bin, which the daemon hands to the community `pi-acp` adapter via `PI_ACP_PI_COMMAND`
-  at boot (an operator's own value is respected). Unset → the pi launch is unchanged.
+  `agent-acp-bridges` **1.1.0** honours the variable wicked-core#441 sets — the snapshot's
+  deliverable portable skill dirs, OS-path-delimited — as `--no-skills --skill <dir>…` ahead of
+  pi's own arguments: in `runBridge` for any bridge that spawns `pi`, and through the new
+  `wicked-pi` launcher bin, which the daemon hands to the community `pi-acp` adapter via
+  `PI_ACP_PI_COMMAND` at boot (an operator's own value is respected). Unset → the pi launch is
+  unchanged. **Requires `agent-acp-bridges` ≥ 1.1.0 on the registry** (`bridges-v1.1.0`, cut
+  BEFORE the crew release that ships this): a published crew resolving 1.0.0 warns once at boot
+  and a pi seat over ACP receives no skills, exactly as before. The `wicked-pi` process is known
+  to the orphan reaper.
 
 ## [0.7.29] — 2026-09-11
 

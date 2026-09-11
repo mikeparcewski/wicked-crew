@@ -222,9 +222,11 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // The pi seat's ACP carrier (community pi-acp) spawns whatever `PI_ACP_PI_COMMAND` names as pi:
   // point it at the packaged `wicked-pi` launcher, which turns the engine's `WICKED_PI_SKILL_DIRS`
   // into pi's `--no-skills --skill <dir>…` (F-079). An operator's own value is left alone.
+  // Expected on an install whose `agent-acp-bridges` predates 1.1.0 (no `wicked-pi` bin yet):
+  // ONE warning naming the remedy, not an error on every boot (review of #532, F-3).
   const piCommand = ensurePiLauncherCommand();
   if (piCommand === null) {
-    console.error(`[crew] ${PI_ACP_COMMAND_ENV} not set: no wicked-pi launcher shim found beside the bridges — a pi seat over ACP receives no skills`);
+    console.warn(`[crew] ${PI_ACP_COMMAND_ENV} not set — no wicked-pi launcher beside the ACP bridges (agent-acp-bridges < 1.1.0): a pi seat over ACP receives no skills; upgrade with \`npm i agent-acp-bridges@^1.1.0\` (bundled with wicked-crew once bridges-v1.1.0 is published)`);
   }
   // Every crew-side durable store follows the SAME state home as the core db (crew#330 for the
   // project graphs, crew#353 for the project settings): a daemon isolated with

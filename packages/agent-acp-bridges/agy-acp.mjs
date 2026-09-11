@@ -18,6 +18,6 @@ process.on('unhandledRejection', (reason) => {
 // prompt-level worktree instruction remains the second layer.
 runBridge({
   name: 'agy-acp',
-  version: '1.0.0',
+  version: '1.1.0',
   invocation: (prompt, cwd) => ({ bin: 'agy', args: ['--add-dir', cwd, '-p', prompt] }),
 });
