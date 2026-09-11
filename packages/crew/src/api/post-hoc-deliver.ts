@@ -21,7 +21,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { deliverPrScript } from '../core/deliver.js';
+import { deliverPrScript, type DeliverScriptOptions } from '../core/deliver.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
@@ -36,8 +36,14 @@ export interface DeliverScriptResult {
 }
 
 /** The exec seam the deliver route runs the script through — injectable so route tests can
- *  point HOME/PATH at a fixture (a stub `gh`, a temp home) without touching the daemon env. */
-export type DeliverExec = (workdir: string, intent?: string) => Promise<DeliverScriptResult>;
+ *  point HOME/PATH at a fixture (a stub `gh`, a temp home) without touching the daemon env.
+ *  `opts` is the script's PR/commit text context (crew#524): the run id, the facts the route
+ *  already holds for the fallback text, and this daemon's own origin for the run-record fetch. */
+export type DeliverExec = (
+  workdir: string,
+  intent?: string,
+  opts?: DeliverScriptOptions,
+) => Promise<DeliverScriptResult>;
 
 /** A worktree stood back up from a run's `wicked/<id>` branch, plus its teardown (crew#418). */
 export interface ReprovisionedWorktree {
@@ -116,18 +122,20 @@ const SCRIPT_TIMEOUT_MS = 5 * 60_000;
 /**
  * The production {@link DeliverExec}: `bash -lc <script>` in the run's worktree — the exact
  * invocation core's `run_tool_cmd` uses for the deliver phase (login shell, so the operator's
- * PATH — where `gh` lives — is loaded). `env` overlays the daemon's own environment; tests use
- * it to substitute HOME (whose `.bash_profile` prepends a stub `gh`), production passes none.
+ * PATH — where `gh` lives — is loaded). `opts` is the PR/commit text context (crew#524). `env`
+ * overlays the daemon's own environment; tests use it to substitute HOME (whose `.bash_profile`
+ * prepends a stub `gh`), production passes none.
  */
 export function runDeliverScript(
   workdir: string,
   intent?: string,
+  opts?: DeliverScriptOptions,
   env?: Record<string, string>,
 ): Promise<DeliverScriptResult> {
   return new Promise((resolve) => {
     execFile(
       'bash',
-      ['-lc', deliverPrScript(intent)],
+      ['-lc', deliverPrScript(intent, opts)],
       {
         cwd: workdir,
         // The daemon's governance-store variables never ride into the deliver shell: the helper is

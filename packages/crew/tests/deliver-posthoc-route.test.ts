@@ -183,7 +183,7 @@ function buildApp(views: SessionView[], env: Record<string, string>): App {
       deliveryIndex: new DeliveryIndex(),
       deliverExec: (workdir, intent) => {
         calls += 1;
-        return runDeliverScript(workdir, intent, env);
+        return runDeliverScript(workdir, intent, undefined, env);
       },
     },
   );

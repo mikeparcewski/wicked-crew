@@ -1009,6 +1009,19 @@ export class CoreAdapter {
   readonly stub: boolean;
   /** The governance store this adapter exported to the engine (crew#495), or `null` when none was resolved. */
   readonly governanceStore: GovernanceStoreLocation | null;
+  /**
+   * This daemon's own bound origin, resolved LAZILY (crew#524): the adapter exists before the
+   * server listens, so `registerRoutes` hands a getter rather than a value. The deliver phase
+   * composed for a run bakes the origin in, so its script can ask `GET /runs/:id/deliver-text`
+   * for the run-derived PR text at delivery time and the PR body can link the run. `null` (a
+   * CLI-driven adapter with no daemon) ⇒ the script carries only its launch-time text.
+   */
+  private deliverApiOrigin: (() => string | null) | null = null;
+
+  /** Hand the adapter the way to learn this daemon's own origin (see `deliverApiOrigin`). */
+  setDeliverApiOrigin(get: () => string | null): void {
+    this.deliverApiOrigin = get;
+  }
 
   constructor(opts: CoreAdapterOptions) {
     // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
@@ -1340,11 +1353,16 @@ export class CoreAdapter {
           // second `deliver` phase would collide on id — launch the def as-is; the intent
           // ("this run opens its PR") is already satisfied.
         } else {
-          // The run's intent rides along so the commit the deliver phase makes NAMES what it
-          // delivered (`wicked-crew run <id>: <intent>`, #318) instead of being an anonymous
-          // blob. Composition stays DEFERRED (#319): deliver and the deliverable floor fold
-          // into one def and one registration below, never two armed ids.
-          composed = composeDeliverWorkflow(composed, input.sessionId, input.problem);
+          // The run's intent rides along so the PR title and the commit subject NAME what was
+          // delivered (#318 — composed from the intent, never `--fill`, crew#524) instead of an
+          // anonymous blob; the repo and this daemon's origin ride too, so the phase's fallback
+          // text names the run and its script knows which daemon to ask for the run record.
+          // Composition stays DEFERRED (#319): deliver and the deliverable floor fold into one
+          // def and one registration below, never two armed ids.
+          composed = composeDeliverWorkflow(composed, input.sessionId, input.problem, {
+            repoRef: input.repoRef ?? null,
+            apiOrigin: this.deliverApiOrigin?.() ?? null,
+          });
         }
       }
       if (composed !== null && composed.id !== input.workflow) {

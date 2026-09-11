@@ -727,6 +727,16 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/runs/:id/deliver-text",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        404
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/runs/:id/diff",
       "requestType": null,
       "responseType": null,
