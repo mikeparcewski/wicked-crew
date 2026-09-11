@@ -39,7 +39,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -78,6 +78,9 @@ export interface ChatScopeDeps {
   ): Promise<ProjectGraphBindingDecision>;
   /** Where chat scratch roots live. Default {@link chatScratchBase}. */
   scratchBase?: string;
+  /** Where a registered root the daemon cannot resolve — and that is NOT in this chat's scope nor
+   *  lexically near the base — is noted instead of refusing the open (hardening, W7). */
+  log?: (msg: string) => void;
 }
 
 let processScratchBase: string | undefined;
@@ -112,13 +115,23 @@ function realish(p: string): string {
     try {
       const real = realpathSync(cur);
       return tail.length === 0 ? real : join(real, ...tail.reverse());
-    } catch {
+    } catch (err) {
+      // Only a MISSING component walks up (hardening, W7): EACCES, ELOOP, ENOTDIR and friends mean
+      // the path exists but cannot be resolved — the caller decides whether that refuses the open.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const parent = dirname(cur);
       if (parent === cur) return resolve(p);
       tail.push(basename(cur));
       cur = parent;
     }
   }
+}
+
+/** Lexical containment/equality of two resolved-but-not-canonicalized paths. */
+function lexicallyOverlaps(a: string, b: string): boolean {
+  const ra = resolve(a);
+  const rb = resolve(b);
+  return ra === rb || ra.startsWith(rb + sep) || rb.startsWith(ra + sep);
 }
 
 /** Whether `a` and `b` are the same directory or one contains the other, judged on real paths. */
@@ -136,17 +149,46 @@ function overlaps(a: string, b: string): boolean {
  * not). Refused as a 409 — it is an operator setup conflict (a repo registered under the OS temp
  * dir, or a daemon whose TMPDIR sits under a checkout), not a caller error.
  */
-function refuseOverlap(repos: RepoEntry[], base: string): ChatScopeResolution | null {
-  const clash = repos.find((r) => overlaps(r.root_path, base));
-  if (clash === undefined) return null;
-  return {
-    ok: false,
-    status: 409,
-    error:
-      `repo '${clash.name}' is registered at ${clash.root_path}, which overlaps this daemon's chat ` +
-      `scratch base ${base}; a chat's scratch root can never sit inside a repository (nor a ` +
-      'repository inside the scratch base) — register the repo elsewhere or set TMPDIR for the daemon.',
-  };
+function refuseOverlap(
+  repos: RepoEntry[],
+  base: string,
+  inScope: ReadonlySet<string>,
+  log: (msg: string) => void,
+): ChatScopeResolution | null {
+  for (const r of repos) {
+    let clash: boolean;
+    try {
+      clash = overlaps(r.root_path, base);
+    } catch (err) {
+      // A root that EXISTS but cannot be resolved (EACCES, ELOOP, an unmounted volume …). NARROWED
+      // (independent review, W7): it refuses the open only when it is IN this chat's scope — the
+      // seats would be pointed at a root nobody can prove safe — or when its lexical spelling
+      // already overlaps the base; an unrelated unresolvable repo is noted and does not block
+      // every chat on the daemon.
+      if (inScope.has(r.id) || lexicallyOverlaps(r.root_path, base)) {
+        return {
+          ok: false,
+          status: 409,
+          error:
+            `repo '${r.name}' at ${r.root_path} cannot be resolved (${message(err)}), so the chat ` +
+            'scratch base cannot be proven outside it; fix the registration or the mount first.',
+        };
+      }
+      log(`chat scope: registered repo '${r.name}' at ${r.root_path} cannot be resolved (${message(err)}); not in scope, continuing`);
+      continue;
+    }
+    if (clash) {
+      return {
+        ok: false,
+        status: 409,
+        error:
+          `repo '${r.name}' is registered at ${r.root_path}, which overlaps this daemon's chat ` +
+          `scratch base ${base}; a chat's scratch root can never sit inside a repository (nor a ` +
+          'repository inside the scratch base) — register the repo elsewhere or set TMPDIR for the daemon.',
+      };
+    }
+  }
+  return null;
 }
 
 /** The production deps over a live adapter. */
@@ -198,9 +240,7 @@ export async function resolveChatScope(
     };
   }
   const repos = await deps.listRepos();
-  // Every registered repo, before any branch: the base itself must not be part of a repository.
-  const overlap = refuseOverlap(repos, base);
-  if (overlap !== null) return overlap;
+  const log = deps.log ?? (() => undefined);
   const refs = [...new Set(req.repoRefs)];
 
   if (refs.length > 0) {
@@ -239,6 +279,9 @@ export async function resolveChatScope(
         missing,
       };
     }
+    // Every registered repo, with THIS chat's repos in scope: the base must not be part of any.
+    const overlap = refuseOverlap(repos, base, new Set(found.map((r) => r.id)), log);
+    if (overlap !== null) return overlap;
     const graph = await graphForRepos(found, req.projectId, deps);
     return ok(
       {
@@ -263,6 +306,8 @@ export async function resolveChatScope(
       if (repo === undefined) dangling.push(ref);
       else found.push(repo);
     }
+    const overlap = refuseOverlap(repos, base, new Set(found.map((r) => r.id)), log);
+    if (overlap !== null) return overlap;
     const decision = await bindOrExplain(deps, req.projectId, undefined);
     return ok(
       {
@@ -278,6 +323,8 @@ export async function resolveChatScope(
     );
   }
 
+  const overlap = refuseOverlap(repos, base, new Set(), log);
+  if (overlap !== null) return overlap;
   return ok(
     {
       kind: 'none',
@@ -300,7 +347,9 @@ function ok(scope: ChatScope, dbPath: string | null, repos: RepoEntry[]): ChatSc
   return {
     ok: true,
     scope,
-    engine: { cwd: scope.cwd, codeGraphDb: dbPath, readRoots: repos.map((r) => r.root_path) },
+    // Read roots ride RESOLVED (independent review, item 5): a registry spelling with a trailing
+    // separator or a `.` segment would otherwise reach the engine's validator verbatim.
+    engine: { cwd: scope.cwd, codeGraphDb: dbPath, readRoots: repos.map((r) => resolve(r.root_path)) },
   };
 }
 
@@ -516,12 +565,19 @@ export function prepareChatScratch(chatId: string, scope: ChatScope): void {
     }
     assertRealOwnedDirectory(dir, 'chat scratch base');
   }
-  // Remember whether THIS call created the root: on a later failure only a root this invocation
-  // made is removed — a pre-existing entry (a planted directory the ownership check refuses) is
-  // never deleted on its planter's behalf (Copilot, #518).
-  const created = !existsSync(scope.cwd);
+  // Only a root THIS call created is removed on a later failure — a pre-existing entry (a planted
+  // directory the ownership check refuses) is never deleted on its planter's behalf (Copilot,
+  // #518). `created` is the non-recursive mkdir's OWN verdict (hardening, W-TOCTOU): a separate
+  // `existsSync` left a window in which another same-user process could create the root between
+  // the check and the mkdir and then lose it to this invocation's cleanup.
+  let created = false;
   try {
-    mkdirSync(scope.cwd, { recursive: true, mode: 0o700 });
+    mkdirSync(scope.cwd, { recursive: false, mode: 0o700 });
+    created = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  try {
     assertRealOwnedDirectory(scope.cwd, 'chat scratch root');
     chmodSync(scope.cwd, 0o700);
     const statement = chatScopeStatement(chatId, scope);
@@ -551,6 +607,50 @@ function assertRealOwnedDirectory(path: string, what: string): void {
       throw new Error(`refusing ${what} ${path}: owned by uid ${uid}, not this daemon's user`);
     }
   }
+}
+
+/**
+ * Reap the scratch namespaces of DEAD daemons (independent review, W6): every sibling
+ * `<pid>-<hex>` directory under the shared parent whose pid no longer exists is removed — judged
+ * with the same checks as {@link removeChatScratch} (a real directory, never a link, owned by this
+ * user). This daemon's own namespace, a live pid, a pid this user may not signal (another user's
+ * daemon), and anything not shaped like a namespace are left alone. Never throws; returns the
+ * removed namespaces. Called once at daemon boot.
+ */
+export function reapStaleChatNamespaces(parent: string = dirname(chatScratchBase())): string[] {
+  const removed: string[] = [];
+  let entries: string[];
+  try {
+    if (lstatSync(parent).isSymbolicLink()) return removed;
+    entries = readdirSync(parent);
+  } catch {
+    return removed;
+  }
+  for (const name of entries) {
+    const m = /^(\d+)-[0-9a-f]+$/.exec(name);
+    if (m === null) continue;
+    const pid = Number(m[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0); // alive (or at least present): keep
+      continue;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') continue; // EPERM: someone else's; keep
+    }
+    const dir = join(parent, name);
+    try {
+      const meta = lstatSync(dir);
+      if (meta.isSymbolicLink() || !meta.isDirectory()) continue;
+      if (process.platform !== 'win32' && typeof process.getuid === 'function' && statSync(dir).uid !== process.getuid()) {
+        continue;
+      }
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+      removed.push(dir);
+    } catch {
+      // vanished or unreadable meanwhile: leave it
+    }
+  }
+  return removed;
 }
 
 /**
@@ -701,6 +801,17 @@ export class ChatScopeIndex {
   closed(chatId: string): void {
     const slot = this.slots.get(chatId);
     if (slot === undefined) return;
+    if (slot.state === 'reserved') {
+      // An open is in flight: its `set` will now fail and it tears its engine chat down, whose own
+      // `chatClosed` is still to come — park the id (as `beginClose` does) rather than free it, so a
+      // reuse in between cannot lose its chat to that teardown (hardening, Copilot seventh pass).
+      const timer = setTimeout(() => {
+        if (this.slots.get(chatId)?.state === 'closing') this.slots.delete(chatId);
+      }, this.closeGraceMs);
+      timer.unref?.();
+      this.slots.set(chatId, { state: 'closing', timer });
+      return;
+    }
     if (slot.state === 'closing') clearTimeout(slot.timer);
     if (slot.state === 'live') removeChatScratch(slot.scope.cwd, this.base);
     this.slots.delete(chatId);

@@ -16,7 +16,7 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
-import { ChatScopeIndex } from './chat-scope.js';
+import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
 import {
   DeliveryIndex,
   deliverUnitOf,
@@ -957,6 +957,16 @@ export async function createServer(
   // the scratch root of an engine-side reap, finishing a `DELETE`'s closing window, or cancelling
   // an open still in flight (the index is a small state machine; see `chat-scope.ts`).
   const chatScopes = new ChatScopeIndex();
+  // Boot reaper (crew#502 hardening, W6): the scratch namespaces of daemons that died without
+  // closing their chats (`<tmp>/wicked-crew-chats/<pid>-*` with a dead pid) are removed once, here,
+  // under the same real-directory/ownership checks a live close applies. Not under vitest: the
+  // suites build many servers and must never touch the developer's real temp namespace.
+  if (!(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test')) {
+    const reaped = reapStaleChatNamespaces();
+    if (reaped.length > 0) {
+      app.log.info(`chat scratch: reaped ${reaped.length} namespace(s) of dead daemons: ${reaped.join(', ')}`);
+    }
+  }
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
