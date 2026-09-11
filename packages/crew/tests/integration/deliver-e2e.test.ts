@@ -103,6 +103,22 @@ function sessionOf(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** Poll the run detail until `pred` holds (or time runs out) — returns the last session seen. */
+
+/**
+ * Where this suite's scratch (bare origin, clone, run worktree, engine db) lives. NOT the system temp
+ * dir on Linux CI: the engine's validator sandbox (wicked-core `validator.rs` — `bwrap --ro-bind / /
+ * … --tmpfs <std::env::temp_dir()>`) masks EVERYTHING under the temp dir except the run dir and the
+ * coverage store it re-binds, so a clone kept there — the linked worktree's real gitdir — and the bare
+ * origin are invisible to the pinned evidence floor at the deliver gate: git fails inside the sandbox
+ * and the floor denies with "no coverage report was produced … the script denied before writing one".
+ * GitHub's RUNNER_TEMP is outside /tmp; elsewhere the OS temp dir (macOS's sandbox-exec profile masks
+ * nothing). Production repositories never live under the temp dir, so this is a fixture concern only.
+ */
+function scratchBase(): string {
+  const runnerTemp = process.env['RUNNER_TEMP'];
+  return process.platform === 'linux' && runnerTemp !== undefined && runnerTemp !== '' ? runnerTemp : tmpdir();
+}
+
 async function waitForRun(
   runId: string,
   pred: (s: Record<string, unknown>) => boolean,
@@ -130,7 +146,7 @@ async function waitForRun(
 }
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'crew-deliver-e2e-'));
+  dir = mkdtempSync(join(scratchBase(), 'crew-deliver-e2e-'));
 
   // ── The scratch HOME every deliver spawn inherits: stub `gh` first on PATH ──
   const home = join(dir, 'home');
