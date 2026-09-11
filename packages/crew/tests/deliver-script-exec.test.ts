@@ -717,3 +717,27 @@ describe('deliver script honours the engine’s verified-base pin (wicked-core#4
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
   }, 60_000);
 });
+
+// Wave-3 isolation review (crew#524 follow-up): the embedded fallback used to derive `Fixes #N`
+// from the intent AFTER bounding it to EMBEDDED_INTENT_CAP, so a closing reference written past
+// the cap never reached the PR body of a run whose daemon did not answer. Driven for real: no
+// daemon origin ⇒ the embedded text, and it still carries the reference.
+describe('deliver script — a `fixes #N` past the embedded-intent cap still reaches the PR body', () => {
+  it('keeps `Fixes #214` from the FULL intent while the embedded text is cut and says so', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const longIntent = `Archive controls never render\n\n${'observation '.repeat(700)}\n\nThis fixes #214 and relates to wicked-studio#211.`;
+    expect(longIntent.indexOf('fixes #214')).toBeGreaterThan(8_000);
+
+    const r = await runDeliver(fx, { intent: longIntent, script: { runId: RUN_ID } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('using the launch-time PR text');
+    expect(r.pr!.title).toBe('Archive controls never render');
+    expect(r.pr!.body).toContain('\nFixes #214\n');
+    expect(r.pr!.body).toContain('the intent is longer than the deliver script embeds');
+    expect(r.pr!.body).not.toContain('This fixes #214 and relates to'); // the TEXT was cut, the reference was not
+    // The commit message carries the same closing line.
+    expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`)).toContain('Fixes #214');
+  }, 60_000);
+});

@@ -73,8 +73,7 @@
 
 import type { PhaseDef, WorkflowDef } from './types.js';
 import {
-  boundIntentForEmbedding,
-  composeDeliverText,
+  composeEmbeddedDeliverText,
   factsFromWorkflow,
   framedDeliverText,
   runUrlFor,
@@ -221,8 +220,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     });
   // The EMBEDDED fallback is bounded (`EMBEDDED_INTENT_CAP`): this script is one argv entry, and an
   // unbounded intent could exceed the platform's single-argument limit and E2BIG the phase before
-  // it runs (Copilot on #525). The daemon-fetched text is never bounded this way.
-  const fallback = composeDeliverText({ ...facts, intent: boundIntentForEmbedding(facts.intent) });
+  // it runs (Copilot on #525). The daemon-fetched text is never bounded this way. The issue
+  // references (`Fixes #N` / `Refs:`) are derived from the FULL intent before the cut, so a closing
+  // reference written past the cap still reaches the PR body (wave-3 isolation review).
+  const fallback = composeEmbeddedDeliverText(facts);
   const api = apiOriginLiteral(opts.apiOrigin);
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);

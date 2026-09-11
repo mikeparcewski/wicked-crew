@@ -50,6 +50,15 @@ mentioned only where a daemon release depends on them.
     `CoreEvent.kind` widened to `string | null` (the engine sends `null` on `evaluatorToolCallDenied`
     when the agent sent no kind). Wire-contract pins for each; endpoint manifest + generated API tests
     re-stamped.
+- **The embedded deliver fallback keeps `Fixes #N` from an intent longer than the script embeds
+  (#524 follow-up; wave-3 isolation review).** The launch-time fallback text the deliver script
+  carries is composed from the intent BOUNDED to `EMBEDDED_INTENT_CAP` (8,000 chars — the script is
+  one argv entry), and the issue references were derived from that bounded copy, so a `fixes #214`
+  written past the cap vanished from the PR body of any run whose daemon did not answer
+  `GET /runs/:id/deliver-text` — and GitHub never closed the issue. `composeEmbeddedDeliverText`
+  now derives `Fixes …` / `Refs: …` from the FULL intent first and bounds only the text (the cut is
+  still disclosed in the body); `composeDeliverText` takes the references as an optional argument.
+  Unit tests over the composer; the script is driven for real with a reference past the cap.
 - **Chat scratch chain hardening (crew#502 follow-up; independent review W6/W7 and deferred
   hunks).** A registered repo root the daemon cannot resolve (a permission wall, a symlink loop, an
   unmounted volume) refuses a `POST /chats` (409) only when that repo is IN the chat's scope or its

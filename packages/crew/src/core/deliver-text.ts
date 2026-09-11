@@ -208,6 +208,19 @@ export function boundIntentForEmbedding(intent: string): string {
   return `${intent.slice(0, EMBEDDED_INTENT_CAP).trimEnd()}\n\n${EMBEDDED_INTENT_NOTE}`;
 }
 
+/**
+ * The launch-time FALLBACK text the deliver script embeds (crew#524; wave-3 isolation review): the
+ * intent rides BOUNDED ({@link boundIntentForEmbedding} — the script is one argv entry) but the
+ * issue references are derived from the FULL intent FIRST, so a `fixes #214` that sits past the
+ * {@link EMBEDDED_INTENT_CAP} still reaches the body as `Fixes #214` — the line GitHub acts on —
+ * when no daemon answers `GET /runs/:id/deliver-text`. The title is the intent's first line either
+ * way. The cut copy carries the "longer than the script embeds" note, so the omission is disclosed
+ * and the reference is not.
+ */
+export function composeEmbeddedDeliverText(f: DeliverTextFacts): DeliverText {
+  return composeDeliverText({ ...f, intent: boundIntentForEmbedding(f.intent) }, issueRefs(f.intent, f.repoRef));
+}
+
 // ── the body ───────────────────────────────────────────────────────────────────────────────────
 
 /** A markdown table cell: control characters out, pipes escaped, bounded. */
@@ -243,10 +256,13 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
 /**
  * The PR title + body (and, through {@link framedDeliverText}, the commit message) for a run.
  * Never empty: every section either carries the recorded facts or says why it does not.
+ *
+ * `links` defaults to the issue references of `f.intent`; the embedded-fallback path passes the
+ * references of the FULL intent while `f.intent` is the bounded copy ({@link composeEmbeddedDeliverText}).
  */
-export function composeDeliverText(f: DeliverTextFacts): DeliverText {
+export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issueRefs(f.intent, f.repoRef)): DeliverText {
   const title = deliverTitle(f.intent, f.runId);
-  const { fixes, refs } = issueRefs(f.intent, f.repoRef);
+  const { fixes, refs } = links;
   const intent = f.intent.replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
 
