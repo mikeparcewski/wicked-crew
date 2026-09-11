@@ -22,12 +22,12 @@
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type * as Wire from 'wicked-crew-api-types';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import type { ChatSummary, CoreAdapter } from '../src/core/adapter.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
-import type { GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RetireMemorySchema } from '../src/api/routes.js';
+import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -144,6 +144,24 @@ respondsWith<DocCreateRefusal['code'], Wire.InteractiveDocCreateRefusal['code']>
 respondsWith<Wire.InteractiveDocCreateRefusal['code'], DocCreateRefusal['code']>();
 respondsWith<string[], DocCreateRefusal['requested']>();
 respondsWith<Wire.InteractiveDocCreateUndetermined, typeof CREATE_UNDETERMINED>();
+
+// crew#502 (api-types 0.32.0) — chat scope, both directions: every body the contract lets a client
+// send (`repoRefs`, the legacy `repoRef`, `projectId`) is accepted by the route schema, and what the
+// route produces on open / detail / list satisfies the published shapes. The `scope` on the open
+// response is the SAME `ChatScope` the resolver builds (`chat-scope.ts` types it off the contract),
+// so a field renamed on one side breaks this file.
+accepts<z.input<typeof ChatOpenSchema>, Wire.ChatOpenBody>();
+respondsWith<
+  Wire.ChatOpenResponse,
+  {
+    chatId: string;
+    seats: { cliKey: string; ok: boolean; error?: string }[];
+    scope: Wire.ChatScope;
+    projectAttachError?: string;
+  }
+>();
+respondsWith<Wire.ChatDetailResponse, { chatId: string; seats: string[]; scope: Wire.ChatScope | null }>();
+respondsWith<Wire.ChatListResponse, { chats: ChatSummary[] }>();
 // The REQUEST the proxy reads IS the published create body (both directions), and every frame the
 // four seams emit on `status.posted` satisfies the published `InteractiveStatusPosted` once
 // `emitInteractive` stamps `ts` (codex on #506: request/frame mappings, not just refusals).

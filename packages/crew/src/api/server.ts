@@ -16,6 +16,7 @@ import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
 import { RunTimingIndex } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
+import { ChatScopeIndex } from './chat-scope.js';
 import {
   DeliveryIndex,
   deliverUnitOf,
@@ -951,10 +952,18 @@ export async function createServer(
   const stallWatchdogArmed =
     options?.stallWatchdog?.enabled ??
     !(process.env['VITEST'] !== undefined || process.env['NODE_ENV'] === 'test');
+  // Chat scopes (crew#502): the routes record one per open; the engine's own reclaims (idle TTL,
+  // pool cap) and operator closes all surface as `chatClosed`, which frees the id here — removing
+  // the scratch root of an engine-side reap, finishing a `DELETE`'s closing window, or cancelling
+  // an open still in flight (the index is a small state machine; see `chat-scope.ts`).
+  const chatScopes = new ChatScopeIndex();
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
     elicitationCache.ingest(event);
     seatHealth.ingest(event);
+    if (event.type === 'chatClosed' && typeof event.chat === 'string') {
+      chatScopes.closed(event.chat);
+    }
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
     // (Copilot on #301).
@@ -1119,6 +1128,7 @@ export async function createServer(
       groupIndex,
       runTimingIndex,
       guidanceIndex,
+      chatScopes,
       deliveryIndex,
       // The delivery machinery built beside the index above: the started cache, and the SAME
       // probe functions it derives through — so the routes' campaign rollup shares one TTL memo

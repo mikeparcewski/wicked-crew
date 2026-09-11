@@ -11,6 +11,62 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **Chats are scoped and grounded; seats never run in the daemon's cwd (acceptance finding F-067,
+  crew#502).** `POST /chats` set the seats' working directory only when `repoRef` was sent and the
+  engine fell back to its own `current_dir()` — the daemon's — so studio's GroupChat (which never
+  sent one) explored wherever `wicked-crew serve` had been started from, with no estate MCP and no
+  statement of the scope; "chat with all 9 repos" worked only because the rig started the daemon
+  from the parent of `repos/`. A chat now takes a SCOPE: the explicit `repoRefs` (the legacy
+  single `repoRef` is merged in; ids or names; every unknown ref is a 404 naming ALL the missing
+  ones, before any seat warms) or, when only `projectId` is given, every registered `crew.repo`
+  member of the project (dangling members are named, not read). The seats run in a PRIVATE SCRATCH
+  ROOT of the chat's own (`<os tmp>/wicked-crew-chats/<pid>-<random>/<chatId>` — this daemon's own
+  per-process namespace, private mode — never a repo, never the daemon's cwd; not under the state
+  home, which the engine's worker fence denies to every seat)
+  with the scoped repos' registered roots as READ roots (advertised to a claude seat as the SDK's
+  `additionalDirectories`) and the READ-ONLY wicked-estate MCP over the project's co-located graph
+  (`resolveProjectGraphBinding`, DES-GROUNDING-001 — the same grounding governed runs get; a single
+  repo without a project gets its own graph; several repos without a project get none, and the
+  reason says so). The scope is STATED to the seats — `AGENTS.md` + `CLAUDE.md` in the scratch root
+  name the repos, their paths, the read-only rule and the grounding — and returned as `scope` on
+  the 201 (and on `GET /chats/:id`), so the UI can show it; an engine predating chat scope is
+  detected (the engine's `chatList` row lacks the scope fields) and a SCOPED open on it is refused
+  with a 501 naming the remedy — never opened unbounded behind a statement that promises read-only
+  roots (an unscoped chat proceeds). The scratch base is this daemon's own per-process namespace
+  (`<os tmp>/wicked-crew-chats/<pid>-<random>`), so daemons sharing one OS user never touch each
+  other's roots; a registered repo that overlaps the base is refused (409); re-opening a live id is a
+  409, and the id stays parked after `DELETE` until the engine's own `chatClosed` is observed, so a
+  late close can never land on a reused id and a close during an open tears that open down. The
+  scratch root is removed on `DELETE /chats/:id` and on the engine's own `chatClosed` (idle reap,
+  pool cap). Needs the engine half (wicked-core#410 — `chatOpen` scope,
+  per-seat config roots, banner gate); `GET /chats` rows gain `cwd` / `codeGraphDb` / `readRoots`
+  from it. The studio's New Chat scope control is a follow-up in wicked-studio.
+- **Upgrade notes, in plain words.** After upgrading, the codex, pi, copilot and opencode seats read
+  `signed_in: false` on System until each is signed in once from Studio → System (its Sign-in
+  command names the seat's own directory); until then councils and governed runs use claude and agy.
+  A project-scoped chat refuses pi, codex, copilot and agy by name — their ACP adapters ask no
+  permissions and arm no sandbox, so the engine cannot hold the project's repositories read-only for
+  them — and the default seats of a scoped chat are pre-filtered to the admissible ones (claude,
+  opencode); open the chat unscoped for those seats, or set `os_sandbox = true` on the seat's
+  `[cli.acp]` record (a write floor only: it keeps the roots read-only but does not stop reads
+  outside the scope). An unscoped chat — no project, no repos — reads nothing but its own scratch
+  root; select the project to chat with its repositories (Studio's New Chat scope control is
+  wicked-studio#248).
+- **Roster `signed_in` reads each seat's OWN configuration root (F-010, wicked-core#410).** With a
+  fresh `WICKED_WORKER_HOME` the roster reported claude `signed_in:false` but codex / pi / copilot /
+  opencode `true` — off the OPERATOR's `~/.codex`, `~/.pi/agent`, `~/.copilot`,
+  `~/.local/share/opencode`, which the engine's seats no longer run under. The heuristic now probes
+  `<worker home>/codex/auth.json`, `<worker home>/pi/auth.json`, `<worker home>/copilot/config.json`
+  and `<worker home>/opencode/data/opencode/auth.json` — the layout `wicked_apps_core::spawn::
+  seat_config_for` points the CLIs at (`CODEX_HOME`, `PI_CODING_AGENT_DIR`, `COPILOT_HOME`, the XDG
+  bases) — and the operator's own homes only under the `WICKED_WORKER_INHERIT_OPERATOR_CONFIG` hatch,
+  where the seats run there too. The engine's `login_invocation` for each seat now names the same
+  root, so the studio's Sign-in terminal signs in the directory the seats read.
+- **`wicked-crew-api-types` 0.32.0** (additive): `ChatOpenBody.repoRefs` + the scope semantics,
+  `ChatScope` / `ChatScopeKind` / `ChatScopeRepo`, `ChatSeatOutcome`, `ChatOpenResponse`,
+  `ChatSummary` (with the engine's `cwd` / `codeGraphDb` / `readRoots`), `ChatListResponse`,
+  `ChatDetailResponse`; `ChatScope.graph.repoLabel` names the estate label a single scoped repo is
+  indexed under. Tag `api-types-v0.32.0` on merge (0.31.0 shipped with #507's gate-evidence events).
 - **Graph surfaces: a missing repo-graph root is 503 everywhere; the project-graph routes declare
   their status codes (wicked-core#406 follow-up).** `codeGraphErrorStatus` in `repoPaths.ts` is the
   ONE mapping every code-graph consumer shares: `/repos/:id/{graph,graph/blast-radius,domain-graph}`
