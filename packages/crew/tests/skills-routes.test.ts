@@ -25,8 +25,9 @@ import type {
   SystemSettings,
 } from '../src/core/types.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { PORTABILITY_RULES_IDENTITY } from '../src/skills/refs.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
-import { COPILOT_VIEW_SKILLS_REL } from '../src/skills/store.js';
+import { COPILOT_VIEW_SKILLS_REL, type CurrentSnapshot } from '../src/skills/store.js';
 import type { VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -302,7 +303,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     // The answered revision is the final one — a publish moves it exactly once.
     expect(body.revision).toBe((await manifest()).revision);
     expect(body.revision).toBe(2);
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
   });
 
   it('one publish at a time: a concurrent publish is a 2xx blocked publish-in-flight envelope, the first one lands, the provisioner ran once (deterministic, codex round 3)', async () => {
@@ -368,7 +369,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect(body.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({ severity: 'warning', file: 'skills/alpha/nested/SKILL.md', line: 10 });
     const real = realpathSync(join(s.root, 'snapshots', '000001'));
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the snapshot is written AND handed over
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
     // analyze mirrors it, PURE: the same warning, nothing persisted, the CAS untouched.
     const analyze = await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' });
     expect(analyze.statusCode).toBe(200);
@@ -392,7 +393,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect(blockedBody.findings.find((f) => f.kind === 'unresolved-ref' && f.severity === 'blocking')).toMatchObject({ file: 'skills/beta/refs/escape.md', line: 1 });
     expect(blockedBody.revision).toBe(rev2);
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the last VERIFIED snapshot stays exported
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
     expect(((await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' })).json() as SkillPublishResult).verdict).toBe('blocked');
     expect((await manifest()).revision).toBe(rev2);
   });
@@ -536,5 +537,13 @@ describe('portability per reason on the wire (F-079; api-types 0.34.0)', () => {
     const snapshot = JSON.parse(readFileSync(join((pub.json() as SkillPublishResult).snapshot?.path ?? '', 'snapshot.json'), 'utf8')) as { skills: Array<{ name: string; portability?: unknown }>; views: { copilot: { skills: string[] } } };
     expect(snapshot.skills.find((x) => x.name === 'wicked-garden-gamma')?.portability).toEqual({ portable: false, reasons: ['cwd-script', 'skill-dir-var'], evidence: ['skills/gamma/refs/extra.md:1', 'skills/gamma/refs/extra.md:2'] });
     expect(snapshot.views.copilot.skills).toEqual(['wicked-garden-beta']);
+    // F-083: `current` additively names the portability rules the generation was published under
+    // beside the running ones, and the rows that derive differently — none: this daemon published it.
+    const current = (await manifest()).current as unknown as CurrentSnapshot | null;
+    expect(current).toMatchObject({
+      gen: (pub.json() as SkillPublishResult).snapshot?.gen,
+      rules: { recorded: { ...PORTABILITY_RULES_IDENTITY }, running: { ...PORTABILITY_RULES_IDENTITY }, stale: false },
+      drift: [],
+    });
   });
 });

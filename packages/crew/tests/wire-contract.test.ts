@@ -42,7 +42,7 @@ import type {
   SkillRevisionSchema,
 } from '../src/api/skills.js';
 import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
-import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
+import type { SkillsHealth, SkillsHealthFinding, SkillsHealthFindingKind } from '../src/skills/runtime.js';
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
@@ -586,6 +586,15 @@ respondsWith<
 respondsWith<Wire.RunFileContent, { path: string } & CappedFileRead>();
 respondsWith<Wire.RunDiff, WorktreeDiff>();
 
+// F-083: the daemon emits the `skills.stale-rules` finding AHEAD of its wire declaration — the next
+// `wicked-crew-api-types` cut (0.36.0, the wave-6 wire PR) adds it to `DiagnosticsSkillsFinding.kind`
+// and declares the additive `rules` / `drift` members of `SkillsManifestResponse.current`. Until it
+// lands the pending kind is carved out here, so every OTHER kind stays pinned both ways; delete the
+// carve-out (and pin `SkillsHealth` directly again) with the api-types bump.
+type PendingSkillsFindingKind = 'skills.stale-rules';
+type DeclaredSkillsHealthFindingKind = Exclude<SkillsHealthFindingKind, PendingSkillsFindingKind>;
+type DeclaredSkillsHealth = Omit<SkillsHealth, 'findings'> & { findings: Array<Omit<SkillsHealthFinding, 'kind'> & { kind: DeclaredSkillsHealthFindingKind }> };
+
 // GET /diagnostics (api-types 0.16.0) — the daemon's self-knowledge surface. The route
 // assembles exactly this shape from the diagnostics module's machinery types; pinning it here
 // (and each machinery type below, BOTH directions) means a null-vs-absent or camelCase drift
@@ -603,7 +612,7 @@ respondsWith<
     stores: StoreFileEntry[];
     recentErrors: RecentError[];
     acp: { byCli: Record<string, AcpCliFold> };
-    skills: SkillsHealth;
+    skills: DeclaredSkillsHealth;
     governance: GovernanceHealth;
   }
 >();
@@ -626,8 +635,8 @@ respondsWith<GovernanceRecords, Wire.DiagnosticsGovernanceRecords>();
 // (independent review of #533, F-5).
 respondsWith<Wire.RepoGraphResponse, RepoGraphReply>();
 respondsWith<RepoGraphReply, Wire.RepoGraphResponse>();
-// The skills seam's health block (api-types 0.28.0), both directions.
-respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
+// The skills seam's health block (api-types 0.28.0), both directions (the pending F-083 kind carved out above).
+respondsWith<Wire.DiagnosticsSkills, DeclaredSkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 // Design v3.6 (api-types 0.29.0, crew #490): the LAST-resort installer copy is a source kind the
 // contract admits, and the persistent warning it raises is a finding kind the contract admits —
@@ -635,8 +644,8 @@ respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 respondsWith<Wire.SkillSourceKind, PluginSource['kind']>();
 respondsWith<PluginSource['kind'], Wire.SkillSourceKind>();
 respondsWith<Wire.SkillSourceKind, 'installer-copy'>();
-respondsWith<Wire.DiagnosticsSkillsFinding['kind'], SkillsHealthFindingKind>();
-respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], DeclaredSkillsHealthFindingKind>();
+respondsWith<DeclaredSkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
@@ -704,6 +713,7 @@ respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['add']>>();
 respondsWith<Wire.SkillPublishResult, Awaited<ReturnType<SkillsStore['publish']>>>();
 respondsWith<Wire.SkillRefreshResult, ReturnType<SkillsStore['refreshBaseline']>>();
 respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
+// `current` is additive (F-083): `{gen, path}` is the declared shape; `rules` / `drift` ride beside it until api-types declares them.
 respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();
 // snapshot.json is what the ENGINE reads — its skill rows reuse the contract's kind vocabulary.
 respondsWith<Wire.SkillKind, SnapshotManifest['skills'][number]['kind']>();

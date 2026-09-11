@@ -43,6 +43,17 @@
  * read now is reported as `config-error` with a `skills.manifest` error finding naming the cause —
  * never the stale outcome the ladder recorded at boot. A read never touches the engine input.
  *
+ * A second orthogonal WARNING (F-083): finding `skills.stale-rules` is present while the CURRENT
+ * generation was published under other portability rules than this daemon runs (an older
+ * publisher — every pre-0.7.31 snapshot records no rules identity at all). The generation is
+ * accepted and exported unchanged (`state: published`); the finding names the rows that derive
+ * differently today (up to five, the count carries the rest) and the remedy — a re-publish, which
+ * records the running identity, re-lays the copilot view, rewrites the rows and clears it. A rule
+ * change is not tampering: before this, the store's row cross-check refused such a generation
+ * outright, and the 0.7.29 → 0.7.30 upgrade left every seat without skills until an operator
+ * re-published. It is judged where the generation is verified (`afterPublish`: boot and every
+ * publish), never re-judged on a read — staleness changes only with a publish or an upgrade.
+ *
  * What the engine is handed is EXACTLY ONE variable, `WICKED_SKILLS_SNAPSHOT` = the absolute REAL
  * path of `snapshots/<gen>` (v3.1 §2, v3.4 §2); `WICKED_SKILLS_CURRENT` is withdrawn and never set,
  * and `WICKED_CREW_STATE_HOME` is RETIRED as an engine input (v3.4 §2): core derives the state home
@@ -68,7 +79,7 @@ import type { CoreEvent, SkillManifest } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
 import { SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
-import { SkillsSourceUnavailableError, type SkillsStore } from './store.js';
+import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
 
 /**
  * The seed source named for the boot log by what it IS (Copilot on #480: the line used to hard-code
@@ -106,12 +117,42 @@ function sourceFinding(m: SkillManifest): SkillsHealthFinding | null {
   };
 }
 
+/** How many drifted rows the `skills.stale-rules` message names — the count carries the rest. */
+const STALE_RULES_NAMED_ROWS = 5;
+
+/**
+ * The `skills.stale-rules` WARNING (F-083): the current generation was published under OTHER
+ * portability rules than the ones this daemon runs — an older publisher (every pre-0.7.31 snapshot
+ * records no identity), or a rule table that moved since — so its rows may derive differently today
+ * without a byte having changed. The generation is ACCEPTED and stays the engine input; the message
+ * names the rows that now derive differently (up to `STALE_RULES_NAMED_ROWS`) and the remedy: a
+ * re-publish, which records the running identity and clears the finding. `null` when the identities
+ * agree (a generation this daemon — or one with the same rules — published).
+ */
+function staleRulesFinding(current: CurrentSnapshot): SkillsHealthFinding | null {
+  if (!current.rules.stale) return null;
+  const { recorded, running } = current.rules;
+  const was = recorded === null ? 'an unrecorded portability rules version (a publisher before 0.7.31)' : `portability rules v${recorded.version} (${recorded.sha256.slice(0, 12)})`;
+  const named = current.drift
+    .slice(0, STALE_RULES_NAMED_ROWS)
+    .map((d) => `${d.name} (portable ${String(d.recorded.portable)} → ${String(d.derived.portable)}${d.derived.reasons.length === 0 ? '' : `: ${d.derived.reasons.join(', ')}`})`)
+    .join(', ');
+  const rest = current.drift.length > STALE_RULES_NAMED_ROWS ? ` (+${current.drift.length - STALE_RULES_NAMED_ROWS} more)` : '';
+  const rows = current.drift.length === 0 ? 'every row derives the same under the current rules' : `${current.drift.length} row(s) now derive differently: ${named}${rest}`;
+  return {
+    kind: 'skills.stale-rules',
+    severity: 'warning',
+    message: `generation ${current.gen} was published under ${was}; the daemon runs v${running.version} (${running.sha256.slice(0, 12)}) — ${rows}; re-publish (POST /skills/publish) to refresh the copilot view and the snapshot rows under the current rules — until then the generation is accepted as published and stays the engine input`,
+  };
+}
+
 /** The refusal sentinel directory name — from the ONE table of root names (design v3.5 §2); re-exported for the tests. */
 export { REFUSED_DIRNAME };
 
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest';
+/** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -326,7 +367,7 @@ export class SkillsRuntime {
    * decided it. Answers the health it recorded, or `null` when there was nothing to export.
    */
   afterPublish(): SkillsHealth | null {
-    let current: { gen: number; path: string } | null;
+    let current: CurrentSnapshot | null;
     try {
       current = this.store.currentSnapshot();
     } catch (err) {
@@ -353,7 +394,18 @@ export class SkillsRuntime {
     // here on opens its pin at this generation (and accumulates later publishes) until the engine's
     // `skillsSnapshotHanded` says which one it used or the run ends (live-generations.ts).
     this.store.live.exported(current.gen);
-    return this.record({ state: 'published', root: this.store.root, current, engineInput: current.path, stateHome: canonicalCrewStateHome(), findings: [] });
+    // Published under OTHER portability rules (F-083): accepted and exported all the same — the ONE
+    // warning names the rows that derive differently and the re-publish that clears it.
+    const stale = staleRulesFinding(current);
+    if (stale !== null) this.log(`[skills] skills.stale-rules: ${stale.message}`);
+    return this.record({
+      state: 'published',
+      root: this.store.root,
+      current: { gen: current.gen, path: current.path },
+      engineInput: current.path,
+      stateHome: canonicalCrewStateHome(),
+      findings: stale === null ? [] : [stale],
+    });
   }
 
   /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */

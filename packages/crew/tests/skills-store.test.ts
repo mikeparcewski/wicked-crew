@@ -33,6 +33,7 @@ import { inBundleClosure, pluginBundleFiles } from '../src/skills/bundle.js';
 import { containedPath, SkillPathError } from '../src/skills/contain.js';
 import { applySkillsSnapshotEnv } from '../src/skills/engine-env.js';
 import { PluginSourceSymlinkError, pluginSourceAt } from '../src/skills/plugin-source.js';
+import { PORTABILITY_RULES_IDENTITY } from '../src/skills/refs.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import {
   COPILOT_VIEW_SKILLS_REL,
@@ -45,6 +46,7 @@ import {
   SkillsSourceUnavailableError,
   SkillsStore,
   type SnapshotManifest,
+  type SnapshotSkillRow,
 } from '../src/skills/store.js';
 import { hashFileSet, hashTree, removeTreeForce, sha256Hex, walkEntries, walkFiles, walkTree } from '../src/skills/tree.js';
 import { noVenv, VENV_READY_MARKER, type VenvProvisioner } from '../src/skills/venv.js';
@@ -223,7 +225,7 @@ describe('seed (design v3 §1/§4/§5)', () => {
       expect(result.verdict).toBe('clear');
       const snap = result.snapshot as NonNullable<typeof result.snapshot>;
       expect(snapshotManifest(snap.path).gardenSource).toMatchObject({ kind: 'installer-copy', path: FIXTURE_PLUGIN, plugin_version: '1.0.0', baseline: m.baseline });
-      expect(copy.store.currentSnapshot()).toEqual({ gen: 1, path: realpathSync(snap.path) }); // verifyCurrent validates gardenSource.kind against the known kinds
+      expect(copy.store.currentSnapshot()).toMatchObject({ gen: 1, path: realpathSync(snap.path) }); // verifyCurrent validates gardenSource.kind against the known kinds
     } finally {
       removeScratch(copy.base);
     }
@@ -345,8 +347,8 @@ describe('publish (design v3 §1)', () => {
     // `current` resolves (verified) to the generation as an absolute REAL path (v3.1 §2 — the engine's
     // one input); the manifest records the publish and lastPublishedHash.
     expect(snap.path).toBe(realpathSync(join(s.root, 'snapshots', '000001')));
-    expect(s.store.currentSnapshot()).toEqual({ gen: 1, path: snap.path });
-    expect(storeOver(s).currentSnapshot()).toEqual({ gen: 1, path: snap.path });
+    expect(s.store.currentSnapshot()).toMatchObject({ gen: 1, path: snap.path });
+    expect(storeOver(s).currentSnapshot()).toMatchObject({ gen: 1, path: snap.path });
     const m = s.store.manifest();
     expect(m.published).toMatchObject({ gen: 1, contentHash: snap.contentHash });
     expect(m.files['skills/beta/SKILL.md']?.lastPublishedHash).toBe(m.files['skills/beta/SKILL.md']?.effectiveHash);
@@ -1636,7 +1638,7 @@ describe('snapshot verification sees SYMLINKS (codex round 5)', () => {
       expect(snap.contentHash).toBe(hashTree(files, tree.links, tree.dirs)); // files, the link AND the directory entries (codex round 9)
       expect(snap.contentHash).not.toBe(hashFileSet(files)); // a hash that skipped the link would not be this one
       expect(snap.contentHash).not.toBe(hashTree(files, tree.links)); // …nor one that skipped the directories
-      expect(storeOver(v).currentSnapshot()).toEqual({ gen: 1, path: snap.path });
+      expect(storeOver(v).currentSnapshot()).toMatchObject({ gen: 1, path: snap.path });
     } finally {
       removeTreeForce(v.base);
     }
@@ -2768,7 +2770,7 @@ describe('pruned directories are CLASSIFIED under effective/ (review pass 10): a
       ]);
       expect(hashFileSet(tree.files)).toBe(hash); // the bundle identity never covers the env
       expect(readlinkSync(join(snap.path, '.venv'))).toBe(join('..', '..', 'baseline', hash, '.venv'));
-      expect(v.store.currentSnapshot()).toEqual({ gen: 1, path: snap.path });
+      expect(v.store.currentSnapshot()).toMatchObject({ gen: 1, path: snap.path });
       // A later publish REUSES the synced baseline (`baselineProblem` re-derived, the provisioner not re-run): still clear.
       const off = v.store.disable('wicked-garden-delta', r.revision);
       const again = await v.store.publish(off.revision);
@@ -3054,5 +3056,213 @@ describe('portability per reason (F-079, wicked-crew#531)', () => {
     const w = storeOver(s).writeFile('wicked-garden-gamma', 'refs/note.md', 'plain\n', m.revision);
     expect(w.verdict).toBe('clear');
     expect(storeOver(s).manifest().skills['wicked-garden-alpha']?.portability).toEqual({ portable: false, reasons: ['plugin-root'], evidence: ['skills/alpha/SKILL.md:10'] });
+  });
+});
+
+describe('a generation published under OLDER portability rules is ACCEPTED, never refused (F-083)', () => {
+  /**
+   * Re-shape the current generation on disk the way an honest OLDER publisher would have written it:
+   * `metadata` is the snapshot.json to write (identity stripped or re-stamped, rows as the old
+   * detector judged them); gamma's copilot view is dropped when the rows call gamma non-portable (the
+   * old publisher laid out exactly ITS portable rows); the walked tree is re-hashed and the manifest
+   * re-stamped — every byte authenticated, only the rules that judged the rows are older.
+   */
+  const asOlderGeneration = (snapPath: string, metadata: Record<string, unknown>, dropGammaView: boolean): void => {
+    const file = join(snapPath, 'snapshot.json');
+    unlock(file);
+    if (dropGammaView) {
+      const gammaView = viewPath(snapPath, 'wicked-garden-gamma');
+      chmodSync(dirname(gammaView), 0o755);
+      removeTreeForce(gammaView);
+    }
+    const tree = walkTree(snapPath);
+    const contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs);
+    writeFileSync(file, `${JSON.stringify({ ...metadata, contentHash }, null, 2)}\n`);
+    stampPublished(s.root, file);
+  };
+  const withoutIdentity = (pristine: SnapshotManifest): Record<string, unknown> => {
+    const older = { ...pristine } as Record<string, unknown>;
+    delete older['rulesVersion'];
+    delete older['rulesSha256'];
+    return older;
+  };
+  /** gamma as the OLD first-hit detector judged it — a false positive: non-portable on `plugin-root`; the view excludes it. */
+  const gammaFalsePositive = (pristine: SnapshotManifest): Record<string, unknown> => ({
+    ...withoutIdentity(pristine),
+    skills: pristine.skills.map((row) => (row.name === 'wicked-garden-gamma' ? { ...row, portable: false, portability: { portable: false, reasons: ['plugin-root'], evidence: ['skills/gamma/SKILL.md:1'] } } : row)),
+    views: { copilot: { dir: 'views/copilot', skills: pristine.views.copilot.skills.filter((n) => n !== 'wicked-garden-gamma') } },
+  });
+  const patchRow = (metadata: Record<string, unknown>, name: string, patch: Record<string, unknown>): Record<string, unknown> => ({
+    ...metadata,
+    skills: (metadata['skills'] as SnapshotSkillRow[]).map((row) => (row.name === name ? { ...row, ...patch } : row)),
+  });
+  const OTHER_RULES = { version: 1, sha256: 'ab'.repeat(32) };
+  const withEnvRestored = async (fn: () => Promise<void>): Promise<void> => {
+    const saved = process.env['WICKED_SKILLS_SNAPSHOT'];
+    try {
+      await fn();
+    } finally {
+      if (saved === undefined) delete process.env['WICKED_SKILLS_SNAPSHOT'];
+      else process.env['WICKED_SKILLS_SNAPSHOT'] = saved;
+    }
+  };
+
+  it('publish records the running rules identity in snapshot.json; `current` answers it — recorded = running, not stale, no drift', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const written = snapshotManifest(snap.path);
+    expect(written.rulesVersion).toBe(PORTABILITY_RULES_IDENTITY.version);
+    expect(written.rulesSha256).toBe(PORTABILITY_RULES_IDENTITY.sha256);
+    expect(written.rulesSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(s.store.currentSnapshot()).toEqual({
+      gen: 1,
+      path: snap.path,
+      rules: { recorded: { ...PORTABILITY_RULES_IDENTITY }, running: { ...PORTABILITY_RULES_IDENTITY }, stale: false },
+      drift: [],
+    });
+  });
+
+  it('the 0.7.29 → 0.7.30 shape — NO recorded identity and a row the old detector got wrong (gamma non-portable, the view without it) — is ACCEPTED from this store and a fresh one with the drift named; the runtime stays `published` with the snapshot as the engine input and ONE skills.stale-rules warning; a publish records the identity and clears it', async () =>
+    withEnvRestored(async () => {
+      s.store.seed();
+      const r = await s.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      asOlderGeneration(snap.path, gammaFalsePositive(snapshotManifest(snap.path)), true);
+      for (const store of [s.store, storeOver(s)]) {
+        const current = store.currentSnapshot();
+        expect(current?.gen).toBe(1);
+        expect(current?.path).toBe(snap.path);
+        expect(current?.rules).toEqual({ recorded: null, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+        expect(current?.drift).toEqual([{ name: 'wicked-garden-gamma', recorded: { portable: false, reasons: ['plugin-root'] }, derived: { portable: true, reasons: [], evidence: [] } }]);
+      }
+      const logged: string[] = [];
+      const runtime = new SkillsRuntime({ store: storeOver(s), log: (m) => logged.push(m), bootSnapshot: undefined });
+      const health = await runtime.apply();
+      expect(health.state).toBe('published');
+      expect(health.current).toEqual({ gen: 1, path: snap.path });
+      expect(health.engineInput).toBe(snap.path);
+      expect(process.env['WICKED_SKILLS_SNAPSHOT']).toBe(snap.path);
+      expect(health.findings.map((f) => f.kind)).toEqual(['skills.stale-rules']);
+      expect(health.findings[0]?.severity).toBe('warning');
+      expect(health.findings[0]?.message).toContain('generation 1 was published under an unrecorded portability rules version (a publisher before 0.7.31)');
+      expect(health.findings[0]?.message).toContain(`the daemon runs v${PORTABILITY_RULES_IDENTITY.version} (${PORTABILITY_RULES_IDENTITY.sha256.slice(0, 12)})`);
+      expect(health.findings[0]?.message).toContain('1 row(s) now derive differently: wicked-garden-gamma (portable false → true)');
+      expect(health.findings[0]?.message).toContain('re-publish (POST /skills/publish)');
+      expect(logged.filter((l) => l.includes('skills.stale-rules'))).toHaveLength(1);
+      expect(logged.some((l) => l.includes('skills.config'))).toBe(false);
+      // The diagnostics read keeps reporting it until a publish.
+      expect(runtime.health().findings.map((f) => f.kind)).toEqual(['skills.stale-rules']);
+      // The remedy: a publish writes the running identity into the new generation and the warning is gone.
+      const again = await runtime.store.publish(runtime.store.manifest().revision);
+      expect(again.verdict).toBe('clear');
+      const after = runtime.afterPublish();
+      expect(after?.state).toBe('published');
+      expect(after?.findings).toEqual([]);
+      expect(after?.current?.gen).toBe(2);
+      expect(runtime.health().findings).toEqual([]);
+      const fresh = runtime.store.currentSnapshot();
+      expect(fresh?.rules).toEqual({ recorded: { ...PORTABILITY_RULES_IDENTITY }, running: { ...PORTABILITY_RULES_IDENTITY }, stale: false });
+      expect(fresh?.drift).toEqual([]);
+      expect(snapshotManifest((again.snapshot as NonNullable<typeof again.snapshot>).path).rulesVersion).toBe(PORTABILITY_RULES_IDENTITY.version);
+    }));
+
+  it('a RECORDED but different identity is stale too; a reasons-only difference (epsilon recorded as plugin-root, derives cwd-script) is drift with the derived evidence; the warning names the recorded version', async () =>
+    withEnvRestored(async () => {
+      s.store.seed();
+      const r = await s.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const pristine = snapshotManifest(snap.path);
+      asOlderGeneration(
+        snap.path,
+        patchRow({ ...pristine, rulesVersion: OTHER_RULES.version, rulesSha256: OTHER_RULES.sha256 }, 'wicked-garden-epsilon', { portability: { portable: false, reasons: ['plugin-root'], evidence: [] } }),
+        false,
+      );
+      const current = storeOver(s).currentSnapshot();
+      expect(current?.rules).toEqual({ recorded: OTHER_RULES, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+      const [drifted] = current?.drift ?? [];
+      expect(current?.drift).toHaveLength(1);
+      expect(drifted).toMatchObject({ name: 'wicked-garden-epsilon', recorded: { portable: false, reasons: ['plugin-root'] }, derived: { portable: false, reasons: ['cwd-script'] } });
+      expect(drifted?.derived.evidence).toEqual([expect.stringMatching(/^skills\/epsilon\/SKILL\.md:\d+$/)]);
+      const health = await new SkillsRuntime({ store: storeOver(s), log: () => undefined, bootSnapshot: undefined }).apply();
+      expect(health.state).toBe('published');
+      expect(health.findings.map((f) => f.kind)).toEqual(['skills.stale-rules']);
+      expect(health.findings[0]?.message).toContain(`published under portability rules v1 (${OTHER_RULES.sha256.slice(0, 12)})`);
+      expect(health.findings[0]?.message).toContain('wicked-garden-epsilon (portable false → false: cwd-script)');
+    }));
+
+  it('a pre-0.7.30 generation — no identity, rows without `portability` — whose rows all agree is accepted as stale with NO drift; the warning says every row derives the same', async () =>
+    withEnvRestored(async () => {
+      s.store.seed();
+      const r = await s.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const pristine = snapshotManifest(snap.path);
+      asOlderGeneration(
+        snap.path,
+        {
+          ...withoutIdentity(pristine),
+          skills: pristine.skills.map((row) => {
+            const older = { ...row } as Record<string, unknown>;
+            delete older['portability'];
+            return older;
+          }),
+        },
+        false,
+      );
+      const current = storeOver(s).currentSnapshot();
+      expect(current?.rules).toEqual({ recorded: null, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+      expect(current?.drift).toEqual([]);
+      const health = await new SkillsRuntime({ store: storeOver(s), log: () => undefined, bootSnapshot: undefined }).apply();
+      expect(health.state).toBe('published');
+      expect(health.findings).toHaveLength(1);
+      expect(health.findings[0]?.kind).toBe('skills.stale-rules');
+      expect(health.findings[0]?.message).toContain('every row derives the same under the current rules');
+    }));
+
+  it('refusal is reserved for tampering: under the SAME identity the row the old detector got wrong is refused as before; under OLDER rules a modified file (content hash), a kind claim and a missing SKILL.md still refuse; a half-recorded or malformed identity is refused at parse', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const pristine = snapshotManifest(snap.path);
+    // SAME recorded identity + gamma flipped: this daemon's rules judged the row — deriving differently IS tampering.
+    asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), rulesVersion: pristine.rulesVersion, rulesSha256: pristine.rulesSha256 }, true);
+    expect(() => storeOver(s).currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-gamma claims portable: false, but its files derive true/);
+    // Stripped of the identity, the SAME bytes are accepted — the row is drift.
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    expect(storeOver(s).currentSnapshot()?.drift.map((d) => d.name)).toEqual(['wicked-garden-gamma']);
+    // A modified FILE under older rules is still a content-hash mismatch.
+    const gammaMd = join(snap.path, 'skills', 'gamma', 'SKILL.md');
+    const before = readFileSync(gammaMd, 'utf8');
+    unlock(gammaMd);
+    writeFileSync(gammaMd, `${before}tampered\n`);
+    expect(() => storeOver(s).currentSnapshot()).toThrow(/content hash mismatch/);
+    writeFileSync(gammaMd, before);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
+    // A kind claim the SKILL.md does not derive is refused under any rules.
+    asOlderGeneration(snap.path, patchRow(gammaFalsePositive(pristine), 'wicked-garden-beta', { kind: 'router' }), false);
+    expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-beta claims kind router, but its SKILL\.md derives module/);
+    // A row whose SKILL.md the generation does not carry (tree re-hashed, so the hash agrees) is refused by the row check.
+    const betaMd = join(snap.path, 'skills', 'beta', 'SKILL.md');
+    const betaBefore = readFileSync(betaMd, 'utf8');
+    unlock(betaMd);
+    rmSync(betaMd);
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-beta names skills\/beta, but the generation carries no skills\/beta\/SKILL\.md/);
+    writeFileSync(betaMd, betaBefore);
+    // A half-recorded or malformed identity pair is not what publish writes — refused at parse.
+    for (const [bad, why] of [
+      [{ rulesVersion: PORTABILITY_RULES_IDENTITY.version }, /rulesVersion without rulesSha256/],
+      [{ rulesSha256: PORTABILITY_RULES_IDENTITY.sha256 }, /rulesSha256 without rulesVersion/],
+      [{ rulesVersion: 0, rulesSha256: PORTABILITY_RULES_IDENTITY.sha256 }, /rulesVersion is not an integer/],
+      [{ rulesVersion: 1.5, rulesSha256: PORTABILITY_RULES_IDENTITY.sha256 }, /rulesVersion is not an integer/],
+      [{ rulesVersion: PORTABILITY_RULES_IDENTITY.version, rulesSha256: 'not-a-digest' }, /rulesSha256 is not a sha256/],
+    ] as Array<[Record<string, unknown>, RegExp]>) {
+      asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), ...bad }, false);
+      expect(() => storeOver(s).currentSnapshot(), JSON.stringify(bad)).toThrow(why);
+    }
+    // Back to the honest older shape: accepted again.
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
   });
 });

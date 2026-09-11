@@ -450,7 +450,7 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(existsSync(join(real, ...COPILOT_VIEW_SKILLS_REL.split('/'), 'wicked-garden-gamma', 'SKILL.md'))).toBe(true);
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
-      expect((res.json() as SkillsManifestResponse).current).toEqual({ gen: 1, path: real });
+      expect((res.json() as SkillsManifestResponse).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
       expect((res.json() as SkillsManifestResponse).root).toBe(root);
       // Exactly ONE engine input (v3.4 §2): nothing is exported beside the snapshot — the retired
       // WICKED_CREW_STATE_HOME is untouched — and the snapshot IS <state home>/skills/snapshots/<gen>

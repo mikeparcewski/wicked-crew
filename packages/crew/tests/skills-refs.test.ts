@@ -11,12 +11,16 @@ import { owningSkillDir } from '../src/skills/bundle.js';
 import { mentionedTokens } from '../src/skills/core-closure.js';
 import { parseFrontmatter, skillKindOf } from '../src/skills/frontmatter.js';
 import {
+  canonicalJson,
   existsIn,
   extractPluginRootRefs,
   extractRelativeRefs,
   PORTABILITY_EVIDENCE_CAP,
   PORTABILITY_REASONS,
   PORTABILITY_RULES,
+  PORTABILITY_RULES_IDENTITY,
+  PORTABILITY_RULES_SHA256,
+  PORTABILITY_RULES_VERSION,
   portabilityEvidenceOf,
   portabilityIssuesOf,
   portabilityReasonsOf,
@@ -110,15 +114,6 @@ const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/portability_rules.js
   bundle: { files: string[]; skill_dirs: string[] };
   cases: FixtureCase[];
 };
-/** Canonical JSON: keys sorted recursively, no whitespace — what `sha256_algorithm` prescribes (Python: `json.dumps(sort_keys=True, separators=(',',':'), ensure_ascii=False)`). */
-function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
-  if (v !== null && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
-}
 const skillDirsOfFiles = (files: readonly string[]): Set<string> => new Set(files.filter((f) => f.startsWith('skills/') && f.endsWith('/SKILL.md')).map((f) => f.slice(0, -'/SKILL.md'.length)));
 /** A context over the fixture bundle (or a case's own `exists`) for the file at `fileRel`. */
 const ctxOver = (fileRel: string, files: readonly string[], skillDir?: string): PortabilityContext => {
@@ -326,6 +321,12 @@ describe('the CANONICAL parity fixture (tests/fixtures/portability_rules.json) �
     expect(normative).toEqual(JSON.parse(JSON.stringify(PORTABILITY_RULES)));
     expect(createHash('sha256').update(canonicalJson(normative), 'utf8').digest('hex')).toBe(FIXTURE.sha256_of_rules);
     expect(FIXTURE.sha256_of_rules).toMatch(/^[0-9a-f]{64}$/);
+    // The identity the RUNTIME records in every snapshot.json (F-083) IS this fixture's: the version
+    // by hand, the digest from the live table — so the daemon never reads a test fixture, and a rule
+    // change that forgets to regenerate the fixture (or bump its version) fails here.
+    expect(PORTABILITY_RULES_VERSION).toBe(FIXTURE.version);
+    expect(PORTABILITY_RULES_SHA256).toBe(FIXTURE.sha256_of_rules);
+    expect(PORTABILITY_RULES_IDENTITY).toEqual({ version: FIXTURE.version, sha256: FIXTURE.sha256_of_rules });
   });
 
   it('every regex source (the named table, each rule\'s list, the fence opener, the interpreter prefix) is a valid pattern under the constraints Python\'s `re` shares — fixed-width lookbehinds only, no named groups, no \\h', () => {
