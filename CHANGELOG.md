@@ -23,7 +23,13 @@ mentioned only where a daemon release depends on them.
   from scratch (`deliver: BASE MOVED since verification — …`; deliberately NOT a `LIFT-CONFLICT`
   strand, since a post-hoc lift would push a tree nobody verified on the new base; an unresolvable
   default ref with the pin set refuses the same way). A post-hoc `POST /runs/:id/deliver` has no
-  engine verification to pin to and strips the variable. Seat health used to mark the unit's
+  engine verification to pin to and strips the variable. The crew#426 preflight (`npm install` +
+  codegen) runs AFTER the engine's verification, so the script now snapshots the worktree content
+  before and after it: an engine-driven delivery REFUSES when the preflight changed any file
+  (`deliver: PREFLIGHT CHANGED the verified tree — … rewrote: <files>`; regenerate in the worktree
+  and approve the retry, which makes the engine re-verify), while a post-hoc lift
+  (`WICKED_DELIVER_POSTHOC=1`, set by the daemon) keeps the regeneration and says which tracked
+  files it rewrote. Seat health used to mark the unit's
   assigned seat inactive on ANY `stepFailed {failureKind: "workerError"}` — and the deliver phase is a
   Tool command no seat ran, stamped `workerError` only because the Tool path has no finer kind — so
   a `deliver: LIFT-CONFLICT` blamed a CLI for a git state. `core/deliver-triage.ts` now recognises
@@ -59,6 +65,13 @@ mentioned only where a daemon release depends on them.
   now derives `Fixes …` / `Refs: …` from the FULL intent first and bounds only the text (the cut is
   still disclosed in the body); `composeDeliverText` takes the references as an optional argument.
   Unit tests over the composer; the script is driven for real with a reference past the cap.
+- **CI + integration fixtures follow the wicked-core#433 engine.** crew's CI builds `wicked-core-ts`
+  from core `main`, which now re-verifies the deliver tree inside an OS write boundary and fails
+  closed without one — the Linux runner installs `bubblewrap` (and lifts the ubuntu-24.04 AppArmor
+  gate on unprivileged user namespaces) so the deliver e2e suites can pass; the elicitation and
+  ACP-kill fixtures admit their stub seat to input governance (`acp_input_governance = true`) so an
+  `executes_code: false` unit stays on the ACP transport under test instead of being rerouted to the
+  wrapped carrier.
 - **Chat scratch chain hardening (crew#502 follow-up; independent review W6/W7 and deferred
   hunks).** A registered repo root the daemon cannot resolve (a permission wall, a symlink loop, an
   unmounted volume) refuses a `POST /chats` (409) only when that repo is IN the chat's scope or its

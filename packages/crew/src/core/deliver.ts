@@ -16,6 +16,10 @@
  *      before staging anything — when origin's default branch no longer resolves to that commit
  *      after its own fetch ({@link DELIVER_BASE_MOVED_MARKER}): a base that moved past the verified
  *      one is re-verified by the engine's retry, never rebased past by this script;
+ *  (b3) the crew#426 preflight (lockfile re-sync + codegen) runs AFTER the engine's verification;
+ *      when it changes the worktree, an engine-driven delivery REFUSES and names the files
+ *      ({@link DELIVER_PREFLIGHT_CHANGED_MARKER}) — a post-hoc lift ({@link DELIVER_POSTHOC_ENV})
+ *      keeps the regeneration and says so;
  *  (c) it STAGES AND COMMITS the run's work, then rebases onto origin's default branch before
  *      pushing. A conflict whose conflicted paths are ALL `CHANGELOG.md` is union-merged (both
  *      sides' additive lines kept) and the rebase continues — the crew#418 collision magnet, made
@@ -146,6 +150,24 @@ export const DELIVER_VERIFIED_BASE_ENV = 'WICKED_DELIVER_VERIFIED_BASE';
  * the deliver gate: it lifts onto the new tip and re-runs the repository's checks first).
  */
 export const DELIVER_BASE_MOVED_MARKER = 'deliver: BASE MOVED since verification';
+
+/**
+ * The env var the daemon sets on a POST-HOC lift (`POST /runs/:id/deliver`, `api/post-hoc-deliver.ts`)
+ * and the engine never does. A post-hoc lift has no engine verification to protect, so the
+ * crew#426 preflight may regenerate tracked files and deliver them (disclosed); an engine-driven
+ * deliver Tool unit — the variable absent — refuses instead ({@link DELIVER_PREFLIGHT_CHANGED_MARKER}).
+ */
+export const DELIVER_POSTHOC_ENV = 'WICKED_DELIVER_POSTHOC';
+
+/**
+ * The sentinel the deliver script prints when the crew#426 preflight (`npm install` + the
+ * `manifest:endpoints` / `generate:api-tests` codegen) CHANGED the worktree AFTER the engine had
+ * verified it (wicked-core#433 review addendum): the tree that would ship is then not the tree the
+ * repository's checks certified, and the script refuses before staging anything. Not a
+ * {@link DELIVER_LIFT_CONFLICT_MARKER}: the remedy is to regenerate in the worktree and approve the
+ * retry, which makes the engine re-verify the changed tree first.
+ */
+export const DELIVER_PREFLIGHT_CHANGED_MARKER = 'deliver: PREFLIGHT CHANGED the verified tree';
 
 /**
  * The BASE heredoc delimiter the script writes its fallback text through. A QUOTED heredoc expands
@@ -361,10 +383,30 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // for a workspace-internal bump (no new tarball to fetch), so a restricted network does not fail
     // delivery. A genuine failure of a step that DID apply stays LOUD (no LIFT-CONFLICT marker →
     // terminal run failure), preserving the phase's refusal posture — the preflight adds no new strand.
+    //
+    // (c0-guard) THE PREFLIGHT MUST NOT WEAKEN THE VERIFIED TREE (wicked-core#433 review addendum).
+    // The engine verified the worktree BEFORE this script runs; the re-sync above runs AFTER it. If
+    // the regeneration changes any file, the tree that would ship is no longer the tree the
+    // repository's checks certified. So the worktree CONTENT is snapshotted as a tree id before and
+    // after (through a scratch index — the real index is untouched) and compared. An engine-driven
+    // delivery (a Tool unit; WICKED_DELIVER_POSTHOC unset) REFUSES on a change and names the files:
+    // the remedy is to regenerate in the worktree and approve to retry, which makes the engine
+    // re-verify the changed tree before this script runs again. A post-hoc lift
+    // (WICKED_DELIVER_POSTHOC=1, `POST /runs/:id/deliver`) has no engine verification to protect and
+    // keeps the crew#426 behaviour — but SAYS which tracked files it regenerated, so the PR reviewer
+    // sees it. Deliberately NO LIFT-CONFLICT marker: a regenerated tree is not a recoverable strand.
+    '_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$TD/preidx" git write-tree; }',
     'if [ -f package.json ] && [ -f package-lock.json ] && [ -f packages/crew/package.json ] && [ -f packages/crew-api-types/package.json ]; then',
+    '  T0=$(_tree)',
     '  npm install --prefer-offline --no-audit --no-fund',
     '  npm run manifest:endpoints -w packages/crew',
     '  npm run generate:api-tests -w packages/crew',
+    '  T1=$(_tree)',
+    '  if [ "$T0" != "$T1" ]; then',
+    '    CH=$(git diff-tree -r --name-only "$T0" "$T1" | tr "\\n" " ")',
+    `    if [ -z "\${WICKED_DELIVER_POSTHOC:-}" ]; then echo "${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: \${CH}; refusing to push a tree the engine did not verify. Regenerate in the worktree (npm install && npm run manifest:endpoints -w packages/crew && npm run generate:api-tests -w packages/crew), then approve to retry the deliver phase (the engine re-verifies the changed tree before pushing). Nothing was staged, committed or pushed"; exit 1; fi`,
+    '    echo "deliver: preflight regenerated tracked files on a post-hoc lift (no engine verification to protect): $CH"',
+    '  fi',
     'fi',
     // (c1a) TRACKED CHANGES ALWAYS RIDE. `git add -u` stages every modification/deletion to an
     // already-tracked path (the run's product for that class), including the crew#426 preflight's

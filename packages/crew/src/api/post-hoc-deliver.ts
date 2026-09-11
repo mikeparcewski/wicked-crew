@@ -21,7 +21,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DELIVER_VERIFIED_BASE_ENV, deliverPrScript, type DeliverScriptOptions } from '../core/deliver.js';
+import {
+  DELIVER_POSTHOC_ENV,
+  DELIVER_VERIFIED_BASE_ENV,
+  deliverPrScript,
+  type DeliverScriptOptions,
+} from '../core/deliver.js';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /** What one spawn of the deliver script produced: its exit status and merged output. */
@@ -140,6 +145,10 @@ export function runDeliverScript(
   // `WICKED_DELIVER_VERIFIED_BASE`) must not fire off a stray pin in the daemon's own environment:
   // it would refuse a base that merely differs from something nobody verified THIS work against.
   delete shellEnv[DELIVER_VERIFIED_BASE_ENV];
+  // …and the script is told this IS a post-hoc lift, so the crew#426 preflight may regenerate
+  // tracked files and deliver them (disclosed) instead of refusing as an engine-driven Tool unit
+  // must (wicked-core#433 review addendum — there is no verified tree here to weaken).
+  shellEnv[DELIVER_POSTHOC_ENV] = '1';
   return new Promise((resolve) => {
     execFile(
       'bash',

@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
+  DELIVER_PREFLIGHT_CHANGED_MARKER as PREFLIGHT_CHANGED_MARKER,
   DELIVER_PHASE_ID,
   DELIVER_TEXT_HEREDOC,
   EVIDENCE_FLOOR_PIN,
@@ -97,7 +98,12 @@ describe('deliverPrScript (the hardened field script)', () => {
   it('stages tracked work then classifies untracked paths before it pushes anything (crew#434)', () => {
     // Tracked changes always ride; the blanket `git add -A` is gone.
     expect(script).toContain('git add -u');
-    expect(script).not.toContain('git add -A');
+    // No `git add -A` STAGING command (a whole line, however indented): the crew#434 classifier
+    // replaced the sweep. The wicked-core#433 preflight guard's `_tree()` helper does spell
+    // `git add -A` — into a SCRATCH index (`GIT_INDEX_FILE="$TD/preidx"`, same line), for a tree id,
+    // never the real index — so the pin is anchored on a staging line, not on the substring.
+    expect(script).not.toMatch(/^\s*git add -A/m);
+    expect(script).toContain('GIT_INDEX_FILE="$TD/preidx" git add -A -- .');
     expect(script).toContain('S=.wicked-crew-delivery-stranded');
     // Untracked candidates are enumerated per-file (gitignore honored, NUL-delimited) and staged
     // individually — not swept.
@@ -234,6 +240,27 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(at).toBeLessThan(script.indexOf('git push -u origin'));
     // Absent pin ⇒ the whole block is skipped: the check is guarded on the variable being non-empty.
     expect(script.indexOf('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]')).toBeLessThan(at);
+  });
+
+  // wicked-core#433 review addendum — the crew#426 preflight runs AFTER the engine's verification;
+  // when it changes the worktree an engine-driven delivery refuses (a post-hoc lift discloses).
+  // Pinned as script properties; driven for real in deliver-script-exec.test.ts.
+  it('refuses when the preflight CHANGED the verified tree — unless the lift is post-hoc, which discloses', () => {
+    expect(script).toContain('_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$TD/preidx" git write-tree; }');
+    expect(script).toContain('  T0=$(_tree)');
+    expect(script).toContain('  T1=$(_tree)');
+    expect(script).toContain('  if [ "$T0" != "$T1" ]; then');
+    const refusal = script.split('\n').find((l) => l.includes(PREFLIGHT_CHANGED_MARKER))!;
+    expect(refusal).toContain('if [ -z "${WICKED_DELIVER_POSTHOC:-}" ]; then');
+    expect(refusal).toMatch(/Nothing was staged, committed or pushed"; exit 1; fi$/);
+    expect(refusal).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(script).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    // Ordered: T0 before the install, the verdict after the codegen and before anything is staged.
+    const t0 = script.indexOf('T0=$(_tree)');
+    expect(t0).toBeGreaterThan(-1);
+    expect(t0).toBeLessThan(script.indexOf('npm install --prefer-offline'));
+    expect(script.indexOf('T1=$(_tree)')).toBeGreaterThan(script.indexOf('generate:api-tests'));
+    expect(script.indexOf(PREFLIGHT_CHANGED_MARKER)).toBeLessThan(script.indexOf('git add -u'));
   });
 
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {

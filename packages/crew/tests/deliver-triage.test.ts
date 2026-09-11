@@ -10,7 +10,11 @@
 // seat-health chip.
 
 import { describe, expect, it } from 'vitest';
-import { DELIVER_BASE_MOVED_MARKER, DELIVER_LIFT_CONFLICT_MARKER } from '../src/core/deliver.js';
+import {
+  DELIVER_BASE_MOVED_MARKER,
+  DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_PREFLIGHT_CHANGED_MARKER,
+} from '../src/core/deliver.js';
 import {
   ENGINE_CHECKS_MUTATED_PHRASE,
   ENGINE_LIFT_APPLY_FAILED_PHRASE,
@@ -169,6 +173,15 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
       'to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing)';
     expect(triageDeliverFailure(moved)).toEqual({
       kind: 'base_moved',
+      author: 'script',
+      disposition: 'escalate',
+      recoverable: false,
+    });
+    const regenerated =
+      `${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: packages/crew/endpoint-manifest.json ; ` +
+      'refusing to push a tree the engine did not verify. Regenerate in the worktree (…), then approve to retry the deliver phase';
+    expect(triageDeliverFailure(regenerated)).toEqual({
+      kind: 'preflight_changed',
       author: 'script',
       disposition: 'escalate',
       recoverable: false,

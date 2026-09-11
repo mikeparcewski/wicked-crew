@@ -741,3 +741,84 @@ describe('deliver script — a `fixes #N` past the embedded-intent cap still rea
     expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`)).toContain('Fixes #214');
   }, 60_000);
 });
+
+// wicked-core#433 review addendum — the crew#426 preflight (`npm install` + `manifest:endpoints` +
+// `generate:api-tests`) runs AFTER the engine verified the tree. Driven for real on a crew-SHAPED
+// fixture (the preflight is gated on root package.json + lockfile + packages/crew +
+// packages/crew-api-types) whose codegen script either leaves the manifest alone or rewrites it.
+describe('deliver script — the preflight must not weaken the verified tree (wicked-core#433 addendum)', () => {
+  /** Turn the fixture's seed into a crew-shaped workspace whose `manifest:endpoints` script runs
+   *  `regen` inside packages/crew; the seed's lockfile is what `npm install` itself produces, so an
+   *  in-sync preflight rewrites nothing. */
+  function crewShaped(fx: Fixture, regen: string): void {
+    const seed = join(fx.root, 'seed');
+    mkdirSync(join(seed, 'packages', 'crew'), { recursive: true });
+    mkdirSync(join(seed, 'packages', 'crew-api-types'), { recursive: true });
+    writeFileSync(join(seed, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(seed, 'package.json'), `${JSON.stringify({ name: 'fx-root', private: true, workspaces: ['packages/*'] }, null, 2)}\n`);
+    writeFileSync(
+      join(seed, 'packages', 'crew', 'package.json'),
+      `${JSON.stringify({ name: 'fx-crew', version: '0.0.0', private: true, scripts: { 'manifest:endpoints': regen, 'generate:api-tests': 'node -e 0' } }, null, 2)}\n`,
+    );
+    writeFileSync(join(seed, 'packages', 'crew', 'endpoint-manifest.json'), '{"version":1,"apiTypesVersion":"0.0.0"}\n');
+    writeFileSync(join(seed, 'packages', 'crew-api-types', 'package.json'), `${JSON.stringify({ name: 'fx-api-types', version: '0.0.0', private: true }, null, 2)}\n`);
+    execFileSync('npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts'], { cwd: seed, stdio: 'ignore' });
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'crew-shaped workspace');
+    git(seed, 'push', '-q', 'origin', 'main');
+    // The run worktree hangs off the clone: bring both to the new tip.
+    git(fx.clone, 'pull', '-q', '--ff-only', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '-q', '--hard', 'origin/main');
+  }
+  const REWRITE = `node -e "require('fs').writeFileSync('endpoint-manifest.json', JSON.stringify({version:1,apiTypesVersion:'9.9.9'})+'\\n')"`;
+
+  it('an in-sync preflight changes nothing and the delivery proceeds', async () => {
+    const fx = fixture();
+    crewShaped(fx, 'node -e 0');
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'in-sync preflight' });
+
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
+    expect(r.output).not.toContain('preflight regenerated');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 90_000);
+
+  it('an ENGINE-driven delivery REFUSES when the preflight rewrote a tracked file — named, nothing staged or pushed', async () => {
+    const fx = fixture();
+    crewShaped(fx, REWRITE);
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'regenerated after verify' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: PREFLIGHT CHANGED the verified tree');
+    expect(r.output).toContain('packages/crew/endpoint-manifest.json');
+    expect(r.output).toContain('Nothing was staged, committed or pushed');
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+    // The regeneration is left in the worktree for the operator to see (unstaged), the work untouched.
+    const status = git(fx.workdir, 'status', '--porcelain');
+    expect(status).toContain(' M packages/crew/endpoint-manifest.json');
+    expect(status).toContain('?? work.ts');
+    expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('0');
+  }, 90_000);
+
+  it('a POST-HOC lift keeps the regeneration, delivers it, and SAYS which files it rewrote', async () => {
+    const fx = fixture();
+    crewShaped(fx, REWRITE);
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'post-hoc regeneration', env: { WICKED_DELIVER_POSTHOC: '1' } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    expect(r.output).toContain('packages/crew/endpoint-manifest.json');
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim().split('\n').sort();
+    expect(files).toEqual(['packages/crew/endpoint-manifest.json', 'work.ts']);
+  }, 90_000);
+});

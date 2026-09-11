@@ -31,9 +31,19 @@
  * `stepFailed.detail` / the unit's `denial_reason` (head 150 + tail 250 chars of the output,
  * `bounded_excerpt` in `actor.rs`; every phrase matched here sits inside the first 150 chars of the
  * line that carries it, and the script prints its refusal as the LAST line, so both ends survive).
+ *
+ * ORDERING: this is a TEXT classifier and assumes nothing about the event stream. In particular a
+ * deliver unit refused for a wrong HEAD ref (`deliver: the worktree's HEAD is attached to …`) emits
+ * its `stepFailed` WITHOUT a preceding `deliverLiftEvaluated` — the run-branch precondition runs
+ * before any lift — so no consumer (this one, the strand derivation, seat health, the studio's
+ * delivery card) may treat the lift event as a prerequisite of a deliver failure.
  */
 
-import { DELIVER_BASE_MOVED_MARKER, DELIVER_LIFT_CONFLICT_MARKER } from './deliver.js';
+import {
+  DELIVER_BASE_MOVED_MARKER,
+  DELIVER_LIFT_CONFLICT_MARKER,
+  DELIVER_PREFLIGHT_CHANGED_MARKER,
+} from './deliver.js';
 
 /** The engine's lift-conflict remedy (`LiftOutcome::Conflict`) — crew's marker plus the engine's words. */
 export const ENGINE_LIFT_CONFLICT_PHRASE = `${DELIVER_LIFT_CONFLICT_MARKER} — lifting the run's work onto`;
@@ -58,6 +68,7 @@ export const ENGINE_CHECKS_MUTATED_PHRASE = "deliver: the repository's checks pa
  * - `reverify_failed` — the repository's checks FAILED on the tree that would ship (engine);
  * - `checks_mutated` — the checks passed but changed the tree / could not be re-proven (engine);
  * - `base_moved` — the script found origin/<default> past `WICKED_DELIVER_VERIFIED_BASE` (script);
+ * - `preflight_changed` — the crew#426 lockfile/codegen re-sync changed the verified tree (script);
  * - `script_refusal` — any other loud `deliver: …` refusal the script prints (script).
  */
 export type DeliverFailureKind =
@@ -68,6 +79,7 @@ export type DeliverFailureKind =
   | 'reverify_failed'
   | 'checks_mutated'
   | 'base_moved'
+  | 'preflight_changed'
   | 'script_refusal';
 
 export interface DeliverFailureTriage {
@@ -121,6 +133,9 @@ export function triageDeliverFailure(detail: string | null | undefined): Deliver
   if (detail.includes(ENGINE_CHECKS_MUTATED_PHRASE)) return ENGINE('checks_mutated');
   if (detail.includes(DELIVER_BASE_MOVED_MARKER)) {
     return { kind: 'base_moved', author: 'script', disposition: 'escalate', recoverable: false };
+  }
+  if (detail.includes(DELIVER_PREFLIGHT_CHANGED_MARKER)) {
+    return { kind: 'preflight_changed', author: 'script', disposition: 'escalate', recoverable: false };
   }
   if (SCRIPT_REFUSAL.test(detail)) {
     return { kind: 'script_refusal', author: 'script', disposition: 'escalate', recoverable: false };
