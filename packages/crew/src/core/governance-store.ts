@@ -361,9 +361,12 @@ export function legacyHomeOutboxPath(env: NodeJS.ProcessEnv = process.env): stri
  *               daemon's store is the repair.
  *  - `'host'` — this daemon runs in an ISOLATED state home (`--db` elsewhere, a fresh rig, a test
  *               harness). A pre-fix engine wrote under HOME regardless of which daemon it served,
- *               so the file holds OTHER daemons' dead letters and this daemon has no legacy of its
- *               own (its only outbox is the sidecar, already folded). Reporting it as a warning with
- *               a replay recipe would import a stranger's governance events into this store.
+ *               so the file is shared by every daemon on the host and CANNOT be attributed to this
+ *               one — it may hold other daemons' dead letters, or (for an isolated daemon that ran
+ *               since before the fix) some of its own, and nothing in the file says which (the
+ *               post-fix `origin` stamp, `emitOrigin`, would — a fold over it is the follow-up).
+ *               Reporting it as a warning with a replay recipe would import a stranger's governance
+ *               events into this store; it is reported at info with the read-only inspect recipe.
  *
  * `coreDbPath` `null` (no store resolved) is `'host'`: with no state home there is nothing to
  * attribute the file to. Pure — the HOME is read off the outbox path itself

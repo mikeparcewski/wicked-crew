@@ -23,8 +23,9 @@
  *                 `governance.store` (error) when no store is resolved; `governance.legacy-outbox`
  *                 when the pre-fix HOME outbox exists — a WARNING naming the replay command when it
  *                 is this daemon's own prior outbox (default state home under that HOME), an INFO
- *                 with no recipe when the state home is isolated and the file is other daemons'
- *                 dead letters (F-2R2-006: a fresh rig must not be told to import them).
+ *                 with only the read-only `--dry-run` inspect recipe when the state home is isolated
+ *                 and the file cannot be attributed to this daemon (F-2R2-006: a fresh rig must not
+ *                 be told to import another daemon's dead letters).
  */
 
 import { createReadStream } from 'node:fs';
@@ -378,19 +379,23 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
     });
   }
   if (input.legacyOutbox !== null && input.legacyOutbox.scope === 'host') {
-    // NOT this daemon's dead letters (F-2R2-006): an isolated state home shares HOME with every
-    // other daemon on the host, so the file is theirs. Said at `info`, with NO replay command —
-    // the recipe would import another daemon's governance events into this store.
+    // CANNOT be attributed to this daemon (F-2R2-006; wording per the #533 review, F-3): an isolated
+    // state home shares HOME with every daemon on the host, so the file may hold any of theirs —
+    // including, for a daemon that ran since before the fix, its own. Said at `info`, with the
+    // read-only inspect recipe (a `--dry-run` writes nothing) and the REPLAY withheld: replaying
+    // into this store would import events another daemon spooled.
+    const inspect = `${replayCommand(input.legacyOutbox.path, null)} --dry-run`;
     findings.push({
       kind: 'governance.legacy-outbox',
       severity: 'info',
       message:
         `a pre-fix dead-letter outbox exists at ${input.legacyOutbox.path} (${input.legacyOutbox.bytes} bytes) — ` +
-        'found under HOME — shared across daemons on this host; not this daemon\'s' +
+        'found under HOME — shared across daemons on this host; cannot be attributed to this daemon' +
         (input.location !== null
           ? ` (its state home is ${dirname(input.location.coreDbPath)} and its own outbox is ${input.location.outboxPath})`
           : '') +
-        '. Nothing to replay here: the daemon that runs in that home\'s default state home reports and repairs it',
+        `. Inspect it read-only with ${inspect}; a replay into this daemon's store is withheld — it would import ` +
+        'events another daemon spooled. The daemon that runs in that home\'s default state home reports and repairs it',
     });
   } else if (input.legacyOutbox !== null) {
     const recipe = replayCommand(input.legacyOutbox.path, input.location);

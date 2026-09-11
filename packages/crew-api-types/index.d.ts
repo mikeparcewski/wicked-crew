@@ -437,6 +437,13 @@ export interface RosterSeat {
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
   /**
+   * Where the `not_required` reading came from: `registry` when the CLI's own record declared the
+   * credential requirement, `crew-heuristic` when the daemon's per-CLI table did (today's only
+   * source — the engine's `AgenticCli` declares none; a wicked-core follow-up). A reader can show
+   * the heuristic as such.
+   */
+  free_tier_source?: 'registry' | 'crew-heuristic';
+  /**
    * Whether a council would seat AND keep this seat as far as the daemon can tell: enabled for
    * council, runtime `health` active, `auth` not `signed_out`. The daemon's PREDICTION from its
    * own records — the engine still convenes whatever roster it is handed and benches a seat only
@@ -445,7 +452,30 @@ export interface RosterSeat {
   council_eligible?: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
+  /**
+   * Present when THIS daemon's recent councils benched the seat: the engine's own
+   * `councilSeatFailed` evidence (`non_zero_exit` / `timed_out`, the derivative `benched` kind
+   * excluded), folded over a bounded window (`window_ms`) and cleared by the seat's next ok unit
+   * output. `council_eligible` is false while it is present.
+   */
+  council_bench?: RosterSeatCouncilBench;
   [k: string]: unknown;
+}
+
+/** `RosterSeat.council_bench` (api-types 0.35.0). */
+export interface RosterSeatCouncilBench {
+  /** Primary ballot failures inside the window. */
+  failures: number;
+  /** The last failure's `councilSeatFailed.kind`. */
+  last_kind: string;
+  /** ISO-8601 of the last failure. */
+  last_at: string;
+  /** The run the last failure happened in, when the frame named one. */
+  last_run?: string;
+  /** A bounded excerpt of the last failure's detail / stderr, when there was one. */
+  last_detail?: string;
+  /** The rolling window the failures were counted over, ms. */
+  window_ms: number;
 }
 
 /** A seat's auth reading (`RosterSeat.auth`; api-types 0.35.0). */
@@ -4164,8 +4194,11 @@ export interface DiagnosticsGovernanceDeadletters {
    *  non-empty — events earlier daemons on this host spooled there; `null` otherwise. Reported, never written.
    *  `scope` (api-types 0.35.0, F-2R2-006): `own` = this daemon runs in that HOME's default state home, so the
    *  file is its own earlier versions' outbox (the finding is a warning with the replay recipe); `host` = this
-   *  daemon's state home is isolated and the file holds OTHER daemons' dead letters (an `info` finding, no
-   *  recipe — replaying it here would import them). A daemon predating api-types 0.35.0 omits it. */
+   *  daemon's state home is isolated, so the file — shared by every daemon on the host — cannot be attributed
+   *  to it (an `info` finding with a read-only `--dry-run` inspect recipe and no replay). REQUIRED, deliberately:
+   *  the daemon always attributes the file it reports, so a `legacyOutbox` object without `scope` never leaves a
+   *  daemon shipping this contract; a skin that talks to an OLDER daemon must treat the whole `legacyOutbox`
+   *  object as best-effort (it predates the attribution), not the field alone. */
   legacyOutbox: { path: string; bytes: number; scope: 'own' | 'host' } | null;
 }
 

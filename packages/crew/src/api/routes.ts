@@ -9,8 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
+  CodeGraphData,
   CoreEvent,
   RepoEntry,
+  RepoFinding,
   WorkflowDef,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
@@ -157,6 +159,18 @@ function sortActionableFirst(views: SessionView[]): SessionView[] {
  * `codeGraphErrorStatus`; anything it does not classify rethrows unchanged (the stale-addon error
  * keeps its pre-existing shape here).
  */
+/**
+ * What `GET /repos/:id/graph` answers with 200 (F-2R2-005) — the daemon-side shape the drift guard
+ * pins both ways against `wicked-crew-api-types` `RepoGraphResponse` (#533 review, F-5). `graph`
+ * present = the estate slice; `graph: null` = not built, with `reason` (and the engine's `finding`
+ * when it has one) saying why.
+ */
+export interface RepoGraphReply {
+  graph: CodeGraphData | null;
+  reason?: string;
+  finding?: RepoFinding;
+}
+
 function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
   try {
     return codeGraphDb(repo);
@@ -967,7 +981,14 @@ export function registerRoutes(
         ...seat,
         health,
         signed_in: signed,
-        ...seatStanding(seat as { key: string; enabled_for_council?: boolean }, signed, health),
+        // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
+        // prediction learns from what the engine actually did with the seat (#533 review, F-1).
+        ...seatStanding(
+          seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
+          signed,
+          health,
+          seatHealth.councilBenchFor(key),
+        ),
       };
     });
   };
@@ -1856,10 +1877,7 @@ export function registerRoutes(
           const key = String(seat.key);
           const admission = chatSeatAdmission(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
-            {
-              auth: seat.auth ?? 'unknown',
-              council_eligible: seat.council_eligible ?? true,
-            },
+            seat.auth ?? 'unknown',
             scoped,
           );
           if (admission.ok) clis.push(key);
@@ -3188,7 +3206,10 @@ export function registerRoutes(
     return { requirement: detail };
   });
 
-  app.get(`${V}/repos/:id/graph`, async (req, reply) => {
+  app.get(
+    `${V}/repos/:id/graph`,
+    { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 500, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
@@ -3202,14 +3223,15 @@ export function registerRoutes(
       const finding = (repo.findings ?? []).find(
         (f) => f.code === 'in_tree_code_graph_ignored' || f.code === 'code_graph_root_unresolvable',
       );
-      return reply.send({
+      const unbuilt: RepoGraphReply = {
         graph: null,
         reason:
           finding?.message ??
           `no code graph has been built for '${repo.name}' yet (nothing at ${dbPath}) — run onboarding ` +
             `(POST /api/v1/repos/${repo.id}/onboard) to index it`,
         ...(finding !== undefined ? { finding } : {}),
-      });
+      };
+      return reply.send(unbuilt);
     }
 
     try {
@@ -3236,17 +3258,19 @@ export function registerRoutes(
         edges: Array<{ src: string; tgt: string }>;
       };
       const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
-      return reply.send({
+      const built: RepoGraphReply = {
         graph: {
           nodes: raw.nodes,
           edges: raw.edges,
           stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
         },
-      });
+      };
+      return reply.send(built);
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
-  });
+    },
+  );
 
   // ── Git history (last 20 commits via git log) ─────────────────────────────
 

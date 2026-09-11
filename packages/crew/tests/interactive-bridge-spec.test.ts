@@ -54,6 +54,14 @@ describe('the wicked-interactive spec crew resolves', () => {
       expect(r.spec, range).toBe(`wicked-interactive@${range.trim()}`);
       expect(interactiveSpec({ [INTERACTIVE_SPEC_ENV]: range })).toBe(r.spec);
     }
+    // An accepted override BELOW crew's need floor is honoured and FLAGGED (#533 review, F-7): the boot line warns.
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.8.1' })).toEqual({ spec: 'wicked-interactive@0.8.1', range: '0.8.1', source: 'env', belowFloor: true });
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.8.1' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '>=0.9.0 <1.0.0' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.1' }).belowFloor).toBeUndefined();
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.10.0-rc.1' }).belowFloor).toBeUndefined();
+    // An upper-bound-only range has no floor to compare — accepted, not flagged.
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });
     // A tag, an x-range, a union, a path, a different package, a whole spec: not a floor within the package.
     for (const bad of ['latest', 'next', '0.9', '0.9.x', '*', '^0.9.1 || ^1.0.0', '/srv/interactive', 'wicked-interactive@^0.9.1', 'other-pkg']) {
       expect(validInteractiveRange(bad), bad).toBe(false);

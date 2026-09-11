@@ -126,6 +126,27 @@ export interface InteractiveSpecResolution {
   source: 'default' | 'env';
   /** Present when the env variable was set but is not a semver range — ignored, default used. */
   rejected?: string;
+  /** Present when an ACCEPTED override's floor is below crew's default floor (#533 review, F-7): the
+   *  override is honoured — a pin-back is the operator's call — but routes crew calls may be missing
+   *  (0.8.x lacks `DELETE /api/docs/:doc`), so the boot line warns. */
+  belowFloor?: true;
+}
+
+/** `MAJOR.MINOR.PATCH` of the first floor-bearing comparator in a range (`^`, `~`, `>=`, `=`, bare);
+ *  `null` when the range has only upper bounds. */
+export function rangeFloor(range: string): [number, number, number] | null {
+  for (const part of range.trim().split(/\s+/)) {
+    const m = /^(?:\^|~|>=|=)?(\d+)\.(\d+)\.(\d+)/.exec(part);
+    if (m !== null) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+  return null;
+}
+
+function floorBelow(a: [number, number, number], b: [number, number, number]): boolean {
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i]! !== b[i]!) return a[i]! < b[i]!;
+  }
+  return false;
 }
 
 /** Resolve the spec from `env` — pure, so the boot line, the spawn and the hint agree. */
@@ -138,7 +159,10 @@ export function resolveInteractiveSpec(env: NodeJS.ProcessEnv = process.env): In
     return { spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default', rejected: raw };
   }
   const range = raw.trim();
-  return { spec: `${INTERACTIVE_PACKAGE}@${range}`, range, source: 'env' };
+  const floor = rangeFloor(range);
+  const need = rangeFloor(INTERACTIVE_DEFAULT_RANGE);
+  const belowFloor = floor !== null && need !== null && floorBelow(floor, need);
+  return { spec: `${INTERACTIVE_PACKAGE}@${range}`, range, source: 'env', ...(belowFloor ? { belowFloor: true as const } : {}) };
 }
 
 /** The spec the daemon spawns and the hint names — resolved from the live env at each use. */

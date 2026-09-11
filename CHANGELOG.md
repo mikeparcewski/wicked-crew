@@ -56,7 +56,11 @@ mentioned only where a daemon release depends on them.
     (`~/.wicked-crew`) owns it (its earlier versions spooled there — warning, replay recipe,
     unchanged); any other state home gets an `info` finding labelled "found under HOME — shared
     across daemons on this host; not this daemon's" with NO replay command, and the boot log says
-    the same. `deadletters.legacyOutbox.scope` (`own` | `host`) carries the attribution.
+    the same. `deadletters.legacyOutbox.scope` (`own` | `host`) carries the attribution. Per the
+    independent review of #533: `host` reads "cannot be attributed to this daemon" (an isolated
+    daemon that ran since before the fix may have spooled there too — nothing in the file says
+    which), and the info finding keeps the read-only `wicked-crew governance replay <path> --dry-run`
+    inspect recipe while withholding the replay.
   - **`POST /chats` names every seat it did not seat (F-2R2-007).** A project-scoped open dropped pi
     with no trace (its ACP adapter asks no permissions). The response now carries
     `refused: [{cliKey, reason}]` — every DEFAULT seat the daemon's admission dropped and every
@@ -84,7 +88,16 @@ mentioned only where a daemon release depends on them.
     `council_eligible` (enabled for council, health active, not signed out — the daemon's
     prediction of what a council would do with the seat) and `council_ineligible_reason`. Chat
     admission (`POST /chats` defaults) reads the SAME auth predicate: a signed-out seat is refused
-    up front with the reason instead of failing its first turn.
+    up front with the reason instead of failing its first turn. Per the independent review of #533:
+    the prediction now LEARNS from the engine — `councilSeatFailed` (`non_zero_exit` / `timed_out`;
+    the derivative `benched` kind excluded) is folded into seat health over a bounded 30-minute
+    window, and from two failures up the seat reads `council_eligible: false` with the last failure
+    named in `council_ineligible_reason` and echoed as `council_bench` (cleared by the seat's next ok
+    unit output; `health` itself is not flipped — a chat is not a council). The free-tier reading
+    says where it came from: `free_tier_source: 'crew-heuristic'` today (the CLI registry's
+    `AgenticCli` declares no credential requirement — a wicked-core follow-up adds
+    `credential = "optional"` + a label to the `[cli]` record; the daemon already reads a record
+    that carries it and reports `'registry'`).
   - **A council that held on a fraction of its seats is narrated as one (F-4R2-007).** The
     interactive threads' "Council picked X for Y…" line now appends "(1 of 5 seats answered — 4
     benched)" from the frame's `seated`/`returned`, and quotes `degradedReason` when the engine
@@ -101,7 +114,8 @@ mentioned only where a daemon release depends on them.
     retire is available. Operators and test rigs can override the RANGE with
     `WICKED_INTERACTIVE_SPEC` (a semver range — `^0.9.1`, `0.9.1`, `>=0.9.1 <1.0.0`; tags, paths and
     `pkg@range` spellings are refused), validated at resolution and reported on the boot line; an
-    invalid value is named and ignored.
+    invalid value is named and ignored, and an accepted range whose floor is below crew's need
+    (`^0.9.1`) is honoured with a boot warning. Documented in both READMEs.
   - **`agent-acp-bridges` 1.1.1 — the pi skills env contract has THREE states (wicked-core #443
     review).** `WICKED_PI_SKILL_DIRS` **unset** = no delivery (the launch is unchanged); **set with
     dirs** = a delivery (`--no-skills` + one `--skill <dir>` each); **set but EMPTY**
@@ -110,8 +124,9 @@ mentioned only where a daemon release depends on them.
     let a seat the engine admitted to nothing fall back to `~/.pi/agent/skills`. `piSkillFlags` /
     `skillFlagsFor` (shared by `runBridge` and the `wicked-pi` launcher), the README contract table
     and the tests follow. Crew's dependency range on the package moves to `^1.1.1` — the launcher
-    contract crew relies on is 1.1.x — so **`bridges-v1.1.1` is cut before crew 0.7.30**
-    (`bridges-v1.1.0` was cut on the #532 merge). Also from the #532 review: the skills validator's
+    contract crew relies on is 1.1.x. **Release order: tag `bridges-v1.1.1` on this PR's merge
+    commit and publish it → then cut crew 0.7.30** (`bridges-v1.1.0` was cut on the #532 merge;
+    until 1.1.1 is on the registry, `npm i -g wicked-crew@0.7.30` cannot resolve `^1.1.1`). Also from the #532 review: the skills validator's
     fence-walk comment (`skills/refs.ts`) named a `semantics.fence` fixture key that never shipped —
     refreshed to the fixture's `fences` rule.
   - **`wicked-crew-api-types` 0.35.0** (additive): `RosterSeat.auth?` / `free_tier?` /
@@ -119,7 +134,11 @@ mentioned only where a daemon release depends on them.
     `ChatOpenResponse.refused?`, `ChatSeatRefusedFrame`; `RepoGraphResponse` (`reason?`,
     `finding?`); `ProjectGraphAction`, `ProjectGraphStatus.action?`, `ChatScope.graph.action?`;
     `DiagnosticsGovernanceFinding.severity` admits `info`;
-    `DiagnosticsGovernanceDeadletters.legacyOutbox.scope?`. Endpoint manifest + generated API tests
+    `DiagnosticsGovernanceDeadletters.legacyOutbox.scope` (required — the daemon always attributes the
+    file it reports; a skin talking to an older daemon treats the whole `legacyOutbox` object as
+    best-effort), `RosterSeat.free_tier_source?` / `council_bench?` + `RosterSeatCouncilBench`;
+    `GET /repos/:id/graph` binds `RepoGraphResponse` in the endpoint manifest and the drift guard.
+    Endpoint manifest + generated API tests
     re-stamped.
 
 ## [0.7.29] — 2026-09-11

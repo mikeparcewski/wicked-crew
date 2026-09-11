@@ -32,27 +32,46 @@
  * Pure, synchronous, no IO: the probe result and the health record are inputs.
  */
 
-import type { SeatHealth } from './seat-health.js';
+import type { CouncilBench, SeatHealth } from './seat-health.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
 
 /**
  * Seats known to answer with NO credential at all — a free tier the CLI selects by itself when no
- * provider is configured. What the daemon knows about the CLI, not something it observed: opencode
- * runs its free "OpenCode Zen" models (`big-pickle` and friends) with no account, which is exactly
- * what the fresh-rig chat exercised (F-2R2-009). Keyed by roster `key`; the value is the label the
- * UI can show beside "no sign-in".
+ * provider is configured. A CREW-SIDE HEURISTIC, keyed by roster `key` (independent review of #533,
+ * F-1): the CLI registry declares no credential requirement today (`AgenticCli` has none;
+ * `AcpConfig.auth_method` is the ACP transport's auth, `None` for every built-in), so the daemon
+ * cannot read this off the record and says so on the wire (`free_tier_source: 'crew-heuristic'`).
+ * The day the `[cli]` record carries `credential = "optional"` (wicked-core follow-up), {@link seatAuth}
+ * reads the record first and reports `free_tier_source: 'registry'` — this table is the fallback.
+ * opencode runs its free "OpenCode Zen" models (`big-pickle` and friends) with no account, which is
+ * exactly what the fresh-rig chat exercised (F-2R2-009).
  */
 export const FREE_TIER_SEATS: Readonly<Record<string, string>> = Object.freeze({
   opencode: 'OpenCode Zen free models (no account needed)',
 });
 
-/** The auth reading for one seat: the probe's answer, re-read against the seat's free tier. */
-export function seatAuth(seatKey: string, signedIn: boolean | null): SeatAuth {
-  if (signedIn === true) return 'signed_in';
-  if (signedIn === null) return 'unknown';
-  return Object.hasOwn(FREE_TIER_SEATS, seatKey) ? 'not_required' : 'signed_out';
+/** Where a `not_required` reading came from: the CLI's registry record, or crew's own table. */
+export type FreeTierSource = 'registry' | 'crew-heuristic';
+
+/** The auth reading for one seat: the probe's answer, re-read against the seat's credential requirement. */
+export function seatAuth(seat: StandingSeat, signedIn: boolean | null): { auth: SeatAuth; free_tier?: string; free_tier_source?: FreeTierSource } {
+  if (signedIn === true) return { auth: 'signed_in' };
+  if (signedIn === null) return { auth: 'unknown' };
+  // The registry record wins when it declares the requirement (forward-compatible with the core
+  // follow-up: `credential: "optional"` + an optional `free_tier` label on the `[cli]` record).
+  if (seat.credential === 'optional') {
+    return {
+      auth: 'not_required',
+      free_tier: typeof seat.free_tier === 'string' && seat.free_tier !== '' ? seat.free_tier : 'free tier declared by the CLI registry',
+      free_tier_source: 'registry',
+    };
+  }
+  if (seat.credential === undefined && Object.hasOwn(FREE_TIER_SEATS, seat.key)) {
+    return { auth: 'not_required', free_tier: FREE_TIER_SEATS[seat.key] as string, free_tier_source: 'crew-heuristic' };
+  }
+  return { auth: 'signed_out' };
 }
 
 /** The roster fields standing reads. Structural, so both the wire seat and a test stub satisfy it. */
@@ -60,15 +79,23 @@ export interface StandingSeat {
   key: string;
   enabled_for_council?: boolean;
   acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null;
+  /** A registry-declared credential requirement, when the engine's record carries one (future core). */
+  credential?: 'required' | 'optional' | string;
+  /** A registry-declared free-tier label, when the record carries one (future core). */
+  free_tier?: string;
 }
 
 export interface SeatStanding {
   auth: SeatAuth;
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
+  /** Present with `free_tier`: whether the CLI registry declared it, or crew's own table did. */
+  free_tier_source?: FreeTierSource;
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
+  /** Present when THIS daemon's recent councils benched the seat (`SeatHealthTracker.councilBenchFor`). */
+  council_bench?: CouncilBench;
 }
 
 /** A seat whose `auth` lets it take a turn — the ONE predicate the roster and the chat share. */
@@ -76,11 +103,16 @@ export function authUsable(auth: SeatAuth): boolean {
   return auth !== 'signed_out';
 }
 
-export function seatStanding(seat: StandingSeat, signedIn: boolean | null, health: SeatHealth): SeatStanding {
-  const auth = seatAuth(seat.key, signedIn);
+export function seatStanding(
+  seat: StandingSeat,
+  signedIn: boolean | null,
+  health: SeatHealth,
+  bench: CouncilBench | null = null,
+): SeatStanding {
+  const read = seatAuth(seat, signedIn);
+  const auth = read.auth;
   const base: SeatStanding = {
-    auth,
-    ...(auth === 'not_required' ? { free_tier: FREE_TIER_SEATS[seat.key] as string } : {}),
+    ...read,
     council_eligible: true,
   };
   if (seat.enabled_for_council === false) {
@@ -101,6 +133,21 @@ export function seatStanding(seat: StandingSeat, signedIn: boolean | null, healt
       council_ineligible_reason: `inactive after a seat-level error${health.message !== undefined ? `: ${health.message}` : ''}`,
     };
   }
+  if (bench !== null) {
+    // The engine's own evidence, from THIS daemon's recent runs (independent review of #533, F-1):
+    // a seat that failed its ballots is benched whatever its auth reading says — the free tier
+    // that answers a chat can still time out a 40 s dispatch budget.
+    const minutes = Math.max(1, Math.round(bench.window_ms / 60_000));
+    return {
+      ...base,
+      council_eligible: false,
+      council_ineligible_reason:
+        `benched by this daemon's recent councils: ${bench.failures} ballot failures in the last ${minutes} min — ` +
+        `last ${bench.last_kind}${bench.last_run !== undefined ? ` on run ${bench.last_run.slice(0, 8)}` : ''}` +
+        `${bench.last_detail !== undefined ? ` (${bench.last_detail})` : ''}; an ok unit output clears it`,
+      council_bench: bench,
+    };
+  }
   return base;
 }
 
@@ -111,10 +158,13 @@ export type ChatAdmission = { ok: true } | { ok: false; reason: string };
  * the engine's admission rule (`acp_runner.rs` `scoped_seat_admission`) restated so a refused seat
  * is named with its reason instead of silently absent (F-2R2-007). Explicitly requested seats
  * (`clis`) bypass this: the engine refuses them per seat, and its reason rides on the outcome.
+ * Takes the seat's `auth` only (independent review of #533, F-4): a chat is not a council, so
+ * `council_eligible` / health are deliberately NOT consulted here — a seat benched in councils can
+ * still answer a chat, and saying otherwise would refuse a working seat.
  */
-export function chatSeatAdmission(seat: StandingSeat, standing: SeatStanding, scoped: boolean): ChatAdmission {
+export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: boolean): ChatAdmission {
   const reasons: string[] = [];
-  if (!authUsable(standing.auth)) {
+  if (!authUsable(auth)) {
     reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
   }
   if (scoped) {

@@ -257,3 +257,79 @@ describe('deliver refusals are escalations, not seat faults (wicked-core#431 fol
     expect(h.lastErrorAt).toBeUndefined();
   });
 });
+
+// ── The council bench fold (independent review of #533, F-1) ─────────────────────────────────────
+//
+// `councilSeatFailed { cli, kind }` is the engine's own evidence that a seat cannot hold a ballot.
+// The fold is bounded — primary kinds only, a rolling window, a threshold — feeds `council_eligible`
+// through `councilBenchFor`, never flips `health`, and is cleared by the seat's next ok output.
+import {
+  COUNCIL_BENCH_THRESHOLD,
+  COUNCIL_BENCH_WINDOW_MS,
+  SeatHealthTracker as BenchTracker,
+} from '../src/api/seat-health.js';
+import type { CoreEvent as BenchEvent } from '../src/core/types.js';
+
+const failed = (cli: string, kind: string, ts: number, extra: Record<string, unknown> = {}): BenchEvent =>
+  ({ type: 'councilSeatFailed', session: 'bb28ad5a-febb-411f-b8db-aed1dee8e515', ord: 1, round: 1, cli, kind, detail: '', ts, ...extra }) as BenchEvent;
+
+describe('SeatHealthTracker — council bench fold (councilSeatFailed)', () => {
+  const T0 = 1_789_121_684_284;
+
+  it('two primary failures inside the window bench the seat with the LAST failure named; one is weather; health is untouched', () => {
+    const t = new BenchTracker();
+    t.ingest(failed('opencode', 'timed_out', T0, { detail: 'exceeded 40s dispatch budget' }));
+    expect(t.councilBenchFor('opencode', T0 + 1000)).toBeNull();
+    // Observed, stamped — not flipped.
+    expect(t.healthFor('opencode')).toMatchObject({ status: 'active', lastErrorAt: new Date(T0).toISOString() });
+    t.ingest(failed('opencode', 'timed_out', T0 + 40_000, { detail: 'exceeded 40s dispatch budget', ord: 2 }));
+    expect(COUNCIL_BENCH_THRESHOLD).toBe(2);
+    expect(t.councilBenchFor('opencode', T0 + 41_000)).toEqual({
+      failures: 2,
+      last_kind: 'timed_out',
+      last_at: new Date(T0 + 40_000).toISOString(),
+      last_run: 'bb28ad5a-febb-411f-b8db-aed1dee8e515',
+      last_detail: 'exceeded 40s dispatch budget',
+      window_ms: COUNCIL_BENCH_WINDOW_MS,
+    });
+    expect(t.healthFor('opencode').status).toBe('active');
+  });
+
+  it('the derivative `benched` kind is NOT a new observation; a seat the engine only re-benched stays where the primary evidence put it', () => {
+    const t = new BenchTracker();
+    t.ingest(failed('codex', 'benched', T0, { detail: 'seat benched for 23s more (span 30s)' }));
+    t.ingest(failed('codex', 'benched', T0 + 1000, { detail: 'probationary ballot in flight' }));
+    expect(t.councilBenchFor('codex', T0 + 2000)).toBeNull();
+    expect(t.healthFor('codex').lastErrorAt).toBeUndefined();
+    // stderr is the detail when the frame carries no `detail` (a non_zero_exit).
+    t.ingest(failed('codex', 'non_zero_exit', T0 + 2000, { stderr: 'Not logged in. Run `codex login`.' }));
+    t.ingest(failed('codex', 'non_zero_exit', T0 + 3000, { stderr: 'Not logged in. Run `codex login`.' }));
+    expect(t.councilBenchFor('codex', T0 + 4000)).toMatchObject({ failures: 2, last_kind: 'non_zero_exit', last_detail: 'Not logged in. Run `codex login`.' });
+  });
+
+  it('failures age out of the window; an ok unit output clears the bench at once (recovery by real work)', () => {
+    const t = new BenchTracker();
+    t.ingest(failed('pi', 'non_zero_exit', T0));
+    t.ingest(failed('pi', 'non_zero_exit', T0 + 1000));
+    expect(t.councilBenchFor('pi', T0 + 2000)).not.toBeNull();
+    // Just past the window from the FIRST failure: only one remains → below threshold → null.
+    expect(t.councilBenchFor('pi', T0 + COUNCIL_BENCH_WINDOW_MS + 1)).toBeNull();
+    // Re-bench, then the seat completes a unit: cleared.
+    t.ingest(failed('pi', 'non_zero_exit', T0 + COUNCIL_BENCH_WINDOW_MS + 2000));
+    t.ingest(failed('pi', 'non_zero_exit', T0 + COUNCIL_BENCH_WINDOW_MS + 3000));
+    expect(t.councilBenchFor('pi', T0 + COUNCIL_BENCH_WINDOW_MS + 4000)).not.toBeNull();
+    t.ingest({ type: 'unitDistributed', session: 's2', ord: 1, cli: 'pi', ts: T0 + COUNCIL_BENCH_WINDOW_MS + 5000 } as BenchEvent);
+    t.ingest({ type: 'unitOutputCaptured', session: 's2', ord: 1, stepStatus: 'ok', ts: T0 + COUNCIL_BENCH_WINDOW_MS + 6000 } as BenchEvent);
+    expect(t.councilBenchFor('pi', T0 + COUNCIL_BENCH_WINDOW_MS + 7000)).toBeNull();
+    expect(t.healthFor('pi').status).toBe('active');
+  });
+
+  it('a frame without a cli or a kind, or an unknown kind, is ignored', () => {
+    const t = new BenchTracker();
+    t.ingest({ type: 'councilSeatFailed', session: 's', ord: 1, kind: 'timed_out', ts: T0 } as BenchEvent);
+    t.ingest({ type: 'councilSeatFailed', session: 's', ord: 1, cli: 'agy', ts: T0 } as BenchEvent);
+    t.ingest(failed('agy', 'spawn_error', T0));
+    t.ingest(failed('agy', 'spawn_error', T0 + 1));
+    expect(t.councilBenchFor('agy', T0 + 2)).toBeNull();
+  });
+});

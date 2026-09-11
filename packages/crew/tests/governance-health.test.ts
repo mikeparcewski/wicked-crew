@@ -262,13 +262,17 @@ describe('governanceHealth (the findings)', () => {
     });
     expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'info']]);
     const msg = health.findings[0]!.message;
-    expect(msg).toContain("found under HOME — shared across daemons on this host; not this daemon's");
-    // Names THIS daemon's state home and outbox so the reader can see they are elsewhere…
+    // Says what is KNOWN — attribution is impossible, not "someone else's" (#533 review, F-3)…
+    expect(msg).toContain('found under HOME — shared across daemons on this host; cannot be attributed to this daemon');
+    expect(msg).not.toMatch(/not this daemon's/);
+    // …names THIS daemon's state home and outbox so the reader can see they are elsewhere…
     expect(msg).toContain(resolve('/state'));
     expect(msg).toContain(location.outboxPath);
-    // …and offers NOTHING to run: a replay here would import another daemon's dead letters.
-    expect(msg).not.toContain('wicked-crew governance replay');
-    expect(msg).not.toContain('--dry-run');
+    // …keeps the READ-ONLY inspect recipe (a --dry-run writes nothing)…
+    expect(msg).toContain(`wicked-crew governance replay ${shellQuote('/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson')} --dry-run`);
+    // …and withholds the replay: no target store is ever named for this file.
+    expect(msg).not.toContain('--governance-db');
+    expect(msg).toContain('withheld');
     expect(health.deadletters.legacyOutbox?.scope).toBe('host');
   });
 });

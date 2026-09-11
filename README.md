@@ -75,6 +75,12 @@ state home, not your home directory (an explicit `WICKED_APPS_EMIT_DEADLETTER` i
 `GET /api/v1/diagnostics` → `governance` counts them and raises a
 `governance.deadletter` finding, and `wicked-crew governance replay <outbox>` puts them back.
 
+The interactive document bridge (Vibe / Demo documents) is spawned on demand as
+`npx wicked-interactive@^0.9.1`; `WICKED_INTERACTIVE_SPEC` overrides the **range** for an operator or
+a test rig (a semver range only — `^0.9.1`, `0.9.1`, `>=0.9.1 <1.0.0`; tags, paths and `pkg@range`
+spellings are refused and the default is used), reported on the boot line, with a warning when the
+override's floor is below the release crew needs.
+
 ## The idea
 
 Spec-driven development promised rigor and delivered ceremony. wicked-crew goes for the **outcome
