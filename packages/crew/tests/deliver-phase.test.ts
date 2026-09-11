@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
   DELIVER_PHASE_ID,
   DELIVER_TEXT_HEREDOC,
@@ -209,6 +210,30 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(nothing).toBeGreaterThan(-1);
     expect(nothing).toBeLessThan(script.indexOf('git push -u origin'));
     expect(script).toMatch(/nothing to deliver[^\n]*nothing was pushed"; exit 1; \}/);
+  });
+
+  // wicked-core#431 / #433 — the engine lifts + re-verifies BEFORE this script and pins the tip it
+  // verified against in WICKED_DELIVER_VERIFIED_BASE; the script closes the fetch→push race by refusing
+  // a default branch that moved past it. Pinned as script properties; driven for real (delivers on a
+  // matching pin, refuses on a moved one with the worktree untouched) in deliver-script-exec.test.ts.
+  it('pins the engine-verified base: refuses when origin/<default> moved past WICKED_DELIVER_VERIFIED_BASE, before staging (wicked-core#431)', () => {
+    expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then');
+    expect(script).toContain('T=$(git rev-parse --verify -q "$D^{commit}" || true)');
+    expect(script).toMatch(
+      /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: BASE MOVED since verification[^\n]*exit 1; \}/,
+    );
+    // NOT a strand: the refusal carries no LIFT-CONFLICT marker — a post-hoc lift would push a tree
+    // nobody verified on the new base; the remedy is the engine's own retry.
+    const line = script.split('\n').find((l) => l.includes(BASE_MOVED_MARKER))!;
+    expect(line).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(line).toContain('Nothing was staged, committed or pushed');
+    // Ordered: after the script's own fetch, before anything is staged or committed, before the push.
+    const at = script.indexOf(BASE_MOVED_MARKER);
+    expect(at).toBeGreaterThan(script.indexOf('git fetch origin'));
+    expect(at).toBeLessThan(script.indexOf('git add -u'));
+    expect(at).toBeLessThan(script.indexOf('git push -u origin'));
+    // Absent pin ⇒ the whole block is skipped: the check is guarded on the variable being non-empty.
+    expect(script.indexOf('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]')).toBeLessThan(at);
   });
 
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {

@@ -11,6 +11,11 @@
  *      to the current branch when that ref does not exist;
  *  (b) the script REFUSES to push `main`/`master` (or an empty/detached branch name) — the
  *      deliver phase only ever pushes run branches;
+ *  (b2) with the engine's `WICKED_DELIVER_VERIFIED_BASE` pin set (wicked-core#431 / #433: the
+ *      remote-tip commit the engine lifted the work onto and re-verified against), it REFUSES —
+ *      before staging anything — when origin's default branch no longer resolves to that commit
+ *      after its own fetch ({@link DELIVER_BASE_MOVED_MARKER}): a base that moved past the verified
+ *      one is re-verified by the engine's retry, never rebased past by this script;
  *  (c) it STAGES AND COMMITS the run's work, then rebases onto origin's default branch before
  *      pushing. A conflict whose conflicted paths are ALL `CHANGELOG.md` is union-merged (both
  *      sides' additive lines kept) and the rebase continues — the crew#418 collision magnet, made
@@ -124,6 +129,26 @@ export interface DeliverScriptOptions {
 }
 
 /**
+ * The env var the engine hands the deliver command with the remote-tip commit it VERIFIED the
+ * run's work against (wicked-core#431 / #433, `deliver_lift.rs` `VERIFIED_BASE_ENV`): set on a
+ * lift outcome of `unchanged` or `lifted`, absent when the lift was skipped (no remote, no default
+ * ref, a branch carrying its own commits) — and never set on a post-hoc `POST /runs/:id/deliver`,
+ * which has no engine verification to pin to (`api/post-hoc-deliver.ts` strips it).
+ */
+export const DELIVER_VERIFIED_BASE_ENV = 'WICKED_DELIVER_VERIFIED_BASE';
+
+/**
+ * The sentinel the deliver script prints when `origin/<default>` no longer resolves to
+ * {@link DELIVER_VERIFIED_BASE_ENV} after the script's own fetch: the remote advanced between the
+ * engine's re-verify and the push window, so the rebase below would carry the base PAST what was
+ * verified. The script refuses BEFORE staging anything. Deliberately NOT a
+ * {@link DELIVER_LIFT_CONFLICT_MARKER}: a moved base is not a recoverable strand — a post-hoc lift
+ * would push a tree nobody verified on the new base; the remedy is the engine's own retry (approve
+ * the deliver gate: it lifts onto the new tip and re-runs the repository's checks first).
+ */
+export const DELIVER_BASE_MOVED_MARKER = 'deliver: BASE MOVED since verification';
+
+/**
  * The BASE heredoc delimiter the script writes its fallback text through. A QUOTED heredoc expands
  * nothing — `$`, backticks, quotes and backslashes in the intent are inert — so the only way the
  * caller-supplied text could break out is a line equal to the delimiter. That line is never
@@ -233,6 +258,23 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // would put one branch's work on another and push a branch that never saw it. Refuse instead.
     'C=$(git branch --show-current)',
     '[ "$C" = "$B" ] || { echo "deliver: the worktree is on \'$C\' but the run branch is \'$B\' — refusing to commit one branch\'s work onto another; nothing was pushed"; exit 1; }',
+    // (a2) VERIFIED-BASE PIN (wicked-core#431 / #433). Before this script runs, the engine LIFTED the
+    // run's work onto the remote default branch's tip and re-ran the repository's checks when the
+    // lift changed the tree; it hands the tip it verified against as WICKED_DELIVER_VERIFIED_BASE
+    // (absent when its lift was skipped — no remote, no default ref, a branch carrying its own
+    // commits — and on a post-hoc `POST /runs/:id/deliver`, which has no engine verification to pin
+    // to). The engine's fetch and this script's fetch are two moments: a remote that advances in
+    // between would make the rebase below carry the base PAST what was verified — F-3R2-013's
+    // verified≠delivered gap, one window later. So when the pin is set and origin/<default> no
+    // longer resolves to it, REFUSE, here, before anything is staged or committed: the worktree
+    // stays exactly as the engine left it, so an approved retry re-lifts onto the new tip and
+    // re-verifies from scratch. Deliberately NO LIFT-CONFLICT marker (see
+    // DELIVER_BASE_MOVED_MARKER). An unresolvable default ref with the pin set refuses the same way
+    // (fail closed): the script cannot prove the base it is about to rebase onto.
+    'if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then',
+    '  T=$(git rev-parse --verify -q "$D^{commit}" || true)',
+    `  [ "$T" = "$WICKED_DELIVER_VERIFIED_BASE" ] || { echo "${DELIVER_BASE_MOVED_MARKER} — $D is now \${T:-unresolvable} but the engine verified this work against $WICKED_DELIVER_VERIFIED_BASE; refusing to rebase past the verified base. Nothing was staged, committed or pushed — approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing)"; exit 1; }`,
+    'fi',
     // A failed PUSH happens after the product was committed. Keep its worktree from being reaped
     // by leaving this reserved, untracked recovery sentinel; it is removed HERE (before staging)
     // so a normal delivery never sees it, and a retry removes it before another attempt (crew#432).

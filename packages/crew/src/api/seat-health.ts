@@ -12,11 +12,18 @@
 //   "workerError"` (the CLI process itself failed — crew#277 asks exactly this stamp), or a
 //   `detail` naming the wrapped runner's "(cli `x` exited N)" message, an ACP "timeout waiting",
 //   or an auth/quota string (401/unauthorized/quota/rate-limit/credits). The seat is read from
-//   the detail when it names one, else from the unit's `unitDistributed` assignment.
+//   the detail when it names one, else from the unit's `unitDistributed` assignment. A DELIVER
+//   refusal is the exception (wicked-core#431 follow-through): the deliver phase is a Tool command
+//   no seat ran, and the engine's pre-push lift + re-verify (`deliver: LIFT-CONFLICT — …`, `… the
+//   repository's own checks FAILED on it …`, `… could not be applied cleanly …`) and crew's own script (nothing to
+//   deliver, a moved verified base, a failed `gh`) both surface as `workerError` only because the
+//   Tool path has no finer kind. They are operator ESCALATIONS (`core/deliver-triage.ts`) and flip
+//   no seat.
 // - `acpFallback` is NOT alone inactive — `session_died` falls back to single-shot and the unit
 //   can still succeed — but REPEATED fallback (3+ in 10 minutes) is a seat that cannot hold a
-//   session, and that is. `governance_requires_wrapped` is deliberate routing, not a failure,
-//   and never counts.
+//   session, and that is. `governance_requires_wrapped` and `read_only_requires_wrapped`
+//   (wicked-core#431: an evaluator on an unadmitted ACP seat is rerouted to the wrapped carrier,
+//   where read-only is an argv fact) are deliberate routing, not failures, and never count.
 // - `unitOutputCaptured` with `stepStatus: "ok"` marks the assigned seat ACTIVE again and clears
 //   the message (the event carries no seat, so `unitDistributed`/`unitReassigned` are folded
 //   into a per-unit assignment map for the correlation).
@@ -33,6 +40,7 @@ import {
   DaemonSignalLog,
   SIGNAL_CORRELATION_WINDOW_MS,
 } from '../core/daemon-signal-log.js';
+import { triageDeliverFailure } from '../core/deliver-triage.js';
 
 export type { SeatHealth };
 
@@ -65,8 +73,11 @@ const SEAT_FAILURE_PATTERNS: RegExp[] = [
   /\bout of credits\b|\binsufficient credits\b/i, // account balance
 ];
 
-/** `acpFallback` kinds that are deliberate routing rather than a failure — never counted. */
-const BENIGN_FALLBACK_KINDS = new Set(['governance_requires_wrapped']);
+/** `acpFallback` kinds that are deliberate routing rather than a failure — never counted:
+ *  `governance_requires_wrapped` (crew#276) and `read_only_requires_wrapped` (wicked-core#431 —
+ *  an `executes_code: false` unit on an ACP seat not admitted to input governance is routed to the
+ *  wrapped carrier before any ACP turn, where the read-only lever is an argv fact). */
+const BENIGN_FALLBACK_KINDS = new Set(['governance_requires_wrapped', 'read_only_requires_wrapped']);
 
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
@@ -134,6 +145,14 @@ export class SeatHealthTracker {
       }
       case 'stepFailed': {
         const detail = typeof event.detail === 'string' ? event.detail : '';
+        // wicked-core#431 follow-through: a DELIVER refusal — the engine's pre-push lift
+        // (LIFT-CONFLICT, a failed re-verify on the lifted tree, an apply failure) or crew's own
+        // script (nothing to deliver, a moved verified base, a failed gh) — is an operator
+        // ESCALATION, never a seat fault: the deliver phase is a Tool command no CLI seat ran, and
+        // the engine stamps it `workerError` only because the Tool path has no finer kind. Reading
+        // that literally blamed the unit's assigned seat for a git state. Recognised by phrase
+        // (`core/deliver-triage.ts`), it flips nobody.
+        if (triageDeliverFailure(detail) !== null) return;
         const failureKind = str((event as { failureKind?: unknown }).failureKind);
         // The detail names the seat when the wrapped runner produced it; otherwise fall back to
         // the unit's assignment (a workerError detail is the CLI's own output and rarely does).

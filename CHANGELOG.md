@@ -11,6 +11,45 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **The deliver script refuses a base that moved past the engine's verification; deliver refusals
+  are escalations, not seat faults (wicked-core#431 follow-through — crew consumes wicked-core#433).**
+  The engine now lifts the run's work onto the remote default branch's tip and re-runs the
+  repository's checks BEFORE the deliver phase runs, and hands the tip it verified against to the
+  deliver command as `WICKED_DELIVER_VERIFIED_BASE`. The script's own `git fetch` is a second moment:
+  a remote that advanced in between would have made its rebase carry the base PAST what was verified
+  — F-3R2-013's verified≠delivered gap, one window later. With the pin set, `deliverPrScript` now
+  refuses when `origin/<default>` no longer resolves to it — BEFORE anything is staged or committed,
+  so the worktree stays exactly as the engine left it and an approved retry re-lifts and re-verifies
+  from scratch (`deliver: BASE MOVED since verification — …`; deliberately NOT a `LIFT-CONFLICT`
+  strand, since a post-hoc lift would push a tree nobody verified on the new base; an unresolvable
+  default ref with the pin set refuses the same way). A post-hoc `POST /runs/:id/deliver` has no
+  engine verification to pin to and strips the variable. Seat health used to mark the unit's
+  assigned seat inactive on ANY `stepFailed {failureKind: "workerError"}` — and the deliver phase is a
+  Tool command no seat ran, stamped `workerError` only because the Tool path has no finer kind — so
+  a `deliver: LIFT-CONFLICT` blamed a CLI for a git state. `core/deliver-triage.ts` now recognises
+  every deliver refusal — the engine's (`deliver: LIFT-CONFLICT — lifting the run's work onto …`, `…
+  the repository's own checks FAILED on it …`, `… could not be applied cleanly …`, `… could not be
+  snapshotted before delivery …`, `… checks passed but CHANGED the worktree …`, `… not the run branch
+  … — nothing was lifted, reset or pushed …`) and the script's own — as an operator
+  escalation that flips no seat; only a lift CONFLICT is `recoverable`. The engine's LIFT-CONFLICT
+  carries crew's marker as its prefix, so the `completed` + `delivery: 'stranded'` derivation fires
+  for it unchanged, while a failed re-verify stays `failed` (never offered a post-hoc push). The
+  engine's new `acpFallback {fallbackKind: "read_only_requires_wrapped"}` (an evaluator on an
+  unadmitted ACP seat rerouted to the wrapped carrier) is deliberate routing and never counts toward
+  a seat's repeated-fallback inactivity.
+  - **`wicked-crew-api-types` 0.33.0** (additive): `GateEvaluatedEvent.judgeCli: string | null` +
+    `judgeDistinct: boolean | null` (who rendered `agentVerdict`; also on the permissive `CoreEvent`);
+    `EvaluatorMutatedWorktreeEvent.restored: boolean` + `restoreError: string | null`; new
+    `WorktreeRestoredEvent {tree, head, discarded}`, `DeliverLiftEvaluatedEvent {outcome, baseRef,
+    baseBefore, baseAfter, treeBefore, treeAfter, conflicts, note}` with `DeliverLiftOutcome`
+    (`unchanged | lifted | conflict | skipped | failed`), `EvaluatorToolCallDeniedEvent {cli, carrier,
+    tool, kind, path, reason}`, `RunBaseResolvedEvent {baseRef, baseCommit, localHead, behind,
+    fetched, lifted, note}`; `AcpFallbackKind` (the five kinds, `read_only_requires_wrapped` included)
+    typing `AcpFallbackEvent.fallbackKind`; `GateEvidenceEvent` gains the three gate-side frames;
+    `RepoChecksEvaluatedEvent` is documented as also arriving for the deliver ord after a lift;
+    `CoreEvent.kind` widened to `string | null` (the engine sends `null` on `evaluatorToolCallDenied`
+    when the agent sent no kind). Wire-contract pins for each; endpoint manifest + generated API tests
+    re-stamped.
 - **Chat scratch chain hardening (crew#502 follow-up; independent review W6/W7 and deferred
   hunks).** A registered repo root the daemon cannot resolve (a permission wall, a symlink loop, an
   unmounted volume) refuses a `POST /chats` (409) only when that repo is IN the chat's scope or its

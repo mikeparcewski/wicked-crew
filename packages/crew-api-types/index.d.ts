@@ -590,6 +590,12 @@ export interface CoreEvent {
   denialReason?: string | null;
   /** `gateEvaluated`: the final deny-dominant decision over all layers (mirrors `gateDecided.allow`). */
   combined?: boolean;
+  /** `gateEvaluated` (wicked-core#431, api-types 0.33.0): WHO rendered `agentVerdict` — the council seat key
+   *  the layer-2 judge ran under; `null` when no judge ran, and on the bus-mediated path. */
+  judgeCli?: string | null;
+  /** `gateEvaluated` (wicked-core#431): whether that judge was identity-distinct from the work's author
+   *  (`true` = the rotation pick, `false` = the single default runner); `null` when no judge ran. */
+  judgeDistinct?: boolean | null;
   // sessionStarted enrichment fields (snake_case — serde wire names)
   workflow_id?: string | null;
   cli_count?: number;
@@ -688,7 +694,10 @@ export interface CoreEvent {
   /** campaignNodeStarted / campaignNodeAwaitingHuman: the node's attempt-keyed Run id. */
   runId?: string;
   // assumptionRecorded (external-transform convention) — camelCase per event_to_json
-  kind?: string;
+  /** `assumptionRecorded`: the assumption kind; `councilSeatFailed`: the failure branch;
+   *  `evaluatorToolCallDenied` (wicked-core#431, api-types 0.33.0): the ACP `toolCall.kind` — `null`
+   *  when the agent sent none. Widened to admit that `null`; every other producer still sends a string. */
+  kind?: string | null;
   library?: string;
   transform?: string;
   known?: boolean;
@@ -869,7 +878,11 @@ export interface UnitDenial {
 
 /** §3 B1 — the gate's decision depth, emitted alongside `gateDecided`. `denial` is the structured
  *  twin of `denialReason`: `null` when the gate approved, else the winning layer (deny-dominates) —
- *  `worktree_guard` and `repo_checks` are the two wicked-core F-036/F-039 layers. */
+ *  `worktree_guard` and `repo_checks` are the two wicked-core F-036/F-039 layers. `judgeCli` /
+ *  `judgeDistinct` (wicked-core#431 / F-3R2-007, api-types 0.33.0) name WHO rendered `agentVerdict`,
+ *  so evaluator ≠ creator is auditable from the event stream alone (compare with the unit's
+ *  `unitDistributed.cli`). Both keys are ALWAYS present: `null` when no judge ran (`agentVerdict`
+ *  is `null` too) and on the bus-mediated evaluator path, where the seat is not reported back. */
 export interface GateEvaluatedEvent {
   type: 'gateEvaluated';
   session: string;
@@ -885,6 +898,13 @@ export interface GateEvaluatedEvent {
   denialReason: string | null;
   denial: UnitDenial | null;
   combined: boolean;
+  /** The council seat key the layer-2 judge ran under (`codex`, `pi`, …) — WHO rendered
+   *  `agentVerdict`. `null` when no judge ran, and on the bus-mediated path. */
+  judgeCli: string | null;
+  /** Whether that judge seat was IDENTITY-DISTINCT from the work's author: `true` for the rotation
+   *  pick, `false` when the judge fell back to the single default runner (prompt-only independence).
+   *  `null` when no judge ran or the seat is unknown. */
+  judgeDistinct: boolean | null;
 }
 
 /** Foundation wave: session started with enriched context. */
@@ -934,13 +954,36 @@ export interface AcpSessionStartedEvent {
   acpSessionId: string;
 }
 
-/** P1 — ACP unavailable or failed for a CLI; the run continues with single-shot fallback. */
+/**
+ * `acpFallback.fallbackKind` — WHY a unit left the ACP carrier for the wrapped (single-shot) one:
+ * - `binary_unavailable` / `session_died` / `auth_required` — the ACP session could not be had; the
+ *   run continues single-shot (a FAILURE of the seat's transport or account, counted by seat health);
+ * - `governance_requires_wrapped` — a governed unit on a seat whose ACP adapter cannot enforce input
+ *   governance is routed to the wrapped carrier by design (crew#276);
+ * - `read_only_requires_wrapped` (wicked-core#431 / F-3R2-009, api-types 0.33.0) — an
+ *   `executes_code: false` unit (an evaluator, a recon rung, a review) on an ACP seat NOT admitted to
+ *   input governance (pi-acp, codex-acp) is routed to the wrapped carrier BEFORE any ACP turn, where
+ *   the read-only lever is an argv fact (`--sandbox read-only` / `--exclude-tools edit,write`). No
+ *   per-call {@link EvaluatorToolCallDeniedEvent} exists on that route — consumers must not wait for one.
+ * The two `*_requires_wrapped` kinds are deliberate routing, not failures — never a seat-health signal.
+ * Open-ended (`string & {}`) so a newer engine's kind parses in an older consumer.
+ */
+export type AcpFallbackKind =
+  | 'binary_unavailable'
+  | 'session_died'
+  | 'auth_required'
+  | 'governance_requires_wrapped'
+  | 'read_only_requires_wrapped'
+  | (string & {});
+
+/** P1 — ACP unavailable or failed for a CLI, or the unit was deliberately routed off ACP; the run
+ *  continues on the wrapped carrier. `fallbackKind` says which (see {@link AcpFallbackKind}). */
 export interface AcpFallbackEvent {
   type: 'acpFallback';
   session: string;
   cliKey: string;
   reason: string;
-  fallbackKind: string;
+  fallbackKind: AcpFallbackKind;
 }
 
 // ── P2 observability events ─────────────────────────────────────────────────
@@ -1089,6 +1132,17 @@ export type EvaluatorMutatedWorktreeEvent = {
   afterTree: string;
   headMoved: boolean;
   changed: WorktreeChangedPath[];
+  /** wicked-core#431 / F-3R2-010 (api-types 0.33.0): whether the engine RESTORED the creator's tree
+   *  (`beforeTree`) in the worktree right after detecting the mutation — so the retry a human
+   *  approves runs against the VERIFIED tree, never against the evaluator's edit. When `true` a
+   *  {@link WorktreeRestoredEvent} follows with the discarded paths, the gate's `denialReason` says the
+   *  edit was discarded, and the `awaitingHuman` prompt reads "… its edit was discarded and the
+   *  creator's verified tree restored. Approve to retry the phase against the restored tree …" (the
+   *  pre-0.33.0 prompt was "confirm to retry the phase"; a card that matched the old text must
+   *  re-check). `false` = the restore failed or was not attempted — `restoreError` says why — and the
+   *  denial keeps the manual `git read-tree` remedy. */
+  restored: boolean;
+  restoreError: string | null;
 };
 
 /** One repository check the engine ran in the run's worktree (wicked-core F-039). */
@@ -1136,7 +1190,17 @@ export interface RepoCheckRun {
  *  true`): no manifest at all, or a readable `package.json` with no string `typecheck`/`lint`/`test`
  *  script and no `Cargo.toml`. A manifest that cannot be read or trusted still FAILS.
  *  "Done" for a verify phase is now the exit code the engine observed, not the seat's account of
- *  having run the suite. `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
+ *  having run the suite.
+ *
+ *  wicked-core#431 (api-types 0.33.0): the frame ALSO arrives for the DELIVER ord — a Tool unit —
+ *  whenever the worktree's tree is NOT the tree the run verified when the deliver phase is about to
+ *  push: after a lift onto the remote tip ({@link DeliverLiftEvaluatedEvent} `outcome: 'lifted'`), on
+ *  a retry after a failed re-verify, after an operator's by-hand rebase, or for a run that recorded
+ *  no verified tree. The engine re-runs the repository's checks on the tree that would ship before
+ *  allowing the push (a lockfile that moved with the base forces a frozen `--ignore-scripts` install
+ *  first), and the deliver unit's `gateEvaluated` then carries `hasDeterministicFloor: true` with
+ *  this floor's `criterion`. `passed: false` there fails the deliver unit closed — nothing is pushed.
+ *  `type` alias on purpose — see {@link EvaluatorMutatedWorktreeEvent}. */
 export type RepoChecksEvaluatedEvent = {
   type: 'repoChecksEvaluated';
   session: string;
@@ -1148,9 +1212,155 @@ export type RepoChecksEvaluatedEvent = {
   skipped: string[];
 };
 
-/** The gate-evidence events (wicked-core F-036/F-039) as a discriminated union for consumers that
- *  narrow on `type`; they also flow through the permissive {@link CoreEvent}. */
-export type GateEvidenceEvent = EvaluatorMutatedWorktreeEvent | RepoChecksEvaluatedEvent;
+// ── wicked-core#431 gate / deliver evidence (F-3R2-013 / -010 / -009; api-types 0.33.0) ──────────
+
+/** wicked-core#431 / F-3R2-010 — the engine PUT THE CREATOR'S TREE BACK after an `executes_code:
+ *  false` phase changed it ({@link EvaluatorMutatedWorktreeEvent} with `restored: true`): the run
+ *  branch's `HEAD` is back at the baseline commit when the phase had moved it (`head`), the index and
+ *  working tree match `tree` (the baseline the actor snapshotted at dispatch), and every path the
+ *  phase ADDED is deleted. `discarded` names exactly what the evaluator's edit was — the same list the
+ *  mutation event carried as `changed` — so the ledger shows what was thrown away, and `suggestionRef`
+ *  says where the discarded edit was pinned so it can be read back. Emitted at the gate fold, AFTER
+ *  `evaluatorMutatedWorktree` and BEFORE `gateEvaluated`. `type` alias on purpose — see
+ *  {@link EvaluatorMutatedWorktreeEvent}. */
+export type WorktreeRestoredEvent = {
+  type: 'worktreeRestored';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The seat that ran the unit. */
+  cli: string;
+  /** The workflow phase id (`verify`, `adversarial-review`, …). */
+  phase: string;
+  /** The tree id the worktree was restored to (the creator's baseline). */
+  tree: string;
+  /** The commit `HEAD` was reset to when the phase had moved it; `null` when it had not. */
+  head: string | null;
+  discarded: WorktreeChangedPath[];
+  /** Where the DISCARDED tree was pinned so the edit is never lost (wicked-core#433 review
+   *  F-433-008 — the seam wicked-core#432's suggestion lane reads from):
+   *  `refs/wicked/suggestions/<run>/<ord>/<attempt>`, a commit whose tree is the mutation event's
+   *  `afterTree`. `null` when the pin failed (the discarded content is then only a gc-prunable
+   *  dangling tree). */
+  suggestionRef: string | null;
+};
+
+/**
+ * `deliverLiftEvaluated.outcome` — what the engine's pre-push lift onto the remote default branch did:
+ * - `unchanged` — the base was already the remote tip; the deliver rebase is a no-op and the tree the
+ *   checks verified is the tree that ships;
+ * - `lifted` — the remote moved; the run's changes were re-applied onto its tip in the worktree
+ *   (`treeBefore` → `treeAfter`) and the repository's own checks were RE-RUN on the lifted tree (a
+ *   {@link RepoChecksEvaluatedEvent} for this ord) before the push was allowed;
+ * - `conflict` — the lift would conflict in `conflicts`; the worktree was left exactly as verified and
+ *   the deliver unit FAILED with a `deliver: LIFT-CONFLICT — …` remedy — nothing rebased or pushed
+ *   (crew reads that marker as a recoverable strand, `delivery: 'stranded'`);
+ * - `skipped` — the lift could not be DECIDED (no remote / fetch failed / git too old / a branch
+ *   carrying its own commits); the worktree was never touched and the deliver script's own rebase
+ *   stands, as before;
+ * - `failed` — the lift was decided but its APPLICATION failed part-way; the worktree may hold a
+ *   partial state, the deliver unit fails closed, nothing was pushed.
+ * Open-ended (`string & {}`) so a newer engine's outcome parses in an older consumer.
+ */
+export type DeliverLiftOutcome =
+  | 'unchanged'
+  | 'lifted'
+  | 'conflict'
+  | 'skipped'
+  | 'failed'
+  | (string & {});
+
+/** wicked-core#431 / F-3R2-013 — before the run's `deliver` Tool phase pushed, the engine LIFTED the
+ *  run's work onto the remote default branch's CURRENT tip (in memory, `git merge-tree`) and said what
+ *  that did (see {@link DeliverLiftOutcome}). Emitted once per deliver attempt, BEFORE the deliver
+ *  unit's `repoChecksEvaluated` (when a re-verify ran — the tree that would ship is not the recorded
+ *  verified tree) / `stepFailed` (conflict, failed, or a failed re-verify) / `unitDone`. The deliver
+ *  gate never pushes a tree that was not verified: on `unchanged` / `lifted` the deliver command
+ *  receives the verified remote-tip commit as `WICKED_DELIVER_VERIFIED_BASE` and crew's script refuses
+ *  to rebase past it (`deliver: BASE MOVED since verification — …`). `type` alias on purpose. */
+export type DeliverLiftEvaluatedEvent = {
+  type: 'deliverLiftEvaluated';
+  session: string;
+  ord: number;
+  attempt: number;
+  outcome: DeliverLiftOutcome;
+  /** The remote default ref the lift targets (`origin/main`), when one was resolved. */
+  baseRef: string | null;
+  /** The run branch's `HEAD` before the lift (the base the work was verified on). */
+  baseBefore: string | null;
+  /** The remote tip the work now sits on (`lifted`) or would have (`conflict`). */
+  baseAfter: string | null;
+  treeBefore: string | null;
+  treeAfter: string | null;
+  /** The paths the lift would conflict in (`conflict`); empty otherwise. */
+  conflicts: string[];
+  /** Why the lift was skipped / failed, or a disclosed degradation (a failed fetch); `null` otherwise. */
+  note: string | null;
+};
+
+/** wicked-core#431 / F-3R2-009 — an `executes_code: false` phase (an evaluator, a recon rung, a
+ *  review) asked to run a WRITE-CLASS tool (edit/write/delete/move, by ACP `kind` or by tool name) and
+ *  the engine REFUSED the call at the carrier's permission boundary, answering the agent's own reject
+ *  option. Fires on the ACP carrier (`carrier: 'acp'`) for a seat whose adapter is ADMITTED to input
+ *  governance (claude, opencode). A guarded unit on an UNADMITTED ACP seat never starts an ACP turn —
+ *  it is rerouted with `acpFallback {fallbackKind: 'read_only_requires_wrapped'}` and no per-call
+ *  event exists on that route. A refused call costs the seat one tool call, not the phase a retry;
+ *  the worktree guard ({@link EvaluatorMutatedWorktreeEvent}) remains the backstop for what a
+ *  permission boundary cannot see (a `bash` heredoc). `type` alias on purpose. */
+export type EvaluatorToolCallDeniedEvent = {
+  type: 'evaluatorToolCallDenied';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The registry seat key (ACP-path convention, as `governanceUnenforced`). */
+  cli: string;
+  /** The carrier the refusal happened on — `'acp'` today. Open-ended for a future carrier. */
+  carrier: 'acp' | (string & {});
+  /** The tool the agent asked for, as it named it (`edit`, `write`, `str_replace_based_edit_tool`, …). */
+  tool: string;
+  /** The ACP `toolCall.kind` when the agent sent one (`edit`, `delete`, `move`, …); `null` otherwise. */
+  kind: string | null;
+  /** The path the call targeted, when its arguments carried one; `null` otherwise. */
+  path: string | null;
+  reason: string;
+};
+
+/** wicked-core#431 / F-3R2-013 — how the run's BASE commit was chosen when its worktree was minted:
+ *  the engine fetches `origin` and, when the registered clone's `HEAD` is strictly behind the remote
+ *  default branch's tip, bases the run on that tip — so the worker starts from the current code and
+ *  the deliver lift has nothing to move. `lifted: true` = the base moved off the clone's `HEAD` by
+ *  `behind` commits; `false` = `HEAD` was already the tip, or was ahead of / diverged from it (local
+ *  unpushed work — kept, `note` says so), or no remote default ref resolved (`baseRef: null`).
+ *  Emitted once per freshly minted worktree, BEFORE `worktreeReady`; a resumed run reuses its live
+ *  worktree and emits nothing. Session-level (no `ord`). `type` alias on purpose. */
+export type RunBaseResolvedEvent = {
+  type: 'runBaseResolved';
+  session: string;
+  /** The remote default ref (`origin/main`), or `null` when none could be resolved. */
+  baseRef: string | null;
+  /** The commit the run worktree was minted from. */
+  baseCommit: string;
+  /** The registered clone's `HEAD` at mint time. */
+  localHead: string;
+  /** How many commits `localHead` was behind `baseRef`; `0` when not behind or unknown. */
+  behind: number;
+  /** Whether `git fetch origin` succeeded (a failed fetch is disclosed in `note`, cached refs used). */
+  fetched: boolean;
+  lifted: boolean;
+  note: string | null;
+};
+
+/** The gate-evidence events (wicked-core F-036/F-039, extended by wicked-core#431 — api-types 0.33.0
+ *  added {@link WorktreeRestoredEvent}, {@link DeliverLiftEvaluatedEvent} and
+ *  {@link EvaluatorToolCallDeniedEvent}) as a discriminated union for consumers that narrow on `type`;
+ *  they also flow through the permissive {@link CoreEvent}. {@link RunBaseResolvedEvent} is
+ *  session-level evidence and stands on its own. */
+export type GateEvidenceEvent =
+  | EvaluatorMutatedWorktreeEvent
+  | RepoChecksEvaluatedEvent
+  | WorktreeRestoredEvent
+  | DeliverLiftEvaluatedEvent
+  | EvaluatorToolCallDeniedEvent;
 
 // ── P2 decisions-full observability events (wicked-core EVT-001/012/013) ────
 
@@ -3731,7 +3941,9 @@ export interface AcpCliDiagnostics {
   sessionsStarted: number;
   /** Count of `acpFallback` events (ACP unavailable/failed; run continued single-shot). */
   fallbacks: number;
-  /** Fallback counts by `fallbackKind` (`session_died`, `auth_required`, `binary_unavailable`, …). */
+  /** Fallback counts by `fallbackKind` (`session_died`, `auth_required`, `binary_unavailable`, and the
+   *  two deliberate reroutes `governance_requires_wrapped` / `read_only_requires_wrapped` — see
+   *  {@link AcpFallbackKind}). */
   fallbackKinds: Record<string, number>;
   /** Epoch ms of the newest `acpSessionStarted`, or `null` when none recorded. */
   lastStartedTs: number | null;

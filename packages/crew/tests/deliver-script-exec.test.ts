@@ -141,6 +141,8 @@ async function runDeliver(
           GH_STUB_RECORD: record,
           // The operator's own account guard must not leak into the fixture.
           GH_ACCOUNT: '',
+          // Nor a verified-base pin (wicked-core#431) — set per test where the pin is under test.
+          WICKED_DELIVER_VERIFIED_BASE: '',
           GH_STUB_FAIL: opts.gh?.failWith ?? '',
           GH_STUB_OUT: opts.gh?.succeedWith ?? '',
           GH_STUB_LOGIN: opts.gh?.login ?? 'tester',
@@ -653,5 +655,65 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.body).toContain('$(touch'); // unexpanded
     expect(r.pr!.body).toContain('\nWICKED_CREW_DELIVER_TEXT_EOF\n'); // the delimiter line too — it moved, the text did not
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
+  }, 60_000);
+});
+
+// wicked-core#431 / #433 — the engine lifts the run's work onto the remote tip and re-verifies it
+// BEFORE this script runs, then hands the tip it verified against as WICKED_DELIVER_VERIFIED_BASE.
+// The engine's fetch and the script's fetch are two moments; these drive the window for real.
+describe('deliver script honours the engine’s verified-base pin (wicked-core#431)', () => {
+  it('DELIVERS when WICKED_DELIVER_VERIFIED_BASE names the current remote tip', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const pinned = true;\n');
+    const tip = git(fx.clone, 'rev-parse', 'origin/main').trim();
+
+    const r = await runDeliver(fx, { intent: 'pinned base', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('REFUSES a base that moved since the engine verified — nothing staged, committed or pushed; not a strand', async () => {
+    const fx = fixture();
+    // What the engine pinned: the remote tip at lift + re-verify time.
+    const verified = git(fx.clone, 'rev-parse', 'origin/main').trim();
+    // The remote advances in the window between the engine's re-verify and this script's fetch.
+    writeFileSync(join(fx.clone, 'README.md'), 'base\nlanded meanwhile\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main moved after the re-verify');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    // The run's verified work sits UNCOMMITTED in the worktree — exactly as the engine leaves it for
+    // its own retry (its lift re-applies uncommitted work; a branch with its own commits is skipped).
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verifiedOnTheOldBase = true;\n');
+
+    const r = await runDeliver(fx, { env: { WICKED_DELIVER_VERIFIED_BASE: verified } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: BASE MOVED since verification');
+    expect(r.output).toContain(verified);
+    expect(r.output).toContain('Nothing was staged, committed or pushed');
+    // NOT a recoverable strand — a post-hoc lift would push a tree nobody verified on the new base.
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+    // The worktree is exactly as the engine left it: the work untracked and unstaged, no commit on
+    // the run branch, no stranded sentinel — so an approved retry re-lifts and re-verifies cleanly.
+    expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
+    expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('0');
+    expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
+  }, 60_000);
+
+  it('REFUSES fail-closed when the pin is set but the default tip does not resolve to it (a garbage pin)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const x = 1;\n');
+
+    const r = await runDeliver(fx, { env: { WICKED_DELIVER_VERIFIED_BASE: 'not-a-commit-0000' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: BASE MOVED since verification');
+    expect(r.output).toContain('not-a-commit-0000');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
   }, 60_000);
 });

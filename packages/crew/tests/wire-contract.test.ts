@@ -118,6 +118,10 @@ const GATE_DENIED_BY_GUARD = {
   denialReason: WORKTREE_GUARD_DENIAL.reason,
   denial: WORKTREE_GUARD_DENIAL,
   combined: false,
+  // wicked-core#431 (api-types 0.33.0): the judge keys are ALWAYS present — `null` here because no
+  // layer-2 judge ran on these denials (`agentVerdict: null`).
+  judgeCli: null,
+  judgeDistinct: null,
 };
 const GATE_DENIED_BY_CHECKS = { ...GATE_DENIED_BY_GUARD, denialReason: REPO_CHECKS_DENIAL.reason, denial: REPO_CHECKS_DENIAL };
 respondsWith<Wire.GateEvaluatedEvent, typeof GATE_DENIED_BY_GUARD>();
@@ -130,6 +134,149 @@ describe('gate-evidence wire shapes (wicked-core F-036/F-039)', () => {
     expect(GATE_DENIED_BY_GUARD.denial.source).toBe('worktree_guard');
     expect(GATE_DENIED_BY_CHECKS.denial.source).toBe('repo_checks');
     expect(GATE_DENIED_BY_CHECKS.denialReason).toBe(REPO_CHECKS_DENIAL.reason);
+  });
+});
+
+// ── wicked-core#431 follow-through (wicked-core#433; api-types 0.33.0) ────────────────────────
+// The deliver lift, the creator-tree restore, the named judge and the ACP write refusal, spelled as
+// the engine's `event_to_json` emits them (camelCase, every key present, `null` never absent). Each
+// new frame is a `type` alias — CoreEvent's index signature, as the F-036/F-039 pair — so it relays
+// through the CoreEvent-typed seams unchanged; the literals mirror wicked-core's own `to_json` tests.
+respondsWith<Wire.CoreEvent, Wire.WorktreeRestoredEvent>();
+respondsWith<Wire.CoreEvent, Wire.DeliverLiftEvaluatedEvent>();
+respondsWith<Wire.CoreEvent, Wire.EvaluatorToolCallDeniedEvent>();
+respondsWith<Wire.CoreEvent, Wire.RunBaseResolvedEvent>();
+respondsWith<Wire.CoreEvent, Wire.GateEvidenceEvent>();
+// gateEvaluated names the judge — both keys ALWAYS present, `null` when no judge ran (F-3R2-007).
+const GATE_WITH_JUDGE = {
+  type: 'gateEvaluated' as const,
+  session: 'run-1',
+  ord: 4,
+  criterion: 'c',
+  hasDeterministicFloor: true,
+  deterministicPass: true,
+  agentVerdict: 'pass',
+  agentReasoning: null,
+  evaluatorPass: null,
+  evaluatorPolicies: [] as string[],
+  denialReason: null,
+  denial: null,
+  combined: true,
+  judgeCli: 'codex',
+  judgeDistinct: true,
+};
+const GATE_NO_JUDGE = { ...GATE_WITH_JUDGE, agentVerdict: null, judgeCli: null, judgeDistinct: null };
+respondsWith<Wire.GateEvaluatedEvent, typeof GATE_WITH_JUDGE>();
+respondsWith<Wire.GateEvaluatedEvent, typeof GATE_NO_JUDGE>();
+// The mutation event says whether the creator's tree was put back; worktreeRestored carries what
+// was discarded (F-3R2-010).
+const MUTATION_RESTORED = {
+  type: 'evaluatorMutatedWorktree' as const,
+  session: 'run-1',
+  ord: 4,
+  attempt: 0,
+  cli: 'pi',
+  phase: 'verify',
+  beforeTree: '598bbb99',
+  afterTree: '4bffa800',
+  headMoved: false,
+  changed: [{ status: 'M', path: 'src/App.tsx' }],
+  restored: true,
+  restoreError: null,
+};
+respondsWith<Wire.EvaluatorMutatedWorktreeEvent, typeof MUTATION_RESTORED>();
+const WORKTREE_RESTORED = {
+  type: 'worktreeRestored' as const,
+  session: 'run-1',
+  ord: 4,
+  attempt: 0,
+  cli: 'pi',
+  phase: 'verify',
+  tree: '598bbb99',
+  head: null,
+  discarded: [{ status: 'M', path: 'src/App.tsx' }],
+  suggestionRef: 'refs/wicked/suggestions/run-1/4/0',
+};
+const WORKTREE_RESTORED_UNPINNED = { ...WORKTREE_RESTORED, suggestionRef: null };
+respondsWith<Wire.WorktreeRestoredEvent, typeof WORKTREE_RESTORED>();
+respondsWith<Wire.WorktreeRestoredEvent, typeof WORKTREE_RESTORED_UNPINNED>();
+// The deliver lift's record (F-3R2-013) — a conflict names its files; every outcome the engine emits
+// is admitted, `'failed'` included (the fail-closed apply outcome, wicked-core#433 review F-433-006).
+const LIFT_CONFLICT = {
+  type: 'deliverLiftEvaluated' as const,
+  session: 'run-1',
+  ord: 5,
+  attempt: 0,
+  outcome: 'conflict' as const,
+  baseRef: 'origin/main',
+  baseBefore: '1432c96',
+  baseAfter: 'f57069d',
+  treeBefore: '598bbb99',
+  treeAfter: null,
+  conflicts: ['testid-inventory.json'],
+  note: null,
+};
+respondsWith<Wire.DeliverLiftEvaluatedEvent, typeof LIFT_CONFLICT>();
+respondsWith<Wire.DeliverLiftOutcome, 'unchanged' | 'lifted' | 'conflict' | 'skipped' | 'failed'>();
+// A write-class ACP tool call refused at the permission boundary (F-3R2-009); `kind`/`path` nullable.
+const TOOL_DENIED = {
+  type: 'evaluatorToolCallDenied' as const,
+  session: 'run-1',
+  ord: 4,
+  attempt: 0,
+  cli: 'pi',
+  carrier: 'acp' as const,
+  tool: 'edit',
+  kind: 'edit',
+  path: 'src/App.tsx',
+  reason: 'write-class tool call from an executes_code:false phase',
+};
+const TOOL_DENIED_KINDLESS = { ...TOOL_DENIED, kind: null, path: null };
+respondsWith<Wire.EvaluatorToolCallDeniedEvent, typeof TOOL_DENIED>();
+respondsWith<Wire.EvaluatorToolCallDeniedEvent, typeof TOOL_DENIED_KINDLESS>();
+// How the run's base was chosen at worktree mint (F-3R2-013) — session-level, before worktreeReady.
+const BASE_RESOLVED = {
+  type: 'runBaseResolved' as const,
+  session: 'run-1',
+  baseRef: 'origin/main',
+  baseCommit: 'f57069d',
+  localHead: '1432c96',
+  behind: 5,
+  fetched: true,
+  lifted: true,
+  note: null,
+};
+respondsWith<Wire.RunBaseResolvedEvent, typeof BASE_RESOLVED>();
+// acpFallback.fallbackKind: every kind the engine emits — the two deliberate reroutes included —
+// and open-ended for a newer engine.
+respondsWith<
+  Wire.AcpFallbackKind,
+  'binary_unavailable' | 'session_died' | 'auth_required' | 'governance_requires_wrapped' | 'read_only_requires_wrapped'
+>();
+const READ_ONLY_REROUTE = {
+  type: 'acpFallback' as const,
+  session: 'run-1',
+  cliKey: 'pi',
+  reason: 'executes_code:false unit on an ACP seat not admitted to input governance',
+  fallbackKind: 'read_only_requires_wrapped' as const,
+};
+respondsWith<Wire.AcpFallbackEvent, typeof READ_ONLY_REROUTE>();
+
+describe('wicked-core#431 wire shapes (api-types 0.33.0)', () => {
+  it('spells the new frames exactly as the engine emits them', () => {
+    // The teeth are the compile-time assertions above; this keeps the literals live.
+    expect(GATE_NO_JUDGE.judgeCli).toBeNull();
+    expect(GATE_WITH_JUDGE.judgeDistinct).toBe(true);
+    expect(MUTATION_RESTORED.restored).toBe(true);
+    expect(WORKTREE_RESTORED.discarded).toEqual(MUTATION_RESTORED.changed);
+    expect(WORKTREE_RESTORED.suggestionRef).toBe('refs/wicked/suggestions/run-1/4/0');
+    expect(WORKTREE_RESTORED_UNPINNED.suggestionRef).toBeNull();
+    expect(LIFT_CONFLICT.outcome).toBe('conflict');
+    expect(TOOL_DENIED.carrier).toBe('acp');
+    expect(TOOL_DENIED_KINDLESS.kind).toBeNull();
+    expect(TOOL_DENIED_KINDLESS.path).toBeNull();
+    expect(BASE_RESOLVED.behind).toBe(5);
+    expect(READ_ONLY_REROUTE.fallbackKind).toBe('read_only_requires_wrapped');
   });
 });
 
