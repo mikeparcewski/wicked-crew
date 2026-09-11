@@ -30,10 +30,19 @@ mentioned only where a daemon release depends on them.
   snapshot is never rewritten), and ONE `skills.stale-rules` WARNING names up to five of them with
   the remedy: `POST /skills/publish`, which records the running identity and clears the warning.
   Refusal is reserved for tampering — a content or metadata hash mismatch under any rules, a
-  malformed identity pair, or a row that derives differently under the SAME recorded rules. Wire
-  note: `skills.stale-rules` and `current.rules` / `current.drift` are emitted ahead of their
-  `wicked-crew-api-types` declaration (the next api-types cut adds them; `tests/wire-contract.test.ts`
-  carves the pending finding kind out until then).
+  malformed identity pair, or a row that derives differently under the SAME recorded rules. The
+  warning also states the seat consequence (independent review M1): the engine admits and delivers
+  by the snapshot's RECORDED rows until the re-publish — a row listed false → true stays
+  Claude-only, a row listed true → false is still delivered to non-Claude seats (named when
+  present); and when the generation is stale the daemon re-derives the EDITOR manifest
+  (`GET /skills` rows) under the running rules at boot, committing only when a derived value moved
+  (review M2 — the rows and `current.drift` answer from one rule table; the snapshot is never
+  rewritten). Rule for maintainers (review L1): the identity's digest covers the rule TABLE, not the
+  detector code — bump `PORTABILITY_RULES_VERSION` (and regenerate the parity fixture) whenever
+  detector semantics change so a row could derive differently, or the next upgrade refuses those
+  rows as tampering. Wire note: `skills.stale-rules` and `current.rules` / `current.drift` are
+  emitted ahead of their `wicked-crew-api-types` declaration (the next api-types cut adds them;
+  `tests/wire-contract.test.ts` carves the pending finding kind out until then).
 
 ## [0.7.30] — 2026-09-11
 

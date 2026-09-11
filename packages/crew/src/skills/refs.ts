@@ -253,6 +253,16 @@ export function canonicalJson(v: unknown): string {
  * changed. A rule change is not tampering — the store accepts such a generation and the runtime
  * raises a `skills.stale-rules` warning instead of refusing the root (an upgrade must never leave
  * every seat without skills).
+ *
+ * WHAT THE DIGEST COVERS (review of #535, L1): the rule TABLE — regex sources, markers, interpreter
+ * and option lists, fence languages, the spelled-out semantics — NOT the detector code that applies
+ * it (`portabilityIssuesOf`, `portabilityReasonsOf`, `looksBinary`, bundle.ts `owningSkillDir`,
+ * frontmatter.ts `skillKindOf`). A code-only change of detector semantics leaves the digest equal,
+ * and a generation whose rows now derive differently would be refused as tampering on the next
+ * upgrade — F-083 again. So: **bump `PORTABILITY_RULES_VERSION` whenever a row could derive
+ * differently**, table change or not, and regenerate the parity fixture (its `cases[]` fail on such a
+ * change and force the regeneration; the version bump is the author's duty — `skills-refs.test.ts`
+ * pins version and digest to the fixture, so both move together).
  */
 export interface PortabilityRulesIdentity {
   version: number;

@@ -125,11 +125,13 @@ const STALE_RULES_NAMED_ROWS = 5;
  * portability rules than the ones this daemon runs — an older publisher (every pre-0.7.31 snapshot
  * records no identity), or a rule table that moved since — so its rows may derive differently today
  * without a byte having changed. The generation is ACCEPTED and stays the engine input; the message
- * names the rows that now derive differently (up to `STALE_RULES_NAMED_ROWS`) and the remedy: a
- * re-publish, which records the running identity and clears the finding. `null` when the identities
- * agree (a generation this daemon — or one with the same rules — published).
+ * names the rows that now derive differently (up to `STALE_RULES_NAMED_ROWS`), states that every
+ * seat is still admitted and served by the RECORDED rows (review M1 — the engine reads the snapshot,
+ * never crew's re-derivation), whether the editor manifest was re-derived (review M2), and the
+ * remedy: a re-publish, which records the running identity and clears the finding. `null` when the
+ * identities agree (a generation this daemon — or one with the same rules — published).
  */
-function staleRulesFinding(current: CurrentSnapshot): SkillsHealthFinding | null {
+function staleRulesFinding(current: CurrentSnapshot, rederived: { moved: number } | null): SkillsHealthFinding | null {
   if (!current.rules.stale) return null;
   const { recorded, running } = current.rules;
   const was = recorded === null ? 'an unrecorded portability rules version (a publisher before 0.7.31)' : `portability rules v${recorded.version} (${recorded.sha256.slice(0, 12)})`;
@@ -139,10 +141,28 @@ function staleRulesFinding(current: CurrentSnapshot): SkillsHealthFinding | null
     .join(', ');
   const rest = current.drift.length > STALE_RULES_NAMED_ROWS ? ` (+${current.drift.length - STALE_RULES_NAMED_ROWS} more)` : '';
   const rows = current.drift.length === 0 ? 'every row derives the same under the current rules' : `${current.drift.length} row(s) now derive differently: ${named}${rest}`;
+  // The seat consequence, said where the operator reads it (review M1): the engine admits and
+  // delivers by the snapshot's RECORDED rows — the drift above is what a re-publish WOULD record,
+  // not what seats get today. The reverse direction is called out by name: a row recorded portable
+  // that now derives non-portable is still handed to every non-Claude seat until the re-publish.
+  const seats =
+    'every seat is still admitted and served by the RECORDED rows until a re-publish (a row listed false → true stays Claude-only; a row listed true → false is still delivered to non-Claude seats)';
+  const reversed = current.drift.filter((d) => d.recorded.portable && !d.derived.portable);
+  const reversedNote =
+    reversed.length === 0
+      ? ''
+      : `; ${reversed.length} recorded-portable row(s) now derive NON-portable and are STILL delivered to non-Claude seats: ${reversed
+          .slice(0, STALE_RULES_NAMED_ROWS)
+          .map((d) => d.name)
+          .join(', ')}${reversed.length > STALE_RULES_NAMED_ROWS ? ` (+${reversed.length - STALE_RULES_NAMED_ROWS} more)` : ''}`;
+  const editor =
+    rederived === null
+      ? 'the editor manifest (GET /skills rows) could not be re-derived under the current rules (see the log)'
+      : `the editor manifest (GET /skills rows) is re-derived under the current rules (${rederived.moved} row(s) moved)`;
   return {
     kind: 'skills.stale-rules',
     severity: 'warning',
-    message: `generation ${current.gen} was published under ${was}; the daemon runs v${running.version} (${running.sha256.slice(0, 12)}) — ${rows}; re-publish (POST /skills/publish) to refresh the copilot view and the snapshot rows under the current rules — until then the generation is accepted as published and stays the engine input`,
+    message: `generation ${current.gen} was published under ${was}; the daemon runs v${running.version} (${running.sha256.slice(0, 12)}) — ${rows}; ${seats}${reversedNote}; ${editor}; re-publish (POST /skills/publish) to refresh the copilot view and the snapshot rows under the current rules — until then the generation is accepted as published and stays the engine input`,
   };
 }
 
@@ -395,8 +415,25 @@ export class SkillsRuntime {
     // `skillsSnapshotHanded` says which one it used or the run ends (live-generations.ts).
     this.store.live.exported(current.gen);
     // Published under OTHER portability rules (F-083): accepted and exported all the same — the ONE
-    // warning names the rows that derive differently and the re-publish that clears it.
-    const stale = staleRulesFinding(current);
+    // warning names the rows that derive differently, the seat consequence, and the re-publish that
+    // clears it. The EDITOR manifest is re-derived under the running rules first (review M2), so the
+    // `GET /skills` rows and `current.drift` answer from the same rule table; a re-derivation that
+    // cannot land (a manifest that cannot be written) is logged and said in the finding — it never
+    // turns an accepted generation into a refusal.
+    let rederived: { moved: number } | null = null;
+    if (current.rules.stale) {
+      try {
+        const r = this.store.rederiveUnderRunningRules();
+        rederived = { moved: r.moved.length };
+        if (r.moved.length > 0) {
+          this.log(`[skills] skills.stale-rules: re-derived the editor manifest under the current rules — ${r.moved.map((x) => `${x.name} (portable ${String(x.from)} → ${String(x.to)})`).join(', ')} (revision ${r.revision})`);
+        }
+        for (const f of r.refused) this.log(`[skills] skills.stale-rules: re-derivation skipped ${f.skill ?? f.file ?? 'a skill'} — ${f.kind}: ${f.evidence}`);
+      } catch (err) {
+        this.log(`[skills] skills.stale-rules: the editor manifest could not be re-derived under the current rules: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const stale = staleRulesFinding(current, rederived);
     if (stale !== null) this.log(`[skills] skills.stale-rules: ${stale.message}`);
     return this.record({
       state: 'published',

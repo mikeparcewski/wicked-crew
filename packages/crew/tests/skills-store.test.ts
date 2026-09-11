@@ -3063,17 +3063,17 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
   /**
    * Re-shape the current generation on disk the way an honest OLDER publisher would have written it:
    * `metadata` is the snapshot.json to write (identity stripped or re-stamped, rows as the old
-   * detector judged them); gamma's copilot view is dropped when the rows call gamma non-portable (the
-   * old publisher laid out exactly ITS portable rows); the walked tree is re-hashed and the manifest
-   * re-stamped — every byte authenticated, only the rules that judged the rows are older.
+   * detector judged them); the copilot views named in `dropViews` are removed (the old publisher laid
+   * out exactly ITS portable rows); the walked tree is re-hashed and the manifest re-stamped — every
+   * byte authenticated, only the rules that judged the rows are older.
    */
-  const asOlderGeneration = (snapPath: string, metadata: Record<string, unknown>, dropGammaView: boolean): void => {
+  const asOlderGeneration = (snapPath: string, metadata: Record<string, unknown>, dropViews: string[] = []): void => {
     const file = join(snapPath, 'snapshot.json');
     unlock(file);
-    if (dropGammaView) {
-      const gammaView = viewPath(snapPath, 'wicked-garden-gamma');
-      chmodSync(dirname(gammaView), 0o755);
-      removeTreeForce(gammaView);
+    for (const name of dropViews) {
+      const view = viewPath(snapPath, name);
+      chmodSync(dirname(view), 0o755);
+      removeTreeForce(view);
     }
     const tree = walkTree(snapPath);
     const contentHash = hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs);
@@ -3097,6 +3097,15 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
     skills: (metadata['skills'] as SnapshotSkillRow[]).map((row) => (row.name === name ? { ...row, ...patch } : row)),
   });
   const OTHER_RULES = { version: 1, sha256: 'ab'.repeat(32) };
+  /** Age a manifest.json row the way a 0.7.29 daemon left it: the old verdict, no per-reason block (the rig's manifest carried none). */
+  const ageManifestRow = (name: string, portable: boolean): void => {
+    const path = join(s.root, 'manifest.json');
+    const m = JSON.parse(readFileSync(path, 'utf8')) as { skills: Record<string, Record<string, unknown>> };
+    const entry = m.skills[name] as Record<string, unknown>;
+    entry['portable'] = portable;
+    delete entry['portability'];
+    writeFileSync(path, `${JSON.stringify(m, null, 2)}\n`);
+  };
   const withEnvRestored = async (fn: () => Promise<void>): Promise<void> => {
     const saved = process.env['WICKED_SKILLS_SNAPSHOT'];
     try {
@@ -3128,7 +3137,7 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
       s.store.seed();
       const r = await s.store.publish(1);
       const snap = r.snapshot as NonNullable<typeof r.snapshot>;
-      asOlderGeneration(snap.path, gammaFalsePositive(snapshotManifest(snap.path)), true);
+      asOlderGeneration(snap.path, gammaFalsePositive(snapshotManifest(snap.path)), ['wicked-garden-gamma']);
       for (const store of [s.store, storeOver(s)]) {
         const current = store.currentSnapshot();
         expect(current?.gen).toBe(1);
@@ -3176,7 +3185,6 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
       asOlderGeneration(
         snap.path,
         patchRow({ ...pristine, rulesVersion: OTHER_RULES.version, rulesSha256: OTHER_RULES.sha256 }, 'wicked-garden-epsilon', { portability: { portable: false, reasons: ['plugin-root'], evidence: [] } }),
-        false,
       );
       const current = storeOver(s).currentSnapshot();
       expect(current?.rules).toEqual({ recorded: OTHER_RULES, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
@@ -3207,7 +3215,6 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
             return older;
           }),
         },
-        false,
       );
       const current = storeOver(s).currentSnapshot();
       expect(current?.rules).toEqual({ recorded: null, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
@@ -3225,11 +3232,11 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
     const snap = r.snapshot as NonNullable<typeof r.snapshot>;
     const pristine = snapshotManifest(snap.path);
     // SAME recorded identity + gamma flipped: this daemon's rules judged the row — deriving differently IS tampering.
-    asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), rulesVersion: pristine.rulesVersion, rulesSha256: pristine.rulesSha256 }, true);
+    asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), rulesVersion: pristine.rulesVersion, rulesSha256: pristine.rulesSha256 }, ['wicked-garden-gamma']);
     expect(() => storeOver(s).currentSnapshot()).toThrow(SkillsCurrentInvalidError);
     expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-gamma claims portable: false, but its files derive true/);
     // Stripped of the identity, the SAME bytes are accepted — the row is drift.
-    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine));
     expect(storeOver(s).currentSnapshot()?.drift.map((d) => d.name)).toEqual(['wicked-garden-gamma']);
     // A modified FILE under older rules is still a content-hash mismatch.
     const gammaMd = join(snap.path, 'skills', 'gamma', 'SKILL.md');
@@ -3240,14 +3247,14 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
     writeFileSync(gammaMd, before);
     expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
     // A kind claim the SKILL.md does not derive is refused under any rules.
-    asOlderGeneration(snap.path, patchRow(gammaFalsePositive(pristine), 'wicked-garden-beta', { kind: 'router' }), false);
+    asOlderGeneration(snap.path, patchRow(gammaFalsePositive(pristine), 'wicked-garden-beta', { kind: 'router' }));
     expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-beta claims kind router, but its SKILL\.md derives module/);
     // A row whose SKILL.md the generation does not carry (tree re-hashed, so the hash agrees) is refused by the row check.
     const betaMd = join(snap.path, 'skills', 'beta', 'SKILL.md');
     const betaBefore = readFileSync(betaMd, 'utf8');
     unlock(betaMd);
     rmSync(betaMd);
-    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine));
     expect(() => storeOver(s).currentSnapshot()).toThrow(/skill row wicked-garden-beta names skills\/beta, but the generation carries no skills\/beta\/SKILL\.md/);
     writeFileSync(betaMd, betaBefore);
     // A half-recorded or malformed identity pair is not what publish writes — refused at parse.
@@ -3258,11 +3265,101 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
       [{ rulesVersion: 1.5, rulesSha256: PORTABILITY_RULES_IDENTITY.sha256 }, /rulesVersion is not an integer/],
       [{ rulesVersion: PORTABILITY_RULES_IDENTITY.version, rulesSha256: 'not-a-digest' }, /rulesSha256 is not a sha256/],
     ] as Array<[Record<string, unknown>, RegExp]>) {
-      asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), ...bad }, false);
+      asOlderGeneration(snap.path, { ...gammaFalsePositive(pristine), ...bad });
       expect(() => storeOver(s).currentSnapshot(), JSON.stringify(bad)).toThrow(why);
     }
     // Back to the honest older shape: accepted again.
-    asOlderGeneration(snap.path, gammaFalsePositive(pristine), false);
+    asOlderGeneration(snap.path, gammaFalsePositive(pristine));
     expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
   });
+
+  it('the exact rig shape — gen 1, NO identity, NO `portability` on any row, `wicked-garden-engineering-architecture` recorded false while its files derive true, the manifest row aged too — is accepted with `recorded.reasons: null` drift; the ONE warning states every seat still runs by the RECORDED rows (false → true stays Claude-only); the EDITOR manifest row is re-derived at boot (revision +1, idempotent on the next boot) while the snapshot row is untouched (review M1/M2/L2)', async () =>
+    withEnvRestored(async () => {
+      s.store.seed();
+      const NAME = 'wicked-garden-engineering-architecture';
+      const added = s.store.add(NAME, { 'SKILL.md': `---\nname: ${NAME}\ndescription: fixture\n---\n\n# ${NAME}\n\nDesign the system before you build it.\n` }, 1);
+      expect(added.verdict).toBe('clear');
+      expect(added.skill?.portable).toBe(true);
+      const r = await s.store.publish(added.revision);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const pristine = snapshotManifest(snap.path);
+      expect(pristine.views.copilot.skills).toContain(NAME);
+      // The OLD publisher: no identity, no per-reason blocks, the row false, the view laid out for ITS portable set.
+      asOlderGeneration(
+        snap.path,
+        {
+          ...withoutIdentity(pristine),
+          skills: pristine.skills.map((x) => {
+            const older = { ...x } as Record<string, unknown>;
+            delete older['portability'];
+            if (x.name === NAME) older['portable'] = false;
+            return older;
+          }),
+          views: { copilot: { dir: 'views/copilot', skills: pristine.views.copilot.skills.filter((n) => n !== NAME) } },
+        },
+        [NAME],
+      );
+      ageManifestRow(NAME, false);
+      const revBefore = s.store.manifest().revision;
+      expect(s.store.manifest().skills[NAME]).toMatchObject({ portable: false });
+      expect(s.store.manifest().skills[NAME]?.portability).toBeUndefined();
+      const current = storeOver(s).currentSnapshot();
+      expect(current?.rules).toEqual({ recorded: null, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+      expect(current?.drift).toEqual([{ name: NAME, recorded: { portable: false, reasons: null }, derived: { portable: true, reasons: [], evidence: [] } }]);
+      const logged: string[] = [];
+      const runtime = new SkillsRuntime({ store: storeOver(s), log: (m) => logged.push(m), bootSnapshot: undefined });
+      const health = await runtime.apply();
+      expect(health.state).toBe('published');
+      expect(health.engineInput).toBe(snap.path);
+      expect(health.findings.map((f) => f.kind)).toEqual(['skills.stale-rules']);
+      const msg = health.findings[0]?.message ?? '';
+      expect(msg).toContain(`1 row(s) now derive differently: ${NAME} (portable false → true)`);
+      expect(msg).toContain('every seat is still admitted and served by the RECORDED rows until a re-publish (a row listed false → true stays Claude-only; a row listed true → false is still delivered to non-Claude seats)');
+      expect(msg).not.toContain('recorded-portable row(s) now derive NON-portable');
+      expect(msg).toContain('the editor manifest (GET /skills rows) is re-derived under the current rules (1 row(s) moved)');
+      // M2: the editor manifest agrees with the drift now; the immutable snapshot row does not move.
+      const after = storeOver(s).manifest();
+      expect(after.skills[NAME]).toMatchObject({ portable: true, portability: { portable: true, reasons: [], evidence: [] } });
+      expect(after.revision).toBe(revBefore + 1);
+      expect(snapshotManifest(snap.path).skills.find((x) => x.name === NAME)?.portable).toBe(false);
+      expect(logged.filter((l) => l.includes('re-derived the editor manifest under the current rules'))).toHaveLength(1);
+      expect(logged.filter((l) => l.includes('skills.stale-rules: generation 1'))).toHaveLength(1);
+      // Idempotent: the next boot finds nothing to move — same ONE finding, revision unchanged.
+      const again = await new SkillsRuntime({ store: storeOver(s), log: () => undefined, bootSnapshot: undefined }).apply();
+      expect(again.findings.map((f) => f.kind)).toEqual(['skills.stale-rules']);
+      expect(again.findings[0]?.message).toContain('(0 row(s) moved)');
+      expect(storeOver(s).manifest().revision).toBe(revBefore + 1);
+    }));
+
+  it('the reverse direction — alpha recorded portable (its own files laid out in the view) while its files derive plugin-root — is accepted as drift under older rules, and the warning names it as STILL delivered to non-Claude seats (review M1/L2)', async () =>
+    withEnvRestored(async () => {
+      s.store.seed();
+      const r = await s.store.publish(1);
+      const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+      const pristine = snapshotManifest(snap.path);
+      // The old publisher believed alpha portable: its OWN files (nested excluded) sit in the copilot view.
+      const alphaView = viewPath(snap.path, 'wicked-garden-alpha');
+      chmodSync(dirname(alphaView), 0o755);
+      mkdirSync(join(alphaView, 'refs'), { recursive: true });
+      for (const rel of ['SKILL.md', 'refs/notes.md']) cpSync(join(snap.path, 'skills', 'alpha', rel), join(alphaView, rel));
+      asOlderGeneration(snap.path, {
+        ...pristine,
+        rulesVersion: OTHER_RULES.version,
+        rulesSha256: OTHER_RULES.sha256,
+        skills: pristine.skills.map((x) => (x.name === 'wicked-garden-alpha' ? { ...x, portable: true, portability: { portable: true, reasons: [], evidence: [] } } : x)),
+        views: { copilot: { dir: 'views/copilot', skills: [...pristine.views.copilot.skills, 'wicked-garden-alpha'].sort() } },
+      });
+      const current = storeOver(s).currentSnapshot();
+      expect(current?.rules).toEqual({ recorded: OTHER_RULES, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+      expect(current?.drift).toEqual([{ name: 'wicked-garden-alpha', recorded: { portable: true, reasons: [] }, derived: { portable: false, reasons: ['plugin-root'], evidence: ['skills/alpha/SKILL.md:10'] } }]);
+      const health = await new SkillsRuntime({ store: storeOver(s), log: () => undefined, bootSnapshot: undefined }).apply();
+      expect(health.state).toBe('published');
+      expect(health.engineInput).toBe(snap.path);
+      const msg = health.findings[0]?.message ?? '';
+      expect(msg).toContain('wicked-garden-alpha (portable true → false: plugin-root)');
+      expect(msg).toContain('1 recorded-portable row(s) now derive NON-portable and are STILL delivered to non-Claude seats: wicked-garden-alpha');
+      // The editor manifest already judged alpha non-portable under the running rules — nothing moves, no commit.
+      expect(msg).toContain('(0 row(s) moved)');
+      expect(storeOver(s).manifest().skills['wicked-garden-alpha']?.portable).toBe(false);
+    }));
 });

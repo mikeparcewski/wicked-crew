@@ -2144,6 +2144,36 @@ export class SkillsStore {
   }
 
   /**
+   * Re-derive every manifest entry's derived fields under the RUNNING portability rules and commit
+   * when any moved (F-083, review M2). `recomputeDerived` otherwise runs only on seed / refresh /
+   * mutation / publish — never at boot — so after an upgrade `GET /skills` kept the previous daemon's
+   * verdicts beside a `current.drift` that said otherwise: two halves of one response disagreeing.
+   * The runtime calls this when the current generation is STALE (its recorded rules identity is not
+   * the running one). The manifest is the EDITOR side — judged over `effective/` against the running
+   * rules, what the next publish would record; the snapshot is what seats run by, and it is never
+   * rewritten. Commits ONLY when a `kind` / `core` / `portable` / `portability` value actually
+   * changed, so a stale-but-agreeing root does not move its revision on every boot (idempotent).
+   * Answers the entries whose `portable` moved and the recompute's path refusals (warnings — a
+   * refused skill keeps its previous values, as everywhere else).
+   */
+  rederiveUnderRunningRules(): { moved: Array<{ name: string; from: boolean; to: boolean }>; refused: SkillConflictFinding[]; revision: number } {
+    const m = this.manifest();
+    const derived = (e: SkillEntry): string => JSON.stringify({ kind: e.kind, core: e.core, portable: e.portable, portability: e.portability ?? null });
+    const before = new Map(Object.entries(m.skills).map(([name, e]) => [name, { key: derived(e), portable: e.portable }]));
+    const refused = this.recomputeWarnings(m);
+    const moved: Array<{ name: string; from: boolean; to: boolean }> = [];
+    let changed = false;
+    for (const [name, e] of Object.entries(m.skills)) {
+      const was = before.get(name);
+      if (was === undefined || was.key === derived(e)) continue;
+      changed = true;
+      if (was.portable !== e.portable) moved.push({ name, from: was.portable, to: e.portable });
+    }
+    if (changed) this.commit(m);
+    return { moved, refused, revision: m.revision };
+  }
+
+  /**
    * The bytes of the REGULAR file at plugin-relative `rel` in `effective/`, every component
    * lstat-walked from the skills root (`containedEffective`; a link anywhere on the way is a
    * `SkillPathError` the caller decides on — never a read through it), `null` when absent.
