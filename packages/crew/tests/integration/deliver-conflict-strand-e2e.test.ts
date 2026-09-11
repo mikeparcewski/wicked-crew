@@ -25,7 +25,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
@@ -37,16 +37,33 @@ const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
 ]);
 
-/** A one-phase code-work def whose Tool phase writes the collision file. `executes_code: true`
- *  makes it a code-work def (the crew#393 deliver default engages); the deliver phase is appended
- *  by that default, not spelled here. */
+/**
+ * The HOLD the work phase waits for before it writes anything (wicked-core#433): the engine now
+ * bases a fresh worktree on the remote tip (F-3R2-013) and lifts the work onto the CURRENT tip
+ * before the deliver script runs, so the collision must land on origin AFTER the worktree is
+ * minted and BEFORE the deliver phase. A `printf` tool is a ~0 ms window; holding the phase on
+ * this file makes the ordering a fact, not a race. Bounded (60 s) so a broken test cannot wedge
+ * the engine. Under the OS temp dir, outside every repo the test creates.
+ */
+const HOLD_FILE = join(tmpdir(), `crew-418-e2e-hold-${process.pid}`);
+
+/** A one-phase code-work def whose Tool phase writes the collision file once released. `executes_code:
+ *  true` makes it a code-work def (the crew#393 deliver default engages); the deliver phase is
+ *  appended by that default, not spelled here. */
 const WORK_WORKFLOW = {
   id: 'deliver-conflict-e2e-work',
   phases: [
     {
       id: 'work',
       kind: 'build',
-      executor: { type: 'tool', cmd: ['bash', '-lc', 'printf "run version\\n" > collision.txt'] },
+      executor: {
+        type: 'tool',
+        cmd: [
+          'bash',
+          '-lc',
+          `for i in $(seq 1 300); do [ -f "${HOLD_FILE}" ] && break; sleep 0.2; done; printf "run version\\n" > collision.txt`,
+        ],
+      },
       gate_type: null,
       gate: 'auto',
       executes_code: true,
@@ -98,6 +115,22 @@ async function postJson(
 function sessionOf(body: Record<string, unknown>): Record<string, unknown> {
   return (body['run'] as { session: Record<string, unknown> }).session;
 }
+
+/**
+ * Where this suite's scratch (bare origin, clone, run worktree, engine db) lives. NOT the system temp
+ * dir on Linux CI: the engine's validator sandbox (wicked-core `validator.rs` — `bwrap --ro-bind / /
+ * … --tmpfs <std::env::temp_dir()>`) masks EVERYTHING under the temp dir except the run dir and the
+ * coverage store it re-binds, so a clone kept there — the linked worktree's real gitdir — and the bare
+ * origin are invisible to the pinned evidence floor at the deliver gate: git fails inside the sandbox
+ * and the floor denies with "no coverage report was produced … the script denied before writing one".
+ * GitHub's RUNNER_TEMP is outside /tmp; elsewhere the OS temp dir (macOS's sandbox-exec profile masks
+ * nothing). Production repositories never live under the temp dir, so this is a fixture concern only.
+ */
+function scratchBase(): string {
+  const runnerTemp = process.env['RUNNER_TEMP'];
+  return process.platform === 'linux' && runnerTemp !== undefined && runnerTemp !== '' ? runnerTemp : tmpdir();
+}
+
 async function waitForRun(
   runId: string,
   pred: (s: Record<string, unknown>) => boolean,
@@ -112,18 +145,34 @@ async function waitForRun(
     if (pred(last)) return last;
     await new Promise((r) => setTimeout(r, 200));
   }
+  // Name the rejected units' denial_reason too: a deliver refusal is text on the unit record, and
+  // without it a `status=failed delivery=none` timeout says nothing about WHICH refusal fired.
+  const { body } = await getJson(`/api/v1/runs/${runId}`);
+  const units = ((body['run'] as { units?: Array<Record<string, unknown>> }).units ?? [])
+    .filter((u) => u['status'] === 'rejected')
+    .map((u) => `${String(u['id'])}: ${String(u['denial_reason'] ?? '(no denial_reason)').slice(0, 600)}`);
   throw new Error(
-    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}`,
+    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
+      (units.length > 0 ? `; rejected units: ${units.join(' | ')}` : ''),
   );
 }
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'crew-418-e2e-'));
+  dir = mkdtempSync(join(scratchBase(), 'crew-418-e2e-'));
   const home = join(dir, 'home');
   const bin = join(dir, 'bin');
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  // The engine's Linux validator sandbox (wicked-core `validator.rs`, `bwrap --ro-bind / /` …) masks
+  // six credential directories under HOME with `--tmpfs`; bwrap must CREATE a missing mount point,
+  // and under a read-only root that mkdir fails (EROFS) — the pinned evidence floor then never runs
+  // ("no coverage report was produced … the script denied before writing one"). macOS's
+  // `sandbox-exec` profile needs no such mount points, so only Linux CI saw it. Give the scratch HOME
+  // the directories the engine masks, empty. (Engine follow-up: mask only directories that exist.)
+  for (const rel of ['.aws', '.ssh', '.gnupg', '.claude', join('.config', 'wicked-council'), join('.config', 'gh')]) {
+    mkdirSync(join(home, rel), { recursive: true });
+  }
   writeFileSync(
     join(bin, 'gh'),
     [
@@ -186,6 +235,7 @@ afterAll(async () => {
       else process.env[k] = v;
     }
     removeScratch(dir);
+    rmSync(HOLD_FILE, { force: true });
   }
 });
 
@@ -194,14 +244,6 @@ describe('crew#418 A — a deliver lift collision strands the run, end-to-end th
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/418';
     const repos = await adapter.listRepos();
     const repoId = repos.find((r) => r.name === 'deliver-418-ws')!.id;
-
-    // Diverge origin/main FIRST (from the seed clone), leaving the run's clone local `main` at
-    // base. The engine cuts the run worktree from that local `main`, so the run's deliver commit
-    // ADDS collision.txt while origin/main ALSO has it — an add/add collision on the rebase.
-    writeFileSync(join(seed, 'collision.txt'), 'main version\n');
-    git(seed, 'add', '-A');
-    git(seed, 'commit', '-qm', 'main adds collision.txt');
-    git(seed, 'push', '-q', 'origin', 'main');
 
     // humanConfirm: 'none' — a tool failure fails CLEANLY (no agent-triage escalation, which would
     // need a real judge seat the stub engine cannot run). No gate, no race.
@@ -215,8 +257,33 @@ describe('crew#418 A — a deliver lift collision strands the run, end-to-end th
     expect(launch.status).toBe(201);
     const runId = (launch.body as { runId: string }).runId;
 
-    // The wire reinterprets the engine's `failed` (the deliver Tool phase exited non-zero on the
-    // conflict) as completed + stranded (recoverable).
+    // Diverge origin/main AFTER the run's worktree is minted and BEFORE its deliver phase. Since
+    // wicked-core#433 (F-3R2-013) the engine fetches origin and bases a fresh worktree on the remote
+    // default branch's tip, so a divergence pushed before launch is simply the run's base — no
+    // collision, the run delivers. The window is the run's whole build phase: `workdir` is set on
+    // the wire once the worktree exists (`runBaseResolved` precedes `worktreeReady`), and the
+    // engine's pre-push lift runs only when the deliver Tool unit is dispatched — and the work phase
+    // itself is HELD on HOLD_FILE until the collision is pushed (a `printf` tool is a ~0 ms window;
+    // without the hold the push can land after the engine's lift, whose `unchanged` base the script's
+    // own fetch then finds moved — the BASE MOVED refusal, correct but not this test). The run's build
+    // then ADDS collision.txt while origin/main ALSO adds it — an add/add collision the engine's
+    // in-memory lift (`git merge-tree`) reports as `deliver: LIFT-CONFLICT — lifting the run's work
+    // onto origin/main …`, leaving the worktree exactly as verified and pushing nothing.
+    await waitForRun(
+      runId,
+      (s) => typeof s['workdir'] === 'string' && s['workdir'] !== '',
+      'the run worktree to be minted (workdir on the wire)',
+    );
+    writeFileSync(join(seed, 'collision.txt'), 'main version\n');
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'main adds collision.txt');
+    git(seed, 'push', '-q', 'origin', 'main');
+    // The collision is on origin — release the held work phase; the deliver lift comes next.
+    writeFileSync(HOLD_FILE, '');
+
+    // The wire reinterprets the engine's `failed` (the deliver Tool unit refused the lift with the
+    // LIFT-CONFLICT marker — engine-authored since wicked-core#433, the script's own before) as
+    // completed + stranded (recoverable).
     const stranded = await waitForRun(
       runId,
       (s) => s['delivery'] === 'stranded',
@@ -239,7 +306,10 @@ describe('crew#418 A — a deliver lift collision strands the run, end-to-end th
     expect(resume.status).toBe(409);
     expect((resume.body as { recovery: string }).recovery).toBe('deliver');
 
-    // Clear the collision on origin (reset main back to base), then lift the stranded work.
+    // Clear the collision on origin (reset main back to base), then lift the stranded work. The
+    // engine's conflict refusal ran BEFORE the script, so the work is still UNCOMMITTED in the run's
+    // worktree (a dirty tree the engine never reaps); the post-hoc lift runs the same hardened
+    // script there — commit, rebase onto the restored main, push, PR.
     git(clone, 'push', '-q', '-f', 'origin', `${baseMain}:refs/heads/main`);
     const lift = await postJson(`/api/v1/runs/${runId}/deliver`);
     expect(lift.status).toBe(200);

@@ -24,6 +24,7 @@ import {
   EMBEDDED_INTENT_CAP,
   baseWorkflowId,
   boundIntentForEmbedding,
+  composeEmbeddedDeliverText,
 } from '../src/core/deliver-text.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -432,5 +433,48 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
     expect(urlPathSegment('ü')).toBe('%C3%BC');
     expect(urlPathSegment('a b')).not.toMatch(/[^A-Za-z0-9._~%-]/);
     expect(decodeURIComponent(urlPathSegment("run/#?'"))).toBe("run/#?'");
+  });
+});
+
+// Wave-3 isolation review (deferred under that PR's freeze): the script's EMBEDDED fallback is
+// composed from the intent BOUNDED to EMBEDDED_INTENT_CAP — so a closing reference written past the
+// cap (a long issue paste ending in `fixes #214`) used to vanish from the fallback body, and GitHub
+// never closed the issue on a run whose daemon did not answer. The references now come from the
+// FULL intent; only the intent's TEXT is cut.
+describe('composeEmbeddedDeliverText — issue refs from the FULL intent, text bounded (crew#524 follow-up)', () => {
+  const tail = '\n\nThis fixes #214 and relates to wicked-studio#211.';
+  const longIntent = `Reproduce the archive controls bug.\n\n${'observation '.repeat(Math.ceil(EMBEDDED_INTENT_CAP / 12) + 20)}${tail}`;
+  const facts = factsFromWorkflow({
+    runId: RUN_ID,
+    intent: longIntent,
+    workflowId: 'bug',
+    repoRef: 'wicked-studio',
+    phases: [],
+    runUrl: null,
+  });
+
+  it('keeps `Fixes #214` and the Refs although the reference sits past the embedded cap', () => {
+    expect(longIntent.length).toBeGreaterThan(EMBEDDED_INTENT_CAP);
+    expect(longIntent.indexOf('fixes #214')).toBeGreaterThan(EMBEDDED_INTENT_CAP);
+    const { title, body } = composeEmbeddedDeliverText(facts);
+    expect(title).toBe(deliverTitle(longIntent, RUN_ID));
+    expect(body).toContain('\nFixes #214\n');
+    expect(body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
+    // The TEXT is still bounded and the cut is disclosed — the reference is not what was cut.
+    expect(body).toContain('the intent is longer than the deliver script embeds');
+    expect(body).not.toContain('This fixes #214 and relates to');
+    const intentSection = body.slice(body.indexOf('## Intent'), body.indexOf('## Run'));
+    expect(intentSection.length).toBeLessThan(EMBEDDED_INTENT_CAP + 400);
+  });
+
+  it('is what the old path lost: bounding first drops the reference, deriving first keeps it', () => {
+    const boundedFirst = composeDeliverText({ ...facts, intent: boundIntentForEmbedding(facts.intent) });
+    expect(boundedFirst.body).not.toContain('Fixes #214');
+    expect(composeEmbeddedDeliverText(facts).body).toContain('Fixes #214');
+  });
+
+  it('is byte-identical to composeDeliverText when the intent fits the cap', () => {
+    const short = factsFromWorkflow({ runId: RUN_ID, intent: INTENT, workflowId: 'bug', repoRef: 'wicked-studio', phases: [], runUrl: null });
+    expect(composeEmbeddedDeliverText(short)).toEqual(composeDeliverText(short));
   });
 });

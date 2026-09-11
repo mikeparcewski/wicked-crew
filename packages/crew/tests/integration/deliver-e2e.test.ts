@@ -103,6 +103,22 @@ function sessionOf(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** Poll the run detail until `pred` holds (or time runs out) — returns the last session seen. */
+
+/**
+ * Where this suite's scratch (bare origin, clone, run worktree, engine db) lives. NOT the system temp
+ * dir on Linux CI: the engine's validator sandbox (wicked-core `validator.rs` — `bwrap --ro-bind / /
+ * … --tmpfs <std::env::temp_dir()>`) masks EVERYTHING under the temp dir except the run dir and the
+ * coverage store it re-binds, so a clone kept there — the linked worktree's real gitdir — and the bare
+ * origin are invisible to the pinned evidence floor at the deliver gate: git fails inside the sandbox
+ * and the floor denies with "no coverage report was produced … the script denied before writing one".
+ * GitHub's RUNNER_TEMP is outside /tmp; elsewhere the OS temp dir (macOS's sandbox-exec profile masks
+ * nothing). Production repositories never live under the temp dir, so this is a fixture concern only.
+ */
+function scratchBase(): string {
+  const runnerTemp = process.env['RUNNER_TEMP'];
+  return process.platform === 'linux' && runnerTemp !== undefined && runnerTemp !== '' ? runnerTemp : tmpdir();
+}
+
 async function waitForRun(
   runId: string,
   pred: (s: Record<string, unknown>) => boolean,
@@ -117,13 +133,20 @@ async function waitForRun(
     if (pred(last)) return last;
     await new Promise((r) => setTimeout(r, 200));
   }
+  // Name the rejected units' denial_reason too: a deliver refusal is text on the unit record, and
+  // without it a `status=failed delivery=none` timeout says nothing about WHICH refusal fired.
+  const { body } = await getJson(`/api/v1/runs/${runId}`);
+  const units = ((body['run'] as { units?: Array<Record<string, unknown>> }).units ?? [])
+    .filter((u) => u['status'] === 'rejected')
+    .map((u) => `${String(u['id'])}: ${String(u['denial_reason'] ?? '(no denial_reason)').slice(0, 600)}`);
   throw new Error(
-    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}`,
+    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
+      (units.length > 0 ? `; rejected units: ${units.join(' | ')}` : ''),
   );
 }
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'crew-deliver-e2e-'));
+  dir = mkdtempSync(join(scratchBase(), 'crew-deliver-e2e-'));
 
   // ── The scratch HOME every deliver spawn inherits: stub `gh` first on PATH ──
   const home = join(dir, 'home');
@@ -131,6 +154,15 @@ beforeAll(async () => {
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  // The engine's Linux validator sandbox (wicked-core `validator.rs`, `bwrap --ro-bind / /` …) masks
+  // six credential directories under HOME with `--tmpfs`; bwrap must CREATE a missing mount point,
+  // and under a read-only root that mkdir fails (EROFS) — the pinned evidence floor then never runs
+  // ("no coverage report was produced … the script denied before writing one"). macOS's
+  // `sandbox-exec` profile needs no such mount points, so only Linux CI saw it. Give the scratch HOME
+  // the directories the engine masks, empty. (Engine follow-up: mask only directories that exist.)
+  for (const rel of ['.aws', '.ssh', '.gnupg', '.claude', join('.config', 'wicked-council'), join('.config', 'gh')]) {
+    mkdirSync(join(home, rel), { recursive: true });
+  }
   writeFileSync(
     join(bin, 'gh'),
     [

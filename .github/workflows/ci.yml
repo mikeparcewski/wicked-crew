@@ -114,6 +114,22 @@ jobs:
         env:
           WICKED_CORE_TS_DIR: ${{ github.workspace }}/wicked-core/crates/wicked-core-ts
 
+      # wicked-core#433: before the deliver phase pushes, the engine re-runs the repository's checks
+      # whenever the worktree's tree is not the tree the run verified — INSIDE an OS write boundary
+      # (Linux: bwrap), failing closed without one ("no OS write boundary could be armed"). The deliver
+      # e2e suites (deliver-e2e, deliver-conflict-strand-e2e) drive a real deliver through the real
+      # engine, so the runner needs the tool; ubuntu-24.04 images gate unprivileged user namespaces
+      # behind AppArmor, which bwrap needs. The smoke line fails THIS step, not a test, if the
+      # boundary cannot be armed.
+      - name: Arm the checks sandbox (bubblewrap) for the engine's repo-checks floor
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent -- /bin/true
+          echo "bwrap can arm a boundary on this runner"
+
       - name: Lint (eslint)
         working-directory: wicked-crew
         run: npm run -w packages/crew lint

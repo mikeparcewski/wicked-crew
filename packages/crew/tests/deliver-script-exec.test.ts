@@ -44,22 +44,23 @@ const roots: string[] = [];
  * A bare origin + a clone on `main` + a run worktree on `wicked/<RUN_ID>` — the exact shape
  * `repo::create_worktree` leaves behind: a branch cut from the base tip with a CLEAN tree.
  */
-function fixture(opts: { worktree?: boolean } = {}): Fixture {
+function fixture(opts: { worktree?: boolean; defaultBranch?: string } = {}): Fixture {
+  const branch = opts.defaultBranch ?? 'main';
   const root = mkdtempSync(join(tmpdir(), 'crew-deliver-'));
   roots.push(root);
   const origin = join(root, 'origin.git');
   const seed = join(root, 'seed');
   const clone = join(root, 'clone');
 
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', seed]);
+  execFileSync('git', ['init', '--bare', '-b', branch, origin]);
+  execFileSync('git', ['init', '-b', branch, seed]);
   git(seed, 'config', 'user.email', 'seed@test');
   git(seed, 'config', 'user.name', 'seed');
   writeFileSync(join(seed, 'README.md'), 'base\n');
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'remote', 'add', 'origin', origin);
-  git(seed, 'push', '-q', '-u', 'origin', 'main');
+  git(seed, 'push', '-q', '-u', 'origin', branch);
 
   execFileSync('git', ['clone', '-q', origin, clone]);
   git(clone, 'config', 'user.email', 'runner@test');
@@ -67,13 +68,13 @@ function fixture(opts: { worktree?: boolean } = {}): Fixture {
   git(clone, 'config', 'commit.gpgsign', 'false');
   // A clone sets origin/HEAD, which is what the script's default-branch derivation reads.
   expect(git(clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').trim()).toBe(
-    'origin/main',
+    `origin/${branch}`,
   );
 
   if (opts.worktree === false) return { workdir: clone, clone, origin, root };
 
   const workdir = join(root, RUN_ID);
-  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, 'main');
+  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, branch);
   return { workdir, clone, origin, root };
 }
 
@@ -141,6 +142,8 @@ async function runDeliver(
           GH_STUB_RECORD: record,
           // The operator's own account guard must not leak into the fixture.
           GH_ACCOUNT: '',
+          // Nor a verified-base pin (wicked-core#431) — set per test where the pin is under test.
+          WICKED_DELIVER_VERIFIED_BASE: '',
           GH_STUB_FAIL: opts.gh?.failWith ?? '',
           GH_STUB_OUT: opts.gh?.succeedWith ?? '',
           GH_STUB_LOGIN: opts.gh?.login ?? 'tester',
@@ -654,4 +657,199 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.body).toContain('\nWICKED_CREW_DELIVER_TEXT_EOF\n'); // the delimiter line too — it moved, the text did not
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
   }, 60_000);
+});
+
+// wicked-core#431 / #433 — the engine lifts the run's work onto the remote tip and re-verifies it
+// BEFORE this script runs, then hands the tip it verified against as WICKED_DELIVER_VERIFIED_BASE.
+// The engine's fetch and the script's fetch are two moments; these drive the window for real.
+describe('deliver script honours the engine’s verified-base pin (wicked-core#431)', () => {
+  it('DELIVERS when WICKED_DELIVER_VERIFIED_BASE names the current remote tip', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const pinned = true;\n');
+    const tip = git(fx.clone, 'rev-parse', 'origin/main').trim();
+
+    const r = await runDeliver(fx, { intent: 'pinned base', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(r.lastLine).toBe('https://github.com/o/r/pull/7');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('REFUSES a base that moved since the engine verified — nothing staged, committed or pushed; not a strand', async () => {
+    const fx = fixture();
+    // What the engine pinned: the remote tip at lift + re-verify time.
+    const verified = git(fx.clone, 'rev-parse', 'origin/main').trim();
+    // The remote advances in the window between the engine's re-verify and this script's fetch.
+    writeFileSync(join(fx.clone, 'README.md'), 'base\nlanded meanwhile\n');
+    git(fx.clone, 'add', '-A');
+    git(fx.clone, 'commit', '-qm', 'main moved after the re-verify');
+    git(fx.clone, 'push', '-q', 'origin', 'main');
+    // The run's verified work sits UNCOMMITTED in the worktree — exactly as the engine leaves it for
+    // its own retry (its lift re-applies uncommitted work; a branch with its own commits is skipped).
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verifiedOnTheOldBase = true;\n');
+
+    const r = await runDeliver(fx, { env: { WICKED_DELIVER_VERIFIED_BASE: verified } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: BASE MOVED since verification');
+    expect(r.output).toContain(verified);
+    expect(r.output).toContain('Nothing was staged, committed or pushed');
+    // NOT a recoverable strand — a post-hoc lift would push a tree nobody verified on the new base.
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+    // The worktree is exactly as the engine left it: the work untracked and unstaged, no commit on
+    // the run branch, no stranded sentinel — so an approved retry re-lifts and re-verifies cleanly.
+    expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
+    expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('0');
+    expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
+  }, 60_000);
+
+  // Review F-527-003 — the default ref is derived as the engine derives it: a repo whose default
+  // branch is `master` (origin/HEAD → origin/master) and a clone whose origin/HEAD DANGLES both
+  // resolve to the branch the engine pinned, so neither reads as a moved base.
+  it('a repo whose default branch is master delivers on a matching pin — no false BASE MOVED', async () => {
+    const fx = fixture({ defaultBranch: 'master' });
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const onMaster = true;\n');
+    const tip = git(fx.clone, 'rev-parse', 'origin/master').trim();
+
+    const r = await runDeliver(fx, { intent: 'master default', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(originBranches(fx).sort()).toEqual(['master', `wicked/${RUN_ID}`]);
+  }, 60_000);
+
+  it('a DANGLING origin/HEAD falls back to origin/main — the pin still matches, nothing is refused', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const dangling = true;\n');
+    // The remote renamed/deleted its default branch since the clone: origin/HEAD points at a ref
+    // that no longer exists.
+    git(fx.clone, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/gone');
+    const tip = git(fx.clone, 'rev-parse', 'origin/main').trim();
+
+    const r = await runDeliver(fx, { intent: 'dangling origin/HEAD', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 60_000);
+
+  it('REFUSES fail-closed when the pin is set but the default tip does not resolve to it (a garbage pin)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const x = 1;\n');
+
+    const r = await runDeliver(fx, { env: { WICKED_DELIVER_VERIFIED_BASE: 'not-a-commit-0000' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: BASE MOVED since verification');
+    expect(r.output).toContain('not-a-commit-0000');
+    expect(originBranches(fx)).toEqual(['main']);
+    expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
+  }, 60_000);
+});
+
+// Wave-3 isolation review (crew#524 follow-up): the embedded fallback used to derive `Fixes #N`
+// from the intent AFTER bounding it to EMBEDDED_INTENT_CAP, so a closing reference written past
+// the cap never reached the PR body of a run whose daemon did not answer. Driven for real: no
+// daemon origin ⇒ the embedded text, and it still carries the reference.
+describe('deliver script — a `fixes #N` past the embedded-intent cap still reaches the PR body', () => {
+  it('keeps `Fixes #214` from the FULL intent while the embedded text is cut and says so', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const longIntent = `Archive controls never render\n\n${'observation '.repeat(700)}\n\nThis fixes #214 and relates to wicked-studio#211.`;
+    expect(longIntent.indexOf('fixes #214')).toBeGreaterThan(8_000);
+
+    const r = await runDeliver(fx, { intent: longIntent, script: { runId: RUN_ID } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('using the launch-time PR text');
+    expect(r.pr!.title).toBe('Archive controls never render');
+    expect(r.pr!.body).toContain('\nFixes #214\n');
+    expect(r.pr!.body).toContain('the intent is longer than the deliver script embeds');
+    expect(r.pr!.body).not.toContain('This fixes #214 and relates to'); // the TEXT was cut, the reference was not
+    // The commit message carries the same closing line.
+    expect(git(fx.origin, 'log', '-1', '--format=%b', `wicked/${RUN_ID}`)).toContain('Fixes #214');
+  }, 60_000);
+});
+
+// wicked-core#433 review addendum — the crew#426 preflight (`npm install` + `manifest:endpoints` +
+// `generate:api-tests`) runs AFTER the engine verified the tree. Driven for real on a crew-SHAPED
+// fixture (the preflight is gated on root package.json + lockfile + packages/crew +
+// packages/crew-api-types) whose codegen script either leaves the manifest alone or rewrites it.
+describe('deliver script — the preflight must not weaken the verified tree (wicked-core#433 addendum)', () => {
+  /** Turn the fixture's seed into a crew-shaped workspace whose `manifest:endpoints` script runs
+   *  `regen` inside packages/crew; the seed's lockfile is what `npm install` itself produces, so an
+   *  in-sync preflight rewrites nothing. */
+  function crewShaped(fx: Fixture, regen: string): void {
+    const seed = join(fx.root, 'seed');
+    mkdirSync(join(seed, 'packages', 'crew'), { recursive: true });
+    mkdirSync(join(seed, 'packages', 'crew-api-types'), { recursive: true });
+    writeFileSync(join(seed, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(seed, 'package.json'), `${JSON.stringify({ name: 'fx-root', private: true, workspaces: ['packages/*'] }, null, 2)}\n`);
+    writeFileSync(
+      join(seed, 'packages', 'crew', 'package.json'),
+      `${JSON.stringify({ name: 'fx-crew', version: '0.0.0', private: true, scripts: { 'manifest:endpoints': regen, 'generate:api-tests': 'node -e 0' } }, null, 2)}\n`,
+    );
+    writeFileSync(join(seed, 'packages', 'crew', 'endpoint-manifest.json'), '{"version":1,"apiTypesVersion":"0.0.0"}\n');
+    writeFileSync(join(seed, 'packages', 'crew-api-types', 'package.json'), `${JSON.stringify({ name: 'fx-api-types', version: '0.0.0', private: true }, null, 2)}\n`);
+    execFileSync('npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts'], { cwd: seed, stdio: 'ignore' });
+    git(seed, 'add', '-A');
+    git(seed, 'commit', '-qm', 'crew-shaped workspace');
+    git(seed, 'push', '-q', 'origin', 'main');
+    // The run worktree hangs off the clone: bring both to the new tip.
+    git(fx.clone, 'pull', '-q', '--ff-only', 'origin', 'main');
+    git(fx.workdir, 'fetch', '-q', 'origin');
+    git(fx.workdir, 'reset', '-q', '--hard', 'origin/main');
+  }
+  const REWRITE = `node -e "require('fs').writeFileSync('endpoint-manifest.json', JSON.stringify({version:1,apiTypesVersion:'9.9.9'})+'\\n')"`;
+
+  it('an in-sync preflight changes nothing and the delivery proceeds', async () => {
+    const fx = fixture();
+    crewShaped(fx, 'node -e 0');
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'in-sync preflight' });
+
+    expect(r.status).toBe(0);
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
+    expect(r.output).not.toContain('preflight regenerated');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+  }, 90_000);
+
+  it('an ENGINE-driven delivery REFUSES when the preflight rewrote a tracked file — named, nothing staged or pushed', async () => {
+    const fx = fixture();
+    crewShaped(fx, REWRITE);
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'regenerated after verify' });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('deliver: PREFLIGHT CHANGED the verified tree');
+    expect(r.output).toContain('packages/crew/endpoint-manifest.json');
+    expect(r.output).toContain('Nothing was staged, committed or pushed');
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+    // The regeneration is left in the worktree for the operator to see (unstaged), the work untouched.
+    const status = git(fx.workdir, 'status', '--porcelain');
+    expect(status).toContain(' M packages/crew/endpoint-manifest.json');
+    expect(status).toContain('?? work.ts');
+    expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('0');
+  }, 90_000);
+
+  it('a POST-HOC lift keeps the regeneration, delivers it, and SAYS which files it rewrote', async () => {
+    const fx = fixture();
+    crewShaped(fx, REWRITE);
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const verified = true;\n');
+
+    const r = await runDeliver(fx, { intent: 'post-hoc regeneration', env: { WICKED_DELIVER_POSTHOC: '1' } });
+
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    expect(r.output).toContain('packages/crew/endpoint-manifest.json');
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+    const files = git(fx.origin, 'show', '--name-only', '--format=', `wicked/${RUN_ID}`).trim().split('\n').sort();
+    expect(files).toEqual(['packages/crew/endpoint-manifest.json', 'work.ts']);
+  }, 90_000);
 });

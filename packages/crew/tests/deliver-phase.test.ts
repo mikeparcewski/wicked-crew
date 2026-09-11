@@ -10,7 +10,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
+  DELIVER_PREFLIGHT_CHANGED_MARKER as PREFLIGHT_CHANGED_MARKER,
   DELIVER_PHASE_ID,
   DELIVER_TEXT_HEREDOC,
   EVIDENCE_FLOOR_PIN,
@@ -29,6 +31,16 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('R=$(basename "$PWD")');
     expect(script).toContain('B="wicked/$R"');
     expect(script).toContain('git branch --show-current');
+  });
+
+  // Review F-527-003 — the default ref is derived as the engine derives it (origin/HEAD when it
+  // resolves, else origin/main, else origin/master), tolerating a dangling origin/HEAD, so a repo
+  // whose base is origin/master never reads as a moved base. Driven for real in deliver-script-exec.
+  it('derives origin’s default branch with the engine’s fallback chain, tolerating a dangling origin/HEAD', () => {
+    expect(script).toContain('D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || true)');
+    expect(script).toContain('if [ -z "$D" ] || ! git rev-parse --verify -q "$D^{commit}" >/dev/null; then');
+    expect(script).toContain('elif git rev-parse --verify -q origin/master^{commit} >/dev/null; then D=origin/master;');
+    expect(script.indexOf('D=$(git symbolic-ref')).toBeLessThan(script.indexOf('DEF="${D#origin/}"'));
   });
 
   it('REFUSES to push main/master (and a detached-HEAD empty name)', () => {
@@ -96,7 +108,12 @@ describe('deliverPrScript (the hardened field script)', () => {
   it('stages tracked work then classifies untracked paths before it pushes anything (crew#434)', () => {
     // Tracked changes always ride; the blanket `git add -A` is gone.
     expect(script).toContain('git add -u');
-    expect(script).not.toContain('git add -A');
+    // No `git add -A` STAGING command (a whole line, however indented): the crew#434 classifier
+    // replaced the sweep. The wicked-core#433 preflight guard's `_tree()` helper does spell
+    // `git add -A` — into a SCRATCH index (`GIT_INDEX_FILE="$TD/preidx"`, same line), for a tree id,
+    // never the real index — so the pin is anchored on a staging line, not on the substring.
+    expect(script).not.toMatch(/^\s*git add -A/m);
+    expect(script).toContain('GIT_INDEX_FILE="$TD/preidx" git add -A -- .');
     expect(script).toContain('S=.wicked-crew-delivery-stranded');
     // Untracked candidates are enumerated per-file (gitignore honored, NUL-delimited) and staged
     // individually — not swept.
@@ -209,6 +226,59 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(nothing).toBeGreaterThan(-1);
     expect(nothing).toBeLessThan(script.indexOf('git push -u origin'));
     expect(script).toMatch(/nothing to deliver[^\n]*nothing was pushed"; exit 1; \}/);
+  });
+
+  // wicked-core#431 / #433 — the engine lifts + re-verifies BEFORE this script and pins the tip it
+  // verified against in WICKED_DELIVER_VERIFIED_BASE; the script closes the fetch→push race by refusing
+  // a default branch that moved past it. Pinned as script properties; driven for real (delivers on a
+  // matching pin, refuses on a moved one with the worktree untouched) in deliver-script-exec.test.ts.
+  it('pins the engine-verified base: refuses when origin/<default> moved past WICKED_DELIVER_VERIFIED_BASE, before staging (wicked-core#431)', () => {
+    expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then');
+    expect(script).toContain('T=$(git rev-parse --verify -q "$D^{commit}" || true)');
+    expect(script).toMatch(
+      /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: the engine verified this work against[^\n]*exit 1; \}/,
+    );
+    // NOT a strand: the refusal carries no LIFT-CONFLICT marker — a post-hoc lift would push a tree
+    // nobody verified on the new base; the remedy is the engine's own retry.
+    const line = script.split('\n').find((l) => l.includes(BASE_MOVED_MARKER))!;
+    expect(line).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(line).toContain('Nothing was staged, committed or pushed');
+    // The marker TRAILS the refusal (review F-527-001): the engine keeps head-150 + tail-250 of the
+    // whole output and this line follows the fetch chatter, so only a trailing marker reliably lands
+    // in the excerpt crew's triage and strand derivation read.
+    expect(line).toMatch(/Nothing was staged, committed or pushed; deliver: BASE MOVED since verification \(/);
+    const echoed = line.slice(line.indexOf('echo "'));
+    expect(echoed.length - echoed.indexOf(BASE_MOVED_MARKER)).toBeLessThan(200);
+    // Ordered: after the script's own fetch, before anything is staged or committed, before the push.
+    const at = script.indexOf(BASE_MOVED_MARKER);
+    expect(at).toBeGreaterThan(script.indexOf('git fetch origin'));
+    expect(at).toBeLessThan(script.indexOf('git add -u'));
+    expect(at).toBeLessThan(script.indexOf('git push -u origin'));
+    // Absent pin ⇒ the whole block is skipped: the check is guarded on the variable being non-empty.
+    expect(script.indexOf('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]')).toBeLessThan(at);
+  });
+
+  // wicked-core#433 review addendum — the crew#426 preflight runs AFTER the engine's verification;
+  // when it changes the worktree an engine-driven delivery refuses (a post-hoc lift discloses).
+  // Pinned as script properties; driven for real in deliver-script-exec.test.ts.
+  it('refuses when the preflight CHANGED the verified tree — unless the lift is post-hoc, which discloses', () => {
+    // Seeded from HEAD, errors loud (review F-527-007).
+    expect(script).toContain('_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git read-tree HEAD && GIT_INDEX_FILE="$TD/preidx" git add -A -- . && GIT_INDEX_FILE="$TD/preidx" git write-tree; }');
+    expect(script).toContain('  T0=$(_tree) || {');
+    expect(script).toContain('  T1=$(_tree) || {');
+    expect(script).toContain('  if [ "$T0" != "$T1" ]; then');
+    const refusal = script.split('\n').find((l) => l.includes(PREFLIGHT_CHANGED_MARKER))!;
+    expect(refusal).toContain('if [ -z "${WICKED_DELIVER_POSTHOC:-}" ]; then');
+    // The marker TRAILS the line, followed by the file list (review F-527-001).
+    expect(refusal).toMatch(/Nothing was staged, committed or pushed; deliver: PREFLIGHT CHANGED the verified tree: \$\{CH\}"; exit 1; fi$/);
+    expect(refusal).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(script).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    // Ordered: T0 before the install, the verdict after the codegen and before anything is staged.
+    const t0 = script.indexOf('T0=$(_tree)');
+    expect(t0).toBeGreaterThan(-1);
+    expect(t0).toBeLessThan(script.indexOf('npm install --prefer-offline'));
+    expect(script.indexOf('T1=$(_tree)')).toBeGreaterThan(script.indexOf('generate:api-tests'));
+    expect(script.indexOf(PREFLIGHT_CHANGED_MARKER)).toBeLessThan(script.indexOf('git add -u'));
   });
 
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {

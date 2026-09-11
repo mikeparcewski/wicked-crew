@@ -157,6 +157,13 @@ beforeAll(async () => {
       `binary = ${JSON.stringify(process.execPath)}`,
       `start_args = [${JSON.stringify(agentPath)}, ${JSON.stringify(pidFile)}, ${JSON.stringify(completeFlag)}]`,
       'transport = "stdio"',
+      // wicked-core#433 (F-3R2-009): an `executes_code: false` unit on an ACP seat NOT admitted to
+      // input governance no longer starts an ACP turn — it is rerouted to the wrapped carrier
+      // (`acpFallback {fallbackKind: "read_only_requires_wrapped"}`), which would take this stub off
+      // the very transport under test. Admit it: the engine then holds the seat read-only by
+      // answering write-class `session/request_permission` calls with the reject option — vacuous
+      // here, the stub makes no tool calls — and the unit stays on ACP.
+      'acp_input_governance = true',
       '',
     ].join('\n'),
   );
