@@ -65,6 +65,7 @@ import {
   type RecallIntent,
   docScope,
   type SeamStatusPayload,
+  narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -73,7 +74,13 @@ import { resolveInteractiveRoot } from './bridge-root.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
-import { councilAgreementPct, councilOutcomeSuffix } from './council-outcome.js';
+import {
+  acpFallbackLine,
+  councilAgreementPct,
+  councilOutcomeSuffix,
+  ungatedGateNote,
+  workerToolCallDeniedLine,
+} from './council-outcome.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -373,6 +380,10 @@ interface InFlight {
   headAtLaunch: number;
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
+  /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
+  runId?: string | undefined;
+  /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
+  narrationOrd?: number | undefined;
   heartbeat: ReturnType<typeof setInterval>;
   /** The engine's own reason for the most recent failed unit (`stepFailed.detail`). Carried so
    *  the terminal error status names WHY — in particular the crew#311 deliverable-floor report,
@@ -523,6 +534,7 @@ export async function startInteractiveChatSubscriber(
       ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
+      ...narrationStamps(flight),
     });
   }
 
@@ -555,6 +567,10 @@ export async function startInteractiveChatSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
+    // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
+    // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
+    flight.runId ??= runId;
+    if (typeof event.ord === 'number') flight.narrationOrd = event.ord;
 
     // Narration ladder — same rationale as the draft fold: the heartbeat repeats the LATEST
     // line and the transcript dedups repeats, so advancing the line = visible progress.
@@ -632,9 +648,26 @@ export async function startInteractiveChatSubscriber(
       return;
     }
 
+    // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
+    // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
+    if (event.type === 'gateEvaluated') {
+      const note = ungatedGateNote(event);
+      if (note !== null) {
+        const ord = typeof event.ord === 'number' ? event.ord : 0;
+        narrate(flight, `Gate for ${phaseName(ord)}: ${note}`);
+      }
+      return;
+    }
+
+    // Wave 6 — the fenced worker (F-7R2-012): a seat that tried to push or open a PR itself was
+    // refused; the thread names who, what, and that delivery belongs to the run's deliver phase.
+    if (event.type === 'workerToolCallDenied') {
+      narrate(flight, workerToolCallDeniedLine(event));
+      return;
+    }
+
     if (event.type === 'acpFallback') {
-      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
-      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
+      narrate(flight, acpFallbackLine(event));
       return;
     }
 
@@ -888,6 +921,7 @@ export async function startInteractiveChatSubscriber(
           ...docScope(flight.documentId, flight.projectId),
           state: 'working',
           message: flight.narration,
+          ...narrationStamps(flight),
         });
       }, heartbeatMs),
       // Do not keep the daemon alive for narration alone.

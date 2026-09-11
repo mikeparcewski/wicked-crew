@@ -46,6 +46,15 @@ import type { CoreAdapter } from '../core/adapter.js';
 import { codeGraphDb } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, RepoEntry } from '../core/types.js';
 import { resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
+import type { ChatRefusalSource } from './seat-standing.js';
+
+/** One seat a `POST /chats` did NOT seat, and why (F-2R2-007 / F-A45-011) — published as
+ *  `ChatSeatRefusal` in wicked-crew-api-types (`source` since 0.36.0). */
+export interface ChatSeatRefusal {
+  cliKey: string;
+  reason: string;
+  source: ChatRefusalSource;
+}
 
 /** The scope a `POST /chats` asked for, after body validation. `repoRefs` is `repoRef` merged in. */
 export interface ChatScopeRequest {
@@ -689,8 +698,10 @@ export function removeChatScratch(cwd: string, base: string = chatScratchBase())
 type ChatSlot =
   /** An open is in flight: reserved synchronously before the route's first `await`. */
   | { state: 'reserved'; token: number }
-  /** The chat is open; its scratch root exists and its seats are reading the statement there. */
-  | { state: 'live'; scope: ChatScope }
+  /** The chat is open; its scratch root exists and its seats are reading the statement there.
+   *  `refused` (F-A45-011): every requested/default seat NOT seated at open, with its reason and
+   *  source — served on `GET /chats/:id` so the studio's admission copy survives a reload. */
+  | { state: 'live'; scope: ChatScope; refused: ChatSeatRefusal[] }
   /** `DELETE` ran: the root is already gone, and the id stays taken until the engine's own
    *  `chatClosed` for it is observed (or the grace timer gives up) — so a delayed close can never
    *  land on a chat that reused the id, and a reuse cannot race the close. */
@@ -765,10 +776,10 @@ export class ChatScopeIndex {
 
   /** Publish the scope of a finished open. `false` when the reservation is gone (cancelled by a
    *  close in the meantime): the caller must tear the chat down, nothing was recorded. */
-  set(chatId: string, scope: ChatScope, token: number): boolean {
+  set(chatId: string, scope: ChatScope, token: number, refused: ChatSeatRefusal[] = []): boolean {
     const slot = this.slots.get(chatId);
     if (slot?.state !== 'reserved' || slot.token !== token) return false;
-    this.slots.set(chatId, { state: 'live', scope });
+    this.slots.set(chatId, { state: 'live', scope, refused: [...refused] });
     return true;
   }
 
@@ -776,6 +787,12 @@ export class ChatScopeIndex {
   get(chatId: string): ChatScope | undefined {
     const slot = this.slots.get(chatId);
     return slot?.state === 'live' ? slot.scope : undefined;
+  }
+
+  /** The seats refused at open (F-A45-011) — `undefined` for a chat this daemon did not open. */
+  refusedOf(chatId: string): ChatSeatRefusal[] | undefined {
+    const slot = this.slots.get(chatId);
+    return slot?.state === 'live' ? [...slot.refused] : undefined;
   }
 
   /**

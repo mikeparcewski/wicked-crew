@@ -49,15 +49,22 @@ import {
   prepareChatScratch,
   removeChatScratch,
   resolveChatScope,
+  type ChatSeatRefusal,
 } from './chat-scope.js';
 import { allowedRootsFor, isInsideRoot, openWithSystemDefault } from './open-path.js';
 import {
   InvalidDiffBaseError,
+  MERGE_BASE_LITERAL,
   NotARegularFileError,
   UnresolvableDiffBaseError,
+  branchDiff,
+  isPlainRef,
   readFileCapped,
   worktreeDiff,
 } from './run-files.js';
+import { DocRunIndex } from '../interactive/doc-run-index.js';
+import { listInteractiveDocs } from '../interactive/docs-index.js';
+import { TestSetIndex } from '../qe/test-sets.js';
 import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
@@ -672,6 +679,14 @@ export interface RuntimeDeps {
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
+  /** The document ↔ run binding (wave 6, F-4R2-006) read off the interactive seams' handoff ledgers —
+   *  `createServer` builds one over the four ledger sources; a directly-driven route set gets an
+   *  EMPTY one (`document_id: null` on every run). */
+  docRuns?: DocRunIndex;
+  /** The registered test sets (wave 6, F-7R2-014) — `createServer` hydrates one from the trail and
+   *  registers into it at each `qe-author-tests` run's terminal frame; a directly-driven route set
+   *  gets a fresh, empty one. */
+  testSets?: TestSetIndex;
 }
 
 /**
@@ -725,6 +740,10 @@ export function registerRoutes(
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
+  // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
+  // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
+  const docRuns = runtime.docRuns ?? new DocRunIndex(() => []);
+  const testSets = runtime.testSets ?? new TestSetIndex();
   const worktreeExists = runtime.worktreeExists ?? ((p: string) => existsSync(p));
   const vacuityProbes: VacuityProbes = {
     worktreeExists,
@@ -813,6 +832,9 @@ export function registerRoutes(
   const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
     view.session.project_id = projects.index.projectOf(view.session.id) ?? null;
+    // Wave 6 (F-4R2-006): the interactive document this run answered, from the seams' handoff
+    // ledgers — `null` = genuinely not a document run, so the field is ALWAYS present on served runs.
+    view.session.document_id = docRuns.documentOf(view.session.id) ?? null;
     const retryOf = retryIndex.retryOfFor(view.session.id);
     if (retryOf !== undefined) view.session.retry_of = retryOf;
     // wicked-studio#27 (api-types 0.19.0): the launch-time group attach, from the same durable
@@ -988,6 +1010,10 @@ export function registerRoutes(
           signed,
           health,
           seatHealth.councilBenchFor(key),
+          // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
+          // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
+          // `council_eligible`, and the evidence rides on the wire.
+          seatHealth.authFailureFor(key),
         ),
       };
     });
@@ -1145,25 +1171,8 @@ export function registerRoutes(
     const resolved = await resolveRunPath(reply, id, rawPath);
     if (resolved === null) return reply;
     const workdir = resolved.session.workdir;
-    if (typeof workdir !== 'string' || workdir.length === 0) {
-      return reply.code(409).send({ error: `run ${id} has no workdir — nothing to diff` });
-    }
-    if (!existsSync(workdir)) {
-      return reply.code(409).send({ error: `run ${id}'s workdir no longer exists: ${workdir}` });
-    }
-    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
-    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
-    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
-    // "outside repository" error as a 500 (Copilot, #305).
-    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
-      return reply.code(400).send({
-        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
-      });
-    }
-    const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
-    try {
-      return await worktreeDiff(workdir, rel, rawBase);
-    } catch (err) {
+    /** The route's one error mapping, shared by the worktree and the branch reads. */
+    const diffError = (err: unknown) => {
       // Named 400s (§8.1): malformed base (not a plain ref) and well-formed-but-unresolvable
       // base are both client errors, each with its error name in the body — never a git 500.
       if (err instanceof InvalidDiffBaseError || err instanceof UnresolvableDiffBaseError) {
@@ -1181,6 +1190,75 @@ export function registerRoutes(
         });
       }
       return reply.code(500).send({ error: message(err) });
+    };
+    const worktreeLive = typeof workdir === 'string' && workdir.length > 0 && existsSync(workdir);
+    if (!worktreeLive) {
+      // Wave 6 (F-7R2-013): the engine reaps a completed run's worktree, and the run page went dark
+      // (`409 workdir no longer exists`). The run's WORK is not gone — it lives on the `wicked/<id>`
+      // branch of the registered repo, and the wave-6 engine records `run_branch` + `base_commit`
+      // on the session. Serve the diff from the BRANCH (`source: 'branch'`): the recorded branch
+      // (else `wicked/<id>`) against the recorded base (else its merge-base with the default
+      // branch), `?base=<ref>` overriding the base with a plain in-repo ref. Only when there is
+      // neither a worktree nor a branch does the 409 stand — and then it says so.
+      const repoRef = resolved.session.repo_ref;
+      const root = repoRef !== null ? await repoRootOf(repoRef) : undefined;
+      if (root !== undefined) {
+        const session = resolved.session as typeof resolved.session & {
+          run_branch?: string;
+          base_commit?: string;
+        };
+        const branch =
+          typeof session.run_branch === 'string' && session.run_branch !== '' ? session.run_branch : `wicked/${id}`;
+        let base: string | null =
+          typeof session.base_commit === 'string' && session.base_commit !== '' ? session.base_commit : null;
+        if (rawBase !== undefined && rawBase !== '' && rawBase !== MERGE_BASE_LITERAL) {
+          if (!isPlainRef(rawBase)) {
+            return reply.code(400).send({
+              error: `InvalidDiffBaseError: \`base\` must be the literal '${MERGE_BASE_LITERAL}' or a plain git ref`,
+            });
+          }
+          base = rawBase;
+        }
+        // Narrowing: a path under the (gone) worktree or under the repo root, made repo-relative.
+        let rel: string | undefined;
+        if (resolved.target !== undefined) {
+          if (isInsideRoot(root, resolved.target)) rel = relative(root, resolved.target);
+          else if (typeof workdir === 'string' && workdir.length > 0 && isInsideRoot(workdir, resolved.target)) {
+            rel = relative(workdir, resolved.target);
+          } else {
+            return reply.code(400).send({
+              error: `\`path\` must be inside the run's worktree or its repository to diff: ${root}`,
+            });
+          }
+        }
+        try {
+          const fromBranch = await branchDiff(root, branch, base, rel);
+          if (fromBranch !== null) return fromBranch;
+        } catch (err) {
+          return diffError(err);
+        }
+      }
+      if (typeof workdir !== 'string' || workdir.length === 0) {
+        return reply.code(409).send({ error: `run ${id} has no workdir and no run branch — nothing to diff` });
+      }
+      return reply.code(409).send({
+        error: `run ${id}'s workdir no longer exists (${workdir}) and its run branch holds no commits — nothing to diff`,
+      });
+    }
+    // Narrowing is WORKTREE-scoped: a contained-but-outside-the-worktree path (extra write
+    // root / repo root) is a valid FILE read but has no meaning as a diff pathspec — rejected
+    // explicitly here rather than handing git a `../`-prefixed pathspec and surfacing its
+    // "outside repository" error as a 500 (Copilot, #305).
+    if (resolved.target !== undefined && !isInsideRoot(workdir, resolved.target)) {
+      return reply.code(400).send({
+        error: `\`path\` must be inside the run's worktree to diff: ${workdir}`,
+      });
+    }
+    const rel = resolved.target === undefined ? undefined : relative(workdir, resolved.target);
+    try {
+      return { ...(await worktreeDiff(workdir, rel, rawBase)), source: 'worktree' as const };
+    } catch (err) {
+      return diffError(err);
     }
   });
 
@@ -1260,7 +1338,10 @@ export function registerRoutes(
     const input: LaunchRunInput = {
       problem: b.problem,
       sessionId: b.sessionId ?? randomUUID(),
-      clisJson: b.clisJson ?? JSON.stringify(CoreAdapter.roster()),
+      // The default roster carries crew's STANDING (wave 6, the crew half of F-7R2-006): the adapter
+      // translates `council_eligible: false` into the engine's per-seat bench verdict at launch
+      // (`core/engine-roster.ts`), so a signed-out seat is never convened, never a judge.
+      clisJson: b.clisJson ?? JSON.stringify(rosterWithStanding()),
     };
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
@@ -1429,8 +1510,21 @@ export function registerRoutes(
     // resolve, not leak.
     // Fastify parses a REPEATED query param as string[] — normalize so `?include=archived`
     // and `?include=archived&include=archived` behave identically (Copilot).
-    const { include, limit } = req.query as { include?: string | string[]; limit?: string | string[] };
+    const { include, limit, doc } = req.query as {
+      include?: string | string[];
+      limit?: string | string[];
+      doc?: string | string[];
+    };
     const includeArchived = (Array.isArray(include) ? include : [include]).includes('archived');
+    // `?doc=<document id>` (wave 6, F-4R2-006): only the runs the interactive seams launched for
+    // that document — the doc↔run binding as a direct read (the run DTO carries `document_id`).
+    // A repeated `?doc` is an ambiguity, not a repetition — refused like a repeated `?limit`.
+    if (Array.isArray(doc)) {
+      return reply.code(400).send({ error: '`doc` may be given at most once' });
+    }
+    if (doc !== undefined && doc.trim() === '') {
+      return reply.code(400).send({ error: '`doc` must name a document id' });
+    }
     // `?limit=N` — the top N AFTER the actionable-first sort below, so a capped poll still sees
     // the runs that need a human before the terminal sediment. The default stays UNBOUNDED: the
     // param used to be read by nobody (silently ignored — the full payload regardless), so an
@@ -1453,9 +1547,11 @@ export function registerRoutes(
       }
       cap = Number(limit);
     }
-    const visible = includeArchived
+    const unarchived = includeArchived
       ? views
       : views.filter((v) => v.session.archived_at == null);
+    const visible =
+      doc === undefined ? unarchived : unarchived.filter((v) => docRuns.documentOf(v.session.id) === doc.trim());
     const ordered = sortActionableFirst(visible);
     return { runs: (cap !== undefined ? ordered.slice(0, cap) : ordered).map(decorateRun) };
   });
@@ -1867,13 +1963,17 @@ export function registerRoutes(
       // person can see why pi is missing. Explicit `clis` are passed through as asked; the engine
       // refuses per seat with its reason, which is copied into `refused` too.
       const scoped = scope.kind !== 'none';
-      const refused: { cliKey: string; reason: string }[] = [];
+      const refused: ChatSeatRefusal[] = [];
+      // The standing roster, read ONCE: the default admission below and the engine-drop
+      // attribution after `chatOpen` both consult it (F-A45-011).
+      const standing = rosterWithStanding();
+      const standingOf = (key: string) => standing.find((s) => String(s.key) === key);
       let clis: string[];
       if (b.clis !== undefined) {
         clis = b.clis;
       } else {
         clis = [];
-        for (const seat of rosterWithStanding()) {
+        for (const seat of standing) {
           const key = String(seat.key);
           const admission = chatSeatAdmission(
             seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
@@ -1881,7 +1981,7 @@ export function registerRoutes(
             scoped,
           );
           if (admission.ok) clis.push(key);
-          else refused.push({ cliKey: key, reason: admission.reason });
+          else refused.push({ cliKey: key, reason: admission.reason, source: admission.source });
         }
       }
       if (clis.length === 0) {
@@ -1905,7 +2005,43 @@ export function registerRoutes(
         });
         // A REQUESTED seat the engine refused joins the same list, with the engine's reason.
         for (const s of seats) {
-          if (!s.ok) refused.push({ cliKey: s.cliKey, reason: s.error ?? 'the engine refused the seat' });
+          if (!s.ok) refused.push({ cliKey: s.cliKey, reason: s.error ?? 'the engine refused the seat', source: 'engine' });
+        }
+        // F-A45-011 (F-2R2-007 still open): a seat the engine DROPPED — absent from `seats`
+        // altogether, neither ok nor refused — used to vanish without a trace (the fresh rig's pi:
+        // default chips claude·pi·opencode, 201 `seats:[claude, opencode]`, `refused: []`). It was
+        // taken out by the council-bench / dispatch-timeout path, not by admission, so admission's
+        // list never named it. Every requested-or-defaulted seat that is not in `seats` is named
+        // here with the most specific cause the daemon knows: its own "no credential" report
+        // (`auth`), this daemon's council bench (`bench`), else the dispatch budget (`budget`).
+        for (const key of clis) {
+          if (seats.some((s) => s.cliKey === key) || refused.some((r) => r.cliKey === key)) continue;
+          const st = standingOf(key);
+          const authFailure = seatHealth.authFailureFor(key);
+          if (authFailure !== null || st?.auth === 'signed_out') {
+            refused.push({
+              cliKey: key,
+              reason:
+                authFailure !== null
+                  ? `not seated — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
+                  : 'not seated — signed out; sign it in from the System page',
+              source: 'auth',
+            });
+          } else if (st?.council_bench !== undefined) {
+            refused.push({
+              cliKey: key,
+              reason: `not seated — ${st.council_ineligible_reason ?? 'benched by this daemon’s recent councils'}`,
+              source: 'bench',
+            });
+          } else {
+            refused.push({
+              cliKey: key,
+              reason:
+                'not seated — the engine did not warm it within its dispatch budget (the seat timed out or ' +
+                'was dropped at dispatch); check GET /roster and try again, or name seats with `clis`',
+              source: 'budget',
+            });
+          }
         }
         // Nothing warmed (independent review, W1): the engine holds no pool row and has dropped the
         // scope itself (no `chatClosed` will come) — report the PER-SEAT reasons, never an
@@ -1979,7 +2115,7 @@ export function registerRoutes(
             projectAttachError = message(err);
           }
         }
-        if (!chatScopes.set(chatId, scope, token)) {
+        if (!chatScopes.set(chatId, scope, token, refused)) {
           // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
           // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
           // session, scratch root, and the filing just made) instead of returning a stale 201.
@@ -2002,6 +2138,7 @@ export function registerRoutes(
             chat: chatId,
             cliKey: r.cliKey,
             reason: r.reason,
+            source: r.source,
             ...(b.projectId !== undefined ? { project_id: b.projectId } : {}),
           } as CoreEvent);
         }
@@ -2070,14 +2207,41 @@ export function registerRoutes(
     },
   );
 
+  // ── Interactive documents, daemon-wide, WITHOUT spawning a bridge (wave 6, studio #263) ──────
+  // The per-project listing (`GET /projects/:id/interactive/api/docs`) asks the project's bridge —
+  // one `wicked-interactive serve` per project root, ≈60 s cold start — so a skin must never fan
+  // it out on mount. This reads what the bridge reads (every project's docs root, each slug child
+  // carrying a `versions.json`) plus what only the daemon knows (the seams that answered each doc
+  // and the runs they launched, from the handoff ledgers). `?includeRetired=1` lists tombstones.
+  app.get(
+    `${V}/interactive/docs`,
+    { config: { manifest: { responseType: 'InteractiveDocsListing', statusCodes: [200] } } },
+    async (req) => {
+      const q = req.query as { includeRetired?: string | string[] };
+      const flag = Array.isArray(q.includeRetired) ? q.includeRetired[0] : q.includeRetired;
+      return listInteractiveDocs({
+        adapter,
+        settings: projectSettings,
+        docRuns,
+        includeRetired: flag === '1' || flag === 'true',
+      });
+    },
+  );
+
   app.get(
     `${V}/chats/:id`,
     { config: { manifest: { responseType: 'ChatDetailResponse', statusCodes: [200, 400] } } },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
-        // The scope recorded at open (crew#502) — `null` for a chat this daemon did not open.
-        return { chatId: id, seats: await adapter.chatSeats(id), scope: chatScopes.get(id) ?? null };
+        // The scope recorded at open (crew#502) — `null` for a chat this daemon did not open — and
+        // the seats refused at open (F-A45-011), so the studio's admission copy survives a reload.
+        return {
+          chatId: id,
+          seats: await adapter.chatSeats(id),
+          scope: chatScopes.get(id) ?? null,
+          refused: chatScopes.refusedOf(id) ?? null,
+        };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });
       }
@@ -2369,9 +2533,38 @@ export function registerRoutes(
     const views = await adapter.sessionsDetail();
     const run = views.find((v) => v.session.id === id);
     if (!run) return reply.code(404).send({ error: 'Run not found' });
-    if (run.session.status !== 'executing') {
+    // Wave 6 (F-7R2-007 root fix): a run PARKED at a gate on a dead seat — the stall watchdog's
+    // escalation gate, or a verdict escalation — used to answer 409 here, so the studio's control
+    // needed two calls (approve, then race the engine's re-dispatch of the same dead seat with a
+    // reassign). The ENGINE's `reassign_unit` accepts ONLY an Executing run (wicked-core actor.rs:
+    // "run X is not Executing (status: AwaitingHuman)") — there is no reassign-in-place for a gated
+    // run — so this route performs APPROVE-THEN-REASSIGN in one call: the approve resumes the run
+    // (the engine re-dispatches the cursor unit to its current seat), and the reassign IMMEDIATELY
+    // supersedes that turn (cancels its epoch, closes the seat's session, bumps the attempt) and
+    // re-dispatches to the requested seat or the council's pick. The dead seat is dispatched for
+    // the gap between the two engine calls — a bounded window the engine contract leaves open (a
+    // reassign-as-approval engine op would close it; documented in the PR). Audited as BOTH a gate
+    // decision (`via: 'reassign'`) and a reassign, so the "who approved" trail has no side door.
+    // A steering-author propose gate is NOT approvable this way: its approve LANDS the proposal
+    // through `POST /runs/:id/gate` (crew#388), and a reassign is not a review of the rules.
+    const gated = run.session.status === 'awaiting_human';
+    if (run.session.status !== 'executing' && !gated) {
       return reply.code(409).send({
         error: `run ${id} is ${run.session.status}, not executing — only an executing run has a cursor unit to reassign`,
+      });
+    }
+    if (gated && typeof adapter.confirmGate !== 'function') {
+      // A partial adapter (a directly-driven route set) cannot approve the gate on the caller's
+      // behalf — say so by name, never a TypeError dressed as a refusal.
+      return reply.code(409).send({
+        error:
+          `run ${id} is awaiting_human, not executing — the engine reassigns only an executing run, and ` +
+          `this build cannot approve the gate on your behalf (no confirmGate); approve via POST /runs/${id}/gate, then reassign`,
+      });
+    }
+    if (gated && typeof adapter.listWorkflows === 'function' && isSteeringAuthorRun(run, adapter.listWorkflows())) {
+      return reply.code(409).send({
+        error: `run ${id} is awaiting a steering-author propose gate — approve or reject it via POST /runs/${id}/gate (the approve lands the proposal); reassign is not a review of the rules`,
       });
     }
     const requestedCli = parsed.data.cli;
@@ -2386,12 +2579,24 @@ export function registerRoutes(
     const cursor = resolveCursorUnit(run);
     const ord = cursor?.ord ?? run.session.unit_ix;
     try {
+      if (gated) {
+        const status = await adapter.confirmGate(id, true);
+        audit.record('gate.decided', actorOf(req), {
+          runId: id,
+          detail: { approve: true, via: 'reassign', status },
+        });
+      }
       await adapter.reassignUnit(id, ord, requestedCli ?? null);
       audit.record('run.reassigned', actorOf(req), {
         runId: id,
-        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) },
+        detail: { ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}), ...(gated ? { approved: true } : {}) },
       });
-      return reply.send({ status: 'ok', ord, ...(requestedCli !== undefined ? { cli: requestedCli } : {}) });
+      return reply.send({
+        status: 'ok',
+        ord,
+        ...(requestedCli !== undefined ? { cli: requestedCli } : {}),
+        ...(gated ? { approved: true } : {}),
+      });
     } catch (err) {
       return reply.code(409).send({ error: message(err) });
     }
@@ -3934,6 +4139,8 @@ export function registerRoutes(
     actorOf,
     roster: () => CoreAdapter.roster(),
     groupIndex,
+    // Wave 6 (F-7R2-014): the registered test sets ride beside the campaigns + groups.
+    testSets,
     deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
     vacuity: vacuityProbes,
     // A non-probe derivation throw in the rollup is a defect — error level, loud in diagnostics.
@@ -3965,8 +4172,12 @@ export function registerRoutes(
   registerTestingRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // The roster WITH crew's standing (wave 6): the adapter turns `council_eligible` into the
+    // engine's per-seat bench at launch, and the author response's `plan.seats` reads it.
+    roster: () => rosterWithStanding(),
     projects: { bus: projects.bus, index: projects.index },
+    // The author launch files each run under its repo's `qe-tests-<repo>` label (F-7R2-014).
+    groupIndex,
     // So the recon fan's `run.launched` entries stamp `created_at` live too (Copilot #466), not
     // just after a restart re-hydrates the trail.
     runTimingIndex,

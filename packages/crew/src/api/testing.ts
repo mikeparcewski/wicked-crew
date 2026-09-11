@@ -45,6 +45,10 @@ import { API_PREFIX } from './api-prefix.js';
 import { STEERING_TYPE_VALUES, STEERING_TYPES } from './governance-steering.js';
 import { resolveScopeRepos } from './multiscope.js';
 import { buildReconCampaign, RECON_INTAKE_GATE_TOKEN } from '../campaigns/plan.js';
+import { eligibleSeatKeys } from '../core/engine-roster.js';
+import { QE_AUTHOR_TESTS_WORKFLOW, qeAuthorPlan } from '../qe/author-workflow.js';
+import { qeTestsGroupLabel } from '../qe/test-sets.js';
+import type { GroupIndex } from './group-index.js';
 import { resolveProjectGraphBinding } from '../projects/graph.js';
 import { MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../projects/events.js';
 import type { ProjectBus } from '../projects/events.js';
@@ -106,11 +110,36 @@ export const TestingReconSchema = z
   })
   .strict();
 
+// The test-authoring launch (wave 6, F-7R2-003/004/014 + F-075): the operator's intent + scope,
+// launched as the `qe-author-tests` WORKFLOW (never a free-text plan). Same scope fields and the
+// same intake-gate default as the recon body; `deliver` is the run's delivery mode — `pr` (the
+// default: the ENGINE's deliver phase opens the PR, never a worker) or `none` (leave the tests on
+// the run branch, `delivery: 'stranded'` on the wire, liftable post-hoc). Strict (FINDING-031).
+export const TestingAuthorSchema = z
+  .object({
+    problem: z.string().min(1),
+    projectId: z.string().min(1).optional(),
+    repoRefs: z
+      .array(z.string().min(1))
+      .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
+      .optional(),
+    ungated: z.boolean().optional(),
+    deliver: z.enum(['pr', 'none']).optional(),
+  })
+  .strict();
+
 export interface TestingRoutesDeps {
   audit: AuditLog;
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
-  /** The default council roster for the recon runs (already parsed) — the steering-author idiom. */
+  /** The default council roster for the recon/author runs (already parsed) — the steering-author
+   *  idiom. `registerRoutes` supplies the roster WITH crew's standing (`council_eligible` …), which
+   *  the adapter translates into the engine's per-seat `health` at launch (`core/engine-roster.ts`)
+   *  and which the author response's `plan.seats` is derived from. */
   roster: () => unknown[];
+  /** The launch-time group index (`RunGroup` on `GET /campaigns`) — an author run is filed under
+   *  its repo's `qe-tests-<repo>` label so the Test landing sees it from launch (F-7R2-014).
+   *  Optional so route-unit tests can omit it; `registerRoutes` always supplies it. */
+  groupIndex?: GroupIndex;
   /** The membership plumbing POST /runs uses for projectId filing (index tag + post-commit event).
    *  Optional so route-level unit tests can omit it; `registerRoutes` always supplies it. */
   projects?: { bus: ProjectBus | null; index: MembershipIndex };
@@ -533,6 +562,181 @@ export function registerTestingRoutes(
       return reply
         .code(201)
         .send({ runId: runIds[0]!, runIds, campaign, campaignRegistered: false });
+    },
+  );
+
+  // ── The test-authoring launch (wave 6 — the Testing page's "New test") ────────────────────
+  // Launches the `qe-author-tests` WORKFLOW (recon → author → verify → review, the engine's deliver
+  // phase appended) over the operator's intent, one governed run per resolved repo — never the
+  // free-text planner (F-7R2-003: seven sentence-units, two of them chat replies). A test-authoring
+  // run WRITES into a repository, so the scope must resolve to ≥ 1 repo (an unscoped author is a
+  // 400 — there is no worktree to author into). Each run: pauses at its intake gate unless the
+  // caller EXPLICITLY sent `ungated: true` (the launch banner's promise); delivers via the ENGINE's
+  // deliver phase (`deliver: 'pr'` default — F-7R2-004/012: the worker never opens the PR); is filed
+  // under the repo's `qe-tests-<repo>` label group so the Test landing shows it from launch
+  // (F-7R2-014); and the 201 carries the PLAN the intake gate shows — the def's phases (kind, role,
+  // agent/tool, skill, gate) plus the engine's deliver phase, and the seats the council may pick
+  // from (F-7R2-008). Multi-repo scopes fan one run per repo (each repo gets its own PR), grouped
+  // per repo — NOT an engine campaign: campaign nodes are engine-launched and would not receive the
+  // crew-side deliver composition, so the per-run path is the one that delivers.
+  app.post(
+    `${V}/testing/author`,
+    {
+      config: {
+        manifest: {
+          requestType: 'TestingAuthorBody',
+          responseType: 'TestingAuthorResponse',
+          // 400: zod reject / no repo in scope; 404: unknown projectId; 409: archived project /
+          // engine busy; 500: a launch failed AFTER earlier fanned runs started (named) or the
+          // daemon cannot serve its own workflow; 501: projectId on an addon without projects.
+          statusCodes: [201, 400, 404, 409, 500, 501],
+        },
+      },
+    },
+    async (req, reply) => {
+      const parsed = TestingAuthorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid author body'));
+      }
+      const b = parsed.data;
+      // NARROWED project scope (studio #263 review, F-4): with BOTH fields, `repoRefs` is the
+      // SCOPE and `projectId` is the FILING — unlike the recon body, where both are unioned. The
+      // studio's project-scoped "New test" with repo chips would otherwise have to fan one
+      // `POST /runs` per repo itself (one deliver/PR per run); here it names the repos and the
+      // project once, and the runs are filed into the project without inheriting its other members.
+      const narrowed = b.projectId !== undefined && b.repoRefs !== undefined;
+      let scope;
+      try {
+        scope = await resolveScopeRepos(
+          adapter,
+          narrowed ? { repoRefs: b.repoRefs } : { projectId: b.projectId, repoRefs: b.repoRefs },
+        );
+        if (narrowed && scope.ok) {
+          // The filing project must be real and active — validated here since the resolver did not
+          // walk it (the same refusals the union path gives, by name).
+          if (b.projectId === 'default') {
+            return reply.code(400).send({
+              error: "projectId: 'default' is the synthesized unfiled container — runs cannot be filed into it; omit projectId",
+            });
+          }
+          const project = await adapter.projectGet(b.projectId!);
+          if (project === null) return reply.code(404).send({ error: `unknown project: ${b.projectId}` });
+          if (project.status === 'archived') {
+            return reply.code(409).send({
+              error: `project '${b.projectId}' is archived — restore it (PATCH /api/v1/projects/${b.projectId} with status "active") before filing runs into it`,
+            });
+          }
+        }
+      } catch (err) {
+        if (err instanceof ProjectsUnsupportedError) return reply.code(501).send({ error: err.message });
+        return reply.code(500).send({ error: message(err) });
+      }
+      if (!scope.ok) return reply.code(scope.status).send({ error: scope.error });
+      if (scope.repos.length === 0) {
+        return reply.code(400).send({
+          error:
+            'a test-authoring run writes tests into a repository: name at least one registered repo ' +
+            '(`repoRefs`) or a project with crew.repo members (`projectId`)',
+        });
+      }
+      const def = adapter.getWorkflow(QE_AUTHOR_TESTS_WORKFLOW);
+      if (def === null) {
+        // A daemon defect, never the caller's: the def ships in BUILTIN_WORKFLOWS.
+        return reply.code(500).send({
+          error: `the daemon does not serve the '${QE_AUTHOR_TESTS_WORKFLOW}' workflow — GET /workflows lists what it serves`,
+        });
+      }
+      const gate = b.ungated === true ? 'none' : RECON_INTAKE_GATE_TOKEN;
+      // The delivery decision, resolved EXACTLY as `POST /runs` resolves it for a repo-scoped
+      // code-work def (crew#393; review M-2 of #536): an explicit `deliver` wins; omitted ⇒ the
+      // daemon's `deliverDefault` setting ('pr' unless the operator flipped it to 'none'). The
+      // resolved value AND whether it was defaulted ride on the `run.launched` trail entry.
+      let deliver: 'pr' | 'none';
+      let deliverDefaulted = false;
+      if (b.deliver !== undefined) {
+        deliver = b.deliver;
+      } else {
+        deliver = (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
+        deliverDefaulted = true;
+      }
+      const roster = deps.roster();
+      const clisJson = JSON.stringify(roster);
+      const plan = qeAuthorPlan(def, eligibleSeatKeys(roster), deliver === 'pr');
+      /** The post-commit half of the §2.2 filing (the POST /runs idiom). */
+      const fileIntoProject = (runId: string, attachedAt: number): void => {
+        if (b.projectId === undefined || deps.projects === undefined) return;
+        deps.projects.index.set(runId, b.projectId);
+        deps.projects.bus?.emit(
+          MEMBERSHIP_ATTACHED,
+          { project_id: b.projectId, member: { kind: 'crew.run', ref: runId }, actor: actorOf(req).id },
+          membershipAttachedKey(b.projectId, 'crew.run', runId, attachedAt),
+        );
+      };
+      const runs: Array<{ runId: string; repoRef: string; label: string }> = [];
+      for (const repo of scope.repos) {
+        const runId = randomUUID();
+        const label = qeTestsGroupLabel(repo.name);
+        const input: LaunchRunInput = {
+          problem: b.problem,
+          sessionId: runId,
+          clisJson,
+          humanConfirm: gate,
+          repoRef: repo.id,
+          workflow: QE_AUTHOR_TESTS_WORKFLOW,
+          ...(deliver === 'pr' ? { deliver: 'pr' as const } : {}),
+        };
+        if (b.projectId !== undefined) {
+          input.projectId = b.projectId;
+          const decision = await resolveProjectGraphBinding(adapter, b.projectId, repo.id);
+          if (decision.binding !== null) input.projectGraph = decision.binding;
+          req.log.info({ runId, projectId: b.projectId, repoRef: repo.id }, `run ${runId}: ${decision.reason}`);
+        }
+        try {
+          await adapter.launchRun(input);
+        } catch (err) {
+          const msg = message(err);
+          if (runs.length > 0) {
+            return reply.code(500).send({
+              error:
+                `test-authoring fan-out failed on repo '${repo.id}' after ${runs.length} run(s) launched: ${msg}`,
+              runIds: runs.map((r) => r.runId),
+              workflow: QE_AUTHOR_TESTS_WORKFLOW,
+            });
+          }
+          if (err instanceof ProjectsUnsupportedError) return reply.code(501).send({ error: msg });
+          const busy = /busy|in flight|already/i.test(msg);
+          return reply.code(busy ? 409 : 400).send({ error: msg });
+        }
+        // The same trail entry POST /runs writes — the durable record of the workflow, the RESOLVED
+        // delivery decision, and the group attach the index (and a restart's hydrate) reads back.
+        recordRunLaunched(audit, deps.runTimingIndex, actorOf(req), runId, {
+          workflow: QE_AUTHOR_TESTS_WORKFLOW,
+          repoRef: repo.id,
+          deliver,
+          ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
+          groupLabel: label,
+          author: true,
+          gate,
+          ...(b.ungated === true ? { ungated: true } : {}),
+          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+        });
+        deps.groupIndex?.set(runId, { label });
+        fileIntoProject(runId, Date.now());
+        runs.push({ runId, repoRef: repo.id, label });
+      }
+      return reply.code(201).send({
+        runId: runs[0]!.runId,
+        runIds: runs.map((r) => r.runId),
+        workflow: QE_AUTHOR_TESTS_WORKFLOW,
+        runs,
+        gate: gate === 'none' ? 'none' : 'before:1',
+        deliver,
+        plan,
+        // How the repos were chosen: the named `repoRefs` (a project, when given, is the filing
+        // only), else the project's repo members.
+        scope: b.repoRefs !== undefined ? 'repoRefs' : 'project',
+        campaignRegistered: false,
+      });
     },
   );
 }

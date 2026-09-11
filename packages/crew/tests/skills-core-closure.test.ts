@@ -46,12 +46,14 @@ const pinnedCoreTs = (): string => {
 };
 
 describe('registeredSkillRefs', () => {
-  it('collects the non-null skill_refs of the workflows crew serves (capture-learnings, domain-extraction)', () => {
+  it('collects the non-null skill_refs of the workflows crew serves (capture-learnings, domain-extraction, qe-author-tests)', () => {
     const refs = registeredSkillRefs(BUILTIN_WORKFLOWS);
     expect([...refs].sort()).toEqual([
       'wicked-garden-domain',
       'wicked-garden-domain-coverage',
       'wicked-garden-domain-extractor',
+      // Wave 6: the governed test-authoring workflow routes recon/author/review through the QE skill.
+      'wicked-garden-qe',
       'wicked-garden-repo-learn',
     ]);
   });

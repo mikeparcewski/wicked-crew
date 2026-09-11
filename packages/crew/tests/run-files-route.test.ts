@@ -332,7 +332,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
     try {
       const ok = await scoped.inject({ method: 'GET', url: '/api/v1/runs/run-clean/diff' });
       expect(ok.statusCode).toBe(200);
-      expect(ok.json()).toEqual({ diff: '', truncated: false });
+      expect(ok.json()).toEqual({ diff: '', truncated: false, source: 'worktree' });
     } finally {
       await scoped.close();
     }
@@ -341,7 +341,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
   it('a non-git workdir answers an empty diff rather than an error (the git-history tolerance)', async () => {
     const res = await getDiff('run-nogit');
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ diff: '', truncated: false });
+    expect(res.json()).toEqual({ diff: '', truncated: false, source: 'worktree' });
   });
 
   // ── diff: caps ────────────────────────────────────────────────────────────

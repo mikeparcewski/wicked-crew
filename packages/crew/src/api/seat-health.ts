@@ -108,7 +108,7 @@ const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
 const SEAT_FAILURE_PATTERNS: RegExp[] = [
   CLI_IN_DETAIL, // non-zero exit, seat named by the runner itself
   /timeout waiting/i, // ACP "timeout waiting for response id=…" (acp_runner.rs)
-  /\b401\b|\bunauthorized\b/i, // auth: needs a re-login
+  /\bHTTP\/?[0-9.]*\s+401\b|\b401\s+unauthori[sz]ed\b|\bunauthori[sz]ed\b/i, // auth: needs a re-login (a 401 only as an HTTP status — never a bare number, review M-3 of #536)
   /\bquota\b|rate.?limit|too many requests|\b429\b/i, // quota/rate ceiling
   /\bout of credits\b|\binsufficient credits\b/i, // account balance
 ];
@@ -121,6 +121,53 @@ const BENIGN_FALLBACK_KINDS = new Set(['governance_requires_wrapped', 'read_only
 
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/**
+ * What a seat's OWN output says when it has no credential (F-A45-006, wave 6): the fresh rig's pi
+ * failed every ballot with "No API key found" while the roster read `signed_in: true` off a present
+ * (empty) `auth.json`. The seat's stderr is the authoritative probe — when it says so, the roster's
+ * `auth` must flip to `signed_out` (not only `council_eligible`), and the evidence rides with it.
+ */
+export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
+  /no api key/i,
+  /not logged in/i,
+  /\bunauthenticated\b/i,
+  /\bunauthori[sz]ed\b/i,
+  // A 401 only as an HTTP STATUS, never a bare number (review M-3 of #536: a bare `\b401\b` matched
+  // stack-trace line/column numbers — `src/foo.ts:401:12` — and benched a healthy seat for 30 min).
+  /\bHTTP\/?[0-9.]*\s+401\b/i,
+  /\b401\s+unauthori[sz]ed\b/i,
+  /\bstatus(?:\s*code)?\s*[:=]?\s*401\b/i,
+  /login required/i,
+  /please (sign|log) in/i,
+  /invalid api key/i,
+  /authentication (failed|required)/i,
+  /missing (api[ _-]?key|credentials?)/i,
+];
+
+/** Whether a failure detail / stderr says the seat has no usable credential. */
+export function isAuthRefusal(text: string): boolean {
+  return AUTH_REFUSAL_PATTERNS.some((re) => re.test(text));
+}
+
+/** `acpFallback.fallbackKind` values that mean the seat's ACCOUNT refused (wave 6 adds two). */
+const AUTH_FALLBACK_KINDS = new Set(['auth_required', 'auth_failed', 'unauthenticated']);
+
+/** How long a seat's own "no credential" report keeps its `auth` at `signed_out` with no ok output
+ *  since — the same window as the council bench; an ok unit output clears it at once. */
+export const AUTH_FAILURE_WINDOW_MS = COUNCIL_BENCH_WINDOW_MS;
+
+/** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
+export interface SeatAuthFailure {
+  /** ISO-8601 of the report. */
+  at: string;
+  /** A bounded excerpt of the seat's own words ("No API key found …"). */
+  detail: string;
+  /** Where it was said: a council `ballot`, a unit's `worker` failure, or the `acp` handshake. */
+  source: 'ballot' | 'worker' | 'acp';
+  /** The run it happened in, when the frame named one. */
+  run?: string;
 }
 
 /**
@@ -137,6 +184,8 @@ export class SeatHealthTracker {
   private readonly fallbacks = new Map<string, number[]>();
   /** cli key → primary council ballot failures inside {@link COUNCIL_BENCH_WINDOW_MS}. */
   private readonly councilFailures = new Map<string, CouncilFailure[]>();
+  /** cli key → the seat's latest own "no credential" report (F-A45-006), cleared by an ok output. */
+  private readonly authFailures = new Map<string, { at: number; detail: string; source: SeatAuthFailure['source']; session?: string }>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -205,6 +254,8 @@ export class SeatHealthTracker {
             : undefined;
         const seat = named ?? assigned;
         if (seat === undefined) return;
+        // F-A45-006: the seat's own words beat the file probe — "No API key found" flips `auth`.
+        if (isAuthRefusal(detail)) this.recordAuthFailure(seat, detail, 'worker', at, session);
         const seatLevel =
           failureKind === 'workerError' || SEAT_FAILURE_PATTERNS.some((re) => re.test(detail));
         if (seatLevel) {
@@ -216,8 +267,13 @@ export class SeatHealthTracker {
       case 'councilSeatFailed': {
         const cli = str(event.cli);
         const kind = str((event as { kind?: unknown }).kind);
-        if (cli === undefined || kind === undefined || !COUNCIL_PRIMARY_FAILURE_KINDS.has(kind)) return;
         const detail = str(event.detail) ?? str((event as { stderr?: unknown }).stderr) ?? '';
+        // F-A45-006: a ballot the seat lost to its own missing credential (`not_logged_in`, or
+        // stderr saying "No API key found") flips `auth`, whatever the file probe read.
+        if (cli !== undefined && (kind === 'not_logged_in' || isAuthRefusal(detail))) {
+          this.recordAuthFailure(cli, detail !== '' ? detail : (kind ?? 'not logged in'), 'ballot', at, session);
+        }
+        if (cli === undefined || kind === undefined || !COUNCIL_PRIMARY_FAILURE_KINDS.has(kind)) return;
         const fresh = (this.councilFailures.get(cli) ?? []).filter((f) => at - f.at < COUNCIL_BENCH_WINDOW_MS);
         fresh.push({ at, kind, detail: excerpt(detail), session });
         this.councilFailures.set(cli, fresh);
@@ -236,6 +292,12 @@ export class SeatHealthTracker {
         const fallbackKind = str((event as { fallbackKind?: unknown }).fallbackKind);
         if (cliKey === undefined) return;
         if (fallbackKind !== undefined && BENIGN_FALLBACK_KINDS.has(fallbackKind)) return;
+        // F-A45-006 / wave 6: an authentication fallback (`auth_required`, `auth_failed`,
+        // `unauthenticated`) is the seat's account refusing — `auth` flips, with the engine's reason.
+        if (fallbackKind !== undefined && AUTH_FALLBACK_KINDS.has(fallbackKind)) {
+          const why = str((event as { reason?: unknown }).reason) ?? fallbackKind;
+          this.recordAuthFailure(cliKey, why, 'acp', at, session);
+        }
         const fresh = (this.fallbacks.get(cliKey) ?? []).filter(
           (t) => at - t < FALLBACK_WINDOW_MS,
         );
@@ -307,6 +369,50 @@ export class SeatHealthTracker {
     });
     this.fallbacks.delete(key); // an ok output resets the repeated-fallback window too
     this.councilFailures.delete(key); // …and the council bench: real work is the recovery
+    this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
+  }
+
+  /** Record a seat's own "no credential" report (F-A45-006) — the newest report wins. */
+  private recordAuthFailure(
+    key: string,
+    detail: string,
+    source: SeatAuthFailure['source'],
+    atMs: number,
+    session: string | undefined,
+  ): void {
+    this.authFailures.set(key, {
+      at: atMs,
+      detail: excerpt(detail),
+      source,
+      ...(session !== undefined ? { session } : {}),
+    });
+    const prev = this.entries.get(key);
+    this.entries.set(key, {
+      status: prev?.status ?? 'active',
+      ...(prev?.message !== undefined ? { message: prev.message } : {}),
+      since: prev?.since ?? this.startedAt,
+      lastErrorAt: new Date(atMs).toISOString(),
+    });
+  }
+
+  /**
+   * The seat's own latest "no credential" report inside {@link AUTH_FAILURE_WINDOW_MS} with no ok
+   * output since (F-A45-006), or `null`. `seatStanding` reads it as `auth: 'signed_out'` — the seat
+   * said so itself — whatever the credential-file probe reads.
+   */
+  authFailureFor(key: string, nowMs = Date.now()): SeatAuthFailure | null {
+    const rec = this.authFailures.get(key);
+    if (rec === undefined) return null;
+    if (nowMs - rec.at >= AUTH_FAILURE_WINDOW_MS) {
+      this.authFailures.delete(key);
+      return null;
+    }
+    return {
+      at: new Date(rec.at).toISOString(),
+      detail: rec.detail,
+      source: rec.source,
+      ...(rec.session !== undefined ? { run: rec.session } : {}),
+    };
   }
 
   /**

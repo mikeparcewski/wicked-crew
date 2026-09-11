@@ -31,10 +31,14 @@ import {
   type VacuityProbes,
 } from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
+import type { TestSetIndex } from '../qe/test-sets.js';
 
 /** The delivery machinery shared with the run DTOs — injected by `registerRoutes`. */
 export interface RollupDeps {
   groupIndex: GroupIndex;
+  /** The registered test sets (wave 6, F-7R2-014) served beside the campaigns as `test_sets` —
+   *  `createServer` hydrates one from the trail; a directly-driven route set may omit it. */
+  testSets?: TestSetIndex;
   /** The `DeliveryIndex` record (the durable `run.delivered` fact). */
   deliveryUrlFor: (runId: string) => string | undefined;
   /** The shared TTL-memoized probes behind `'stranded'`/`'vacuous'`. */
