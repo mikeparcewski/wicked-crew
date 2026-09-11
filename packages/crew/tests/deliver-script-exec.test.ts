@@ -603,11 +603,16 @@ describe('deliver script — composed PR text (crew#524)', () => {
 
     expect(r.status).toBe(0);
     expect(existsSync(marker)).toBe(false); // nothing in the intent ran
-    // The title is the first line as plain words, cut at the word boundary before the long marker
-    // path (≤ 72, one line, code markers stripped) — nothing in it was expanded.
-    expect(r.pr!.title).toBe("x'; touch…");
+    // The title is the first line as plain words, cut at a word boundary (≤ 72, one line, code
+    // markers stripped) — nothing in it was expanded. WHERE the cut lands depends on the length of
+    // the temp path (short `/tmp/…` on Linux, long `/var/folders/…` on macOS), so the composer is
+    // the oracle, not a literal.
+    expect(r.pr!.title).toBe(deliverTitle(hostile, RUN_ID));
+    expect(r.pr!.title.startsWith("x'; touch")).toBe(true);
+    expect(r.pr!.title.endsWith('…')).toBe(true);
     expect(r.pr!.title.length).toBeLessThanOrEqual(72);
     expect(r.pr!.title).not.toContain('\n');
+    expect(r.pr!.title).not.toContain('`');
     expect(r.pr!.body).toContain(`touch ${marker}`); // the intent rides as TEXT, verbatim
     expect(r.pr!.body).toContain('$(touch'); // unexpanded
     expect(r.pr!.body).toContain('\nWICKED_CREW_DELIVER_TEXT_EOF\n'); // the delimiter line too — it moved, the text did not
