@@ -68,6 +68,7 @@ import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
+import { composeDeliverText, factsFromRun, framedDeliverText, runUrlFor } from '../core/deliver-text.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
@@ -725,6 +726,12 @@ export function registerRoutes(
       isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
+  // crew#524: the deliver phase's script asks THIS daemon for the run-derived PR text, and the PR
+  // body links the run here — so the adapter learns the bound origin lazily (the server has not
+  // listened yet when routes register). Guarded: directly-driven route sets hand in fakes.
+  if (typeof (adapter as Partial<CoreAdapter>).setDeliverApiOrigin === 'function') {
+    adapter.setDeliverApiOrigin(() => boundOrigin(app.server.address()));
+  }
   const reprovisionWorktree = runtime.reprovisionWorktree ?? gitReprovisionWorktree;
   // The estate MCP client behind `/proposals*` AND `/memory*` (DES-MEM-FACETED-001) — one seam. The
   // default is the real spawn-per-call `wicked-estate-mcp` client; route tests inject a stub so no
@@ -1473,6 +1480,28 @@ export function registerRoutes(
     return { run: decorateRun(run) };
   });
 
+  // ── Deliver text (crew#524 / F-3R2-014) — the PR title + body a run's delivery carries ──
+  // `gh pr create --fill` gave wicked-studio#249 a mid-word title and an EMPTY body. The deliver
+  // script now asks this route for the text composed from the PERSISTED RUN RECORD: the intent,
+  // `Fixes #N`, the run link, every phase with its seat and gate outcome, the repo checks with
+  // their exit codes, the evaluator verdict (`core/deliver-text.ts`). text/plain, FRAMED as line 1
+  // title, line 2 blank, then the body — the same shape the script's embedded fallback has, so the
+  // script parses exactly one thing. Read-only; the run's `deliver` unit is still running when it
+  // asks, and is listed as `this PR`.
+  app.get(
+    `${V}/runs/:id/deliver-text`,
+    { config: { manifest: { statusCodes: [200, 404] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const views = await adapter.sessionsDetail();
+      const run = views.find((v) => v.session.id === id);
+      if (!run) return reply.code(404).send({ error: 'Run not found' });
+      const origin = boundOrigin(app.server.address());
+      const text = composeDeliverText(factsFromRun(decorateRun(run), runUrlFor(origin, id)));
+      return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
+    },
+  );
+
   // ── Post-hoc delivery (crew#393) — lift a stranded run's worktree into a PR ──
   // The recovery path for the run 83052f0b class: a COMPLETED repo-scoped run whose reviewable
   // work was never lifted (`delivery: 'stranded'` on the wire — including runs recorded long
@@ -1590,7 +1619,14 @@ export function registerRoutes(
               workdir = reprov.workdir;
               cw = reprov.cleanup;
             }
-            result = await deliverExec(workdir, s.problem ?? undefined);
+            // crew#524: the post-hoc lift composes its PR text from the run record it already
+            // holds (the fallback), and names this daemon so the script can re-ask at delivery.
+            const origin = boundOrigin(app.server.address());
+            result = await deliverExec(workdir, s.problem ?? undefined, {
+              runId: id,
+              apiOrigin: origin,
+              facts: factsFromRun(run, runUrlFor(origin, id)),
+            });
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
           }

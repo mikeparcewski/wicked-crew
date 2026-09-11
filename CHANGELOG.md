@@ -79,6 +79,54 @@ mentioned only where a daemon release depends on them.
   `ChatSummary` (with the engine's `cwd` / `codeGraphDb` / `readRoots`), `ChatListResponse`,
   `ChatDetailResponse`; `ChatScope.graph.repoLabel` names the estate label a single scoped repo is
   indexed under. Tag `api-types-v0.32.0` on merge (0.31.0 shipped with #507's gate-evidence events).
+- **Deliver opens a PR a reviewer can review against (#524, acceptance finding F-3R2-014).** The
+  deliver phase used `gh pr create --fill`: wicked-studio#249 opened with the intent cut MID-WORD
+  behind a run-id prefix (`…scenario CLN-2) aga`), an EMPTY body, no `Fixes #214`, no run link, and
+  the same truncated headline as its commit subject. The PR title, body and commit message are now
+  COMPOSED FROM THE RUN (`core/deliver-text.ts`): the title is the intent's first line cut at a word
+  boundary within 72 characters; the body carries the intent, `Fixes #N` when the intent names an
+  issue with a closing verb (other `#N` / `repo#N` mentions as `Refs:`), the run id linked to this
+  daemon's `/runs/<id>`, every phase with its seat and gate outcome, the repo checks the verify phase
+  ran with their exit codes, the evaluator verdict, and a footer. The script asks the daemon that
+  launched it — new `GET /api/v1/runs/:id/deliver-text` (text/plain: title, blank line, body) — for
+  the run-derived text at delivery time and falls back to the same composer's launch-time text
+  embedded in the script (intent, issue links, run link, phase list; runtime sections say they were
+  not available) when the daemon cannot answer, saying so in the phase output. The commit message is
+  that same text (`git commit -F`), so subject and title cannot drift; the PR opens with `--title` +
+  `--body-file`, never `--fill`. Post-hoc delivery (`POST /runs/:id/deliver`) composes from the run
+  record it already holds.
+- **Worker claude deny rules are the ones the CLI enforces (#524, F-3R2-004; the generator lives in
+  wicked-core).** The engine emitted a `Write(<path>/**)` twin beside every `Edit(<path>/**)` deny
+  rule for the operator's `~/.claude`, `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
+  `~/.wicked*` and the daemon's config dir; Claude Code does not match `Write(path)` rules (`only
+  Edit(path) rules are … Edit rules cover all file-editing tools`) and warned 12× per ballot. Fixed
+  where the rules are built — wicked-core `execute_wrapped::{deny_rules, shared_deny_rules}` emit
+  `Read` + `Edit` only, and a template's own `Write(<path>)` is lifted as `Edit(<path>)` — so the
+  fence is what the settings file says it is and the ballots stop paying for the warnings. Lands in
+  crew with the next `wicked-core-ts` pin; no crew code path generates these rules.
+
+## [0.7.28] — 2026-09-10
+
+Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
+`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
+merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
+worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
+the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
+under Fixed / Added / Changed:
+
+- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
+  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
+  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
+  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
+  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
+- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
+  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
+  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
+  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
+  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
+  registration now requires.
+
+### Fixed
 - **Graph surfaces: a missing repo-graph root is 503 everywhere; the project-graph routes declare
   their status codes (wicked-core#406 follow-up).** `codeGraphErrorStatus` in `repoPaths.ts` is the
   ONE mapping every code-graph consumer shares: `/repos/:id/{graph,graph/blast-radius,domain-graph}`

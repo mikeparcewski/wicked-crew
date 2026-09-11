@@ -19,8 +19,14 @@
  *      pushed conflicted tree;
  *  (d) `git push -u origin <branch>` — every rejected push carries the recovery marker. The run
  *      work is already committed locally, so an operator can repair auth/transport and retry;
- *  (e) `gh pr create --head <branch> --fill`, with gh's output and exit status captured
- *      SEPARATELY so a gh failure fails the phase carrying gh's own message;
+ *  (e) `gh pr create --head <branch> --title … --body-file …`, with gh's output and exit status
+ *      captured SEPARATELY so a gh failure fails the phase carrying gh's own message. The title
+ *      and body are COMPOSED FROM THE RUN (crew#524 / F-3R2-014, `core/deliver-text.ts`): the
+ *      script asks the daemon that launched it (`GET /runs/:id/deliver-text`) for the text derived
+ *      from the persisted run record — intent, `Fixes #N`, run link, phases + seats + gate
+ *      outcomes, repo checks with exit codes, the evaluator verdict — and falls back to the same
+ *      composer's launch-time text (embedded in the script) when the daemon cannot answer. The
+ *      commit message is that same text (`git commit -F`), so subject and title never drift;
  *  (f) the PR URL is the last line of the phase output.
  *
  * One deliberate change from the field version: NO gh account is baked into crew code (the
@@ -60,6 +66,13 @@
  */
 
 import type { PhaseDef, WorkflowDef } from './types.js';
+import {
+  composeDeliverText,
+  factsFromWorkflow,
+  framedDeliverText,
+  runUrlFor,
+  type DeliverTextFacts,
+} from './deliver-text.js';
 
 /**
  * The content-address of wicked-core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`,
@@ -94,28 +107,52 @@ export const DELIVER_PHASE_ID = 'deliver';
  */
 export const DELIVER_LIFT_CONFLICT_MARKER = 'deliver: LIFT-CONFLICT';
 
-/** How much of the run's intent rides in the commit subject before it is truncated. */
-const INTENT_SUBJECT_CAP = 72;
+/** What the script carries for its PR/commit text (crew#524). All optional: the bare script still
+ *  composes a title and a body from the intent alone. */
+export interface DeliverScriptOptions {
+  /** The run this script delivers; names the run in the fallback text. */
+  runId?: string;
+  /** Everything known when the script was composed — the embedded fallback is built from it.
+   *  Defaults to the intent + run id alone (no workflow, no phases). */
+  facts?: DeliverTextFacts;
+  /** The launching daemon's own origin (`http://127.0.0.1:7701`). When set, the script first asks
+   *  it for the run-derived text; unset (or unreachable) ⇒ the embedded fallback. */
+  apiOrigin?: string | null;
+}
 
 /**
- * The run's intent, reduced to something safe to embed in a single-quoted shell assignment and
- * to use as a one-line commit subject.
- *
- * The intent is caller-supplied free text off `POST /runs`, and it is being spliced into a bash
- * script — so this is a containment boundary, not cosmetics. Control characters (newlines
- * included) and the single quote are REMOVED: with no `'` left, the value cannot escape the
- * single-quoted assignment the script wraps it in, and with no control characters it cannot add
- * a line. Everything else (unicode, `$`, backticks, backslashes) is inert inside single quotes
- * and is kept, so the subject still reads like the intent it came from.
+ * The heredoc delimiter the script writes its fallback text through. A QUOTED heredoc expands
+ * nothing — `$`, backticks, quotes and backslashes in the intent are inert — so the only way the
+ * caller-supplied text could break out is a line equal to this delimiter, and
+ * {@link heredocLines} drops exactly those lines.
  */
-function commitSubjectIntent(intent: string | undefined): string {
-  return (intent ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    .replace(/'/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, INTENT_SUBJECT_CAP)
-    .trim();
+export const DELIVER_TEXT_HEREDOC = 'WICKED_CREW_DELIVER_TEXT_EOF';
+
+/**
+ * The framed PR/commit text as heredoc body lines. This is a containment boundary, not cosmetics:
+ * the intent is caller-supplied free text off `POST /runs` and it is being spliced into a bash
+ * script. CR and every control character other than tab and newline are removed (a bare CR could
+ * split a line in the CLI's eyes), and a line equal to the delimiter is dropped so the heredoc
+ * always ends where the script says it ends.
+ */
+export function heredocLines(framed: string): string[] {
+  return framed
+    .replace(/\r/g, '')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .replace(/\n$/, '')
+    .split('\n')
+    .filter((l) => l !== DELIVER_TEXT_HEREDOC);
+}
+
+/**
+ * The daemon origin as a single-quoted shell literal, or `''` when it is not a plain http(s)
+ * origin. Same containment logic as the heredoc: nothing that is not `scheme://host[:port]` is
+ * ever spliced into the script, so a hostile value can only cost the callback, never a line.
+ */
+function apiOriginLiteral(origin: string | null | undefined): string {
+  if (origin === null || origin === undefined) return '';
+  const trimmed = origin.replace(/\/+$/, '');
+  return /^https?:\/\/[A-Za-z0-9.\-[\]:]+$/.test(trimmed) ? trimmed : '';
 }
 
 /**
@@ -127,10 +164,24 @@ function commitSubjectIntent(intent: string | undefined): string {
  * `StepStatus::Failed`. It is no longer the ONLY thing standing between a failed `gh` and a green
  * phase, though — the gh result is captured explicitly and success is re-derived from evidence.
  *
- * `intent` (the run's problem statement) rides in the commit subject; it is sanitised by
- * {@link commitSubjectIntent} before it is spliced in.
+ * `intent` (the run's problem statement) is what the PR title and the commit subject are composed
+ * from (`core/deliver-text.ts`); `opts` carries the rest of the launch-time facts and the daemon
+ * origin the script asks for the run-derived text (crew#524).
  */
-export function deliverPrScript(intent?: string): string {
+export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}): string {
+  const runId = opts.runId ?? opts.facts?.runId ?? '';
+  const fallback = composeDeliverText(
+    opts.facts ??
+      factsFromWorkflow({
+        runId,
+        intent,
+        workflowId: null,
+        repoRef: null,
+        phases: [],
+        runUrl: null,
+      }),
+  );
+  const api = apiOriginLiteral(opts.apiOrigin);
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -171,8 +222,37 @@ export function deliverPrScript(intent?: string): string {
     // pushing nothing, if that config is missing). Staging is two passes (see below): tracked
     // changes always ride; untracked paths ride UNLESS a scratch/key-material classifier excludes
     // them — and every exclusion is reported loudly (crew#434).
-    `I='${commitSubjectIntent(intent)}'`,
-    'if [ -n "$I" ]; then M="wicked-crew run $R: $I"; else M="wicked-crew run $R"; fi',
+    //
+    // (c1-text) THE PR TITLE + BODY AND THE COMMIT MESSAGE (crew#524 / F-3R2-014). `--fill` gave
+    // wicked-studio#249 a title cut mid-word and an EMPTY body. The text now comes from the run:
+    // the script asks the daemon that launched it for `GET /runs/<id>/deliver-text` — composed from
+    // the persisted run record (phases + seats + gate outcomes, repo checks with exit codes, the
+    // evaluator verdict, the run link) — and falls back to the launch-time composition embedded
+    // below (intent, `Fixes #N`, run id, phase list) when the daemon cannot answer: no origin
+    // known, no `curl`, an auth-required daemon (401), a daemon that went away. Either way the text
+    // is FRAMED the same (line 1 title, line 2 blank, then the body), it is the commit message
+    // verbatim (`git commit -F`: git takes the first paragraph as the subject), and the PR is
+    // opened with `--title` + `--body-file` from it. A fallback is always said so in the output.
+    'TD=$(mktemp -d)',
+    "trap 'rm -rf \"$TD\"' EXIT",
+    'RUNID="${B#wicked/}"',
+    `API='${api}'`,
+    'if [ -n "$API" ] && command -v curl >/dev/null 2>&1; then',
+    // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
+    '  if curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && [ -s "$TD/text" ] && [ -n "$(sed -n 1p "$TD/text")" ]; then',
+    '    echo "deliver: PR text composed from the run record ($API)"',
+    '  else',
+    '    rm -f "$TD/text"',
+    '    echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
+    '  fi',
+    'fi',
+    'if [ ! -s "$TD/text" ]; then',
+    `  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`,
+    ...heredocLines(framedDeliverText(fallback)),
+    DELIVER_TEXT_HEREDOC,
+    'fi',
+    'TITLE=$(sed -n 1p "$TD/text")',
+    "sed '1,2d' \"$TD/text\" > \"$TD/body\"",
     // (c0) DELIVER PREFLIGHT (crew#426) — a governed run that bumps an internal WORKSPACE package's
     // version (e.g. packages/crew-api-types) leaves its version-derived codegen AND the lockfile
     // stale. A per-run worktree is provisioned with `git worktree add` alone — no `node_modules` —
@@ -245,7 +325,7 @@ export function deliverPrScript(intent?: string): string {
     'done < <(git ls-files --others --exclude-standard -z)',
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
-    'git diff --cached --quiet || git commit -q -m "$M"',
+    'git diff --cached --quiet || git commit -q -F "$TD/text"',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
     'A=$(git rev-list --count "$D..$B")',
@@ -319,7 +399,8 @@ export function deliverPrScript(intent?: string): string {
     // (e) Open the PR with gh's OUTPUT and EXIT STATUS captured separately (crew#317). The old
     // `| tail -1` threw away everything gh said but one line and made the phase's verdict a
     // property of a shell option; a gh failure now fails the phase carrying gh's own message.
-    'if ! OUT=$(gh pr create --head "$B" --fill 2>&1); then echo "$OUT"; echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1; fi',
+    // Title and body are the composed text (c1-text) — never `--fill` (crew#524).
+    'if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then echo "$OUT"; echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1; fi',
     'echo "$OUT"',
     // (f) DONE IS RE-DERIVED, NOT ASSERTED — twice, from two independent facts, before the phase
     // is allowed to report a delivery:
@@ -364,11 +445,15 @@ export function deliverPrScript(intent?: string): string {
  * deterministic and costs no LLM call. The PR-URL and branch-ahead assertions stay in the script
  * because no vaulted floor can see the remote.
  */
-export function deliverPrPhase(dependsOn: string[] = [], intent?: string): PhaseDef {
+export function deliverPrPhase(
+  dependsOn: string[] = [],
+  intent?: string,
+  opts: DeliverScriptOptions = {},
+): PhaseDef {
   return {
     id: DELIVER_PHASE_ID,
     kind: 'build',
-    executor: { type: 'tool', cmd: ['bash', '-lc', deliverPrScript(intent)] },
+    executor: { type: 'tool', cmd: ['bash', '-lc', deliverPrScript(intent, opts)] },
     gate_type: null,
     gate: 'auto',
     executes_code: false,
@@ -388,17 +473,26 @@ export function deliverPrPhase(dependsOn: string[] = [], intent?: string): Phase
  * with the engine for THIS run only; nothing is written to the overlay dir and the composed id
  * never enters the user-workflow registry, so the catalog (`GET /workflows`) stays clean.
  *
- * `intent` is the run's problem statement — it names WHAT was delivered in the commit subject
- * (`wicked-crew run <run-id>: <intent>`); omit it and the subject carries the run id alone.
+ * `intent` is the run's problem statement — the PR title and commit subject are composed from it
+ * (`core/deliver-text.ts`); omit it and they name the run id alone. `launch` carries what else is
+ * known here (the repo, the daemon's own origin) so the phase's embedded fallback text names the
+ * workflow, its phases and the run link, and so the script knows which daemon to ask for the
+ * run-derived text at delivery time (crew#524).
  *
  * Throws when `base` already carries a `deliver` phase — appending a second phase with the same
  * id would be ambiguous at best; the caller launches such a def as-is instead (see
  * `CoreAdapter.launchRun`).
  */
+export interface DeliverLaunchContext {
+  repoRef?: string | null;
+  apiOrigin?: string | null;
+}
+
 export function composeDeliverWorkflow(
   base: WorkflowDef,
   runId: string,
   intent?: string,
+  launch: DeliverLaunchContext = {},
 ): WorkflowDef {
   if (base.phases.some((p) => p.id === DELIVER_PHASE_ID)) {
     throw new Error(
@@ -412,10 +506,22 @@ export function composeDeliverWorkflow(
   // registerWorkflow enforces id.length <= 128; a caller-supplied CLI session id can be long.
   // Truncate the run-id TAIL, keeping the base+marker prefix intact (Copilot on #303).
   const composedId = `${base.id}-deliver-${safeRunId}`.slice(0, 128);
+  const apiOrigin = launch.apiOrigin ?? null;
+  const facts = factsFromWorkflow({
+    runId,
+    intent,
+    workflowId: base.id,
+    repoRef: launch.repoRef ?? null,
+    phases: base.phases,
+    runUrl: runUrlFor(apiOrigin, runId),
+  });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the
     // composed def is engine-input, not catalog data.
     id: composedId,
-    phases: [...base.phases, deliverPrPhase(last !== undefined ? [last.id] : [], intent)],
+    phases: [
+      ...base.phases,
+      deliverPrPhase(last !== undefined ? [last.id] : [], intent, { runId, facts, apiOrigin }),
+    ],
   };
 }

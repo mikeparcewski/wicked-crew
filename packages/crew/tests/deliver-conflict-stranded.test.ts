@@ -337,7 +337,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     git(fx.clone, 'push', '-q', 'origin', 'main');
 
     // Prove the deliver script REALLY refuses with the marker here (nothing pushed).
-    const first = await runDeliverScript(fx.workdir, 'run change', fx.env);
+    const first = await runDeliverScript(fx.workdir, 'run change', undefined, fx.env);
     expect(first.status).not.toBe(0);
     expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
     expect(originBranches(fx)).toEqual(['main']);
@@ -361,7 +361,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
       worktreeIsClean: gitWorktreeIsClean(),
       deliverExec: (workdir, intent) => {
         calls += 1;
-        return runDeliverScript(workdir, intent, fx.env);
+        return runDeliverScript(workdir, intent, undefined, fx.env);
       },
     });
     apps.push(app);
@@ -412,7 +412,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     writeFileSync(hook, '#!/bin/sh\necho "remote: HTTP 403 authentication failed" >&2\nexit 1\n');
     chmodSync(hook, 0o755);
 
-    const first = await runDeliverScript(fx.workdir, 'auth retry', fx.env);
+    const first = await runDeliverScript(fx.workdir, 'auth retry', undefined, fx.env);
     expect(first.status).not.toBe(0);
     expect(first.output).toContain('HTTP 403 authentication failed');
     expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
@@ -431,7 +431,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     const app = buildApp([view({ status: 'failed', workdir: fx.workdir, units })], {
       worktreeExists: (p) => existsSync(p),
       worktreeIsClean: gitWorktreeIsClean(),
-      deliverExec: (workdir, intent) => runDeliverScript(workdir, intent, fx.env),
+      deliverExec: (workdir, intent) => runDeliverScript(workdir, intent, undefined, fx.env),
     });
     apps.push(app);
     await app.ready();
