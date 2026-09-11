@@ -129,8 +129,15 @@ async function waitForRun(
     if (pred(last)) return last;
     await new Promise((r) => setTimeout(r, 200));
   }
+  // Name the rejected units' denial_reason too: a deliver refusal is text on the unit record, and
+  // without it a `status=failed delivery=none` timeout says nothing about WHICH refusal fired.
+  const { body } = await getJson(`/api/v1/runs/${runId}`);
+  const units = ((body['run'] as { units?: Array<Record<string, unknown>> }).units ?? [])
+    .filter((u) => u['status'] === 'rejected')
+    .map((u) => `${String(u['id'])}: ${String(u['denial_reason'] ?? '(no denial_reason)').slice(0, 600)}`);
   throw new Error(
-    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}`,
+    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
+      (units.length > 0 ? `; rejected units: ${units.join(' | ')}` : ''),
   );
 }
 

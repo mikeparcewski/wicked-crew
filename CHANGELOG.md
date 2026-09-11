@@ -26,8 +26,9 @@ mentioned only where a daemon release depends on them.
   engine verification to pin to and strips the variable. The crew#426 preflight (`npm install` +
   codegen) runs AFTER the engine's verification, so the script now snapshots the worktree content
   before and after it: an engine-driven delivery REFUSES when the preflight changed any file
-  (`deliver: PREFLIGHT CHANGED the verified tree — … rewrote: <files>`; regenerate in the worktree
-  and approve the retry, which makes the engine re-verify), while a post-hoc lift
+  (`deliver: PREFLIGHT CHANGED the verified tree — … rewrote: <files>`; the regenerated files stay
+  in the worktree, so approving the retry makes the engine re-verify the changed tree and the
+  retry deliver it — the crew#426 auto-repair now costs one gate approval and ships verified), while a post-hoc lift
   (`WICKED_DELIVER_POSTHOC=1`, set by the daemon) keeps the regeneration and says which tracked
   files it rewrote. Seat health used to mark the unit's
   assigned seat inactive on ANY `stepFailed {failureKind: "workerError"}` — and the deliver phase is a

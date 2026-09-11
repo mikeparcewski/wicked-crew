@@ -163,9 +163,10 @@ export const DELIVER_POSTHOC_ENV = 'WICKED_DELIVER_POSTHOC';
  * The sentinel the deliver script prints when the crew#426 preflight (`npm install` + the
  * `manifest:endpoints` / `generate:api-tests` codegen) CHANGED the worktree AFTER the engine had
  * verified it (wicked-core#433 review addendum): the tree that would ship is then not the tree the
- * repository's checks certified, and the script refuses before staging anything. Not a
- * {@link DELIVER_LIFT_CONFLICT_MARKER}: the remedy is to regenerate in the worktree and approve the
- * retry, which makes the engine re-verify the changed tree first.
+ * repository's checks certified, and the script refuses before staging anything, leaving the
+ * regenerated files in the worktree. Not a {@link DELIVER_LIFT_CONFLICT_MARKER}: the remedy is to
+ * approve the retry — the engine re-verifies the changed tree first, and the retry's preflight
+ * regenerates nothing more.
  */
 export const DELIVER_PREFLIGHT_CHANGED_MARKER = 'deliver: PREFLIGHT CHANGED the verified tree';
 
@@ -389,9 +390,11 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // the regeneration changes any file, the tree that would ship is no longer the tree the
     // repository's checks certified. So the worktree CONTENT is snapshotted as a tree id before and
     // after (through a scratch index — the real index is untouched) and compared. An engine-driven
-    // delivery (a Tool unit; WICKED_DELIVER_POSTHOC unset) REFUSES on a change and names the files:
-    // the remedy is to regenerate in the worktree and approve to retry, which makes the engine
-    // re-verify the changed tree before this script runs again. A post-hoc lift
+    // delivery (a Tool unit; WICKED_DELIVER_POSTHOC unset) REFUSES on a change and names the files.
+    // The regenerated files stay in the worktree, so the remedy is simply to approve the retry: the
+    // engine re-verifies the changed tree (tree ≠ recorded verified tree ⇒ the checks run) before
+    // this script runs again, and the retry's preflight regenerates nothing. The crew#426 repair
+    // thus costs one gate approval on an engine-driven run and ships verified. A post-hoc lift
     // (WICKED_DELIVER_POSTHOC=1, `POST /runs/:id/deliver`) has no engine verification to protect and
     // keeps the crew#426 behaviour — but SAYS which tracked files it regenerated, so the PR reviewer
     // sees it. Deliberately NO LIFT-CONFLICT marker: a regenerated tree is not a recoverable strand.
@@ -404,7 +407,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  T1=$(_tree)',
     '  if [ "$T0" != "$T1" ]; then',
     '    CH=$(git diff-tree -r --name-only "$T0" "$T1" | tr "\\n" " ")',
-    `    if [ -z "\${WICKED_DELIVER_POSTHOC:-}" ]; then echo "${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: \${CH}; refusing to push a tree the engine did not verify. Regenerate in the worktree (npm install && npm run manifest:endpoints -w packages/crew && npm run generate:api-tests -w packages/crew), then approve to retry the deliver phase (the engine re-verifies the changed tree before pushing). Nothing was staged, committed or pushed"; exit 1; fi`,
+    `    if [ -z "\${WICKED_DELIVER_POSTHOC:-}" ]; then echo "${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: \${CH}; refusing to push a tree the engine did not verify. The regenerated files are left in the worktree (unstaged) — approve to retry the deliver phase: the engine re-verifies the changed tree first and this script then delivers it (a second regeneration changes nothing). Nothing was staged, committed or pushed"; exit 1; fi`,
     '    echo "deliver: preflight regenerated tracked files on a post-hoc lift (no engine verification to protect): $CH"',
     '  fi',
     'fi',
