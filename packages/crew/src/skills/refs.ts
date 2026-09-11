@@ -49,6 +49,7 @@
  * punctuation is then trimmed.
  */
 
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 
 import type { SkillPortabilityReason } from '../core/types.js';
@@ -221,6 +222,55 @@ export const PORTABILITY_RULES = {
   frontmatter: { requires_harness_key: 'metadata.requires-harness', requires_harness_value: 'claude' },
   evidence: { reasons_sorted_unique: true, anchor_format: '<plugin-relative file>:<line>', cap: 5, portable: 'reasons.length === 0' },
 } as const;
+
+/**
+ * Canonical JSON — keys sorted recursively, no whitespace, non-ASCII unescaped — what the parity
+ * fixture's `sha256_algorithm` prescribes (Python: `json.dumps(obj, sort_keys=True,
+ * separators=(',',':'), ensure_ascii=False)`). ONE implementation: the rules identity below and
+ * `tests/skills-refs.test.ts` (which re-derives the fixture's `sha256_of_rules`) both use it.
+ */
+export function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
+/**
+ * The portability rules IDENTITY — which rule table judged a set of rows (F-083).
+ * A publish records it in `snapshot.json` (`rulesVersion` / `rulesSha256`); `current` verification
+ * compares it with the identity the running daemon carries. `version` is the canonical fixture's
+ * `version` (bumped by hand when the rules change — `tests/skills-refs.test.ts` asserts the two
+ * agree); `sha256` is the digest over the canonical JSON of `PORTABILITY_RULES` — computed from the
+ * LIVE table, so the runtime never reads a test fixture, and asserted equal to the fixture's
+ * `sha256_of_rules` by the same test. A generation whose recorded identity differs from the running
+ * one was published under OTHER rules: its rows may derive differently today without a byte having
+ * changed. A rule change is not tampering — the store accepts such a generation and the runtime
+ * raises a `skills.stale-rules` warning instead of refusing the root (an upgrade must never leave
+ * every seat without skills).
+ *
+ * WHAT THE DIGEST COVERS (review of #535, L1): the rule TABLE — regex sources, markers, interpreter
+ * and option lists, fence languages, the spelled-out semantics — NOT the detector code that applies
+ * it (`portabilityIssuesOf`, `portabilityReasonsOf`, `looksBinary`, bundle.ts `owningSkillDir`,
+ * frontmatter.ts `skillKindOf`). A code-only change of detector semantics leaves the digest equal,
+ * and a generation whose rows now derive differently would be refused as tampering on the next
+ * upgrade — F-083 again. So: **bump `PORTABILITY_RULES_VERSION` whenever a row could derive
+ * differently**, table change or not, and regenerate the parity fixture (its `cases[]` fail on such a
+ * change and force the regeneration; the version bump is the author's duty — `skills-refs.test.ts`
+ * pins version and digest to the fixture, so both move together).
+ */
+export interface PortabilityRulesIdentity {
+  version: number;
+  sha256: string;
+}
+export const PORTABILITY_RULES_VERSION = 2;
+export const PORTABILITY_RULES_SHA256: string = createHash('sha256').update(canonicalJson(PORTABILITY_RULES), 'utf8').digest('hex');
+export const PORTABILITY_RULES_IDENTITY: Readonly<PortabilityRulesIdentity> = Object.freeze({ version: PORTABILITY_RULES_VERSION, sha256: PORTABILITY_RULES_SHA256 });
 
 /**
  * Trailing sentence punctuation a prose reference picks up (`…/foo.` at the end of a sentence,

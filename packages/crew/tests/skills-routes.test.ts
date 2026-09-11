@@ -8,8 +8,8 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import Fastify, { type FastifyInstance } from 'fastify';
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -25,8 +25,10 @@ import type {
   SystemSettings,
 } from '../src/core/types.js';
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
+import { PORTABILITY_RULES_IDENTITY } from '../src/skills/refs.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
-import { COPILOT_VIEW_SKILLS_REL } from '../src/skills/store.js';
+import { COPILOT_VIEW_SKILLS_REL, type CurrentSnapshot } from '../src/skills/store.js';
+import { hashTree, removeTreeForce, sha256Hex, walkTree } from '../src/skills/tree.js';
 import type { VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
 import { scaffold, type Scaffold } from './support/skills-fixture.js';
@@ -302,7 +304,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     // The answered revision is the final one — a publish moves it exactly once.
     expect(body.revision).toBe((await manifest()).revision);
     expect(body.revision).toBe(2);
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
   });
 
   it('one publish at a time: a concurrent publish is a 2xx blocked publish-in-flight envelope, the first one lands, the provisioner ran once (deterministic, codex round 3)', async () => {
@@ -368,7 +370,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect(body.findings.find((f) => f.kind === 'unresolved-ref')).toMatchObject({ severity: 'warning', file: 'skills/alpha/nested/SKILL.md', line: 10 });
     const real = realpathSync(join(s.root, 'snapshots', '000001'));
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the snapshot is written AND handed over
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
     // analyze mirrors it, PURE: the same warning, nothing persisted, the CAS untouched.
     const analyze = await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' });
     expect(analyze.statusCode).toBe(200);
@@ -392,7 +394,7 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
     expect(blockedBody.findings.find((f) => f.kind === 'unresolved-ref' && f.severity === 'blocking')).toMatchObject({ file: 'skills/beta/refs/escape.md', line: 1 });
     expect(blockedBody.revision).toBe(rev2);
     expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(real); // the last VERIFIED snapshot stays exported
-    expect((await manifest()).current).toEqual({ gen: 1, path: real });
+    expect((await manifest()).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
     expect(((await app.inject({ method: 'POST', url: '/api/v1/skills/analyze' })).json() as SkillPublishResult).verdict).toBe('blocked');
     expect((await manifest()).revision).toBe(rev2);
   });
@@ -536,5 +538,101 @@ describe('portability per reason on the wire (F-079; api-types 0.34.0)', () => {
     const snapshot = JSON.parse(readFileSync(join((pub.json() as SkillPublishResult).snapshot?.path ?? '', 'snapshot.json'), 'utf8')) as { skills: Array<{ name: string; portability?: unknown }>; views: { copilot: { skills: string[] } } };
     expect(snapshot.skills.find((x) => x.name === 'wicked-garden-gamma')?.portability).toEqual({ portable: false, reasons: ['cwd-script', 'skill-dir-var'], evidence: ['skills/gamma/refs/extra.md:1', 'skills/gamma/refs/extra.md:2'] });
     expect(snapshot.views.copilot.skills).toEqual(['wicked-garden-beta']);
+    // F-083: `current` additively names the portability rules the generation was published under
+    // beside the running ones, and the rows that derive differently — none: this daemon published it.
+    const current = (await manifest()).current as unknown as CurrentSnapshot | null;
+    expect(current).toMatchObject({
+      gen: (pub.json() as SkillPublishResult).snapshot?.gen,
+      rules: { recorded: { ...PORTABILITY_RULES_IDENTITY }, running: { ...PORTABILITY_RULES_IDENTITY }, stale: false },
+      drift: [],
+    });
+  });
+});
+
+describe('a STALE generation on the wire (F-083, review M2/L2)', () => {
+  /**
+   * Age the current generation + manifest.json the way a 0.7.29 publisher left them: no rules
+   * identity, no per-reason blocks, `name` recorded non-portable with its copilot view absent, the
+   * tree re-hashed, the manifest re-stamped and its row aged too.
+   */
+  const ageAsOlderPublisher = (snapPath: string, name: string): void => {
+    const metadata = join(snapPath, 'snapshot.json');
+    chmodSync(dirname(metadata), 0o755);
+    chmodSync(metadata, 0o644);
+    const view = join(snapPath, ...COPILOT_VIEW_SKILLS_REL.split('/'), name);
+    chmodSync(dirname(view), 0o755);
+    removeTreeForce(view);
+    const pristine = JSON.parse(readFileSync(metadata, 'utf8')) as Record<string, unknown> & { skills: Array<Record<string, unknown>>; views: { copilot: { dir: string; skills: string[] } } };
+    delete pristine['rulesVersion'];
+    delete pristine['rulesSha256'];
+    const tree = walkTree(snapPath);
+    const aged = {
+      ...pristine,
+      contentHash: hashTree(tree.files.filter((f) => f.rel !== 'snapshot.json'), tree.links, tree.dirs),
+      skills: pristine.skills.map((row) => {
+        const older = { ...row };
+        delete older['portability'];
+        if (older['name'] === name) older['portable'] = false;
+        return older;
+      }),
+      views: { copilot: { dir: pristine.views.copilot.dir, skills: pristine.views.copilot.skills.filter((n) => n !== name) } },
+    };
+    const raw = `${JSON.stringify(aged, null, 2)}\n`;
+    writeFileSync(metadata, raw);
+    const manifestPath = join(s.root, 'manifest.json');
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as { published: { contentHash: string; snapshotHash: string }; skills: Record<string, Record<string, unknown>> };
+    m.published.contentHash = aged.contentHash;
+    m.published.snapshotHash = sha256Hex(raw);
+    const entry = m.skills[name] as Record<string, unknown>;
+    entry['portable'] = false;
+    delete entry['portability'];
+    writeFileSync(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
+  };
+
+  it('a daemon booted over a 0.7.29-shaped root answers GET /skills 200 with the EDITOR rows re-derived under the running rules beside current.rules / current.drift, GET /diagnostics carries the ONE skills.stale-rules warning with the seat clause and the snapshot as engineInput, and POST /skills/publish clears it', async () => {
+    const before = await manifest();
+    const pub = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: before.revision } });
+    expect(pub.statusCode).toBe(200);
+    const snapPath = (pub.json() as SkillPublishResult).snapshot?.path ?? '';
+    expect(snapPath).not.toBe('');
+    ageAsOlderPublisher(snapPath, 'wicked-garden-gamma');
+    expect((await manifest()).manifest.skills['wicked-garden-gamma']).toMatchObject({ portable: false }); // the aged verdict, as 0.7.29 left it
+    // A daemon boot over the aged root: the seam's ladder, then the routes.
+    const booted = new SkillsRuntime({ store: s.store, log: (m) => logs.push(m) });
+    const health = await booted.apply();
+    expect(health.state).toBe('published');
+    const app2 = buildApp(booted);
+    await app2.ready();
+    try {
+      const res = await app2.inject({ method: 'GET', url: '/api/v1/skills' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as SkillsManifestResponse;
+      expect(body.manifest.skills['wicked-garden-gamma']).toMatchObject({ portable: true, portability: { portable: true, reasons: [], evidence: [] } });
+      const current = body.current as unknown as CurrentSnapshot | null;
+      expect(current?.gen).toBe(1);
+      expect(current?.rules).toEqual({ recorded: null, running: { ...PORTABILITY_RULES_IDENTITY }, stale: true });
+      expect(current?.drift.map((d) => [d.name, d.recorded.portable, d.recorded.reasons, d.derived.portable])).toEqual([['wicked-garden-gamma', false, null, true]]);
+      const diag = await app2.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+      expect(diag.statusCode).toBe(200);
+      const skills = (diag.json() as { skills: { state: string; engineInput: string | null; findings: Array<{ kind: string; severity: string; message: string }> } }).skills;
+      expect(skills.state).toBe('published');
+      expect(skills.engineInput).toBe(snapPath);
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(snapPath);
+      expect(skills.findings.map((f) => [f.kind, f.severity])).toEqual([['skills.stale-rules', 'warning']]);
+      expect(skills.findings[0]?.message).toContain('wicked-garden-gamma (portable false → true)');
+      expect(skills.findings[0]?.message).toContain('every seat is still admitted and served by the RECORDED rows until a re-publish');
+      expect(skills.findings[0]?.message).toContain('(1 row(s) moved)');
+      // The remedy through the route: publish → the new generation records the identity, the warning is gone.
+      const pub2 = await app2.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: body.revision } });
+      expect(pub2.statusCode).toBe(200);
+      expect((pub2.json() as SkillPublishResult).snapshot?.gen).toBe(2);
+      const after = (await app2.inject({ method: 'GET', url: '/api/v1/skills' })).json() as SkillsManifestResponse;
+      const cur2 = after.current as unknown as CurrentSnapshot | null;
+      expect(cur2).toMatchObject({ gen: 2, rules: { recorded: { ...PORTABILITY_RULES_IDENTITY }, stale: false }, drift: [] });
+      const diag2 = (await app2.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as { skills: { findings: unknown[] } };
+      expect(diag2.skills.findings).toEqual([]);
+    } finally {
+      await app2.close();
+    }
   });
 });

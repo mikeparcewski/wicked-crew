@@ -118,6 +118,17 @@
  * (codex round 2: a verification cached by link text was ineffective after its first success; a
  * snapshot modified under a running daemon is refused by the same store instance). Any failure is
  * `SkillsCurrentInvalidError` — a loud config error, never a silent "not published".
+ *
+ * One thing is NOT a failure (F-083): a generation published under OTHER portability rules. Every
+ * publish records the rules identity (`rulesVersion` / `rulesSha256` — refs.ts
+ * `PORTABILITY_RULES_IDENTITY`); when the running daemon's identity differs, or the snapshot
+ * predates the field (every pre-0.7.31 publish), the row re-derivation reports the rows that derive
+ * differently as `CurrentSnapshot.drift` and the generation is ACCEPTED — the runtime raises ONE
+ * `skills.stale-rules` warning naming them and the re-publish remedy. A rule change is not
+ * tampering, and an upgrade must never turn a valid generation into a refusal (0.7.29 → 0.7.30 did
+ * exactly that: every seat launched without skills until an operator re-published). Under the SAME
+ * identity a row that derives differently is refused as before; a content or metadata hash
+ * mismatch is refused under any identity.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -151,6 +162,7 @@ import type {
   SkillManifest,
   SkillMutationResult,
   SkillPortability,
+  SkillPortabilityReason,
   SkillProvenance,
   SkillPublishResult,
   SkillReadResult,
@@ -194,6 +206,7 @@ import {
   looksBinary,
   PORTABILITY_EVIDENCE_CAP,
   PORTABILITY_REASONS,
+  PORTABILITY_RULES_IDENTITY,
   portabilityEvidenceOf,
   portabilityIssuesOf,
   portabilityReasonsOf,
@@ -201,6 +214,7 @@ import {
   resolveRelativeRef,
   type PortabilityContext,
   type PortabilityHit,
+  type PortabilityRulesIdentity,
 } from './refs.js';
 import { CURRENT_TMP_PREFIX, STAGING_PREFIX } from './root-names.js';
 import {
@@ -480,9 +494,44 @@ export interface SnapshotManifest {
   gardenSource: { kind: SkillSourceKind; path: string; plugin_version: string; baseline: string };
   /** The baseline env's state at publish: `synced` ⇒ `.venv` links it; `skipped` ⇒ no link (nothing to provision). */
   venv: SkillVenvState;
+  /** The portability rules the rows were judged under (F-083): `rulesVersion` = the canonical
+   *  fixture's `version`, `rulesSha256` = the digest of the live rule table
+   *  (`PORTABILITY_RULES_IDENTITY`). Written as a PAIR by every publish since 0.7.31; ABSENT on every
+   *  older generation. `current` verification compares it with the running identity: a generation
+   *  published under OTHER (or unrecorded) rules is ACCEPTED — its rows are re-derived for readers
+   *  (`CurrentSnapshot.drift`) and reported as `skills.stale-rules` — never refused for deriving
+   *  differently. The immutable snapshot is never rewritten; a re-publish records the running identity. */
+  rulesVersion?: number;
+  rulesSha256?: string;
   skills: SnapshotSkillRow[];
   /** The generated delivery views (design v3.2 §4) — today only `copilot`. */
   views: { copilot: SnapshotView };
+}
+
+/** One skill row whose recorded portability is not what its files derive under the RUNNING rules (F-083). */
+export interface SnapshotRowDrift {
+  name: string;
+  /** What the generation records: `portable`, and the per-reason claim when the row carries one (`null` on a pre-0.7.30 row). */
+  recorded: { portable: boolean; reasons: SkillPortabilityReason[] | null };
+  /** What the row's own files derive under the rules this daemon runs — what a re-publish would record. */
+  derived: SkillPortability;
+}
+
+/**
+ * The verified current generation — what `currentSnapshot()` answers, `GET /skills` reports as
+ * `current`, and the engine is handed (`path`). `rules` names the portability rules the generation
+ * was published under (`recorded`; `null` when the snapshot predates the identity — every
+ * pre-0.7.31 publish) beside the ones this daemon runs (`running`); `stale` when they differ or the
+ * recorded one is absent. `drift` is the rows that derive differently today — non-empty only under
+ * stale rules (under the SAME rules a row that derives differently is tampering, and the generation
+ * is refused). `gen` and `path` are the wire shape api-types 0.35.0 declares; `rules` and `drift`
+ * are additive (declared by the next api-types cut).
+ */
+export interface CurrentSnapshot {
+  gen: number;
+  path: string;
+  rules: { recorded: PortabilityRulesIdentity | null; running: PortabilityRulesIdentity; stale: boolean };
+  drift: SnapshotRowDrift[];
 }
 
 /**
@@ -998,7 +1047,7 @@ export class SkillsStore {
    * link text (codex round 2): the answer holds for the daemon's whole lifetime only because it is
    * re-derived each time it is handed out.
    */
-  currentSnapshot(): { gen: number; path: string } | null {
+  currentSnapshot(): CurrentSnapshot | null {
     this.assertRootIdentity(); // never answered through a root that changed identity (codex round 4)
     const link = this.currentLink();
     let target: string;
@@ -1012,7 +1061,7 @@ export class SkillsStore {
     return this.verifyCurrent(link, target);
   }
 
-  private verifyCurrent(link: string, target: string): { gen: number; path: string } {
+  private verifyCurrent(link: string, target: string): CurrentSnapshot {
     const invalid = (detail: string): never => {
       throw new SkillsCurrentInvalidError(link, detail);
     };
@@ -1089,11 +1138,21 @@ export class SkillsStore {
     if (hash !== parsed.contentHash) {
       return invalid(`content hash mismatch — snapshot.json records ${parsed.contentHash}, the tree hashes ${hash}: the immutable snapshot was modified`);
     }
-    const rowProblem = this.snapshotRowsProblem(parsed, tree);
-    if (rowProblem !== null) return invalid(rowProblem);
+    // The rules identity (F-083): the generation records which portability rule table judged its
+    // rows; this daemon carries its own. A DIFFERENT (or unrecorded — every pre-0.7.31 publish)
+    // identity means the rows may derive differently today without a byte having changed — a rule
+    // change is not tampering, so the row re-derivation reports drift instead of refusing. Under the
+    // SAME identity a row that derives differently IS a refusal, as before. The identity is compared,
+    // never trusted to name anything: the hashes above already authenticated every byte.
+    const running: PortabilityRulesIdentity = { ...PORTABILITY_RULES_IDENTITY };
+    const recorded: PortabilityRulesIdentity | null =
+      parsed.rulesVersion === undefined || parsed.rulesSha256 === undefined ? null : { version: parsed.rulesVersion, sha256: parsed.rulesSha256 };
+    const stale = recorded === null || recorded.version !== running.version || recorded.sha256 !== running.sha256;
+    const rows = this.snapshotRowsProblem(parsed, tree, stale);
+    if ('problem' in rows) return invalid(rows.problem);
     const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
     if (linkProblem !== null) return invalid(linkProblem);
-    return { gen: parsed.gen, path: real };
+    return { gen: parsed.gen, path: real, rules: { recorded, running, stale }, drift: rows.drift };
   }
 
   /**
@@ -1106,8 +1165,16 @@ export class SkillsStore {
    * registered set may legitimately move afterwards), so it is authenticated by the metadata hash
    * rather than re-derived. Read-only mode bits are re-checked by nobody: they are a guard against
    * accidents, never the integrity boundary — the hashes are.
+   *
+   * `staleRules` (F-083): the generation records a portability rules identity other than the running
+   * one (or none). The portability re-derivation then answers the rows that derive differently as
+   * `drift` instead of a problem — the bytes are authenticated, only the verdict moved. Everything
+   * else (a missing SKILL.md, a kind claim, the view shape against the RECORDED rows) is judged the
+   * same under any rules: none of it depends on the rule table.
    */
-  private snapshotRowsProblem(parsed: SnapshotManifest, tree: TreeListing): string | null {
+  private snapshotRowsProblem(parsed: SnapshotManifest, tree: TreeListing, staleRules: boolean): { problem: string } | { drift: SnapshotRowDrift[] } {
+    const problem = (detail: string): { problem: string } => ({ problem: detail });
+    const drift: SnapshotRowDrift[] = [];
     const files = tree.files;
     const byRel = new Map(files.map((f) => [f.rel, f]));
     const dirs = new Set(parsed.skills.map((r) => r.dir));
@@ -1118,26 +1185,35 @@ export class SkillsStore {
     const exists = (p: string): boolean => existsIn(bundle, p);
     for (const row of parsed.skills) {
       const skillMd = byRel.get(`${row.dir}/SKILL.md`);
-      if (skillMd === undefined) return `skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`;
+      if (skillMd === undefined) return problem(`skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`);
       const fm = parseFrontmatter(readFileNoFollow(skillMd.abs).toString('utf8'));
-      if (!fm.ok) return `${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`;
+      if (!fm.ok) return problem(`${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`);
       const kind = skillKindOf(fm.fields);
-      if (kind !== row.kind) return `skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`;
-      const hits: PortabilityHit[] = [];
+      if (kind !== row.kind) return problem(`skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`);
+      const hits: Array<PortabilityHit & { fileRel: string }> = [];
       const prefix = `${row.dir}/`;
       for (const f of files) {
         if (!f.rel.startsWith(prefix) || owningSkillDir(f.rel, dirs) !== row.dir) continue;
         const buf = readFileNoFollow(f.abs);
         if (looksBinary(buf)) continue;
-        hits.push(...portabilityIssuesOf(buf.toString('utf8'), { fileRel: f.rel, skillDir: row.dir, skillDirs: dirs, exists }));
+        for (const hit of portabilityIssuesOf(buf.toString('utf8'), { fileRel: f.rel, skillDir: row.dir, skillDirs: dirs, exists })) hits.push({ ...hit, fileRel: f.rel });
       }
       const reasons = portabilityReasonsOf(hits);
       const portable = reasons.length === 0;
-      if (portable !== row.portable) return `skill row ${row.name} claims portable: ${String(row.portable)}, but its files derive ${String(portable)}`;
-      // The per-reason claim (F-079) is re-derived too — a row cannot name reasons its files do not carry.
-      if (row.portability !== undefined && !sameStrings(row.portability.reasons, reasons)) {
-        return `skill row ${row.name} claims portability reasons [${row.portability.reasons.join(', ')}], but its files derive [${reasons.join(', ')}]`;
+      const recordedReasons = row.portability?.reasons ?? null;
+      // The per-reason claim (F-079) is re-derived like `portable` is — a row cannot name reasons its files do not carry.
+      const differs = portable !== row.portable || (recordedReasons !== null && !sameStrings(recordedReasons, reasons));
+      if (!differs) continue;
+      if (!staleRules) {
+        if (portable !== row.portable) return problem(`skill row ${row.name} claims portable: ${String(row.portable)}, but its files derive ${String(portable)}`);
+        return problem(`skill row ${row.name} claims portability reasons [${(recordedReasons ?? []).join(', ')}], but its files derive [${reasons.join(', ')}]`);
       }
+      // Published under OTHER rules (F-083): the same authenticated bytes, a different verdict — drift, not tampering.
+      drift.push({
+        name: row.name,
+        recorded: { portable: row.portable, reasons: recordedReasons === null ? null : [...recordedReasons] },
+        derived: { portable, reasons, evidence: portabilityEvidenceOf(hits) },
+      });
     }
     // The copilot view as a WHOLE tree (codex round 9): EXACTLY `views/copilot/.github/skills/<name>/…`
     // for the sorted portable rows — the files each row owns, the directories they imply — and nothing
@@ -1156,12 +1232,12 @@ export class SkillsStore {
     const underViews = (rel: string): boolean => rel === VIEWS_DIRNAME || rel.startsWith(`${VIEWS_DIRNAME}/`);
     const expectedDirs = new Set(impliedDirs(expectedFiles).filter(underViews));
     const shape = `the copilot view is exactly ${COPILOT_VIEW_SKILLS_REL}/<name>/… for [${expectedView.join(', ')}] (each skill's own files and the directories they imply); a view entry is missing or extra`;
-    for (const f of files) if (underViews(f.rel) && !expectedFiles.has(f.rel)) return `unexpected view file ${f.rel} — ${shape}`;
-    for (const d of tree.dirs) if (underViews(d) && !expectedDirs.has(d)) return `unexpected view directory ${d} — ${shape}`;
-    for (const f of expectedFiles) if (!byRel.has(f)) return `the copilot view is missing ${f} — ${shape}`;
+    for (const f of files) if (underViews(f.rel) && !expectedFiles.has(f.rel)) return problem(`unexpected view file ${f.rel} — ${shape}`);
+    for (const d of tree.dirs) if (underViews(d) && !expectedDirs.has(d)) return problem(`unexpected view directory ${d} — ${shape}`);
+    for (const f of expectedFiles) if (!byRel.has(f)) return problem(`the copilot view is missing ${f} — ${shape}`);
     const dirSet = new Set(tree.dirs);
-    for (const d of expectedDirs) if (!dirSet.has(d)) return `the copilot view is missing directory ${d} — ${shape}`;
-    return null;
+    for (const d of expectedDirs) if (!dirSet.has(d)) return problem(`the copilot view is missing directory ${d} — ${shape}`);
+    return { drift };
   }
 
   /** Hash over a snapshot tree — files (`snapshot.json` excluded), link entries (path + link text) AND directory entries (codex round 9: an extra empty directory changes it). */
@@ -1283,6 +1359,16 @@ export class SkillsStore {
       return `${SNAPSHOT_MANIFEST_FILENAME} gardenSource is not {kind: ${[...SOURCE_KINDS].join('|')}, path, plugin_version, baseline}`;
     }
     if (!VENV_STATES.has(String(s.venv))) return `${SNAPSHOT_MANIFEST_FILENAME} has no venv state (${[...VENV_STATES].join('|')})`;
+    // The rules identity (F-083) is optional as a PAIR — absent on every generation published before
+    // 0.7.31 — and typed when present: an integer version ≥ 1 and a 64-hex digest. It is compared,
+    // never trusted to name anything; a half-recorded or malformed pair is not what publish writes.
+    const hasVersion = Object.hasOwn(s, 'rulesVersion');
+    const hasSha = Object.hasOwn(s, 'rulesSha256');
+    if (hasVersion !== hasSha) {
+      return `${SNAPSHOT_MANIFEST_FILENAME} records ${hasVersion ? 'rulesVersion without rulesSha256' : 'rulesSha256 without rulesVersion'} — the portability rules identity is written as a pair`;
+    }
+    if (hasVersion && (typeof s.rulesVersion !== 'number' || !Number.isInteger(s.rulesVersion) || s.rulesVersion < 1)) return `${SNAPSHOT_MANIFEST_FILENAME} rulesVersion is not an integer ≥ 1`;
+    if (hasSha && (typeof s.rulesSha256 !== 'string' || !CONTENT_HASH_RE.test(s.rulesSha256))) return `${SNAPSHOT_MANIFEST_FILENAME} rulesSha256 is not a sha256 hex digest`;
     if (!isSnapshotViews(s.views, s.skills as SnapshotSkillRow[])) {
       return `${SNAPSHOT_MANIFEST_FILENAME} has no well-formed views block ({copilot: {dir: "${COPILOT_VIEW_REL}", skills: EXACTLY the sorted portable names}})`;
     }
@@ -2055,6 +2141,36 @@ export class SkillsStore {
   /** The recompute's refusals as WARNINGS — for a mutation that landed on another skill (the blocking form is publish's). */
   private recomputeWarnings(m: SkillManifest): SkillConflictFinding[] {
     return this.recomputeDerived(m).map((f) => ({ ...f, severity: 'warning' as const }));
+  }
+
+  /**
+   * Re-derive every manifest entry's derived fields under the RUNNING portability rules and commit
+   * when any moved (F-083, review M2). `recomputeDerived` otherwise runs only on seed / refresh /
+   * mutation / publish — never at boot — so after an upgrade `GET /skills` kept the previous daemon's
+   * verdicts beside a `current.drift` that said otherwise: two halves of one response disagreeing.
+   * The runtime calls this when the current generation is STALE (its recorded rules identity is not
+   * the running one). The manifest is the EDITOR side — judged over `effective/` against the running
+   * rules, what the next publish would record; the snapshot is what seats run by, and it is never
+   * rewritten. Commits ONLY when a `kind` / `core` / `portable` / `portability` value actually
+   * changed, so a stale-but-agreeing root does not move its revision on every boot (idempotent).
+   * Answers the entries whose `portable` moved and the recompute's path refusals (warnings — a
+   * refused skill keeps its previous values, as everywhere else).
+   */
+  rederiveUnderRunningRules(): { moved: Array<{ name: string; from: boolean; to: boolean }>; refused: SkillConflictFinding[]; revision: number } {
+    const m = this.manifest();
+    const derived = (e: SkillEntry): string => JSON.stringify({ kind: e.kind, core: e.core, portable: e.portable, portability: e.portability ?? null });
+    const before = new Map(Object.entries(m.skills).map(([name, e]) => [name, { key: derived(e), portable: e.portable }]));
+    const refused = this.recomputeWarnings(m);
+    const moved: Array<{ name: string; from: boolean; to: boolean }> = [];
+    let changed = false;
+    for (const [name, e] of Object.entries(m.skills)) {
+      const was = before.get(name);
+      if (was === undefined || was.key === derived(e)) continue;
+      changed = true;
+      if (was.portable !== e.portable) moved.push({ name, from: was.portable, to: e.portable });
+    }
+    if (changed) this.commit(m);
+    return { moved, refused, revision: m.revision };
   }
 
   /**
@@ -3350,6 +3466,11 @@ export class SkillsStore {
         baseline: m.baseline,
       },
       venv,
+      // The rules identity the rows were judged under (F-083) — what `current` verification compares
+      // with the running daemon's: a later daemon with other rules accepts this generation and reports
+      // the rows that now derive differently (`skills.stale-rules`) instead of refusing the root.
+      rulesVersion: PORTABILITY_RULES_IDENTITY.version,
+      rulesSha256: PORTABILITY_RULES_IDENTITY.sha256,
       skills: v.enabledSkills
         .map(({ name, entry }) => ({
           name,

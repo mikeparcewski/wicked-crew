@@ -10,6 +10,40 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **F-083 — a skills generation published under OLDER portability rules is accepted with a
+  `skills.stale-rules` warning, never refused.** Upgrading a daemon whose `current` generation was
+  published by 0.7.29 (the first-hit detector) to 0.7.30 (#532's tightened rules) made the store's
+  row cross-check ("skill row X claims portable: false, but its files derive true") refuse the
+  generation: `skills.state = config-error`, `WICKED_SKILLS_SNAPSHOT` pointed at
+  `<root>/refused/skills.config`, and every seat launched with NO skills until an operator
+  re-published. A detector-rule change is not tampering; an upgrade must never brick the skills
+  root. Every publish now records the portability rules identity in `snapshot.json`
+  (`rulesVersion` = the canonical fixture's `version`, `rulesSha256` = the digest over the live rule
+  table — `PORTABILITY_RULES_IDENTITY` in `refs.ts`, asserted equal to
+  `tests/fixtures/portability_rules.json` by the parity test, so the runtime never reads a test
+  fixture). On load, a generation whose recorded identity differs from the running one — or
+  predates the field, i.e. every pre-0.7.31 snapshot — stays `published` and the engine input; its
+  rows are re-derived under the current rules and the ones that derive differently are reported
+  beside the identities on `GET /skills` → `current.rules` / `current.drift` (additive; the immutable
+  snapshot is never rewritten), and ONE `skills.stale-rules` WARNING names up to five of them with
+  the remedy: `POST /skills/publish`, which records the running identity and clears the warning.
+  Refusal is reserved for tampering — a content or metadata hash mismatch under any rules, a
+  malformed identity pair, or a row that derives differently under the SAME recorded rules. The
+  warning also states the seat consequence (independent review M1): the engine admits and delivers
+  by the snapshot's RECORDED rows until the re-publish — a row listed false → true stays
+  Claude-only, a row listed true → false is still delivered to non-Claude seats (named when
+  present); and when the generation is stale the daemon re-derives the EDITOR manifest
+  (`GET /skills` rows) under the running rules at boot, committing only when a derived value moved
+  (review M2 — the rows and `current.drift` answer from one rule table; the snapshot is never
+  rewritten). Rule for maintainers (review L1): the identity's digest covers the rule TABLE, not the
+  detector code — bump `PORTABILITY_RULES_VERSION` (and regenerate the parity fixture) whenever
+  detector semantics change so a row could derive differently, or the next upgrade refuses those
+  rows as tampering. Wire note: `skills.stale-rules` and `current.rules` / `current.drift` are
+  emitted ahead of their `wicked-crew-api-types` declaration (the next api-types cut adds them;
+  `tests/wire-contract.test.ts` carves the pending finding kind out until then).
+
 ## [0.7.30] — 2026-09-11
 
 Release train (wave 4/5) — **core-ts 0.7.21 / studio 0.5.6 / interactive 0.9.1 / garden 12.33.0.**
