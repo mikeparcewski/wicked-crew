@@ -10,6 +10,41 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.29] — 2026-09-11
+
+Release train: ships `wicked-crew-api-types` 0.33.0 (workspace link; 0.32.0 from #518, tagged
+`api-types-v0.32.0` on the #518 merge, and 0.33.0 from #527, tagged `api-types-v0.33.0` on this
+release's merge), pins the published `wicked-core-ts` `^0.7.20` engine (wicked-core #420 / #421 /
+#425 / #426 / #429 / #430 / #434 / #435 / #436 in 0.7.19 — event `seq` across restarts, dead-letter
+stamps + `replayEmitOutbox`, repo graphs under the state home, per-seat config roots, enforceable
+deny rules, scope-validator hardening — and #433 in 0.7.20: deliver lifts onto the current base and
+re-verifies, the creator tree is restored on evaluator mutation, the judge is named, read-only ACP
+evaluators) and bundles the published `wicked-studio` 0.5.5 skin (repo findings on the repo card,
+governance in the Health panel, scoped New Chat, evaluator-verdict gate cards). One crew release
+carries both engine steps: the 0.7.29-on-`^0.7.19` split wicked-core's CHANGELOG anticipated was
+folded into this one. What merged since 0.7.28 — the detailed entries follow under Fixed:
+
+- **#516** — governance records land in a state-home store; dead letters are visible and never
+  under HOME (crew#495); `GET /diagnostics` gains `governance`; `wicked-crew governance replay`.
+- **#517** — repo graphs live under the state home; an in-tree `.codegraph` is never adopted
+  (wicked-core#406); `RepoEntry.findings`; `GET /diagnostics` `stores` lists the repo graphs.
+- **#518** — chats are scoped and grounded; seats run in a private scratch root (crew#502; api-types
+  0.32.0). The plain-words upgrade notes are under Fixed.
+- **#520** — release: the post-publish probe waits for npm processing and names the real failure
+  (#514; workflow only, no daemon change).
+- **#522** — governance post-review hardenings: replay target checks, archive naming, recovery,
+  quoting, recipes (#521).
+- **#523** — a missing repo-graph root is 503 everywhere; the project-graph routes declare their
+  status codes (wicked-core#406 follow-up).
+- **#525** — enforceable deny rules for the claude seat (the generator lives in wicked-core);
+  deliver composes a real PR title and body (#524).
+- **#526** — chat scratch chain hardening (crew#502 follow-up).
+- **#527** — the deliver script refuses a base that moved past the engine's verification; every
+  deliver refusal is an operator escalation and only a lift CONFLICT is recoverable; triage knows
+  the engine's lift phrasing; the embedded fallback keeps `Fixes #N`; api-types 0.33.0 declares the
+  #433 events (`deliverLiftEvaluated`, `worktreeRestored`, `evaluatorToolCallDenied`, `acpFallback`,
+  `GateEvaluatedEvent.judgeCli`).
+
 ### Fixed
 - **The deliver script refuses a base that moved past the engine's verification; deliver refusals
   are escalations, not seat faults (wicked-core#431 follow-through — crew consumes wicked-core#433).**
@@ -172,28 +207,6 @@ mentioned only where a daemon release depends on them.
   fence is what the settings file says it is and the ballots stop paying for the warnings. Lands in
   crew with the next `wicked-core-ts` pin; no crew code path generates these rules.
 
-## [0.7.28] — 2026-09-10
-
-Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
-`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
-merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
-worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
-the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
-under Fixed / Added / Changed:
-
-- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
-  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
-  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
-  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
-  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
-- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
-  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
-  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
-  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
-  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
-  registration now requires.
-
-### Fixed
 - **Graph surfaces: a missing repo-graph root is 503 everywhere; the project-graph routes declare
   their status codes (wicked-core#406 follow-up).** `codeGraphErrorStatus` in `repoPaths.ts` is the
   ONE mapping every code-graph consumer shares: `/repos/:id/{graph,graph/blast-radius,domain-graph}`
@@ -236,29 +249,6 @@ under Fixed / Added / Changed:
   the state home's `repo-graphs` (the `--db` parent, exactly how the engine derives it) — so no
   new engine export is needed; `-wal`/`-shm` siblings, in-flight `estate.db.migrating-*` temps and
   never-indexed key dirs are not stores and are not listed.
-
-## [0.7.28] — 2026-09-10
-
-Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
-`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
-merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
-worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
-the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
-under Fixed / Added / Changed:
-
-- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
-  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
-  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
-  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
-  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
-- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
-  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
-  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
-  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
-  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
-  registration now requires.
-
-### Fixed
 - **Governance records land in a state-home store; dead letters are visible and never under HOME
   (crew#495, acceptance finding F-022).** The engine's emit seam writes every cross-product
   governance event — conformance claims and decisions, phase transitions, the steering-rule
@@ -290,6 +280,29 @@ under Fixed / Added / Changed:
   - **wicked-crew-api-types 0.31.0** — additive `DiagnosticsResponse.governance` with
     `DiagnosticsGovernance` / `DiagnosticsGovernanceStore(Source)` / `DiagnosticsGovernanceRecords`
     / `DiagnosticsGovernanceDeadletters` / `DiagnosticsGovernanceFinding`.
+
+## [0.7.28] — 2026-09-10
+
+Release train: ships `wicked-crew-api-types` 0.31.0 (workspace link; 0.30.0 from #506, tagged
+`api-types-v0.30.0` on the #506 merge, and 0.31.0 from #507, tagged `api-types-v0.31.0` on the #507
+merge), pins the published `wicked-core-ts` `^0.7.18` engine (the wicked-core F-036 / F-039 fixes —
+worktree guard, read-only no-code posture, gate-evaluates-nothing registration refusal) and bundles
+the published `wicked-studio` 0.5.4 skin. What merged since 0.7.27 — the detailed entries follow
+under Fixed / Added / Changed:
+
+- **#506 — interactive seams: honest live status, grounded on the NAMED repository, one bus per
+  daemon** (F-045 / F-046 / F-042 / F-043; api-types 0.30.0): every seam event carries `project_id`;
+  `POST /projects/:id/interactive/api/docs` accepts `repo_ref` / `repo_refs` validated against the
+  project's members (400 `repo_not_in_project`) and remembered as a `crew-grounding.json` sidecar;
+  the bridge spawn exports this daemon's own origin and its own bus sidecar (`<core db>.bus/bus.db`).
+- **#507 — the `fix` gate gets an evaluator; non-claude evaluator seats run read-only**
+  (F-036 / F-039; api-types 0.31.0): `EvaluatorMutatedWorktreeEvent` / `RepoChecksEvaluatedEvent`
+  on the wire and `GateEvaluatedEvent.denial`; the acceptance view folds an evaluator that rewrote
+  the code into `enforcement.unenforced`; the served `feature` / `bug` / `migration` mirrors pin the
+  evidence floor (`validator_pin: e2e7af1db9e48454`) on their code-writing phases, as wicked-core's
+  registration now requires.
+
+### Fixed
 - **Interactive seams — honest live status (acceptance finding F-045 + its two follow-ups).** Every
   event crew's four interactive seams emit — `wicked.interactive.status.posted` narration and the
   15 s heartbeats, the terminal error/complete lines, and the closing `draft.completed` /
@@ -1797,7 +1810,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...HEAD
+[0.7.29]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.25...v0.7.26
