@@ -71,6 +71,7 @@ import {
   factsFromWorkflow,
   framedDeliverText,
   runUrlFor,
+  urlPathSegment,
   type DeliverTextFacts,
 } from './deliver-text.js';
 
@@ -195,6 +196,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   const api = apiOriginLiteral(opts.apiOrigin);
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
+  // The run id for the daemon URL: the LAUNCH id when the composer knows it, pre-encoded as one
+  // strict path segment (only `[A-Za-z0-9._~%-]` survive, so the single-quoted literal is safe);
+  // otherwise derived from the branch at run time and percent-encoded byte-wise by the script.
+  const runIdSegment = runId === '' ? '' : urlPathSegment(runId);
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -250,14 +255,24 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // the daemon did not answer, or the run record was fetched.
     'TD=$(mktemp -d)',
     "trap 'rm -rf \"$TD\"' EXIT",
-    'RUNID="${B#wicked/}"',
+    // One URL path segment, RFC 3986: unreserved bytes verbatim, everything else `%XX` (byte-wise
+    // under LC_ALL=C so multibyte characters encode per byte, as a URL requires). Used only when
+    // the composer did not bake the launch id in (Copilot on #525: `/`, `#`, `?` in an id must
+    // not change the request path).
+    "_urlenc() { local LC_ALL=C s=\"$1\" out=\"\" i c; for ((i=0; i<${#s}; i++)); do c=\"${s:i:1}\"; case \"$c\" in [A-Za-z0-9._~-]) out+=\"$c\";; *) out+=$(printf '%%%02X' \"'$c\");; esac; done; printf '%s' \"$out\"; }",
+    `RUNID='${runIdSegment}'`,
+    '[ -n "$RUNID" ] || RUNID=$(_urlenc "${B#wicked/}")',
+    // Is the fetched text FRAMED as promised — non-empty title line, blank line 2, a non-empty body?
+    // Anything else (a proxy page, a stale endpoint's JSON, a bare title) is not the run record
+    // and must not become the PR text (Copilot on #525).
+    "_framed() { [ -s \"$1\" ] && [ -n \"$(sed -n 1p \"$1\")\" ] && [ -z \"$(sed -n 2p \"$1\")\" ] && [ -n \"$(sed -n '3,$p' \"$1\" | tr -d '[:space:]' | head -c 1)\" ]; }",
     `API='${api}'`,
     'if [ -z "$API" ]; then',
     '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
     'elif ! command -v curl >/dev/null 2>&1; then',
     '  echo "deliver: curl is not available in this shell — using the launch-time PR text"',
     // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
-    'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && [ -s "$TD/text" ] && [ -n "$(sed -n 1p "$TD/text")" ]; then',
+    'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && _framed "$TD/text"; then',
     '  echo "deliver: PR text composed from the run record ($API)"',
     'else',
     '  rm -f "$TD/text"',

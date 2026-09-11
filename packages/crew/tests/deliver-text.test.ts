@@ -20,6 +20,7 @@ import {
   issueRefs,
   parseFramedDeliverText,
   runUrlFor,
+  urlPathSegment,
 } from '../src/core/deliver-text.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -186,6 +187,21 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
   it('removes control characters — a title is one line', () => {
     expect(deliverTitle('fix\u0000 the\u0007 thing\rnow', RUN_ID)).toBe('fix the thing now');
   });
+
+  it('a run id carrying newlines or control characters still yields a ONE-line blank-intent title (Copilot on #525)', () => {
+    const title = deliverTitle('', 'r-1\nsecond line\r\tx\u0000y');
+    expect(title).toBe('wicked-crew run r-1 second line x y');
+    expect(title).not.toMatch(/[\u0000-\u001f]/);
+    // …and the framed text keeps its shape: line 1 title, line 2 blank.
+    const framed = framedDeliverText(
+      composeDeliverText(
+        factsFromWorkflow({ runId: 'r-1\nsecond', intent: '', workflowId: null, repoRef: null, phases: [], runUrl: null }),
+      ),
+    );
+    expect(framed.split('\n')[0]).toBe('wicked-crew run r-1 second');
+    expect(framed.split('\n')[1]).toBe('');
+    expect(framed).toContain('- Run: `r-1 second`'); // code cells are one line too
+  });
 });
 
 describe('issueRefs — `Fixes #N` from a closing verb, everything else as Refs', () => {
@@ -335,5 +351,15 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
     expect(runUrlFor('http://[::1]:7701/', 'a b')).toBe('http://[::1]:7701/runs/a%20b');
     expect(runUrlFor(null, 'r1')).toBeNull();
     expect(runUrlFor('', 'r1')).toBeNull();
+  });
+
+  it('encodes a run id as ONE strict path segment — `/ # ? \'` and friends cannot change the request (Copilot on #525)', () => {
+    expect(urlPathSegment("run/../../etc:passwd#x?y='z'(1)*!")).toBe(
+      'run%2F..%2F..%2Fetc%3Apasswd%23x%3Fy%3D%27z%27%281%29%2A%21',
+    );
+    expect(urlPathSegment('d74e4e8f-bbc9-4697-8c30-181bae005217')).toBe('d74e4e8f-bbc9-4697-8c30-181bae005217');
+    expect(urlPathSegment('ü')).toBe('%C3%BC');
+    expect(urlPathSegment('a b')).not.toMatch(/[^A-Za-z0-9._~%-]/);
+    expect(decodeURIComponent(urlPathSegment("run/#?'"))).toBe("run/#?'");
   });
 });

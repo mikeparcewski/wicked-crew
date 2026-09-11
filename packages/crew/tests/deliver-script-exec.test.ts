@@ -577,6 +577,39 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(git(fx.origin, 'log', '-1', '--format=%s', `wicked/${RUN_ID}`).trim()).toBe(expected.title);
   }, 60_000);
 
+  it('REJECTS a 200 that is not framed as title / blank / body and falls back, saying so (Copilot on #525)', async () => {
+    for (const bogus of ['{"error":"stale endpoint"}\n', 'title only\n', 'title\nno blank line\nbody\n', 'title\n\n\n   \n']) {
+      const fx = fixture();
+      writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+      const daemon = await fakeDaemon(() => ({ status: 200, body: bogus }));
+      daemons.push(daemon);
+
+      const r = await runDeliver(fx, { intent: 'ship it', script: { runId: RUN_ID, apiOrigin: daemon.origin } });
+
+      expect(r.status).toBe(0);
+      expect(daemon.requests).toHaveLength(1);
+      expect(r.output).toContain('did not answer with the run record — using the launch-time PR text');
+      expect(r.pr!.title).toBe('ship it'); // the embedded fallback, not the bogus answer
+      expect(r.pr!.body).not.toContain('stale endpoint');
+      expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
+    }
+  }, 120_000);
+
+  it('asks the daemon by the ENCODED launch run id, not the raw branch text', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');
+    const daemon = await fakeDaemon((id) => (id === "odd/id#1?x='y'" ? { status: 200, body: 'Odd id delivered\n\nbody\n' } : null));
+    daemons.push(daemon);
+
+    // The worktree's branch is still `wicked/<RUN_ID>`; the LAUNCH id the composer knows is what
+    // the daemon is asked about, as one percent-encoded path segment.
+    const r = await runDeliver(fx, { intent: 'x', script: { runId: "odd/id#1?x='y'", apiOrigin: daemon.origin } });
+
+    expect(r.status).toBe(0);
+    expect(daemon.requests).toEqual(["GET /api/v1/runs/odd%2Fid%231%3Fx%3D%27y%27/deliver-text"]);
+    expect(r.pr!.title).toBe('Odd id delivered');
+  }, 60_000);
+
   it('uses the launch-time text when NO daemon origin is known (CLI-driven launch) — no request, no fetch', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'fix.ts'), 'export const fixed = true;\n');

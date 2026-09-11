@@ -132,7 +132,18 @@ describe('deliverPrScript (the hardened field script)', () => {
     // The callback to THIS daemon for the run-derived text, then the embedded fallback.
     expect(withIntent).toContain("API='http://127.0.0.1:7701'");
     expect(withIntent).toContain('"$API/api/v1/runs/$RUNID/deliver-text"');
-    expect(withIntent).toContain('RUNID="${B#wicked/}"');
+    // The LAUNCH run id rides pre-encoded as one path segment; the branch-derived id is only the
+    // fallback, percent-encoded byte-wise by the script (Copilot on #525).
+    expect(withIntent).toContain("RUNID='run-1'");
+    expect(withIntent).toContain('[ -n "$RUNID" ] || RUNID=$(_urlenc "${B#wicked/}")');
+    expect(deliverPrScript('x', { runId: "run/../../etc:passwd#1?q='z'" })).toContain(
+      "RUNID='run%2F..%2F..%2Fetc%3Apasswd%231%3Fq%3D%27z%27'",
+    );
+    expect(script).toContain("RUNID=''"); // no launch id known ⇒ derived + encoded at run time
+    // The fetched text is used ONLY when it is framed (title / blank / body) — a 200 that is not
+    // the run record falls back (Copilot on #525).
+    expect(withIntent).toContain('&& _framed "$TD/text"; then');
+    expect(withIntent).toMatch(/_framed\(\) \{ \[ -s "\$1" \] && \[ -n "\$\(sed -n 1p "\$1"\)" \] && \[ -z "\$\(sed -n 2p "\$1"\)" \]/);
     expect(withIntent).toContain('using the launch-time PR text');
     expect(withIntent).toContain(`cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`);
     // Both carriers are FRAMED the same and parsed once: line 1 title, line 2 blank, then body.

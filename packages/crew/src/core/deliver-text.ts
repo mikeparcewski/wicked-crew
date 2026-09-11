@@ -95,6 +95,13 @@ export interface IssueRefs {
 
 /** Control characters other than newline/tab — never part of a title, a table cell or a commit. */
 const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
+/** EVERY control character, newline and tab included — for values that must stay on one line. */
+const ALL_CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+
+/** `s` as one line: control characters (newlines included) become spaces, runs collapse, ends trim. */
+function oneLine(s: string): string {
+  return s.replace(ALL_CONTROL_CHARS, ' ').replace(/\s+/g, ' ').trim();
+}
 
 /** One line of intent reduced to plain words: markdown markers and links stripped, spaces collapsed. */
 function plainLine(raw: string): string {
@@ -126,7 +133,9 @@ function firstLine(intent: string): string {
  */
 export function deliverTitle(intent: string, runId: string): string {
   const line = firstLine(intent);
-  return boundedTitle(line === '' ? `wicked-crew run ${runId}`.trim() : line);
+  // The run id is caller-supplied too (`LaunchSchema` only requires it non-empty): a newline in it
+  // must not turn the title into two lines and break the framing (Copilot on #525).
+  return boundedTitle(line === '' ? oneLine(`wicked-crew run ${oneLine(runId)}`) : line);
 }
 
 /** `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ 72 characters. */
@@ -174,8 +183,10 @@ function cell(value: string | number | null | undefined, max = 200): string {
 
 function code(value: string | null | undefined): string {
   if (value === null || value === undefined || value === '') return '—';
-  // Backticks inside a code span would end it early; a code span cannot carry them, so drop them.
-  return `\`${value.replace(CONTROL_CHARS, ' ').replace(/`/g, '').replace(/\|/g, '\\|')}\``;
+  // One line (a code span cannot span lines); backticks inside a code span would end it early, so
+  // they are dropped; pipes are escaped for the table cells this lands in.
+  const one = oneLine(value).replace(/`/g, '').replace(/\|/g, '\\|');
+  return one === '' ? '—' : `\`${one}\``;
 }
 
 function duration(ms: number | null): string {
@@ -415,8 +426,20 @@ export function factsFromWorkflow(input: {
   };
 }
 
+/**
+ * `s` as ONE URL path segment, RFC 3986 strict: everything but unreserved characters is
+ * percent-encoded — `encodeURIComponent` alone leaves `!'()*` alone, and `'` in particular must not
+ * reach a single-quoted shell literal (the deliver script bakes this in; Copilot on #525).
+ */
+export function urlPathSegment(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
 /** The studio bookmark for a run under a daemon origin (`http://127.0.0.1:7701/runs/<id>`), or null. */
 export function runUrlFor(origin: string | null | undefined, runId: string): string | null {
   if (origin === null || origin === undefined || origin === '') return null;
-  return `${origin.replace(/\/+$/, '')}/runs/${encodeURIComponent(runId)}`;
+  return `${origin.replace(/\/+$/, '')}/runs/${urlPathSegment(runId)}`;
 }
