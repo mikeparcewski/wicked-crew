@@ -53,6 +53,44 @@ export interface SigninProbeIo {
   env?: Record<string, string | undefined>;
 }
 
+/** Key names under which a credential file keeps the secret itself (any depth). */
+const CREDENTIAL_KEY_RE = /key|token|secret|password|credential|access|refresh|bearer|api/i;
+
+/**
+ * Whether a credential file's CONTENT carries a credential (F-A45-006): a JSON object (or array)
+ * holding, at any depth ≤ 4, a NON-EMPTY string under a key that names a secret (`key`, `token`,
+ * `access`/`refresh`, `OPENAI_API_KEY`, …). The fresh rig's pi `auth.json` was `{}` — present, and
+ * every ballot failed "No API key found" — so PRESENCE alone is not a sign-in: `{}`, `[]`, a type
+ * marker with no secret (`{"type":"api_key"}`), malformed JSON and an empty file all read `false`.
+ */
+export function hasCredentialShape(raw: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  const walk = (v: unknown, depth: number, keyed: boolean): boolean => {
+    if (depth > 4) return false;
+    if (typeof v === 'string') return keyed && v.trim() !== '';
+    if (Array.isArray(v)) return v.some((x) => walk(x, depth + 1, keyed));
+    if (typeof v === 'object' && v !== null) {
+      return Object.entries(v as Record<string, unknown>).some(([k, x]) => walk(x, depth + 1, CREDENTIAL_KEY_RE.test(k)));
+    }
+    return false;
+  };
+  return walk(parsed, 0, false);
+}
+
+/** The credential-file probe: present AND credential-shaped ({@link hasCredentialShape}). */
+function credentialFilePresent(path: string): boolean {
+  try {
+    return hasCredentialShape(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Cheap signed-in presence for one seat. `workerConfigRoot` is the settings-applied
  * `WICKED_WORKER_HOME` value when set (the roster route passes the live env, which is exactly
@@ -97,7 +135,7 @@ export function signedInHeuristic(
     case 'codex':
       // `codex login` writes `$CODEX_HOME/auth.json` (tokens live IN the file — presence is the
       // state); the seat's CODEX_HOME is `<root>/codex` (wicked-core#410).
-      return existsSync(
+      return credentialFilePresent(
         inherit ? join(home, '.codex', 'auth.json') : join(root, 'codex', 'auth.json'),
       );
 
@@ -146,7 +184,7 @@ export function signedInHeuristic(
     case 'opencode':
       // `opencode auth login` writes `$XDG_DATA_HOME/opencode/auth.json` — presence is the state;
       // the seat's XDG_DATA_HOME is `<root>/opencode/data` (wicked-core#410).
-      return existsSync(
+      return credentialFilePresent(
         inherit
           ? join(home, '.local', 'share', 'opencode', 'auth.json')
           : join(root, 'opencode', 'data', 'opencode', 'auth.json'),
@@ -155,7 +193,9 @@ export function signedInHeuristic(
     case 'pi':
       // pi's auth flow writes `$PI_CODING_AGENT_DIR/auth.json` — presence is the state; the
       // seat's agent dir is `<root>/pi` (wicked-core#410).
-      return existsSync(
+      // A credential-SHAPED file, not mere presence (F-A45-006): the fresh rig's pi `auth.json` was
+      // `{}` and every ballot failed "No API key found" while the roster read `signed_in: true`.
+      return credentialFilePresent(
         inherit ? join(home, '.pi', 'agent', 'auth.json') : join(root, 'pi', 'auth.json'),
       );
 

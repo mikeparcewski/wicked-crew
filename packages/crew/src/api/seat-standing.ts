@@ -32,7 +32,7 @@
  * Pure, synchronous, no IO: the probe result and the health record are inputs.
  */
 
-import type { CouncilBench, SeatHealth } from './seat-health.js';
+import type { CouncilBench, SeatAuthFailure, SeatHealth } from './seat-health.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
@@ -91,6 +91,12 @@ export interface SeatStanding {
   free_tier?: string;
   /** Present with `free_tier`: whether the CLI registry declared it, or crew's own table did. */
   free_tier_source?: FreeTierSource;
+  /** Where `auth` came from (F-A45-006): `seat-stderr` = the seat ITSELF reported no credential
+   *  (a council ballot, a worker failure or the ACP handshake said "No API key found" / 401 …),
+   *  which overrides the credential-file probe; absent = the probe (`signed_in`) decided. */
+  auth_source?: 'seat-stderr';
+  /** Present with `auth_source: 'seat-stderr'`: the seat's own words, bounded. */
+  auth_evidence?: string;
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
@@ -108,8 +114,16 @@ export function seatStanding(
   signedIn: boolean | null,
   health: SeatHealth,
   bench: CouncilBench | null = null,
+  authFailure: SeatAuthFailure | null = null,
 ): SeatStanding {
-  const read = seatAuth(seat, signedIn);
+  // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
+  // off a present-but-empty `auth.json` while every ballot failed "No API key found"; when the seat
+  // itself says it has no credential, `auth` is `signed_out` — the free tier does not apply either
+  // (a seat that answers on a free tier does not say "No API key") — and the evidence rides along.
+  const read =
+    authFailure !== null
+      ? { auth: 'signed_out' as const, auth_source: 'seat-stderr' as const, auth_evidence: authFailure.detail }
+      : seatAuth(seat, signedIn);
   const auth = read.auth;
   const base: SeatStanding = {
     ...read,
@@ -123,7 +137,9 @@ export function seatStanding(
       ...base,
       council_eligible: false,
       council_ineligible_reason:
-        'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
+        authFailure !== null
+          ? `signed out — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
+          : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
     };
   }
   if (health.status === 'inactive') {
@@ -151,7 +167,13 @@ export function seatStanding(
   return base;
 }
 
-export type ChatAdmission = { ok: true } | { ok: false; reason: string };
+/** Why a seat was not seated (F-A45-011; `ChatSeatRefusal.source` on the wire): `auth` — signed
+ *  out; `scope` — the scoped-chat admission rule; `bench` — benched by this daemon's recent councils;
+ *  `budget` — the engine did not seat it (its warm-up timed out or it was dropped at dispatch);
+ *  `engine` — the engine refused it with its own reason. */
+export type ChatRefusalSource = 'auth' | 'scope' | 'bench' | 'budget' | 'engine';
+
+export type ChatAdmission = { ok: true } | { ok: false; reason: string; source: ChatRefusalSource };
 
 /**
  * Whether a chat seats this seat BY DEFAULT — the seat's own auth standing plus, for a SCOPED chat,
@@ -164,8 +186,10 @@ export type ChatAdmission = { ok: true } | { ok: false; reason: string };
  */
 export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: boolean): ChatAdmission {
   const reasons: string[] = [];
+  let source: ChatRefusalSource = 'scope';
   if (!authUsable(auth)) {
     reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
+    source = 'auth';
   }
   if (scoped) {
     const acp = seat.acp ?? undefined;
@@ -178,5 +202,5 @@ export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: bo
       );
     }
   }
-  return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; ') };
+  return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
 }

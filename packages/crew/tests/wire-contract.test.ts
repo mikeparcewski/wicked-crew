@@ -22,7 +22,12 @@
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type * as Wire from 'wicked-crew-api-types';
+import type { UnitDistributedEventJson } from 'wicked-core-ts';
 import type { ChatSummary, CoreAdapter } from '../src/core/adapter.js';
+import type { QeAuthorPlan } from '../src/qe/author-workflow.js';
+import type { TestSet } from '../src/qe/test-sets.js';
+import type { TestingAuthorSchema } from '../src/api/testing.js';
+import { councilOutcomeSuffix } from '../src/interactive/council-outcome.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
@@ -42,7 +47,7 @@ import type {
   SkillRevisionSchema,
 } from '../src/api/skills.js';
 import type { SkillsStore, SnapshotManifest } from '../src/skills/store.js';
-import type { SkillsHealth, SkillsHealthFinding, SkillsHealthFindingKind } from '../src/skills/runtime.js';
+import type { SkillsHealth, SkillsHealthFindingKind } from '../src/skills/runtime.js';
 import type { PluginSource } from '../src/skills/plugin-source.js';
 import type { CappedFileRead, WorktreeDiff } from '../src/api/run-files.js';
 import type { DeliveryState } from '../src/api/delivery-index.js';
@@ -261,6 +266,116 @@ const READ_ONLY_REROUTE = {
   fallbackKind: 'read_only_requires_wrapped' as const,
 };
 respondsWith<Wire.AcpFallbackEvent, typeof READ_ONLY_REROUTE>();
+
+// ── Wave 6 wire shapes (api-types 0.36.0) ────────────────────────────────────────────────────────
+// `UnitDistributedEvent` is pinned against the ENGINE's own napi declaration of the frame
+// (`wicked-core-ts` `UnitDistributedEventJson`, itself pinned against `event_to_json` by the binding's
+// cargo tests): the contract must accept exactly what the engine emits — camelCase. Pre-0.36 the
+// contract declared snake_case names the engine never sent, so a consumer reading `degraded_reason`
+// got `undefined` (crew#533 follow-through).
+respondsWith<Wire.UnitDistributedEvent, UnitDistributedEventJson>();
+// (`UnitDistributedEvent` is an interface — no implicit index signature — so its CoreEvent relay is
+// asserted through the napi type, which `extends CoreEventJson`: the frame the daemon relays IS the
+// engine's, and the contract accepts it.)
+respondsWith<Wire.CoreEvent, UnitDistributedEventJson>();
+// A RECORDED frame (run b86c14c1's shape, wave-6 fields filled): every Option is `null`, never absent.
+const RECORDED_UNIT_DISTRIBUTED = {
+  type: 'unitDistributed' as const,
+  session: 'b86c14c1-e295-4659-8a30-51b4ec1ac589',
+  ord: 2,
+  cli: 'claude',
+  routingMethod: 'council' as const,
+  agreementPct: 100,
+  returned: 1,
+  seated: 1,
+  dissent: 0,
+  degradedReason: '4 of 5 seats benched: codex (signed out — launcher), pi (unauthenticated — ballot), copilot (signed out — launcher), opencode (dispatch budget — ballot)',
+  seatConstraint: null,
+};
+respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED>();
+respondsWith<UnitDistributedEventJson, typeof RECORDED_UNIT_DISTRIBUTED>();
+// The new frames relay through the CoreEvent-typed seams and narrow on `type`.
+respondsWith<Wire.CoreEvent, Wire.WorkerToolCallDeniedEvent>();
+respondsWith<Wire.GateEvidenceEvent, Wire.WorkerToolCallDeniedEvent>();
+const WORKER_DENIED = {
+  type: 'workerToolCallDenied' as const,
+  session: 'run-1',
+  ord: 7,
+  attempt: 0,
+  cli: 'claude',
+  carrier: 'acp' as const,
+  role: 'creator' as const,
+  tool: 'Bash',
+  command: 'gh pr create --title x --body-file b',
+  reason: 'remote-write fence: gh pr create',
+  remedy: "delivery is performed by the run's deliver phase",
+};
+respondsWith<Wire.WorkerToolCallDeniedEvent, typeof WORKER_DENIED>();
+const GATE_UNGATED = {
+  ...GATE_NO_JUDGE,
+  hasDeterministicFloor: false,
+  evaluatorPolicies: [] as string[],
+  ungated: true,
+  ungatedReason: 'no floor: the repo-checks floor did not apply; no judge: no eligible judge seat distinct from creator `claude`',
+  // #449 @ 9e11685: the two per-layer reasons ride beside the summary, `null` when the layer ran.
+  floorNote: 'no pinned validator; the repo-checks floor did not apply: the tree was not changed',
+  judgeSkippedReason: 'no eligible judge seat distinct from creator `claude` (roster: claude; benched: codex (signed out — launcher))',
+};
+respondsWith<Wire.GateEvaluatedEvent, typeof GATE_UNGATED>();
+// A repo-checks frame with NOTHING detected says WHY (#449 @ 9e11685) — a consumer renders
+// "0 checks detected", never "checks ran".
+const REPO_CHECKS_NONE_DETECTED = {
+  type: 'repoChecksEvaluated' as const,
+  session: 'run-1',
+  ord: 3,
+  attempt: 0,
+  passed: true,
+  criterion: 'the repository checks pass on the verified tree',
+  checks: [] as Wire.RepoCheckRun[],
+  skipped: [] as string[],
+  sandboxLevel: 'none',
+  sandboxError: null,
+  detectError: 'no package.json scripts among typecheck/lint/test, no Cargo.toml',
+};
+respondsWith<Wire.RepoChecksEvaluatedEvent, typeof REPO_CHECKS_NONE_DETECTED>();
+respondsWith<Wire.BenchedSeat['source'], 'launcher' | 'ballot' | 'worker' | 'judge'>();
+respondsWith<Wire.AcpFallbackKind, 'auth_failed' | 'unauthenticated'>();
+const BASE_RESOLVED_WITH_BRANCH = { ...BASE_RESOLVED, runBranch: 'wicked/run-1' };
+respondsWith<Wire.RunBaseResolvedEvent, typeof BASE_RESOLVED_WITH_BRANCH>();
+// The author launch, both directions; the plan / test set / diff / status stamps the daemon produces.
+accepts<z.input<typeof TestingAuthorSchema>, Wire.TestingAuthorBody>();
+respondsWith<Wire.WorkflowPlan, QeAuthorPlan>();
+respondsWith<Wire.TestSet, TestSet>();
+respondsWith<Wire.RunDiff, WorktreeDiff>();
+respondsWith<Wire.RunDiff, { diff: string; truncated: boolean; source: 'branch'; branch: string; base: string }>();
+respondsWith<Wire.InteractiveStatusPosted, SeamStatusPayload & { ts: string }>();
+respondsWith<Wire.CampaignsListResponse['test_sets'], TestSet[] | undefined>();
+
+describe('wave 6 wire shapes (api-types 0.36.0)', () => {
+  it('spells unitDistributed exactly as the engine emits it — camelCase — and the narrator reads it', () => {
+    // The teeth are the compile-time assertions above; these keep the literal live and prove the
+    // narrator reads the EMITTED spelling (a consumer of `degraded_reason` saw undefined pre-0.36).
+    expect(Object.keys(RECORDED_UNIT_DISTRIBUTED).sort()).toEqual(
+      ['agreementPct', 'cli', 'degradedReason', 'dissent', 'ord', 'returned', 'routingMethod', 'seatConstraint', 'seated', 'session', 'type'].sort(),
+    );
+    expect(RECORDED_UNIT_DISTRIBUTED.degradedReason).toContain('4 of 5 seats benched');
+    expect(councilOutcomeSuffix(RECORDED_UNIT_DISTRIBUTED as unknown as Wire.CoreEvent)).toContain('4 of 5 seats benched: codex (signed out — launcher)');
+    // The deprecated aliases are OPTIONAL: a frame without them satisfies the contract (asserted
+    // at compile time above); a consumer must not require them.
+    expect('degraded_reason' in RECORDED_UNIT_DISTRIBUTED).toBe(false);
+  });
+  it('spells the wave-6 gate, fence, checks and base frames as the engine does', () => {
+    expect(GATE_UNGATED.ungated).toBe(true);
+    expect(GATE_UNGATED.floorNote).toMatch(/no pinned validator/);
+    expect(GATE_UNGATED.judgeSkippedReason).toMatch(/no eligible judge seat/);
+    expect(WORKER_DENIED.carrier).toBe('acp');
+    expect(WORKER_DENIED.remedy).toMatch(/deliver phase/);
+    // An empty report says WHY — "0 checks detected", never "checks ran".
+    expect(REPO_CHECKS_NONE_DETECTED.checks).toEqual([]);
+    expect(REPO_CHECKS_NONE_DETECTED.detectError).toContain('no package.json');
+    expect(BASE_RESOLVED_WITH_BRANCH.runBranch).toBe('wicked/run-1');
+  });
+});
 
 describe('wicked-core#431 wire shapes (api-types 0.33.0)', () => {
   it('spells the new frames exactly as the engine emits them', () => {
@@ -586,14 +701,9 @@ respondsWith<
 respondsWith<Wire.RunFileContent, { path: string } & CappedFileRead>();
 respondsWith<Wire.RunDiff, WorktreeDiff>();
 
-// F-083: the daemon emits the `skills.stale-rules` finding AHEAD of its wire declaration — the next
-// `wicked-crew-api-types` cut (0.36.0, the wave-6 wire PR) adds it to `DiagnosticsSkillsFinding.kind`
-// and declares the additive `rules` / `drift` members of `SkillsManifestResponse.current`. Until it
-// lands the pending kind is carved out here, so every OTHER kind stays pinned both ways; delete the
-// carve-out (and pin `SkillsHealth` directly again) with the api-types bump.
-type PendingSkillsFindingKind = 'skills.stale-rules';
-type DeclaredSkillsHealthFindingKind = Exclude<SkillsHealthFindingKind, PendingSkillsFindingKind>;
-type DeclaredSkillsHealth = Omit<SkillsHealth, 'findings'> & { findings: Array<Omit<SkillsHealthFinding, 'kind'> & { kind: DeclaredSkillsHealthFindingKind }> };
+// F-083 (crew#535): `skills.stale-rules` and `SkillsManifestResponse.current.rules` / `.drift` are
+// DECLARED since api-types 0.36.0 — the carve-out that held the pending kind out of the both-ways
+// pins is gone, and `SkillsHealth` is pinned directly again (below).
 
 // GET /diagnostics (api-types 0.16.0) — the daemon's self-knowledge surface. The route
 // assembles exactly this shape from the diagnostics module's machinery types; pinning it here
@@ -612,7 +722,7 @@ respondsWith<
     stores: StoreFileEntry[];
     recentErrors: RecentError[];
     acp: { byCli: Record<string, AcpCliFold> };
-    skills: DeclaredSkillsHealth;
+    skills: SkillsHealth;
     governance: GovernanceHealth;
   }
 >();
@@ -635,8 +745,8 @@ respondsWith<GovernanceRecords, Wire.DiagnosticsGovernanceRecords>();
 // (independent review of #533, F-5).
 respondsWith<Wire.RepoGraphResponse, RepoGraphReply>();
 respondsWith<RepoGraphReply, Wire.RepoGraphResponse>();
-// The skills seam's health block (api-types 0.28.0), both directions (the pending F-083 kind carved out above).
-respondsWith<Wire.DiagnosticsSkills, DeclaredSkillsHealth>();
+// The skills seam's health block (api-types 0.28.0), both directions.
+respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 // Design v3.6 (api-types 0.29.0, crew #490): the LAST-resort installer copy is a source kind the
 // contract admits, and the persistent warning it raises is a finding kind the contract admits —
@@ -644,8 +754,10 @@ respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();
 respondsWith<Wire.SkillSourceKind, PluginSource['kind']>();
 respondsWith<PluginSource['kind'], Wire.SkillSourceKind>();
 respondsWith<Wire.SkillSourceKind, 'installer-copy'>();
-respondsWith<Wire.DiagnosticsSkillsFinding['kind'], DeclaredSkillsHealthFindingKind>();
-respondsWith<DeclaredSkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], SkillsHealthFindingKind>();
+respondsWith<SkillsHealthFindingKind, Wire.DiagnosticsSkillsFinding['kind']>();
+// F-083 (api-types 0.36.0): the stale-rules kind is declared, both ways.
+respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.stale-rules'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.source'>();
 respondsWith<Wire.DiagnosticsSkillsFinding['kind'], 'skills.manifest'>();
 respondsWith<Wire.AcpCliDiagnostics, AcpCliFold>();
@@ -713,7 +825,7 @@ respondsWith<Wire.SkillMutationResult, ReturnType<SkillsStore['add']>>();
 respondsWith<Wire.SkillPublishResult, Awaited<ReturnType<SkillsStore['publish']>>>();
 respondsWith<Wire.SkillRefreshResult, ReturnType<SkillsStore['refreshBaseline']>>();
 respondsWith<Wire.SkillAnalyzeResult, ReturnType<SkillsStore['analyze']>>();
-// `current` is additive (F-083): `{gen, path}` is the declared shape; `rules` / `drift` ride beside it until api-types declares them.
+// `current` (F-083, api-types 0.36.0): `{gen, path}` plus the declared `rules` / `drift` members — the produced shape satisfies the contract, both spelled.
 respondsWith<Wire.SkillsManifestResponse['current'], ReturnType<SkillsStore['currentSnapshot']>>();
 // snapshot.json is what the ENGINE reads — its skill rows reuse the contract's kind vocabulary.
 respondsWith<Wire.SkillKind, SnapshotManifest['skills'][number]['kind']>();

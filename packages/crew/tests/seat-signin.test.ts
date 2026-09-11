@@ -8,11 +8,13 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyWorkerConfigRoot, BOOT_WORKER_HOME, signedInHeuristic } from '../src/api/seat-signin.js';
+import { applyWorkerConfigRoot, BOOT_WORKER_HOME, hasCredentialShape, signedInHeuristic } from '../src/api/seat-signin.js';
 
 let home: string;
 /** Empty env: no ambient GH_TOKEN/GITHUB_TOKEN from the machine running the suite leaks in. */
 const NO_ENV: Record<string, string | undefined> = {};
+/** A credential-SHAPED auth file (F-A45-006): presence alone is not a sign-in — `{}` is not. */
+const CRED = JSON.stringify({ anthropic: { type: 'api', key: 'sk-test-not-a-real-key' } });
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'seat-signin-'));
@@ -88,23 +90,26 @@ describe('claude — worker-home .claude.json with oauthAccount', () => {
 // opencode's XDG bases) — never the operator's own CLI home. The finding: a fresh worker home
 // reported claude `signed_in:false` but codex/pi/copilot/opencode `true`, off the OPERATOR's logins.
 describe('codex — <worker home>/codex/auth.json presence (CODEX_HOME)', () => {
-  it('false without the file, true with it — and the OPERATOR\'s ~/.codex/auth.json does not count', () => {
-    writeFile(join(home, '.codex', 'auth.json'), '{}');
+  it('false without the file, true with a credential-shaped one — and the OPERATOR\'s ~/.codex/auth.json does not count', () => {
+    writeFile(join(home, '.codex', 'auth.json'), CRED);
     expect(probe('codex')).toBe(false);
+    // Present but EMPTY is not a sign-in (F-A45-006).
     writeFile(seatRoot('codex', 'auth.json'), '{}');
+    expect(probe('codex')).toBe(false);
+    writeFile(seatRoot('codex', 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-test', tokens: { access_token: 'a', id_token: 'i' } }));
     expect(probe('codex')).toBe(true);
   });
 
   it('honours an explicit workerConfigRoot', () => {
     const custom = join(home, 'custom-root');
-    writeFile(join(custom, 'codex', 'auth.json'), '{}');
+    writeFile(join(custom, 'codex', 'auth.json'), CRED);
     expect(probe('codex')).toBe(false);
     expect(probe('codex', custom)).toBe(true);
   });
 
   it('under the inherit hatch the seat runs on the operator\'s ~/.codex, so that is what is probed', () => {
     expect(probeInherit('codex')).toBe(false);
-    writeFile(join(home, '.codex', 'auth.json'), '{}');
+    writeFile(join(home, '.codex', 'auth.json'), CRED);
     expect(probeInherit('codex')).toBe(true);
   });
 });
@@ -171,32 +176,64 @@ describe('copilot — env token, else keychain-unknowable', () => {
   });
 });
 
-describe('opencode / pi — credential-file presence under their seat roots', () => {
+describe('opencode / pi — a credential-SHAPED file under their seat roots (F-A45-006: presence is not a sign-in)', () => {
   it('opencode: <worker home>/opencode/data/opencode/auth.json (XDG_DATA_HOME=<root>/opencode/data)', () => {
-    writeFile(join(home, '.local', 'share', 'opencode', 'auth.json'), '{}');
+    writeFile(join(home, '.local', 'share', 'opencode', 'auth.json'), CRED);
     expect(probe('opencode')).toBe(false);
-    writeFile(seatRoot('opencode', 'data', 'opencode', 'auth.json'), '{}');
+    writeFile(seatRoot('opencode', 'data', 'opencode', 'auth.json'), CRED);
     expect(probe('opencode')).toBe(true);
     // Under the hatch the operator's own store is the seat's.
     expect(probeInherit('opencode')).toBe(true);
   });
 
   it('pi: <worker home>/pi/auth.json (PI_CODING_AGENT_DIR=<root>/pi)', () => {
-    writeFile(join(home, '.pi', 'agent', 'auth.json'), '{}');
+    writeFile(join(home, '.pi', 'agent', 'auth.json'), CRED);
     expect(probe('pi')).toBe(false);
-    writeFile(seatRoot('pi', 'auth.json'), '{}');
+    writeFile(seatRoot('pi', 'auth.json'), CRED);
     expect(probe('pi')).toBe(true);
     expect(probeInherit('pi')).toBe(true);
   });
 
+  it('the fresh-rig shape — pi auth.json is `{}` — reads signed OUT (every ballot failed "No API key found" while the roster said signed_in)', () => {
+    writeFile(seatRoot('pi', 'auth.json'), '{}');
+    expect(probe('pi')).toBe(false);
+    writeFile(seatRoot('pi', 'auth.json'), '');
+    expect(probe('pi')).toBe(false);
+    writeFile(seatRoot('pi', 'auth.json'), '{not json');
+    expect(probe('pi')).toBe(false);
+    // A type marker with no secret is not a credential either.
+    writeFile(seatRoot('pi', 'auth.json'), JSON.stringify({ anthropic: { type: 'api_key' } }));
+    expect(probe('pi')).toBe(false);
+    // pi's OAuth shape (access + refresh) and its api-key shape both count.
+    writeFile(seatRoot('pi', 'auth.json'), JSON.stringify({ anthropic: { type: 'oauth', access: 'a', refresh: 'r', expires: 1 } }));
+    expect(probe('pi')).toBe(true);
+    writeFile(seatRoot('pi', 'auth.json'), JSON.stringify({ openai: { type: 'api_key', key: 'sk-x' } }));
+    expect(probe('pi')).toBe(true);
+  });
+
   it('an explicit workerConfigRoot relocates every seat root together', () => {
     const custom = join(home, 'elsewhere');
-    writeFile(join(custom, 'pi', 'auth.json'), '{}');
-    writeFile(join(custom, 'opencode', 'data', 'opencode', 'auth.json'), '{}');
+    writeFile(join(custom, 'pi', 'auth.json'), CRED);
+    writeFile(join(custom, 'opencode', 'data', 'opencode', 'auth.json'), CRED);
     expect(probe('pi', custom)).toBe(true);
     expect(probe('opencode', custom)).toBe(true);
     expect(probe('pi')).toBe(false);
     expect(probe('opencode')).toBe(false);
+  });
+});
+
+describe('hasCredentialShape (F-A45-006)', () => {
+  it('needs a non-empty string under a secret-naming key, at any depth up to 4', () => {
+    expect(hasCredentialShape('{}')).toBe(false);
+    expect(hasCredentialShape('[]')).toBe(false);
+    expect(hasCredentialShape('')).toBe(false);
+    expect(hasCredentialShape('null')).toBe(false);
+    expect(hasCredentialShape('{"type":"api_key"}')).toBe(false);
+    expect(hasCredentialShape('{"anthropic":{"key":""}}')).toBe(false);
+    expect(hasCredentialShape('{"anthropic":{"key":"sk"}}')).toBe(true);
+    expect(hasCredentialShape('{"OPENAI_API_KEY":"sk"}')).toBe(true);
+    expect(hasCredentialShape('{"tokens":{"access_token":"a"}}')).toBe(true);
+    expect(hasCredentialShape('[{"provider":"x","token":"t"}]')).toBe(true);
   });
 });
 

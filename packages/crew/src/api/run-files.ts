@@ -93,6 +93,89 @@ export async function readFileCapped(target: string, opts: CappedReadOptions = {
 export interface WorktreeDiff {
   diff: string;
   truncated: boolean;
+  /**
+   * Where the diff was read from (wave 6, F-7R2-013; api-types 0.36.0): `worktree` — the live run
+   * worktree (staged + unstaged + untracked, the pre-0.36 answer); `branch` — the run's retained
+   * `wicked/<id>` branch in the REGISTERED repo, diffed against its base, served when the engine
+   * has reaped the worktree (a completed run) so the files view never goes dark at completion.
+   * Absent on a pre-0.36 daemon (which answered 409 for a reaped worktree).
+   */
+  source?: 'worktree' | 'branch';
+  /** `source: 'branch'` — the run branch the diff was read from. */
+  branch?: string;
+  /** `source: 'branch'` — the base commit the branch was diffed against (the engine's recorded
+   *  `base_commit` when it has one, else the branch's merge-base with the default branch). */
+  base?: string;
+}
+
+/**
+ * The BRANCH-sourced diff (wave 6, F-7R2-013): `git diff <base> <branch>` over the REGISTERED repo
+ * root — read-only plumbing, argv array (never a shell string), `GIT_OPTIONAL_LOCKS=0` (this root is
+ * the repo an operator or a deliver may be writing in right now). Used when the run worktree is
+ * gone: the engine keeps the `wicked/<run id>` branch (and, since wave 6, records `run_branch` +
+ * `base_commit` on the session), so the run's work stays diffable after the reap.
+ *
+ * `base`: the recorded base commit when the caller has one; else the branch's merge-base with the
+ * repo's default branch (`origin/HEAD` → `origin/main` → `origin/master` → local `main`/`master`).
+ * Returns `null` when the branch does not exist in the repo (nothing was ever committed for the run
+ * — the caller's 409 stands). Throws `UnresolvableDiffBaseError` when no base can be derived.
+ */
+export async function branchDiff(
+  repoRoot: string,
+  branch: string,
+  base: string | null,
+  relPath?: string,
+): Promise<WorktreeDiff | null> {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+  const gitOut = (args: string[]) =>
+    execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env });
+  const ref = `refs/heads/${branch}`;
+  try {
+    await gitOut(['rev-parse', '--verify', '--quiet', ref]);
+  } catch (err) {
+    // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch gone".
+    if ((err as { code?: unknown }).code === 1) return null;
+    throw err;
+  }
+  let baseRev = base;
+  if (baseRev === null || baseRev === '') {
+    baseRev = null;
+    for (const candidate of ['origin/HEAD', 'origin/main', 'origin/master', 'main', 'master']) {
+      try {
+        const { stdout } = await gitOut(['merge-base', '--end-of-options', candidate, ref]);
+        if (stdout.trim() !== '') {
+          baseRev = stdout.trim();
+          break;
+        }
+      } catch {
+        /* next candidate */
+      }
+    }
+    if (baseRev === null) {
+      throw new UnresolvableDiffBaseError(
+        MERGE_BASE_LITERAL,
+        `no base for branch '${branch}': the run recorded no base commit and no default branch resolves in ${repoRoot}`,
+      );
+    }
+  }
+  const limit = relPath === undefined ? [] : ['--', relPath];
+  const { stdout } = await gitOut([
+    'diff',
+    '--no-color',
+    '--no-ext-diff',
+    '--end-of-options',
+    baseRev,
+    ref,
+    ...limit,
+  ]);
+  const outBytes = Buffer.from(stdout, 'utf8');
+  const shortBase = baseRev.length > 40 ? baseRev.slice(0, 40) : baseRev;
+  if (outBytes.byteLength > DIFF_OUTPUT_CAP_BYTES) {
+    let end = DIFF_OUTPUT_CAP_BYTES;
+    while (end > 0 && (outBytes[end]! & 0xc0) === 0x80) end--;
+    return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true, source: 'branch', branch, base: shortBase };
+  }
+  return { diff: stdout, truncated: false, source: 'branch', branch, base: shortBase };
 }
 
 const GIT_TIMEOUT_MS = 10_000;

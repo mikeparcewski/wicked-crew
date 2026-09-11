@@ -35,6 +35,8 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
+import { engineRosterJson } from './engine-roster.js';
+import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
@@ -630,6 +632,14 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'verdict', kind: 'review', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['revise'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
+  // The governed test-authoring workflow (wave 6 — F-7R2-003/004/005/012/014/015, R4-r2): recon →
+  // author (creator, evidence-floor pinned) → verify (a TOOL phase that RUNS every produced test
+  // under the repository's own harness and fails the unit when one fails or never ran) → review
+  // (evaluator ≠ creator). Delivery is appended per run by the engine-side composition (`deliver:
+  // "pr"`), never performed by a worker. Def + verify script live in `qe/author-workflow.ts` so the
+  // e2e can assert the script's behaviour without reaching into this array. Crew-only drop-in (NOT
+  // core-seeded); the `wicked-garden-qe` skill carries the method (plan/author/review actions).
+  QE_AUTHOR_TESTS_WORKFLOW_DEF,
   // The one workflow that ARMS the dual-validator gate: `coverage` carries an approved
   // `validator_pin`, so layer 1 is live here and inert in every entry above. Transcribed
   // field-for-field from the source of truth, `wicked-core/workflows/domain-extraction.json`
@@ -1225,7 +1235,12 @@ export class CoreAdapter {
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
-      clisJson: input.clisJson,
+      // The roster crew hands the ENGINE (wave 6, `core/engine-roster.ts`): the studio round-trips
+      // `GET /roster` seats — decorated with crew's own `health {status}`, `auth`, `council_eligible`
+      // readings — into `clisJson`; the wave-6 engine grew `AgenticCli.health {usable, reason}` under
+      // the SAME key, so the readings are stripped and `council_eligible` becomes the engine's
+      // bench verdict. An older engine ignores the stamp; a newer one benches the seat for the run.
+      clisJson: engineRosterJson(input.clisJson),
     };
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;

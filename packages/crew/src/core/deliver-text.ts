@@ -76,6 +76,13 @@ export interface DeliverTextFacts {
   phases: DeliverPhaseFact[];
   /** Recorded repo checks; `null` when the run recorded none. Ignored when `source` is `workflow`. */
   checks: DeliverCheckFact[] | null;
+  /**
+   * WHY `checks` is empty, when the engine said (wave 6, wicked-core#449 @ 9e11685: a
+   * `repoChecksEvaluated` with `checks: []` carries `detectError` / `sandboxError`, persisted on
+   * the unit's repo-checks report). `null` when checks ran or the engine gave no reason. Rendered
+   * as "0 checks detected — <reason>", never as "checks ran".
+   */
+  checksNote: string | null;
   verdicts: DeliverVerdictFact[];
 }
 
@@ -309,9 +316,13 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
   if (f.source === 'workflow') {
     out.push('_Not available at composition time — the run record has them._');
   } else if (f.checks === null || f.checks.length === 0) {
+    // Never "checks ran" over an empty report (wave 6, F-7R2-017): 0 checks were detected, and
+    // when the engine said why (`repoChecksEvaluated.detectError` / `sandboxError`, #449), say it.
     out.push(
-      '_The run recorded no repo checks (no `typecheck` / `lint` / `test` script was found, or the ' +
-        'workflow has no verify phase)._',
+      f.checksNote !== null
+        ? `_0 checks detected — ${f.checksNote}. The run recorded no repo checks._`
+        : '_0 checks detected. The run recorded no repo checks (no `typecheck` / `lint` / `test` ' +
+            'script was found, or the workflow has no verify phase)._',
     );
   } else {
     out.push('| check | command | exit | duration |', '|---|---|---|---|');
@@ -397,6 +408,33 @@ function seatOf(unit: WorkUnit): string | null {
   return null;
 }
 
+/**
+ * Why a unit's repo-checks report detected NOTHING (wave 6, wicked-core#449 @ 9e11685): the
+ * report's `detect_error` / `sandbox_error` (the persisted snake_case; the camelCase frame spelling
+ * is read too until the persisted shape is pinned), with the sandbox level when named. `null` when
+ * the report ran checks, or carries no reason.
+ */
+function checksNoteOf(unit: WorkUnit): string | null {
+  const rc = (unit as WorkUnit & { repo_checks?: Record<string, unknown> | null }).repo_checks;
+  if (rc === null || rc === undefined || typeof rc !== 'object') return null;
+  if (Array.isArray(rc['checks']) && rc['checks'].length > 0) return null;
+  const str = (...keys: string[]): string | null => {
+    for (const k of keys) {
+      const v = rc[k];
+      if (typeof v === 'string' && v.trim() !== '') return v.trim();
+    }
+    return null;
+  };
+  const parts: string[] = [];
+  const detect = str('detect_error', 'detectError');
+  if (detect !== null) parts.push(detect);
+  const sandbox = str('sandbox_error', 'sandboxError');
+  if (sandbox !== null) parts.push(`sandbox: ${sandbox}`);
+  const level = str('sandbox_level', 'sandboxLevel');
+  if (level !== null && parts.length > 0) parts.push(`sandbox level ${level}`);
+  return parts.length === 0 ? null : parts.join('; ');
+}
+
 function checksOf(unit: WorkUnit): DeliverCheckFact[] {
   const rc = (unit as WorkUnit & { repo_checks?: EngineRepoChecks | null }).repo_checks;
   if (rc === null || rc === undefined || !Array.isArray(rc.checks)) return [];
@@ -463,6 +501,8 @@ export function factsFromRun(
       };
     }),
     checks: checks.length > 0 ? checks : null,
+    // The engine's reason for an EMPTY report, when it gave one (the first unit that says why).
+    checksNote: checks.length > 0 ? null : (units.map(checksNoteOf).find((n) => n !== null) ?? null),
     verdicts: units
       .filter((u) => u.role === 'evaluator')
       .map((u) => ({
@@ -499,6 +539,7 @@ export function factsFromWorkflow(input: {
       outcome: '—',
     })),
     checks: null,
+    checksNote: null,
     verdicts: [],
   };
 }

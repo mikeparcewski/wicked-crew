@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.35.0",
+  "apiTypesVersion": "0.36.0",
   "endpoints": [
     {
       "method": "GET",
@@ -278,6 +278,15 @@
       "path": "/api/v1/health",
       "requestType": null,
       "responseType": null,
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/interactive/docs",
+      "requestType": null,
+      "responseType": "InteractiveDocsListing",
       "statusCodes": [
         200
       ]
@@ -1062,6 +1071,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/author",
+      "requestType": "TestingAuthorBody",
+      "responseType": "TestingAuthorResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
+        500,
+        501
+      ]
     },
     {
       "method": "POST",

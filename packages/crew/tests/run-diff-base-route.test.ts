@@ -135,8 +135,11 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
   it('base=merge-base diffs from the fork point: committed work + worktree dirt, response shape unchanged', async () => {
     const res = await getDiff('run-1', { base: 'merge-base' });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { diff: string; truncated: boolean };
-    expect(Object.keys(body).sort()).toEqual(['diff', 'truncated']); // RunDiff, no new fields
+    const body = res.json() as { diff: string; truncated: boolean; source?: string };
+    // RunDiff: `?base=` adds no field of its own; `source` is the wave-6 read-origin stamp
+    // (`worktree` here — the tree is live; `branch` only when the worktree is reaped, F-7R2-013).
+    expect(Object.keys(body).sort()).toEqual(['diff', 'source', 'truncated']);
+    expect(body.source).toBe('worktree');
     expect(body.truncated).toBe(false);
     expect(body.diff).toContain('b/committed.txt'); // committed run work is now visible
     expect(body.diff).toContain('+committed run work');
@@ -226,7 +229,7 @@ describe('GET /runs/:id/diff?base= (CREW-UX-1, DES-UX-001 §8.1)', () => {
   it('a non-git workdir with a base still answers the empty diff — the standing tolerance', async () => {
     const res = await getDiff('run-nogit', { base: 'main' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ diff: '', truncated: false });
+    expect(res.json()).toEqual({ diff: '', truncated: false, source: 'worktree' });
   });
 
   it('the byte-accurate 1 MB cap holds on a base diff', async () => {

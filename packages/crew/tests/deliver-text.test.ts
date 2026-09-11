@@ -316,10 +316,36 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     const { title, body } = composeDeliverText(factsFromRun(v, null));
     expect(title).toBe(`wicked-crew run ${RUN_ID}`);
     expect(body).toContain('_(the run recorded no intent)_');
+    // Wave 6 (F-7R2-017): an empty report is "0 checks detected", never "checks ran".
+    expect(body).toContain('0 checks detected');
     expect(body).toContain('The run recorded no repo checks');
+    expect(body).not.toMatch(/checks ran/i);
     expect(body).toContain('This workflow has no evaluator phase.');
     expect(body).toContain(`- Run: \`${RUN_ID}\``); // no origin ⇒ no link, still named
     expect(body).not.toContain('Fixes');
+  });
+
+  it('names WHY 0 checks were detected when the engine said (wicked-core#449: detect_error / sandbox_error on the repo-checks report)', () => {
+    const v = runView();
+    const verify = v.units.find((u) => u.id.endsWith(':verify'))!;
+    (verify as WorkUnit & { repo_checks: unknown }).repo_checks = {
+      checks: [],
+      skipped: [],
+      sandbox_level: 'none',
+      sandbox_error: null,
+      detect_error: 'no package.json scripts among typecheck/lint/test, no Cargo.toml',
+    };
+    const facts = factsFromRun(v, null);
+    expect(facts.checks).toBeNull();
+    expect(facts.checksNote).toBe('no package.json scripts among typecheck/lint/test, no Cargo.toml; sandbox level none');
+    const { body } = composeDeliverText(facts);
+    expect(body).toContain('_0 checks detected — no package.json scripts among typecheck/lint/test, no Cargo.toml; sandbox level none. The run recorded no repo checks._');
+    expect(body).not.toMatch(/checks ran/i);
+    // The camelCase frame spelling is read too, and a sandbox failure is named as such.
+    (verify as WorkUnit & { repo_checks: unknown }).repo_checks = { checks: [], sandboxError: 'bwrap: EPERM', sandboxLevel: 'bwrap' };
+    expect(factsFromRun(v, null).checksNote).toBe('sandbox: bwrap: EPERM; sandbox level bwrap');
+    // A report that RAN checks carries no note.
+    expect(factsFromRun(runView(), null).checksNote).toBeNull();
   });
 
   it('reports a denied evaluator with its reason, pipes escaped so the table survives', () => {

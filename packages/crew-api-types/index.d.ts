@@ -282,6 +282,34 @@ export interface AgentSession {
    * now; a joined `AgentSession.cost` is a follow-up once that store exists.
    */
   created_at?: number;
+  /**
+   * The interactive DOCUMENT this run answered (wave 6, F-4R2-006 root fix; api-types 0.36.0) —
+   * daemon-joined at DTO assembly on `GET /runs` and `GET /runs/:id` from the interactive seams'
+   * handoff ledgers (the system of record for "this handoff was answered by this run"), so a skin
+   * no longer parses `extra_write_roots` for it. `GET /runs?doc=<id>` filters on it. `null` =
+   * genuinely not a document run; ABSENT = a pre-0.36 daemon. A document chip renders only on
+   * `typeof === 'string'`.
+   */
+  document_id?: string | null;
+  /**
+   * Wave 6 (F-7R2-013): the run branch the worktree was minted on (`wicked/<run id>`, sanitized) —
+   * recorded by the engine when the worktree is ready and durable past its reap, so
+   * `GET /runs/:id/diff` serves the run's work from the branch (`source: 'branch'`) once the
+   * worktree is gone. Absent for an unbound run and on an engine predating wave 6 (the daemon then
+   * derives `wicked/<id>` itself).
+   */
+  run_branch?: string;
+  /** Wave 6 (F-7R2-013): the commit the worktree was minted FROM (`runBaseResolved.baseCommit`) —
+   *  the branch diff's base. Absent for an unbound run, a reused worktree, or an older engine (the
+   *  daemon then uses the branch's merge-base with the default branch). */
+  base_commit?: string;
+  /** Wave 6 (F-7R2-013): when the run reached a TERMINAL status, unix millis. A COMPLETED run's
+   *  worktree is RETAINED from here until archive or the engine's retention window elapses
+   *  (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`, default 14). Absent on a live run and on older engines. */
+  finished_at?: number;
+  /** Wave 6 (F-7R2-006): the seats BENCHED for this run — never convened, never a failover or
+   *  judge target. Absent (never `[]`) when none / on an older engine. */
+  benched_seats?: BenchedSeat[];
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -434,6 +462,17 @@ export interface RosterSeat {
    * cheaply (keychain-backed seats, unknown seat keys). Absent on a daemon predating the field.
    */
   auth?: SeatAuth;
+  /**
+   * Where `auth` came from (api-types 0.36.0, F-A45-006): `seat-stderr` — the seat ITSELF reported
+   * no credential (a council ballot's "No API key found", a worker's 401, an authentication ACP
+   * fallback) within the last 30 minutes with no ok output since, which OVERRIDES the credential-
+   * file probe (`signed_in`) — the fresh rig's pi read `signed_in: true` off an empty `auth.json`
+   * while every ballot failed. Absent = the probe decided (and since 0.36.0 the probe itself needs
+   * a credential-SHAPED file, never mere presence).
+   */
+  auth_source?: 'seat-stderr';
+  /** Present with `auth_source: 'seat-stderr'`: the seat's own words, bounded. */
+  auth_evidence?: string;
   /** Present when `auth` is `not_required`: the free tier the seat answers on. */
   free_tier?: string;
   /**
@@ -523,6 +562,21 @@ export interface RunDiff {
   diff: string;
   /** The diff exceeded the 1 MB output cap and was cut. */
   truncated: boolean;
+  /**
+   * Where the diff was read from (wave 6, F-7R2-013; api-types 0.36.0): `worktree` — the live run
+   * worktree (staged + unstaged + untracked; the pre-0.36 answer); `branch` — the run's retained
+   * `wicked/<id>` branch in the REGISTERED repository, diffed against its base, served when the
+   * engine has reaped the worktree (a completed run) so the files view never goes dark at
+   * completion. A pre-0.36 daemon omits the field and answers 409 for a reaped worktree; 409 now
+   * means "no worktree AND no run branch" (nothing was ever committed for the run).
+   */
+  source?: 'worktree' | 'branch';
+  /** `source: 'branch'` — the run branch the diff was read from. */
+  branch?: string;
+  /** `source: 'branch'` — the base commit the branch was diffed against: the engine's recorded
+   *  `AgentSession.base_commit` when it has one, else the branch's merge-base with the default
+   *  branch; `?base=<ref>` overrides it with a plain in-repo ref. */
+  base?: string;
 }
 
 /** The daemon's cached open-gate record (`GET /runs/:id/gate`, DES-STUDIO-001 §3.3). */
@@ -681,17 +735,40 @@ export interface CoreEvent {
   hasValidatorPin?: boolean;
   executor_type?: string;
   executorType?: string;
-  // unitDistributed enrichment fields
+  // unitDistributed enrichment fields — the wire spelling is camelCase (event_to_json; see
+  // UnitDistributedEvent, api-types 0.36.0); the snake_case variants are kept for older relays.
+  routingMethod?: string;
   routing_method?: string;
   agreement_pct?: number | null;
   returned?: number | null;
+  seated?: number | null;
   dissent?: number | null;
+  degradedReason?: string | null;
   degraded_reason?: string | null;
+  seatConstraint?: string | null;
+  /** `gateEvaluated` (wave 6, F-7R2-005): `true` when NOTHING gated the unit — render as UNGATED. */
+  ungated?: boolean;
+  /** `gateEvaluated` (wave 6): why, when `ungated`. */
+  ungatedReason?: string | null;
+  /** `gateEvaluated` (wave 6, #449 @ 9e11685): why the deterministic layer is absent / why no judge ran. */
+  floorNote?: string | null;
+  judgeSkippedReason?: string | null;
+  /** `repoChecksEvaluated` (wave 6): the sandbox level, and why the sandbox / check detection failed. */
+  sandboxLevel?: string;
+  sandboxError?: string | null;
+  detectError?: string | null;
+  /** `workerToolCallDenied` (wave 6, F-7R2-012): the refused command / the remedy / the unit's role. */
+  command?: string;
+  remedy?: string;
+  role?: string;
+  /** `runBaseResolved` (wave 6, F-7R2-013): the run branch the worktree was minted on. */
+  runBranch?: string;
   // councilConvened / councilDeliberated / councilVoted (live deliberation) — camelCase
   // per event_to_json
   clis?: string[];
   consensus?: boolean;
-  agreementPct?: number;
+  /** councilConvened/Deliberated/Voted: a number; `unitDistributed` (api-types 0.36.0): `number | null`. */
+  agreementPct?: number | null;
   votes?: number;
   /** councilDeliberated: the completed ballot number (1-based). */
   round?: number;
@@ -957,6 +1034,28 @@ export interface GateEvaluatedEvent {
    *  pick, `false` when the judge fell back to the single default runner (prompt-only independence).
    *  `null` when no judge ran or the seat is unknown. */
   judgeDistinct: boolean | null;
+  /**
+   * Wave 6 (F-7R2-005, api-types 0.36.0): `true` when NOTHING gated this unit — no deterministic
+   * floor (no pinned validator, and the repo-checks floor did not apply), no agent judge, and an
+   * EMPTY evaluator-policy selection — the exact default-allow shape run b86c14c1 passed seven times.
+   * A consumer MUST render it as UNGATED, never as "pass", and a narrator must never say "checks
+   * ran" without a `repoChecksEvaluated` for the same unit. Absent on an engine predating wave 6
+   * (read `=== true`); `false` on a gated unit.
+   */
+  ungated?: boolean;
+  /** WHY, when `ungated` — each absent layer and its cause (`"no judge: no eligible judge seat
+   *  distinct from creator \`claude\` (roster: claude; benched: codex (signed out))"`). `null` when
+   *  gated; absent on an older engine. */
+  ungatedReason?: string | null;
+  /** Wave 6 (wicked-core#449 @ 9e11685, api-types 0.36.0): WHY the deterministic layer is absent —
+   *  set whenever `hasDeterministicFloor` is `false` on an agent unit, judge or not (`"no pinned
+   *  validator; the repo-checks floor did not apply: the tree was not changed"`). `null` when a
+   *  floor ran; absent on an older engine. */
+  floorNote?: string | null;
+  /** Wave 6: WHY no judge was convened for a unit that WANTED one (its tree changed and no pinned
+   *  validator gated it) — `"no eligible judge seat distinct from creator \`claude\` (roster: …;
+   *  benched: …)"`. `null` when a judge ran or none was wanted; absent on an older engine. */
+  judgeSkippedReason?: string | null;
 }
 
 /** Foundation wave: session started with enriched context. */
@@ -1024,6 +1123,12 @@ export type AcpFallbackKind =
   | 'binary_unavailable'
   | 'session_died'
   | 'auth_required'
+  /** Wave 6 (F-7R2-019, api-types 0.36.0): the ACP handshake was REFUSED for authentication — the
+   *  seat's account, not its binary (`pi-acp` existed; pi answered 401). The engine benches the seat
+   *  for the run and does NOT attempt the single-shot wrapped fallback (it fails the same way). */
+  | 'auth_failed'
+  /** Wave 6 — the seat reported no credential at all (`unauthenticated`); same bench, same no-retry. */
+  | 'unauthenticated'
   | 'governance_requires_wrapped'
   | 'read_only_requires_wrapped'
   | (string & {});
@@ -1264,8 +1369,19 @@ export type RepoChecksEvaluatedEvent = {
   attempt: number;
   passed: boolean;
   criterion: string;
+  /** The checks that RAN. EMPTY means "0 checks detected" — a consumer must say so, never "checks
+   *  ran"; since wave 6 the frame says WHY (`detectError`, `sandboxError`). */
   checks: RepoCheckRun[];
   skipped: string[];
+  /** Wave 6 (wicked-core#449 @ 9e11685, api-types 0.36.0): the sandbox level the checks ran under
+   *  (`bwrap`, `sandbox-exec`, `none`, …). Absent on an older engine. */
+  sandboxLevel?: string;
+  /** Wave 6: why the sandbox could not be armed, when it could not (`null` when it was). */
+  sandboxError?: string | null;
+  /** Wave 6: why check DETECTION failed (an unreadable `package.json`, a manifest with no
+   *  `typecheck`/`lint`/`test` script, …) — the reason an empty `checks` is empty; `null` when
+   *  detection succeeded. */
+  detectError?: string | null;
 };
 
 // ── wicked-core#431 gate / deliver evidence (F-3R2-013 / -010 / -009; api-types 0.33.0) ──────────
@@ -1404,6 +1520,11 @@ export type RunBaseResolvedEvent = {
   fetched: boolean;
   lifted: boolean;
   note: string | null;
+  /** Wave 6 (F-7R2-013, api-types 0.36.0): the run branch the worktree was minted on
+   *  (`wicked/<run id>`, sanitized), recorded on the session as `run_branch` beside `base_commit`
+   *  so the run's diff is servable from the branch once the worktree is reaped. Absent on an
+   *  engine predating wave 6. */
+  runBranch?: string;
 };
 
 /** The gate-evidence events (wicked-core F-036/F-039, extended by wicked-core#431 — api-types 0.33.0
@@ -1411,12 +1532,45 @@ export type RunBaseResolvedEvent = {
  *  {@link EvaluatorToolCallDeniedEvent}) as a discriminated union for consumers that narrow on `type`;
  *  they also flow through the permissive {@link CoreEvent}. {@link RunBaseResolvedEvent} is
  *  session-level evidence and stands on its own. */
+/**
+ * Wave 6 (F-7R2-012, api-types 0.36.0) — a WORKER seat asked to run a REMOTE-WRITING command
+ * (`git push`, `gh pr create|merge|edit|comment`, a `gh api` mutation, `gh release`, …) and the
+ * engine REFUSED it: delivery is performed by the run's deliver phase (which lifts, re-verifies,
+ * pushes and opens the PR so the ledger records it), never by a creator or evaluator seat. Emitted
+ * on both carriers: the ACP permission bridge (`carrier: 'acp'`) answers the seat's permission
+ * request with its reject option; the wrapped carrier's PreToolUse gate hook (`carrier:
+ * 'wrapped_cli'`) blocks the call and the fold replays the record at the gate. A refusal costs the
+ * seat one tool call, never the unit — the seat continues with `remedy`. Spelled exactly as
+ * wicked-core's `CoreEvent::to_json` emits it. `type` alias on purpose (relays through the
+ * `CoreEvent`-typed seams unchanged).
+ */
+export type WorkerToolCallDeniedEvent = {
+  type: 'workerToolCallDenied';
+  session: string;
+  ord: number;
+  attempt: number;
+  /** The registry seat key. */
+  cli: string;
+  /** `'acp'` | `'wrapped_cli'`; open-ended for a future carrier. */
+  carrier: 'acp' | 'wrapped_cli' | (string & {});
+  /** The unit's role (`creator` | `evaluator` | `neutral`). */
+  role: 'creator' | 'evaluator' | 'neutral' | (string & {});
+  /** The tool the seat invoked (`Bash`, `bash`, `shell`, …). */
+  tool: string;
+  /** The command text the seat sent. */
+  command: string;
+  reason: string;
+  /** What the seat was told to do instead ("delivery is performed by the run's deliver phase"). */
+  remedy: string;
+};
+
 export type GateEvidenceEvent =
   | EvaluatorMutatedWorktreeEvent
   | RepoChecksEvaluatedEvent
   | WorktreeRestoredEvent
   | DeliverLiftEvaluatedEvent
-  | EvaluatorToolCallDeniedEvent;
+  | EvaluatorToolCallDeniedEvent
+  | WorkerToolCallDeniedEvent;
 
 // ── P2 decisions-full observability events (wicked-core EVT-001/012/013) ────
 
@@ -1488,17 +1642,64 @@ export interface UnitPlannedEvent {
   executor_type: 'agent' | 'tool';
 }
 
-/** Foundation wave: a unit was distributed with full routing detail. */
+/**
+ * Foundation wave: a unit was distributed with full routing detail.
+ *
+ * WIRE SPELLING (api-types 0.36.0, crew#533 follow-through): the engine's `CoreEvent::to_json` and
+ * the napi frames spell these fields camelCase — `routingMethod`, `agreementPct`, `returned`,
+ * `seated`, `dissent`, `degradedReason`, `seatConstraint` — exactly as `wicked-core-ts`'s own
+ * `UnitDistributedEventJson` declares them; `packages/crew/tests/wire-contract.test.ts` pins this
+ * interface against that type AND against a recorded frame. Pre-0.36 this interface declared the
+ * snake_case spellings, which the engine never emitted — a consumer reading `degraded_reason` got
+ * `undefined` and rendered a benched council as whole. The snake_case names stay for ONE minor as
+ * `@deprecated` optional aliases (a normalising relay may still produce them); consumers read the
+ * camelCase names. Every camelCase `Option` field is emitted unconditionally: `null`, never absent.
+ */
 export interface UnitDistributedEvent {
   type: 'unitDistributed';
   session: string;
   ord: number;
+  /** The roster key of the assigned seat. */
   cli: string;
-  routing_method: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
-  agreement_pct: number | null;
+  /** How the seat was chosen: the council verdict, a degrade to the first candidate, an
+   *  evaluator ≠ creator reassignment, or a deterministic tool execution. */
+  routingMethod: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  agreementPct: number | null;
+  /** Ballots that came back. Read against `seated`. */
   returned: number | null;
+  /** Seats CONVENED for the council that produced this assignment (`null` = unknown / not a council). */
+  seated: number | null;
   dissent: number | null;
-  degraded_reason: string | null;
+  /**
+   * WHY the routing was degraded. Since wave 6 (F-7R2-006) the engine sets it on EVERY routing arm
+   * whenever the eligible seat set is smaller than the configured roster — `"4 of 5 seats benched:
+   * codex (signed out — launcher), pi (unauthenticated — ballot), …"` — not only for its `degraded`
+   * arm, so a council that held on a fraction of its seats reads as degraded. `null` when whole.
+   */
+  degradedReason: string | null;
+  /** WHY the candidate seats were narrowed BEFORE the council voted (core#401): a non-portable
+   *  skill constrained the unit to a claude seat. `null` when every roster seat was a candidate. */
+  seatConstraint: string | null;
+  /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
+  routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
+  /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */
+  agreement_pct?: number | null;
+  /** @deprecated api-types 0.36.0 — the engine emits `degradedReason`; removed in 0.37. */
+  degraded_reason?: string | null;
+}
+
+/** One seat the wave-6 engine BENCHED for a run (`AgentSession.benched_seats`, F-7R2-006): never
+ *  convened, never a failover or judge target, named in `unitDistributed.degradedReason`. */
+export interface BenchedSeat {
+  /** The roster key. */
+  cli: string;
+  /** Why — the launcher's words (`signed out`) or the engine's classification (`not_logged_in`,
+   *  `unauthenticated`). */
+  reason: string;
+  /** Who benched it: `launcher` (the roster's health probe — crew's `council_eligible`), `ballot`
+   *  (a council seat failure), `worker` (a unit's worker failed with an auth refusal), `judge`
+   *  (the seat failed while judging another unit — wicked-core#449 @ 9e11685). */
+  source: 'launcher' | 'ballot' | 'worker' | 'judge' | (string & {});
 }
 
 // ── Worker injection + reassignment events (core#93) ──────────────────────────
@@ -1962,8 +2163,40 @@ export interface SkillsManifestResponse {
   root: string;
   /** The VERIFIED published snapshot `current` resolves to, or `null` before the first publish.
    *  `path` is the absolute REAL path of `snapshots/<gen>` — byte-identical to the one input the
-   *  engine is handed (`WICKED_SKILLS_SNAPSHOT`; design v3.1 §2). */
-  current: { gen: number; path: string } | null;
+   *  engine is handed (`WICKED_SKILLS_SNAPSHOT`; design v3.1 §2). `rules` / `drift` (api-types
+   *  0.36.0, F-083 / crew#535) ride beside it on a daemon ≥ 0.7.30 — absent on an older one. */
+  current: {
+    gen: number;
+    path: string;
+    /** The portability rules the generation was published under vs the rules this daemon runs:
+     *  `recorded` is `null` for a generation predating the identity (0.7.29 and earlier);
+     *  `stale: true` = they differ and the daemon raised `skills.stale-rules`. */
+    rules?: {
+      recorded: PortabilityRulesIdentity | null;
+      running: PortabilityRulesIdentity;
+      stale: boolean;
+    };
+    /** The rows whose portability derives differently under the running rules than the snapshot
+     *  recorded — the `skills.stale-rules` warning names up to five; the list carries the rest.
+     *  `recorded.reasons` is `null` for a row written before per-reason portability (0.34.0). */
+    drift?: SnapshotRowDrift[];
+  } | null;
+}
+
+/** The identity of a portability-rule table (api-types 0.36.0, F-083): its version and the
+ *  sha256 of the committed parity fixture (`tests/fixtures/portability_rules.json`). */
+export interface PortabilityRulesIdentity {
+  version: number;
+  sha256: string;
+}
+
+/** One snapshot row whose portability the RUNNING rules derive differently than the snapshot
+ *  recorded (api-types 0.36.0, F-083) — see `SkillsManifestResponse.current.drift`. */
+export interface SnapshotRowDrift {
+  name: string;
+  recorded: { portable: boolean; reasons: SkillPortabilityReason[] | null };
+  /** What the RUNNING rules derive for the row — the same per-reason shape `SkillEntry.portability` carries. */
+  derived: SkillPortability;
 }
 
 export interface SkillFileEntry {
@@ -2563,6 +2796,148 @@ export interface TestingReconResponse {
   /** Present only when the fan was campaign-registered with a `projectId` and filing a sibling
    *  into the project failed — the runs are LIVE; re-attach via POST /projects/:id/members. */
   projectAttachError?: string;
+}
+
+// ── The governed test-authoring launch (wave 6; api-types 0.36.0) ──────────────────────────────
+
+/**
+ * The id of the governed test-authoring workflow the daemon serves (`GET /workflows` lists it, not
+ * `is_system` — an operator-selectable work mode): recon (`wicked-garden-qe` plan) → author
+ * (creator, evidence-floor pinned, `wicked-garden-qe` author) → verify (a TOOL phase that RUNS every
+ * produced test under the repository's own harness — vitest/jest/pytest/Playwright — and FAILS the
+ * unit when one fails or was never executed) → review (evaluator ≠ creator, `wicked-garden-qe`
+ * review) → the ENGINE's deliver phase (appended per run; never a worker's `gh pr create`).
+ * F-7R2-003/004/005/012/014/015 + acceptance R4-r2.
+ */
+export type QeAuthorTestsWorkflowId = 'qe-author-tests';
+
+/**
+ * Body of `POST /testing/author` — the Testing page's "New test". Same scope wire as
+ * {@link TestingReconBody} (`repoRefs` and/or `projectId`, resolved server-side), but the scope
+ * MUST resolve to ≥ 1 repo (a test-authoring run writes into a repository; an unscoped author is a
+ * 400). One governed `qe-author-tests` run per resolved repo, each filed under the repo's
+ * `qe-tests-<repo name>` label group (`RunGroup` on `GET /campaigns`).
+ */
+export interface TestingAuthorBody {
+  /** The operator's intent — what to test — verbatim; the run's problem statement. */
+  problem: string;
+  /** The project to FILE the runs into. Alone: the scope is the project's `crew.repo` members. */
+  projectId?: string;
+  /**
+   * The repos to author into (registry id or name). With `projectId`, THIS is the scope and the
+   * project is the filing only (a NARROWED project scope — studio #263 F-4): the runs are filed
+   * into the project without inheriting its other repo members, so a skin with repo chips names
+   * the repos and the project once instead of fanning one `POST /runs` per repo (one deliver/PR
+   * each). Unlike {@link TestingReconBody}, where both fields union. The 201 says which was used
+   * (`scope`).
+   */
+  repoRefs?: string[];
+  /** EXPLICITLY launch unattended (no intake gate). Default `false`: each run pauses at its intake
+   *  gate (`before:1`) with the plan on the table before any unit runs. */
+  ungated?: boolean;
+  /** `pr` (default) — the ENGINE's deliver phase opens the PR; `none` — the tests stay on the run
+   *  branch (`delivery: 'stranded'` on the wire, liftable via `POST /runs/:id/deliver`). */
+  deliver?: 'pr' | 'none';
+}
+
+/** One planned phase as the intake gate shows it — derived from the workflow DEFINITION. */
+export interface WorkflowPlanPhase {
+  id: string;
+  kind: StageKindPhase;
+  role: PhaseRole;
+  executor: 'agent' | 'tool';
+  /** The garden skill the phase routes through (`wicked-garden-qe`), `null` for a tool phase. */
+  skillRef: string | null;
+  /** `auto` | `human` (unconditional confirm) | `human_if_not_pass` (a not-pass verdict escalates). */
+  gate: 'auto' | 'human' | 'human_if_not_pass';
+  executesCode: boolean;
+  /** `true` for the phase the ENGINE appends and owns (the deliver phase) — not in the def. */
+  engine?: boolean;
+}
+
+/** The plan the intake gate shows (F-7R2-008): the phases in order + the seats a council may
+ *  pick from (the launcher's eligible roster — benched seats excluded). */
+export interface WorkflowPlan {
+  workflow: string;
+  phases: WorkflowPlanPhase[];
+  seats: string[];
+}
+
+/** One launched authoring run and the label group it was filed under. */
+export interface TestingAuthorRun {
+  runId: string;
+  repoRef: string;
+  /** `qe-tests-<repo name>` — the `RunGroup.label` on `GET /campaigns`. */
+  label: string;
+}
+
+/**
+ * The `POST /testing/author` 201 body. `runIds` is the source of truth (one per resolved repo in
+ * the caller's order); `runId` is its first entry. `plan` is what the intake card renders before
+ * approval; `gate` says whether the runs paused there. `campaignRegistered` is always `false`: an
+ * author launch is filed as label groups, never an engine campaign (campaign nodes are
+ * engine-launched and would not receive the daemon's deliver composition).
+ */
+export interface TestingAuthorResponse {
+  runId: string;
+  runIds: string[];
+  workflow: QeAuthorTestsWorkflowId;
+  runs: TestingAuthorRun[];
+  gate: 'before:1' | 'none';
+  deliver: 'pr' | 'none';
+  plan: WorkflowPlan;
+  /** How the repos were chosen: `repoRefs` — the named repos (a `projectId`, when given, was the
+   *  filing only); `project` — the project's `crew.repo` members. Absent on a daemon predating it. */
+  scope?: 'repoRefs' | 'project';
+  campaignRegistered: false;
+}
+
+/** One produced test file as the verify phase judged it. */
+export interface TestSetFile {
+  path: string;
+  /** `playwright` | `playwright-python` | `vitest` | `jest` | `pytest` | `python` | `unknown`. */
+  harness: string;
+  status: 'passed' | 'failed' | 'not-executed';
+}
+
+/**
+ * A registered TEST SET (wave 6, F-7R2-014; api-types 0.36.0) — the produced tests of a terminal
+ * `qe-author-tests` run, read back from its verify phase's `QE-VERIFY` report and recorded as a
+ * durable `testing.testset.registered` audit entry the daemon hydrates at boot. Served as
+ * `CampaignsListResponse.test_sets` — what the Test landing counts. Deny-dominates: a run whose
+ * verify phase FAILED registers too (`verified: false`, counts intact) so a red set is shown, never
+ * hidden; a run that never reached its verdict registers with zero counts and `plan: null`.
+ */
+export interface TestSet {
+  /** `testset-<run id>` — one set per producing run. */
+  id: string;
+  run_id: string;
+  workflow_id: QeAuthorTestsWorkflowId;
+  /** The `RunGroup.label` the launch filed the run under, when it did. */
+  label?: string;
+  repo_ref: string | null;
+  repo_name?: string;
+  /** Unix millis. */
+  registered_at: number;
+  /** The producing run's terminal status. */
+  run_status: SessionStatus | (string & {});
+  /** The verify unit's status (`done` | `rejected` | …); `null` when the run never planned one. */
+  verify_status: string | null;
+  /** `true` ONLY when the verify phase passed: ≥ 1 produced test, every one executed and green,
+   *  the repository checks green, the PLAN present. */
+  verified: boolean;
+  files: TestSetFile[];
+  produced: number;
+  executed: number;
+  passed: number;
+  failed: number;
+  not_executed: number;
+  /** The produced `tests/PLAN-*.md`, `null` when none was produced. */
+  plan: string | null;
+  /** The harnesses the produced tests ran under (unique, first-use order). */
+  harnesses: string[];
+  /** The delivered PR, when the engine's deliver phase opened one. */
+  deliverUrl?: string;
 }
 
 // ── Governance claims (crew#40/43) ─────────────────────────────────────────────
@@ -3329,6 +3704,12 @@ export interface InteractiveStatusPosted {
   message?: string;
   /** The edit seam stamps the handoff version it is answering. */
   version?: number;
+  /** Wave 6 (F-4R2-005 root fix; api-types 0.36.0): the governed run this narration is about, so a
+   *  skin keys the thread per run. Absent on a pre-launch status and on a pre-0.36 daemon. */
+  run_id?: string;
+  /** Wave 6: the unit (ord) the line narrates — the latest unit-scoped engine frame's `ord`, so a
+   *  skin renders one council at a time. Absent before the first unit-scoped frame. */
+  unit_ord?: number;
 }
 
 /**
@@ -3355,6 +3736,62 @@ export interface InteractiveDocSummary {
   retired_at?: string;
   /** The crew project this row was listed under — the mount's `:projectId`. */
   projectId: string;
+}
+
+/**
+ * `GET /api/v1/interactive/docs` (api-types 0.36.0, studio #263) — every interactive document across
+ * projects, listed by the DAEMON from disk WITHOUT spawning a bridge: each project's docs root
+ * (the per-project `interactiveRoot` binding, else `WICKED_INTERACTIVE_ROOT`, else the default
+ * root / its `projects/<id>` partition), each slug-named child carrying a `versions.json`, read by
+ * the bridge's own `listDocs` rules — plus what only the daemon knows: the seams that answered
+ * the document and the governed runs they launched (the handoff ledgers). The per-project
+ * `GET /projects/:id/interactive/api/docs` spawns one bridge per project (≈60 s cold start) — a
+ * skin must never fan that out on mount; this is the listing it mounts with. `?includeRetired=1`
+ * lists tombstoned rows too.
+ */
+export interface InteractiveDocsListing {
+  /** Newest first (by `updatedAt`), then by name. */
+  docs: InteractiveDocIndexRow[];
+  /** Project docs roots the daemon could not read (or a partition its containment walk refused),
+   *  with the reason — never silently dropped. `[]` when every root was readable. */
+  unreachable: InteractiveDocsUnreachable[];
+}
+
+/** The seams that can answer a document (the handoff ledgers). */
+export type InteractiveSeamKind = 'draft' | 'edit' | 'chat' | 'demo' | (string & {});
+
+/** One document on the daemon-wide listing (api-types 0.36.0). */
+export interface InteractiveDocIndexRow {
+  /** The project whose docs root holds the document. A root SHARED by several projects (an
+   *  explicit `interactiveRoot` binding, or `WICKED_INTERACTIVE_ROOT` applying to all) lists once,
+   *  under the first project in listing order (the synthesized `default` first). */
+  projectId: string;
+  /** The doc name (slug). */
+  name: string;
+  /** Manifest `kind`; a manifest without one lists as `doc`. */
+  kind: 'doc' | 'html' | 'source' | 'demo' | (string & {});
+  /** Head version; `null` when the manifest carries none. */
+  head: number | null;
+  /** Lineage size. */
+  versions: number;
+  /** ISO-8601 of the head (last) version, or `null` when the lineage is empty. */
+  updatedAt: string | null;
+  /** Present only on a retired (tombstoned) row, listed only with `?includeRetired=1`. */
+  retired?: true;
+  /** ISO-8601 retirement timestamp; present with `retired`. */
+  retiredAt?: string;
+  /** The seams that answered this document, from the handoff ledgers (`[]` = none yet). */
+  kinds: InteractiveSeamKind[];
+  /** The governed runs those seams launched for it (ledger order) — the doc ↔ run binding. */
+  runs: string[];
+}
+
+/** A project docs root the listing could not read (api-types 0.36.0). */
+export interface InteractiveDocsUnreachable {
+  projectId: string;
+  /** The resolved root, or `null` when the containment walk refused the partition before resolving one. */
+  root: string | null;
+  error: string;
 }
 
 /**
@@ -3491,9 +3928,22 @@ export interface ChatSeatOutcome {
  * REQUESTED seat (`clis`) the engine refused (`ChatSeatOutcome.ok: false`, its `error` repeated
  * here as `reason`). One list for the scope card and the thread to read.
  */
+/**
+ * Why a seat was not seated (api-types 0.36.0, F-A45-011): `auth` — signed out (the probe, or the
+ * seat's own "no credential" report); `scope` — the scoped-chat admission rule; `bench` — benched by
+ * this daemon's recent councils; `budget` — the engine did not warm it within its dispatch budget
+ * (the seat timed out or was dropped at dispatch); `engine` — the engine refused it with its own
+ * reason. Open-ended so a newer daemon's source parses in an older skin.
+ */
+export type ChatRefusalSource = 'auth' | 'scope' | 'bench' | 'budget' | 'engine' | (string & {});
+
 export interface ChatSeatRefusal {
   cliKey: string;
   reason: string;
+  /** api-types 0.36.0 (F-A45-011): the cause class. Absent on a daemon predating the field. Since
+   *  0.36.0 EVERY requested-or-defaulted seat that is not in `seats` as warm has an entry — a seat
+   *  the engine DROPPED at dispatch (absent from `seats` altogether) included, never a silent gap. */
+  source?: ChatRefusalSource;
 }
 
 /** `POST /chats` → 201. */
@@ -3522,6 +3972,8 @@ export type ChatSeatRefusedFrame = {
   chat: string;
   cliKey: string;
   reason: string;
+  /** api-types 0.36.0 (F-A45-011): the cause class — see {@link ChatRefusalSource}. */
+  source?: ChatRefusalSource;
   project_id?: string;
 };
 
@@ -3551,6 +4003,10 @@ export interface ChatDetailResponse {
   seats: string[];
   /** The scope recorded at open; `null` for a chat this daemon did not open (or after a restart). */
   scope: ChatScope | null;
+  /** The seats refused at open (api-types 0.36.0, F-A45-011) — the same list the 201 carried, so
+   *  the admission copy survives a reload; `null` for a chat this daemon did not open; absent on a
+   *  daemon predating the field. */
+  refused?: ChatSeatRefusal[] | null;
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────
@@ -3945,6 +4401,9 @@ export interface RunGroup {
 export interface CampaignsListResponse {
   campaigns: Campaign[];
   groups: RunGroup[];
+  /** The registered test sets (wave 6, F-7R2-014; api-types 0.36.0 — ADDITIVE: a pre-0.36 daemon
+   *  omits it). Newest first. See {@link TestSet}. */
+  test_sets?: TestSet[];
 }
 
 /**
@@ -4239,8 +4698,18 @@ export interface DiagnosticsSkillsFinding {
    *  (`error`, api-types 0.29.0) = `manifest.json` could not be read when diagnostics were taken
    *  (corrupt, unreadable, or the root no longer the one the store bound) — reported as
    *  `config-error` with the cause instead of the stale boot outcome; the exported engine input is
-   *  unchanged until the daemon restarts. */
-  kind: 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest';
+   *  unchanged until the daemon restarts; `skills.stale-rules` (`warning`, api-types 0.36.0, F-083 /
+   *  crew#535) = the CURRENT generation was published under OTHER portability rules than the daemon
+   *  now runs — accepted (the snapshot is never rewritten; the runtime stays `published`), the rows
+   *  that now derive differently are named (`SkillsManifestResponse.current.drift`), and a publish
+   *  records the running rules and clears it. */
+  kind:
+    | 'skills.fallback'
+    | 'skills.blocked'
+    | 'skills.config'
+    | 'skills.source'
+    | 'skills.manifest'
+    | 'skills.stale-rules';
   severity: 'warning' | 'error';
   message: string;
 }

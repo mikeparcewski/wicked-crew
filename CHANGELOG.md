@@ -10,6 +10,117 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **"New test" is a governed QE workflow, not a free-text plan (wave 6 — F-7R2-003/004/005/008/012/
+  013/014/015, acceptance R4-r2, F-075).** The studio's "New test" used to `POST /testing/recon` a
+  plain governed run: the planner split the brief at sentence boundaries into seven agent units
+  (two of them chat replies), every gate was a default-allow, no `skill_ref` routed the QE domain,
+  no deliver phase ran (the LAST worker opened the PR from its own shell — invisible to the
+  ledger), no campaign was registered (the Test landing stayed empty), and the produced Playwright
+  e2e was never executed by the run (it failed at its first check on the first independent run).
+  - **`qe-author-tests` drop-in workflow** (`packages/crew/src/qe/author-workflow.ts`, served from
+    `GET /workflows`, operator-selectable): `recon` (agent, `wicked-garden-qe` plan) → `author`
+    (agent CREATOR, `executes_code`, evidence-floor pinned, `wicked-garden-qe` author: behaviour
+    tests against the repo's own harness + `tests/PLAN-<slug>.md`) → `verify` (a TOOL phase that
+    RUNS the repository's own checks INCLUDING every produced test — vitest/jest/pytest/Playwright
+    detected from the repo, a repo-local `node_modules/.bin/<tool>` preferred — and FAILS the unit
+    when a produced test fails, was never executed, or no PLAN was produced; the report rides the
+    transcript as `QE-VERIFY:` / `QE-VERIFY-SUMMARY:` lines) → `review` (agent EVALUATOR,
+    `wicked-garden-qe` review, `human_confirm_if: verdict_not_pass`). Delivery is the ENGINE's
+    deliver phase appended per run (`deliver: "pr"` — the crew#393 code-work default), never a
+    worker's `gh pr create`. Validated by the engine as authored (wicked-core#414).
+  - **`POST /testing/author`** launches it: `repoRefs`/`projectId` scope (must resolve to ≥ 1 repo),
+    the operator's intent as the problem statement, one run per repo, each paused at its intake
+    gate unless `ungated: true`, filed under a `qe-tests-<repo>` label group; the 201 carries the
+    PLAN the intake gate shows (phases with kind/role/agent|tool/skill/gate + the engine's deliver
+    phase, and the seats a council may pick from — F-7R2-008). `POST /testing/recon` is unchanged.
+  - **A NARROWED project scope on `POST /testing/author`** (studio #263 review, F-4): with both
+    `projectId` and `repoRefs`, the repos are the SCOPE and the project is the FILING — the runs are
+    filed into the project without inheriting its other repo members (unlike `POST /testing/recon`,
+    where both union), so a skin with repo chips names them once instead of fanning one `POST /runs`
+    (one deliver/PR) per repo. The 201 says which was used (`scope: 'repoRefs' | 'project'`).
+  - **`GET /interactive/docs`** (studio #263 review): every interactive document across projects,
+    listed by the daemon from disk WITHOUT spawning a bridge — each project's docs root (its own
+    `interactiveRoot`, else `WICKED_INTERACTIVE_ROOT`, else the default root / `projects/<id>`
+    partition), each slug child carrying a `versions.json`, by the bridge's own `listDocs` rules
+    (`kind` defaults to `doc`, `updatedAt` = the head version's `created_at`, tombstones only with
+    `?includeRetired=1`) — plus the seams that answered each doc and the runs they launched (from
+    the handoff ledgers). `{docs, unreachable}`: a root the daemon could not read is named, never
+    dropped; a shared root lists once. The per-project `GET /projects/:id/interactive/api/docs`
+    still spawns one bridge per project (≈60 s cold start) — this is the listing a skin mounts with.
+  - **Test sets on `GET /campaigns`** (`test_sets`, F-7R2-014): a terminal `qe-author-tests` run
+    registers the produced tests as the verify phase judged them (files, harness, executed/passed/
+    failed counts, the PLAN, the delivered PR) — a durable `testing.testset.registered` audit entry
+    hydrated at boot. A failed verify registers `verified: false` (shown red, never hidden).
+  - **`GET /runs/:id/diff` serves a reaped worktree from the run branch** (F-7R2-013): when the
+    engine has reaped the worktree, the diff is read from the registered repo's `wicked/<id>`
+    branch against the engine's recorded `base_commit` (else the merge-base with the default
+    branch) — `source: 'branch'` (+ `branch`, `base`); the live worktree read carries
+    `source: 'worktree'`. 409 now means "no worktree AND no run branch".
+  - **`POST /runs/:id/reassign` on an `awaiting_human` run** (F-7R2-007): the engine's
+    `reassign_unit` accepts only an Executing run, so the route performs approve-then-reassign in
+    ONE call (audited as `gate.decided {via: 'reassign'}` + `run.reassigned`); the dead seat is
+    dispatched for the gap between the two engine calls — a bounded window the engine contract
+    leaves open. A steering-author propose gate is refused (its approve lands the proposal).
+  - **`document_id` on the run DTO + `GET /runs?doc=`** (F-4R2-006): the doc ↔ run binding read
+    off the interactive seams' handoff ledgers, no more `extra_write_roots` parsing in the skin.
+  - **`status.posted` frames carry `run_id` + `unit_ord`** (F-4R2-005): every seam narration line
+    and heartbeat is keyed per run and per unit.
+  - **The narrator consumes the wave-6 engine fields**: `unitDistributed.degradedReason` (now set on
+    every routing arm when seats are benched), `gateEvaluated.ungated`/`ungatedReason` ("Gate for
+    author: UNGATED — …", never "approved"), `workerToolCallDenied` (who, the refused command, the
+    remedy), and the `auth_failed`/`unauthenticated` `acpFallback` kinds (the seat is benched, not
+    "dropped").
+  - **The roster crew hands the engine is translated** (`core/engine-roster.ts`, the crew half of
+    F-7R2-006): crew's `GET /roster` readings (`health {status}`, `auth`, `council_eligible`, …) are
+    stripped from `clisJson` at launch and `council_eligible: false` becomes the wave-6 engine's
+    `AgenticCli.health {usable: false, reason}` bench verdict — a round-tripped crew `health` would
+    otherwise fail the wave-6 engine's deserializer under the same key. `POST /runs`' default roster
+    and the testing launches carry the standing.
+  - **A seat's `auth` comes from a credential PROBE, and the seat's own words override it
+    (F-A45-006, F-2R2-009 follow-through).** The roster read pi `signed_in: true` off a PRESENT but
+    EMPTY `auth.json` (`{}`) while every ballot failed "No API key found". The codex / opencode / pi
+    probes now need a credential-SHAPED file (a non-empty secret under a `key`/`token`/`access`/…
+    key at any depth; `{}`, a bare type marker, malformed JSON all read signed out), and the
+    seat-health fold records the seat's OWN "no credential" report — a `councilSeatFailed`
+    `not_logged_in` / "No API key" ballot, a worker's 401 / "Not logged in", an `auth_required` /
+    `auth_failed` / `unauthenticated` ACP fallback — which flips `auth` to `signed_out` (not only
+    `council_eligible`) for 30 minutes or until an ok output, with `auth_source: 'seat-stderr'` +
+    `auth_evidence` on the roster seat and in the council-ineligible reason.
+  - **Every seat a chat did not seat is named, whatever dropped it (F-A45-011, F-2R2-007 closed).**
+    A default seat the ENGINE dropped at dispatch (absent from `seats` altogether — the fresh rig's
+    pi, taken out by the council-bench / dispatch-timeout path, not by scope admission) answered a
+    201 with `refused: []`. `POST /chats` now names every requested-or-defaulted seat that is not
+    warm, with a `source` — `auth` (the seat's own "no credential" report or the probe), `scope`
+    (the scoped-chat rule), `bench` (this daemon's council bench), `budget` (the engine did not warm
+    it within its dispatch budget), `engine` (the engine's own refusal) — on the 201, on
+    `GET /chats/:id` (`refused`, kept with the scope), and as one `chatSeatRefused` thread frame each.
+  - **`wicked-crew-api-types` 0.36.0** (additive over 0.35.0): `ChatRefusalSource` +
+    `ChatSeatRefusal.source?` / `ChatSeatRefusedFrame.source?`, `ChatDetailResponse.refused?`,
+    `RosterSeat.auth_source?` / `auth_evidence?`; the F-083 hotfix's (crew#535) wire —
+    `DiagnosticsSkillsFinding.kind` gains `skills.stale-rules`, `SkillsManifestResponse.current`
+    gains `rules?` (`PortabilityRulesIdentity` recorded/running + `stale`) and `drift?`
+    (`SnapshotRowDrift[]`); the #449 review-fix wire (`@ 9e11685`): `GateEvaluatedEvent.floorNote?`
+    / `judgeSkippedReason?` (the per-layer reasons beside `ungated`), `RepoChecksEvaluatedEvent.sandboxLevel?`
+    / `sandboxError?` / `detectError?` (an empty `checks` says WHY — the deliver text renders
+    "0 checks detected" with that reason, never "checks ran"), `BenchedSeat.source` gains `judge`;
+    `UnitDistributedEvent` now declares
+    the camelCase names the engine EMITS (`routingMethod`, `agreementPct`, `returned`, `seated`,
+    `dissent`, `degradedReason`, `seatConstraint` — the snake_case names stay one minor as
+    `@deprecated` optional aliases; a wire-contract test pins the interface against wicked-core-ts's
+    own `UnitDistributedEventJson` and a recorded frame); `GateEvaluatedEvent.ungated?` /
+    `ungatedReason?`; `WorkerToolCallDeniedEvent` (in `GateEvidenceEvent`); `AcpFallbackKind`
+    `auth_failed` / `unauthenticated`; `RunBaseResolvedEvent.runBranch?`; `AgentSession.document_id?`
+    / `run_branch?` / `base_commit?` / `finished_at?` / `benched_seats?` (+ `BenchedSeat`);
+    `RunDiff.source?` / `branch?` / `base?`; `TestingAuthorBody` / `TestingAuthorResponse` /
+    `WorkflowPlan` / `WorkflowPlanPhase` / `TestingAuthorRun` / `QeAuthorTestsWorkflowId`;
+    `TestSet` / `TestSetFile` + `CampaignsListResponse.test_sets?`; `InteractiveStatusPosted.run_id?`
+    / `unit_ord?`; `TestingAuthorResponse.scope?` + the narrowed-scope semantic on
+    `TestingAuthorBody.repoRefs`; `InteractiveDocsListing` / `InteractiveDocIndexRow` /
+    `InteractiveDocsUnreachable` / `InteractiveSeamKind` (`GET /interactive/docs`). Endpoint manifest
+    + generated API tests re-stamped.
+
 ### Fixed
 
 - **F-083 — a skills generation published under OLDER portability rules is accepted with a

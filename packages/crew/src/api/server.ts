@@ -35,7 +35,9 @@ import { startInteractiveEditSubscriber } from '../interactive/edit-events.js';
 import { startInteractiveChatSubscriber } from '../interactive/chat-events.js';
 import { startInteractiveDemoSubscriber } from '../interactive/demo-events.js';
 import { resolveProjectInteractiveRoot } from '../interactive/bridge-root.js';
-import { sweepDocLedgers, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
+import { sweepDocLedgers, type DocLedgerSource, type DocLedgerSweep } from '../interactive/doc-ledger-sweep.js';
+import { DocRunIndex } from '../interactive/doc-run-index.js';
+import { TestSetIndex, registerTestSetForRun } from '../qe/test-sets.js';
 import { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { crewStateHome } from '../projects/state-home.js';
@@ -458,6 +460,10 @@ export async function createServer(
   // trail's `run.delivered` entries so `session.delivery` survives a daemon restart.
   const deliveryIndex = new DeliveryIndex();
   await deliveryIndex.hydrate(audit, (m) => app.log.warn(m));
+  // Wave 6 (F-7R2-014): the test sets `qe-author-tests` runs registered — same durable pattern,
+  // hydrated from the trail's `testing.testset.registered` entries, fed at each terminal frame.
+  const testSets = new TestSetIndex();
+  await testSets.hydrate(audit, (m) => app.log.warn(m));
   // The background delivery-derivation cache (GET /runs p99): the ONLY place the git vacuity
   // probes run in the daemon — the run DTOs read this cache (degrading to the stat-only
   // stranded/none label on a miss) and never spawn git on the request path. ONE probes object,
@@ -576,37 +582,43 @@ export async function createServer(
   // `crew-grounding.json` sidecar beside the doc's `versions.json` under the project's docs root
   // (doc-grounding.ts says why not the state home: core's fence refuses unregistered entries).
   const docGrounding = new DocGroundingStore();
+  /** The four seams' ledgers, read AT USE TIME (a seam that armed after this closure was built is
+   *  still preferred over its file) — shared by the doc-delete sweep and the doc↔run index. */
+  const docLedgerSources = (): DocLedgerSource[] => [
+    {
+      name: 'draft',
+      ledger: draftSub?.ledger,
+      path:
+        options?.interactiveDraftEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-draft-ledger.json'),
+    },
+    {
+      name: 'edit',
+      ledger: editSub?.ledger,
+      path:
+        options?.interactiveEditEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-edit-ledger.json'),
+    },
+    {
+      name: 'chat',
+      ledger: chatSub?.ledger,
+      path:
+        options?.interactiveChatEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-chat-ledger.json'),
+    },
+    {
+      name: 'demo',
+      ledger: demoSub?.ledger,
+      path:
+        options?.interactiveDemoEvents?.ledgerPath ??
+        join(crewStateDir, 'interactive-demo-ledger.json'),
+    },
+  ];
   const dropDocLedgerRows = (documentId: string): DocLedgerSweep =>
-    sweepDocLedgers(documentId, [
-      {
-        name: 'draft',
-        ledger: draftSub?.ledger,
-        path:
-          options?.interactiveDraftEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-draft-ledger.json'),
-      },
-      {
-        name: 'edit',
-        ledger: editSub?.ledger,
-        path:
-          options?.interactiveEditEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-edit-ledger.json'),
-      },
-      {
-        name: 'chat',
-        ledger: chatSub?.ledger,
-        path:
-          options?.interactiveChatEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-chat-ledger.json'),
-      },
-      {
-        name: 'demo',
-        ledger: demoSub?.ledger,
-        path:
-          options?.interactiveDemoEvents?.ledgerPath ??
-          join(crewStateDir, 'interactive-demo-ledger.json'),
-      },
-    ]);
+    sweepDocLedgers(documentId, docLedgerSources());
+  // Wave 6 (F-4R2-006 root fix): the document ↔ run binding as a direct read off the SAME four
+  // ledgers — `AgentSession.document_id` on the run DTO and `GET /runs?doc=`.
+  const docRuns = new DocRunIndex(docLedgerSources, { log: (m) => app.log.warn(m) });
 
   // The interactive relay seam (DES-MERGE-001 §5.4/§6.1, slice 3): every wicked.interactive.**
   // bus event becomes an `interactiveEvent` frame on the SAME /ws socket the studio already
@@ -995,7 +1007,36 @@ export async function createServer(
       (event.type === 'sessionCompleted' || event.type === 'sessionFailed') &&
       session !== undefined
     ) {
-      void resolveRunDelivery(session).then(() => deliveryCache.warm(session));
+      void resolveRunDelivery(session)
+        .then(() => deliveryCache.warm(session))
+        // Wave 6 (F-7R2-014): a terminal `qe-author-tests` run registers its TEST SET — the
+        // produced tests as the verify phase judged them — AFTER the delivery record resolved, so
+        // the set carries the PR URL when the engine's deliver phase opened one. Best-effort:
+        // registration never fails the run; a non-qe run is a no-op.
+        .then(() =>
+          registerTestSetForRun(
+            {
+              adapter,
+              audit,
+              index: testSets,
+              workflows: () => adapter.listWorkflows(),
+              deliveryUrlFor: (runId) => deliveryIndex.urlFor(runId),
+              labelFor: (runId) => {
+                const attach = groupIndex.attachOf(runId);
+                return attach !== undefined && 'label' in attach ? attach.label : undefined;
+              },
+              log: (m) => app.log.info(m),
+            },
+            session,
+          ),
+        )
+        .catch((err: unknown) => {
+          app.log.warn(
+            `[testing] test-set registration for ${session} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
     }
     // A completed ONBOARDING run refreshes the project graph(s) its repo belongs to (F-2R2-008):
     // bounded (plain refresh — unchanged members skip; one project at a time; at most two rounds),
@@ -1158,6 +1199,9 @@ export async function createServer(
       guidanceIndex,
       chatScopes,
       deliveryIndex,
+      // Wave 6: the doc↔run binding (F-4R2-006) and the registered test sets (F-7R2-014).
+      docRuns,
+      testSets,
       // The delivery machinery built beside the index above: the started cache, and the SAME
       // probe functions it derives through — so the routes' campaign rollup shares one TTL memo
       // with the sweeper instead of re-probing on its own clock.

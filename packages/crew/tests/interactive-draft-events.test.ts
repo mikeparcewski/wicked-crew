@@ -615,6 +615,35 @@ describe('startInteractiveDraftSubscriber (real bus, fake engine)', () => {
     await waitFor(narrated('using Write, Read'));
     engine.fire({ type: 'gateDecided', session: launch.sessionId, ord: 2, allow: true });
     await waitFor(narrated('checking the file landed'));
+    // Wave 6: the honest gate (F-7R2-005) and the fenced worker (F-7R2-012) reach the thread, and
+    // every line is stamped per run + unit (F-4R2-005) so a skin keys narration per unit.
+    engine.fire({
+      type: 'gateEvaluated',
+      session: launch.sessionId,
+      ord: 2,
+      ungated: true,
+      ungatedReason: 'no judge: no eligible judge seat distinct from creator `stub`',
+    } as unknown as CoreEvent);
+    await waitFor(narrated('UNGATED — no judge'));
+    engine.fire({
+      type: 'workerToolCallDenied',
+      session: launch.sessionId,
+      ord: 2,
+      attempt: 0,
+      cli: 'stub',
+      carrier: 'acp',
+      role: 'creator',
+      tool: 'Bash',
+      command: 'gh pr create',
+      reason: 'remote-write fence',
+      remedy: "delivery is performed by the run's deliver phase",
+    } as unknown as CoreEvent);
+    await waitFor(narrated('asked to run `gh pr create` — refused'));
+    const stamped = probeEvents.find(
+      (e) => e.event_type === STATUS_POSTED && String((e.payload as { message?: string }).message).includes('UNGATED'),
+    );
+    expect((stamped!.payload as { run_id?: string }).run_id).toBe(launch.sessionId);
+    expect((stamped!.payload as { unit_ord?: number }).unit_ord).toBe(2);
     // The floor's own gate is what says "landing it now" — the draft is announced once the
     // FILE is verified, never on the strength of the worker's reply alone (crew#311).
     engine.fire({ type: 'unitDispatched', session: launch.sessionId, ord: 3, attempt: 0 });

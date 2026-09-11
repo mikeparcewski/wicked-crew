@@ -199,8 +199,8 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       expect(scopedBody.refused[1]!.reason).toMatch(/no ACP adapter registered/);
       // …and in the thread, one frame per refused seat, AFTER the scope is published.
       expect(broadcast).toEqual([
-        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'pi', reason: scopedBody.refused[0]!.reason },
-        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[1]!.reason },
+        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'pi', reason: scopedBody.refused[0]!.reason, source: 'scope' },
+        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[1]!.reason, source: 'scope' },
       ]);
       broadcast = [];
       const plain = await open({ chatId: 'dflt-plain' });
@@ -257,8 +257,8 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(res.statusCode).toBe(201);
     const body = res.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
     expect(body.seats.map((s) => [s.cliKey, s.ok])).toEqual([['claude', true], ['pi', false]]);
-    expect(body.refused).toEqual([{ cliKey: 'pi', reason: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" }]);
-    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'req', cliKey: 'pi', reason: body.refused[0]!.reason }]);
+    expect(body.refused).toEqual([{ cliKey: 'pi', reason: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions", source: 'engine' }]);
+    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'req', cliKey: 'pi', reason: body.refused[0]!.reason, source: 'engine' }]);
   });
 
   it('a chatClosed that lands while an open is in flight cancels it: nothing is recorded and the chat is torn down', async () => {

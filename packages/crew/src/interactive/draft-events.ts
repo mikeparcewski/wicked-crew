@@ -56,7 +56,13 @@ import {
 import type { CoreAdapter } from '../core/adapter.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
-import { councilAgreementPct, councilOutcomeSuffix } from './council-outcome.js';
+import {
+  acpFallbackLine,
+  councilAgreementPct,
+  councilOutcomeSuffix,
+  ungatedGateNote,
+  workerToolCallDeniedLine,
+} from './council-outcome.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -107,6 +113,27 @@ export interface SeamStatusPayload {
   state: 'processing' | 'working' | 'asking' | 'complete' | 'error';
   message?: string;
   version?: number;
+  /** The governed run this narration is about (wave 6, F-4R2-005): a skin keys narration per run
+   *  and per unit instead of one undifferentiated thread. Absent on a pre-launch status. */
+  run_id?: string;
+  /** The unit (ord) the line narrates — the most recent engine frame's `ord`; absent before the
+   *  first unit-scoped frame. */
+  unit_ord?: number;
+}
+
+/**
+ * The `run_id` / `unit_ord` stamps every seam's narration and heartbeat carry (F-4R2-005): the run
+ * the flight launched and the ord of the latest unit-scoped engine frame — so a repeated heartbeat
+ * says which unit it is still waiting on, and a skin can render one council at a time.
+ */
+export function narrationStamps(flight: {
+  runId?: string | undefined;
+  narrationOrd?: number | undefined;
+}): { run_id?: string; unit_ord?: number } {
+  return {
+    ...(flight.runId !== undefined ? { run_id: flight.runId } : {}),
+    ...(flight.narrationOrd !== undefined ? { unit_ord: flight.narrationOrd } : {}),
+  };
 }
 
 /** How long a seam waits for the proxy to record a document's create-time grounding binding when
@@ -550,6 +577,10 @@ interface InFlight {
   snapshotDirs: string[];
   /** The most recent real narration line (phase transitions overwrite it; the heartbeat repeats it). */
   narration: string;
+  /** The governed run id (the in-flight map key), stamped on narration as `run_id` (F-4R2-005). */
+  runId?: string | undefined;
+  /** The ord of the latest unit-scoped engine frame, stamped on narration as `unit_ord`. */
+  narrationOrd?: number | undefined;
   /** Undefined while the flight is a PRE-LAUNCH placeholder (registered before the snapshot
    *  await so `inFlightDocs()` reports the doc busy — Copilot round 2); set once the launch
    *  resolves. */
@@ -687,6 +718,7 @@ export async function startInteractiveDraftSubscriber(
       ...docScope(flight.documentId, flight.projectId),
       state: 'working',
       message,
+      ...narrationStamps(flight),
     });
   }
 
@@ -738,6 +770,10 @@ export async function startInteractiveDraftSubscriber(
     if (runId === undefined) return;
     const flight = inFlight.get(runId);
     if (flight === undefined) return;
+    // F-4R2-005: every narration line and heartbeat from here carries the run id and the ord of the
+    // latest unit-scoped frame (`narrationStamps`), so a skin keys the thread per run and per unit.
+    flight.runId ??= runId;
+    if (typeof event.ord === 'number') flight.narrationOrd = event.ord;
 
     // Narration ladder (#user-feedback 2026-08-14): the heartbeat repeats the LATEST line, and
     // the interactive transcript dedups consecutive repeats — so the more the line ADVANCES with
@@ -819,9 +855,26 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
 
+    // Wave 6 — the honest gate (F-7R2-005): a unit NOTHING gated must read as UNGATED in the thread,
+    // never as approved; the engine says so on `gateEvaluated.ungated` and names the missing layers.
+    if (event.type === 'gateEvaluated') {
+      const note = ungatedGateNote(event);
+      if (note !== null) {
+        const ord = typeof event.ord === 'number' ? event.ord : 0;
+        narrate(flight, `Gate for ${phaseName(ord)}: ${note}`);
+      }
+      return;
+    }
+
+    // Wave 6 — the fenced worker (F-7R2-012): a seat that tried to push or open a PR itself was
+    // refused; the thread names who, what, and that delivery belongs to the run's deliver phase.
+    if (event.type === 'workerToolCallDenied') {
+      narrate(flight, workerToolCallDeniedLine(event));
+      return;
+    }
+
     if (event.type === 'acpFallback') {
-      const who = typeof event.cliKey === 'string' ? event.cliKey : 'the worker';
-      narrate(flight, `${who}'s live session dropped — continuing in single-shot mode…`);
+      narrate(flight, acpFallbackLine(event));
       return;
     }
 
@@ -1219,6 +1272,7 @@ export async function startInteractiveDraftSubscriber(
         ...docScope(flight.documentId, flight.projectId),
         state: 'working',
         message: flight.narration,
+        ...narrationStamps(flight),
       });
     }, heartbeatMs);
     // Do not keep the daemon alive for narration alone.

@@ -201,6 +201,9 @@ export function registerCampaignRoutes(
         return {
           campaigns: await Promise.all(campaigns.map((c) => enrichCampaign(c, byId, deps))),
           groups: await buildGroups(byId, deps),
+          // Wave 6 (F-7R2-014): the test sets `qe-author-tests` runs registered at completion —
+          // what the Test landing counts (tests / test runs / pass rate). Additive, `[]` when none.
+          test_sets: deps.testSets?.list() ?? [],
         };
       } catch (err) {
         if (err instanceof CampaignsUnsupportedError) {
