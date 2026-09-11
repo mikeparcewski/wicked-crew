@@ -10,6 +10,40 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.30] — 2026-09-11
+
+Release train (wave 4/5) — **core-ts 0.7.21 / studio 0.5.6 / interactive 0.9.1 / garden 12.33.0.**
+Pins the published `wicked-core-ts` `^0.7.21` engine (wicked-core #442 / #443 / #444: every seat
+that receives a skills delivery is also handed `WICKED_GARDEN_ROOT` + a `PATH` prefix; over ACP the
+skills lever is judged from the seat binary, so pi behind `pi-acp` receives `WICKED_PI_SKILL_DIRS`
+with the SET / EMPTY / UNSET contract; the codex skills lever populates the engine-minted
+`CODEX_HOME/skills` from the pinned snapshot; the creator write posture is derived per unit from its
+role — F-4R2-004), bundles the published `wicked-studio` 0.5.6 skin (built against
+`wicked-crew-api-types` 0.34.0 — reassign-to-seat + retry on a failure-escalation gate, the
+wicked-core#431 wire on the gate card / delivery card / run head; the 0.35.0 roster fields below are
+read defensively when this daemon sends them), follows `wicked-interactive@^0.9.1` (F-081 — the
+compiled `^0.8.1` floor had frozen the bridge) and rides with `wicked-garden` 12.33.0 (the cross-CLI
+skills-portability convention + launcher; garden's lint vendors this release's
+`portability_rules.json`). The sibling workspace packages were published AHEAD of this cut:
+`wicked-crew-api-types` 0.34.0 (`api-types-v0.34.0` on the #532 merge) and 0.35.0
+(`api-types-v0.35.0` on the #533 merge); `agent-acp-bridges` 1.1.0 (`bridges-v1.1.0`, #532) and
+1.1.1 (`bridges-v1.1.1`, #533) — crew's dependency range is `^1.1.1`. This is the first crew release
+cut through wicked-ci v1.2.0 with `arm_checks_sandbox: true` (#530). What merged since 0.7.29 — the
+detailed entries follow under Added / Changed / Fixed:
+
+- **#530** — release workflow: pin wicked-ci v1.2.0 by SHA and opt into its checks sandbox
+  (`arm_checks_sandbox: true`) instead of the #529 `install_cmd` prefix (workflow only, no daemon
+  change).
+- **#532** — skills portability is reported per reason (validator; F-079, crew#531); api-types
+  0.34.0; a pi seat receives the skills snapshot over the ACP carrier (`agent-acp-bridges` 1.1.0 +
+  the `wicked-pi` launcher).
+- **#533** — daemon honesty, wave 5: the legacy outbox is attributed to the daemon that owns it,
+  `POST /chats` names every seat it refused, `GET /repos/:id/graph` says why there is no graph, the
+  roster says what "signed out" means per seat (+ council eligibility learned from the engine),
+  degraded councils are narrated as such, an onboarding run's seat pool is its workflow's, the
+  interactive bridge follows `^0.9.1` (F-081) with the `WICKED_INTERACTIVE_SPEC` range override;
+  api-types 0.35.0; `agent-acp-bridges` 1.1.1 (the three-state pi skills env contract).
+
 ### Added
 
 - **Skills portability is reported per reason, not as one bit (F-079, wicked-crew#531).** The
@@ -44,6 +78,18 @@ mentioned only where a daemon release depends on them.
   BEFORE the crew release that ships this): a published crew resolving 1.0.0 warns once at boot
   and a pi seat over ACP receives no skills, exactly as before. The `wicked-pi` process is known
   to the orphan reaper.
+
+### Changed
+
+- **The release workflow calls wicked-ci v1.2.0 and opts into its checks sandbox (#530).**
+  `.github/workflows/release.yml` now pins `node-release.yml@2346ba60 # v1.2.0` (the last caller
+  still floating on `@v1`) and sets `arm_checks_sandbox: true`, so the reusable workflow itself
+  installs `bubblewrap`, lifts the ubuntu-24.04 AppArmor gate on unprivileged user namespaces and
+  smokes `bwrap … /bin/true` before the test job — the sequence #529 had folded into this caller's
+  `install_cmd` as a stop-gap after the `v0.7.29` tag's first release run went red on deliver-e2e
+  (`no OS write boundary could be armed`, wicked-core#433) while PR CI was green. `install_cmd` is
+  back to `node scripts/fetch-core-checkout.mjs && npm install`. No daemon change; the `v0.7.30` tag
+  is the first run that proves the reusable step.
 
 ### Fixed
 
@@ -1941,7 +1987,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...HEAD
+[0.7.30]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.26...v0.7.27
