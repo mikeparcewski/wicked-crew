@@ -28,9 +28,12 @@
  * Every one of them — and every refusal crew's own script prints (`core/deliver.ts`: nothing to
  * deliver, the default branch, a moved verified base, a failed `gh`) — is an OPERATOR decision,
  * never a seat fault. This module recognises them from the excerpt the engine puts on
- * `stepFailed.detail` / the unit's `denial_reason` (head 150 + tail 250 chars of the output,
- * `bounded_excerpt` in `actor.rs`; every phrase matched here sits inside the first 150 chars of the
- * line that carries it, and the script prints its refusal as the LAST line, so both ends survive).
+ * `stepFailed.detail` / the unit's `denial_reason` — head 150 + tail 250 chars of the WHOLE Tool
+ * output (`bounded_excerpt` in `actor.rs`). The engine's refusals ARE the whole output (the command
+ * never ran) and every phrase matched here sits inside the first 150 chars of that text, so they
+ * survive in the head. The script's refusals come AFTER real fetch / install / codegen chatter, so
+ * only the tail is theirs: every script marker (`LIFT-CONFLICT`, `BASE MOVED`, `PREFLIGHT CHANGED`)
+ * TRAILS its last line and lands in the tail-250 (review F-527-001).
  *
  * ORDERING: this is a TEXT classifier and assumes nothing about the event stream. In particular a
  * deliver unit refused for a wrong HEAD ref (`deliver: the worktree's HEAD is attached to …`) emits

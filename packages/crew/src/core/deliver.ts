@@ -272,7 +272,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // Derive origin's default branch FIRST — the refusal below must cover a repo whose
     // default is trunk/develop/anything, not just main/master (Copilot on #303).
     'git fetch origin',
-    'D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)',
+    // …the way the ENGINE derives it (wicked-core `deliver_lift.rs`, review F-527-003): origin/HEAD
+    // when it resolves to a commit — a DANGLING origin/HEAD (the remote's default branch renamed or
+    // deleted since the clone) is tolerated — else origin/main, else origin/master, else origin/main
+    // for the refusal texts. A repo whose base is origin/master must never read as a moved base.
+    'D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || true)',
+    'if [ -z "$D" ] || ! git rev-parse --verify -q "$D^{commit}" >/dev/null; then if git rev-parse --verify -q origin/main^{commit} >/dev/null; then D=origin/main; elif git rev-parse --verify -q origin/master^{commit} >/dev/null; then D=origin/master; else D=origin/main; fi; fi',
     'DEF="${D#origin/}"',
     // (b) Refuse the repo's own default branch (by derived name), the classic names, and an
     // empty name (detached HEAD), which would otherwise turn the push into a garbage ref.
@@ -294,10 +299,13 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // stays exactly as the engine left it, so an approved retry re-lifts onto the new tip and
     // re-verifies from scratch. Deliberately NO LIFT-CONFLICT marker (see
     // DELIVER_BASE_MOVED_MARKER). An unresolvable default ref with the pin set refuses the same way
-    // (fail closed): the script cannot prove the base it is about to rebase onto.
+    // (fail closed): the script cannot prove the base it is about to rebase onto. The MARKER TRAILS
+    // the line (review F-527-001): the engine keeps head-150 + tail-250 chars of the WHOLE output, and
+    // this line follows the fetch's chatter, so a marker at its head would be elided while a trailing
+    // one always lands in the tail — as the LIFT-CONFLICT push-failure line below already does.
     'if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then',
     '  T=$(git rev-parse --verify -q "$D^{commit}" || true)',
-    `  [ "$T" = "$WICKED_DELIVER_VERIFIED_BASE" ] || { echo "${DELIVER_BASE_MOVED_MARKER} — $D is now \${T:-unresolvable} but the engine verified this work against $WICKED_DELIVER_VERIFIED_BASE; refusing to rebase past the verified base. Nothing was staged, committed or pushed — approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing)"; exit 1; }`,
+    `  [ "$T" = "$WICKED_DELIVER_VERIFIED_BASE" ] || { echo "deliver: the engine verified this work against $WICKED_DELIVER_VERIFIED_BASE but $D is now \${T:-unresolvable} — refusing to rebase past the verified base; approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing). Nothing was staged, committed or pushed; ${DELIVER_BASE_MOVED_MARKER} ($D now \${T:-unresolvable}, verified $WICKED_DELIVER_VERIFIED_BASE)"; exit 1; }`,
     'fi',
     // A failed PUSH happens after the product was committed. Keep its worktree from being reaped
     // by leaving this reserved, untracked recovery sentinel; it is removed HERE (before staging)
@@ -398,16 +406,21 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // (WICKED_DELIVER_POSTHOC=1, `POST /runs/:id/deliver`) has no engine verification to protect and
     // keeps the crew#426 behaviour — but SAYS which tracked files it regenerated, so the PR reviewer
     // sees it. Deliberately NO LIFT-CONFLICT marker: a regenerated tree is not a recoverable strand.
-    '_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$TD/preidx" git write-tree; }',
+    // The scratch index is SEEDED from HEAD before `add -A` (review F-527-007), so a tracked path a
+    // `.gitignore` also matches is still in both snapshots and its regeneration is seen; a git failure
+    // is loud (no swallowed stderr — a partial snapshot on both sides would compare equal).
+    '_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git read-tree HEAD && GIT_INDEX_FILE="$TD/preidx" git add -A -- . && GIT_INDEX_FILE="$TD/preidx" git write-tree; }',
     'if [ -f package.json ] && [ -f package-lock.json ] && [ -f packages/crew/package.json ] && [ -f packages/crew-api-types/package.json ]; then',
-    '  T0=$(_tree)',
+    '  T0=$(_tree) || { echo "deliver: could not snapshot the worktree before the preflight; nothing was staged, committed or pushed"; exit 1; }',
     '  npm install --prefer-offline --no-audit --no-fund',
     '  npm run manifest:endpoints -w packages/crew',
     '  npm run generate:api-tests -w packages/crew',
-    '  T1=$(_tree)',
+    '  T1=$(_tree) || { echo "deliver: could not snapshot the worktree after the preflight; nothing was staged, committed or pushed"; exit 1; }',
     '  if [ "$T0" != "$T1" ]; then',
     '    CH=$(git diff-tree -r --name-only "$T0" "$T1" | tr "\\n" " ")',
-    `    if [ -z "\${WICKED_DELIVER_POSTHOC:-}" ]; then echo "${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: \${CH}; refusing to push a tree the engine did not verify. The regenerated files are left in the worktree (unstaged) — approve to retry the deliver phase: the engine re-verifies the changed tree first and this script then delivers it (a second regeneration changes nothing). Nothing was staged, committed or pushed"; exit 1; fi`,
+    // The marker TRAILS the line, followed by the file list, so both survive the engine's tail-250
+    // excerpt after the install/codegen chatter (review F-527-001).
+    `    if [ -z "\${WICKED_DELIVER_POSTHOC:-}" ]; then echo "deliver: the crew#426 lockfile/codegen re-sync CHANGED the worktree after the engine verified it — refusing to push a tree the engine did not verify. The regenerated files are left in the worktree (unstaged); approve to retry the deliver phase: the engine re-verifies the changed tree first and this script then delivers it (a second regeneration changes nothing). Nothing was staged, committed or pushed; ${DELIVER_PREFLIGHT_CHANGED_MARKER}: \${CH}"; exit 1; fi`,
     '    echo "deliver: preflight regenerated tracked files on a post-hoc lift (no engine verification to protect): $CH"',
     '  fi',
     'fi',

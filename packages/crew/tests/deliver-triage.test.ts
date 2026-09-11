@@ -71,9 +71,9 @@ const ENGINE = {
     'worktree (or reject the run) and approve to retry; the checks run again until the tree passes.',
   checksMutated:
     "deliver: the repository's checks passed but CHANGED the worktree while running (tree 598bbb99 → " +
-    '4bffa800, HEAD f57069d → f57069d) — a check script that edits tracked files or moves HEAD leaves ' +
-    "a tree nobody verified. Nothing was pushed. Inspect the worktree, fix or ignore the check's " +
-    'writes, and approve to retry.',
+    '4bffa800, HEAD f57069d → f57069d, HEAD ref Some("refs/heads/wicked/run-1") → Some("refs/heads/main")) — ' +
+    'a check script that edits tracked files, moves HEAD or switches the branch leaves a tree nobody ' +
+    "verified. Nothing was pushed. Inspect the worktree, fix or ignore the check's writes, and approve to retry.",
   resnapshotFailed:
     "deliver: the repository's checks passed but the worktree could not be re-snapshotted afterwards " +
     '(git status: exit 128); nothing was pushed — the deliver gate never pushes a tree it cannot prove.',
@@ -168,9 +168,9 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
       `retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}`;
     expect(triageDeliverFailure(push)).toMatchObject({ kind: 'lift_conflict', author: 'script', recoverable: true });
     const moved =
-      `${DELIVER_BASE_MOVED_MARKER} — origin/main is now 9f3c1a2 but the engine verified this work against ` +
-      'f57069d; refusing to rebase past the verified base. Nothing was staged, committed or pushed — approve ' +
-      'to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing)';
+      'deliver: the engine verified this work against f57069d but origin/main is now 9f3c1a2 — refusing to rebase past ' +
+      'the verified base; approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository ' +
+      `checks before pushing). Nothing was staged, committed or pushed; ${DELIVER_BASE_MOVED_MARKER} (origin/main now 9f3c1a2, verified f57069d)`;
     expect(triageDeliverFailure(moved)).toEqual({
       kind: 'base_moved',
       author: 'script',
@@ -178,8 +178,8 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
       recoverable: false,
     });
     const regenerated =
-      `${DELIVER_PREFLIGHT_CHANGED_MARKER} — the crew#426 lockfile/codegen re-sync rewrote: packages/crew/endpoint-manifest.json ; ` +
-      'refusing to push a tree the engine did not verify. Regenerate in the worktree (…), then approve to retry the deliver phase';
+      'deliver: the crew#426 lockfile/codegen re-sync CHANGED the worktree after the engine verified it — refusing to push a tree ' +
+      `the engine did not verify. … Nothing was staged, committed or pushed; ${DELIVER_PREFLIGHT_CHANGED_MARKER}: packages/crew/endpoint-manifest.json `;
     expect(triageDeliverFailure(regenerated)).toEqual({
       kind: 'preflight_changed',
       author: 'script',
@@ -200,6 +200,49 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
         recoverable: false,
       });
     }
+  });
+
+  it('the script’s BASE MOVED and PREFLIGHT CHANGED markers survive the excerpt after real fetch/npm chatter (review F-527-001)', () => {
+    // What precedes the refusal in a real Tool output: the fetch, the account guard, npm's install
+    // and codegen lines — hundreds of chars the head-150 keeps INSTEAD of the refusal's start. The
+    // markers trail the refusal, so the tail-250 carries them.
+    const chatter =
+      'From /srv/git/wicked-studio\n * branch            main       -> FETCH_HEAD\n   1432c96..f57069d  main       -> origin/main\n' +
+      'deliver: PR text composed from the run record (http://127.0.0.1:7701)\n';
+    const baseMoved =
+      chatter +
+      'deliver: the engine verified this work against 1432c96b8d3f4e2a9c7d6e5f0a1b2c3d4e5f6a7b but origin/main is now ' +
+      'f57069d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7 — refusing to rebase past the verified base; approve to retry the deliver ' +
+      'phase (the engine lifts onto the new tip and re-runs the repository checks before pushing). Nothing was staged, ' +
+      `committed or pushed; ${DELIVER_BASE_MOVED_MARKER} (origin/main now f57069d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7, verified 1432c96b8d3f4e2a9c7d6e5f0a1b2c3d4e5f6a7b)`;
+    const npmChatter =
+      chatter +
+      '\nadded 481 packages in 23s\n\n> wicked-crew@0.7.28 manifest:endpoints\n> tsx scripts/generate-endpoint-manifest.ts\n\n' +
+      'wrote packages/crew/endpoint-manifest.json: 126 endpoints (wicked-crew-api-types 0.33.0)\n\n> wicked-crew@0.7.28 generate:api-tests\n' +
+      '> tsx scripts/generate-api-tests.ts\n\nwrote packages/crew/tests/generated/api-sample.generated.test.ts (8 sampled endpoints)\n';
+    const preflight =
+      npmChatter +
+      'deliver: the crew#426 lockfile/codegen re-sync CHANGED the worktree after the engine verified it — refusing to push a tree ' +
+      'the engine did not verify. The regenerated files are left in the worktree (unstaged); approve to retry the deliver phase: ' +
+      'the engine re-verifies the changed tree first and this script then delivers it (a second regeneration changes nothing). ' +
+      `Nothing was staged, committed or pushed; ${DELIVER_PREFLIGHT_CHANGED_MARKER}: package-lock.json packages/crew/endpoint-manifest.json packages/crew/tests/generated/api-sample.generated.test.ts `;
+    for (const [text, kind] of [
+      [baseMoved, 'base_moved'],
+      [preflight, 'preflight_changed'],
+    ] as const) {
+      expect([...text].length, kind).toBeGreaterThan(400);
+      const excerpt = framed(text);
+      expect(excerpt, kind).toContain('chars elided');
+      // The head is chatter, not the refusal — the marker must come from the tail.
+      expect([...excerpt].slice(0, 220).join(''), kind).not.toContain('deliver: the ');
+      expect(triageDeliverFailure(excerpt), kind).toMatchObject({ kind, author: 'script', disposition: 'escalate', recoverable: false });
+    }
+    // And the existing LIFT-CONFLICT push-failure line, which trails its marker the same way.
+    const pushFail =
+      chatter +
+      'remote: HTTP 403 authentication failed\ndeliver: git push of wicked/x failed after commit: remote: HTTP 403 ... authentication failed; ' +
+      `retry POST /runs/:id/deliver; nothing was pushed; ${DELIVER_LIFT_CONFLICT_MARKER}`;
+    expect(triageDeliverFailure(framed(`${'-'.repeat(300)}\n${pushFail}`))?.kind).toBe('lift_conflict');
   });
 
   it('answers null for a spawn/infra failure, an ordinary worker transcript, exclusion notes alone, and empty input', () => {

@@ -222,9 +222,9 @@ describe('deliver refusals are escalations, not seat faults (wicked-core#431 fol
       'script rebase conflict',
       'CONFLICT (content): Merge conflict in src/thing.ts\ndeliver: LIFT-CONFLICT — rebase of wicked/x onto origin/main hit conflicts outside the changelog; resolve on the branch and re-run; nothing was pushed',
     ],
-    ['script base moved', 'deliver: BASE MOVED since verification — origin/main is now 9f3c1a2 but the engine verified this work against f57069d; refusing to rebase past the verified base.'],
+    ['script base moved', 'deliver: the engine verified this work against f57069d but origin/main is now 9f3c1a2 — refusing to rebase past the verified base; … Nothing was staged, committed or pushed; deliver: BASE MOVED since verification (origin/main now 9f3c1a2, verified f57069d)'],
     ['script nothing to deliver', 'deliver: nothing to deliver — the run produced no committed change (wicked/x is not ahead of origin/main); nothing was pushed'],
-    ['script preflight changed', 'deliver: PREFLIGHT CHANGED the verified tree — the crew#426 lockfile/codegen re-sync rewrote: packages/crew/endpoint-manifest.json ; refusing to push a tree the engine did not verify.'],
+    ['script preflight changed', 'deliver: the crew#426 lockfile/codegen re-sync CHANGED the worktree after the engine verified it — … Nothing was staged, committed or pushed; deliver: PREFLIGHT CHANGED the verified tree: packages/crew/endpoint-manifest.json '],
   ];
 
   it('a workerError stepFailed carrying a deliver refusal flips NO seat — not even the assigned one', () => {

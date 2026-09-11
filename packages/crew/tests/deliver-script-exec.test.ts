@@ -44,22 +44,23 @@ const roots: string[] = [];
  * A bare origin + a clone on `main` + a run worktree on `wicked/<RUN_ID>` — the exact shape
  * `repo::create_worktree` leaves behind: a branch cut from the base tip with a CLEAN tree.
  */
-function fixture(opts: { worktree?: boolean } = {}): Fixture {
+function fixture(opts: { worktree?: boolean; defaultBranch?: string } = {}): Fixture {
+  const branch = opts.defaultBranch ?? 'main';
   const root = mkdtempSync(join(tmpdir(), 'crew-deliver-'));
   roots.push(root);
   const origin = join(root, 'origin.git');
   const seed = join(root, 'seed');
   const clone = join(root, 'clone');
 
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', seed]);
+  execFileSync('git', ['init', '--bare', '-b', branch, origin]);
+  execFileSync('git', ['init', '-b', branch, seed]);
   git(seed, 'config', 'user.email', 'seed@test');
   git(seed, 'config', 'user.name', 'seed');
   writeFileSync(join(seed, 'README.md'), 'base\n');
   git(seed, 'add', '-A');
   git(seed, 'commit', '-qm', 'base');
   git(seed, 'remote', 'add', 'origin', origin);
-  git(seed, 'push', '-q', '-u', 'origin', 'main');
+  git(seed, 'push', '-q', '-u', 'origin', branch);
 
   execFileSync('git', ['clone', '-q', origin, clone]);
   git(clone, 'config', 'user.email', 'runner@test');
@@ -67,13 +68,13 @@ function fixture(opts: { worktree?: boolean } = {}): Fixture {
   git(clone, 'config', 'commit.gpgsign', 'false');
   // A clone sets origin/HEAD, which is what the script's default-branch derivation reads.
   expect(git(clone, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').trim()).toBe(
-    'origin/main',
+    `origin/${branch}`,
   );
 
   if (opts.worktree === false) return { workdir: clone, clone, origin, root };
 
   const workdir = join(root, RUN_ID);
-  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, 'main');
+  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, branch);
   return { workdir, clone, origin, root };
 }
 
@@ -702,6 +703,36 @@ describe('deliver script honours the engine’s verified-base pin (wicked-core#4
     expect(git(fx.workdir, 'status', '--porcelain').trim()).toBe('?? work.ts');
     expect(git(fx.workdir, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('0');
     expect(existsSync(join(fx.workdir, '.wicked-crew-delivery-stranded'))).toBe(false);
+  }, 60_000);
+
+  // Review F-527-003 — the default ref is derived as the engine derives it: a repo whose default
+  // branch is `master` (origin/HEAD → origin/master) and a clone whose origin/HEAD DANGLES both
+  // resolve to the branch the engine pinned, so neither reads as a moved base.
+  it('a repo whose default branch is master delivers on a matching pin — no false BASE MOVED', async () => {
+    const fx = fixture({ defaultBranch: 'master' });
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const onMaster = true;\n');
+    const tip = git(fx.clone, 'rev-parse', 'origin/master').trim();
+
+    const r = await runDeliver(fx, { intent: 'master default', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(originBranches(fx).sort()).toEqual(['master', `wicked/${RUN_ID}`]);
+  }, 60_000);
+
+  it('a DANGLING origin/HEAD falls back to origin/main — the pin still matches, nothing is refused', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const dangling = true;\n');
+    // The remote renamed/deleted its default branch since the clone: origin/HEAD points at a ref
+    // that no longer exists.
+    git(fx.clone, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/gone');
+    const tip = git(fx.clone, 'rev-parse', 'origin/main').trim();
+
+    const r = await runDeliver(fx, { intent: 'dangling origin/HEAD', env: { WICKED_DELIVER_VERIFIED_BASE: tip } });
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('BASE MOVED');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
   it('REFUSES fail-closed when the pin is set but the default tip does not resolve to it (a garbage pin)', async () => {

@@ -33,6 +33,16 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('git branch --show-current');
   });
 
+  // Review F-527-003 — the default ref is derived as the engine derives it (origin/HEAD when it
+  // resolves, else origin/main, else origin/master), tolerating a dangling origin/HEAD, so a repo
+  // whose base is origin/master never reads as a moved base. Driven for real in deliver-script-exec.
+  it('derives origin’s default branch with the engine’s fallback chain, tolerating a dangling origin/HEAD', () => {
+    expect(script).toContain('D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || true)');
+    expect(script).toContain('if [ -z "$D" ] || ! git rev-parse --verify -q "$D^{commit}" >/dev/null; then');
+    expect(script).toContain('elif git rev-parse --verify -q origin/master^{commit} >/dev/null; then D=origin/master;');
+    expect(script.indexOf('D=$(git symbolic-ref')).toBeLessThan(script.indexOf('DEF="${D#origin/}"'));
+  });
+
   it('REFUSES to push main/master (and a detached-HEAD empty name)', () => {
     expect(script).toMatch(/case "\$B" in ""\|main\|master\|"\$DEF"\)/);
     expect(script).toContain('refusing to push');
@@ -226,13 +236,19 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then');
     expect(script).toContain('T=$(git rev-parse --verify -q "$D^{commit}" || true)');
     expect(script).toMatch(
-      /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: BASE MOVED since verification[^\n]*exit 1; \}/,
+      /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: the engine verified this work against[^\n]*exit 1; \}/,
     );
     // NOT a strand: the refusal carries no LIFT-CONFLICT marker — a post-hoc lift would push a tree
     // nobody verified on the new base; the remedy is the engine's own retry.
     const line = script.split('\n').find((l) => l.includes(BASE_MOVED_MARKER))!;
     expect(line).not.toContain(LIFT_CONFLICT_MARKER);
     expect(line).toContain('Nothing was staged, committed or pushed');
+    // The marker TRAILS the refusal (review F-527-001): the engine keeps head-150 + tail-250 of the
+    // whole output and this line follows the fetch chatter, so only a trailing marker reliably lands
+    // in the excerpt crew's triage and strand derivation read.
+    expect(line).toMatch(/Nothing was staged, committed or pushed; deliver: BASE MOVED since verification \(/);
+    const echoed = line.slice(line.indexOf('echo "'));
+    expect(echoed.length - echoed.indexOf(BASE_MOVED_MARKER)).toBeLessThan(200);
     // Ordered: after the script's own fetch, before anything is staged or committed, before the push.
     const at = script.indexOf(BASE_MOVED_MARKER);
     expect(at).toBeGreaterThan(script.indexOf('git fetch origin'));
@@ -246,13 +262,15 @@ describe('deliverPrScript (the hardened field script)', () => {
   // when it changes the worktree an engine-driven delivery refuses (a post-hoc lift discloses).
   // Pinned as script properties; driven for real in deliver-script-exec.test.ts.
   it('refuses when the preflight CHANGED the verified tree — unless the lift is post-hoc, which discloses', () => {
-    expect(script).toContain('_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$TD/preidx" git write-tree; }');
-    expect(script).toContain('  T0=$(_tree)');
-    expect(script).toContain('  T1=$(_tree)');
+    // Seeded from HEAD, errors loud (review F-527-007).
+    expect(script).toContain('_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git read-tree HEAD && GIT_INDEX_FILE="$TD/preidx" git add -A -- . && GIT_INDEX_FILE="$TD/preidx" git write-tree; }');
+    expect(script).toContain('  T0=$(_tree) || {');
+    expect(script).toContain('  T1=$(_tree) || {');
     expect(script).toContain('  if [ "$T0" != "$T1" ]; then');
     const refusal = script.split('\n').find((l) => l.includes(PREFLIGHT_CHANGED_MARKER))!;
     expect(refusal).toContain('if [ -z "${WICKED_DELIVER_POSTHOC:-}" ]; then');
-    expect(refusal).toMatch(/Nothing was staged, committed or pushed"; exit 1; fi$/);
+    // The marker TRAILS the line, followed by the file list (review F-527-001).
+    expect(refusal).toMatch(/Nothing was staged, committed or pushed; deliver: PREFLIGHT CHANGED the verified tree: \$\{CH\}"; exit 1; fi$/);
     expect(refusal).not.toContain(LIFT_CONFLICT_MARKER);
     expect(script).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
     // Ordered: T0 before the install, the verdict after the codegen and before anything is staged.

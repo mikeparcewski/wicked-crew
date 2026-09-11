@@ -1150,7 +1150,11 @@ export interface RepoCheckRun {
   /** `install` | `typecheck` | `lint` | `test` | `cargo-test`. */
   name: string;
   argv: string[];
-  /** Provenance an operator can verify: `package.json scripts.test`, `Cargo.toml`, … */
+  /** Provenance an operator can verify: `package.json scripts.test`, `Cargo.toml`, … For the `install`
+   *  step the lockfile and WHY it ran: `package-lock.json (node_modules absent)`, `pnpm-lock.yaml (…)`,
+   *  `yarn.lock (…)`, `package.json (…, no lockfile)` — and, since wicked-core#431 / #433, `… (forced:
+   *  lockfile drift)` when the deliver lift moved a lockfile/manifest between the old base and the
+   *  remote tip and the re-verify re-installed (frozen lockfile, `--ignore-scripts`) before the checks. */
   source: string;
   /** The process exit code; `null` when it produced none (timed out / could not spawn). */
   exitCode: number | null;

@@ -47,13 +47,14 @@ mentioned only where a daemon release depends on them.
   - **`wicked-crew-api-types` 0.33.0** (additive): `GateEvaluatedEvent.judgeCli: string | null` +
     `judgeDistinct: boolean | null` (who rendered `agentVerdict`; also on the permissive `CoreEvent`);
     `EvaluatorMutatedWorktreeEvent.restored: boolean` + `restoreError: string | null`; new
-    `WorktreeRestoredEvent {tree, head, discarded}`, `DeliverLiftEvaluatedEvent {outcome, baseRef,
+    `WorktreeRestoredEvent {tree, head, discarded, suggestionRef}`, `DeliverLiftEvaluatedEvent {outcome, baseRef,
     baseBefore, baseAfter, treeBefore, treeAfter, conflicts, note}` with `DeliverLiftOutcome`
     (`unchanged | lifted | conflict | skipped | failed`), `EvaluatorToolCallDeniedEvent {cli, carrier,
     tool, kind, path, reason}`, `RunBaseResolvedEvent {baseRef, baseCommit, localHead, behind,
     fetched, lifted, note}`; `AcpFallbackKind` (the five kinds, `read_only_requires_wrapped` included)
     typing `AcpFallbackEvent.fallbackKind`; `GateEvidenceEvent` gains the three gate-side frames;
-    `RepoChecksEvaluatedEvent` is documented as also arriving for the deliver ord after a lift;
+    `RepoChecksEvaluatedEvent` is documented as also arriving for the deliver ord after a lift, and
+    `RepoCheckRun.source` documents the forced-install provenance (`… (forced: lockfile drift)`);
     `CoreEvent.kind` widened to `string | null` (the engine sends `null` on `evaluatorToolCallDenied`
     when the agent sent no kind). Wire-contract pins for each; endpoint manifest + generated API tests
     re-stamped.
