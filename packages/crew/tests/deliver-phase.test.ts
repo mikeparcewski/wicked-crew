@@ -148,23 +148,41 @@ describe('deliverPrScript (the hardened field script)', () => {
     );
     // The commit message IS that text (git takes the first paragraph as the subject).
     expect(withIntent).toContain('git commit -q -F "$TD/text"');
-    // No origin ⇒ no callback is even attempted; the fallback still names the run.
+    // No origin ⇒ no callback is even attempted, and the output SAYS which text is used (Copilot
+    // on #525) — every branch names its reason.
     expect(script).toContain("API=''");
+    expect(script).toContain('no daemon origin was known when this run launched — using the launch-time PR text');
+    expect(script).toContain('curl is not available in this shell — using the launch-time PR text');
+    expect(script).toContain('did not answer with the run record — using the launch-time PR text');
+    expect(script).toContain('deliver: PR text composed from the run record ($API)');
     // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
-    // and control characters are removed, and a line equal to the delimiter is dropped.
+    // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
+    // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).
     const hostile = deliverPrScript(
       `x'; rm -rf /; echo '$(id) \`id\`\r\n${DELIVER_TEXT_HEREDOC}\nsecond line`,
       { runId: 'run-1' },
     );
     const hl = hostile.split('\n');
-    const hOpen = hl.indexOf(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`);
-    const hClose = hl.indexOf(DELIVER_TEXT_HEREDOC, hOpen + 1);
+    const hOpen = hl.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    const chosen = /<<'([^']+)'$/.exec(hl[hOpen]!)![1]!;
+    expect(chosen).toBe(`${DELIVER_TEXT_HEREDOC}_1`); // suffixed away from the colliding line
+    const hClose = hl.indexOf(chosen, hOpen + 1);
     expect(hClose).toBeGreaterThan(hOpen);
-    expect(hl.slice(hOpen + 1, hClose)).not.toContain(DELIVER_TEXT_HEREDOC); // the intent's copy is gone
-    expect(hl.indexOf(DELIVER_TEXT_HEREDOC, hClose + 1)).toBe(-1); // exactly one closing delimiter
+    expect(hl.slice(hOpen + 1, hClose)).toContain(DELIVER_TEXT_HEREDOC); // the intent's line rides verbatim
+    expect(hl.indexOf(chosen, hClose + 1)).toBe(-1); // exactly one closing delimiter
     expect(hostile).not.toContain('\r');
     // Anything after the heredoc is the script's own text again.
     expect(hl[hClose + 1]).toBe('fi');
+    // The degenerate case Copilot named: the intent's FIRST line is the base delimiter — it is the
+    // title, it stays line 1 of the heredoc, and the framing is intact.
+    const titled = deliverPrScript(`${DELIVER_TEXT_HEREDOC}\n\nbody`, { runId: 'run-1' }).split('\n');
+    const tOpen = titled.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    expect(titled[tOpen]).toBe(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}_1'`);
+    expect(titled[tOpen + 1]).toBe(DELIVER_TEXT_HEREDOC);
+    expect(titled[tOpen + 2]).toBe('');
+    // …and when the text ALSO carries the first suffix, the delimiter keeps moving.
+    const twice = deliverPrScript(`${DELIVER_TEXT_HEREDOC}\n${DELIVER_TEXT_HEREDOC}_1\nbody`, { runId: 'run-1' });
+    expect(twice).toContain(`<<'${DELIVER_TEXT_HEREDOC}_2'`);
     // An origin that is not a plain http(s) origin is never spliced in.
     expect(deliverPrScript('x', { apiOrigin: "http://h'; rm -rf /; echo '" })).toContain("API=''");
     expect(deliverPrScript('x', { apiOrigin: 'ftp://h:1' })).toContain("API=''");

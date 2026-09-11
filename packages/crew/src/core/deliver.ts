@@ -121,10 +121,12 @@ export interface DeliverScriptOptions {
 }
 
 /**
- * The heredoc delimiter the script writes its fallback text through. A QUOTED heredoc expands
+ * The BASE heredoc delimiter the script writes its fallback text through. A QUOTED heredoc expands
  * nothing — `$`, backticks, quotes and backslashes in the intent are inert — so the only way the
- * caller-supplied text could break out is a line equal to this delimiter, and
- * {@link heredocLines} drops exactly those lines.
+ * caller-supplied text could break out is a line equal to the delimiter. That line is never
+ * removed or altered (it may be the title itself — Copilot on #525): {@link heredocDelimiter}
+ * picks a delimiter no line of the text equals, so the text rides verbatim and the heredoc still
+ * ends exactly where the script says it ends.
  */
 export const DELIVER_TEXT_HEREDOC = 'WICKED_CREW_DELIVER_TEXT_EOF';
 
@@ -132,16 +134,25 @@ export const DELIVER_TEXT_HEREDOC = 'WICKED_CREW_DELIVER_TEXT_EOF';
  * The framed PR/commit text as heredoc body lines. This is a containment boundary, not cosmetics:
  * the intent is caller-supplied free text off `POST /runs` and it is being spliced into a bash
  * script. CR and every control character other than tab and newline are removed (a bare CR could
- * split a line in the CLI's eyes), and a line equal to the delimiter is dropped so the heredoc
- * always ends where the script says it ends.
+ * split a line in the CLI's eyes); nothing else is touched.
  */
 export function heredocLines(framed: string): string[] {
   return framed
     .replace(/\r/g, '')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
     .replace(/\n$/, '')
-    .split('\n')
-    .filter((l) => l !== DELIVER_TEXT_HEREDOC);
+    .split('\n');
+}
+
+/**
+ * A heredoc delimiter none of `lines` equals: the base, or the base with a numeric suffix
+ * (`…_EOF_1`, `…_EOF_2`, …) when the text happens to carry the base as a whole line. The framing
+ * (line 1 = title) is therefore never disturbed by containment.
+ */
+export function heredocDelimiter(lines: readonly string[]): string {
+  let delimiter = DELIVER_TEXT_HEREDOC;
+  for (let n = 1; lines.includes(delimiter); n += 1) delimiter = `${DELIVER_TEXT_HEREDOC}_${n}`;
+  return delimiter;
 }
 
 /**
@@ -182,6 +193,8 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
       }),
   );
   const api = apiOriginLiteral(opts.apiOrigin);
+  const fallbackLines = heredocLines(framedDeliverText(fallback));
+  const heredoc = heredocDelimiter(fallbackLines);
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -232,24 +245,30 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // known, no `curl`, an auth-required daemon (401), a daemon that went away. Either way the text
     // is FRAMED the same (line 1 title, line 2 blank, then the body), it is the commit message
     // verbatim (`git commit -F`: git takes the first paragraph as the subject), and the PR is
-    // opened with `--title` + `--body-file` from it. A fallback is always said so in the output.
+    // opened with `--title` + `--body-file` from it. WHICH text was used is always said in the
+    // output — every branch below prints its reason (Copilot on #525): no origin known, no curl,
+    // the daemon did not answer, or the run record was fetched.
     'TD=$(mktemp -d)',
     "trap 'rm -rf \"$TD\"' EXIT",
     'RUNID="${B#wicked/}"',
     `API='${api}'`,
-    'if [ -n "$API" ] && command -v curl >/dev/null 2>&1; then',
+    'if [ -z "$API" ]; then',
+    '  echo "deliver: no daemon origin was known when this run launched — using the launch-time PR text"',
+    'elif ! command -v curl >/dev/null 2>&1; then',
+    '  echo "deliver: curl is not available in this shell — using the launch-time PR text"',
     // `--noproxy "*"`: the daemon is loopback; an operator shell's http_proxy must not swallow it.
-    '  if curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && [ -s "$TD/text" ] && [ -n "$(sed -n 1p "$TD/text")" ]; then',
-    '    echo "deliver: PR text composed from the run record ($API)"',
-    '  else',
-    '    rm -f "$TD/text"',
-    '    echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
-    '  fi',
+    'elif curl -fsS -m 20 --noproxy "*" -H "Accept: text/plain" "$API/api/v1/runs/$RUNID/deliver-text" -o "$TD/text" 2>/dev/null && [ -s "$TD/text" ] && [ -n "$(sed -n 1p "$TD/text")" ]; then',
+    '  echo "deliver: PR text composed from the run record ($API)"',
+    'else',
+    '  rm -f "$TD/text"',
+    '  echo "deliver: the daemon at $API did not answer with the run record — using the launch-time PR text"',
     'fi',
     'if [ ! -s "$TD/text" ]; then',
-    `  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`,
-    ...heredocLines(framedDeliverText(fallback)),
-    DELIVER_TEXT_HEREDOC,
+    // The delimiter is chosen so no line of the text equals it (heredocDelimiter) — the text,
+    // title line included, is never filtered.
+    `  cat > "$TD/text" <<'${heredoc}'`,
+    ...fallbackLines,
+    heredoc,
     'fi',
     'TITLE=$(sed -n 1p "$TD/text")',
     "sed '1,2d' \"$TD/text\" > \"$TD/body\"",

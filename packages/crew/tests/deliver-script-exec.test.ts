@@ -586,6 +586,8 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.status).toBe(0);
     expect(r.output).not.toContain('deliver: the daemon at');
     expect(r.output).not.toContain('composed from the run record');
+    // …but the output still SAYS which text was used (Copilot on #525).
+    expect(r.output).toContain('deliver: no daemon origin was known when this run launched — using the launch-time PR text');
     expect(r.pr!.title).toBe('fix the thing (closes #3)');
     expect(r.pr!.body).toContain('Fixes #3');
     expect(r.pr!.body).toContain(`- Run: \`${RUN_ID}\``);
@@ -608,6 +610,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.title).not.toContain('\n');
     expect(r.pr!.body).toContain(`touch ${marker}`); // the intent rides as TEXT, verbatim
     expect(r.pr!.body).toContain('$(touch'); // unexpanded
+    expect(r.pr!.body).toContain('\nWICKED_CREW_DELIVER_TEXT_EOF\n'); // the delimiter line too — it moved, the text did not
     expect(git(fx.origin, 'rev-list', '--count', `main..wicked/${RUN_ID}`).trim()).toBe('1');
   }, 60_000);
 });
