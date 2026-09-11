@@ -41,6 +41,17 @@ mentioned only where a daemon release depends on them.
   pool cap). Needs the engine half (wicked-core#410 — `chatOpen` scope,
   per-seat config roots, banner gate); `GET /chats` rows gain `cwd` / `codeGraphDb` / `readRoots`
   from it. The studio's New Chat scope control is a follow-up in wicked-studio.
+- **Upgrade notes, in plain words.** After upgrading, the codex, pi, copilot and opencode seats read
+  `signed_in: false` on System until each is signed in once from Studio → System (its Sign-in
+  command names the seat's own directory); until then councils and governed runs use claude and agy.
+  A project-scoped chat refuses pi, codex, copilot and agy by name — their ACP adapters ask no
+  permissions and arm no sandbox, so the engine cannot hold the project's repositories read-only for
+  them — and the default seats of a scoped chat are pre-filtered to the admissible ones (claude,
+  opencode); open the chat unscoped for those seats, or set `os_sandbox = true` on the seat's
+  `[cli.acp]` record (a write floor only: it keeps the roots read-only but does not stop reads
+  outside the scope). An unscoped chat — no project, no repos — reads nothing but its own scratch
+  root; select the project to chat with its repositories (Studio's New Chat scope control is
+  wicked-studio#248).
 - **Roster `signed_in` reads each seat's OWN configuration root (F-010, wicked-core#410).** With a
   fresh `WICKED_WORKER_HOME` the roster reported claude `signed_in:false` but codex / pi / copilot /
   opencode `true` — off the OPERATOR's `~/.codex`, `~/.pi/agent`, `~/.copilot`,

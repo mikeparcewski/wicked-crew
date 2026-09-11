@@ -377,37 +377,35 @@ async function graphForRepos(
 
 /** A single repo's OWN graph — bound only when the registered graph file exists. */
 function ownGraph(only: RepoEntry): { wire: ChatScope['graph']; dbPath: string | null } {
-  {
-    try {
-      const dbPath = codeGraphDb(only);
-      // The registry field says WHERE the repo's graph lives, not that it was ever built
-      // (Copilot, #518): a repo indexed by nothing would otherwise be reported as grounded while
-      // the estate MCP answers "not found" about everything. Existence is the honest floor here
-      // (the project path gets the same from `projectGraphStatus`).
-      if (!existsSync(dbPath)) {
-        return {
-          wire: {
-            bound: false,
-            reason:
-              `'${only.name}' has no code graph built yet (nothing at its registered graph path); ` +
-              'index the repo (wicked-estate index / onboarding) to ground this chat. This chat gets none.',
-          },
-          dbPath: null,
-        };
-      }
-      return {
-        wire: { bound: true, reason: `bound to '${only.name}'s own code graph.` },
-        dbPath,
-      };
-    } catch (err) {
+  try {
+  const dbPath = codeGraphDb(only);
+    // The registry field says WHERE the repo's graph lives, not that it was ever built
+    // (Copilot, #518): a repo indexed by nothing would otherwise be reported as grounded while
+    // the estate MCP answers "not found" about everything. Existence is the honest floor here
+    // (the project path gets the same from `projectGraphStatus`).
+    if (!existsSync(dbPath)) {
       return {
         wire: {
           bound: false,
-          reason: `'${only.name}' has no resolvable code graph (${message(err)}); this chat gets none.`,
+          reason:
+            `'${only.name}' has no code graph built yet (nothing at its registered graph path); ` +
+            'index the repo (wicked-estate index / onboarding) to ground this chat. This chat gets none.',
         },
         dbPath: null,
       };
     }
+    return {
+      wire: { bound: true, reason: `bound to '${only.name}'s own code graph.` },
+      dbPath,
+    };
+  } catch (err) {
+    return {
+      wire: {
+        bound: false,
+        reason: `'${only.name}' has no resolvable code graph (${message(err)}); this chat gets none.`,
+      },
+      dbPath: null,
+    };
   }
 }
 
@@ -497,8 +495,27 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
  */
 export function prepareChatScratch(chatId: string, scope: ChatScope): void {
   const base = resolve(scope.cwd, '..');
-  mkdirSync(base, { recursive: true, mode: 0o700 });
-  assertRealOwnedDirectory(base, 'chat scratch base');
+  // The WHOLE chain below the OS temp dir is created and validated one segment at a time (Copilot,
+  // #518): a recursive mkdir would follow a planted symlink at `<tmp>/wicked-crew-chats` (the
+  // parent every daemon's namespace shares) and create the "private" root inside its target. The
+  // OS temp dir itself is trusted as the platform's (macOS's `/var -> /private/var` is root-owned).
+  const stop = resolve(tmpdir());
+  const chain: string[] = [];
+  for (let dir = base; dir !== stop && dirname(dir) !== dir; dir = dirname(dir)) chain.unshift(dir);
+  if (chain.length === 0 || !base.startsWith(stop + sep)) {
+    throw new Error(`refusing chat scratch base ${base}: not below the OS temp dir ${stop}`);
+  }
+  for (const dir of chain) {
+    // Non-recursive on purpose (a recursive mkdir resolves the whole parent chain through any
+    // link): an existing segment is fine — `EEXIST` alone is ignored (independent review, W3) —
+    // and EVERY segment, existing or not, must then be a real directory owned by this user.
+    try {
+      mkdirSync(dir, { recursive: false, mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    assertRealOwnedDirectory(dir, 'chat scratch base');
+  }
   // Remember whether THIS call created the root: on a later failure only a root this invocation
   // made is removed — a pre-existing entry (a planted directory the ownership check refuses) is
   // never deleted on its planter's behalf (Copilot, #518).
@@ -544,26 +561,23 @@ function assertRealOwnedDirectory(path: string, what: string): void {
  * here deletes someone else's files, so the policy is the same as `prepareChatScratch`'s.
  */
 export function removeChatScratch(cwd: string, base: string = chatScratchBase()): void {
-  let baseReal: string;
+  // Every check AND the removal sit under one catch-all (Copilot, #518): a filesystem race between
+  // the checks and the removal (the entry replaced or gone) must leave the path untouched and the
+  // caller's lifecycle intact — never throw out of a `DELETE` or an engine `chatClosed`.
   try {
     if (lstatSync(base).isSymbolicLink()) return;
-    baseReal = realpathSync(base);
+    const baseReal = realpathSync(base);
+    const target = resolve(cwd);
+    const meta = lstatSync(target);
+    if (meta.isSymbolicLink() || !meta.isDirectory()) return;
+    if (realpathSync(dirname(target)) !== baseReal) return;
+    if (process.platform !== 'win32' && typeof process.getuid === 'function' && statSync(target).uid !== process.getuid()) {
+      return;
+    }
+    rmSync(target, { recursive: true, force: true, maxRetries: 3 });
   } catch {
-    return; // no base, nothing of ours to remove
+    // no base, already gone, or unresolvable: nothing of ours is provably here — leave it
   }
-  const target = resolve(cwd);
-  let meta;
-  try {
-    meta = lstatSync(target);
-  } catch {
-    return; // already gone
-  }
-  if (meta.isSymbolicLink() || !meta.isDirectory()) return;
-  if (realpathSync(dirname(target)) !== baseReal) return;
-  if (process.platform !== 'win32' && typeof process.getuid === 'function' && statSync(target).uid !== process.getuid()) {
-    return;
-  }
-  rmSync(target, { recursive: true, force: true, maxRetries: 3 });
 }
 
 /** One chat id's lifecycle slot in the index — see {@link ChatScopeIndex}. */
@@ -667,17 +681,17 @@ export class ChatScopeIndex {
   beginClose(chatId: string): ChatScope | undefined {
     const slot = this.slots.get(chatId);
     if (slot === undefined || slot.state === 'closing') return undefined;
-    if (slot.state === 'reserved') {
-      this.slots.delete(chatId);
-      return undefined;
-    }
-    removeChatScratch(slot.scope.cwd, this.base);
+    if (slot.state === 'live') removeChatScratch(slot.scope.cwd, this.base);
+    // A RESERVED id is parked too, not freed (Copilot, #518): the in-flight open will find its
+    // reservation gone, tear the engine chat down and that close's `chatClosed` is still to come —
+    // a reuse before then would lose its own chat to it. The grace covers an open that never
+    // reached the engine (no event will ever come).
     const timer = setTimeout(() => {
       if (this.slots.get(chatId)?.state === 'closing') this.slots.delete(chatId);
     }, this.closeGraceMs);
     timer.unref?.();
     this.slots.set(chatId, { state: 'closing', timer });
-    return slot.scope;
+    return slot.state === 'live' ? slot.scope : undefined;
   }
 
   /**

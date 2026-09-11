@@ -316,6 +316,22 @@ describe('the scratch root and its statement', () => {
       symlinkSync(elsewhere, linkedBase);
       expect(() => prepareChatScratch('c-x', scopeAt(join(linkedBase, 'c-x')))).toThrow(/symlink/);
       expect(existsSync(join(elsewhere, 'c-x'))).toBe(false);
+      // A link at an ANCESTOR of the base (the shared `wicked-crew-chats` parent): refused before
+      // anything is created, even though the base itself does not exist yet (W2/W3).
+      const linkedParent = join(base, 'linked-parent');
+      symlinkSync(elsewhere, linkedParent);
+      expect(() => prepareChatScratch('c-y', scopeAt(join(linkedParent, 'ns', 'c-y')))).toThrow(/symlink/);
+      expect(existsSync(join(elsewhere, 'ns'))).toBe(false);
+      // An EXISTING chain (the mkdtemp base, a namespace prepared once) is fine: EEXIST is not an
+      // error (independent review, W3) — every segment is still verified real and owned.
+      const ns = join(base, 'ns-existing');
+      prepareChatScratch('c-a', scopeAt(join(ns, 'c-a')));
+      prepareChatScratch('c-b', scopeAt(join(ns, 'c-b')));
+      expect(statSync(join(ns, 'c-b')).isDirectory()).toBe(true);
+      // A base outside the OS temp dir is refused outright, before anything is created.
+      const outsideTmp = join('/', 'w2chat-not-a-temp-dir', 'c-z');
+      expect(() => prepareChatScratch('c-z', scopeAt(outsideTmp))).toThrow(/not below the OS temp dir/);
+      expect(existsSync(join('/', 'w2chat-not-a-temp-dir'))).toBe(false);
       // A planted LINK as an instruction file inside our own root is replaced, never followed.
       const own = join(base, 'c-own');
       mkdirSync(own, { recursive: true, mode: 0o700 });
@@ -413,6 +429,15 @@ describe('the scratch root and its statement', () => {
     expect(index.reserve('a')).toBeNull();
     index.closed('a');
     expect(index.has('a')).toBe(false);
+    // DELETE against a RESERVED id parks it (closing) instead of freeing it — the in-flight open's
+    // teardown close is still to come; closed() frees it.
+    const t7 = index.reserve('h')!;
+    expect(index.beginClose('h')).toBeUndefined();
+    expect(index.stateOf('h')).toBe('closing');
+    expect(index.set('h', scopeFor('h'), t7)).toBe(false);
+    expect(index.reserve('h')).toBeNull();
+    index.closed('h');
+    expect(index.has('h')).toBe(false);
     // The grace timer frees a closing id whose event never comes.
     const t4 = index.reserve('d')!;
     prepareChatScratch('d', scopeFor('d'));

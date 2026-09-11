@@ -13,7 +13,7 @@ import { ChatScopeIndex } from '../src/api/chat-scope.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
-import type { CoreAdapter } from '../src/core/adapter.js';
+import { CoreAdapter } from '../src/core/adapter.js';
 
 let base: string;
 let graphFile: string;
@@ -124,11 +124,13 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect((await open({ chatId: 'live', clis: ['claude'] })).statusCode).toBe(201);
   });
 
-  it('a scoped open the engine did not confirm is REFUSED (501) and torn down — never opened unbounded; an unscoped one proceeds', async () => {
+  it('a scoped open on an engine that PREDATES scope (row without the fields) is REFUSED (501) with the seats and torn down; an unscoped one proceeds', async () => {
     applied = false;
     const res = await open({ chatId: 'old-engine', clis: ['claude'], repoRefs: ['alpha'] });
     expect(res.statusCode).toBe(501);
-    expect((res.json() as { error: string }).error).toMatch(/predates chat scope/);
+    const body = res.json() as { error: string; seats: unknown[] };
+    expect(body.error).toMatch(/predates chat scope/);
+    expect(body.seats).toEqual([{ cliKey: 'claude', ok: true }]);
     expect(existsSync(join(base, 'chats', 'old-engine'))).toBe(false);
     // The engine chat was closed again, so its `chatClosed` is still on its way: the id is parked
     // as closing (no scope, no reuse) until that event frees it.
@@ -136,15 +138,61 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(chatScopes.stateOf('old-engine')).toBe('closing');
     chatScopes.closed('old-engine');
     expect(chatScopes.has('old-engine')).toBe(false);
-    // `null` — nothing confirmed — is refused too, with its own reason.
+    // `null` with a seat reporting warm — NO row at all — is "nothing warmed", not an engine
+    // version guess (independent review, W1): 409 with the seats, torn down.
     applied = null;
     const res2 = await open({ chatId: 'unconfirmed', clis: ['claude'], repoRefs: ['alpha'] });
-    expect(res2.statusCode).toBe(501);
-    expect((res2.json() as { error: string }).error).toMatch(/did not confirm/);
+    expect(res2.statusCode).toBe(409);
+    const body2 = res2.json() as { error: string; seats: unknown[] };
+    expect(body2.error).toMatch(/nothing warmed/);
+    expect(body2.seats).toHaveLength(1);
+    expect(existsSync(join(base, 'chats', 'unconfirmed'))).toBe(false);
     // An UNSCOPED chat promises nothing beyond its scratch root and opens regardless.
     const plain = await open({ chatId: 'plain', clis: ['claude'] });
     expect(plain.statusCode).toBe(201);
     expect((plain.json() as { scope: { kind: string } }).scope.kind).toBe('none');
+  });
+
+  it('a scoped open where EVERY seat fails reports the per-seat reasons (409 + seats) before any engine probe, tears down, and frees the id (W1)', async () => {
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => ({ cliKey: c, ok: false, error: `seat '${c}' cannot join a SCOPED chat: its ACP adapter asks no permissions` })),
+    );
+    applied = null; // what the adapter returns when the engine holds no row — must NOT read as a version problem
+    const res = await open({ chatId: 'pi-only', clis: ['pi', 'codex'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(409);
+    const body = res.json() as { error: string; seats: { cliKey: string; ok: boolean; error?: string }[] };
+    expect(body.error).toMatch(/no seat warmed \(2 failed\)/);
+    expect(body.seats.map((s) => s.cliKey)).toEqual(['pi', 'codex']);
+    expect(body.seats[0]!.error).toMatch(/cannot join a SCOPED chat/);
+    expect(body.error).not.toMatch(/upgrade the engine/);
+    expect(existsSync(join(base, 'chats', 'pi-only'))).toBe(false);
+    expect(chatScopes.has('pi-only')).toBe(false);
+    // The id is free again immediately (the engine dropped the scope itself; no chatClosed will come).
+    applied = true;
+    expect((await open({ chatId: 'pi-only', clis: ['claude'], repoRefs: ['alpha'] })).statusCode).toBe(201);
+  });
+
+  it('the DEFAULT seats of a SCOPED open are pre-filtered to admissible adapters; an unscoped open keeps the whole roster (W5)', async () => {
+    const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } },
+      { key: 'codex', acp: { acp_input_governance: false, os_sandbox: true } },
+      { key: 'agy' },
+    ]);
+    try {
+      expect((await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] })).statusCode).toBe(201);
+      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'codex']);
+      expect((await open({ chatId: 'dflt-plain' })).statusCode).toBe(201);
+      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'pi', 'codex', 'agy']);
+      // A roster with no admissible seat cannot open a scoped chat by default — said plainly.
+      spy.mockReturnValue([{ key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } }]);
+      const none = await open({ chatId: 'dflt-none', repoRefs: ['alpha'] });
+      expect(none.statusCode).toBe(409);
+      expect((none.json() as { error: string }).error).toMatch(/no seat in the roster can be held/);
+      expect(existsSync(join(base, 'chats', 'dflt-none'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('a chatClosed that lands while an open is in flight cancels it: nothing is recorded and the chat is torn down', async () => {

@@ -1685,169 +1685,209 @@ export function registerRoutes(
       },
     },
     async (req, reply) => {
-    const parsed = ChatOpenSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
-    }
-    const b = parsed.data;
-    const chatId = b.chatId ?? randomUUID();
-    // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
-    // attach against atomically (chats are an in-memory seat pool), so the route validates
-    // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
-    // changelog. Fail here and no seats were warmed for a filing that could never happen.
-    if (b.projectId !== undefined) {
-      try {
-        const project = await adapter.projectGet(b.projectId);
-        if (project === null) {
-          return reply.code(404).send({ error: `Project ${b.projectId} not found` });
-        }
-        if (project.status === 'archived') {
-          return reply
-            .code(409)
-            .send({ error: `project ${b.projectId} is archived and blocks new attachments` });
-        }
-      } catch (err) {
-        return reply.code(501).send({ error: message(err) });
+      const parsed = ChatOpenSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       }
-    }
-    // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
-    // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
-    // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
-    const token = chatScopes.reserve(chatId);
-    if (token === null) {
-      const state = chatScopes.stateOf(chatId);
-      return reply.code(409).send({
-        error:
-          state === 'closing'
-            ? `chat ${chatId} is closing; wait for its chatClosed (a few seconds at most) before reusing the id, or omit chatId to mint a fresh one`
-            : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
-      });
-    }
-    // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
-    try {
-    // The scope (crew#502): explicit repos (`repoRefs`, the legacy `repoRef` merged in) or the
-    // project's members — each ref checked against the registry, EVERY missing one named — else
-    // none. Resolved before any seat warms: a 404 here warmed nothing.
-    const resolution = await resolveChatScope(
-      {
-        chatId,
-        ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
-        repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
-      },
-      { ...chatScopeDeps(adapter), scratchBase: chatScopes.base },
-    );
-    if (!resolution.ok) {
-      chatScopes.release(chatId, token);
-      return reply.code(resolution.status).send({
-        error: resolution.error,
-        ...(resolution.missing !== undefined ? { missing: resolution.missing } : {}),
-      });
-    }
-    const { scope, engine } = resolution;
-    try {
-      // Cleans up only what it created itself on failure (Copilot, #518).
-      prepareChatScratch(chatId, scope);
-    } catch (err) {
-      chatScopes.release(chatId, token);
-      return reply
-        .code(500)
-        .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
-    }
-    const clis =
-      b.clis ??
-      (CoreAdapter.roster() as { key?: string }[])
-        .map((s) => s.key)
-        .filter((k): k is string => typeof k === 'string');
-    try {
-      const seats = await adapter.chatOpen(chatId, clis, engine.cwd, {
-        codeGraphDb: engine.codeGraphDb,
-        readRoots: engine.readRoots,
-      });
-      // Honest scope (Copilot, #518): a SCOPED chat is a promise — the roots are read-only, the
-      // graph is attached, the seats see nothing else — and only an engine that CONFIRMS it
-      // recorded the scope (its `chatList` row carries the scope fields) can keep it. An engine
-      // predating chat scope (wicked-core#410) dropped `scopeJson` and runs the seats unbounded in
-      // the scratch root; an engine that cannot be asked has confirmed nothing. Neither may hold a
-      // scoped chat: it is closed again, its root removed, and the caller gets a 501 naming the
-      // remedy — never a chat whose statement promises what its seats do not enforce. An UNSCOPED
-      // chat (`kind: 'none'`) promises nothing beyond its scratch root and proceeds.
-      const applied = await adapter.chatScopeApplied(chatId);
-      if (applied !== true && scope.kind !== 'none') {
-        await adapter.chatClose(chatId).catch(() => undefined);
-        // The engine's `chatClosed` for this id is still on its way: park, do not release
-        // (Copilot, #518), so a reuse cannot have its root removed by the late event.
-        chatScopes.abortToClosing(chatId, token);
-        removeChatScratch(scope.cwd, chatScopes.base);
-        return reply.code(501).send({
-          error:
-            applied === false
-              ? 'the installed wicked-core-ts predates chat scope (wicked-core#410): it cannot ground ' +
-                'a scoped chat or hold its read roots read-only — upgrade the engine, or open the ' +
-                'chat without projectId/repoRefs.'
-              : 'the engine did not confirm it recorded this chat\'s scope (no enumerate surface, or ' +
-                'no row for the chat); a scoped chat is refused rather than opened unbounded — ' +
-                'upgrade the engine, or open the chat without projectId/repoRefs.',
-        });
-      }
-      // File the chat into its project WHILE the id is still reserved (Copilot, #518): publishing
-      // first would let a concurrent DELETE / engine `chatClosed` land during this await and leave
-      // a 201 with a stale scope and a membership attached to a closed chat.
-      let projectAttachError: string | undefined;
-      let attachedMemberId: string | undefined;
+      const b = parsed.data;
+      const chatId = b.chatId ?? randomUUID();
+      // Validate the project BEFORE opening seats: a chat has no launch record for the engine to
+      // attach against atomically (chats are an in-memory seat pool), so the route validates
+      // up-front and attaches right after open — the one non-atomic attach, documented in the ADR
+      // changelog. Fail here and no seats were warmed for a filing that could never happen.
       if (b.projectId !== undefined) {
         try {
-          const { member, created } = await adapter.projectMemberAttach(
-            b.projectId,
-            'crew.chat',
-            chatId,
-          );
-          if (created) attachedMemberId = member.id;
-          if (created) {
-            projects.index.set(chatId, b.projectId);
-            projects.bus?.emit(
-              MEMBERSHIP_ATTACHED,
-              { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
-              membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
-            );
+          const project = await adapter.projectGet(b.projectId);
+          if (project === null) {
+            return reply.code(404).send({ error: `Project ${b.projectId} not found` });
+          }
+          if (project.status === 'archived') {
+            return reply
+              .code(409)
+              .send({ error: `project ${b.projectId} is archived and blocks new attachments` });
           }
         } catch (err) {
-          // The chat is open and usable; the filing failed. Said on the 201 rather than failing
-          // the open — the caller can re-attach via POST /projects/:id/members.
-          projectAttachError = message(err);
+          return reply.code(501).send({ error: message(err) });
         }
       }
-      if (!chatScopes.set(chatId, scope, token)) {
-        // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
-        // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
-        // session, scratch root, and the filing just made) instead of returning a stale 201.
-        await adapter.chatClose(chatId).catch(() => undefined);
-        removeChatScratch(scope.cwd, chatScopes.base);
-        if (b.projectId !== undefined && attachedMemberId !== undefined) {
-          await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
-          projects.index.delete(chatId);
-        }
+      // A chat id this daemon already holds a scope for is LIVE: re-preparing its scratch root and
+      // re-opening it would overwrite the statement its seats are reading and (on a changed scope)
+      // evict them mid-conversation (Copilot, #518). Close it first, or let the daemon mint the id.
+      const token = chatScopes.reserve(chatId);
+      if (token === null) {
+        const state = chatScopes.stateOf(chatId);
         return reply.code(409).send({
-          error: `chat ${chatId} was closed while it was being opened; open it again`,
+          error:
+            state === 'closing'
+              ? `chat ${chatId} is closing; wait for its chatClosed (a few seconds at most) before reusing the id, or omit chatId to mint a fresh one`
+              : `chat ${chatId} is already open on this daemon; DELETE /chats/${chatId} first, or omit chatId to mint a fresh one`,
         });
       }
-      return reply.code(201).send({
-        chatId,
-        seats,
-        scope,
-        ...(projectAttachError !== undefined ? { projectAttachError } : {}),
-      });
-    } catch (err) {
-      // Nothing warmed: the scratch root prepared above must not linger — removed under the SAME
-      // base the resolver created it in (Copilot, #518), fail-closed like every removal.
-      chatScopes.release(chatId, token);
-      removeChatScratch(scope.cwd, chatScopes.base);
-      return reply.code(400).send({ error: message(err) });
-    }
-    } finally {
-      // A reservation that never became a scope (any early return above) must not pin the id —
-      // token-guarded, so a reservation that is no longer ours is left alone.
-      chatScopes.release(chatId, token);
-    }
+      // Everything below either ends in `chatScopes.set(chatId, …, token)` or releases the reservation.
+      try {
+      // The scope (crew#502): explicit repos (`repoRefs`, the legacy `repoRef` merged in) or the
+      // project's members — each ref checked against the registry, EVERY missing one named — else
+      // none. Resolved before any seat warms: a 404 here warmed nothing.
+      const resolution = await resolveChatScope(
+        {
+          chatId,
+          ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+          repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
+        },
+        { ...chatScopeDeps(adapter), scratchBase: chatScopes.base },
+      );
+      if (!resolution.ok) {
+        chatScopes.release(chatId, token);
+        return reply.code(resolution.status).send({
+          error: resolution.error,
+          ...(resolution.missing !== undefined ? { missing: resolution.missing } : {}),
+        });
+      }
+      const { scope, engine } = resolution;
+      try {
+        // Cleans up only what it created itself on failure (Copilot, #518).
+        prepareChatScratch(chatId, scope);
+      } catch (err) {
+        chatScopes.release(chatId, token);
+        return reply
+          .code(500)
+          .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
+      }
+      // The default seats of a SCOPED chat are pre-filtered by admissibility (independent review,
+      // W5): the engine admits a seat to a scoped chat only when its ACP adapter asks permissions
+      // (`acp_input_governance`) or its record arms the kernel write floor (`os_sandbox`) — with the
+      // default roster that is claude and opencode — so a default project-scoped open does not show
+      // four refused seats. Explicit `clis` are passed through as asked; the engine refuses per seat
+      // with the reason.
+      const scoped = scope.kind !== 'none';
+      const roster = CoreAdapter.roster() as {
+        key?: string;
+        acp?: { acp_input_governance?: boolean; os_sandbox?: boolean };
+      }[];
+      const clis =
+        b.clis ??
+        roster
+          .filter((s) => !scoped || s.acp?.acp_input_governance === true || s.acp?.os_sandbox === true)
+          .map((s) => s.key)
+          .filter((k): k is string => typeof k === 'string');
+      if (clis.length === 0) {
+        chatScopes.release(chatId, token);
+        removeChatScratch(scope.cwd, chatScopes.base);
+        return reply.code(409).send({
+          error:
+            'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
+            'governance, or `os_sandbox = true` on its [cli.acp] record); open the chat unscoped, or ' +
+            'name seats with `clis`',
+        });
+      }
+      try {
+        const seats = await adapter.chatOpen(chatId, clis, engine.cwd, {
+          codeGraphDb: engine.codeGraphDb,
+          readRoots: engine.readRoots,
+        });
+        // Nothing warmed (independent review, W1): the engine holds no pool row and has dropped the
+        // scope itself (no `chatClosed` will come) — report the PER-SEAT reasons, never an
+        // engine-version guess; the root goes, the id is free again.
+        if (seats.every((s) => !s.ok)) {
+          chatScopes.release(chatId, token);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          return reply.code(409).send({
+            error: `chat ${chatId}: no seat warmed (${seats.length} failed) — see seats`,
+            seats,
+          });
+        }
+        // Honest scope (Copilot, #518): a SCOPED chat is a promise — the roots are read-only, the
+        // graph is attached, the seats see nothing else — and only an engine that CONFIRMS it
+        // recorded the scope (its `chatList` row carries the scope fields) can keep it. An engine
+        // predating chat scope (wicked-core#410) dropped `scopeJson` and runs the seats unbounded in
+        // the scratch root; an engine that cannot be asked has confirmed nothing. Neither may hold a
+        // scoped chat: it is closed again, its root removed, and the caller gets a 501 naming the
+        // remedy — never a chat whose statement promises what its seats do not enforce. An UNSCOPED
+        // chat (`kind: 'none'`) promises nothing beyond its scratch root and proceeds.
+        const applied = await adapter.chatScopeApplied(chatId);
+        if (applied !== true && scoped) {
+          await adapter.chatClose(chatId).catch(() => undefined);
+          // The engine's `chatClosed` for this id is still on its way: park, do not release
+          // (Copilot, #518), so a reuse cannot have its root removed by the late event.
+          chatScopes.abortToClosing(chatId, token);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          if (applied === false) {
+            // A row WITHOUT the scope fields: the engine predates chat scope (wicked-core#410).
+            return reply.code(501).send({
+              error:
+                'the installed wicked-core-ts predates chat scope (wicked-core#410): it cannot ground ' +
+                'a scoped chat or hold its read roots read-only — upgrade the engine, or open the ' +
+                'chat without projectId/repoRefs.',
+              seats,
+            });
+          }
+          // NO row although a seat reported warm: nothing is actually held for this chat.
+          return reply.code(409).send({
+            error:
+              `chat ${chatId}: a seat reported warm but the engine holds no row for the chat — ` +
+              'nothing warmed; open it again (see seats)',
+            seats,
+          });
+        }
+        // File the chat into its project WHILE the id is still reserved (Copilot, #518): publishing
+        // first would let a concurrent DELETE / engine `chatClosed` land during this await and leave
+        // a 201 with a stale scope and a membership attached to a closed chat.
+        let projectAttachError: string | undefined;
+        let attachedMemberId: string | undefined;
+        if (b.projectId !== undefined) {
+          try {
+            const { member, created } = await adapter.projectMemberAttach(
+              b.projectId,
+              'crew.chat',
+              chatId,
+            );
+            if (created) attachedMemberId = member.id;
+            if (created) {
+              projects.index.set(chatId, b.projectId);
+              projects.bus?.emit(
+                MEMBERSHIP_ATTACHED,
+                { project_id: b.projectId, member: { kind: 'crew.chat', ref: chatId }, actor: actorOf(req).id },
+                membershipAttachedKey(b.projectId, 'crew.chat', chatId, member.attached_at),
+              );
+            }
+          } catch (err) {
+            // The chat is open and usable; the filing failed. Said on the 201 rather than failing
+            // the open — the caller can re-attach via POST /projects/:id/members.
+            projectAttachError = message(err);
+          }
+        }
+        if (!chatScopes.set(chatId, scope, token)) {
+          // The reservation was cancelled while the open was in flight — an engine `chatClosed` or a
+          // `DELETE` for this id (Copilot, #518). Nothing was recorded; tear the chat down (engine
+          // session, scratch root, and the filing just made) instead of returning a stale 201.
+          await adapter.chatClose(chatId).catch(() => undefined);
+          removeChatScratch(scope.cwd, chatScopes.base);
+          if (b.projectId !== undefined && attachedMemberId !== undefined) {
+            await adapter.projectMemberDetach(b.projectId, attachedMemberId).catch(() => false);
+            projects.index.delete(chatId);
+          }
+          return reply.code(409).send({
+            error: `chat ${chatId} was closed while it was being opened; open it again`,
+          });
+        }
+        return reply.code(201).send({
+          chatId,
+          seats,
+          scope,
+          ...(projectAttachError !== undefined ? { projectAttachError } : {}),
+        });
+      } catch (err) {
+        // Nothing warmed: the scratch root prepared above must not linger — removed under the SAME
+        // base the resolver created it in (Copilot, #518), fail-closed like every removal.
+        chatScopes.release(chatId, token);
+        removeChatScratch(scope.cwd, chatScopes.base);
+        return reply.code(400).send({ error: message(err) });
+      }
+      } finally {
+        // A reservation that never became a scope (any early return above) must not pin the id —
+        // token-guarded, so a reservation that is no longer ours is left alone.
+        chatScopes.release(chatId, token);
+      }
     },
   );
 
