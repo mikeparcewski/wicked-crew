@@ -169,6 +169,20 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
     expect(huge.endsWith('…')).toBe(true);
   });
 
+  it('a blank intent with a LONG caller-supplied run id goes through the same bounded cut — never mid-id (Copilot on #525)', () => {
+    // LaunchSchema only requires a non-empty sessionId and the CLI passes `--session` through.
+    const longId = `campaign-${'a'.repeat(90)}`;
+    const title = deliverTitle('', longId);
+    expect(title.length).toBeLessThanOrEqual(72);
+    expect(title).toBe('wicked-crew run…'); // the word boundary before the id; the body carries the id in full
+    // A 56-char id still fits whole (16 + 56 = 72).
+    const fits = `r-${'b'.repeat(54)}`;
+    expect(deliverTitle('', fits)).toBe(`wicked-crew run ${fits}`);
+    expect(deliverTitle('', fits).length).toBe(72);
+    // One more character and it is cut at the boundary, not inside the id.
+    expect(deliverTitle('', `${fits}c`)).toBe('wicked-crew run…');
+  });
+
   it('removes control characters — a title is one line', () => {
     expect(deliverTitle('fix\u0000 the\u0007 thing\rnow', RUN_ID)).toBe('fix the thing now');
   });

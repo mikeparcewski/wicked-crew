@@ -120,11 +120,17 @@ function firstLine(intent: string): string {
  * The PR title / commit subject: the intent's first line, whole when it fits, otherwise cut at the
  * last word boundary that leaves room for a single `…` — so the result is ≤ 72 characters and never
  * ends mid-word (the F-3R2-014 headline `…scenario CLN-2) aga`). Dangling punctuation before the
- * ellipsis is dropped. A blank intent names the run instead.
+ * ellipsis is dropped. A blank intent names the run instead — through the SAME bounded cut, so a
+ * long caller-supplied session id (the CLI passes `--session` through) is never cut mid-id either
+ * (Copilot on #525): the body names the run id in full.
  */
 export function deliverTitle(intent: string, runId: string): string {
   const line = firstLine(intent);
-  if (line === '') return `wicked-crew run ${runId}`.trim().slice(0, DELIVER_TITLE_MAX);
+  return boundedTitle(line === '' ? `wicked-crew run ${runId}`.trim() : line);
+}
+
+/** `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ 72 characters. */
+function boundedTitle(line: string): string {
   if (line.length <= DELIVER_TITLE_MAX) return line;
   const room = DELIVER_TITLE_MAX - 1; // one character is the ellipsis
   const head = line.slice(0, room + 1); // one past the room: a space HERE means the room ends a word
