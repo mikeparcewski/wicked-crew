@@ -21,6 +21,9 @@ import {
   parseFramedDeliverText,
   runUrlFor,
   urlPathSegment,
+  EMBEDDED_INTENT_CAP,
+  baseWorkflowId,
+  boundIntentForEmbedding,
 } from '../src/core/deliver-text.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
@@ -153,6 +156,11 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
       'Fix the useLegacyRedirect loop',
     );
     expect(deliverTitle('- add a thing', RUN_ID)).toBe('add a thing');
+    // Paired SINGLE emphasis markers go too; identifiers with underscores and bare operators stay.
+    expect(deliverTitle('*Fix* the _redirect_ in snake_case_name where a * b * c', RUN_ID)).toBe(
+      'Fix the redirect in snake_case_name where a * b * c',
+    );
+    expect(deliverTitle('_leading_ and *trailing*', RUN_ID)).toBe('leading and trailing');
   });
 
   it('drops dangling punctuation before the ellipsis', () => {
@@ -207,6 +215,25 @@ describe('deliverTitle — ≤72 characters, never cut mid-word (F-3R2-014)', ()
 describe('issueRefs — `Fixes #N` from a closing verb, everything else as Refs', () => {
   it('reads `fix issue #214` as fixes and `wicked-studio#211` as a plain ref', () => {
     expect(issueRefs(INTENT)).toEqual({ fixes: ['#214'], refs: ['wicked-studio#211'] });
+    // …and on a wicked-studio DELIVERY the owner-less `wicked-studio#211` is this repo's `#211`.
+    expect(issueRefs(INTENT, 'wicked-studio')).toEqual({ fixes: ['#214'], refs: ['#211'] });
+  });
+
+  it('an owner-less `repo#N` naming the delivery repo closes as `#N`; `owner/repo#N` stays as written (W3-K2)', () => {
+    expect(issueRefs('fixes wicked-studio#214; closes mikeparcewski/wicked-studio#7; see wicked-crew#9', 'wicked-studio')).toEqual({
+      fixes: ['#214', 'mikeparcewski/wicked-studio#7'],
+      refs: ['wicked-crew#9'], // another repo, no owner: verbatim, informational
+    });
+    // Without a delivery repo nothing is collapsed — a guess would point at the wrong repo.
+    expect(issueRefs('fixes wicked-studio#214', null).fixes).toEqual(['wicked-studio#214']);
+    // `fix issue #214` and `fixes wicked-studio#214` on a wicked-studio delivery are ONE fix.
+    expect(issueRefs('fix issue #214 — fixes wicked-studio#214', 'wicked-studio').fixes).toEqual(['#214']);
+    const { body } = composeDeliverText(
+      factsFromWorkflow({ runId: RUN_ID, intent: 'fixes wicked-studio#214', workflowId: 'bug', repoRef: 'wicked-studio', phases: [], runUrl: null }),
+    );
+    expect(body).toContain('\nFixes #214\n'); // the closing line GitHub acts on
+    expect(body).not.toContain('Fixes wicked-studio#214'); // never the non-closing owner-less form
+    expect(body).toContain('fixes wicked-studio#214'); // the intent itself still rides verbatim
   });
 
   it('understands the closing verbs and cross-repo refs, deduplicated', () => {
@@ -231,6 +258,17 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
   it('reads the run view: base workflow id, repo, intent, checks, evaluator', () => {
     expect(facts.source).toBe('run');
     expect(facts.workflowId).toBe('bug'); // `bug-deliver-<run>` reads as its base
+    // The composed id is capped at 128 chars, so a long run id leaves only a PREFIX of itself in
+    // the marker; the base is still recovered. Both composition suffixes are understood, and a
+    // definition the route resolved (a user-registered workflow's `wf-…` instance id) wins.
+    const longId = 'r'.repeat(150);
+    expect(baseWorkflowId(`bug-deliver-${longId}`.slice(0, 128), longId)).toBe('bug');
+    expect(baseWorkflowId(`bug-verified-${RUN_ID}-deliver-${RUN_ID}`, RUN_ID)).toBe('bug');
+    expect(baseWorkflowId('feature', RUN_ID)).toBe('feature');
+    const v = runView();
+    v.session.workflow_id = `wf-${RUN_ID}`;
+    expect(factsFromRun(v, null).workflowId).toBe(`wf-${RUN_ID}`);
+    expect(factsFromRun(v, null, { workflowId: 'custom-bug' }).workflowId).toBe('custom-bug');
     expect(facts.repoRef).toBe('wicked-studio');
     expect(facts.runUrl).toBe(`http://127.0.0.1:7701/runs/${RUN_ID}`);
     // Units are ordered by ord, whatever order the view listed them in.
@@ -248,7 +286,7 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('## Intent');
     expect(body).toContain('Found by the seed-surfaces suite (wicked-studio#211, scenario CLN-2)'); // the intent verbatim
     expect(body).toContain('\nFixes #214\n');
-    expect(body).toContain('Refs: wicked-studio#211');
+    expect(body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
     expect(body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:7701/runs/${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
     // Phases with seats and gate outcomes.
@@ -339,18 +377,51 @@ describe('framing — one shape for the daemon answer, the embedded fallback and
     expect(parseFramedDeliverText(framed)).toEqual(text);
   });
 
-  it('refuses text that is not framed', () => {
+  it('refuses text that is not framed — an EMPTY body included, like the script’s `_framed`', () => {
     expect(parseFramedDeliverText('')).toBeNull();
     expect(parseFramedDeliverText('title only')).toBeNull();
     expect(parseFramedDeliverText('\n\nbody without a title')).toBeNull();
     expect(parseFramedDeliverText('title\nno blank line\nbody')).toBeNull();
+    expect(parseFramedDeliverText('title\n\n')).toBeNull();
+    expect(parseFramedDeliverText('title\n\n   \n\t\n')).toBeNull();
+    expect(parseFramedDeliverText('title\n\nbody\n')).toEqual({ title: 'title', body: 'body' });
   });
 
   it('builds the run bookmark from an origin, tolerating a trailing slash', () => {
     expect(runUrlFor('http://127.0.0.1:7701', 'r1')).toBe('http://127.0.0.1:7701/runs/r1');
     expect(runUrlFor('http://[::1]:7701/', 'a b')).toBe('http://[::1]:7701/runs/a%20b');
+    expect(runUrlFor('http://localhost:7701', 'r1')).toBe('http://localhost:7701/runs/r1');
+    expect(runUrlFor('http://127.255.0.9:1', 'r1')).toBe('http://127.255.0.9:1/runs/r1');
     expect(runUrlFor(null, 'r1')).toBeNull();
     expect(runUrlFor('', 'r1')).toBeNull();
+  });
+
+  it('links the run ONLY for a loopback origin — a LAN host never lands in a PR body (W3-K4)', () => {
+    for (const origin of ['http://192.168.1.5:7701', 'http://10.0.0.2:7701', 'https://crew.corp.example:443', 'http://[fe80::1]:7701', 'not a url']) {
+      expect(runUrlFor(origin, RUN_ID)).toBeNull();
+    }
+    const facts = factsFromRun(runView(), runUrlFor('http://192.168.1.5:7701', RUN_ID));
+    const { body } = composeDeliverText(facts);
+    expect(body).toContain(`- Run: \`${RUN_ID}\``); // the id is still named
+    expect(body).not.toContain('192.168.1.5');
+    // The LINKED form labels the run with the same one-line code span — a newline or backtick in
+    // a caller-supplied id cannot break the entry or the Markdown.
+    const odd = runView();
+    odd.session.id = 'r`1\nx';
+    const linked = composeDeliverText(factsFromRun(odd, runUrlFor('http://127.0.0.1:7701', odd.session.id))).body;
+    expect(linked).toContain('- Run: [`r1 x`](http://127.0.0.1:7701/runs/r%601%0Ax)');
+  });
+
+  it('bounds the intent the SCRIPT embeds and says so; the run-derived text is never bounded (E2BIG)', () => {
+    const huge = `first line\n\n${'x'.repeat(300_000)}`;
+    const bounded = boundIntentForEmbedding(huge);
+    expect(bounded.length).toBeLessThan(EMBEDDED_INTENT_CAP + 200);
+    expect(bounded).toContain('the full text is on the run record');
+    expect(boundIntentForEmbedding('short')).toBe('short');
+    // The daemon's answer carries the whole intent.
+    const v = runView();
+    v.session.problem = huge;
+    expect(composeDeliverText(factsFromRun(v, null)).body.length).toBeGreaterThan(300_000);
   });
 
   it('encodes a run id as ONE strict path segment — `/ # ? \'` and friends cannot change the request (Copilot on #525)', () => {

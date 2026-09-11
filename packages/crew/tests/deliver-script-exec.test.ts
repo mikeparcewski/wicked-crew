@@ -217,6 +217,9 @@ afterEach(() => {
 describe('deliver script, driven for real (crew#317)', () => {
   it('COMMITS the run’s uncommitted work — an UNTRACKED new file rides, pushes it, prints the PR URL last', async () => {
     const fx = fixture();
+    // An operator/repo `commit.cleanup=strip` would treat the `## …` heading lines of the message
+    // as comments — the script commits with `--cleanup=whitespace` so they survive (W3-K1).
+    git(fx.clone, 'config', 'commit.cleanup', 'strip');
     // What an agent leaves behind: files written, nothing committed AND nothing staged
     // (core#291's premise). A brand-new source file the agent never `git add`ed MUST still ride —
     // that is the run's product, and crew, not the agent, owns staging it.
@@ -570,7 +573,7 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.pr!.title.endsWith('…')).toBe(true); // word-boundary cut, never `…aga`
     expect(r.pr!.body).toBe(`${expected.body}\n`);
     expect(r.pr!.body).toContain('Fixes #214');
-    expect(r.pr!.body).toContain('Refs: wicked-studio#211');
+    expect(r.pr!.body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
     expect(r.pr!.body).toContain(`- Run: [\`${RUN_ID}\`](${daemon.origin}/runs/${RUN_ID})`);
     expect(r.pr!.body).toContain('workflow `bug` · repo `wicked-studio`');
     expect(r.pr!.body).toContain('Not available at composition time');

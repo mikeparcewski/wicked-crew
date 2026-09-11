@@ -91,10 +91,14 @@ mentioned only where a daemon release depends on them.
   launched it — new `GET /api/v1/runs/:id/deliver-text` (text/plain: title, blank line, body) — for
   the run-derived text at delivery time and falls back to the same composer's launch-time text
   embedded in the script (intent, issue links, run link, phase list; runtime sections say they were
-  not available) when the daemon cannot answer, saying so in the phase output. The commit message is
-  that same text (`git commit -F`), so subject and title cannot drift; the PR opens with `--title` +
-  `--body-file`, never `--fill`. Post-hoc delivery (`POST /runs/:id/deliver`) composes from the run
-  record it already holds.
+  not available) when the daemon cannot answer, saying so in the phase output. The commit the phase
+  makes for uncommitted work carries that same text (`git commit --cleanup=whitespace -F`, so `## …`
+  headings survive a `commit.cleanup=strip` config) — its subject is the PR title; a run that
+  committed incrementally keeps its own commits. The PR opens with `--title` + `--body-file`, never
+  `--fill`. The run link is emitted only for a loopback daemon origin (a LAN host never lands in a
+  PR body); an owner-less `repo#N` that names the delivery repo closes as `#N`; the script embeds a
+  bounded copy of the intent (the run record carries it whole). Post-hoc delivery
+  (`POST /runs/:id/deliver`) composes from the run record it already holds.
 - **Worker claude deny rules are the ones the CLI enforces (#524, F-3R2-004; the generator lives in
   wicked-core).** The engine emitted a `Write(<path>/**)` twin beside every `Edit(<path>/**)` deny
   rule for the operator's `~/.claude`, `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,

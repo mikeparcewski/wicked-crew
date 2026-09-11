@@ -112,7 +112,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('-gt 1048576');
     // A GUARD, NOT A SILENT DROP: every exclusion is reported with its reason.
     expect(script).toContain('deliver: EXCLUDED ($RN): $F');
-    expect(script).toContain('git diff --cached --quiet || git commit -q -F "$TD/text"');
+    // `--cleanup=whitespace`: a `commit.cleanup=strip` config must not eat the `## …` headings (W3-K1).
+    expect(script).toContain('git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"');
     // The commit precedes both the rebase (which refuses a dirty tree) and the push.
     expect(script.indexOf('git add -u')).toBeLessThan(script.indexOf('git rebase'));
     expect(script.indexOf('git commit')).toBeLessThan(script.indexOf('git push -u origin'));
@@ -157,8 +158,9 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(lines.slice(open + 3, lines.indexOf(DELIVER_TEXT_HEREDOC, open)).join('\n')).toContain(
       'Delivered by [wicked-crew](https://wc.wickedagile.com) run `run-1`.',
     );
-    // The commit message IS that text (git takes the first paragraph as the subject).
-    expect(withIntent).toContain('git commit -q -F "$TD/text"');
+    // The commit message IS that text (git takes the first paragraph as the subject); the cleanup
+    // mode keeps the `## …` headings under a `commit.cleanup=strip` config (W3-K1).
+    expect(withIntent).toContain('git commit -q --cleanup=whitespace -F "$TD/text"');
     // No origin ⇒ no callback is even attempted, and the output SAYS which text is used (Copilot
     // on #525) — every branch names its reason.
     expect(script).toContain("API=''");
@@ -321,6 +323,18 @@ describe('composeDeliverWorkflow (per-run composition)', () => {
   it('keeps the composed id inside registerWorkflow’s safe charset', () => {
     const composed = composeDeliverWorkflow(feature, 'run/../../etc:passwd');
     expect(composed.id).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+  });
+
+  it('embeds a BOUNDED fallback: a 300 KB intent cannot E2BIG the `bash -lc` argument (Copilot on #525)', () => {
+    const huge = `ship the thing\n\n${'y'.repeat(300_000)}\n\nfix issue #3`;
+    const cmd = deliverPrScript(huge, { runId: 'run-1' });
+    expect(cmd.length).toBeLessThan(64 * 1024);
+    expect(cmd).toContain('the full text is on the run record');
+    const lines = cmd.split('\n');
+    const open = lines.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    expect(lines[open + 1]).toBe('ship the thing'); // the title still comes first
+    // A normal intent is embedded whole, with no note.
+    expect(deliverPrScript('ship the thing', { runId: 'run-1' })).not.toContain('the full text is on the run record');
   });
 
   it('bakes the daemon origin, the run link, the repo and the phase list into the deliver phase (crew#524)', () => {

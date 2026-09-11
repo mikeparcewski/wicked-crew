@@ -22,8 +22,10 @@
  *
  * FRAMING, shared by both carriers (the daemon's text/plain answer and the script's embedded
  * fallback) so the script parses exactly one shape: line 1 = title, line 2 = blank, then the body.
- * The framed text is also, verbatim, the commit message (`git commit -F`): git takes the first
- * paragraph as the subject, so the PR title and the commit subject cannot drift.
+ * The framed text is also, verbatim, the message of the commit the deliver phase MAKES when the
+ * run left uncommitted work (`git commit -F`: git takes the first paragraph as the subject). A run
+ * that committed incrementally keeps its own commits untouched — the PR title is composed from the
+ * run either way; only the deliver phase's own commit is guaranteed to match it.
  */
 
 import type { GateSpec, PhaseDef, SessionView, WorkUnit } from './types.js';
@@ -109,7 +111,11 @@ function plainLine(raw: string): string {
     .replace(CONTROL_CHARS, ' ')
     .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|\d+\.\s+)/, '') // heading / list / quote markers
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // [text](url) → text
-    .replace(/\*\*|__|`/g, '') // emphasis / code markers
+    .replace(/\*\*|__|`/g, '') // strong / code markers
+    // Paired single-marker emphasis (`*fix*`, `_fix_`), guarded by word boundaries so an identifier
+    // like `snake_case_name` or a bare `a * b` is left alone.
+    .replace(/(^|[^\w*])\*([^*\s][^*]*?)\*(?![\w*])/g, '$1$2')
+    .replace(/(^|[^\w_])_([^_\s][^_]*?)_(?![\w_])/g, '$1$2')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -157,19 +163,49 @@ const CLOSING_REF =
 /** Any `#N`, `repo#N` or `owner/repo#N` not glued to a word/path (so `a/b#1` is one ref, `#1a` none). */
 const ANY_REF = /(?<![\w/#])((?:[\w.-]+\/)?[\w.-]+)?#(\d+)\b/g;
 
-/** The issues the intent names, split into the ones it says it fixes and the rest. */
-export function issueRefs(intent: string): IssueRefs {
+/**
+ * The issues the intent names, split into the ones it says it fixes and the rest.
+ *
+ * GitHub links and closes on `#N` (this repo) and `owner/repo#N` only. An OWNER-LESS `repo#N`
+ * does neither — so when its repo segment names the delivery repo (`repoRef`, the registered
+ * repo id the PR lands in) it is emitted as plain `#N` (review W3-K2: `fixes wicked-studio#214`
+ * on a wicked-studio delivery must close #214). Any other owner-less `repo#N` rides verbatim as
+ * information; `owner/repo#N` is left exactly as written.
+ */
+export function issueRefs(intent: string, repoRef?: string | null): IssueRefs {
+  const normalize = (prefix: string | undefined, n: string): string => {
+    if (prefix === undefined || prefix === '') return `#${n}`;
+    if (!prefix.includes('/') && repoRef !== undefined && repoRef !== null && prefix === repoRef) return `#${n}`;
+    return `${prefix}#${n}`;
+  };
   const fixes: string[] = [];
   const refs: string[] = [];
   for (const m of intent.matchAll(CLOSING_REF)) {
-    const ref = `${m[1] ?? ''}#${m[2]}`;
+    const ref = normalize(m[1], m[2]!);
     if (!fixes.includes(ref)) fixes.push(ref);
   }
   for (const m of intent.matchAll(ANY_REF)) {
-    const ref = `${m[1] ?? ''}#${m[2]}`;
+    const ref = normalize(m[1], m[2]!);
     if (!fixes.includes(ref) && !refs.includes(ref)) refs.push(ref);
   }
   return { fixes, refs };
+}
+
+/**
+ * How much of the intent the deliver SCRIPT carries in its embedded fallback text. The script is
+ * one `bash -lc` argument, and `LaunchSchema.problem` has no length cap, so an unbounded intent
+ * could exceed a platform's single-argument limit (Linux: 128 KiB) and fail the phase with E2BIG
+ * before it runs (Copilot on #525). The run-derived text the daemon answers is NOT bounded — it
+ * travels over HTTP, never through argv.
+ */
+export const EMBEDDED_INTENT_CAP = 8_000;
+const EMBEDDED_INTENT_NOTE =
+  '_(the intent is longer than the deliver script embeds — the full text is on the run record)_';
+
+/** `intent` bounded for embedding in the script: whole when it fits, else cut and said so. */
+export function boundIntentForEmbedding(intent: string): string {
+  if (intent.length <= EMBEDDED_INTENT_CAP) return intent;
+  return `${intent.slice(0, EMBEDDED_INTENT_CAP).trimEnd()}\n\n${EMBEDDED_INTENT_NOTE}`;
 }
 
 // ── the body ───────────────────────────────────────────────────────────────────────────────────
@@ -210,7 +246,7 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
  */
 export function composeDeliverText(f: DeliverTextFacts): DeliverText {
   const title = deliverTitle(f.intent, f.runId);
-  const { fixes, refs } = issueRefs(f.intent);
+  const { fixes, refs } = issueRefs(f.intent, f.repoRef);
   const intent = f.intent.replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
 
@@ -222,7 +258,9 @@ export function composeDeliverText(f: DeliverTextFacts): DeliverText {
   }
 
   out.push('## Run', '');
-  out.push(f.runUrl !== null ? `- Run: [\`${f.runId}\`](${f.runUrl})` : `- Run: ${code(f.runId)}`);
+  // The label is the same one-line code span as the unlinked form — a caller-supplied id cannot
+  // break the line or the Markdown (the URL half is `urlPathSegment`-encoded by `runUrlFor`).
+  out.push(f.runUrl !== null ? `- Run: [${code(f.runId)}](${f.runUrl})` : `- Run: ${code(f.runId)}`);
   const where = [
     f.workflowId !== null && f.workflowId !== '' ? `workflow ${code(f.workflowId)}` : null,
     f.repoRef !== null && f.repoRef !== '' ? `repo ${code(f.repoRef)}` : null,
@@ -293,11 +331,17 @@ export function framedDeliverText(text: DeliverText): string {
   return `${text.title}\n\n${text.body}\n`;
 }
 
-/** The inverse of {@link framedDeliverText}, or `null` when the text is not framed that way. */
+/**
+ * The inverse of {@link framedDeliverText}, or `null` when the text is not framed that way — a
+ * non-empty title line, a blank line 2, and a body with something in it (the same three conditions
+ * the deliver script's `_framed` check applies before it accepts a daemon answer).
+ */
 export function parseFramedDeliverText(framed: string): DeliverText | null {
   const lines = framed.split('\n');
   if (lines.length < 3 || lines[0]!.trim() === '' || lines[1] !== '') return null;
-  return { title: lines[0]!, body: lines.slice(2).join('\n').replace(/\n$/, '') };
+  const body = lines.slice(2).join('\n').replace(/\n$/, '');
+  if (body.trim() === '') return null;
+  return { title: lines[0]!, body };
 }
 
 // ── facts ──────────────────────────────────────────────────────────────────────────────────────
@@ -350,26 +394,43 @@ function checksOf(unit: WorkUnit): DeliverCheckFact[] {
   }));
 }
 
-/** A composed per-run workflow id (`<base>-deliver-<run id>`) reads as its base. */
-function baseWorkflowId(workflowId: string, runId: string): string {
+/**
+ * A composed per-run workflow id (`<base>-deliver-<run id>`, `<base>-verified-<run id>`; see
+ * `composeDeliverWorkflow` / `composeDeliverableFloor`) reads as its base. The composed id is
+ * capped at 128 characters, so for a long caller-supplied run id the marker's tail is CUT — the
+ * tail is therefore matched as a prefix of the sanitised run id, not whole.
+ */
+export function baseWorkflowId(workflowId: string, runId: string): string {
   const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const marker = `-deliver-${safeRunId}`;
-  const at = workflowId.indexOf(marker);
-  return at > 0 ? workflowId.slice(0, at) : workflowId;
+  let id = workflowId;
+  for (const marker of ['-deliver-', '-verified-']) {
+    const at = id.indexOf(marker);
+    if (at > 0 && safeRunId.startsWith(id.slice(at + marker.length))) id = id.slice(0, at);
+  }
+  return id;
 }
 
 /**
  * The facts from a persisted run view — what the daemon answers on `GET /runs/:id/deliver-text`.
  * The deliver phase itself (running while it asks) is listed as `this PR`.
+ *
+ * `resolved.workflowId` is the DEFINITION the route resolved for the run (`resolveRunWorkflow`
+ * over the full registry): the engine stores an instance id (`wf-<uuid>`) that `sessionsDetail()`
+ * patches back to a name for BUILT-INS only, so a user-registered workflow would otherwise read as
+ * `workflow wf-…` here. Absent, the view's id is used (with the per-run composition suffix cut).
  */
-export function factsFromRun(view: SessionView, runUrl: string | null): DeliverTextFacts {
+export function factsFromRun(
+  view: SessionView,
+  runUrl: string | null,
+  resolved: { workflowId?: string | null } = {},
+): DeliverTextFacts {
   const s = view.session;
   const units = [...view.units].sort((a, b) => a.ord - b.ord);
   const checks = units.flatMap(checksOf);
   return {
     runId: s.id,
     intent: s.problem ?? '',
-    workflowId: baseWorkflowId(s.workflow_id, s.id),
+    workflowId: resolved.workflowId ?? baseWorkflowId(s.workflow_id, s.id),
     repoRef: s.repo_ref,
     runUrl,
     source: 'run',
@@ -438,8 +499,25 @@ export function urlPathSegment(s: string): string {
   );
 }
 
-/** The studio bookmark for a run under a daemon origin (`http://127.0.0.1:7701/runs/<id>`), or null. */
+/** Is `host` (as `URL.hostname` spells it) the local machine — `127.0.0.0/8`, `::1`, `localhost`? */
+function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  return h === 'localhost' || h === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * The studio bookmark for a run under a daemon origin (`http://127.0.0.1:7701/runs/<id>`), or
+ * null. LOOPBACK ORIGINS ONLY (review W3-K4): a daemon bound to a LAN host or IP would otherwise
+ * put that host into a public PR body; the run id itself is always named in the text.
+ */
 export function runUrlFor(origin: string | null | undefined, runId: string): string | null {
   if (origin === null || origin === undefined || origin === '') return null;
+  let host: string;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return null;
+  }
+  if (!isLoopbackHost(host)) return null;
   return `${origin.replace(/\/+$/, '')}/runs/${urlPathSegment(runId)}`;
 }

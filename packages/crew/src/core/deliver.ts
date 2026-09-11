@@ -26,7 +26,8 @@
  *      from the persisted run record — intent, `Fixes #N`, run link, phases + seats + gate
  *      outcomes, repo checks with exit codes, the evaluator verdict — and falls back to the same
  *      composer's launch-time text (embedded in the script) when the daemon cannot answer. The
- *      commit message is that same text (`git commit -F`), so subject and title never drift;
+ *      commit the phase makes for uncommitted work carries that same text (`git commit -F`), so
+ *      ITS subject is the PR title; a run that committed incrementally keeps its own commits;
  *  (f) the PR URL is the last line of the phase output.
  *
  * One deliberate change from the field version: NO gh account is baked into crew code (the
@@ -67,6 +68,7 @@
 
 import type { PhaseDef, WorkflowDef } from './types.js';
 import {
+  boundIntentForEmbedding,
   composeDeliverText,
   factsFromWorkflow,
   framedDeliverText,
@@ -182,17 +184,20 @@ function apiOriginLiteral(origin: string | null | undefined): string {
  */
 export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}): string {
   const runId = opts.runId ?? opts.facts?.runId ?? '';
-  const fallback = composeDeliverText(
+  const facts =
     opts.facts ??
-      factsFromWorkflow({
-        runId,
-        intent,
-        workflowId: null,
-        repoRef: null,
-        phases: [],
-        runUrl: null,
-      }),
-  );
+    factsFromWorkflow({
+      runId,
+      intent,
+      workflowId: null,
+      repoRef: null,
+      phases: [],
+      runUrl: null,
+    });
+  // The EMBEDDED fallback is bounded (`EMBEDDED_INTENT_CAP`): this script is one argv entry, and an
+  // unbounded intent could exceed the platform's single-argument limit and E2BIG the phase before
+  // it runs (Copilot on #525). The daemon-fetched text is never bounded this way.
+  const fallback = composeDeliverText({ ...facts, intent: boundIntentForEmbedding(facts.intent) });
   const api = apiOriginLiteral(opts.apiOrigin);
   const fallbackLines = heredocLines(framedDeliverText(fallback));
   const heredoc = heredocDelimiter(fallbackLines);
@@ -359,7 +364,10 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'done < <(git ls-files --others --exclude-standard -z)',
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
-    'git diff --cached --quiet || git commit -q -F "$TD/text"',
+    // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`
+    // would otherwise treat every `## Intent` / `## Run` / `## Phases` heading as a `#` comment and
+    // strip it from the commit body (review W3-K1).
+    'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
     'A=$(git rev-list --count "$D..$B")',

@@ -8,7 +8,10 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
-import type { RepoEntry } from '../core/types.js';
+import type {
+  RepoEntry,
+  WorkflowDef,
+} from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -1480,6 +1483,10 @@ export function registerRoutes(
     return { run: decorateRun(run) };
   });
 
+  /** The full workflow registry, or `[]` on a directly-driven route set whose fake adapter has none. */
+  const listWorkflowsSafe = (): WorkflowDef[] =>
+    typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : [];
+
   // ── Deliver text (crew#524 / F-3R2-014) — the PR title + body a run's delivery carries ──
   // `gh pr create --fill` gave wicked-studio#249 a mid-word title and an EMPTY body. The deliver
   // script now asks this route for the text composed from the PERSISTED RUN RECORD: the intent,
@@ -1497,7 +1504,11 @@ export function registerRoutes(
       const run = views.find((v) => v.session.id === id);
       if (!run) return reply.code(404).send({ error: 'Run not found' });
       const origin = boundOrigin(app.server.address());
-      const text = composeDeliverText(factsFromRun(decorateRun(run), runUrlFor(origin, id)));
+      // The workflow DEFINITION (a user-registered workflow's view carries the engine instance id).
+      const def = resolveRunWorkflow(run, listWorkflowsSafe());
+      const text = composeDeliverText(
+        factsFromRun(decorateRun(run), runUrlFor(origin, id), { workflowId: def?.id ?? null }),
+      );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
     },
   );
@@ -1622,10 +1633,11 @@ export function registerRoutes(
             // crew#524: the post-hoc lift composes its PR text from the run record it already
             // holds (the fallback), and names this daemon so the script can re-ask at delivery.
             const origin = boundOrigin(app.server.address());
+            const def = resolveRunWorkflow(run, listWorkflowsSafe());
             result = await deliverExec(workdir, s.problem ?? undefined, {
               runId: id,
               apiOrigin: origin,
-              facts: factsFromRun(run, runUrlFor(origin, id)),
+              facts: factsFromRun(run, runUrlFor(origin, id), { workflowId: def?.id ?? null }),
             });
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw

@@ -16,7 +16,7 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { parseFramedDeliverText } from '../src/core/deliver-text.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
-import type { SessionView, WorkUnit } from '../src/core/types.js';
+import type { PhaseDef, SessionView, WorkflowDef, WorkUnit } from '../src/core/types.js';
 
 const RUN_ID = 'd74e4e8f-bbc9-4697-8c30-181bae005217';
 
@@ -82,12 +82,16 @@ afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
 });
 
-async function buildApp(views: SessionView[]): Promise<{ app: FastifyInstance; setOrigin: ReturnType<typeof vi.fn> }> {
+async function buildApp(
+  views: SessionView[],
+  workflows: WorkflowDef[] = [],
+): Promise<{ app: FastifyInstance; setOrigin: ReturnType<typeof vi.fn> }> {
   const setOrigin = vi.fn();
   const mockAdapter = {
     sessionsDetail: vi.fn(async () => views),
     sessions: vi.fn(async () => views.map((v) => v.session.id)),
     setDeliverApiOrigin: setOrigin,
+    listWorkflows: () => workflows,
   } as unknown as CoreAdapter;
   const app = Fastify({ logger: false });
   registerRoutes(
@@ -128,6 +132,22 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     expect(text!.body).toContain('| test | `npm run test` | 0 | 1.5s |');
     expect(text!.body).toContain('- `verify` (pi): **approved**');
     expect(text!.body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
+  });
+
+  it('names the workflow DEFINITION for a user-registered workflow whose view carries the engine instance id', async () => {
+    // `sessionsDetail()` patches `wf-<uuid>` back to a name for BUILT-INS only; a user-registered
+    // workflow is resolved here by phase sequence (fix, verify + the appended deliver).
+    const v = view();
+    v.session.workflow_id = `wf-${RUN_ID}`;
+    const phase = (id: string, kind: PhaseDef['kind'], role: PhaseDef['role']): PhaseDef => ({
+      id, kind, gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false,
+      required_deliverables: [], depends_on: [], role, skill_ref: null, allowed_skills: [], validator_pin: null,
+    });
+    const custom: WorkflowDef = { id: 'custom-bug', phases: [phase('fix', 'build', 'creator'), phase('verify', 'test', 'evaluator')] };
+    const { app } = await buildApp([v], [custom]);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}/deliver-text` });
+    expect(res.statusCode).toBe(200);
+    expect(parseFramedDeliverText(res.body)!.body).toContain('workflow `custom-bug` · repo `wicked-studio`');
   });
 
   it('404s an unknown run', async () => {
