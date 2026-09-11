@@ -111,6 +111,7 @@ import { InteractiveHandoffLedger } from './ledger.js';
 import { crewStateHome } from '../projects/state-home.js';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent, WorkflowDef } from '../core/types.js';
+import { councilAgreementPct, councilOutcomeSuffix } from './council-outcome.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -747,8 +748,10 @@ export async function startInteractiveDemoSubscriber(
     if (event.type === 'unitDistributed') {
       if (isFloorOrd(event)) return;
       const who = typeof event.cli === 'string' ? event.cli : 'a worker';
-      const pct = typeof event.agreement_pct === 'number' ? ` (${event.agreement_pct}% agreement)` : '';
-      narrate(flight, `Council picked ${who} to write ${authoring}${pct}…`);
+      const agreement = councilAgreementPct(event);
+      const pct = agreement !== null ? ` (${agreement}% agreement)` : '';
+      // Honest about a council that held on a fraction of its seats (F-4R2-007).
+      narrate(flight, `Council picked ${who} to write ${authoring}${pct}${councilOutcomeSuffix(event)}…`);
       return;
     }
 

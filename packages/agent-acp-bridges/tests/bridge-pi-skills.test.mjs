@@ -2,8 +2,9 @@
  * `WICKED_PI_SKILL_DIRS` → pi's skill flags (F-079, wicked-crew#531; the env contract
  * wicked-core#441 sets on a pi seat's ACP carrier).
  *
- *   1. the pure derivation: unset/blank → nothing; a delimiter-separated list → `--no-skills`
- *      then `--skill <dir>` per entry, in order, blanks and duplicates dropped;
+ *   1. the pure derivation: unset → nothing; set-but-empty → `--no-skills` alone (a delivery of
+ *      zero skills, discovery off); a delimiter-separated list → `--no-skills` then `--skill <dir>`
+ *      per entry, in order, blanks and duplicates dropped;
  *   2. the bridge applies it ONLY to a pi invocation, BEFORE the bridge's own args, and a
  *      non-pi bin's argv is byte-identical to its invocation — proven by spawning a stub `pi`
  *      that echoes its argv back through the bridge's stream;
@@ -38,11 +39,18 @@ function stubPi(body) {
 }
 
 describe('piSkillFlags', () => {
-  it('unset or blank → no flags (a launch without a delivery is unchanged)', () => {
+  it('unset → no flags (no delivery: a launch without one is unchanged)', () => {
     expect(piSkillFlags({})).toEqual([]);
-    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: '' })).toEqual([]);
-    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: '   ' })).toEqual([]);
-    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: delimiter })).toEqual([]);
+    expect(piSkillFlags({ OTHER: 'x' })).toEqual([]);
+  });
+
+  it('set but EMPTY → `--no-skills` ALONE (a delivery of zero portable skills keeps discovery off — the core #443 contract)', () => {
+    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: '' })).toEqual(['--no-skills']);
+    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: '   ' })).toEqual(['--no-skills']);
+    expect(piSkillFlags({ [PI_SKILL_DIRS_ENV]: delimiter })).toEqual(['--no-skills']);
+    expect(skillFlagsFor('pi', { [PI_SKILL_DIRS_ENV]: '' })).toEqual(['--no-skills']);
+    // Still nothing for a non-pi binary, whatever the variable says.
+    expect(skillFlagsFor('codex', { [PI_SKILL_DIRS_ENV]: '' })).toEqual([]);
   });
 
   it('a delimiter-separated list → `--no-skills` then one `--skill <dir>` per entry, in order, blanks + duplicates dropped', () => {
@@ -136,6 +144,14 @@ describe.skipIf(!posix)('runBridge spawns pi with the skill flags BEFORE the inv
     expect(JSON.parse(text.trim())).toEqual(['--no-skills', '--skill', '/snap/skills/qe', '--skill', '/snap/skills/mem', '--mode', 'rpc', '-p', 'work']);
   });
 
+  it('the variable set but EMPTY: `--no-skills` alone, then the bridge args (a zero-skill delivery)', async () => {
+    const { bin } = stubPi("process.stdout.write(JSON.stringify(process.argv.slice(2)) + '\\n');");
+    process.env[PI_SKILL_DIRS_ENV] = '';
+    const b = createTestBridge((prompt) => ({ bin, args: ['--mode', 'rpc', '-p', prompt] }));
+    const { text } = await turnOutput(b);
+    expect(JSON.parse(text.trim())).toEqual(['--no-skills', '--mode', 'rpc', '-p', 'work']);
+  });
+
   it('the variable unset: the argv is exactly the invocation (byte-identical to before F-079)', async () => {
     const { bin } = stubPi("process.stdout.write(JSON.stringify(process.argv.slice(2)) + '\\n');");
     delete process.env[PI_SKILL_DIRS_ENV];
@@ -168,6 +184,8 @@ describe('wicked-pi launcher', () => {
       '--no-themes',
     ]);
     expect(composePiArgv(['--mode', 'rpc', '--no-themes'], {})).toEqual(['--mode', 'rpc', '--no-themes']);
+    // Set but empty: a zero-skill delivery — discovery off, nothing else.
+    expect(composePiArgv(['--mode', 'rpc', '--no-themes'], { [PI_SKILL_DIRS_ENV]: '' })).toEqual(['--no-skills', '--mode', 'rpc', '--no-themes']);
   });
 
   it('piBinary: `pi` on PATH by default, `WICKED_PI_BINARY` when set', () => {

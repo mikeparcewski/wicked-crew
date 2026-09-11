@@ -61,6 +61,7 @@ import {
   DEFAULT_WORKER_STALL_MINUTES,
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
+import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js';
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -996,6 +997,23 @@ export async function createServer(
     ) {
       void resolveRunDelivery(session).then(() => deliveryCache.warm(session));
     }
+    // A completed ONBOARDING run refreshes the project graph(s) its repo belongs to (F-2R2-008):
+    // bounded (plain refresh — unchanged members skip; one project at a time; at most two rounds),
+    // off the hot path, logged. Only runs THIS daemon launched are known here, by design.
+    if (event.type === 'sessionCompleted' && session !== undefined) {
+      const onboardedRepo = adapter.onboardedRepoOf(session);
+      if (onboardedRepo !== undefined) {
+        void refreshProjectGraphsAfterOnboarding(adapter, onboardedRepo, {
+          log: (m) => app.log.info(m),
+        }).catch((err: unknown) => {
+          app.log.warn(
+            `[projects] auto-refresh after onboarding ${onboardedRepo} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
+    }
     // The foundation record's evidence pointer (§3.2 row 3): a project-bound run that completes
     // gets its run-scope pointer written, best-effort, off the hot path.
     if (event.type === 'sessionCompleted' && session !== undefined && projectId !== undefined) {
@@ -1155,6 +1173,9 @@ export async function createServer(
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
+      // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
+      // SAME /ws fan-out the engine's frames take.
+      broadcast: (frame) => broadcast(frame),
     },
   );
 

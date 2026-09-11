@@ -426,8 +426,60 @@ export interface RosterSeat {
    * unknown seat keys, or a daemon predating the field).
    */
   signed_in?: boolean | null;
+  /**
+   * What `signed_in` MEANS for this seat (api-types 0.35.0, F-2R2-009): `signed_in` — a credential
+   * artifact is observable; `signed_out` — none is and the seat needs one (a council benches it on
+   * its first ballot; a chat refuses it up front); `not_required` — none is, but the seat answers
+   * on a free tier with no account (`free_tier` names it); `unknown` — the probe cannot tell
+   * cheaply (keychain-backed seats, unknown seat keys). Absent on a daemon predating the field.
+   */
+  auth?: SeatAuth;
+  /** Present when `auth` is `not_required`: the free tier the seat answers on. */
+  free_tier?: string;
+  /**
+   * Where the `not_required` reading came from: `registry` when the CLI's own record declared the
+   * credential requirement, `crew-heuristic` when the daemon's per-CLI table did (today's only
+   * source — the engine's `AgenticCli` declares none; a wicked-core follow-up). A reader can show
+   * the heuristic as such.
+   */
+  free_tier_source?: 'registry' | 'crew-heuristic';
+  /**
+   * Whether a council would seat AND keep this seat as far as the daemon can tell: enabled for
+   * council, runtime `health` active, `auth` not `signed_out`. The daemon's PREDICTION from its
+   * own records — the engine still convenes whatever roster it is handed and benches a seat only
+   * after it fails. Chat admission (`POST /chats` defaults) reads the same auth predicate.
+   */
+  council_eligible?: boolean;
+  /** Present when `council_eligible` is false: the one reason, in the operator's words. */
+  council_ineligible_reason?: string;
+  /**
+   * Present when THIS daemon's recent councils benched the seat: the engine's own
+   * `councilSeatFailed` evidence (`non_zero_exit` / `timed_out`, the derivative `benched` kind
+   * excluded), folded over a bounded window (`window_ms`) and cleared by the seat's next ok unit
+   * output. `council_eligible` is false while it is present.
+   */
+  council_bench?: RosterSeatCouncilBench;
   [k: string]: unknown;
 }
+
+/** `RosterSeat.council_bench` (api-types 0.35.0). */
+export interface RosterSeatCouncilBench {
+  /** Primary ballot failures inside the window. */
+  failures: number;
+  /** The last failure's `councilSeatFailed.kind`. */
+  last_kind: string;
+  /** ISO-8601 of the last failure. */
+  last_at: string;
+  /** The run the last failure happened in, when the frame named one. */
+  last_run?: string;
+  /** A bounded excerpt of the last failure's detail / stderr, when there was one. */
+  last_detail?: string;
+  /** The rolling window the failures were counted over, ms. */
+  window_ms: number;
+}
+
+/** A seat's auth reading (`RosterSeat.auth`; api-types 0.35.0). */
+export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
 
 /** Body for `POST /open` — open a file/folder with the OS default application (crew#273). */
 export interface OpenPathBody {
@@ -2825,6 +2877,20 @@ export interface CodeGraphData {
   stats: { nodeCount: number; edgeCount: number; fileCount: number };
 }
 
+/**
+ * `GET /repos/:id/graph` → 200 (api-types 0.35.0, F-2R2-005). `graph: null` = the repo's code
+ * graph has not been built (nothing at its registered graph path) — and `reason` says WHY, so a
+ * consumer of this route alone can tell "not indexed" from "empty": the same finding text the
+ * repos wire carries when the engine has one (`finding` — e.g. `in_tree_code_graph_ignored`: a
+ * checkout's in-tree graph is ignored and no live graph exists yet; re-run onboarding), else the
+ * daemon's own sentence. Both absent when `graph` is present.
+ */
+export interface RepoGraphResponse {
+  graph: CodeGraphData | null;
+  reason?: string;
+  finding?: RepoFinding;
+}
+
 export interface GitCommit {
   sha: string;
   shortSha: string;
@@ -3403,8 +3469,10 @@ export interface ChatScope {
   cwd: string;
   /** Whether a READ-ONLY estate MCP over a code graph is attached, and why / why not. `repoLabel`
    *  is the estate label the project graph indexes the (single) scoped repo under, when the
-   *  binding was repo-bound — informational; the engine binds by graph path. */
-  graph: { bound: boolean; reason: string; repoLabel?: string };
+   *  binding was repo-bound — informational; the engine binds by graph path. `action` (api-types
+   *  0.35.0, F-2R2-008) names the UI action that would change a `bound: false` outcome, when one
+   *  would: `projects.graph.refresh` = build the project graph from the project page. */
+  graph: { bound: boolean; reason: string; repoLabel?: string; action?: ProjectGraphAction };
   /** `crew.repo` members of the project whose registry record is gone — named, not readable. */
   dangling: string[];
 }
@@ -3416,6 +3484,18 @@ export interface ChatSeatOutcome {
   error?: string;
 }
 
+/**
+ * One seat a `POST /chats` did NOT seat, and why (api-types 0.35.0, F-2R2-007): a DEFAULT seat the
+ * daemon's admission dropped before the engine saw it (signed out; not admissible to a scoped chat
+ * — its ACP adapter asks no permissions and arms no sandbox, or it has no ACP adapter), or a
+ * REQUESTED seat (`clis`) the engine refused (`ChatSeatOutcome.ok: false`, its `error` repeated
+ * here as `reason`). One list for the scope card and the thread to read.
+ */
+export interface ChatSeatRefusal {
+  cliKey: string;
+  reason: string;
+}
+
 /** `POST /chats` → 201. */
 export interface ChatOpenResponse {
   chatId: string;
@@ -3424,7 +3504,26 @@ export interface ChatOpenResponse {
   scope: ChatScope;
   /** Present when the chat opened but its `crew.chat` filing into `projectId` failed. */
   projectAttachError?: string;
+  /** Every seat that was asked for or defaulted and is NOT in `seats` as warm, with its reason
+   *  (api-types 0.35.0). Empty when every seat warmed; absent on a daemon predating the field. */
+  refused?: ChatSeatRefusal[];
 }
+
+/**
+ * A seat refused at `POST /chats` (api-types 0.35.0, F-2R2-007). DAEMON-SYNTHETIC: broadcast
+ * straight to `/ws` once per refused seat, right after the open, so the chat thread can say why a
+ * seat is missing (the studio's `chat-scope-admission` copy) — the engine emits nothing for a seat
+ * it never saw. `chat` names the chat the way the engine's `chatClosed` does; `project_id` rides
+ * along when the chat was filed. An anonymous object type on purpose, like the stall frames, so it
+ * flows through `CoreEvent`-typed seams.
+ */
+export type ChatSeatRefusedFrame = {
+  type: 'chatSeatRefused';
+  chat: string;
+  cliKey: string;
+  reason: string;
+  project_id?: string;
+};
 
 /** One live chat on `GET /chats` (FINDING-027 gap 4; scope fields with crew#502). */
 export interface ChatSummary {
@@ -3522,11 +3621,21 @@ export interface ProjectGraphRepo {
 }
 
 /** `GET /projects/:id/graph` — what the project graph holds and what it cannot answer. */
+/** The UI action that resolves a project-graph state or a declined binding (api-types 0.35.0):
+ *  `projects.graph.refresh` = `POST /projects/:id/graph/refresh`, surfaced as the project page's
+ *  build/refresh control. */
+export type ProjectGraphAction = 'projects.graph.refresh';
+
 export interface ProjectGraphStatus {
   projectId: string;
   state: ProjectGraphState;
-  /** One sentence naming the state's cause and its remedy. Always present, never empty. */
+  /** One sentence naming the state's cause and its remedy, in the operator's words — never a raw
+   *  route (F-2R2-008); the route rides on `action`. Always present, never empty. */
   detail: string;
+  /** Present when one UI action resolves the state (today: `not-indexed` with registered members
+   *  → `projects.graph.refresh`). Absent when no single action does (dangling-only members, no
+   *  members, or a graph that is already built). api-types 0.35.0. */
+  action?: ProjectGraphAction;
   /** Absolute path of the co-located database; `null` when there is none to point at. */
   dbPath: string | null;
   repos: ProjectGraphRepo[];
@@ -4082,16 +4191,24 @@ export interface DiagnosticsGovernanceDeadletters {
   /** `true` when the fold stopped at its byte cap — `count` is then a floor. */
   truncated: boolean;
   /** The pre-fix outbox under HOME (`~/.something-wicked/wicked-apps/emit-outbox.ndjson`) when it exists and is
-   *  non-empty — events earlier daemons on this host spooled there; `null` otherwise. Reported, never written. */
-  legacyOutbox: { path: string; bytes: number } | null;
+   *  non-empty — events earlier daemons on this host spooled there; `null` otherwise. Reported, never written.
+   *  `scope` (api-types 0.35.0, F-2R2-006): `own` = this daemon runs in that HOME's default state home, so the
+   *  file is its own earlier versions' outbox (the finding is a warning with the replay recipe); `host` = this
+   *  daemon's state home is isolated, so the file — shared by every daemon on the host — cannot be attributed
+   *  to it (an `info` finding with a read-only `--dry-run` inspect recipe and no replay). REQUIRED, deliberately:
+   *  the daemon always attributes the file it reports, so a `legacyOutbox` object without `scope` never leaves a
+   *  daemon shipping this contract; a skin that talks to an OLDER daemon must treat the whole `legacyOutbox`
+   *  object as best-effort (it predates the attribution), not the field alone. */
+  legacyOutbox: { path: string; bytes: number; scope: 'own' | 'host' } | null;
 }
 
 /** One governance finding. `governance.store` (error) = no store resolved, every emit dead-letters;
- *  `governance.deadletter` (error) = the outbox holds entries; `governance.legacy-outbox` (warning) =
- *  the pre-fix HOME outbox exists. Every message names the replay command. */
+ *  `governance.deadletter` (error) = the outbox holds entries; `governance.legacy-outbox` = the pre-fix
+ *  HOME outbox exists — `warning` with the replay command when it is this daemon's own, `info` with none
+ *  when it is shared across the host's daemons and not this one's (api-types 0.35.0). */
 export interface DiagnosticsGovernanceFinding {
   kind: 'governance.store' | 'governance.deadletter' | 'governance.legacy-outbox';
-  severity: 'warning' | 'error';
+  severity: 'info' | 'warning' | 'error';
   message: string;
 }
 

@@ -33,6 +33,16 @@ import { dirname, join, resolve } from 'node:path';
  */
 let configuredStateHome: string | undefined;
 
+/** The DEFAULT state home's directory name under the user's home: `~/.wicked-crew`. */
+export const DEFAULT_STATE_HOME_DIRNAME = '.wicked-crew';
+
+/** The default state home for a given home directory — `<home>/.wicked-crew`. Pure, so a probe
+ *  that already knows which HOME a file was found under can ask "is that home's default state home
+ *  the one this daemon runs in?" without consulting the process environment. */
+export function defaultStateHome(home: string): string {
+  return join(home, DEFAULT_STATE_HOME_DIRNAME);
+}
+
 /**
  * Thread the daemon's ACTUAL state home in — called from the CLI bootstrap (the one place that
  * knows the resolved `--db`), before the server constructs any store. `undefined` clears it
@@ -45,7 +55,7 @@ export function setCrewStateHome(stateHome: string | undefined): void {
 /** The state home every durable store resolves under: the bootstrap-configured `--db` parent when
  *  a daemon is running, the historical `~/.wicked-crew` default otherwise. */
 export function crewStateHome(): string {
-  return configuredStateHome ?? join(homedir(), '.wicked-crew');
+  return configuredStateHome ?? defaultStateHome(homedir());
 }
 
 /**

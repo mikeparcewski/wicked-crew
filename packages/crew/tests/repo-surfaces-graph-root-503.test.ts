@@ -85,13 +85,38 @@ describe('repo surfaces — a current engine with no repo-graph root answers 503
     expect((res.json() as { error: string }).error).toMatch(/no repo-graph root resolves/);
   });
 
-  it('a repo whose graph is merely not indexed yet keeps its pre-existing answers', async () => {
-    expect((await app.inject({ method: 'GET', url: '/api/v1/repos/ok/graph' })).json()).toEqual({ graph: null });
+  it('a repo whose graph is merely not indexed yet keeps its pre-existing answers — and /graph now SAYS it is not indexed (F-2R2-005)', async () => {
+    const graph = (await app.inject({ method: 'GET', url: '/api/v1/repos/ok/graph' })).json() as {
+      graph: null;
+      reason?: string;
+      finding?: unknown;
+    };
+    expect(graph.graph).toBeNull();
+    // `graph: null` alone cannot distinguish "not indexed" from "empty": the reason names the repo,
+    // the registered graph path, and the onboarding route that builds it.
+    expect(graph.reason).toMatch(/no code graph has been built for 'ok' yet/);
+    expect(graph.reason).toContain('/state/repo-graphs/ok-0123456789ab/estate.db');
+    expect(graph.reason).toContain('POST /api/v1/repos/ok/onboard');
+    expect(graph.finding).toBeUndefined();
     const br = await app.inject({ method: 'GET', url: '/api/v1/repos/ok/graph/blast-radius?name=x' });
     expect(br.statusCode).toBe(404);
     expect((br.json() as { error: string }).error).toMatch(/not built/);
     const req = await app.inject({ method: 'GET', url: '/api/v1/repos/ok/requirements' });
     expect(req.statusCode).toBe(404);
+  });
+
+  it('/graph for a repo whose in-tree graph is IGNORED carries the repos wire\'s own finding as the reason (F-2R2-005)', async () => {
+    const finding = {
+      code: 'in_tree_code_graph_ignored',
+      message:
+        'in-tree graph /repos/legacy/.codegraph is ignored and no live graph exists under the state home yet — re-run onboarding (POST /repos/legacy/onboard)',
+      path: '/repos/legacy/.codegraph',
+    };
+    await app.close();
+    await build([{ ...unindexedRepo('legacy'), findings: [finding] }]);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/repos/legacy/graph' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ graph: null, reason: finding.message, finding });
   });
 
   it('an unknown repo is still a 404', async () => {

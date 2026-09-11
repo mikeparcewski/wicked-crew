@@ -49,11 +49,18 @@ import { basename, delimiter } from 'path';
 export const PI_SKILL_DIRS_ENV = 'WICKED_PI_SKILL_DIRS';
 
 /**
- * `WICKED_PI_SKILL_DIRS` → pi's skill flags: `--no-skills` (discovery OFF, so the seat sees the
- * snapshot's skills and nothing from `~/.pi/agent/skills`) followed by one `--skill <dir>` per
- * entry, in order, blanks dropped, duplicates dropped (first occurrence kept). Unset, blank, or
- * naming no directory at all → `[]`, so a pi launch without a delivery is byte-identical to before
- * (`--no-skills` is never emitted alone: an empty delivery is no delivery).
+ * `WICKED_PI_SKILL_DIRS` → pi's skill flags. The variable's three states are the contract
+ * wicked-core pins (core #443 review):
+ *
+ *  - **unset** — no delivery: `[]`, so a pi launch without one is byte-identical to before;
+ *  - **set with dirs** — a delivery: `--no-skills` (discovery OFF, so the seat sees the snapshot's
+ *    skills and nothing from `~/.pi/agent/skills`) followed by one `--skill <dir>` per entry, in
+ *    order, blanks dropped, duplicates dropped (first occurrence kept);
+ *  - **set but EMPTY** (`WICKED_PI_SKILL_DIRS=`, or naming no directory at all) — a delivery of
+ *    ZERO portable skills: `--no-skills` ALONE. Discovery is still off, because the engine DID
+ *    decide what this seat may see and the answer was "nothing from the snapshot"; letting pi fall
+ *    back to `~/.pi/agent/skills` would hand the seat skills the snapshot never admitted.
+ *    (1.1.0 read blank as "no delivery" and returned `[]` — the one reading the contract rules out.)
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [sep] the list separator — `path.delimiter` unless a test says otherwise
@@ -61,16 +68,16 @@ export const PI_SKILL_DIRS_ENV = 'WICKED_PI_SKILL_DIRS';
  */
 export function piSkillFlags(env = process.env, sep = delimiter) {
   const raw = env[PI_SKILL_DIRS_ENV];
-  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  if (typeof raw !== 'string') return [];
   const seen = new Set();
-  const flags = [];
+  const flags = ['--no-skills'];
   for (const entry of raw.split(sep)) {
     const dir = entry.trim();
     if (dir === '' || seen.has(dir)) continue;
     seen.add(dir);
     flags.push('--skill', dir);
   }
-  return flags.length === 0 ? [] : ['--no-skills', ...flags];
+  return flags;
 }
 
 /** `true` when `bin` names the pi CLI itself (`pi`, `/x/bin/pi`, `pi.cmd`, `C:\\x\\pi.exe`) — either separator, any case. */

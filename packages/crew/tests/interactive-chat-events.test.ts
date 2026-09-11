@@ -999,7 +999,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
       expect(launch.projectId).toBe('proj-nograph');
       expect('projectGraph' in launch).toBe(false);
       // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
-      expect(logged.some((m) => /no code graph yet|repo-less run gets no code graph/.test(m))).toBe(true);
+      expect(logged.some((m) => /has not been built yet|repo-less run gets no code graph/.test(m))).toBe(true);
     });
 
     it('an UNFILED doc (no project_id) launches with NO projectGraph key — nothing to bind', async () => {

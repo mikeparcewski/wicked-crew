@@ -27,6 +27,7 @@ import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import type { LaunchRunInput } from '../core/types.js';
+import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 
 const [, , command, ...argv] = process.argv;
 
@@ -248,15 +249,42 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     `[crew] governance store: ${governanceStore.displayPath} (${governanceStore.source}); ` +
       `dead letters: ${governanceStore.outboxPath} (${governanceStore.outboxSource})`,
   );
+  // The interactive bridge crew will spawn (F-081): the default range, or the operator's
+  // WICKED_INTERACTIVE_SPEC when it is a semver range — an invalid value is named and ignored.
+  const interactive = resolveInteractiveSpec();
+  console.error(
+    `[crew] interactive bridge: npx ${interactive.spec} (${interactive.source === 'env' ? `${INTERACTIVE_SPEC_ENV} override` : 'default range'})` +
+      (interactive.rejected === undefined
+        ? ''
+        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.9.1, 0.9.1, >=0.9.1 <1.0.0) and was ignored`),
+  );
+  if (interactive.belowFloor === true) {
+    console.warn(
+      `[crew] ${INTERACTIVE_SPEC_ENV}=${interactive.range} is BELOW crew's need floor ${INTERACTIVE_DEFAULT_RANGE}: the override is ` +
+        'honoured, but routes crew calls may be missing on that release (DELETE /api/docs/:doc retire arrived in 0.9.1)',
+    );
+  }
   const crewVersion = crewPackageVersion();
   applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath }));
-  const legacyOutbox = await probeLegacyOutbox(legacyHomeOutboxPath());
+  const legacyOutbox = await probeLegacyOutbox(legacyHomeOutboxPath(), governanceStore.coreDbPath);
   if (legacyOutbox !== null && legacyOutbox.path !== governanceStore.outboxPath) {
-    console.warn(
-      `[crew] a pre-fix dead-letter outbox exists under HOME at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
-        `governance events earlier daemons could not store; inspect with ${replayCommand(legacyOutbox.path, governanceStore)} --dry-run, ` +
-        'then replay it into this daemon\'s store with the same command',
-    );
+    if (legacyOutbox.scope === 'host') {
+      // Cannot be attributed to this daemon (F-2R2-006; #533 review F-3 wording): an isolated state
+      // home shares HOME with every daemon on the host. Inspect read-only; the replay is withheld —
+      // it would import another daemon's dead letters.
+      console.error(
+        `[crew] a pre-fix dead-letter outbox exists at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
+          'found under HOME — shared across daemons on this host; cannot be attributed to this daemon (its state home is ' +
+          `${stateHomeOfDb(governanceStore.coreDbPath)}); inspect read-only with ${replayCommand(legacyOutbox.path, null)} --dry-run; ` +
+          'replay into this store is withheld',
+      );
+    } else {
+      console.warn(
+        `[crew] a pre-fix dead-letter outbox exists under HOME at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
+          `governance events this daemon's earlier versions could not store; inspect with ${replayCommand(legacyOutbox.path, governanceStore)} --dry-run, ` +
+          'then replay it into this daemon\'s store with the same command',
+      );
+    }
   }
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,

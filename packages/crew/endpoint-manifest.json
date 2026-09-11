@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.34.0",
+  "apiTypesVersion": "0.35.0",
   "endpoints": [
     {
       "method": "GET",
@@ -607,8 +607,13 @@
       "method": "GET",
       "path": "/api/v1/repos/:id/graph",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "RepoGraphResponse",
+      "statusCodes": [
+        200,
+        404,
+        500,
+        503
+      ]
     },
     {
       "method": "GET",

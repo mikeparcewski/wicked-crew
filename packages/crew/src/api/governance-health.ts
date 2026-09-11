@@ -21,14 +21,25 @@
  *                 legacy HOME outbox a pre-fix engine wrote, if one exists.
  *  - `findings` — `governance.deadletter` (error) whenever the outbox holds an entry;
  *                 `governance.store` (error) when no store is resolved; `governance.legacy-outbox`
- *                 (warning) when the pre-fix HOME outbox exists. Each names the replay command.
+ *                 when the pre-fix HOME outbox exists — a WARNING naming the replay command when it
+ *                 is this daemon's own prior outbox (default state home under that HOME), an INFO
+ *                 with only the read-only `--dry-run` inspect recipe when the state home is isolated
+ *                 and the file cannot be attributed to this daemon (F-2R2-006: a fresh rig must not
+ *                 be told to import another daemon's dead letters).
  */
 
 import { createReadStream } from 'node:fs';
 import { promises as fsp } from 'node:fs';
+import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import { governanceSidecarDb, type GovernanceStoreLocation, type GovernanceStoreSource } from '../core/governance-store.js';
+import {
+  governanceSidecarDb,
+  legacyOutboxScope,
+  type GovernanceStoreLocation,
+  type GovernanceStoreSource,
+  type LegacyOutboxScope,
+} from '../core/governance-store.js';
 
 // ── Wire-facing shapes (mirrored by wicked-crew-api-types `DiagnosticsGovernance*`) ──────────
 
@@ -54,14 +65,24 @@ export interface GovernanceDeadletters {
   oldestTs: number | null;
   newestTs: number | null;
   truncated: boolean;
-  legacyOutbox: { path: string; bytes: number } | null;
+  /** The pre-fix HOME outbox, when one exists — with WHOSE it is (`scope`, F-2R2-006): `own` when
+   *  this daemon runs in that HOME's default state home (its earlier versions spooled it), `host`
+   *  when this daemon's state home is isolated and the file is other daemons' dead letters. */
+  legacyOutbox: LegacyOutbox | null;
+}
+
+export interface LegacyOutbox {
+  path: string;
+  bytes: number;
+  scope: LegacyOutboxScope;
 }
 
 export type GovernanceFindingKind = 'governance.store' | 'governance.deadletter' | 'governance.legacy-outbox';
 
 export interface GovernanceFinding {
   kind: GovernanceFindingKind;
-  severity: 'warning' | 'error';
+  /** `info` is the one non-actionable rung: a HOME outbox that is NOT this daemon's (F-2R2-006). */
+  severity: 'info' | 'warning' | 'error';
   message: string;
 }
 
@@ -324,8 +345,8 @@ export interface GovernanceHealthInputs {
   location: GovernanceStoreLocation | null;
   records: GovernanceRecords;
   fold: DeadletterFold;
-  /** `{ path, bytes }` of the pre-fix HOME outbox when it exists and is non-empty, else `null`. */
-  legacyOutbox: { path: string; bytes: number } | null;
+  /** The pre-fix HOME outbox when it exists and is non-empty — path, size and whose it is — else `null`. */
+  legacyOutbox: LegacyOutbox | null;
 }
 
 export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealth {
@@ -357,14 +378,33 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
         `replay them with ${replayCommand(path, input.location)}`,
     });
   }
-  if (input.legacyOutbox !== null) {
+  if (input.legacyOutbox !== null && input.legacyOutbox.scope === 'host') {
+    // CANNOT be attributed to this daemon (F-2R2-006; wording per the #533 review, F-3): an isolated
+    // state home shares HOME with every daemon on the host, so the file may hold any of theirs —
+    // including, for a daemon that ran since before the fix, its own. Said at `info`, with the
+    // read-only inspect recipe (a `--dry-run` writes nothing) and the REPLAY withheld: replaying
+    // into this store would import events another daemon spooled.
+    const inspect = `${replayCommand(input.legacyOutbox.path, null)} --dry-run`;
+    findings.push({
+      kind: 'governance.legacy-outbox',
+      severity: 'info',
+      message:
+        `a pre-fix dead-letter outbox exists at ${input.legacyOutbox.path} (${input.legacyOutbox.bytes} bytes) — ` +
+        'found under HOME — shared across daemons on this host; cannot be attributed to this daemon' +
+        (input.location !== null
+          ? ` (its state home is ${dirname(input.location.coreDbPath)} and its own outbox is ${input.location.outboxPath})`
+          : '') +
+        `. Inspect it read-only with ${inspect}; a replay into this daemon's store is withheld — it would import ` +
+        'events another daemon spooled. The daemon that runs in that home\'s default state home reports and repairs it',
+    });
+  } else if (input.legacyOutbox !== null) {
     const recipe = replayCommand(input.legacyOutbox.path, input.location);
     findings.push({
       kind: 'governance.legacy-outbox',
       severity: 'warning',
       message:
         `a pre-fix dead-letter outbox exists under HOME at ${input.legacyOutbox.path} (${input.legacyOutbox.bytes} bytes) — ` +
-        `events every earlier daemon on this host spooled there instead of storing; inspect it with ` +
+        `events this daemon's earlier versions spooled there instead of storing; inspect it with ` +
         `${recipe} --dry-run, then ` +
         (input.location !== null
           ? `replay it into this daemon's store with ${recipe}`
@@ -380,12 +420,21 @@ export function governanceHealth(input: GovernanceHealthInputs): GovernanceHealt
   };
 }
 
-/** `{ path, bytes }` when the legacy HOME outbox exists and is non-empty (a `stat`, never a read), else `null`. */
-export async function probeLegacyOutbox(path: string | null): Promise<{ path: string; bytes: number } | null> {
+/**
+ * `{ path, bytes, scope }` when the legacy HOME outbox exists and is non-empty (a `stat`, never a
+ * read), else `null`. `scope` is {@link legacyOutboxScope} against `coreDbPath` — the daemon's core
+ * db, `null` when no store resolved (then `host`: nothing to attribute the file to).
+ */
+export async function probeLegacyOutbox(
+  path: string | null,
+  coreDbPath: string | null = null,
+): Promise<LegacyOutbox | null> {
   if (path === null) return null;
   try {
     const st = await fsp.stat(path);
-    return st.isFile() && st.size > 0 ? { path, bytes: st.size } : null;
+    return st.isFile() && st.size > 0
+      ? { path, bytes: st.size, scope: legacyOutboxScope(coreDbPath, path) }
+      : null;
   } catch {
     return null;
   }
@@ -418,8 +467,12 @@ export class GovernanceDiagnostics {
     const [records, fold, legacyOutbox] = await Promise.all([
       this.counter.records(),
       outbox !== null ? this.folds.get(outbox) : Promise.resolve(emptyDeadletterFold(null)),
-      // The legacy pointer is only meaningful when it is NOT this daemon's own outbox.
-      probeLegacyOutbox(this.legacyOutboxPath !== null && this.legacyOutboxPath !== outbox ? this.legacyOutboxPath : null),
+      // The legacy pointer is only meaningful when it is NOT this daemon's own outbox; whose it is
+      // (`scope`) decides warning-with-recipe vs info-without (F-2R2-006).
+      probeLegacyOutbox(
+        this.legacyOutboxPath !== null && this.legacyOutboxPath !== outbox ? this.legacyOutboxPath : null,
+        this.location?.coreDbPath ?? null,
+      ),
     ]);
     return governanceHealth({ location: this.location, records, fold, legacyOutbox });
   }

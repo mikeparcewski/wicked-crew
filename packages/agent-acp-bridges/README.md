@@ -43,8 +43,9 @@ snapshot over the ACP carrier (F-079; wicked-core#441 sets the variable, wicked-
 |---|---|
 | variable | `WICKED_PI_SKILL_DIRS` |
 | value | the deliverable **portable** skill directories of the pinned snapshot generation (`<snapshot>/skills/<dir>`), joined with the OS path delimiter (`:` on POSIX, `;` on Windows), in the order the wrapped carrier puts them on pi's argv |
-| effect when set | pi is started with `--no-skills` (discovery of `~/.pi/agent/skills` OFF) followed by one `--skill <dir>` per entry — order kept, blank entries and duplicates dropped — **before** every other argument |
-| effect when unset / blank | nothing is added; the launch is byte-identical to before |
+| effect when set with dirs | a **delivery**: pi is started with `--no-skills` (discovery of `~/.pi/agent/skills` OFF) followed by one `--skill <dir>` per entry — order kept, blank entries and duplicates dropped — **before** every other argument |
+| effect when set but **empty** (`WICKED_PI_SKILL_DIRS=`) | a delivery of **zero** portable skills: pi is started with `--no-skills` **alone** — discovery stays off, the seat sees no skills (1.1.1; 1.1.0 read this as "no delivery") |
+| effect when unset | **no delivery**: nothing is added; the launch is byte-identical to before |
 
 Two places implement it:
 

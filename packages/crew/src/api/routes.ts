@@ -9,7 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
+  CodeGraphData,
+  CoreEvent,
   RepoEntry,
+  RepoFinding,
   WorkflowDef,
 } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
@@ -39,6 +42,7 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
+import { chatSeatAdmission, seatStanding } from './seat-standing.js';
 import {
   ChatScopeIndex,
   chatScopeDeps,
@@ -155,6 +159,18 @@ function sortActionableFirst(views: SessionView[]): SessionView[] {
  * `codeGraphErrorStatus`; anything it does not classify rethrows unchanged (the stale-addon error
  * keeps its pre-existing shape here).
  */
+/**
+ * What `GET /repos/:id/graph` answers with 200 (F-2R2-005) — the daemon-side shape the drift guard
+ * pins both ways against `wicked-crew-api-types` `RepoGraphResponse` (#533 review, F-5). `graph`
+ * present = the estate slice; `graph: null` = not built, with `reason` (and the engine's `finding`
+ * when it has one) saying why.
+ */
+export interface RepoGraphReply {
+  graph: CodeGraphData | null;
+  reason?: string;
+  finding?: RepoFinding;
+}
+
 function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
   try {
     return codeGraphDb(repo);
@@ -619,6 +635,9 @@ export interface RuntimeDeps {
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
+  /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
+   *  chat seat, F-2R2-007). Absent (unit tests, library use) = nothing is broadcast. */
+  broadcast?: (frame: CoreEvent) => void;
   /** The wicked-interactive bridge pool behind `/projects/:id/interactive/*` (DES-MERGE-001
    *  slice 1). Injectable so the integration suite proxies to a FAKE bridge instead of
    *  spawning a real `npx wicked-interactive serve`. */
@@ -946,16 +965,34 @@ export function registerRoutes(
   // gains `signed_in`: the cheap file/env presence heuristic, computed against the LIVE
   // `WICKED_WORKER_HOME` env — the same value the engine reads at the next worker spawn, kept
   // current by `applyWorkerConfigRoot` at boot and on every settings change.
-  app.get(`${V}/roster`, async () => {
+  //
+  // Each seat ALSO carries its STANDING (F-2R2-009): `auth` re-reads `signed_in` for what it means
+  // (a `signed_out` codex is benched on its first ballot; a `not_required` opencode answers on its
+  // free tier), and `council_eligible` says what a council would do with the seat as far as the
+  // daemon can tell. `POST /chats` seats its defaults through the SAME standing, so the roster and
+  // the chat never disagree about a seat.
+  const rosterWithStanding = (): RosterSeat[] => {
     const workerRoot = process.env['WICKED_WORKER_HOME'];
-    return {
-      roster: (CoreAdapter.roster() as RosterSeat[]).map((seat) => ({
+    return (CoreAdapter.roster() as RosterSeat[]).map((seat) => {
+      const key = String(seat.key);
+      const health = seatHealth.healthFor(key);
+      const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
+      return {
         ...seat,
-        health: seatHealth.healthFor(String(seat.key)),
-        signed_in: signedIn(String(seat.key), workerRoot === '' ? undefined : workerRoot),
-      })),
-    };
-  });
+        health,
+        signed_in: signed,
+        // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
+        // prediction learns from what the engine actually did with the seat (#533 review, F-1).
+        ...seatStanding(
+          seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
+          signed,
+          health,
+          seatHealth.councilBenchFor(key),
+        ),
+      };
+    });
+  };
+  app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
 
   // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
   // click-to-open. The open MUST happen daemon-side (the SPA cannot spawn a process), which is
@@ -1820,31 +1857,45 @@ export function registerRoutes(
           .code(500)
           .send({ error: `cannot prepare the chat's scratch root ${scope.cwd}: ${message(err)}` });
       }
-      // The default seats of a SCOPED chat are pre-filtered by admissibility (independent review,
-      // W5): the engine admits a seat to a scoped chat only when its ACP adapter asks permissions
-      // (`acp_input_governance`) or its record arms the kernel write floor (`os_sandbox`) — with the
-      // default roster that is claude and opencode — so a default project-scoped open does not show
-      // four refused seats. Explicit `clis` are passed through as asked; the engine refuses per seat
-      // with the reason.
+      // The DEFAULT seats are the roster seats the daemon's own admission admits (F-2R2-007,
+      // F-2R2-009): the seat's auth standing (a signed-out seat is refused up front, with the
+      // reason, instead of failing its first turn — the same predicate `GET /roster` reports as
+      // `council_eligible`) and, for a SCOPED chat, the engine's rule restated (only a seat whose
+      // ACP adapter asks permissions or whose record arms the kernel write floor can be held to
+      // read-only roots — with the default roster that is claude and opencode). Every seat dropped
+      // here is NAMED on the response (`refused`) and in the thread (`chatSeatRefused`), so a
+      // person can see why pi is missing. Explicit `clis` are passed through as asked; the engine
+      // refuses per seat with its reason, which is copied into `refused` too.
       const scoped = scope.kind !== 'none';
-      const roster = CoreAdapter.roster() as {
-        key?: string;
-        acp?: { acp_input_governance?: boolean; os_sandbox?: boolean };
-      }[];
-      const clis =
-        b.clis ??
-        roster
-          .filter((s) => !scoped || s.acp?.acp_input_governance === true || s.acp?.os_sandbox === true)
-          .map((s) => s.key)
-          .filter((k): k is string => typeof k === 'string');
+      const refused: { cliKey: string; reason: string }[] = [];
+      let clis: string[];
+      if (b.clis !== undefined) {
+        clis = b.clis;
+      } else {
+        clis = [];
+        for (const seat of rosterWithStanding()) {
+          const key = String(seat.key);
+          const admission = chatSeatAdmission(
+            seat as { key: string; enabled_for_council?: boolean; acp?: { acp_input_governance?: boolean; os_sandbox?: boolean } | null },
+            seat.auth ?? 'unknown',
+            scoped,
+          );
+          if (admission.ok) clis.push(key);
+          else refused.push({ cliKey: key, reason: admission.reason });
+        }
+      }
       if (clis.length === 0) {
         chatScopes.release(chatId, token);
         removeChatScratch(scope.cwd, chatScopes.base);
         return reply.code(409).send({
           error:
-            'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
-            'governance, or `os_sandbox = true` on its [cli.acp] record); open the chat unscoped, or ' +
-            'name seats with `clis`',
+            (scoped
+              ? 'no seat in the roster can be held to a scoped chat (an ACP adapter admitted to input ' +
+                'governance, or `os_sandbox = true` on its [cli.acp] record) and take a turn; open the ' +
+                'chat unscoped, sign a seat in, or name seats with `clis`'
+              : 'no seat in the roster can take a turn (every seat is signed out); sign a seat in from ' +
+                'the System page, or name seats with `clis`') + ' — see refused',
+          refused,
         });
       }
       try {
@@ -1852,6 +1903,10 @@ export function registerRoutes(
           codeGraphDb: engine.codeGraphDb,
           readRoots: engine.readRoots,
         });
+        // A REQUESTED seat the engine refused joins the same list, with the engine's reason.
+        for (const s of seats) {
+          if (!s.ok) refused.push({ cliKey: s.cliKey, reason: s.error ?? 'the engine refused the seat' });
+        }
         // Nothing warmed (independent review, W1): the engine holds no pool row and has dropped the
         // scope itself (no `chatClosed` will come) — report the PER-SEAT reasons, never an
         // engine-version guess; the root goes, the id is free again.
@@ -1861,6 +1916,7 @@ export function registerRoutes(
           return reply.code(409).send({
             error: `chat ${chatId}: no seat warmed (${seats.length} failed) — see seats`,
             seats,
+            refused,
           });
         }
         // Honest scope (Copilot, #518): a SCOPED chat is a promise — the roots are read-only, the
@@ -1937,10 +1993,23 @@ export function registerRoutes(
             error: `chat ${chatId} was closed while it was being opened; open it again`,
           });
         }
+        // The thread learns of every refused seat the way it learns of everything else — a frame
+        // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it
+        // cannot yet look up.
+        for (const r of refused) {
+          runtime.broadcast?.({
+            type: 'chatSeatRefused',
+            chat: chatId,
+            cliKey: r.cliKey,
+            reason: r.reason,
+            ...(b.projectId !== undefined ? { project_id: b.projectId } : {}),
+          } as CoreEvent);
+        }
         return reply.code(201).send({
           chatId,
           seats,
           scope,
+          refused,
           ...(projectAttachError !== undefined ? { projectAttachError } : {}),
         });
       } catch (err) {
@@ -3137,7 +3206,10 @@ export function registerRoutes(
     return { requirement: detail };
   });
 
-  app.get(`${V}/repos/:id/graph`, async (req, reply) => {
+  app.get(
+    `${V}/repos/:id/graph`,
+    { config: { manifest: { responseType: 'RepoGraphResponse', statusCodes: [200, 404, 500, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
@@ -3146,7 +3218,20 @@ export function registerRoutes(
     const dbPath = codeGraphDbOr503(repo, reply);
     if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
-      return reply.send({ graph: null });
+      // `graph: null` alone cannot tell "not indexed" from "empty" (F-2R2-005): say WHY, with the
+      // same finding text the repos wire carries when the engine has one.
+      const finding = (repo.findings ?? []).find(
+        (f) => f.code === 'in_tree_code_graph_ignored' || f.code === 'code_graph_root_unresolvable',
+      );
+      const unbuilt: RepoGraphReply = {
+        graph: null,
+        reason:
+          finding?.message ??
+          `no code graph has been built for '${repo.name}' yet (nothing at ${dbPath}) — run onboarding ` +
+            `(POST /api/v1/repos/${repo.id}/onboard) to index it`,
+        ...(finding !== undefined ? { finding } : {}),
+      };
+      return reply.send(unbuilt);
     }
 
     try {
@@ -3173,17 +3258,19 @@ export function registerRoutes(
         edges: Array<{ src: string; tgt: string }>;
       };
       const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
-      return reply.send({
+      const built: RepoGraphReply = {
         graph: {
           nodes: raw.nodes,
           edges: raw.edges,
           stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
         },
-      });
+      };
+      return reply.send(built);
     } catch (err) {
       return reply.code(500).send({ error: message(err) });
     }
-  });
+    },
+  );
 
   // ── Git history (last 20 commits via git log) ─────────────────────────────
 

@@ -69,6 +69,17 @@ import type { Actor } from '../core/types.js';
 
 const V = API_PREFIX;
 
+/**
+ * The `error` of a query route that cannot answer: the status's own sentence — customer copy since
+ * F-2R2-008, which names the page action and not the route — plus, for an API caller who has no
+ * page, the route the `action` stands for. `status` rides alongside with the machine field.
+ */
+function notQueryableError(status: ProjectGraphStatus): string {
+  return status.action === 'projects.graph.refresh'
+    ? `${status.detail} API: POST ${V}/projects/${status.projectId}/graph/refresh.`
+    : status.detail;
+}
+
 // Exported for tests/wire-contract.test.ts (the request-direction drift guard).
 export const CreateProjectSchema = z
   .object({
@@ -582,7 +593,7 @@ export function registerProjectRoutes(
       // different — and dangerous — statement from "there is no graph to ask".
       if (!ready.ok) {
         const code = ready.status.state === 'engine-too-old' ? 501 : 404;
-        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+        return reply.code(code).send({ error: notQueryableError(ready.status), status: ready.status });
       }
       return reply.send(await projectBlastRadius(ready, q.name.trim()));
     } catch (err) {
@@ -608,7 +619,7 @@ export function registerProjectRoutes(
       const ready = await queryable(adapter, id);
       if (!ready.ok) {
         const code = ready.status.state === 'engine-too-old' ? 501 : 404;
-        return reply.code(code).send({ error: ready.status.detail, status: ready.status });
+        return reply.code(code).send({ error: notQueryableError(ready.status), status: ready.status });
       }
       return reply.send(await projectSymbolSearch(ready, q.name.trim()));
     } catch (err) {

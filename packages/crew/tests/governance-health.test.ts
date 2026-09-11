@@ -1,9 +1,9 @@
 // `GET /diagnostics` → `governance` (crew#495 / F-022): the dead-letter fold, its cache, the
 // record counter and the findings — over fixture outboxes, never a real engine.
 
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -238,19 +238,42 @@ describe('governanceHealth (the findings)', () => {
     expect(health.findings[0]!.message).toContain(`wicked-crew governance replay ${shellQuote('<outbox.ndjson>')} --dry-run`);
   });
 
-  it('a pre-fix outbox under HOME is governance.legacy-outbox (warning) with the dry-run recipe', () => {
+  it('a pre-fix outbox under HOME that is THIS daemon\'s own (scope own) is governance.legacy-outbox (warning) with the dry-run recipe', () => {
     const health = governanceHealth({
       location,
       records: { total: 3, sinceBoot: 1 },
       fold: emptyDeadletterFold(location.outboxPath),
-      legacyOutbox: { path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415 },
+      legacyOutbox: { path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415, scope: 'own' },
     });
     expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'warning']]);
     expect(health.findings[0]!.message).toContain('--dry-run');
     expect(health.findings[0]!.message).toContain(`--governance-db ${shellQuote(resolve('/state/core.db.governance/governance.db'))}`);
     // W10: a replay of that file appends its failed lines back onto it — the warning persists until repaired.
     expect(health.findings[0]!.message).toContain('persists until they are repaired');
-    expect(health.deadletters.legacyOutbox).toEqual({ path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415 });
+    expect(health.deadletters.legacyOutbox).toEqual({ path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 3415, scope: 'own' });
+  });
+
+  it('a HOME outbox that is NOT this daemon\'s (scope host — an isolated state home) is INFO, labelled shared, with NO replay command (F-2R2-006)', () => {
+    const health = governanceHealth({
+      location,
+      records: { total: 3, sinceBoot: 1 },
+      fold: emptyDeadletterFold(location.outboxPath),
+      legacyOutbox: { path: '/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson', bytes: 1_477_998, scope: 'host' },
+    });
+    expect(health.findings.map((f) => [f.kind, f.severity])).toEqual([['governance.legacy-outbox', 'info']]);
+    const msg = health.findings[0]!.message;
+    // Says what is KNOWN — attribution is impossible, not "someone else's" (#533 review, F-3)…
+    expect(msg).toContain('found under HOME — shared across daemons on this host; cannot be attributed to this daemon');
+    expect(msg).not.toMatch(/not this daemon's/);
+    // …names THIS daemon's state home and outbox so the reader can see they are elsewhere…
+    expect(msg).toContain(resolve('/state'));
+    expect(msg).toContain(location.outboxPath);
+    // …keeps the READ-ONLY inspect recipe (a --dry-run writes nothing)…
+    expect(msg).toContain(`wicked-crew governance replay ${shellQuote('/homes/op/.something-wicked/wicked-apps/emit-outbox.ndjson')} --dry-run`);
+    // …and withholds the replay: no target store is ever named for this file.
+    expect(msg).not.toContain('--governance-db');
+    expect(msg).toContain('withheld');
+    expect(health.deadletters.legacyOutbox?.scope).toBe('host');
   });
 });
 
@@ -271,10 +294,23 @@ describe('GovernanceDiagnostics (the per-daemon assembly)', () => {
     writeFileSync(legacy, `${UNSTAMPED}\n`, 'utf8');
     const withLegacy = new GovernanceDiagnostics(loc, null, legacy);
     const h2 = await withLegacy.health();
-    expect(h2.deadletters.legacyOutbox).toEqual({ path: legacy, bytes: UNSTAMPED.length + 1 });
-    expect(h2.findings.map((f) => f.kind)).toEqual(['governance.deadletter', 'governance.legacy-outbox']);
+    // The scratch core db is NOT the default state home of the home that file sits under → `host`:
+    // reported at info, without a recipe (F-2R2-006).
+    expect(h2.deadletters.legacyOutbox).toEqual({ path: legacy, bytes: UNSTAMPED.length + 1, scope: 'host' });
+    expect(h2.findings.map((f) => [f.kind, f.severity])).toEqual([
+      ['governance.deadletter', 'error'],
+      ['governance.legacy-outbox', 'info'],
+    ]);
     // `null` = report none (tests never stat the developer's real home).
     expect(await probeLegacyOutbox(null)).toBeNull();
     expect(await probeLegacyOutbox(join(scratch as string, 'absent.ndjson'))).toBeNull();
+    // The probe attributes: a core db INSIDE `<that home>/.wicked-crew` owns the file.
+    const home = join(scratch as string, 'home');
+    const homeOutbox = join(home, '.something-wicked', 'wicked-apps', 'emit-outbox.ndjson');
+    mkdirSync(dirname(homeOutbox), { recursive: true });
+    writeFileSync(homeOutbox, `${UNSTAMPED}\n`, 'utf8');
+    expect((await probeLegacyOutbox(homeOutbox, join(home, '.wicked-crew', 'core.db')))?.scope).toBe('own');
+    expect((await probeLegacyOutbox(homeOutbox, join(scratch as string, 'isolated', 'core.db')))?.scope).toBe('host');
+    expect((await probeLegacyOutbox(homeOutbox, null))?.scope).toBe('host');
   });
 });

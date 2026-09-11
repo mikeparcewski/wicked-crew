@@ -20,6 +20,10 @@ let graphFile: string;
 let app: FastifyInstance;
 let chatScopes: ChatScopeIndex;
 let applied: boolean | null;
+/** The injected sign-in probe: `null` (unknown → admitted) unless a test says otherwise. */
+let signedIn: (seatKey: string) => boolean | null = () => null;
+/** Every frame the route broadcast to /ws (the thread's copy of a refusal). */
+let broadcast: unknown[];
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
 const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
   args[1].map((c) => ({ cliKey: c, ok: true })),
@@ -51,10 +55,15 @@ beforeEach(async () => {
   writeFileSync(graphFile, '');
   applied = true;
   chatOpen.mockClear();
+  signedIn = () => null;
+  broadcast = [];
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
   registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
     chatScopes,
+    // Never the real dotfile probe: the suite must not read the developer's worker home.
+    signedIn: (seatKey) => signedIn(seatKey),
+    broadcast: (frame) => broadcast.push(frame),
   });
   await app.ready();
 });
@@ -180,19 +189,76 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       { key: 'agy' },
     ]);
     try {
-      expect((await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] })).statusCode).toBe(201);
+      const scopedRes = await open({ chatId: 'dflt-scoped', repoRefs: ['alpha'] });
+      expect(scopedRes.statusCode).toBe(201);
       expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'codex']);
-      expect((await open({ chatId: 'dflt-plain' })).statusCode).toBe(201);
+      // F-2R2-007: the two dropped seats are NAMED with their reasons — on the response…
+      const scopedBody = scopedRes.json() as { refused: { cliKey: string; reason: string }[] };
+      expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['pi', 'agy']);
+      expect(scopedBody.refused[0]!.reason).toMatch(/asks no permissions/);
+      expect(scopedBody.refused[1]!.reason).toMatch(/no ACP adapter registered/);
+      // …and in the thread, one frame per refused seat, AFTER the scope is published.
+      expect(broadcast).toEqual([
+        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'pi', reason: scopedBody.refused[0]!.reason },
+        { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[1]!.reason },
+      ]);
+      broadcast = [];
+      const plain = await open({ chatId: 'dflt-plain' });
+      expect(plain.statusCode).toBe(201);
       expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'pi', 'codex', 'agy']);
-      // A roster with no admissible seat cannot open a scoped chat by default — said plainly.
+      expect((plain.json() as { refused: unknown[] }).refused).toEqual([]);
+      expect(broadcast).toEqual([]);
+      // A roster with no admissible seat cannot open a scoped chat by default — said plainly, with the list.
       spy.mockReturnValue([{ key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } }]);
       const none = await open({ chatId: 'dflt-none', repoRefs: ['alpha'] });
       expect(none.statusCode).toBe(409);
       expect((none.json() as { error: string }).error).toMatch(/no seat in the roster can be held/);
+      expect((none.json() as { refused: { cliKey: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi']);
       expect(existsSync(join(base, 'chats', 'dflt-none'))).toBe(false);
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('a SIGNED-OUT default seat is refused up front with the reason (the roster\'s auth predicate); a free-tier seat with no credential is seated (F-2R2-009)', async () => {
+    const spy = vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
+      { key: 'claude', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'opencode', acp: { acp_input_governance: true, os_sandbox: false } },
+      { key: 'codex', acp: { acp_input_governance: false, os_sandbox: true } },
+    ]);
+    // The fresh rig: claude signed in, the rest not observable as signed in.
+    signedIn = (seatKey) => seatKey === 'claude';
+    try {
+      const res = await open({ chatId: 'auth-scoped', repoRefs: ['alpha'] });
+      expect(res.statusCode).toBe(201);
+      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'opencode']);
+      const body = res.json() as { refused: { cliKey: string; reason: string }[] };
+      expect(body.refused).toHaveLength(1);
+      expect(body.refused[0]!.cliKey).toBe('codex');
+      expect(body.refused[0]!.reason).toMatch(/signed out/);
+      expect(body.refused[0]!.reason).not.toMatch(/asks no permissions/);
+      // Everyone signed out and no free tier: nothing can take a turn, said plainly (unscoped too).
+      spy.mockReturnValue([{ key: 'codex', acp: { acp_input_governance: true, os_sandbox: false } }]);
+      signedIn = () => false;
+      const none = await open({ chatId: 'auth-none' });
+      expect(none.statusCode).toBe(409);
+      expect((none.json() as { error: string }).error).toMatch(/every seat is signed out/);
+      expect(chatOpen).not.toHaveBeenCalledWith('auth-none', expect.anything(), expect.anything(), expect.anything());
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a REQUESTED seat the engine refuses joins `refused` with the engine\'s reason, and reaches the thread', async () => {
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
+    );
+    const res = await open({ chatId: 'req', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { seats: { cliKey: string; ok: boolean }[]; refused: { cliKey: string; reason: string }[] };
+    expect(body.seats.map((s) => [s.cliKey, s.ok])).toEqual([['claude', true], ['pi', false]]);
+    expect(body.refused).toEqual([{ cliKey: 'pi', reason: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" }]);
+    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'req', cliKey: 'pi', reason: body.refused[0]!.reason }]);
   });
 
   it('a chatClosed that lands while an open is in flight cancels it: nothing is recorded and the chat is torn down', async () => {

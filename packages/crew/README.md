@@ -38,7 +38,10 @@ engine cannot store dead-letter to
 `<core db>.governance/emit-outbox.ndjson` by default (under the state home, not HOME; an explicit
 `WICKED_APPS_EMIT_DEADLETTER` is honoured), are counted on
 `GET /api/v1/diagnostics` → `governance` (a `governance.deadletter` finding), and are drained back
-with `wicked-crew governance replay <outbox>`.
+with `wicked-crew governance replay <outbox>`. The interactive document bridge is spawned on demand
+as `npx wicked-interactive@^0.9.1`; `WICKED_INTERACTIVE_SPEC` overrides the range (semver range
+only, validated; invalid values are named on the boot line and ignored, a floor below crew's need
+is warned about).
 
 ## Quickstart
 

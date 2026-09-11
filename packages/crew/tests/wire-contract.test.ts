@@ -27,7 +27,7 @@ import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
 import type { RequirementDetail, RequirementsPage } from '../src/api/requirements.js';
-import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RetireMemorySchema } from '../src/api/routes.js';
+import type { ChatOpenSchema, GateSchema, GuidanceSchema, LaunchSchema, OpenPathSchema, OpenTerminalSchema, RepoGraphReply, RetireMemorySchema } from '../src/api/routes.js';
 import type { SteeringAuthorSchema, SteeringImportSchema } from '../src/api/governance-steering.js';
 import type {
   ImportEvalCorpusSchema,
@@ -621,6 +621,11 @@ respondsWith<Wire.DiagnosticsGovernanceDeadletters, GovernanceDeadletters>();
 respondsWith<GovernanceDeadletters, Wire.DiagnosticsGovernanceDeadletters>();
 respondsWith<Wire.DiagnosticsGovernanceRecords, GovernanceRecords>();
 respondsWith<GovernanceRecords, Wire.DiagnosticsGovernanceRecords>();
+// `GET /repos/:id/graph` (api-types 0.35.0, F-2R2-005): the daemon's typed reply and the published
+// shape pinned both ways, so a `reason`/`finding` rename or a graph-shape drift stops compiling
+// (independent review of #533, F-5).
+respondsWith<Wire.RepoGraphResponse, RepoGraphReply>();
+respondsWith<RepoGraphReply, Wire.RepoGraphResponse>();
 // The skills seam's health block (api-types 0.28.0), both directions.
 respondsWith<Wire.DiagnosticsSkills, SkillsHealth>();
 respondsWith<SkillsHealth, Wire.DiagnosticsSkills>();

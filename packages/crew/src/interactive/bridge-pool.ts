@@ -88,8 +88,87 @@ export const LINEAGE_MAX_HOPS = 16;
  *
  * Bump this when crew starts depending on a newer interactive route, and say which route in the
  * commit.
+ *
+ * F-081 (acceptance): the `^0.8.1` floor was a COMPILED constant, so the daemon never picked up
+ * wicked-interactive 0.9.0 (2026-09-02) and would not have picked up 0.9.1 — a silent freeze the
+ * caret was never meant to be. The default range now follows 0.9.1 (the exporter honours the
+ * author's page geometry — F-050; `DELETE /api/docs/:doc` retire exists), and an operator or a test
+ * rig can override the RANGE with `WICKED_INTERACTIVE_SPEC` (a semver range — `^0.9.1`, `0.9.1`,
+ * `>=0.9.1 <1.0.0`; never a tag, a path or a different package), validated at resolution and
+ * reported on the boot line. An invalid value is IGNORED with a named warning — the default floor
+ * is the safe reading, and a daemon must not start bridges against `latest` because a variable
+ * was mistyped.
  */
-export const INTERACTIVE_SPEC = 'wicked-interactive@^0.8.1';
+/** The package crew starts as the interactive bridge — named in CODE exactly once. */
+const INTERACTIVE_PACKAGE = 'wicked-interactive';
+/** The range crew needs when nothing overrides it (see F-081 above). */
+export const INTERACTIVE_DEFAULT_RANGE = '^0.9.1';
+/** The env override of the RANGE (not the package). */
+export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
+/** The default spec — what the daemon spawns with no override. */
+export const INTERACTIVE_SPEC = `${INTERACTIVE_PACKAGE}@${INTERACTIVE_DEFAULT_RANGE}`;
+
+/** One comparator: optional `^` `~` `>=` `<=` `>` `<` `=` then `MAJOR.MINOR.PATCH[-prerelease]`. */
+const SEMVER_COMPARATOR = /^(?:\^|~|>=?|<=?|=)?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+/** A semver RANGE this daemon will resolve: one comparator, or a space-separated intersection of
+ *  them (`>=0.9.1 <1.0.0`). Tags (`latest`), `x`-ranges, `||` unions, paths and `pkg@range` spellings
+ *  are refused — the override names a floor within the package, nothing else. */
+export function validInteractiveRange(raw: string): boolean {
+  const trimmed = raw.trim();
+  return trimmed !== '' && trimmed.split(/\s+/).every((part) => SEMVER_COMPARATOR.test(part));
+}
+
+export interface InteractiveSpecResolution {
+  /** The npm spec to spawn: `wicked-interactive@<range>`. */
+  spec: string;
+  range: string;
+  source: 'default' | 'env';
+  /** Present when the env variable was set but is not a semver range — ignored, default used. */
+  rejected?: string;
+  /** Present when an ACCEPTED override's floor is below crew's default floor (#533 review, F-7): the
+   *  override is honoured — a pin-back is the operator's call — but routes crew calls may be missing
+   *  (0.8.x lacks `DELETE /api/docs/:doc`), so the boot line warns. */
+  belowFloor?: true;
+}
+
+/** `MAJOR.MINOR.PATCH` of the first floor-bearing comparator in a range (`^`, `~`, `>=`, `=`, bare);
+ *  `null` when the range has only upper bounds. */
+export function rangeFloor(range: string): [number, number, number] | null {
+  for (const part of range.trim().split(/\s+/)) {
+    const m = /^(?:\^|~|>=|=)?(\d+)\.(\d+)\.(\d+)/.exec(part);
+    if (m !== null) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+  return null;
+}
+
+function floorBelow(a: [number, number, number], b: [number, number, number]): boolean {
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i]! !== b[i]!) return a[i]! < b[i]!;
+  }
+  return false;
+}
+
+/** Resolve the spec from `env` — pure, so the boot line, the spawn and the hint agree. */
+export function resolveInteractiveSpec(env: NodeJS.ProcessEnv = process.env): InteractiveSpecResolution {
+  const raw = env[INTERACTIVE_SPEC_ENV];
+  if (raw === undefined || raw.trim() === '') {
+    return { spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default' };
+  }
+  if (!validInteractiveRange(raw)) {
+    return { spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default', rejected: raw };
+  }
+  const range = raw.trim();
+  const floor = rangeFloor(range);
+  const need = rangeFloor(INTERACTIVE_DEFAULT_RANGE);
+  const belowFloor = floor !== null && need !== null && floorBelow(floor, need);
+  return { spec: `${INTERACTIVE_PACKAGE}@${range}`, range, source: 'env', ...(belowFloor ? { belowFloor: true as const } : {}) };
+}
+
+/** The spec the daemon spawns and the hint names — resolved from the live env at each use. */
+export function interactiveSpec(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveInteractiveSpec(env).spec;
+}
 /** ADR-0025: 1.5 s × 3 while the pid lives. */
 export const HEALTH_TIMEOUT_MS = 1500;
 export const HEALTH_ATTEMPTS = 3;
@@ -116,7 +195,7 @@ export class BridgeUnavailableError extends Error {
 
 /** The one command that reproduces a failed start in a terminal, where its output is visible. */
 function serveCommand(root: string): string {
-  return `npx ${INTERACTIVE_SPEC} serve --root ${root}`;
+  return `npx ${interactiveSpec()} serve --root ${root}`;
 }
 
 /** The two variables crew hands the bridge it spawns (F-042/F-043). Absent = not set — the bridge
@@ -652,7 +731,7 @@ export class InteractiveBridgePool {
 function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
   // `--yes` is load-bearing: without it npx PROMPTS when the package is not installed, and a
   // daemon has no tty to answer with — the request would hang instead of failing to a 503.
-  return nodeSpawn('npx', ['--yes', INTERACTIVE_SPEC, 'serve', '--root', root], {
+  return nodeSpawn('npx', ['--yes', interactiveSpec(), 'serve', '--root', root], {
     cwd: root,
     detached: true,
     stdio: 'ignore',

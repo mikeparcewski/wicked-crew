@@ -184,8 +184,9 @@ export function registerInteractiveDocDelete(
       }
 
       // A 404 is only the retire wire's "unknown doc" when the BODY says so. A bridge too old to
-      // carry the retire route (any published wicked-interactive up to 0.8.1 — the route is newer
-      // than the ^0.8.1 spawn floor) answers this DELETE with express's default not-found page:
+      // carry the retire route (any published wicked-interactive up to 0.8.1 — the spawn floor is
+      // ^0.9.1 since F-081, but a bridge an older daemon left running, or one pinned back through
+      // WICKED_INTERACTIVE_SPEC, can still answer) replies with express's default not-found page:
       // same status, no JSON, doc still alive and listed. Sweeping on that 404 would drop live
       // replay-dedup rows and report "unknown doc" for a doc `GET /api/docs` plainly lists — a
       // silent two-store divergence. So the sweep below trusts only the wire's own body.

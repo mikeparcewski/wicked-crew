@@ -30,6 +30,7 @@ import {
   isStoreSpec,
   isUrlSpec,
   legacyHomeOutboxPath,
+  legacyOutboxScope,
   redactStoreSpec,
   resolveGovernanceStore,
 } from '../src/core/governance-store.js';
@@ -251,5 +252,19 @@ describe('the engine handoff', () => {
     expect(legacyHomeOutboxPath({ USERPROFILE: 'C:\\Users\\op' })).toBe(join('C:\\Users\\op', '.something-wicked', 'wicked-apps', 'emit-outbox.ndjson'));
     expect(legacyHomeOutboxPath({})).toBeNull();
     expect(legacyHomeOutboxPath({ HOME: '' })).toBeNull();
+  });
+
+  it('legacyOutboxScope attributes the HOME outbox: OWN only for the daemon in that home\'s default state home, HOST for every isolated state home and for no store (F-2R2-006)', () => {
+    const outbox = join('/homes/op', '.something-wicked', 'wicked-apps', 'emit-outbox.ndjson');
+    // The default daemon (`~/.wicked-crew/core.db`) under the SAME home: its earlier versions wrote it.
+    expect(legacyOutboxScope(join('/homes/op', '.wicked-crew', 'core.db'), outbox)).toBe('own');
+    // A `--db` elsewhere — a fresh rig, a scratch daemon, a test harness — shares the file through HOME only.
+    expect(legacyOutboxScope('/private/tmp/fresh/state/core.db', outbox)).toBe('host');
+    // A default state home under a DIFFERENT home (another OS user's daemon reading this one's HOME) is not own either.
+    expect(legacyOutboxScope(join('/homes/other', '.wicked-crew', 'core.db'), outbox)).toBe('host');
+    // A relative core db is resolved before comparing, like every other path here.
+    expect(legacyOutboxScope(join('/homes/op', '.wicked-crew', 'sub', '..', 'core.db'), outbox)).toBe('own');
+    // No store at all: nothing to attribute the file to.
+    expect(legacyOutboxScope(null, outbox)).toBe('host');
   });
 });

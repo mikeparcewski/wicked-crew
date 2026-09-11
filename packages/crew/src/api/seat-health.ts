@@ -49,6 +49,46 @@ export const FALLBACK_WINDOW_MS = 10 * 60 * 1000;
 /** Fallbacks within the window that flip a seat inactive. */
 export const FALLBACK_THRESHOLD = 3;
 
+/**
+ * The council BENCH fold (independent review of #533, F-1): `councilSeatFailed { cli, kind }` is the
+ * engine's own evidence that a seat cannot hold a ballot — `non_zero_exit` ("Not logged in", "No
+ * API key found", "exceeded your monthly quota") or `timed_out` (opencode past the 40 s dispatch
+ * budget on the phase-4 rig). Until this fold existed the tracker never read it, so a seat benched
+ * in every council kept `health: active` and the roster's `council_eligible` prediction could not
+ * learn. The fold is bounded on purpose: only PRIMARY failures count (`benched` is the engine's
+ * derivative of an earlier failure, not a new observation), only within {@link COUNCIL_BENCH_WINDOW_MS},
+ * and only from {@link COUNCIL_BENCH_THRESHOLD} failures up (one timed-out ballot is weather). It
+ * does NOT flip `health` — a chat is not a council and the free tier may still answer — it feeds
+ * `council_eligible` through {@link SeatHealthTracker.councilBenchFor}, and an ok unit output clears
+ * it like every other recovery.
+ */
+export const COUNCIL_BENCH_WINDOW_MS = 30 * 60 * 1000;
+export const COUNCIL_BENCH_THRESHOLD = 2;
+/** The `councilSeatFailed.kind` values that are the seat's OWN failure (the engine's `benched` is derivative). */
+export const COUNCIL_PRIMARY_FAILURE_KINDS: ReadonlySet<string> = new Set(['non_zero_exit', 'timed_out']);
+
+/** One primary council failure the tracker holds for a seat, inside the window. */
+interface CouncilFailure {
+  at: number;
+  kind: string;
+  detail: string;
+  session: string | undefined;
+}
+
+/** What the roster carries as `council_bench` when a seat is benched by this daemon's recent evidence. */
+export interface CouncilBench {
+  /** Primary ballot failures inside the window. */
+  failures: number;
+  last_kind: string;
+  /** ISO-8601 of the last failure. */
+  last_at: string;
+  /** The run the last failure happened in, when the frame named one. */
+  last_run?: string;
+  /** A bounded excerpt of the last failure's detail / stderr, when there was one. */
+  last_detail?: string;
+  window_ms: number;
+}
+
 /** Health messages are operator-facing chips, not transcripts — bound them hard. */
 const EXCERPT_MAX = 240;
 
@@ -95,6 +135,8 @@ export class SeatHealthTracker {
   private readonly assignments = new Map<string, string>();
   /** cli key → recent failure-fallback timestamps (epoch ms), pruned to the rolling window. */
   private readonly fallbacks = new Map<string, number[]>();
+  /** cli key → primary council ballot failures inside {@link COUNCIL_BENCH_WINDOW_MS}. */
+  private readonly councilFailures = new Map<string, CouncilFailure[]>();
   /** Default `since` for seats that have never changed state. */
   private readonly startedAt = new Date().toISOString();
 
@@ -169,6 +211,24 @@ export class SeatHealthTracker {
           const msg = excerpt(detail) || `seat failure (${failureKind ?? 'unreported'})`;
           this.markInactive(seat, msg, at);
         }
+        return;
+      }
+      case 'councilSeatFailed': {
+        const cli = str(event.cli);
+        const kind = str((event as { kind?: unknown }).kind);
+        if (cli === undefined || kind === undefined || !COUNCIL_PRIMARY_FAILURE_KINDS.has(kind)) return;
+        const detail = str(event.detail) ?? str((event as { stderr?: unknown }).stderr) ?? '';
+        const fresh = (this.councilFailures.get(cli) ?? []).filter((f) => at - f.at < COUNCIL_BENCH_WINDOW_MS);
+        fresh.push({ at, kind, detail: excerpt(detail), session });
+        this.councilFailures.set(cli, fresh);
+        // An observed error — stamped, never a status flip (see COUNCIL_BENCH_WINDOW_MS).
+        const prev = this.entries.get(cli);
+        this.entries.set(cli, {
+          status: prev?.status ?? 'active',
+          ...(prev?.message !== undefined ? { message: prev.message } : {}),
+          since: prev?.since ?? this.startedAt,
+          lastErrorAt: new Date(at).toISOString(),
+        });
         return;
       }
       case 'acpFallback': {
@@ -246,6 +306,31 @@ export class SeatHealthTracker {
       ...(prev?.lastErrorAt !== undefined ? { lastErrorAt: prev.lastErrorAt } : {}),
     });
     this.fallbacks.delete(key); // an ok output resets the repeated-fallback window too
+    this.councilFailures.delete(key); // …and the council bench: real work is the recovery
+  }
+
+  /**
+   * The seat's council bench from THIS daemon's recent evidence, or `null`: fewer than
+   * {@link COUNCIL_BENCH_THRESHOLD} primary ballot failures inside {@link COUNCIL_BENCH_WINDOW_MS}
+   * (older ones have aged out), or an ok output since.
+   */
+  councilBenchFor(key: string, nowMs = Date.now()): CouncilBench | null {
+    const fresh = (this.councilFailures.get(key) ?? []).filter((f) => nowMs - f.at < COUNCIL_BENCH_WINDOW_MS);
+    if (fresh.length === 0) {
+      this.councilFailures.delete(key);
+      return null;
+    }
+    this.councilFailures.set(key, fresh);
+    if (fresh.length < COUNCIL_BENCH_THRESHOLD) return null;
+    const last = fresh[fresh.length - 1]!;
+    return {
+      failures: fresh.length,
+      last_kind: last.kind,
+      last_at: new Date(last.at).toISOString(),
+      ...(last.session !== undefined ? { last_run: last.session } : {}),
+      ...(last.detail !== '' ? { last_detail: last.detail } : {}),
+      window_ms: COUNCIL_BENCH_WINDOW_MS,
+    };
   }
 
   /** Flip a seat INACTIVE with the error excerpt; `since` survives while already inactive. */
