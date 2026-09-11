@@ -51,7 +51,22 @@ jobs:
       # the v0.4.0 tag that meant one guard hard-failed (blocking the publish) while two others
       # silently skipped. Fetch the checkout so the release gates on the same evidence CI does
       # (FINDING-094). `tests/core-checkout-policy.test.ts` fails loudly if this ever stops working.
-      install_cmd: 'node scripts/fetch-core-checkout.mjs && npm install'
+      # wicked-core#433: before the deliver phase pushes, the engine re-runs the repository's checks
+      # whenever the worktree's tree is not the tree the run verified — INSIDE an OS write boundary
+      # (Linux: bwrap), failing closed without one ("no OS write boundary could be armed"). The deliver
+      # e2e suites drive a real deliver through the real engine, so the Linux test runner needs the
+      # tool — exactly the step crew's ci.yml arms (#527); ubuntu-24.04 images gate unprivileged user
+      # namespaces behind AppArmor, which bwrap needs. The smoke line fails the INSTALL step, not a
+      # test, if the boundary cannot be armed. The v0.7.29 tag's first release run (34582106702) went
+      # red on deliver-e2e for want of this while the same suite was green on PR CI.
+      install_cmd: >-
+        if [ "$RUNNER_OS" = Linux ]; then
+        sudo apt-get update -y && sudo apt-get install -y bubblewrap
+        && (sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true)
+        && bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent -- /bin/true
+        && echo "bwrap can arm a boundary on this runner";
+        fi
+        && node scripts/fetch-core-checkout.mjs && npm install
       test_cmd: 'npm run -w packages/crew build && npm run -w packages/crew test'
       enable_sync_pr: true
     secrets: inherit
