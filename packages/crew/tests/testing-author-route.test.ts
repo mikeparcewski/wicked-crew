@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
 import { QE_AUTHOR_TESTS_WORKFLOW } from '../src/qe/author-workflow.js';
+import { DEFAULT_SETTINGS } from '../src/core/types.js';
 import type { AuditEntry, LaunchRunInput, Project, ProjectMember, RepoEntry, SessionView } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
 
@@ -147,6 +148,37 @@ describe('POST /testing/author', () => {
     expect(launches[0]).toMatchObject({ humanConfirm: 'none' });
     expect('deliver' in launches[0]!).toBe(false);
     expect((body['plan'] as { phases: Array<{ id: string }> }).phases.map((p) => p.id)).toEqual(['recon', 'author', 'verify', 'review']);
+  });
+
+  it('with NO explicit deliver the daemon’s deliverDefault decides, exactly as POST /runs — "none" launches without delivery and the trail says the default was applied (review M-2 of #536)', async () => {
+    const original = adapter.getSettings.bind(adapter);
+    adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, deliverDefault: 'none' });
+    try {
+      const { status, body } = await post('/api/v1/testing/author', { problem: 'tests, but this daemon does not open PRs by default', repoRefs: ['repo-alpha'] });
+      expect(status).toBe(201);
+      expect(body['deliver']).toBe('none');
+      expect(launches).toHaveLength(1);
+      expect('deliver' in launches[0]!).toBe(false);
+      expect((body['plan'] as { phases: Array<{ id: string }> }).phases.map((p) => p.id)).toEqual(['recon', 'author', 'verify', 'review']);
+      const isOurs = (e: AuditEntry) => e.action === 'run.launched' && e.runId === body['runId'];
+      const launched = (await trail((entries) => entries.some(isOurs))).filter(isOurs);
+      expect(launched[0]!.detail).toMatchObject({ deliver: 'none', deliverDefaulted: true });
+    } finally {
+      adapter.getSettings = original;
+    }
+    // An EXPLICIT deliver still wins over the setting.
+    adapter.getSettings = async () => ({ ...DEFAULT_SETTINGS, deliverDefault: 'none' });
+    try {
+      const { body } = await post('/api/v1/testing/author', { problem: 'explicit', repoRefs: ['repo-alpha'], deliver: 'pr' });
+      expect(body['deliver']).toBe('pr');
+      expect(launches[1]).toMatchObject({ deliver: 'pr' });
+      const isOurs = (e: AuditEntry) => e.action === 'run.launched' && e.runId === body['runId'];
+      const launched = (await trail((entries) => entries.some(isOurs))).filter(isOurs);
+      expect(launched[0]!.detail).toMatchObject({ deliver: 'pr' });
+      expect('deliverDefaulted' in (launched[0]!.detail as Record<string, unknown>)).toBe(false);
+    } finally {
+      adapter.getSettings = original;
+    }
   });
 
   it('a project scope fans one run per repo member, each under its own repo label', async () => {

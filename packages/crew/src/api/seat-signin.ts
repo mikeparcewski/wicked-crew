@@ -53,8 +53,12 @@ export interface SigninProbeIo {
   env?: Record<string, string | undefined>;
 }
 
-/** Key names under which a credential file keeps the secret itself (any depth). */
-const CREDENTIAL_KEY_RE = /key|token|secret|password|credential|access|refresh|bearer|api/i;
+/** Key names under which a credential file keeps the secret itself (any depth) — WHOLE names, so
+ *  `keyring`, `apiVersion`, `monkey` never read as a credential (review L-4 of #536): `key`,
+ *  `api_key` / `OPENAI_API_KEY`, `token` / `access_token` / `id_token`, `secret`, `password`,
+ *  `credential(s)`, `access` / `refresh` (pi's OAuth pair), `bearer`. */
+const CREDENTIAL_KEY_RE =
+  /^(?:.*[_-])?(?:api[_-]?key|key|token|secret|password|credentials?|access(?:[_-]?token)?|refresh(?:[_-]?token)?|bearer)$/i;
 
 /**
  * Whether a credential file's CONTENT carries a credential (F-A45-006): a JSON object (or array)

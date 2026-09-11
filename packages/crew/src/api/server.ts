@@ -1004,7 +1004,7 @@ export async function createServer(
     // derivation cache warms this run (after, so a just-recorded PR URL skips the git pair),
     // healing the DTO's stranded/vacuous/none label in seconds instead of at the next sweep.
     if (
-      (event.type === 'sessionCompleted' || event.type === 'sessionFailed') &&
+      (event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') &&
       session !== undefined
     ) {
       void resolveRunDelivery(session)
@@ -1012,7 +1012,9 @@ export async function createServer(
         // Wave 6 (F-7R2-014): a terminal `qe-author-tests` run registers its TEST SET — the
         // produced tests as the verify phase judged them — AFTER the delivery record resolved, so
         // the set carries the PR URL when the engine's deliver phase opened one. Best-effort:
-        // registration never fails the run; a non-qe run is a no-op.
+        // registration never fails the run; a non-qe run is a no-op. `runCancelled` is a terminal
+        // frame too (review L-2 of #536): a run the operator cancelled after verify passed still
+        // has a set worth showing (`run_status: 'cancelled'`).
         .then(() =>
           registerTestSetForRun(
             {

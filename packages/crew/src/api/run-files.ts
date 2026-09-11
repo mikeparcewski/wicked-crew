@@ -129,13 +129,25 @@ export async function branchDiff(
   const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
   const gitOut = (args: string[]) =>
     execCapped('git', args, { timeout: GIT_TIMEOUT_MS, cwd: repoRoot, windowsHide: true, env });
-  const ref = `refs/heads/${branch}`;
+  // The LOCAL run branch first; when the engine's retention has pruned it (core#449
+  // `WICKED_COMPLETED_WORKTREE_KEEP_DAYS`), the PUSHED copy `refs/remotes/origin/<branch>` still
+  // carries the delivered work — read that, and say so in `branch` (review L-1 of #536).
+  let ref = `refs/heads/${branch}`;
+  let branchLabel = branch;
   try {
     await gitOut(['rev-parse', '--verify', '--quiet', ref]);
   } catch (err) {
     // `--verify --quiet` on a missing ref is a CLEAN exit 1 — the one verifiable "branch gone".
-    if ((err as { code?: unknown }).code === 1) return null;
-    throw err;
+    if ((err as { code?: unknown }).code !== 1) throw err;
+    const remote = `refs/remotes/origin/${branch}`;
+    try {
+      await gitOut(['rev-parse', '--verify', '--quiet', remote]);
+      ref = remote;
+      branchLabel = `origin/${branch}`;
+    } catch (remoteErr) {
+      if ((remoteErr as { code?: unknown }).code === 1) return null;
+      throw remoteErr;
+    }
   }
   let baseRev = base;
   if (baseRev === null || baseRev === '') {
@@ -173,9 +185,9 @@ export async function branchDiff(
   if (outBytes.byteLength > DIFF_OUTPUT_CAP_BYTES) {
     let end = DIFF_OUTPUT_CAP_BYTES;
     while (end > 0 && (outBytes[end]! & 0xc0) === 0x80) end--;
-    return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true, source: 'branch', branch, base: shortBase };
+    return { diff: outBytes.subarray(0, end).toString('utf8'), truncated: true, source: 'branch', branch: branchLabel, base: shortBase };
   }
-  return { diff: stdout, truncated: false, source: 'branch', branch, base: shortBase };
+  return { diff: stdout, truncated: false, source: 'branch', branch: branchLabel, base: shortBase };
 }
 
 const GIT_TIMEOUT_MS = 10_000;

@@ -91,15 +91,29 @@ const REVIEW_INSTRUCTIONS =
  *  2. PRODUCED — every path changed/added since BASE plus every untracked file: the run's own work,
  *     committed or not. Test files are the conventional shapes (`*.test.*`, `*.spec.*`, `*_test.py`,
  *     `test_*.py`, `__tests__/`); fixtures, factories and the PLAN are produced but not "tests".
- *  3. HARNESS per file — the REPOSITORY's own: Playwright (`playwright.config.*` / `@playwright/test`)
- *     for `*.spec.*`, a Python Playwright rig (imports `playwright`) run as a script, vitest/jest from
- *     package.json, pytest otherwise for `.py`. A repo-local `node_modules/.bin/<tool>` is preferred
- *     over `npx` (offline, the repo's pinned version). No recognised harness = NOT EXECUTED = fail.
- *  4. REPO CHECKS — the full unit suite of every harness a produced test used (vitest/jest/pytest)
- *     runs once too, so the produced tests are verified INSIDE the repository's own check, not
- *     beside it. The Playwright suite is not re-run whole (its produced specs ran individually).
- *  5. VERDICT — `QE-VERIFY-SUMMARY:` then exit 0 only when: ≥ 1 produced test, every one executed,
- *     none failed, the PLAN exists, and the repo checks passed. Every refusal names its reason.
+ *  3. HARNESS per file — the REPOSITORY's own, resolved PER FILE by walking up from the file's
+ *     directory to the nearest marker (monorepo-aware — review H-1/M-1 of #536): Playwright
+ *     (`playwright.config.*` / `@playwright/test` in the nearest package.json) for `*.spec.*`, a
+ *     Python Playwright rig (imports `playwright`), vitest/jest from the nearest package.json that
+ *     declares them, pytest for every other test-shaped `.py` (nearest `pytest.ini` / `conftest.py`
+ *     / `tox.ini` / `pyproject.toml [tool.pytest]` / `setup.cfg [tool:pytest]` dir, else the root).
+ *     The RUNNER is the nearest `node_modules/.bin/<tool>` (or `.venv/bin/pytest` / an importable
+ *     pytest) from that package dir up to the worktree root — NEVER `npx` (a registry fetch on the
+ *     verify path) and NEVER a plain interpreter for a test-shaped file (a pytest module run as
+ *     `python3 file.py` defines its functions and exits 0 with zero assertions — a vacuous PASS).
+ *     A missing/unrunnable runner is NOT EXECUTED = fail, with "harness not available: <tool>" and
+ *     the remedy (install the dependencies in the worktree in the author phase). The runner runs
+ *     FROM its package dir with a package-relative path.
+ *  4. COLLECTED — every executed file must show ≥ 1 test in the RUNNER's own summary (pytest
+ *     `N passed` / `collected N items`, vitest `Tests N passed`, jest `N total`, Playwright
+ *     `N passed`, a Python rig's check/pass lines); exit 0 with 0 tests reported = NOT EXECUTED.
+ *  5. REPO CHECKS — the full unit suite of every (harness, package dir) a produced test used
+ *     (vitest/jest/pytest) runs once too, so the produced tests are verified INSIDE the repository's
+ *     own check, not beside it. The Playwright suite is not re-run whole (its produced specs ran
+ *     individually).
+ *  6. VERDICT — `QE-VERIFY-SUMMARY:` then exit 0 only when: ≥ 1 produced test, every one executed
+ *     with ≥ 1 test collected, none failed, the PLAN exists, and the repo checks passed. Every
+ *     refusal names its reason.
  *
  * `set -u -o pipefail` but NOT `-e`: each command's exit is captured deliberately. `exec 2>&1`
  * keeps the transcript chronological (the engine appends stderr after stdout otherwise).
@@ -127,65 +141,93 @@ export function qeVerifyScript(): string {
     '  case "$1" in *.test.*|*.spec.*|*_test.py|test_*.py|*/test_*.py|__tests__/*|*/__tests__/*) return 0;; esac',
     '  return 1',
     '}',
-    'has_dep() { [ -f package.json ] && grep -Eq "\\"$1\\"[[:space:]]*:" package.json; }',
-    'has_pw_config() { ls playwright.config.* >/dev/null 2>&1; }',
-    'harness_for() {',
+    // 3. harness detection — PER FILE, nearest marker dir walking UP from the file (monorepo-aware)
+    'pkg_has_dep() { [ -f "$1/package.json" ] && grep -Eq "\\"$2\\"[[:space:]]*:" "$1/package.json"; }',
+    'is_pw_dir() { ls "$1"/playwright.config.* >/dev/null 2>&1 || pkg_has_dep "$1" "@playwright/test"; }',
+    'is_vitest_dir() { pkg_has_dep "$1" vitest; }',
+    'is_jest_dir() { pkg_has_dep "$1" jest; }',
+    'is_py_dir() { [ -f "$1/pytest.ini" ] || [ -f "$1/conftest.py" ] || [ -f "$1/tox.ini" ] || { [ -f "$1/pyproject.toml" ] && grep -q "tool.pytest" "$1/pyproject.toml"; } || { [ -f "$1/setup.cfg" ] && grep -q "tool:pytest" "$1/setup.cfg"; }; }',
+    'nearest() { local d; d=$(dirname "$1"); while :; do if "$2" "$d"; then echo "$d"; return 0; fi; [ "$d" = "." ] && break; d=$(dirname "$d"); done; echo ""; return 1; }',
+    // the runner: the nearest node_modules/.bin/<tool> from the package dir up to the worktree root,
+    // spelled RELATIVE TO the package dir (every command runs from there: `./…` or `../…`) — NEVER npx
+    'find_bin() { local d="$1" up=""; while :; do if [ -x "$d/node_modules/.bin/$2" ]; then echo "${up:-./}node_modules/.bin/$2"; return 0; fi; [ "$d" = "." ] && break; d=$(dirname "$d"); up="../$up"; done; echo ""; return 1; }',
+    'find_pytest() { local d="$1" up=""; while :; do if [ -x "$d/.venv/bin/pytest" ]; then echo "${up:-./}.venv/bin/pytest"; return 0; fi; [ "$d" = "." ] && break; d=$(dirname "$d"); up="../$up"; done; if python3 -c "import pytest" >/dev/null 2>&1; then echo "python3 -m pytest"; return 0; fi; echo ""; return 1; }',
+    'resolve() {',
+    '  local d',
     '  case "$1" in',
     '    *.py)',
-    '      if grep -Eq "^[[:space:]]*(from|import)[[:space:]]+playwright" "$1" 2>/dev/null; then echo playwright-python; return; fi',
-    '      if [ -f pytest.ini ] || [ -f conftest.py ] || [ -f tests/conftest.py ] || python3 -c "import pytest" >/dev/null 2>&1; then echo pytest; return; fi',
-    '      echo python; return;;',
+    '      if grep -Eq "^[[:space:]]*(from|import)[[:space:]]+playwright" "$1" 2>/dev/null; then echo "playwright-python	$(dirname "$1")"; return; fi',
+    '      d=$(nearest "$1" is_py_dir); [ -n "$d" ] || d="."',
+    '      echo "pytest	$d"; return;;',
     '  esac',
-    '  case "$1" in *.spec.*) if has_pw_config || has_dep "@playwright/test"; then echo playwright; return; fi;; esac',
-    '  if has_dep vitest; then echo vitest; return; fi',
-    '  if has_dep jest; then echo jest; return; fi',
-    '  if has_pw_config; then echo playwright; return; fi',
-    '  echo unknown',
+    '  case "$1" in *.spec.*) d=$(nearest "$1" is_pw_dir); if [ -n "$d" ]; then echo "playwright	$d"; return; fi;; esac',
+    '  d=$(nearest "$1" is_vitest_dir); if [ -n "$d" ]; then echo "vitest	$d"; return; fi',
+    '  d=$(nearest "$1" is_jest_dir); if [ -n "$d" ]; then echo "jest	$d"; return; fi',
+    '  d=$(nearest "$1" is_pw_dir); if [ -n "$d" ]; then echo "playwright	$d"; return; fi',
+    '  echo "unknown	."',
+    '}',
+    // how many tests the RUNNER says it executed (its own summary line) — 0 = nothing ran
+    'sum_counts() { grep -E "$2" "$1" | tail -1 | awk \'{s=0; for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^(passed|failed|flaky|skipped|total)/) s+=$i; print s}\'; }',
+    'collected() {',
+    '  local n=""',
+    '  case "$1" in',
+    '    pytest) n=$(sum_counts "$2" "[0-9]+ (passed|failed)"); [ "${n:-0}" -gt 0 ] || n=$(grep -Eo "collected [0-9]+ item" "$2" | tail -1 | grep -Eo "[0-9]+");;',
+    '    vitest) n=$(sum_counts "$2" "^[[:space:]]*Tests[[:space:]]");;',
+    '    jest) n=$(grep -Eo "[0-9]+ total" "$2" | tail -1 | grep -Eo "[0-9]+");;',
+    '    playwright) n=$(sum_counts "$2" "[0-9]+ (passed|failed|flaky)");;',
+    '    playwright-python) n=$(grep -Eci "passed|\\bpass\\b|✓|\\"checks\\"|\\bok\\b" "$2");;',
+    '  esac',
+    '  echo "${n:-0}"',
     '}',
     'P=0; E=0; PASS=0; FAIL=0; NX=0; PLAN=""; HARNESSES=""',
+    'not_executed() { NX=$((NX+1)); echo "QE-VERIFY: file=$1 harness=$2 pkg=$3 cmd=\\"\\" exit=- tests=0 status=not-executed reason=\\"$4\\""; echo "qe-verify: $1 — $4"; }',
     'while IFS= read -r f; do',
     '  [ -n "$f" ] || continue',
     '  case "$f" in tests/PLAN-*.md|*/tests/PLAN-*.md) PLAN="$f";; esac',
     '  is_test_path "$f" || continue',
     '  P=$((P+1))',
-    '  H=$(harness_for "$f")',
+    '  R=$(resolve "$f"); H="${R%%	*}"; PKG="${R#*	}"',
+    '  rel="$f"; [ "$PKG" = "." ] || rel="${f#$PKG/}"',
     '  case "$H" in',
-    '    playwright) if [ -x node_modules/.bin/playwright ]; then CMD=(node_modules/.bin/playwright test "$f"); else CMD=(npx playwright test "$f"); fi;;',
-    '    playwright-python|python) CMD=(python3 "$f");;',
-    '    pytest) CMD=(python3 -m pytest -q "$f");;',
-    '    vitest) if [ -x node_modules/.bin/vitest ]; then CMD=(node_modules/.bin/vitest run "$f"); else CMD=(npx vitest run "$f"); fi;;',
-    '    jest) if [ -x node_modules/.bin/jest ]; then CMD=(node_modules/.bin/jest "$f"); else CMD=(npx jest "$f"); fi;;',
-    '    *) NX=$((NX+1)); echo "QE-VERIFY: file=$f harness=unknown cmd=\\"\\" exit=- status=not-executed"; echo "qe-verify: no harness recognised for $f — declare one (playwright.config.*, vitest/jest in package.json, pytest)"; continue;;',
+    '    playwright) BIN=$(find_bin "$PKG" playwright) || { not_executed "$f" "$H" "$PKG" "harness not available: playwright (@playwright/test) — no node_modules/.bin/playwright from $PKG up to the worktree root; install the repository dependencies in the worktree (npm ci) in the author phase. The verify path never runs npx"; continue; }; CMD=("$BIN" test "$rel");;',
+    '    vitest) BIN=$(find_bin "$PKG" vitest) || { not_executed "$f" "$H" "$PKG" "harness not available: vitest — no node_modules/.bin/vitest from $PKG up to the worktree root; install the repository dependencies in the worktree (npm ci) in the author phase. The verify path never runs npx"; continue; }; CMD=("$BIN" run "$rel");;',
+    '    jest) BIN=$(find_bin "$PKG" jest) || { not_executed "$f" "$H" "$PKG" "harness not available: jest — no node_modules/.bin/jest from $PKG up to the worktree root; install the repository dependencies in the worktree (npm ci) in the author phase. The verify path never runs npx"; continue; }; CMD=("$BIN" "$rel");;',
+    '    pytest) PT=$(find_pytest "$PKG") || { not_executed "$f" "$H" "$PKG" "harness not available: pytest — no .venv/bin/pytest from $PKG up to the worktree root and python3 cannot import pytest; a test-shaped .py file is NEVER run as a plain script (it would pass with zero assertions). Install pytest in the worktree in the author phase"; continue; }; if [ "$PT" = "python3 -m pytest" ]; then CMD=(python3 -m pytest -q "$rel"); else CMD=("$PT" -q "$rel"); fi;;',
+    '    playwright-python) python3 -c "import playwright" >/dev/null 2>&1 || { not_executed "$f" "$H" "$PKG" "harness not available: playwright (python) — python3 cannot import playwright; pip install playwright && playwright install chromium in the author phase"; continue; }; CMD=(python3 "$rel");;',
+    '    *) not_executed "$f" unknown "$PKG" "no harness recognised — declare one the repository owns (playwright.config.*, vitest/jest in the nearest package.json, a pytest marker)"; continue;;',
     '  esac',
-    '  case " $HARNESSES " in *" $H "*) ;; *) HARNESSES="$HARNESSES $H";; esac',
-    '  echo "QE-VERIFY-RUN file=$f harness=$H cmd=\\"${CMD[*]}\\""',
-    '  "${CMD[@]}"; RC=$?',
+    '  case " $HARNESSES " in *" $H|$PKG "*) ;; *) HARNESSES="$HARNESSES $H|$PKG";; esac',
+    '  echo "QE-VERIFY-RUN file=$f harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\""',
+    '  OUT=$(mktemp)',
+    '  ( cd "$PKG" && "${CMD[@]}" ) 2>&1 | tee "$OUT"; RC=${PIPESTATUS[0]}',
+    '  N=$(collected "$H" "$OUT"); rm -f "$OUT"',
     '  E=$((E+1))',
-    '  if [ "$RC" -eq 0 ]; then PASS=$((PASS+1)); ST=passed; else FAIL=$((FAIL+1)); ST=failed; fi',
-    '  echo "QE-VERIFY: file=$f harness=$H cmd=\\"${CMD[*]}\\" exit=$RC status=$ST"',
-    'done <<QE_VERIFY_PRODUCED_EOF',
-    '$PRODUCED',
-    'QE_VERIFY_PRODUCED_EOF',
-    // 4. repo checks
+    '  if [ "$RC" -ne 0 ]; then FAIL=$((FAIL+1)); ST=failed;',
+    '  elif [ "${N:-0}" -lt 1 ]; then NX=$((NX+1)); E=$((E-1)); ST=not-executed; echo "qe-verify: $f — the $H runner exited 0 but reported 0 tests (nothing was collected or executed)";',
+    '  else PASS=$((PASS+1)); ST=passed; fi',
+    '  echo "QE-VERIFY: file=$f harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\" exit=$RC tests=${N:-0} status=$ST"',
+    "done < <(printf '%s\\n' \"$PRODUCED\")",
+    // 4. repo checks — the full unit suite once per (harness, package dir) the produced tests used
     'C=0; CF=0',
-    'for H in $HARNESSES; do',
+    'for HP in $HARNESSES; do',
+    '  H="${HP%%|*}"; PKG="${HP#*|}"',
     '  case "$H" in',
-    '    vitest) if [ -x node_modules/.bin/vitest ]; then CMD=(node_modules/.bin/vitest run); else CMD=(npx vitest run); fi;;',
-    '    jest) if [ -x node_modules/.bin/jest ]; then CMD=(node_modules/.bin/jest); else CMD=(npx jest); fi;;',
-    '    pytest) CMD=(python3 -m pytest -q);;',
-    '    *) echo "QE-VERIFY-CHECK: harness=$H skipped=full-suite (produced files ran individually)"; continue;;',
+    '    vitest) BIN=$(find_bin "$PKG" vitest); CMD=("$BIN" run);;',
+    '    jest) BIN=$(find_bin "$PKG" jest); CMD=("$BIN");;',
+    '    pytest) PT=$(find_pytest "$PKG"); if [ "$PT" = "python3 -m pytest" ]; then CMD=(python3 -m pytest -q); else CMD=("$PT" -q); fi;;',
+    '    *) echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG skipped=full-suite (produced files ran individually)"; continue;;',
     '  esac',
     '  C=$((C+1))',
-    '  echo "QE-VERIFY-CHECK-RUN harness=$H cmd=\\"${CMD[*]}\\""',
-    '  "${CMD[@]}"; RC=$?',
+    '  echo "QE-VERIFY-CHECK-RUN harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\""',
+    '  ( cd "$PKG" && "${CMD[@]}" ); RC=$?',
     '  [ "$RC" -eq 0 ] || CF=$((CF+1))',
-    '  echo "QE-VERIFY-CHECK: harness=$H cmd=\\"${CMD[*]}\\" exit=$RC"',
+    '  echo "QE-VERIFY-CHECK: harness=$H pkg=$PKG cmd=\\"${CMD[*]}\\" exit=$RC"',
     'done',
     // 5. verdict
     'echo "QE-VERIFY-SUMMARY: produced=$P executed=$E passed=$PASS failed=$FAIL not_executed=$NX plan=${PLAN:-missing} checks=$C checks_failed=$CF"',
     '[ "$P" -gt 0 ] || { echo "qe-verify: FAIL — the author phase produced no test files; nothing was verified, so done cannot be asserted"; exit 1; }',
     '[ -n "$PLAN" ] || { echo "qe-verify: FAIL — no tests/PLAN-*.md was produced (the plan records every test, the command that ran it and its result)"; exit 1; }',
-    '[ "$NX" -eq 0 ] || { echo "qe-verify: FAIL — $NX produced test file(s) were never executed (no recognised harness); a test that never ran proves nothing"; exit 1; }',
+    '[ "$NX" -eq 0 ] || { echo "qe-verify: FAIL — $NX produced test file(s) were never executed (no available harness, or the runner reported 0 tests); a test that never ran proves nothing"; exit 1; }',
     '[ "$FAIL" -eq 0 ] || { echo "qe-verify: FAIL — $FAIL of $E produced test file(s) failed under the repository harness"; exit 1; }',
     '[ "$CF" -eq 0 ] || { echo "qe-verify: FAIL — $CF repository check(s) failed with the produced tests in the tree"; exit 1; }',
     'echo "qe-verify: PASS — $E produced test file(s) executed and passed under the repository harness; plan $PLAN"',
@@ -269,7 +311,14 @@ export interface QeVerifiedFile {
   cmd: string;
   /** The process exit code; `null` when the file was never executed. */
   exit: number | null;
+  /** How many tests the RUNNER reported for the file (its own summary line); `0` when nothing was
+   *  collected — which reads as `not-executed` even on exit 0 (review H-1 of #536). */
+  tests: number;
+  /** The package dir (worktree-relative, `.` = root) the harness was resolved in and run from. */
+  pkg: string;
   status: 'passed' | 'failed' | 'not-executed';
+  /** Why a `not-executed` file was not executed ("harness not available: pytest — …"). */
+  reason?: string;
 }
 
 /** One repository-own check the verify phase ran. */
@@ -328,8 +377,19 @@ export function parseQeVerifyOutput(text: string): QeVerifyReport | null {
       if (f['file'] === undefined) continue;
       const status =
         f['status'] === 'passed' || f['status'] === 'failed' ? f['status'] : ('not-executed' as const);
-      const exit = status === 'not-executed' ? null : int(f['exit']);
-      files.push({ path: f['file'], harness: f['harness'] ?? 'unknown', cmd: f['cmd'] ?? '', exit, status });
+      // A file the runner ran but reported 0 tests for carries its exit code; a file never handed
+      // to a runner has `exit=-` (→ null).
+      const exit = f['exit'] === undefined || f['exit'] === '-' ? null : int(f['exit']);
+      files.push({
+        path: f['file'],
+        harness: f['harness'] ?? 'unknown',
+        cmd: f['cmd'] ?? '',
+        exit,
+        tests: int(f['tests']),
+        pkg: f['pkg'] === undefined || f['pkg'] === '' ? '.' : f['pkg'],
+        status,
+        ...(f['reason'] !== undefined && f['reason'] !== '' ? { reason: f['reason'] } : {}),
+      });
     }
   }
   if (summary === null) return null;

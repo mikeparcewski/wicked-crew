@@ -210,7 +210,7 @@ beforeAll(async () => {
   writeFileSync(join(seed, 'playwright.config.mjs'), 'export default { testDir: "e2e" };\n');
   writeFileSync(
     join(seed, 'node_modules', '.bin', 'playwright'),
-    ['#!/bin/sh', '# repo-local runner shim: "playwright test <spec>" → run the spec with node', 'if [ "$1" = "test" ]; then echo "QE-E2E-RAN $2"; node "$2"; exit $?; fi', 'echo "shim: unexpected $*" >&2; exit 2'].join('\n'),
+    ['#!/bin/sh', '# repo-local runner shim: "playwright test <spec>" → run the spec with node', 'if [ "$1" = "test" ]; then echo "QE-E2E-RAN $2"; node "$2"; rc=$?; if [ $rc -eq 0 ]; then echo "  1 passed (0.1s)"; else echo "  1 failed"; fi; exit $rc; fi', 'echo "shim: unexpected $*" >&2; exit 2'].join('\n'),
   );
   chmodSync(join(seed, 'node_modules', '.bin', 'playwright'), 0o755);
   git(seed, 'add', '-A', '-f');
@@ -348,7 +348,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(run.session['delivery']).toBe('none');
     const verify = run.units.find((u) => u.id.endsWith(`:${QE_VERIFY_PHASE_ID}`))!;
     expect(verify.status).toBe('rejected');
-    expect(String(verify.denial_reason ?? '')).toMatch(/failed under the repository harness|QE-VERIFY|status=failed|exit/);
+    // The refusal names the R4-r2 rung: the produced test FAILED under the harness (not a missing
+    // harness, not a produced=0 floor) — review L-7 of #536 tightened this from a catch-all.
+    expect(String(verify.denial_reason ?? '')).toMatch(/failed under the repository harness|status=failed/);
     // The deliver phase never ran: nothing reached the origin, no PR-equivalent exists anywhere.
     expect(run.units.find((u) => u.id.endsWith(':deliver'))?.status).not.toBe('done');
     expect(originBranches()).not.toContain(`wicked/${runId}`);
@@ -361,7 +363,7 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect('deliverUrl' in set).toBe(false);
   }, 540_000);
 
-  it('SHIPPED DEF via POST /testing/author: a run whose author produced nothing cannot pass its floor — and never delivers', async () => {
+  it('SHIPPED DEF via POST /testing/author: a run whose author produced nothing is refused BEFORE deliver — whichever rung refuses (skill routing, the author floor, verify’s produced=0) — and never delivers', async () => {
     process.env['GH_STUB_OUT'] = 'https://github.com/o/r/pull/603';
     const launch = await postJson('/api/v1/testing/author', {
       problem: 'e2e: functional tests for the launch flow',

@@ -647,7 +647,18 @@ export function registerTestingRoutes(
         });
       }
       const gate = b.ungated === true ? 'none' : RECON_INTAKE_GATE_TOKEN;
-      const deliver: 'pr' | 'none' = b.deliver ?? 'pr';
+      // The delivery decision, resolved EXACTLY as `POST /runs` resolves it for a repo-scoped
+      // code-work def (crew#393; review M-2 of #536): an explicit `deliver` wins; omitted ⇒ the
+      // daemon's `deliverDefault` setting ('pr' unless the operator flipped it to 'none'). The
+      // resolved value AND whether it was defaulted ride on the `run.launched` trail entry.
+      let deliver: 'pr' | 'none';
+      let deliverDefaulted = false;
+      if (b.deliver !== undefined) {
+        deliver = b.deliver;
+      } else {
+        deliver = (await adapter.getSettings()).deliverDefault !== 'none' ? 'pr' : 'none';
+        deliverDefaulted = true;
+      }
       const roster = deps.roster();
       const clisJson = JSON.stringify(roster);
       const plan = qeAuthorPlan(def, eligibleSeatKeys(roster), deliver === 'pr');
@@ -702,6 +713,7 @@ export function registerTestingRoutes(
           workflow: QE_AUTHOR_TESTS_WORKFLOW,
           repoRef: repo.id,
           deliver,
+          ...(deliverDefaulted ? { deliverDefaulted: true } : {}),
           groupLabel: label,
           author: true,
           gate,

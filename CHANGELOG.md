@@ -119,7 +119,21 @@ mentioned only where a daemon release depends on them.
     / `unit_ord?`; `TestingAuthorResponse.scope?` + the narrowed-scope semantic on
     `TestingAuthorBody.repoRefs`; `InteractiveDocsListing` / `InteractiveDocIndexRow` /
     `InteractiveDocsUnreachable` / `InteractiveSeamKind` (`GET /interactive/docs`). Endpoint manifest
-    + generated API tests re-stamped.
+    + generated API tests re-stamped. The ONE type-level narrowing: the permissive
+    `CoreEvent.agreementPct` widens `number` → `number | null` (the engine emits `null` on
+    `unitDistributed`) — arithmetic on it now needs a null check.
+  - **Independent review of #536 (REVISE → applied):** the verify phase never runs a test-shaped
+    `.py` as a plain script and never `npx`-fetches a runner — a missing/unrunnable harness
+    (pytest, vitest, jest, Playwright) is NOT EXECUTED with "harness not available: <tool> — <remedy>",
+    and every executed file must show ≥ 1 test in the runner's own summary (exit 0 with 0 tests
+    reported = not executed); harness detection is per file, walking up to the nearest package /
+    pytest marker dir (monorepos), with the runner and the full-suite check run from that dir;
+    `POST /testing/author` honours `deliverDefault` (+ `deliverDefaulted` on the trail) exactly as
+    `POST /runs`; the auth-refusal and seat-failure patterns match a 401 only as an HTTP status
+    (a bare `401` in a stack-trace line number benched a healthy seat for 30 min); `branchDiff`
+    falls back to `refs/remotes/origin/<branch>` when retention pruned the local run branch; a
+    `runCancelled` `qe-author-tests` run registers its test set too; credential-file key names are
+    matched whole (`keyring` / `apiVersion` are not credentials).
 
 ### Fixed
 

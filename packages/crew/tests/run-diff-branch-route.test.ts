@@ -80,6 +80,15 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'recorded run');
     git(repo, 'checkout', '-q', 'main');
+    // A third run whose LOCAL branch the engine's retention pruned — only the PUSHED copy under
+    // refs/remotes/origin/ remains (review L-1 of #536).
+    git(repo, 'checkout', '-q', '-b', 'wicked/run-remote-only', mainTip);
+    writeFileSync(join(repo, 'remote-only.txt'), 'pushed, then pruned locally\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'pushed run');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'update-ref', 'refs/remotes/origin/wicked/run-remote-only', 'wicked/run-remote-only');
+    git(repo, 'branch', '-q', '-D', 'wicked/run-remote-only');
     // A LIVE worktree for the source:'worktree' stamp.
     mkdirSync(live);
     git(live, 'init', '-q', '-b', 'main');
@@ -90,6 +99,7 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
         view('run-gone', gone, 'repo-1'),
         view('run-rec', gone, 'repo-1', { run_branch: 'wicked/custom-branch', base_commit: mainTip }),
         view('run-nobranch', gone, 'repo-1'),
+        view('run-remote-only', gone, 'repo-1'),
         view('run-norepo', gone, null),
         view('run-live', live, 'repo-1'),
       ]),
@@ -145,6 +155,15 @@ describe('GET /runs/:id/diff — branch fallback for a reaped worktree (F-7R2-01
     expect(viaWorktree.diff).toContain('committed.txt');
     const viaRepo = (await getDiff('run-gone', { path: join(repo, 'base.txt') })).json() as Body;
     expect(viaRepo.diff).toBe(''); // base.txt is unchanged on the branch
+  });
+
+  it('a run branch pruned LOCALLY is still served from its pushed copy refs/remotes/origin/<branch>, labelled origin/<branch> (review L-1 of #536)', async () => {
+    const res = await getDiff('run-remote-only');
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as Body;
+    expect(body).toMatchObject({ source: 'branch', branch: 'origin/wicked/run-remote-only' });
+    expect(body.diff).toContain('remote-only.txt');
+    expect(body.diff).not.toContain('main-only.txt');
   });
 
   it('409 only when there is neither a worktree nor a run branch — and the reason says so', async () => {

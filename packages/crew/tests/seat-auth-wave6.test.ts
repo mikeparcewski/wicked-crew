@@ -79,7 +79,15 @@ describe('the seat-health fold records the seat’s OWN "no credential" report (
     for (const s of ['No API key found', 'Not logged in', 'HTTP 401 Unauthorized', 'unauthenticated', 'Please sign in', 'invalid api key', 'authentication failed', 'missing API key', 'missing credentials']) {
       expect(isAuthRefusal(s), s).toBe(true);
     }
+    // A 401 counts only as an HTTP STATUS (review M-3 of #536)…
+    for (const s of ['HTTP/1.1 401', 'request failed: HTTP 401', 'status: 401', 'status code 401', 'status=401', '401 Unauthorized', '401 unauthorised']) {
+      expect(isAuthRefusal(s), s).toBe(true);
+    }
     for (const s of ['timeout waiting for response', 'rate limit exceeded', 'exit 137', 'the deliverable was not written']) {
+      expect(isAuthRefusal(s), s).toBe(false);
+    }
+    // …never as a bare number: stack-trace line/column numbers, byte counts, ports, issue numbers.
+    for (const s of ['    at run (src/foo.ts:401:12)', 'Error at /w/pkg/index.js:401', 'read 401 bytes', 'listening on port 401', 'closes #401', 'exit code 1 after 401 ms']) {
       expect(isAuthRefusal(s), s).toBe(false);
     }
   });

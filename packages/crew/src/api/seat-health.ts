@@ -108,7 +108,7 @@ const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
 const SEAT_FAILURE_PATTERNS: RegExp[] = [
   CLI_IN_DETAIL, // non-zero exit, seat named by the runner itself
   /timeout waiting/i, // ACP "timeout waiting for response id=…" (acp_runner.rs)
-  /\b401\b|\bunauthorized\b/i, // auth: needs a re-login
+  /\bHTTP\/?[0-9.]*\s+401\b|\b401\s+unauthori[sz]ed\b|\bunauthori[sz]ed\b/i, // auth: needs a re-login (a 401 only as an HTTP status — never a bare number, review M-3 of #536)
   /\bquota\b|rate.?limit|too many requests|\b429\b/i, // quota/rate ceiling
   /\bout of credits\b|\binsufficient credits\b/i, // account balance
 ];
@@ -134,7 +134,11 @@ export const AUTH_REFUSAL_PATTERNS: RegExp[] = [
   /not logged in/i,
   /\bunauthenticated\b/i,
   /\bunauthori[sz]ed\b/i,
-  /\b401\b/,
+  // A 401 only as an HTTP STATUS, never a bare number (review M-3 of #536: a bare `\b401\b` matched
+  // stack-trace line/column numbers — `src/foo.ts:401:12` — and benched a healthy seat for 30 min).
+  /\bHTTP\/?[0-9.]*\s+401\b/i,
+  /\b401\s+unauthori[sz]ed\b/i,
+  /\bstatus(?:\s*code)?\s*[:=]?\s*401\b/i,
   /login required/i,
   /please (sign|log) in/i,
   /invalid api key/i,

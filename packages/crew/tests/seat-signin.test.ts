@@ -235,6 +235,14 @@ describe('hasCredentialShape (F-A45-006)', () => {
     expect(hasCredentialShape('{"tokens":{"access_token":"a"}}')).toBe(true);
     expect(hasCredentialShape('[{"provider":"x","token":"t"}]')).toBe(true);
   });
+
+  it('matches WHOLE key names only — `keyring`, `apiVersion`, `monkey` are not credentials (review L-4 of #536); pi’s access/refresh pair and a bearer are', () => {
+    expect(hasCredentialShape('{"keyring":"none","apiVersion":"v1","monkey":"see"}')).toBe(false);
+    expect(hasCredentialShape('{"anthropic":{"keyring":"system","tokenizer":"x"}}')).toBe(false);
+    expect(hasCredentialShape('{"anthropic":{"access":"a","refresh":"r"}}')).toBe(true);
+    expect(hasCredentialShape('{"bearer":"b"}')).toBe(true);
+    expect(hasCredentialShape('{"OPENAI-API-KEY":"sk"}')).toBe(true);
+  });
 });
 
 describe('agy — keyring-backed, json artifact upgrades to true', () => {

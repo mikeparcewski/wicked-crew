@@ -6,7 +6,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -146,6 +146,8 @@ describe('qe-author-tests — the ENGINE validates the def as authored', () => {
 // ── The verify script, driven for real ─────────────────────────────────────────────────────────
 
 const bashAvailable = spawnSync('bash', ['-c', 'true']).status === 0 && process.platform !== 'win32';
+/** Each verify case spawns a login bash + git + the harness shim: generous under a loaded host. */
+const VERIFY_TEST_TIMEOUT_MS = 60_000;
 
 /** A repo with a Playwright-SHAPED harness whose runner is a repo-local shim (offline: `npx` is
  *  never reached because `node_modules/.bin/playwright` exists — exactly the repo's-own-harness
@@ -156,9 +158,11 @@ function harnessRepo(root: string): void {
   mkdirSync(join(root, 'tests'), { recursive: true });
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, devDependencies: { '@playwright/test': '1.0.0' } }));
   writeFileSync(join(root, 'playwright.config.mjs'), 'export default {};\n');
+  // The shim prints Playwright's own summary line (`N passed (…)`) — the script counts tests from
+  // the RUNNER's summary, so a runner that reports nothing reads as not executed (review H-1).
   writeFileSync(
     join(root, 'node_modules', '.bin', 'playwright'),
-    ['#!/bin/sh', 'if [ "$1" = "test" ]; then echo "QE-E2E-RAN $2"; node "$2"; exit $?; fi', 'echo "shim: unexpected $*" >&2; exit 2'].join('\n'),
+    ['#!/bin/sh', 'if [ "$1" = "test" ]; then echo "QE-E2E-RAN $2"; node "$2"; rc=$?; [ $rc -eq 0 ] && echo "  1 passed (0.1s)" || echo "  1 failed"; exit $rc; fi', 'echo "shim: unexpected $*" >&2; exit 2'].join('\n'),
   );
   chmodSync(join(root, 'node_modules', '.bin', 'playwright'), 0o755);
   writeFileSync(join(root, 'README.md'), '# fixture\n');
@@ -180,7 +184,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
   let base: string;
   beforeAll(() => {
     base = mkdtempSync(join(tmpdir(), 'qe-verify-'));
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
   afterAll(() => removeScratch(base));
 
   it('PASS: a produced e2e spec + PLAN → the spec is EXECUTED by the repo harness (marker in output), counted, and the phase exits 0', () => {
@@ -198,9 +202,110 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(status).toBe(0);
     const report = parseQeVerifyOutput(out);
     expect(report).not.toBeNull();
-    expect(report!.files).toEqual([{ path: 'e2e/launch.spec.mjs', harness: 'playwright', cmd: 'node_modules/.bin/playwright test e2e/launch.spec.mjs', exit: 0, status: 'passed' }]);
+    expect(report!.files).toEqual([{ path: 'e2e/launch.spec.mjs', harness: 'playwright', cmd: './node_modules/.bin/playwright test e2e/launch.spec.mjs', exit: 0, tests: 1, pkg: '.', status: 'passed' }]);
     expect(report!.plan).toBe('tests/PLAN-launch.md');
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('H-1: a pytest-style module in a repo WITHOUT pytest is NOT run as a plain script — "harness not available: pytest", the phase FAILS', () => {
+    const root = join(base, 'pyplain');
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'pyproject.toml'), '[project]\nname = "fixture"\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n');
+    writeFileSync(join(root, 'README.md'), '# py\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    // The R4-r2 shape: a module whose functions DEFINE assertions — run as `python3 file.py` it
+    // defines them and exits 0 with zero assertions executed (the review's reproduction).
+    writeFileSync(join(root, 'tests', 'test_math.py'), 'def test_add():\n    assert 1 + 1 == 3\n');
+    writeFileSync(join(root, 'tests', 'PLAN-math.md'), '# plan\n');
+    // A python3 on PATH that has NO pytest (the host's real python3 may), so the runner lookup fails.
+    // The shim rides in a scratch HOME's .bash_profile: the engine runs Tool phases under `bash -l`,
+    // and macOS path_helper re-orders a PATH handed in through env (system dirs first).
+    const home = join(base, 'pyplain-home');
+    const bin = join(home, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, 'python3'),
+      ['#!/bin/sh', 'case "$*" in *pytest*) echo "ModuleNotFoundError: No module named pytest" >&2; exit 1;; esac', 'echo "plain python3 ran $*"; exit 0'].join('\n'),
+    );
+    chmodSync(join(bin, 'python3'), 0o755);
+    writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+    const r = spawnSync('bash', ['-lc', qeVerifyScript()], { cwd: root, encoding: 'utf8', env: { ...process.env, HOME: home } });
+    const out = `${r.stdout}${r.stderr}`;
+    expect(out).not.toContain('plain python3 ran'); // NEVER run as a script
+    expect(out).toMatch(/file=tests\/test_math\.py harness=pytest pkg=\. .*status=not-executed reason="harness not available: pytest/);
+    expect(out).toContain('not_executed=1');
+    expect(out).toContain('qe-verify: FAIL');
+    expect(r.status).not.toBe(0);
+    const report = parseQeVerifyOutput(out)!;
+    expect(report.files[0]).toMatchObject({ harness: 'pytest', status: 'not-executed', exit: null, tests: 0 });
+    expect(report.files[0]!.reason).toMatch(/harness not available: pytest/);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('M-1: a monorepo declares the harness in the PACKAGE that owns the test — detected per file, runner + full-suite check run from that package dir', () => {
+    const root = join(base, 'monorepo');
+    mkdirSync(join(root, 'packages', 'app', 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(root, 'packages', 'app', 'tests'), { recursive: true });
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'mono', private: true, workspaces: ['packages/*'] })); // NO vitest at the root
+    writeFileSync(join(root, 'packages', 'app', 'package.json'), JSON.stringify({ name: 'app', private: true, devDependencies: { vitest: '^3.0.0' } }));
+    writeFileSync(
+      join(root, 'packages', 'app', 'node_modules', '.bin', 'vitest'),
+      ['#!/bin/sh', 'echo "QE-VITEST-RAN cwd=$(basename "$PWD") args=$*"', 'echo " Test Files  1 passed (1)"', 'echo "      Tests  2 passed (2)"', 'exit 0'].join('\n'),
+    );
+    chmodSync(join(root, 'packages', 'app', 'node_modules', '.bin', 'vitest'), 0o755);
+    writeFileSync(join(root, 'README.md'), '# mono\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A', '-f');
+    git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    writeFileSync(join(root, 'packages', 'app', 'tests', 'sum.test.ts'), 'import { it, expect } from "vitest"; it("adds", () => expect(1 + 1).toBe(2));\n');
+    writeFileSync(join(root, 'tests', 'PLAN-sum.md'), '# plan\n');
+    const { status, out } = runVerify(root);
+    // Resolved in the package, run FROM it with a package-relative path.
+    expect(out).toContain('QE-VITEST-RAN cwd=app args=run tests/sum.test.ts');
+    expect(out).toMatch(/file=packages\/app\/tests\/sum\.test\.ts harness=vitest pkg=packages\/app .*exit=0 tests=2 status=passed/);
+    // The repository's own check ran once for (vitest, packages/app).
+    expect(out).toMatch(/^QE-VITEST-RAN cwd=app args=run$/m);
+    expect(out).toMatch(/QE-VERIFY-CHECK: harness=vitest pkg=packages\/app .*exit=0/);
+    expect(out).toContain('produced=1 executed=1 passed=1 failed=0 not_executed=0');
+    expect(status).toBe(0);
+    expect(parseQeVerifyOutput(out)!.files[0]).toMatchObject({ pkg: 'packages/app', tests: 2 });
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('a runner that exits 0 but reports 0 tests is NOT EXECUTED (nothing was collected), and a declared-but-uninstalled harness is "not available" — never npx', () => {
+    const root = join(base, 'zero-and-missing');
+    mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'z', private: true, devDependencies: { vitest: '^3.0.0' } }));
+    writeFileSync(join(root, 'node_modules', '.bin', 'vitest'), ['#!/bin/sh', 'echo "      Tests  0 passed (0)"', 'exit 0'].join('\n'));
+    chmodSync(join(root, 'node_modules', '.bin', 'vitest'), 0o755);
+    writeFileSync(join(root, 'README.md'), '# z\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A', '-f');
+    git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    writeFileSync(join(root, 'tests', 'empty.test.ts'), '// no tests in here\n');
+    writeFileSync(join(root, 'tests', 'PLAN-empty.md'), '# plan\n');
+    const zero = runVerify(root);
+    expect(zero.out).toMatch(/file=tests\/empty\.test\.ts harness=vitest pkg=\. .*exit=0 tests=0 status=not-executed/);
+    expect(zero.out).toContain('reported 0 tests');
+    expect(zero.status).not.toBe(0);
+    // Now the declared runner is not installed: no node_modules/.bin/vitest anywhere → not available, no npx.
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    const missing = runVerify(root);
+    expect(missing.out).toMatch(/status=not-executed reason="harness not available: vitest/);
+    expect(missing.out).toContain('never runs npx');
+    expect(missing.out).not.toContain('npx vitest');
+    expect(missing.status).not.toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
 
   it('FAIL: a produced spec that fails under the harness fails the phase — and says which file', () => {
     const root = join(base, 'fail');
@@ -210,11 +315,11 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     writeFileSync(join(root, 'tests', 'PLAN-broken.md'), '# plan\n');
     const { status, out } = runVerify(root);
     expect(out).toContain('QE-E2E-RAN e2e/broken.spec.mjs');
-    expect(out).toMatch(/file=e2e\/broken\.spec\.mjs harness=playwright .*exit=1 status=failed/);
+    expect(out).toMatch(/file=e2e\/broken\.spec\.mjs harness=playwright .*exit=1 tests=1 status=failed/);
     expect(out).toContain('qe-verify: FAIL — 1 of 1 produced test file(s) failed');
     expect(status).not.toBe(0);
     expect(parseQeVerifyOutput(out)?.failed).toBe(1);
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
 
   it('FAIL: the author produced NO test files (the b86c14c1 shape — prose and a plan, nothing runnable)', () => {
     const root = join(base, 'none');
@@ -225,7 +330,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(out).toContain(`${QE_VERIFY_SUMMARY_MARKER} produced=0 executed=0`);
     expect(out).toContain('produced no test files');
     expect(status).not.toBe(0);
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
 
   it('FAIL: a produced test with no PLAN under tests/ — the plan is part of the deliverable', () => {
     const root = join(base, 'noplan');
@@ -236,7 +341,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(out).toContain('plan=missing');
     expect(out).toContain('no tests/PLAN-*.md was produced');
     expect(status).not.toBe(0);
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
 
   it('FAIL: a produced test no recognised harness can run counts as NEVER EXECUTED — a test that never ran proves nothing (F-7R2-015)', () => {
     const root = join(base, 'unknown');
@@ -259,7 +364,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(out).toContain('were never executed');
     expect(status).not.toBe(0);
     expect(parseQeVerifyOutput(out)?.notExecuted).toBe(1);
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
 
   it('fixtures, factories and the PLAN are produced but not "tests": only conventional test shapes are executed', () => {
     const root = join(base, 'fixture-only');
@@ -273,7 +378,7 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(out).toContain('produced=1 executed=1 passed=1');
     expect(out).not.toContain('uxfix_fixture.py harness=');
     expect(status).toBe(0);
-  });
+  }, VERIFY_TEST_TIMEOUT_MS);
 });
 
 describe('parseQeVerifyOutput', () => {
