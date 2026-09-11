@@ -77,7 +77,10 @@ export const BRIDGE_BINS: readonly string[] = [
  * gate as orphaned bridges: ppid == 1, a token-boundary command match, AND a cwd inside an
  * engine run worktree — an operator's own `claude`/`codex` never runs from one of those.
  */
-export const WORKER_CLI_BINS: readonly string[] = ['agy', 'claude', 'codex', 'pi'];
+export const WORKER_CLI_BINS: readonly string[] = ['agy', 'claude', 'codex', 'pi', 'wicked-pi'];
+// `wicked-pi` is the launcher pi-acp starts as pi (F-079; `PI_ACP_PI_COMMAND`) — a grandchild that
+// sits BETWEEN the bridge and pi. Through the npm shim it runs as `node …/wicked-pi.mjs …`, so
+// the token matcher below also accepts a `.mjs` launcher extension.
 
 /** How long a SIGTERM'd bridge gets to exit before the SIGKILL escalation. */
 export const BRIDGE_KILL_GRACE_MS = 2000;
@@ -92,13 +95,14 @@ const POLL_INTERVAL_MS = 100;
  */
 /**
  * Matches `bin` as a whole command token, never a substring: start/whitespace/path-sep/
- * quote before; an optional Windows launcher extension (.cmd/.exe/.bat) and then
+ * quote before; an optional launcher extension (.cmd/.exe/.bat on Windows; .mjs for the
+ * node-run `wicked-pi` launcher) and then
  * end/whitespace/path-sep/quote after — so `pi-acp`, `/x/pi-acp`, `"C:\\x\\pi-acp.cmd"`
  * all match while `api-acp` and `copy-of-pi-acp-backup` never do.
  */
 function bridgeTokenRe(bin: string): RegExp {
   const esc = bin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s/\\\\"'])${esc}(?:\\.(?:cmd|exe|bat))?(?:[\\s/\\\\"']|$)`, 'i');
+  return new RegExp(`(?:^|[\\s/\\\\"'])${esc}(?:\\.(?:cmd|exe|bat|mjs))?(?:[\\s/\\\\"']|$)`, 'i');
 }
 
 /** Precompiled per-bin matchers — the scan loops run one test per line, no per-line RegExp churn. */

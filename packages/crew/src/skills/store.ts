@@ -150,6 +150,7 @@ import type {
   SkillKind,
   SkillManifest,
   SkillMutationResult,
+  SkillPortability,
   SkillProvenance,
   SkillPublishResult,
   SkillReadResult,
@@ -187,12 +188,19 @@ import {
 import { LiveGenerations } from './live-generations.js';
 import { discoverLivePluginDetailed, gitStateOf, PluginSourceSymlinkError, type PluginSource } from './plugin-source.js';
 import {
+  existsIn,
   extractPluginRootRefs,
   extractRelativeRefs,
   looksBinary,
-  portabilityIssueOf,
+  PORTABILITY_EVIDENCE_CAP,
+  PORTABILITY_REASONS,
+  portabilityEvidenceOf,
+  portabilityIssuesOf,
+  portabilityReasonsOf,
   resolvePluginRootRef,
   resolveRelativeRef,
+  type PortabilityContext,
+  type PortabilityHit,
 } from './refs.js';
 import { CURRENT_TMP_PREFIX, STAGING_PREFIX } from './root-names.js';
 import {
@@ -416,9 +424,45 @@ export interface SnapshotSkillRow {
   core: boolean;
   /** REQUIRED boolean: non-Claude seats may only invoke portable skills. */
   portable: boolean;
+  /** Per-reason portability (F-079): `portable` again, the sorted unique reasons, up to five
+   *  `file:line` anchors. Written by every publish since 0.7.30; absent on older generations
+   *  (verify then re-derives `portable` alone). Core ignores it (`portable` is its admission key). */
+  portability?: SkillPortability;
   /** `true` when the dir is not directly under `skills/` — Claude Code discovers top-level skill dirs
    *  only, so a nested skill is not invocable for a Claude seat (core enforces; crew just says so). */
   nested: boolean;
+}
+
+/**
+ * Why `value` is not a well-formed `SkillPortability` for a row whose `portable` is `portable` —
+ * or `null` when it is: an object whose `portable` repeats the row's, whose `reasons` is a
+ * strictly sorted, unique list of known tokens (empty exactly when portable), and whose optional
+ * `evidence` is at most five strings. Shared by the manifest parse and the snapshot-row check.
+ */
+function portabilityProblem(value: unknown, portable: boolean): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'is not an object';
+  const p = value as Record<string, unknown>;
+  for (const k of Object.keys(p)) if (!['portable', 'reasons', 'evidence'].includes(k)) return `carries an unknown key ${JSON.stringify(k)}`;
+  if (p['portable'] !== portable) return `.portable is ${JSON.stringify(p['portable'])}, not the row's ${String(portable)}`;
+  const reasons = p['reasons'];
+  if (!Array.isArray(reasons)) return '.reasons is not an array';
+  for (let i = 0; i < reasons.length; i += 1) {
+    const r: unknown = reasons[i];
+    if (typeof r !== 'string' || !PORTABILITY_REASONS.has(r)) return `.reasons[${i}] is ${JSON.stringify(r)}, not a known reason (${[...PORTABILITY_REASONS].join('|')})`;
+    if (i > 0 && !((reasons[i - 1] as string) < r)) return '.reasons is not sorted and unique';
+  }
+  if ((reasons.length === 0) !== portable) return `.reasons is ${reasons.length === 0 ? 'empty' : 'non-empty'} but the row is ${portable ? 'portable' : 'not portable'}`;
+  if (Object.hasOwn(p, 'evidence')) {
+    const ev = p['evidence'];
+    if (!Array.isArray(ev) || ev.some((e) => typeof e !== 'string')) return '.evidence is not an array of strings';
+    if (ev.length > PORTABILITY_EVIDENCE_CAP) return `.evidence carries ${ev.length} anchors (cap ${PORTABILITY_EVIDENCE_CAP})`;
+  }
+  return null;
+}
+
+/** Two string lists, equal element for element. */
+function sameStrings(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** One generated delivery view inside a snapshot: its root (snapshot-relative) and the skills it carries. */
@@ -453,6 +497,9 @@ function isSnapshotSkillRow(row: unknown): boolean {
   const r = row as Partial<SnapshotSkillRow>;
   if (typeof r.name !== 'string' || !SKILL_NAME_RE.test(r.name) || !r.name.startsWith(SKILL_NAME_PREFIX)) return false;
   if (typeof r.dir !== 'string' || typeof r.portable !== 'boolean') return false;
+  // `portability` (F-079) is optional — older generations lack it — but when present it must be
+  // well-formed and agree with `portable`; its reasons are re-derived at verify (`snapshotRowsProblem`).
+  if (Object.hasOwn(r, 'portability') && portabilityProblem(r.portability, r.portable) !== null) return false;
   // EVERY field is typed (codex round 7): `kind` an enum, `core` / `nested` real booleans — and
   // `nested` IS the fact the dir spells, a row cannot claim otherwise. `kind` and `portable` are
   // re-derived from the generation's own files at verify (`snapshotRowsProblem`); `core` is
@@ -813,9 +860,9 @@ export class SkillsStore {
     };
     const record = (value: unknown, where: string): Record<string, unknown> =>
       typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : fail(`${where} is not an object`);
-    const exactKeys = (obj: Record<string, unknown>, keys: ReadonlyArray<string>, where: string): void => {
+    const exactKeys = (obj: Record<string, unknown>, keys: ReadonlyArray<string>, where: string, optional: ReadonlyArray<string> = []): void => {
       for (const k of keys) if (!(k in obj)) fail(`${where} lacks ${JSON.stringify(k)}`);
-      for (const k of Object.keys(obj)) if (!keys.includes(k)) fail(`${where} carries an unknown key ${JSON.stringify(k)}`);
+      for (const k of Object.keys(obj)) if (!keys.includes(k) && !optional.includes(k)) fail(`${where} carries an unknown key ${JSON.stringify(k)}`);
     };
     const bool = (value: unknown, where: string): boolean => (typeof value === 'boolean' ? value : fail(`${where} is ${JSON.stringify(value)}, not a boolean`));
     const str = (value: unknown, where: string): string => (typeof value === 'string' ? value : fail(`${where} is ${JSON.stringify(value)}, not a string`));
@@ -857,17 +904,20 @@ export class SkillsStore {
       }
       const where = `skills[${name}]`;
       const e = record(value, where);
-      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict', 'upstreamDir'], where);
+      // `portability` (F-079) is OPTIONAL: a manifest written before 0.7.30 carries `portable` alone
+      // and still loads — the next recompute (any mutation, analyze, publish) fills the field in.
+      exactKeys(e, ['dir', 'kind', 'core', 'portable', 'enabled', 'provenance', 'editedAt', 'upgradeAvailable', 'conflict', 'upstreamDir'], where, ['portability']);
       const dir = str(e['dir'], `${where}.dir`);
       const bad = unsafeSkillDir(dir);
       if (bad !== null) fail(`${where}: ${bad}`);
       const derived = derivedSkillName(dir.slice(`${SKILLS_SUBDIR}/`.length));
       if (derived !== name) fail(`${where} sits at ${dir}, which derives ${JSON.stringify(derived)} — the key must be the path-derived name of its dir`);
+      const portable = bool(e['portable'], `${where}.portable`);
       skills[name] = {
         dir,
         kind: oneOf<SkillKind>(e['kind'], SKILL_KINDS, `${where}.kind`),
         core: bool(e['core'], `${where}.core`),
-        portable: bool(e['portable'], `${where}.portable`),
+        portable,
         enabled: bool(e['enabled'], `${where}.enabled`),
         provenance: oneOf<SkillProvenance>(e['provenance'], PROVENANCES, `${where}.provenance`),
         editedAt: strOrNull(e['editedAt'], `${where}.editedAt`),
@@ -875,6 +925,11 @@ export class SkillsStore {
         conflict: bool(e['conflict'], `${where}.conflict`),
         upstreamDir: strOrNull(e['upstreamDir'], `${where}.upstreamDir`),
       };
+      if (Object.hasOwn(e, 'portability')) {
+        const problem = portabilityProblem(e['portability'], portable);
+        if (problem !== null) fail(`${where}.portability ${problem}`);
+        (skills[name] as SkillEntry).portability = e['portability'] as SkillPortability;
+      }
       const upstreamDir = skills[name]?.upstreamDir ?? null;
       if (upstreamDir !== null) {
         const badUpstream = unsafeSkillDir(upstreamDir);
@@ -1056,6 +1111,11 @@ export class SkillsStore {
     const files = tree.files;
     const byRel = new Map(files.map((f) => [f.rel, f]));
     const dirs = new Set(parsed.skills.map((r) => r.dir));
+    // The validator's universe at verify is the generation's OWN bundle files — the views and the
+    // metadata file are crew's, not the plugin's — the same universe recompute judged against
+    // (closure support files + enabled skills' own files), so the reasons re-derive identically.
+    const bundle = new Set(files.map((f) => f.rel).filter((rel) => rel !== SNAPSHOT_MANIFEST_FILENAME && !rel.startsWith(`${VIEWS_DIRNAME}/`)));
+    const exists = (p: string): boolean => existsIn(bundle, p);
     for (const row of parsed.skills) {
       const skillMd = byRel.get(`${row.dir}/SKILL.md`);
       if (skillMd === undefined) return `skill row ${row.name} names ${row.dir}, but the generation carries no ${row.dir}/SKILL.md`;
@@ -1063,18 +1123,21 @@ export class SkillsStore {
       if (!fm.ok) return `${row.dir}/SKILL.md frontmatter does not parse (${fm.reason}) — its row cannot be re-derived`;
       const kind = skillKindOf(fm.fields);
       if (kind !== row.kind) return `skill row ${row.name} claims kind ${row.kind}, but its SKILL.md derives ${kind}`;
-      let portable = true;
+      const hits: PortabilityHit[] = [];
       const prefix = `${row.dir}/`;
       for (const f of files) {
         if (!f.rel.startsWith(prefix) || owningSkillDir(f.rel, dirs) !== row.dir) continue;
         const buf = readFileNoFollow(f.abs);
         if (looksBinary(buf)) continue;
-        if (portabilityIssueOf(buf.toString('utf8')) !== null) {
-          portable = false;
-          break;
-        }
+        hits.push(...portabilityIssuesOf(buf.toString('utf8'), { fileRel: f.rel, skillDir: row.dir, skillDirs: dirs, exists }));
       }
+      const reasons = portabilityReasonsOf(hits);
+      const portable = reasons.length === 0;
       if (portable !== row.portable) return `skill row ${row.name} claims portable: ${String(row.portable)}, but its files derive ${String(portable)}`;
+      // The per-reason claim (F-079) is re-derived too — a row cannot name reasons its files do not carry.
+      if (row.portability !== undefined && !sameStrings(row.portability.reasons, reasons)) {
+        return `skill row ${row.name} claims portability reasons [${row.portability.reasons.join(', ')}], but its files derive [${reasons.join(', ')}]`;
+      }
     }
     // The copilot view as a WHOLE tree (codex round 9): EXACTLY `views/copilot/.github/skills/<name>/…`
     // for the sorted portable rows — the files each row owns, the directories they imply — and nothing
@@ -1209,7 +1272,7 @@ export class SkillsStore {
     if (typeof s.contentHash !== 'string' || !CONTENT_HASH_RE.test(s.contentHash)) return `${SNAPSHOT_MANIFEST_FILENAME} has no sha256 contentHash`;
     if (!Array.isArray(s.skills)) return `${SNAPSHOT_MANIFEST_FILENAME} has no skills array`;
     if (!s.skills.every(isSnapshotSkillRow)) {
-      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, kind: ${[...SKILL_KINDS].join('|')}, core: boolean, portable: boolean, nested: what the dir spells} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
+      return `${SNAPSHOT_MANIFEST_FILENAME} has a skill row that is not {name: a wicked-garden-* skill name, dir: a safe relative skills/… path deriving that name, kind: ${[...SKILL_KINDS].join('|')}, core: boolean, portable: boolean, portability?: {portable: the same boolean, reasons: sorted unique tokens (empty iff portable), evidence?: ≤ ${PORTABILITY_EVIDENCE_CAP} anchors}, nested: what the dir spells} — metadata is never trusted to name a path, and core cannot judge seat compatibility from it`;
     }
     if (!isSortedUniqueRows(s.skills as SnapshotSkillRow[])) return `${SNAPSHOT_MANIFEST_FILENAME} skill rows are not sorted by unique name — not what publish writes`;
     const gs = s.gardenSource as Partial<SnapshotManifest['gardenSource']> | null | undefined;
@@ -1876,6 +1939,8 @@ export class SkillsStore {
     const refused: SkillConflictFinding[] = [];
     const catalogMd = new Map<string, string>();
     const byOwner = this.recordsByOwner(m);
+    const skillDirs = this.ownershipDirs(m);
+    const bundleView = this.publishedBundleView(m, skillDirs);
     for (const [name, entry] of Object.entries(m.skills)) {
       const records = byOwner.get(entry.dir) ?? [];
       const userAdded = records.length > 0 && records.every(([, r]) => r.baselineHash === null);
@@ -1911,7 +1976,10 @@ export class SkillsStore {
       // Judged from what is on disk as a REGULAR file reached without crossing a link: a recorded
       // file that vanished is drift (publish reports it; the mutation in progress must not die on
       // it); one that became a link, or sits behind one, is refused and reported — never read.
-      let portable = true;
+      // EVERY reason is collected (F-079), against the bundle the next publish would carry — so
+      // the snapshot row re-derives to the same reasons at verify.
+      const ctx = bundleView.contextFor(entry.dir);
+      const hits: Array<PortabilityHit & { fileRel: string }> = [];
       for (const [rel, r] of records) {
         if (r.effectiveHash === null) continue;
         let buf: Buffer | null;
@@ -1922,9 +1990,11 @@ export class SkillsStore {
           continue;
         }
         if (buf === null || looksBinary(buf)) continue;
-        if (portabilityIssueOf(buf.toString('utf8')) !== null) portable = false;
+        for (const hit of portabilityIssuesOf(buf.toString('utf8'), ctx(rel))) hits.push({ ...hit, fileRel: rel });
       }
-      entry.portable = portable;
+      const reasons = portabilityReasonsOf(hits);
+      entry.portable = reasons.length === 0;
+      entry.portability = { portable: entry.portable, reasons, evidence: portabilityEvidenceOf(hits) };
     }
     // A DIRECTLY registered reference is core regardless of its readability (design v3.5 §5; codex
     // round 8): a skill a workflow names by `skill_ref` keeps `core: true` when its `SKILL.md` is
@@ -1935,6 +2005,51 @@ export class SkillsStore {
     const closure = coreClosure(registered, catalogMd);
     for (const [name, entry] of Object.entries(m.skills)) entry.core = closure.core.has(name) || registered.has(name);
     return refused;
+  }
+
+  /**
+   * The portability validator's view of the bundle (F-079): what the NEXT publish would carry —
+   * support files inside the closure and ENABLED skills' own files. A disabled skill's files, a
+   * file outside the closure, a vanished record: not there. Judging against this universe (rather
+   * than everything under `effective/`) is what lets `snapshotRowsProblem` re-derive the SAME
+   * reasons from the generation alone — a `../` link into a disabled skill is a broken link
+   * (`unresolved-ref` at publish), not a portability fact about a file the snapshot omits. The
+   * judged skill's own files are always visible to it (own-directory links stay portable anyway),
+   * and `extra` lets a write guard see the files it is about to land.
+   */
+  private publishedBundleView(
+    m: SkillManifest,
+    skillDirs: ReadonlySet<string>,
+    extra: Readonly<Record<string, string>> = {},
+  ): { contextFor: (skillDir: string) => (fileRel: string) => PortabilityContext } {
+    const enabledDirs = new Set(Object.values(m.skills).filter((e) => e.enabled).map((e) => e.dir));
+    const present = Object.entries(m.files).filter(([, r]) => r.effectiveHash !== null).map(([rel]) => rel);
+    const visible = new Set<string>();
+    const own = new Map<string, Set<string>>();
+    for (const rel of present) {
+      const owner = owningSkillDir(rel, skillDirs);
+      if (owner === null) {
+        // EXACTLY validate's selection of support files (review of #532, F-1): an owner-less file
+        // under `skills/` (a `skills/README.md`, a dir whose SKILL.md never registered) is never
+        // shipped, so it must not count as existing here either — or recompute would derive a
+        // reason verify cannot re-derive from the generation, and `current` would be refused.
+        if (!rel.startsWith(`${SKILLS_SUBDIR}/`) && inBundleClosure(rel)) visible.add(rel);
+        continue;
+      }
+      if (enabledDirs.has(owner)) visible.add(rel);
+      const list = own.get(owner);
+      if (list === undefined) own.set(owner, new Set([rel]));
+      else list.add(rel);
+    }
+    for (const rel of Object.keys(extra)) visible.add(rel);
+    return {
+      contextFor: (skillDir) => {
+        const dirs = skillDirs.has(skillDir) ? skillDirs : new Set([...skillDirs, skillDir]);
+        const mine = own.get(skillDir) ?? new Set<string>();
+        const exists = (p: string): boolean => existsIn(visible, p) || existsIn(mine, p);
+        return (fileRel) => ({ fileRel, skillDir, skillDirs: dirs, exists });
+      },
+    };
   }
 
   /** The recompute's refusals as WARNINGS — for a mutation that landed on another skill (the blocking form is publish's). */
@@ -2184,6 +2299,10 @@ export class SkillsStore {
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     if (entry.enabled) return this.result(m, name, findings);
     entry.enabled = true;
+    // Enablement moves the bundle the validator judges against (F-079): another skill's `../`
+    // link into this one now resolves. Re-derive so the manifest's `portability` stays honest
+    // between publishes (refusals were reported by the recompute above).
+    this.recomputeDerived(m);
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -2197,6 +2316,8 @@ export class SkillsStore {
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     if (!entry.enabled) return this.result(m, name, findings);
     entry.enabled = false;
+    // See `enable`: the disabled skill's files leave the validator's bundle view.
+    this.recomputeDerived(m);
     this.commit(m);
     return this.result(m, name, findings);
   }
@@ -2315,7 +2436,7 @@ export class SkillsStore {
     } catch (err) {
       return this.blocked(m, [this.pathFinding(err, name, rawRel)]);
     }
-    const findings = this.putGuards(name, entry, target.rel, content);
+    const findings = this.putGuards(m, name, entry, target.rel, content);
     if (verdictOf(findings) === 'blocked') return this.blocked(m, findings);
     // One file, the same transaction as every multi-file swap (codex round 7): staged, the existing
     // file parked, placed, and committed WITH the manifest — a failed manifest commit rolls it back.
@@ -2677,15 +2798,32 @@ export class SkillsStore {
     return this.result(m, name, findings);
   }
 
-  private putGuards(name: string, entry: SkillEntry, rel: string, content: string): SkillConflictFinding[] {
+  private putGuards(m: SkillManifest, name: string, entry: SkillEntry, rel: string, content: string): SkillConflictFinding[] {
     const out: SkillConflictFinding[] = [];
     if (rel === 'SKILL.md') out.push(...frontmatterGuard(content, name, { isCore: entry.core, file: `${entry.dir}/SKILL.md` }));
     out.push(...compact([nestedSkillCreateGuard(rel, name), supportFileGuard(rel, name)]));
-    if (entry.portable) out.push(...compact([nonPortableGuard({ [rel]: content }, name)]));
+    // Warn on every reason this write INTRODUCES — one the skill does not already carry (review
+    // of #532, F-7): an author fixing a non-portable skill file by file still hears about a new
+    // reason, while a reason the skill already has is not repeated on every edit. An entry with
+    // no `portability` yet (an older manifest) knows no reasons, so everything is new.
+    const known = new Set<string>(entry.portability?.reasons ?? []);
+    out.push(...nonPortableGuard({ [rel]: content }, name, this.writeContext(m, entry.dir, { [rel]: content })).filter((f) => f.portabilityReason === undefined || !known.has(f.portabilityReason)));
     return out;
   }
 
-  private filesGuards(name: string, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
+  /**
+   * The portability validator's context for a write of `files` (skill-relative keys) into
+   * `skillDir`: the would-be bundle plus the files about to land, keyed by the skill-relative
+   * path the guard iterates.
+   */
+  private writeContext(m: SkillManifest, skillDir: string, files: Readonly<Record<string, string>>): (rel: string) => PortabilityContext {
+    const extra: Record<string, string> = {};
+    for (const [rel, content] of Object.entries(files)) extra[`${skillDir}/${rel}`] = content;
+    const ctx = this.publishedBundleView(m, this.ownershipDirs(m), extra).contextFor(skillDir);
+    return (rel) => ctx(`${skillDir}/${rel}`);
+  }
+
+  private filesGuards(m: SkillManifest, name: string, dir: string, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
     const out: SkillConflictFinding[] = [];
     const keys = Object.keys(files).sort();
     for (const rel of keys) {
@@ -2724,7 +2862,7 @@ export class SkillsStore {
         ),
       );
     }
-    out.push(...compact([nonPortableGuard(files, name)]));
+    out.push(...nonPortableGuard(files, name, this.writeContext(m, dir, files)));
     return out;
   }
 
@@ -2736,13 +2874,13 @@ export class SkillsStore {
     if (existsSync(this.pluginPath(dir)) || this.hasBaselineDir(m, dir)) {
       out.push(finding('name-collision', 'blocking', 'a directory already exists where this skill would land', `${dir} exists`, { skill: name }));
     }
-    out.push(...this.filesGuards(name, files));
+    out.push(...this.filesGuards(m, name, dir, files));
     out.push(...frontmatterGuard(files['SKILL.md'], name, { isCore: this.registeredRefs().has(name), file: `${dir}/SKILL.md` }));
     return out;
   }
 
   private replaceGuards(m: SkillManifest, name: string, entry: SkillEntry, files: Readonly<Record<string, string>>): SkillConflictFinding[] {
-    const out = this.filesGuards(name, files);
+    const out = this.filesGuards(m, name, entry.dir, files);
     const nestedUnder = [...this.ownershipDirs(m)].filter((d) => d !== entry.dir && d.startsWith(`${entry.dir}/`));
     for (const rel of Object.keys(files)) {
       const owner = owningSkillDir(`${entry.dir}/${rel}`, new Set([entry.dir, ...nestedUnder]));
@@ -3219,6 +3357,9 @@ export class SkillsStore {
           kind: entry.kind,
           core: entry.core,
           portable: entry.portable,
+          // `validate` recomputed every entry (F-079), so the per-reason claim is fresh here; the
+          // fallback only guards the type — a row is never written without `portability`.
+          portability: entry.portability ?? { portable: entry.portable, reasons: [], evidence: [] },
           nested: isNestedSkillDir(entry.dir),
         }))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),

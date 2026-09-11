@@ -161,6 +161,13 @@ describe('seed (design v3 §1/§4/§5)', () => {
     expect(m.skills['wicked-garden-gamma']).toMatchObject({ portable: true, core: true });
     expect(m.skills['wicked-garden-delta']).toMatchObject({ portable: false, core: false });
     expect(m.skills['wicked-garden-epsilon']).toMatchObject({ portable: false, core: false });
+    // F-079: every entry says WHY, with `file:line` evidence, and `portability.portable` repeats `portable`.
+    expect(alpha?.portability).toEqual({ portable: false, reasons: ['plugin-root'], evidence: ['skills/alpha/SKILL.md:10'] });
+    expect(nested?.portability).toEqual({ portable: false, reasons: ['cross-skill-path', 'relative-link'], evidence: ['skills/alpha/nested/SKILL.md:10'] });
+    expect(m.skills['wicked-garden-delta']?.portability).toEqual({ portable: false, reasons: ['cross-skill-path', 'relative-link'], evidence: ['skills/delta/SKILL.md:8'] });
+    expect(m.skills['wicked-garden-epsilon']?.portability).toEqual({ portable: false, reasons: ['cwd-script'], evidence: ['skills/epsilon/SKILL.md:8'] });
+    expect(m.skills['wicked-garden-beta']?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    expect(m.skills['wicked-garden-gamma']?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
     // Every managed file has a record; a shipped one has equal hashes and no publish yet.
     expect(m.files['skills/beta/SKILL.md']).toMatchObject({ lastPublishedHash: null, conflict: false });
     expect(m.files['skills/beta/SKILL.md']?.baselineHash).toBe(m.files['skills/beta/SKILL.md']?.effectiveHash);
@@ -301,9 +308,20 @@ describe('publish (design v3 §1)', () => {
       kind: 'fork-worker',
       core: false,
       portable: false,
+      // F-079: the per-reason claim rides the row — `../SKILL.md` into the parent is a relative link INTO another skill.
+      portability: { portable: false, reasons: ['cross-skill-path', 'relative-link'], evidence: ['skills/alpha/nested/SKILL.md:10'] },
       nested: true,
     });
     expect(manifest.skills.every((x) => typeof x.portable === 'boolean' && typeof x.nested === 'boolean')).toBe(true);
+    // Every row's `portability` agrees with `portable` and names the reasons its files carry (F-079).
+    expect(manifest.skills.every((x) => x.portability?.portable === x.portable && (x.portability.reasons.length === 0) === x.portable)).toBe(true);
+    expect(Object.fromEntries(manifest.skills.map((x) => [x.name, x.portability?.reasons]))).toEqual({
+      'wicked-garden-alpha': ['plugin-root'],
+      'wicked-garden-alpha-nested': ['cross-skill-path', 'relative-link'],
+      'wicked-garden-beta': [],
+      'wicked-garden-epsilon': ['cwd-script'],
+      'wicked-garden-gamma': [],
+    });
     expect(manifest.skills.filter((x) => x.nested).map((x) => x.name)).toEqual(['wicked-garden-alpha-nested']);
     // The copilot view (v3.2 §4): the enabled PORTABLE skills' own files under their frontmatter
     // names, inside the snapshot, named in snapshot.json — non-portable skills (alpha, alpha/nested,
@@ -2546,7 +2564,7 @@ describe('snapshot.json is AUTHENTICATED by the manifest and RE-DERIVED from the
     stamp(withRow('wicked-garden-alpha-nested', { nested: false }));
     expect(() => s.store.currentSnapshot()).toThrow(/nested: what the dir spells/);
     // alpha is NOT portable; claiming it is — with the view list made consistent — is caught by its own files.
-    const alphaPortable = withRow('wicked-garden-alpha', { portable: true });
+    const alphaPortable = withRow('wicked-garden-alpha', { portable: true, portability: { portable: true, reasons: [], evidence: [] } });
     stamp({ ...alphaPortable, views: { copilot: { dir: 'views/copilot', skills: [...pristine.views.copilot.skills, 'wicked-garden-alpha'].sort() } } });
     expect(() => s.store.currentSnapshot()).toThrow(/claims portable: true, but its files derive false/);
     // The view block must name EXACTLY the portable rows: one dropped ⇒ refused at parse.
@@ -2830,5 +2848,211 @@ describe('baseline reaping is a CAS mutation (codex round 9): a record drop ride
     expect(Object.keys(s.store.manifest().baselines)).toEqual([ref.baseline]);
     expect(s.store.baselinesOnDisk()).toEqual([ref.baseline]);
     expect(existsSync(join(s.root, 'baseline', a))).toBe(false);
+  });
+});
+
+describe('portability per reason (F-079, wicked-crew#531)', () => {
+  /** A minimal SKILL.md for a user-added skill `name` with `body` under the heading. */
+  const skillMd = (name: string, body: string, frontmatterExtra = ''): string => `---\nname: ${name}\ndescription: fixture\n${frontmatterExtra}---\n\n# ${name}\n\n${body}\n`;
+
+  it('one fixture skill per reason: the manifest entry and the snapshot row carry {portable, reasons, evidence}; a write warns ONCE PER REASON with file:line', async () => {
+    s.store.seed();
+    let rev = 1;
+    const add = (name: string, files: Record<string, string>): ReturnType<SkillsStore['add']> => {
+      const r = s.store.add(name, files, rev);
+      expect(r.verdict, `${name}: ${JSON.stringify(r.findings)}`).not.toBe('blocked');
+      rev = r.revision;
+      return r;
+    };
+    // skill-dir-var
+    const dirVar = add('wicked-garden-p-dirvar', { 'SKILL.md': skillMd('wicked-garden-p-dirvar', 'ls ${CLAUDE_SKILL_DIR}/refs') });
+    expect(dirVar.findings.filter((f) => f.kind === 'non-portable')).toMatchObject([{ portabilityReason: 'skill-dir-var', file: 'SKILL.md', line: 8 }]);
+    expect(dirVar.skill?.portability).toEqual({ portable: false, reasons: ['skill-dir-var'], evidence: ['skills/p-dirvar/SKILL.md:8'] });
+    // cross-skill-path through the plugin root (gamma's own file exists in the bundle)
+    const cross = add('wicked-garden-p-cross', { 'SKILL.md': skillMd('wicked-garden-p-cross', 'Read `${CLAUDE_PLUGIN_ROOT}/skills/gamma/SKILL.md` first.') });
+    expect(cross.findings.filter((f) => f.kind === 'non-portable').map((f) => f.portabilityReason)).toEqual(['cross-skill-path', 'plugin-root']);
+    expect(cross.skill?.portability).toEqual({ portable: false, reasons: ['cross-skill-path', 'plugin-root'], evidence: ['skills/p-cross/SKILL.md:8'] });
+    // requires-harness:claude — declared, not detected
+    const harness = add('wicked-garden-p-harness', { 'SKILL.md': skillMd('wicked-garden-p-harness', 'Needs the Skill tool.', 'metadata:\n  requires-harness: claude\n') });
+    expect(harness.findings.filter((f) => f.kind === 'non-portable')).toMatchObject([{ portabilityReason: 'requires-harness:claude', line: 5 }]);
+    expect(harness.skill?.portability).toEqual({ portable: false, reasons: ['requires-harness:claude'], evidence: ['skills/p-harness/SKILL.md:5'] });
+    // the launcher forms + base-dir refs: PORTABLE
+    const launcher = add('wicked-garden-p-launcher', {
+      'SKILL.md': skillMd('wicked-garden-p-launcher', 'Run `wicked-garden run scripts/alpha/run.py` then `python3 scripts/local.py`; read `refs/plan.md`; dispatch **`wicked-garden-gamma`**.\nWT_LIB="$(wicked-garden path scripts/alpha)"'),
+      'refs/plan.md': 'Back to [the skill](../SKILL.md).\n',
+      'scripts/local.py': 'print(1)\n',
+    });
+    expect(launcher.findings.filter((f) => f.kind === 'non-portable')).toEqual([]);
+    expect(launcher.skill?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    // a MIXED skill: three files, four reasons — one finding per reason PER FILE, evidence capped at five anchors in file order
+    const mixed = add('wicked-garden-p-mixed', {
+      'SKILL.md': skillMd('wicked-garden-p-mixed', 'Run `python3 scripts/alpha/run.py`.\nSee ${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh and ${CLAUDE_PLUGIN_ROOT}/schemas/evidence.json.'),
+      'refs/a.md': 'link [gamma](../../gamma/SKILL.md)\n${CLAUDE_PLUGIN_ROOT}\n',
+      'refs/b.md': 'ls ${CLAUDE_SKILL_DIR}\n${CLAUDE_PLUGIN_ROOT}/docs/examples/campaign.yml\n',
+    });
+    expect(mixed.findings.filter((f) => f.kind === 'non-portable').map((f) => [f.file, f.portabilityReason, f.line])).toEqual([
+      ['SKILL.md', 'cwd-script', 8],
+      ['SKILL.md', 'plugin-root', 9],
+      ['refs/a.md', 'cross-skill-path', 1],
+      ['refs/a.md', 'plugin-root', 2],
+      ['refs/a.md', 'relative-link', 1],
+      ['refs/b.md', 'plugin-root', 2],
+      ['refs/b.md', 'skill-dir-var', 1],
+    ]);
+    const pr = mixed.findings.find((f) => f.file === 'SKILL.md' && f.portabilityReason === 'plugin-root');
+    expect(pr?.evidence).toBe('skills/p-mixed/SKILL.md:9: plugin-root — ${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh (+1 more)');
+    expect(pr?.explanation).toContain('only Claude Code substitutes');
+    expect(mixed.skill?.portability).toEqual({
+      portable: false,
+      reasons: ['cross-skill-path', 'cwd-script', 'plugin-root', 'relative-link', 'skill-dir-var'],
+      evidence: ['skills/p-mixed/SKILL.md:8', 'skills/p-mixed/SKILL.md:9', 'skills/p-mixed/refs/a.md:1', 'skills/p-mixed/refs/a.md:2', 'skills/p-mixed/refs/b.md:1'],
+    });
+
+    // Published: every row carries the claim; the copilot view is STILL exactly the portable rows; `current` verifies.
+    const r = await s.store.publish(rev);
+    expect(r.verdict).toBe('clear');
+    const snap = snapshotManifest((r.snapshot as NonNullable<typeof r.snapshot>).path);
+    const rows = Object.fromEntries(snap.skills.map((x) => [x.name, x.portability]));
+    expect(rows['wicked-garden-p-dirvar']).toEqual({ portable: false, reasons: ['skill-dir-var'], evidence: ['skills/p-dirvar/SKILL.md:8'] });
+    expect(rows['wicked-garden-p-cross']?.reasons).toEqual(['cross-skill-path', 'plugin-root']);
+    expect(rows['wicked-garden-p-harness']?.reasons).toEqual(['requires-harness:claude']);
+    expect(rows['wicked-garden-p-launcher']).toEqual({ portable: true, reasons: [], evidence: [] });
+    expect(rows['wicked-garden-p-mixed']?.reasons).toEqual(['cross-skill-path', 'cwd-script', 'plugin-root', 'relative-link', 'skill-dir-var']);
+    expect(snap.skills.every((x) => x.portability?.portable === x.portable)).toBe(true);
+    expect(snap.views.copilot.skills).toEqual(['wicked-garden-beta', 'wicked-garden-gamma', 'wicked-garden-p-launcher']);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
+  });
+
+  it('the row\'s reasons are RE-DERIVED at verify like `portable` is: a re-stamped reason list is refused by name; a malformed `portability` block is refused at parse', async () => {
+    s.store.seed();
+    const r = await s.store.publish(1);
+    const snap = r.snapshot as NonNullable<typeof r.snapshot>;
+    const metadata = join(snap.path, 'snapshot.json');
+    const pristine = snapshotManifest(snap.path);
+    unlock(metadata);
+    const stamp = (obj: unknown): void => {
+      writeFileSync(metadata, `${JSON.stringify(obj, null, 2)}\n`);
+      stampPublished(s.root, metadata);
+    };
+    const withRow = (name: string, patch: Record<string, unknown>): SnapshotManifest =>
+      ({ ...pristine, skills: pristine.skills.map((row) => (row.name === name ? { ...row, ...patch } : row)) }) as SnapshotManifest;
+    // alpha's files derive [plugin-root]; a row claiming [cwd-script] (still non-portable, still consistent) is caught by re-derivation.
+    stamp(withRow('wicked-garden-alpha', { portability: { portable: false, reasons: ['cwd-script'], evidence: [] } }));
+    expect(() => s.store.currentSnapshot()).toThrow(/claims portability reasons \[cwd-script\], but its files derive \[plugin-root\]/);
+    // Shape: reasons not sorted / unknown token / portable disagreeing / too much evidence ⇒ refused at parse.
+    for (const bad of [
+      { portable: false, reasons: ['relative-link', 'cross-skill-path'], evidence: [] },
+      { portable: false, reasons: ['made-up'], evidence: [] },
+      { portable: true, reasons: [], evidence: [] },
+      { portable: false, reasons: [], evidence: [] },
+      { portable: false, reasons: ['plugin-root'], evidence: ['a:1', 'b:2', 'c:3', 'd:4', 'e:5', 'f:6'] },
+      { portable: false, reasons: ['plugin-root'], evidence: [], extra: 1 },
+    ]) {
+      stamp(withRow('wicked-garden-alpha', { portability: bad }));
+      expect(() => s.store.currentSnapshot(), JSON.stringify(bad)).toThrow(/portability\?: \{portable: the same boolean/);
+    }
+    // An OLDER generation's rows (no `portability` at all) still parse and verify on `portable` alone.
+    stamp({
+      ...pristine,
+      skills: pristine.skills.map((row) => {
+        const older = { ...row } as Record<string, unknown>;
+        delete older['portability'];
+        return older;
+      }),
+    });
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    stamp(pristine);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+  });
+
+  it('the validator judges against the bundle the NEXT publish carries: a `../` link into a DISABLED skill is a broken link (unresolved-ref), not a portability reason — so verify re-derives the same answer from the generation', async () => {
+    s.store.seed();
+    // delta links `../gamma/SKILL.md`; with gamma enabled that is cross-skill-path + relative-link.
+    expect(s.store.manifest().skills['wicked-garden-delta']?.portability?.reasons).toEqual(['cross-skill-path', 'relative-link']);
+    // gamma is core (through beta's mandate) — disabling it is blocked; use alpha/nested → alpha instead.
+    const off = s.store.disable('wicked-garden-alpha', 1);
+    expect(off.verdict).toBe('clear');
+    // alpha's files left the bundle view: nested's `../SKILL.md` now names nothing the snapshot carries.
+    expect(s.store.manifest().skills['wicked-garden-alpha-nested']?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    const r = await s.store.publish(off.revision);
+    expect(r.verdict).toBe('warnings'); // the broken link is reported as unresolved-ref (design v3.4 §1)
+    expect(r.findings.map((f) => f.kind)).toContain('unresolved-ref');
+    const snap = snapshotManifest((r.snapshot as NonNullable<typeof r.snapshot>).path);
+    expect(snap.skills.find((x) => x.name === 'wicked-garden-alpha-nested')?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    expect(snap.views.copilot.skills).toContain('wicked-garden-alpha-nested');
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
+    // Re-enabling alpha brings the reason back — enablement re-derives, no other mutation needed.
+    const on = s.store.enable('wicked-garden-alpha', r.revision);
+    expect(on.verdict).toBe('clear');
+    expect(s.store.manifest().skills['wicked-garden-alpha-nested']?.portability?.reasons).toEqual(['cross-skill-path', 'relative-link']);
+  });
+
+  it('recompute and verify judge ONE universe (review of #532, F-1): an owner-less file under skills/ (a `skills/README.md`) is never in the bundle — a `../README.md` link to it derives NO reason at recompute, publish lands, and `current` verifies', async () => {
+    // Upstream ships a top-level `skills/README.md` (no skill owns it — validate never ships it) and
+    // beta links it. Before the fix recompute saw the file (it is inside the closure) and stamped
+    // `relative-link`; verify, judging the generation, derived nothing → `current` was refused
+    // and no re-publish could repair it.
+    writeFileSync(join(s.upstream, 'skills', 'README.md'), '# skills\n\nAn index nobody owns.\n');
+    const beta = join(s.upstream, 'skills', 'beta', 'SKILL.md');
+    writeFileSync(beta, `${readFileSync(beta, 'utf8')}\nSee ../README.md for the index.\n`);
+    s.store.seed();
+    const m = s.store.manifest();
+    expect(Object.keys(m.files)).toContain('skills/README.md'); // recorded — it is in the closure…
+    expect(m.skills['wicked-garden-beta']?.portability).toEqual({ portable: true, reasons: [], evidence: [] }); // …but not in the validator's universe
+    expect(m.skills['wicked-garden-beta']?.portable).toBe(true);
+    const r = await s.store.publish(1);
+    expect(r.snapshot).not.toBeNull();
+    // The link IS broken in the generation — publish says so as unresolved-ref (v3.4 §1) — and the row says portable.
+    expect(r.findings.some((f) => f.kind === 'unresolved-ref' && f.skill === 'wicked-garden-beta')).toBe(true);
+    const snapPath = (r.snapshot as NonNullable<typeof r.snapshot>).path;
+    expect(rels(snapPath)).not.toContain('skills/README.md');
+    expect(snapshotManifest(snapPath).skills.find((x) => x.name === 'wicked-garden-beta')?.portability).toEqual({ portable: true, reasons: [], evidence: [] });
+    // The whole point: the generation verifies — from this store and from a fresh one.
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
+    // And a second publish is a clean no-drama gen 2, not a repair loop.
+    const again = await s.store.publish(r.revision);
+    expect(again.snapshot?.gen).toBe(2);
+    expect(storeOver(s).currentSnapshot()?.gen).toBe(2);
+  });
+
+  it('a write warns on every reason it INTRODUCES, not on ones the skill already carries (review of #532, F-7): editing a non-portable skill still names a NEW reason', () => {
+    s.store.seed();
+    // alpha is non-portable (plugin-root). A file adding skill-dir-var → ONE finding, for the new reason only.
+    const w1 = s.store.writeFile('wicked-garden-alpha', 'refs/more.md', 'ls ${CLAUDE_SKILL_DIR}\nand ${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh\n', 1);
+    expect(w1.verdict).toBe('warnings');
+    expect(w1.findings.filter((f) => f.kind === 'non-portable').map((f) => [f.portabilityReason, f.line])).toEqual([['skill-dir-var', 1]]);
+    expect(w1.skill?.portability?.reasons).toEqual(['plugin-root', 'skill-dir-var']);
+    // The same reasons again in another file → nothing new to say.
+    const w2 = s.store.writeFile('wicked-garden-alpha', 'refs/again.md', '${CLAUDE_PLUGIN_ROOT} and ${CLAUDE_SKILL_DIR}\n', w1.revision);
+    expect(w2.verdict).toBe('clear');
+    expect(w2.findings.filter((f) => f.kind === 'non-portable')).toEqual([]);
+    // A portable skill hears about every reason (nothing is known yet).
+    const w3 = s.store.writeFile('wicked-garden-gamma', 'refs/x.md', 'run `python3 scripts/alpha/run.py`\n', w2.revision);
+    expect(w3.findings.filter((f) => f.kind === 'non-portable').map((f) => f.portabilityReason)).toEqual(['cwd-script']);
+  });
+
+  it('an older `portable`-only manifest (written before 0.7.30) still loads; the next recompute fills `portability` in', () => {
+    s.store.seed();
+    const manifestPath = join(s.root, 'manifest.json');
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as { skills: Record<string, Record<string, unknown>> };
+    for (const e of Object.values(raw.skills)) delete e['portability'];
+    writeFileSync(manifestPath, `${JSON.stringify(raw, null, 2)}\n`);
+    const older = storeOver(s);
+    const m = older.manifest();
+    expect(m.skills['wicked-garden-alpha']).toMatchObject({ portable: false });
+    expect(Object.hasOwn(m.skills['wicked-garden-alpha'] ?? {}, 'portability')).toBe(false);
+    // A malformed block is refused as a corrupt manifest, by name.
+    const broken = JSON.parse(readFileSync(manifestPath, 'utf8')) as { skills: Record<string, Record<string, unknown>> };
+    (broken.skills['wicked-garden-alpha'] as Record<string, unknown>)['portability'] = { portable: true, reasons: [] };
+    writeFileSync(manifestPath, `${JSON.stringify(broken, null, 2)}\n`);
+    expect(() => storeOver(s).manifest()).toThrow(SkillsManifestCorruptError);
+    expect(() => storeOver(s).manifest()).toThrow(/portability \.portable is true, not the row's false/);
+    writeFileSync(manifestPath, `${JSON.stringify(raw, null, 2)}\n`);
+    // Any mutation recomputes: the field appears with the reasons the files derive.
+    const w = storeOver(s).writeFile('wicked-garden-gamma', 'refs/note.md', 'plain\n', m.revision);
+    expect(w.verdict).toBe('clear');
+    expect(storeOver(s).manifest().skills['wicked-garden-alpha']?.portability).toEqual({ portable: false, reasons: ['plugin-root'], evidence: ['skills/alpha/SKILL.md:10'] });
   });
 });

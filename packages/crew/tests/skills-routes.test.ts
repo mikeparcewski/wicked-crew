@@ -507,3 +507,34 @@ describe('without a skills runtime', () => {
     }
   });
 });
+
+describe('portability per reason on the wire (F-079; api-types 0.34.0)', () => {
+  it('GET /skills carries `portability` on every entry beside `portable`; a PUT that adds two reasons answers two `non-portable` findings with file:line and the reason token', async () => {
+    const before = await manifest();
+    expect(before.manifest.skills['wicked-garden-alpha']).toMatchObject({ portable: false, portability: { portable: false, reasons: ['plugin-root'], evidence: ['skills/alpha/SKILL.md:10'] } });
+    expect(before.manifest.skills['wicked-garden-gamma']).toMatchObject({ portable: true, portability: { portable: true, reasons: [], evidence: [] } });
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/skills/wicked-garden-gamma/files/refs/extra.md',
+      payload: { content: 'ls ${CLAUDE_SKILL_DIR}\nrun `python3 scripts/alpha/run.py`\n', expectedRevision: before.revision },
+    });
+    expect(put.statusCode).toBe(200);
+    const body = put.json() as SkillMutationResult;
+    expect(body.verdict).toBe('warnings');
+    expect(body.findings.filter((f) => f.kind === 'non-portable').map((f) => [f.portabilityReason, f.file, f.line])).toEqual([
+      ['cwd-script', 'refs/extra.md', 2],
+      ['skill-dir-var', 'refs/extra.md', 1],
+    ]);
+    expect(body.skill).toMatchObject({ portable: false, portability: { portable: false, reasons: ['cwd-script', 'skill-dir-var'], evidence: ['skills/gamma/refs/extra.md:1', 'skills/gamma/refs/extra.md:2'] } });
+    const after = await manifest();
+    expect(after.manifest.skills['wicked-garden-gamma']?.portability?.reasons).toEqual(['cwd-script', 'skill-dir-var']);
+    // The GET shape itself is unchanged: {manifest, revision, root, current}.
+    expect(Object.keys(after).sort()).toEqual(['current', 'manifest', 'revision', 'root']);
+    // Published: the snapshot row carries the same claim and the view excludes gamma now.
+    const pub = await app.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: body.revision } });
+    expect(pub.statusCode).toBe(200);
+    const snapshot = JSON.parse(readFileSync(join((pub.json() as SkillPublishResult).snapshot?.path ?? '', 'snapshot.json'), 'utf8')) as { skills: Array<{ name: string; portability?: unknown }>; views: { copilot: { skills: string[] } } };
+    expect(snapshot.skills.find((x) => x.name === 'wicked-garden-gamma')?.portability).toEqual({ portable: false, reasons: ['cwd-script', 'skill-dir-var'], evidence: ['skills/gamma/refs/extra.md:1', 'skills/gamma/refs/extra.md:2'] });
+    expect(snapshot.views.copilot.skills).toEqual(['wicked-garden-beta']);
+  });
+});

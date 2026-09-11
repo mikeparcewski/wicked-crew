@@ -335,9 +335,22 @@ describe('orphaned run-process sweep (crew#340)', () => {
   });
 
   it('WORKER_CLI_BINS names the CLIs the declared bridges drive', () => {
-    // agy-acp→agy, claude-agent-acp→claude, codex-acp→codex, pi-acp→pi. A bridge added
-    // to BRIDGE_BINS whose CLI is missing here escapes the orphan sweep — keep them in step.
-    expect([...WORKER_CLI_BINS].sort()).toEqual(['agy', 'claude', 'codex', 'pi']);
+    // agy-acp→agy, claude-agent-acp→claude, codex-acp→codex, pi-acp→pi (through the wicked-pi
+    // launcher, F-079). A bridge added to BRIDGE_BINS whose CLI is missing here escapes the
+    // orphan sweep — keep them in step.
+    expect([...WORKER_CLI_BINS].sort()).toEqual(['agy', 'claude', 'codex', 'pi', 'wicked-pi']);
+  });
+
+  it('the wicked-pi launcher (pi-acp → wicked-pi → pi) is an orphan the sweep sees — as the npm shim runs it (`node …/wicked-pi.mjs`) and as a bare bin; `wicked-pi` never matches inside another token', () => {
+    const listing = [
+      '  920     1 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc --no-themes',
+      '  921     1 /repo/node_modules/.bin/wicked-pi --mode rpc',
+      String.raw`  922     1 "C:\repo\node_modules\.bin\wicked-pi.cmd" --mode rpc`,
+      '  923   700 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc', // parented: pi-acp alive
+      '  924     1 node /x/not-wicked-pi.mjs', // embedded token
+      '  925     1 node /x/wicked-pi-backup.mjs', // hyphen-adjacent
+    ].join('\n');
+    expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([920, 921, 922]);
   });
 
   it('reapOrphansAtBoot SIGTERMs only worktree-cwd orphans (worker CLIs included)', () => {
