@@ -5,8 +5,9 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -14,6 +15,7 @@ import {
   chatScopeStatement,
   chatScratchBase,
   prepareChatScratch,
+  reapStaleChatNamespaces,
   removeChatScratch,
   resolveChatScope,
   type ChatScopeDeps,
@@ -259,6 +261,73 @@ describe('resolveChatScope — no scope, and the id guard', () => {
     }
   });
 
+  it('a registered root that EXISTS but cannot be resolved refuses the open only when it is in scope or spelled over the base; otherwise it is logged and the open proceeds (hardening, W7)', async () => {
+    // A symlink loop: `realpath` fails with ELOOP — the root is there, its identity is unprovable.
+    const loopA = join(base, 'loop-a');
+    const loopB = join(base, 'loop-b');
+    symlinkSync(loopB, loopA);
+    symlinkSync(loopA, loopB);
+    const elsewhere = mkdtempSync(join(tmpdir(), 'chat-scope-elsewhere-'));
+    try {
+      const farA = join(elsewhere, 'far-a');
+      const farB = join(elsewhere, 'far-b');
+      symlinkSync(farB, farA);
+      symlinkSync(farA, farB);
+      const logged: string[] = [];
+      const unresolvable = repo('r-loop', 'looped', join(farA, 'checkout'));
+      const d = deps({ listRepos: async () => [...REPOS(), unresolvable], log: (m) => logged.push(m) });
+      // Not in scope, spelled far from the base: noted, the open proceeds on every branch.
+      for (const req of [
+        { chatId: 'c-x', repoRefs: ['r-alpha'] },
+        { chatId: 'c-y', projectId: 'p1', repoRefs: [] },
+        { chatId: 'c-z', repoRefs: [] },
+      ]) {
+        const res = await resolveChatScope(req, d);
+        expect(res.ok, req.chatId).toBe(true);
+      }
+      expect(logged.length).toBe(3);
+      expect(logged[0]).toMatch(/looped/);
+      expect(logged[0]).toMatch(/cannot be resolved/);
+      // IN the chat's scope: refused — the seats would be pointed at a root nobody can prove safe.
+      const inScope = await resolveChatScope({ chatId: 'c-s', repoRefs: ['r-loop'] }, d);
+      expect(inScope.ok).toBe(false);
+      if (!inScope.ok) {
+        expect(inScope.status).toBe(409);
+        expect(inScope.error).toMatch(/looped/);
+        expect(inScope.error).toMatch(/cannot be resolved/);
+      }
+      const viaProject = await resolveChatScope(
+        { chatId: 'c-p', projectId: 'p1', repoRefs: [] },
+        deps({ listRepos: async () => [...REPOS(), unresolvable], projectRepoRefs: async () => ['r-loop'], log: (m) => logged.push(m) }),
+      );
+      expect(viaProject.ok).toBe(false);
+      if (!viaProject.ok) expect(viaProject.status).toBe(409);
+      // Spelled OVER the base (lexically inside it): refused even when no chat selects it.
+      const overBase = repo('r-over', 'over-base', join(loopA, 'checkout'));
+      const d2 = deps({ listRepos: async () => [...REPOS(), overBase], log: (m) => logged.push(m) });
+      const res = await resolveChatScope({ chatId: 'c-o', repoRefs: ['r-alpha'] }, d2);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.status).toBe(409);
+        expect(res.error).toMatch(/over-base/);
+      }
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('read roots reach the engine resolved, never as the raw registry spelling', async () => {
+    const trailing = repo('r-t', 'trailing', '/srv/repos/trailing/');
+    const dotted = repo('r-d', 'dotted', '/srv/repos/./dotted/sub/..');
+    const d = deps({ listRepos: async () => [...REPOS(), trailing, dotted] });
+    const res = await resolveChatScope({ chatId: 'c-r', repoRefs: ['r-t', 'r-d', 'r-alpha'] }, d);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.engine.readRoots).toEqual([resolve('/srv/repos/trailing'), resolve('/srv/repos/dotted'), resolve('/srv/repos/alpha')]);
+    // The statement still shows the registered spelling: that is what the operator recognises.
+    expect(res.scope.repos.map((r) => r.rootPath)).toEqual(['/srv/repos/trailing/', '/srv/repos/./dotted/sub/..', '/srv/repos/alpha']);
+  });
+
   it('the default scratch base is THIS process\'s own namespace, minted once', () => {
     const a = chatScratchBase();
     expect(a).toBe(chatScratchBase());
@@ -410,11 +479,21 @@ describe('the scratch root and its statement', () => {
     expect(index.stateOf('a')).toBe('live');
     // A stale token publishes nothing.
     expect(index.set('a', scopeFor('a'), 999)).toBe(false);
-    // closed() while reserved cancels the reservation: set() then fails.
+    // closed() while reserved PARKS the id (closing) rather than freeing it — the in-flight open's
+    // set() fails and its own teardown close is still to come (hardening); the grace, or that
+    // close, frees it.
     const t2 = index.reserve('b')!;
     index.closed('b');
+    expect(index.stateOf('b')).toBe('closing');
     expect(index.set('b', scopeFor('b'), t2)).toBe(false);
+    expect(index.reserve('b')).toBeNull();
+    index.closed('b');
     expect(index.has('b')).toBe(false);
+    const t2b = index.reserve('b2')!;
+    index.closed('b2');
+    expect(index.set('b2', scopeFor('b2'), t2b)).toBe(false);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(index.has('b2')).toBe(false);
     // release() honours only the holder's token.
     const t3 = index.reserve('c')!;
     index.release('c', t3 + 1);
@@ -465,6 +544,57 @@ describe('the scratch root and its statement', () => {
     expect(index.has('f')).toBe(false);
     index.abortToClosing('g', 123); // no such reservation: no-op
     expect(index.has('g')).toBe(false);
+  });
+
+  it('prepareChatScratch never removes a root it did not create, and creates the root itself non-recursively (hardening, no TOCTOU)', () => {
+    const scope = { kind: 'none' as const, repos: [], cwd: join(base, 'pre'), graph: { bound: false, reason: 'x' }, dangling: [] };
+    // A root that already exists (another same-user process made it) and then fails the
+    // preparation: the root stays — it was never this call's to remove.
+    mkdirSync(scope.cwd, { mode: 0o700 });
+    mkdirSync(join(scope.cwd, 'AGENTS.md')); // a DIRECTORY where the statement file goes: the write fails
+    expect(() => prepareChatScratch('pre', scope)).toThrow();
+    expect(existsSync(scope.cwd)).toBe(true);
+    rmSync(join(scope.cwd, 'AGENTS.md'), { recursive: true });
+    // A root this call CREATES is fully prepared, and re-preparing over its own root rewrites the
+    // statement in place (the second create sees EEXIST — its own root — and carries on).
+    const own = { ...scope, cwd: join(base, 'own') };
+    prepareChatScratch('own', own);
+    expect(existsSync(join(own.cwd, 'AGENTS.md'))).toBe(true);
+    expect(existsSync(join(own.cwd, 'CLAUDE.md'))).toBe(true);
+    prepareChatScratch('own', own);
+    expect(readFileSync(join(own.cwd, 'AGENTS.md'), 'utf8')).toContain('own');
+  });
+
+  it('reapStaleChatNamespaces removes only the real, owned, dead-pid namespaces of OTHER daemons (hardening, W6)', () => {
+    const parent = join(base, 'wicked-crew-chats');
+    mkdirSync(parent);
+    // A pid that is certainly dead: a child that has already exited.
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+    expect(dead).toBeGreaterThan(0);
+    const deadNs = join(parent, `${dead}-abcdef0123`);
+    mkdirSync(deadNs);
+    writeFileSync(join(deadNs, 'c1'), '');
+    const ownNs = join(parent, `${process.pid}-0123456789`);
+    mkdirSync(ownNs);
+    const oddName = join(parent, 'not-a-namespace');
+    mkdirSync(oddName);
+    const deadFile = join(parent, `${dead}-ffff`);
+    writeFileSync(deadFile, '');
+    const deadLink = join(parent, `${dead}-eeee`);
+    symlinkSync(oddName, deadLink);
+    const removed = reapStaleChatNamespaces(parent);
+    expect(removed).toEqual([deadNs]);
+    expect(existsSync(deadNs)).toBe(false);
+    expect(existsSync(ownNs)).toBe(true);
+    expect(existsSync(oddName)).toBe(true);
+    expect(existsSync(deadFile)).toBe(true);
+    expect(lstatSync(deadLink).isSymbolicLink()).toBe(true);
+    // A parent that is a link, or missing, reaps nothing and never throws.
+    const linkParent = join(base, 'linked-parent');
+    symlinkSync(parent, linkParent);
+    expect(reapStaleChatNamespaces(linkParent)).toEqual([]);
+    expect(reapStaleChatNamespaces(join(base, 'missing'))).toEqual([]);
+    expect(existsSync(ownNs)).toBe(true);
   });
 
   it('ChatScopeIndex.delete forgets the chat AND removes its scratch root; idempotent', () => {

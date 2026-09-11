@@ -204,7 +204,13 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     const res = await open({ chatId: 'racy', clis: ['claude'], repoRefs: ['alpha'] });
     expect(res.statusCode).toBe(409);
     expect((res.json() as { error: string }).error).toMatch(/closed while it was being opened/);
-    expect(chatScopes.has('racy')).toBe(false);
+    // Nothing recorded — but the id is PARKED (closing), not freed (hardening): the route's own
+    // teardown `chatClose` has a `chatClosed` still to come, and a reuse of the id in between must
+    // not lose its chat to it. That event (or the grace) frees the id.
+    expect(chatScopes.get('racy')).toBeUndefined();
+    expect(chatScopes.stateOf('racy')).toBe('closing');
     expect(existsSync(join(base, 'chats', 'racy'))).toBe(false);
+    chatScopes.closed('racy'); // the teardown's chatClosed lands
+    expect(chatScopes.has('racy')).toBe(false);
   });
 });

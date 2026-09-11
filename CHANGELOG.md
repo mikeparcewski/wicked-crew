@@ -11,6 +11,18 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **Chat scratch chain hardening (crew#502 follow-up; independent review W6/W7 and deferred
+  hunks).** A registered repo root the daemon cannot resolve (a permission wall, a symlink loop, an
+  unmounted volume) refuses a `POST /chats` (409) only when that repo is IN the chat's scope or its
+  spelling already overlaps the scratch base; any other unresolvable root is logged and the open
+  continues — it no longer blocks every chat on the daemon. At boot the daemon reaps the sibling
+  `<tmp>/wicked-crew-chats/<pid>-*` namespaces of dead daemons (same real-directory/ownership
+  checks as a live close; a live or foreign pid, a link, a file and this daemon's own namespace are
+  left alone). An engine `chatClosed` for a chat still RESERVED parks the id as closing (the way
+  `DELETE` does) instead of freeing it, so a re-use in between cannot lose its chat to the in-flight
+  open's teardown. The scratch root is created non-recursively and `created` is that mkdir's own
+  verdict (no `existsSync` check-then-create window). Read roots reach the engine `resolve()`d, never
+  as the raw registry spelling.
 - **Chats are scoped and grounded; seats never run in the daemon's cwd (acceptance finding F-067,
   crew#502).** `POST /chats` set the seats' working directory only when `repoRef` was sent and the
   engine fell back to its own `current_dir()` — the daemon's — so studio's GroupChat (which never

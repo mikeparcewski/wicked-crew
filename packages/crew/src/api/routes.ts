@@ -1753,7 +1753,7 @@ export function registerRoutes(
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
           repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
         },
-        { ...chatScopeDeps(adapter), scratchBase: chatScopes.base },
+        { ...chatScopeDeps(adapter), scratchBase: chatScopes.base, log: (m) => req.log.warn(m) },
       );
       if (!resolution.ok) {
         chatScopes.release(chatId, token);
