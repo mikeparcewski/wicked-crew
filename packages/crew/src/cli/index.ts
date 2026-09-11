@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
-import { ensureBridgesOnPath } from '../core/bridge-path.js';
+import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
@@ -219,6 +219,13 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // environment. Makes a plain `npm install` deployment fully self-contained (no
   // global installs, no hand-made symlinks).
   ensureBridgesOnPath();
+  // The pi seat's ACP carrier (community pi-acp) spawns whatever `PI_ACP_PI_COMMAND` names as pi:
+  // point it at the packaged `wicked-pi` launcher, which turns the engine's `WICKED_PI_SKILL_DIRS`
+  // into pi's `--no-skills --skill <dir>…` (F-079). An operator's own value is left alone.
+  const piCommand = ensurePiLauncherCommand();
+  if (piCommand === null) {
+    console.error(`[crew] ${PI_ACP_COMMAND_ENV} not set: no wicked-pi launcher shim found beside the bridges — a pi seat over ACP receives no skills`);
+  }
   // Every crew-side durable store follows the SAME state home as the core db (crew#330 for the
   // project graphs, crew#353 for the project settings): a daemon isolated with
   // `--db $SCRATCH/core.db` must not write 40+ MB graphs — or the operator's project settings —

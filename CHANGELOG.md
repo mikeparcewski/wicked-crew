@@ -10,6 +10,37 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+
+- **Skills portability is reported per reason, not as one bit (F-079, wicked-crew#531).** The
+  publisher's portability rule is now a VALIDATOR that names every reason a skill's text cannot be
+  followed on a non-Claude CLI — `plugin-root`, `skill-dir-var` (`${CLAUDE_SKILL_DIR}`, new),
+  `cwd-script`, `relative-link`, `cross-skill-path` (a path into another skill's directory, new)
+  and `requires-harness:claude` (declared by the author under `metadata.requires-harness`, new) —
+  with `file:line` evidence. The manifest entry and the `snapshot.json` row carry
+  `portability {portable, reasons (sorted unique), evidence (≤ 5 anchors)}` beside `portable`
+  (unchanged: still the admission key core reads; the copilot view is still exactly the portable
+  rows); verify re-derives the reasons from the generation the way it already re-derived `portable`.
+  Writes warn ONCE PER REASON (`non-portable` findings carry `portabilityReason` and the line).
+  The detector is tightened so authoring rules alone decide: a cwd-relative script counts only when
+  the file exists at the plugin root (a path inside the skill's own directory is the base-directory
+  idiom every CLI shares; `go test ./...`, `npx @axe-core/cli`, `python3 tests/x.py` are not plugin
+  files), a `../` link only when its target exists in the bundle and leaves the skill's own tree,
+  matches inside non-shell code fences are ignored, and the `wicked-garden run|python|path`
+  launcher forms are portable. The rule table is committed as the parity fixture
+  `packages/crew/tests/fixtures/portability_rules.json`, vendored verbatim by wicked-garden's own
+  lint (a drift is a failing test in both repos). Older `portable`-only manifests and generations
+  still load.
+  - **`wicked-crew-api-types` 0.34.0** (additive): `SkillPortabilityReason`, `SkillPortability`,
+    `SkillEntry.portability?`, `SkillConflictFinding.portabilityReason?`; endpoint manifest +
+    generated API tests re-stamped.
+- **A pi seat receives the skills snapshot over the ACP carrier (`WICKED_PI_SKILL_DIRS`).**
+  `agent-acp-bridges` honours the variable wicked-core#441 sets — the snapshot's deliverable
+  portable skill dirs, OS-path-delimited — as `--no-skills --skill <dir>…` ahead of pi's own
+  arguments: in `runBridge` for any bridge that spawns `pi`, and through the new `wicked-pi`
+  launcher bin, which the daemon hands to the community `pi-acp` adapter via `PI_ACP_PI_COMMAND`
+  at boot (an operator's own value is respected). Unset → the pi launch is unchanged.
+
 ## [0.7.29] — 2026-09-11
 
 Release train: ships `wicked-crew-api-types` 0.33.0 (workspace link; 0.32.0 from #518, tagged

@@ -14,9 +14,11 @@
  *     skill through the parent's endpoint (nested ownership, v3 §6) — `POST /skills` adds skills;
  *   - an edit under `scripts/` or `schemas/` (a skill's own, or the root support tree) is allowed
  *     but a WARNING: those files back behavior, not prose, and every invocation shares them;
- *   - content that makes a skill non-portable (`${CLAUDE_PLUGIN_ROOT}`, cwd-relative scripts,
- *     `../` links) is a warning: the skill becomes Claude-only and leaves every non-Claude
- *     delivery view (`views/copilot/`, the per-launch `--skill` lists core builds).
+ *   - content that makes a skill non-portable (`${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_SKILL_DIR}`,
+ *     cwd-relative scripts, `../` links, paths into another skill, a declared
+ *     `requires-harness: claude`) is a warning PER REASON with `file:line` (F-079): the skill
+ *     becomes Claude-only and leaves every non-Claude delivery view (`views/copilot/`, the
+ *     per-launch `--skill` lists core builds).
  *
  * `{verdict, findings[]}` is the ONE result shape; a mutation with a `blocked` verdict writes nothing.
  * Publish-time validation (unresolved refs, core closure, drift) lives in the store — it needs the
@@ -27,10 +29,11 @@ import type {
   SkillConflictFinding,
   SkillFindingKind,
   SkillFindingSeverity,
+  SkillPortabilityReason,
   SkillVerdict,
 } from '../core/types.js';
 import { parseFrontmatter, SKILL_NAME_PREFIX } from './frontmatter.js';
-import { portabilityIssueOf, type PortabilityIssue } from './refs.js';
+import { portabilityIssuesOf, type PortabilityContext, type PortabilityHit, type PortabilityIssue } from './refs.js';
 
 /** The name charset — a manifest key, a directory segment, and a URL path segment at once. */
 export const SKILL_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -51,6 +54,8 @@ export interface FindingAnchor {
   file?: string | null;
   line?: number | null;
   against?: { name: string; core: boolean };
+  /** `non-portable` only: the reason this finding reports (api-types 0.34.0). */
+  portabilityReason?: SkillPortabilityReason;
 }
 
 export function finding(
@@ -70,6 +75,7 @@ export function finding(
     againstIsCore: anchor.against?.core ?? false,
     evidence,
     explanation,
+    ...(anchor.portabilityReason === undefined ? {} : { portabilityReason: anchor.portabilityReason }),
   };
 }
 
@@ -216,29 +222,56 @@ export function nestedSkillCreateGuard(rel: string, skill: string): SkillConflic
   );
 }
 
-const PORTABILITY_EXPLANATION: Record<PortabilityIssue, string> = {
-  'plugin-root': 'the content resolves `${CLAUDE_PLUGIN_ROOT}`, which only Claude Code provides',
-  'cwd-script': 'the content invokes a plugin script relative to the worktree cwd, which only the Claude plugin path arranges',
-  'relative-link': 'the content links a sibling via `../`, which the flat `<name>/SKILL.md` layout of every non-Claude view cannot follow',
+/** One sentence per reason token (design W4 §5.1) — the "why" the finding and the studio drawer show. */
+export const PORTABILITY_EXPLANATION: Record<PortabilityIssue, string> = {
+  'plugin-root': 'the content resolves `${CLAUDE_PLUGIN_ROOT}`, which only Claude Code substitutes — write the skill\'s own files relative to its base directory and reach shared scripts through `wicked-garden run …`',
+  'skill-dir-var': 'the content resolves `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes — every CLI announces the skill\'s base directory, so a plain relative path is the portable spelling',
+  'cwd-script': 'the content invokes a plugin script by a path relative to the worktree cwd, which only the Claude plugin path arranges — the launcher form `wicked-garden run <scripts-relative path>` resolves the plugin root on every CLI',
+  'relative-link': 'the content links a file via `../`, which the flat `<name>/SKILL.md` layout of every non-Claude install cannot follow',
+  'cross-skill-path': 'the content reaches ANOTHER skill by filesystem path; skills are laid out flat by name outside Claude Code, so name the skill (`wicked-garden-<x>`, "its `refs/x.md`") instead',
+  'requires-harness:claude': 'the frontmatter declares `metadata.requires-harness: claude` — the author says this skill genuinely needs the Claude harness',
 };
 
-/** Content that makes a skill non-portable → warning (it leaves every non-Claude delivery view). */
+/** The tail every `non-portable` explanation shares. */
+const NON_PORTABLE_CONSEQUENCE =
+  "the skill becomes Claude-only — excluded from the snapshot's copilot view and from the per-launch skill lists core builds for pi/opencode, so a non-Claude seat that requires it is refused at launch";
+
+/**
+ * Content that makes a skill non-portable → ONE warning per reason per file, anchored at the first
+ * line the reason occurs on (further hits are counted in the evidence). `ctxFor` answers the
+ * validator's context for a skill-relative path (where the file sits, what exists in the bundle).
+ */
 export function nonPortableGuard(
   files: Readonly<Record<string, string>>,
   skill: string,
-): SkillConflictFinding | null {
+  ctxFor: (rel: string) => PortabilityContext,
+): SkillConflictFinding[] {
+  const out: SkillConflictFinding[] = [];
   for (const rel of Object.keys(files).sort()) {
-    const issue = portabilityIssueOf(files[rel] ?? '');
-    if (issue === null) continue;
-    return finding(
-      'non-portable',
-      'warning',
-      `${PORTABILITY_EXPLANATION[issue]}; the skill becomes Claude-only — excluded from the snapshot's copilot view and from the per-launch skill lists core builds for pi/opencode, so a non-Claude seat that requires it is refused at launch`,
-      `${rel}: ${issue}`,
-      { skill, file: rel },
-    );
+    const ctx = ctxFor(rel);
+    const hits = portabilityIssuesOf(files[rel] ?? '', ctx);
+    const byReason = new Map<PortabilityIssue, PortabilityHit[]>();
+    for (const hit of hits) {
+      const list = byReason.get(hit.reason);
+      if (list === undefined) byReason.set(hit.reason, [hit]);
+      else list.push(hit);
+    }
+    for (const reason of [...byReason.keys()].sort()) {
+      const list = byReason.get(reason) ?? [];
+      const first = list[0];
+      if (first === undefined) continue;
+      out.push(
+        finding(
+          'non-portable',
+          'warning',
+          `${PORTABILITY_EXPLANATION[reason]}; ${NON_PORTABLE_CONSEQUENCE}`,
+          `${ctx.fileRel}:${first.line}: ${reason} — ${first.evidence}${list.length > 1 ? ` (+${list.length - 1} more)` : ''}`,
+          { skill, file: rel, line: first.line, portabilityReason: reason },
+        ),
+      );
+    }
   }
-  return null;
+  return out;
 }
 
 /** Disabling a core-by-reference skill is blocking. */

@@ -38,6 +38,61 @@
 import { createInterface } from 'readline';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import { basename, delimiter } from 'path';
+
+/**
+ * The environment variable wicked-core sets on a pi seat's ACP carrier when it hands the seat a
+ * skills delivery (F-079, wicked-core#441 / wicked-crew#531): the deliverable portable skill
+ * directories of the published snapshot, joined with the OS path delimiter (`:` / `;`), in the
+ * same order the wrapped carrier would put them on pi's argv.
+ */
+export const PI_SKILL_DIRS_ENV = 'WICKED_PI_SKILL_DIRS';
+
+/**
+ * `WICKED_PI_SKILL_DIRS` → pi's skill flags: `--no-skills` (discovery OFF, so the seat sees the
+ * snapshot's skills and nothing from `~/.pi/agent/skills`) followed by one `--skill <dir>` per
+ * entry, in order, blanks dropped, duplicates dropped (first occurrence kept). Unset, blank, or
+ * naming no directory at all → `[]`, so a pi launch without a delivery is byte-identical to before
+ * (`--no-skills` is never emitted alone: an empty delivery is no delivery).
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [sep] the list separator — `path.delimiter` unless a test says otherwise
+ * @returns {string[]}
+ */
+export function piSkillFlags(env = process.env, sep = delimiter) {
+  const raw = env[PI_SKILL_DIRS_ENV];
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  const seen = new Set();
+  const flags = [];
+  for (const entry of raw.split(sep)) {
+    const dir = entry.trim();
+    if (dir === '' || seen.has(dir)) continue;
+    seen.add(dir);
+    flags.push('--skill', dir);
+  }
+  return flags.length === 0 ? [] : ['--no-skills', ...flags];
+}
+
+/** `true` when `bin` names the pi CLI itself (`pi`, `/x/bin/pi`, `pi.cmd`, `C:\\x\\pi.exe`) — either separator, any case. */
+export function isPiBinary(bin) {
+  const last = String(bin).split(/[\\/]/).pop() ?? '';
+  const base = basename(last).toLowerCase();
+  return base === 'pi' || base === 'pi.cmd' || base === 'pi.exe' || base === 'pi.bat';
+}
+
+/**
+ * The flags a CLI invocation gets BEFORE the bridge's own args: pi's skill flags when the bin is
+ * pi and a delivery is in the environment; nothing for every other CLI (their skills reach them
+ * through other levers — copilot `--add-dir`, opencode `OPENCODE_CONFIG_CONTENT`, claude the
+ * plugin root — none of which this bridge composes).
+ *
+ * @param {string} bin
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function skillFlagsFor(bin, env = process.env) {
+  return isPiBinary(bin) ? piSkillFlags(env) : [];
+}
 
 /**
  * Strip ANSI escape sequences so spinner/colour codes never pollute the transcript:
@@ -143,9 +198,13 @@ export function runBridge({ name, version, invocation, _streams, _exit, _killGra
         .trim();
 
       const { bin, args } = invocation(promptText, sessionCwd);
+      // A pi invocation gets the snapshot's skill flags (`--no-skills --skill <dir>…`) from
+      // `WICKED_PI_SKILL_DIRS` BEFORE the bridge's own args; unset → the args are exactly the
+      // invocation's (F-079).
+      const argv = [...skillFlagsFor(bin, process.env), ...args];
       let child;
       try {
-        child = spawn(bin, args, {
+        child = spawn(bin, argv, {
           cwd: sessionCwd,
           env: process.env,
           stdio: ['ignore', 'pipe', 'ignore'],

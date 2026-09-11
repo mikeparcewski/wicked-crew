@@ -1,0 +1,464 @@
+{
+  "$schema_note": "Parity fixture for the skill-portability validator (F-079). Vendored verbatim by wicked-garden (tests/portability_rules.json) and asserted equal to wicked-crew's live rule table (packages/crew/src/skills/refs.ts PORTABILITY_RULES) by packages/crew/tests/skills-refs.test.ts. Regex sources are ECMAScript AND Python-re compatible (fixed-width lookbehinds, no named groups). `corpus[*].expect` is the sorted unique reason list a lint must derive for `text` judged as the file `file` inside `bundle`; `first_line` (optional) is the 1-based line of the first hit per reason.",
+  "version": 1,
+  "rules": {
+    "version": 1,
+    "markers": {
+      "plugin-root": "${CLAUDE_PLUGIN_ROOT}",
+      "skill-dir-var": "${CLAUDE_SKILL_DIR}"
+    },
+    "regex": {
+      "path_chars": "[^\\s\"'`()\\[\\]{}<>|;&*?]",
+      "plugin_root_ref": "\\$\\{CLAUDE_PLUGIN_ROOT\\}(\\/[^\\s\"'`()\\[\\]{}<>|;&*?]*)?",
+      "relative_ref": "(?<![A-Za-z0-9_./-])((?:\\.\\.\\/)+[^\\s\"'`()\\[\\]{}<>|;&*?]*)",
+      "cwd_script": "(?<![A-Za-z0-9_./-])(?:python3?|uv\\s+run|bash|sh|zsh|node|npx|tsx|deno\\s+run)(?:\\s+(?:(?:-[WXmcQrepCo]|--(?:require|loader|experimental-loader|import|eval|print|env-file|conditions|input-type|python|with|directory|project|config|import-map))\\s+\\S+|(?!(?:-[WXmcQrepCo]|--(?:require|loader|experimental-loader|import|eval|print|env-file|conditions|input-type|python|with|directory|project|config|import-map))\\s)-{1,2}[A-Za-z0-9_-]+(?:=\\S+)?))*\\s+(?![/$~])((?:\\.{1,2}\\/)?(?:[A-Za-z0-9_.+@%=,:~-]+\\/)*[A-Za-z0-9_.+@%=,:~-]+(?:\\/|\\.(?:py|sh|bash|zsh|mjs|cjs|js|ts))|(?:[A-Za-z0-9_.+@%=,:~-]+\\/)+[A-Za-z0-9_.+@%=,:~-]+)(?![A-Za-z0-9_])",
+      "launcher_call": "(?<![A-Za-z0-9_./-])wicked-garden(?:@[A-Za-z0-9_.^~<>=-]+)?\\s+(?:run|python|path)\\s+[^\\s\"'`()\\[\\]{}<>|;&*?]+",
+      "fence_line": "^\\s*(`{3,}|~{3,})\\s*([^\\s`{]*)"
+    },
+    "fence_scanned_languages": [
+      "",
+      "sh",
+      "bash",
+      "zsh",
+      "shell",
+      "console",
+      "text"
+    ],
+    "frontmatter": {
+      "requires_harness_key": "metadata.requires-harness",
+      "requires_harness_value": "claude"
+    }
+  },
+  "tokens": [
+    {
+      "token": "plugin-root",
+      "description": "the text contains the marker `${CLAUDE_PLUGIN_ROOT}` (only Claude Code substitutes it); every occurrence is a hit — fences included",
+      "detector": "markers.plugin-root (substring); regex.plugin_root_ref extracts the path"
+    },
+    {
+      "token": "skill-dir-var",
+      "description": "the text contains `${CLAUDE_SKILL_DIR}` (a Claude-only substitution)",
+      "detector": "markers.skill-dir-var (substring)"
+    },
+    {
+      "token": "cwd-script",
+      "description": "an interpreter (regex.cwd_script) followed by a relative path token that, normalized against the PLUGIN ROOT (the worktree cwd), names a file or directory the bundle carries. Not a hit: a target that exists nowhere in the bundle; a target that exists only inside the skill's own directory (base-directory relative — portable); a launcher call (regex.launcher_call spans are masked first); a match inside a fenced code block whose language is not in fence_scanned_languages",
+      "detector": "regex.launcher_call masked → regex.cwd_script group 1 → normalize → exists at plugin root"
+    },
+    {
+      "token": "relative-link",
+      "description": "a `../` token (regex.relative_ref) resolved from the referencing file's directory that lands INSIDE the plugin root on a path the bundle carries AND outside the skill's own directory (a link that stays inside the skill's tree survives every layout). An escaping or non-existent target is not a hit",
+      "detector": "regex.relative_ref → resolve from dirname(file) → exists → owner != own skill dir"
+    },
+    {
+      "token": "cross-skill-path",
+      "description": "a plugin-root target or a resolved `../` target that exists in the bundle and whose deepest owning skill directory is ANOTHER skill (a nested module's parent counts). Reported in addition to plugin-root / relative-link",
+      "detector": "target → deepest skill dir prefix → != own skill dir"
+    },
+    {
+      "token": "requires-harness:claude",
+      "description": "the skill's SKILL.md frontmatter declares `metadata.requires-harness: claude` (value compared trimmed, case-insensitively; only the skill-root SKILL.md counts)",
+      "detector": "frontmatter.requires_harness_key == frontmatter.requires_harness_value"
+    }
+  ],
+  "semantics": {
+    "reasons_sorted_unique": true,
+    "evidence_anchor_format": "<plugin-relative file>:<line>",
+    "evidence_cap": 5,
+    "portable": "reasons.length === 0",
+    "exists": "the normalized plugin-relative path is a file the bundle carries, or a directory some carried file sits under; '' (the bare root) exists",
+    "bundle_universe": "the files the next publish carries: support files inside the bundle closure + ENABLED skills' own files (crew) / every file under skills/ + scripts/ + schemas/ + docs/examples/ (garden's checkout)",
+    "skill_dirs": "every directory holding a SKILL.md under skills/; a file's owner is the DEEPEST such directory that prefixes it"
+  },
+  "bundle": {
+    "files": [
+      ".claude-plugin/plugin.json",
+      "scripts/_python.sh",
+      "scripts/qe/campaign_dispatch.py",
+      "scripts/qe/lib/x.mjs",
+      "scripts/domain/extract_loop.py",
+      "scripts/x.py",
+      "scripts/foo.py",
+      "scripts/alpha/run.py",
+      "lib/x.mjs",
+      "docs/examples/campaign.yml",
+      "schemas/evidence.json",
+      "skills/qe/SKILL.md",
+      "skills/qe/refs/plan.md",
+      "skills/qe/refs/review.md",
+      "skills/qe/scripts/local.py",
+      "skills/domain/SKILL.md",
+      "skills/domain/refs/x.md",
+      "skills/search/SKILL.md",
+      "skills/search/refs/hotspots.md",
+      "skills/search/codebase-narrator/SKILL.md",
+      "skills/engineering/SKILL.md",
+      "skills/engineering/architecture/SKILL.md"
+    ],
+    "skill_dirs": [
+      "skills/domain",
+      "skills/engineering",
+      "skills/engineering/architecture",
+      "skills/qe",
+      "skills/search",
+      "skills/search/codebase-narrator"
+    ]
+  },
+  "corpus": [
+    {
+      "name": "go-test-dots",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Run `go test ./...` before pushing.",
+      "expect": []
+    },
+    {
+      "name": "aws-sync-dist",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Deploy with `aws s3 sync ./dist s3://bucket/site`.",
+      "expect": []
+    },
+    {
+      "name": "npx-package-spec",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Audit with `npx @axe-core/cli http://localhost:3000`.",
+      "expect": []
+    },
+    {
+      "name": "js-import-in-ts-fence",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "```ts\nimport schema from './schemas/evidence.json';\n```",
+      "expect": []
+    },
+    {
+      "name": "changelog-dot-slash-link",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "See [CHANGELOG.md](./CHANGELOG.md).",
+      "expect": []
+    },
+    {
+      "name": "output-flag-dot-slash",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Render with `--output ./out.png`.",
+      "expect": []
+    },
+    {
+      "name": "tests-path-not-in-bundle",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Run `python3 tests/test_conformance.py`.",
+      "expect": []
+    },
+    {
+      "name": "template-parent-link-not-a-file",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Template:\n\n```yaml\nrequirements: ../requirements.md\n```",
+      "expect": []
+    },
+    {
+      "name": "uv-run-example-not-in-bundle",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "Example: `uv run python script.py`",
+      "expect": []
+    },
+    {
+      "name": "module-then-path-not-in-bundle",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "`python3 -m pytest tests/test_x.py`",
+      "expect": []
+    },
+    {
+      "name": "absolute-home-module-inline",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "`python3 /abs/scripts/x.py`, `node ~/bin/x.js`, `python3 -m pytest`, `python3 -c \"print(1)\"`, `bash -lc echo`",
+      "expect": []
+    },
+    {
+      "name": "valued-option-consumes-path",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "`python3 -W scripts/foo.py`",
+      "expect": []
+    },
+    {
+      "name": "path-merely-containing-scripts",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "the file lives at plugin/scripts/x.py",
+      "expect": []
+    },
+    {
+      "name": "bare-dot-slash-no-interpreter",
+      "file": "skills/engineering/architecture/SKILL.md",
+      "text": "run `./scripts/x` now",
+      "expect": []
+    },
+    {
+      "name": "launcher-run",
+      "file": "skills/qe/SKILL.md",
+      "text": "Run `wicked-garden run scripts/qe/campaign_dispatch.py <name>` first.",
+      "expect": []
+    },
+    {
+      "name": "launcher-path-subshell",
+      "file": "skills/qe/SKILL.md",
+      "text": "WT_LIB=\"$(wicked-garden path scripts/qe/lib)\"",
+      "expect": []
+    },
+    {
+      "name": "launcher-python",
+      "file": "skills/qe/SKILL.md",
+      "text": "`wicked-garden python scripts/x.py --check`",
+      "expect": []
+    },
+    {
+      "name": "launcher-npx-pinned",
+      "file": "skills/qe/SKILL.md",
+      "text": "`npx wicked-garden@12 run scripts/qe/lib/x.mjs --help`",
+      "expect": []
+    },
+    {
+      "name": "skill-local-script-base-dir",
+      "file": "skills/qe/SKILL.md",
+      "text": "Run `python3 scripts/local.py diagnose` from this skill's base directory.",
+      "expect": []
+    },
+    {
+      "name": "own-dir-parent-link",
+      "file": "skills/qe/refs/plan.md",
+      "text": "Back to [the skill](../SKILL.md) and [review](../refs/review.md).",
+      "expect": []
+    },
+    {
+      "name": "base-dir-relative-ref",
+      "file": "skills/qe/SKILL.md",
+      "text": "Read `refs/plan.md` (relative to this skill's base directory).",
+      "expect": []
+    },
+    {
+      "name": "dispatch-by-name",
+      "file": "skills/qe/SKILL.md",
+      "text": "Dispatch **`wicked-garden-domain`** with the args; elsewhere open its `SKILL.md` and follow it inline.",
+      "expect": []
+    },
+    {
+      "name": "cwd-script-inside-ts-fence",
+      "file": "skills/qe/SKILL.md",
+      "text": "```ts\nnode scripts/qe/lib/x.mjs\n```",
+      "expect": []
+    },
+    {
+      "name": "cwd-script-inside-python-tilde-fence",
+      "file": "skills/qe/SKILL.md",
+      "text": "~~~python\npython3 scripts/x.py\n~~~",
+      "expect": []
+    },
+    {
+      "name": "cwd-script-inside-unclosed-js-fence",
+      "file": "skills/qe/SKILL.md",
+      "text": "```js\nnode scripts/qe/lib/x.mjs",
+      "expect": []
+    },
+    {
+      "name": "requires-harness-other-value",
+      "file": "skills/qe/SKILL.md",
+      "text": "---\nname: wicked-garden-qe\nmetadata:\n  requires-harness: codex\n---\n\n# qe\n",
+      "expect": []
+    },
+    {
+      "name": "requires-harness-in-refs-file",
+      "file": "skills/qe/refs/plan.md",
+      "text": "---\nname: x\nmetadata:\n  requires-harness: claude\n---\n\nnotes\n",
+      "expect": []
+    },
+    {
+      "name": "plugin-root-self-ref",
+      "file": "skills/qe/SKILL.md",
+      "text": "Read(\"${CLAUDE_PLUGIN_ROOT}/skills/qe/refs/plan.md\")",
+      "expect": [
+        "plugin-root"
+      ],
+      "first_line": {
+        "plugin-root": 1
+      }
+    },
+    {
+      "name": "plugin-root-shared-script",
+      "file": "skills/qe/SKILL.md",
+      "text": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/_python.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/qe/campaign_dispatch.py\" <name>",
+      "expect": [
+        "plugin-root"
+      ]
+    },
+    {
+      "name": "plugin-root-bare",
+      "file": "skills/qe/SKILL.md",
+      "text": "root is ${CLAUDE_PLUGIN_ROOT} itself",
+      "expect": [
+        "plugin-root"
+      ]
+    },
+    {
+      "name": "plugin-root-inside-ts-fence-still-counts",
+      "file": "skills/qe/SKILL.md",
+      "text": "```ts\nconst p = `${CLAUDE_PLUGIN_ROOT}/scripts/x.py`;\n```",
+      "expect": [
+        "plugin-root"
+      ],
+      "first_line": {
+        "plugin-root": 2
+      }
+    },
+    {
+      "name": "skill-dir-var",
+      "file": "skills/qe/SKILL.md",
+      "text": "ls ${CLAUDE_SKILL_DIR}/refs",
+      "expect": [
+        "skill-dir-var"
+      ],
+      "first_line": {
+        "skill-dir-var": 1
+      }
+    },
+    {
+      "name": "cwd-script-python",
+      "file": "skills/domain/SKILL.md",
+      "text": "Run `python3 scripts/domain/extract_loop.py --db x`",
+      "expect": [
+        "cwd-script"
+      ],
+      "first_line": {
+        "cwd-script": 1
+      }
+    },
+    {
+      "name": "cwd-script-node",
+      "file": "skills/domain/SKILL.md",
+      "text": "`node scripts/qe/lib/x.mjs`",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-uv-flag",
+      "file": "skills/domain/SKILL.md",
+      "text": "`uv run --frozen scripts/x.py`",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-valued-option-then-path",
+      "file": "skills/domain/SKILL.md",
+      "text": "`python3 -W ignore scripts/foo.py`",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-dot-slash-with-interpreter",
+      "file": "skills/domain/SKILL.md",
+      "text": "`bash ./scripts/_python.sh`",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-other-root-dir",
+      "file": "skills/domain/SKILL.md",
+      "text": "`node lib/x.mjs`",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-inside-bash-fence",
+      "file": "skills/domain/SKILL.md",
+      "text": "```bash\nnode scripts/qe/lib/x.mjs\n```",
+      "expect": [
+        "cwd-script"
+      ],
+      "first_line": {
+        "cwd-script": 2
+      }
+    },
+    {
+      "name": "cwd-script-inside-bare-fence",
+      "file": "skills/domain/SKILL.md",
+      "text": "```\npython3 scripts/x.py\n```",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "cwd-script-inside-console-fence",
+      "file": "skills/domain/SKILL.md",
+      "text": "```console\n$ python3 -u scripts/alpha/run.py\n```",
+      "expect": [
+        "cwd-script"
+      ]
+    },
+    {
+      "name": "relative-link-shared-file",
+      "file": "skills/qe/SKILL.md",
+      "text": "Template: [campaign](../../docs/examples/campaign.yml)",
+      "expect": [
+        "relative-link"
+      ],
+      "first_line": {
+        "relative-link": 1
+      }
+    },
+    {
+      "name": "cross-skill-relative-link",
+      "file": "skills/domain/SKILL.md",
+      "text": "See ../search/refs/hotspots.md for ranking.",
+      "expect": [
+        "cross-skill-path",
+        "relative-link"
+      ]
+    },
+    {
+      "name": "cross-skill-plugin-root",
+      "file": "skills/qe/SKILL.md",
+      "text": "Read `${CLAUDE_PLUGIN_ROOT}/skills/domain/refs/x.md`.",
+      "expect": [
+        "cross-skill-path",
+        "plugin-root"
+      ]
+    },
+    {
+      "name": "nested-module-to-parent",
+      "file": "skills/search/codebase-narrator/SKILL.md",
+      "text": "Follow the parent contract in [search](../SKILL.md).",
+      "expect": [
+        "cross-skill-path",
+        "relative-link"
+      ]
+    },
+    {
+      "name": "requires-harness-claude",
+      "file": "skills/qe/SKILL.md",
+      "text": "---\nname: wicked-garden-qe\nmetadata:\n  requires-harness: claude\n---\n\n# qe\n",
+      "expect": [
+        "requires-harness:claude"
+      ],
+      "first_line": {
+        "requires-harness:claude": 4
+      }
+    },
+    {
+      "name": "mixed-four-reasons",
+      "file": "skills/qe/SKILL.md",
+      "text": "Run `python3 scripts/x.py`.\nRead ${CLAUDE_PLUGIN_ROOT}/skills/qe/refs/plan.md.\nSee ../../docs/examples/campaign.yml.\nls ${CLAUDE_SKILL_DIR}\n",
+      "expect": [
+        "cwd-script",
+        "plugin-root",
+        "relative-link",
+        "skill-dir-var"
+      ],
+      "first_line": {
+        "cwd-script": 1,
+        "plugin-root": 2,
+        "relative-link": 3,
+        "skill-dir-var": 4
+      }
+    }
+  ]
+}

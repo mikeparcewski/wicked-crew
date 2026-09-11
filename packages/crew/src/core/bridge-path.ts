@@ -62,6 +62,46 @@ export function findBridgeBinDir(start: string): string | null {
 }
 
 /**
+ * The variable the community `pi-acp` adapter reads for the command it spawns as pi
+ * (`getPiCommand(process.env.PI_ACP_PI_COMMAND)`), and the bin this package's
+ * `agent-acp-bridges` dependency provides for it: `wicked-pi` turns wicked-core's
+ * `WICKED_PI_SKILL_DIRS` (the deliverable portable skill dirs of the published snapshot,
+ * F-079 / wicked-core#441) into pi's `--no-skills --skill <dir>…` and runs pi. Without
+ * this seam the env contract is inert on the ACP carrier: pi-acp forwards no argv.
+ */
+export const PI_ACP_COMMAND_ENV = 'PI_ACP_PI_COMMAND';
+const PI_LAUNCHER_BIN = 'wicked-pi';
+
+/**
+ * The launcher shim in `binDir`, or `null` when this install has none (an older
+ * `agent-acp-bridges` on the registry — the seat keeps working, skills do not reach pi
+ * over ACP). Windows shims are `<name>.cmd` and pi-acp starts a `.cmd` through a shell.
+ */
+export function piLauncherIn(binDir: string): string | null {
+  const shim = join(binDir, process.platform === 'win32' ? `${PI_LAUNCHER_BIN}.cmd` : PI_LAUNCHER_BIN);
+  return existsSync(shim) ? shim : null;
+}
+
+/**
+ * Point pi-acp at the `wicked-pi` launcher (idempotent; an operator's own
+ * `PI_ACP_PI_COMMAND` is respected and never overwritten). Returns the command set — or
+ * already in force — else `null`. Call once at daemon startup, after `ensureBridgesOnPath`.
+ */
+export function ensurePiLauncherCommand(
+  start: string = dirname(fileURLToPath(import.meta.url)),
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const current = env[PI_ACP_COMMAND_ENV];
+  if (current !== undefined && current !== '') return current;
+  const binDir = findBridgeBinDir(start);
+  if (binDir === null) return null;
+  const shim = piLauncherIn(binDir);
+  if (shim === null) return null;
+  env[PI_ACP_COMMAND_ENV] = shim;
+  return shim;
+}
+
+/**
  * Prepend the bridge `.bin` directory to PATH (idempotent). Returns the directory
  * when one was found, else `null`. Call once at daemon startup, before the engine
  * spawns anything.
