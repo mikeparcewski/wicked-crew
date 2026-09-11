@@ -148,6 +148,15 @@ beforeAll(async () => {
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  // The engine's Linux validator sandbox (wicked-core `validator.rs`, `bwrap --ro-bind / /` …) masks
+  // six credential directories under HOME with `--tmpfs`; bwrap must CREATE a missing mount point,
+  // and under a read-only root that mkdir fails (EROFS) — the pinned evidence floor then never runs
+  // ("no coverage report was produced … the script denied before writing one"). macOS's
+  // `sandbox-exec` profile needs no such mount points, so only Linux CI saw it. Give the scratch HOME
+  // the directories the engine masks, empty. (Engine follow-up: mask only directories that exist.)
+  for (const rel of ['.aws', '.ssh', '.gnupg', '.claude', join('.config', 'wicked-council'), join('.config', 'gh')]) {
+    mkdirSync(join(home, rel), { recursive: true });
+  }
   writeFileSync(
     join(bin, 'gh'),
     [
