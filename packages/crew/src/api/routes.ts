@@ -7,7 +7,8 @@ import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
-import { codeGraphDb, requirementsGraph } from '../core/repoPaths.js';
+import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
+import type { RepoEntry } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { detectRefusal, type GateCache } from './gate-cache.js';
 import type { ElicitationCache } from './elicitation-cache.js';
@@ -141,6 +142,24 @@ function sortActionableFirst(views: SessionView[]): SessionView[] {
   return [...views].sort(
     (a, b) => (STATUS_ORDER[a.session.status] ?? 9) - (STATUS_ORDER[b.session.status] ?? 9),
   );
+}
+
+/**
+ * `codeGraphDb(repo)` for a repo surface, or `null` after answering **503** — a CURRENT engine that
+ * resolved no repo-graph root (`code_graph_root_unresolvable`, wicked-core#406) is a daemon-
+ * environment fault, not a bad request and not Fastify's generic 500. The mapping is the shared
+ * `codeGraphErrorStatus`; anything it does not classify rethrows unchanged (the stale-addon error
+ * keeps its pre-existing shape here).
+ */
+function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
+  try {
+    return codeGraphDb(repo);
+  } catch (err) {
+    const status = codeGraphErrorStatus(err);
+    if (status === null) throw err;
+    void reply.code(status).send({ error: message(err) });
+    return null;
+  }
 }
 
 function message(err: unknown): string {
@@ -2919,7 +2938,8 @@ export function registerRoutes(
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
     const graphPath = requirementsGraph(repo);
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
 
     // Coverage from the live estate store — computed by wicked-core governance layer.
     let coverage: unknown = null;
@@ -2980,7 +3000,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid query'));
     }
-    const page = await listRequirements(repo, parsed.data);
+    let page: Awaited<ReturnType<typeof listRequirements>>;
+    try {
+      page = await listRequirements(repo, parsed.data);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (page === null) {
       return reply.code(404).send({ error: 'requirements_graph.json not generated for this repo yet' });
     }
@@ -3007,7 +3035,15 @@ export function registerRoutes(
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await getRequirement(repo, decoded);
+    let detail: Awaited<ReturnType<typeof getRequirement>>;
+    try {
+      detail = await getRequirement(repo, decoded);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -3040,7 +3076,15 @@ export function registerRoutes(
     } catch {
       return reply.code(400).send({ error: 'Malformed requirement key encoding' });
     }
-    const detail = await patchRequirement(repo, decodedKey, parsed.data);
+    let detail: Awaited<ReturnType<typeof patchRequirement>>;
+    try {
+      detail = await patchRequirement(repo, decodedKey, parsed.data);
+    } catch (err) {
+      // wicked-core#406: a CURRENT engine with no repo-graph root is a 503, not a 500.
+      const status = codeGraphErrorStatus(err);
+      if (status === null) throw err;
+      return reply.code(status).send({ error: message(err) });
+    }
     if (detail === null) return reply.code(404).send({ error: 'Requirement not found' });
     return { requirement: detail };
   });
@@ -3051,7 +3095,8 @@ export function registerRoutes(
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
 
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
       return reply.send({ graph: null });
     }
@@ -3108,7 +3153,8 @@ export function registerRoutes(
     const repos = await adapter.listRepos();
     const repo = repos.find((r) => r.id === id);
     if (!repo) return reply.code(404).send({ error: `Repo ${id} not found` });
-    const dbPath = codeGraphDb(repo);
+    const dbPath = codeGraphDbOr503(repo, reply);
+    if (dbPath === null) return reply;
     if (!existsSync(dbPath)) {
       return reply.code(404).send({ error: 'Code graph not built for this repo yet' });
     }

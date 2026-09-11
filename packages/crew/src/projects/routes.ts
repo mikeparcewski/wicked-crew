@@ -28,6 +28,7 @@
  *   409 · anything else 400. A pre-0.6.0 addon answers 501 (ProjectsUnsupportedError), never 400.
  */
 
+import { codeGraphErrorStatus } from '../core/repoPaths.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CoreAdapter } from '../core/adapter.js';
@@ -501,27 +502,40 @@ export function registerProjectRoutes(
     };
   }
 
-  /** Engine capability gaps map to 501, everything else to the projects mapping. */
+  /** Engine capability gaps map to 501; a current engine with no resolvable repo-graph root (a
+   *  daemon-environment fault, wicked-core#406) to 503 through the shared `codeGraphErrorStatus`
+   *  every code-graph consumer uses; everything else to the projects mapping. */
   function graphErrorStatus(err: unknown): number {
-    return err instanceof ProjectGraphEngineTooOldError ? 501 : engineErrorStatus(err);
+    if (err instanceof ProjectGraphEngineTooOldError) return 501;
+    return codeGraphErrorStatus(err) ?? engineErrorStatus(err);
   }
 
-  app.get(`${V}/projects/:id/graph`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph`,
+    { config: { manifest: { statusCodes: [200, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id === DEFAULT_PROJECT_ID) return { status: defaultProjectGraph() };
     try {
       const project = await adapter.projectGet(id);
       if (project === null) return reply.code(404).send({ error: `Project ${id} not found` });
-      // Always 200: "this project has no repos" and "its graph was never built" are ANSWERS about
-      // the graph's standing, which is what this route reports. The query routes below are where
-      // they become a refusal, because there they are the reason a question cannot be answered.
+      // 200 for every answer about the graph's STANDING: "this project has no repos", "its graph
+      // was never built", "the addon is too old" are all reported as a status, not refused. The
+      // query routes below are where they become a refusal, because there they are the reason a
+      // question cannot be answered. The non-200s here are not standings: 404 unknown project,
+      // and — via `graphErrorStatus` — 503 when a CURRENT engine resolved no repo-graph root
+      // (a daemon-environment fault, wicked-core#406) or 501 when the standing itself could not
+      // be computed because the addon predates `code_graph_db`.
       return { status: await projectGraphStatus(adapter, id) };
     } catch (err) {
       return reply.code(graphErrorStatus(err)).send({ error: message(err) });
     }
   });
 
-  app.post(`${V}/projects/:id/graph/refresh`, async (req, reply) => {
+  app.post(
+    `${V}/projects/:id/graph/refresh`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 409, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     if (id === DEFAULT_PROJECT_ID) {
       return reply.code(409).send({ error: defaultProjectGraph().detail });
@@ -547,7 +561,10 @@ export function registerProjectRoutes(
     }
   });
 
-  app.get(`${V}/projects/:id/graph/blast-radius`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph/blast-radius`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { name?: string };
     if (q.name === undefined || q.name.trim() === '') {
@@ -573,7 +590,10 @@ export function registerProjectRoutes(
     }
   });
 
-  app.get(`${V}/projects/:id/graph/search`, async (req, reply) => {
+  app.get(
+    `${V}/projects/:id/graph/search`,
+    { config: { manifest: { statusCodes: [200, 400, 404, 501, 503] } } },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { name?: string };
     if (q.name === undefined || q.name.trim() === '') {

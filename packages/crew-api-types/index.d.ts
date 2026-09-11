@@ -341,8 +341,31 @@ export interface RepoEntry {
    * Optional in the TYPE, mandatory in practice: an addon predating the field omits it, and
    * `codeGraphDb()` in the daemon's `repoPaths.ts` is where that turns into a loud error. Never
    * join this path yourself — six independent spellings is what FINDING-069 was.
+   *
+   * Since wicked-core#406 the path is `<daemon state home>/repo-graphs/<key>/estate.db` — never
+   * inside `root_path`; a checkout's in-tree `.codegraph/` is reported in `findings`, not adopted.
    */
   code_graph_db?: string;
+  /**
+   * Diagnostics about the checkout the engine wants shown on the repo card (wicked-core#406) —
+   * derived by the engine on every read like `code_graph_db`, never authoritative in the record.
+   * An empty array for a clean checkout; optional in the TYPE only because an addon predating the
+   * field omits it. Today's codes: `in_tree_code_graph_ignored` (the checkout carries a
+   * `.codegraph/` an older engine indexed in-tree — ignored; `path` names the directory and
+   * `message` says how to clear it) and `code_graph_root_unresolvable` (no repo-graph root
+   * resolves for this daemon, so `code_graph_db` is empty).
+   */
+  findings?: RepoFinding[];
+}
+
+/** One engine diagnostic on a registered repo (`RepoEntry.findings[]`; wicked-core#406). */
+export interface RepoFinding {
+  /** Stable machine code (`snake_case`) a consumer switches on. */
+  code: string;
+  /** Operator-facing explanation: what was found, why it is ignored, how to clear it. */
+  message: string;
+  /** The filesystem path the finding is about, or `null` when it has none. */
+  path: string | null;
 }
 
 /** The run id of the onboarding run launched when a repo was registered (`GET /repos/:id/onboard`). */
@@ -3730,7 +3753,9 @@ export interface AcpDiagnostics {
 export interface DiagnosticsResponse {
   components: DiagnosticsComponents;
   daemon: DiagnosticsDaemon;
-  /** `core.db` + sidecars + the events dir (as a total), sorted by name. */
+  /** `core.db` + sidecars + the events dir (as a total), sorted by name, followed by one entry per
+   *  repo code graph under the state home (`repo-graphs/<key>/estate.db`, key-sorted;
+   *  wicked-core#406). */
   stores: DiagnosticsStoreFile[];
   /** Bounded tail of the daemon's own error-level log lines, newest first. */
   recentErrors: DiagnosticsRecentError[];

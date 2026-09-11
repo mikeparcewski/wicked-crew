@@ -362,28 +362,52 @@
       "path": "/api/v1/projects/:id/graph",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",
       "path": "/api/v1/projects/:id/graph/blast-radius",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "POST",
       "path": "/api/v1/projects/:id/graph/refresh",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",
       "path": "/api/v1/projects/:id/graph/search",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",

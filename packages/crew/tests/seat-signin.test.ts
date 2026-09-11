@@ -201,19 +201,19 @@ describe('opencode / pi — credential-file presence under their seat roots', ()
 });
 
 describe('agy — keyring-backed, json artifact upgrades to true', () => {
-  it('null when ~/.antigravitycli is missing (keyring unknowable)', () => {
+  it('null when ~/.gemini is missing (keyring unknowable)', () => {
     expect(probe('agy')).toBeNull();
   });
 
   it('null when the dir exists but holds no .json (still unknowable, never false)', () => {
-    mkdirSync(join(home, '.antigravitycli'), { recursive: true });
-    writeFileSync(join(home, '.antigravitycli', 'notes.txt'), 'x');
+    mkdirSync(join(home, '.gemini'), { recursive: true });
+    writeFileSync(join(home, '.gemini', 'notes.txt'), 'x');
     expect(probe('agy')).toBeNull();
   });
 
   it('true when any .json is present', () => {
-    mkdirSync(join(home, '.antigravitycli'), { recursive: true });
-    writeFileSync(join(home, '.antigravitycli', 'settings.json'), '{}');
+    mkdirSync(join(home, '.gemini'), { recursive: true });
+    writeFileSync(join(home, '.gemini', 'settings.json'), '{}');
     expect(probe('agy')).toBe(true);
   });
 });

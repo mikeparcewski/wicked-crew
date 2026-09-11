@@ -31,7 +31,8 @@
 //               no trace → false.
 //   opencode  — `<root>/opencode/data/opencode/auth.json` (`XDG_DATA_HOME=<root>/opencode/data`).
 //   pi        — `<root>/pi/auth.json` (`PI_CODING_AGENT_DIR=<root>/pi`).
-//   agy       — any `.json` under `~/.antigravitycli/` → true; else null (keyring unknowable; no
+//   agy       — any `.json` under `~/.gemini/` (the installed agy's layout) → true; else null
+//               (keyring unknowable; no
 //               configuration-home variable is known for agy, so it runs where the operator does).
 //   unknown   — null (a seat this module has no rule for is exactly "unknown").
 // Under the operator's inherit hatch (`WICKED_WORKER_INHERIT_OPERATOR_CONFIG` set in the daemon's
@@ -159,12 +160,14 @@ export function signedInHeuristic(
       );
 
     case 'agy': {
-      // Antigravity keeps its credential in the OS keyring; a `.json` in ~/.antigravitycli/ is
+      // Antigravity keeps its credential in the OS keyring; a `.json` under ~/.gemini/ (the
+      // installed agy's configuration directory — verified by the independent review; the earlier
+      // `~/.antigravitycli` spelling was a stale guess) is
       // the observable artifact a completed login leaves behind. Missing dir OR dir-with-no-json
       // both mean the keyring state is unknowable cheaply → null (only a json upgrades to true).
       let entries: string[];
       try {
-        entries = readdirSync(join(home, '.antigravitycli'));
+        entries = readdirSync(join(home, '.gemini'));
       } catch {
         return null;
       }

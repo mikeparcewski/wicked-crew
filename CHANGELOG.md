@@ -67,6 +67,48 @@ mentioned only where a daemon release depends on them.
   `ChatSummary` (with the engine's `cwd` / `codeGraphDb` / `readRoots`), `ChatListResponse`,
   `ChatDetailResponse`; `ChatScope.graph.repoLabel` names the estate label a single scoped repo is
   indexed under. Tag `api-types-v0.32.0` on merge (0.31.0 shipped with #507's gate-evidence events).
+- **Graph surfaces: a missing repo-graph root is 503 everywhere; the project-graph routes declare
+  their status codes (wicked-core#406 follow-up).** `codeGraphErrorStatus` in `repoPaths.ts` is the
+  ONE mapping every code-graph consumer shares: `/repos/:id/{graph,graph/blast-radius,domain-graph}`
+  and the requirements routes now answer **503** with the engine's own diagnosis when a current
+  engine resolved no repo-graph root (`CodeGraphRootUnresolvableError`) instead of Fastify's generic
+  500; the project-graph routes reuse it. `GET/POST /projects/:id/graph{,/refresh,/blast-radius,/search}`
+  declare `statusCodes` (200 · 400 · 404 · 409 · 501 · 503 as applicable) — `endpoint-manifest.json`
+  and the generated API tests are regenerated, and the graph route's "Always 200" note now separates
+  standings (200) from refusals (404 / 501 / 503). `listStoreFiles` spells the state home through
+  `stateHomeOfDb()` (absolute even for a relative `--db`) and keeps listing the repo-graph root when
+  the core-store directory is absent (the override can live elsewhere). `projects/graph.ts`'s
+  "Honest degradation" inventory names the fifth case. The two #406 bullets below were filed under
+  `[0.7.28]` by a merge that crossed the release cut; they are unreleased and now live here.
+- **State-home registry: `repo-graphs` is a registered subtree (wicked-core#406).** wicked-core now
+  keeps every registered repo's code graph under the daemon state home —
+  `<state home>/repo-graphs/<repo-dir-name>-<12-hex>/estate.db`, the `--db` parent, so `--db`
+  relocates the graphs with the rest of the durable state and a checkout's in-tree `.codegraph/` is
+  never adopted — instead of the operator's `~/.wicked-estate/repo-graphs`. The shared fence fixture
+  (`packages/crew/tests/fixtures/state-home-subtrees.json`, byte-identical to core's
+  `tests/fixtures/state-home-subtrees.json`) gains the `repo-graphs` entry (owner `engine`,
+  `worker_read: none`) so the worker Read fence classifies and denies the subtree rather than
+  refusing every governed launch on a daemon that has indexed a repo. Crew spells no new path: it
+  keeps reading the engine's `code_graph_db` off the repo record (`repoPaths.ts`). The record now
+  also carries an additive `findings` array (e.g. `in_tree_code_graph_ignored`) the repo card can
+  show — declared in `wicked-crew-api-types` as `RepoEntry.findings?: RepoFinding[]` (additive; the
+  package version moves at its next release). `repoPaths.ts codeGraphDb()` reads it for the one case
+  that shares the empty-`code_graph_db` shape with a stale addon: an engine that resolved NO root
+  (`code_graph_root_unresolvable`) now surfaces its own diagnosis instead of the "reinstall
+  wicked-core-ts" error — as its own `CodeGraphRootUnresolvableError`, which `projects/graph.ts`
+  lets through untouched (every other `codeGraphDb` throw still becomes
+  `ProjectGraphEngineTooOldError` / 501 `engine-too-old`) and the project-graph routes answer 503
+  with the finding's message: a daemon-environment fault, not a stale addon and not a bad request.
+  `resolveProjectGraphBinding()` records the same truth on a launch: with no repo-graph root there
+  is no per-repo graph to degrade to, so its reason names the environment fault and says the run
+  gets no code graph — never "uses its own repo's code graph".
+- **`GET /diagnostics` `stores` lists the engine's repo graphs** (wicked-core#406 asked for it):
+  after `core.db` and its sidecars, one entry per `<state home>/repo-graphs/<key>/estate.db`
+  (`name: "repo-graphs/<key>/estate.db"`, path + bytes like every other store; key-sorted). The
+  root is spelled with the engine's precedence — `WICKED_ESTATE_REPO_GRAPH_ROOT` when set, else
+  the state home's `repo-graphs` (the `--db` parent, exactly how the engine derives it) — so no
+  new engine export is needed; `-wal`/`-shm` siblings, in-flight `estate.db.migrating-*` temps and
+  never-indexed key dirs are not stores and are not listed.
 
 ## [0.7.28] — 2026-09-10
 
