@@ -63,6 +63,7 @@ import {
   ungatedGateNote,
   workerToolCallDeniedLine,
 } from './council-outcome.js';
+import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
@@ -335,6 +336,8 @@ export interface InteractiveEditOptions {
   onRunFiled?: (runId: string, projectId: string) => void;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (message: string) => void;
 }
 
 /** Handle for a running subscription. */
@@ -891,11 +894,12 @@ export async function startInteractiveEditSubscriber(
     // would double-launch precisely because the ledger row is only written on success.
     maxRetries: 0,
     handler: (event: BusEvent) => handleFeedbackProcessed(event),
-    onError: (err: Error, event?: BusEvent) => {
-      log(
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
         `[interactive-edit] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-      );
-    },
+      log,
+      logError: opts.logError,
+    }),
   });
 
   return {

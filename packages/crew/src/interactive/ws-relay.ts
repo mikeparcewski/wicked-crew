@@ -38,6 +38,7 @@ import { API_PREFIX } from '../api/api-prefix.js';
 import { LOCAL_ACTOR } from '../api/auth.js';
 import { INTERACTIVE_DOMAIN, INTERACTIVE_PRODUCER } from './draft-events.js';
 import type { Actor } from '../core/types.js';
+import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 
 const V = API_PREFIX;
 
@@ -87,6 +88,8 @@ export interface InteractiveRelayOptions {
   /** Poll cadence for the relay subscriber, ms (tests shorten it). */
   pollIntervalMs?: number;
   log?: (msg: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (msg: string) => void;
   /**
    * Called once per observed `wicked.interactive.doc.retired` with the retired document id
    * (crew#338). This is how a retirement that BYPASSED crew's governed delete route — a direct
@@ -172,11 +175,12 @@ export async function startInteractiveWsRelay(
           }
         }
       },
-      onError: (err, event) => {
-        log(
+      onError: busSubscriberErrorReporter({
+        describe: (err, event) =>
           `[interactive-relay] relay error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-        );
-      },
+        log,
+        logError: opts.logError,
+      }),
     });
   } catch (err) {
     log(

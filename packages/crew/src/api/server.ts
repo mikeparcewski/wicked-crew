@@ -550,6 +550,7 @@ export async function createServer(
             ? { pollIntervalMs: options.projectEvents.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
+          logError: (m) => app.log.error(m),
         });
   if (projectBus !== null) {
     app.log.info('project bus seam armed (wicked.crew.project.* + /ws activity bridge)');
@@ -636,6 +637,7 @@ export async function createServer(
             ? { pollIntervalMs: options.interactiveWsRelay.pollIntervalMs }
             : {}),
           log: (m) => app.log.warn(m),
+          logError: (m) => app.log.error(m),
           // crew#338 — a retirement that bypassed the governed DELETE route (direct bridge call,
           // another tool) still drops the doc's ledger rows. Idempotent, so overlapping with the
           // route's own synchronous sweep is harmless.
@@ -698,6 +700,7 @@ export async function createServer(
       ...(dbPath !== undefined ? { dbPath } : {}),
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (sub !== null) {
       app.log.info(`qe gate-event subscription armed (filter wicked.qe.**)`);
@@ -769,6 +772,7 @@ export async function createServer(
       groundingStore: docGrounding,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (draftSub !== null) {
       const sub = draftSub;
@@ -802,6 +806,7 @@ export async function createServer(
       demoSeamArmed: () => demoSub !== null,
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (editSub !== null) {
       const sub = editSub;
@@ -830,6 +835,7 @@ export async function createServer(
       onRunFiled: fileRun,
       groundingStore: docGrounding,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (demoSub !== null) {
       const sub = demoSub;
@@ -864,6 +870,7 @@ export async function createServer(
         (editSub?.inFlightDocs().includes(documentId) ?? false),
       onRunFiled: fileRun,
       log: (m) => app.log.warn(m),
+      logError: (m) => app.log.error(m),
     });
     if (chatSub !== null) {
       const sub = chatSub;

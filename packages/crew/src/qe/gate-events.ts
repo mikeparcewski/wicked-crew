@@ -23,6 +23,7 @@
  */
 
 import type { BusEvent } from 'wicked-bus';
+import { busSubscriberErrorReporter } from '../interactive/bus-subscriber-errors.js';
 
 /** The gate-result event types (the old gate.mjs wire contract, verbatim). */
 export const QE_GATE_EVENT_TYPES = [
@@ -156,6 +157,8 @@ export interface QeGateSubscriberOptions {
   pollIntervalMs?: number;
   /** Diagnostics sink (default: console.error). */
   log?: (message: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (message: string) => void;
 }
 
 /** Handle for a running subscription. */
@@ -219,11 +222,12 @@ export async function startQeGateSubscriber(
     handler: (event: BusEvent) => {
       cache.ingest(event.event_type, event.payload);
     },
-    onError: (err: Error, event?: BusEvent) => {
-      log(
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
         `[qe-gate-events] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-      );
-    },
+      log,
+      logError: opts.logError,
+    }),
   });
 
   return {
