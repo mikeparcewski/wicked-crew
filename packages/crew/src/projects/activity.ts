@@ -5,38 +5,60 @@
  * - CREW: the durable core-event log of the project's `crew.run`/`crew.chat` members
  *   (`adapter.runEvents` — the same log `/runs/:id/events` serves), entry id `crew:<run>:<seq>`.
  * - INTERACTIVE: `wicked.interactive.*` bus events carrying this `project_id`, read directly
- *   from the bus SQLite READ-ONLY (`node:sqlite`, the `requirements.ts` precedent — wicked-bus
- *   exposes subscribe-cursors, not ad-hoc history queries, and a durable cursor per feed-read
- *   would turn a GET into a write), entry id `bus:<event_id>`.
+ *   from the bus SQLite READ-ONLY through the SAME SQLite library wicked-bus itself uses
+ *   (better-sqlite3, resolved from wicked-bus's own location — wicked-bus exposes
+ *   subscribe-cursors, not ad-hoc history queries, and a durable cursor per feed-read would turn
+ *   a GET into a write), entry id `bus:<event_id>`.
+ *
+ * WHY NOT `node:sqlite` (F-E2E-021): this daemon already holds long-lived better-sqlite3
+ * connections on the very same bus.db (the interactive seams, the /ws relay, the project bridge).
+ * SQLite's file locks are POSIX advisory locks, which the kernel releases for the WHOLE process the
+ * moment ANY descriptor for that file is closed. One SQLite library instance protects itself (it
+ * defers the close while sibling connections hold locks); a SECOND library instance in the same
+ * process — Node's bundled SQLite behind `node:sqlite` — knows nothing about the first, so its
+ * `close()` here silently released every lock the seams held on bus.db and bus.db-shm. The next
+ * short-lived external emitter (`wicked-bus emit`, what wicked-estate spawns after an index) then
+ * won the EXCLUSIVE lock on its own close, checkpointed and UNLINKED bus.db-wal/-shm under the
+ * seams, whose reads decayed into "database disk image is malformed" on every poll for the life
+ * of the daemon. Rule: ONE SQLite library per database file per process — this read goes through
+ * wicked-bus's better-sqlite3, whose deferred-close protection then covers it like any seam.
  *
  * Newest-first, cursor on `(ts, id)` — an opaque `<ts>:<id>` token, base64url. The merge is
  * recomputed per read; members are few and the log excludes high-volume frames, so the simple
  * full-merge is the honest v1 (the ADR explicitly rejects a new store here).
  */
 
+import { createRequire } from 'node:module';
 import type { CoreAdapter } from '../core/adapter.js';
 import type { ActivityEntry } from '../core/types.js';
 
-/** Minimal `node:sqlite` surface (typed locally; resolved dynamically — older Nodes lack it). */
+/** Minimal better-sqlite3 surface (typed locally — crew reaches it through wicked-bus, never directly). */
 interface SqliteDatabase {
   prepare(sql: string): { all(...params: unknown[]): unknown[] };
   close(): void;
 }
-interface SqliteModule {
-  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => SqliteDatabase;
-}
+type SqliteCtor = new (
+  path: string,
+  opts?: { readonly?: boolean; fileMustExist?: boolean },
+) => SqliteDatabase;
 
-let sqliteMod: SqliteModule | null | undefined;
-async function sqlite(): Promise<SqliteModule | null> {
-  if (sqliteMod === undefined) {
+let sqliteCtor: SqliteCtor | null | undefined;
+/**
+ * The better-sqlite3 module INSTANCE wicked-bus loads: resolved from wicked-bus's own entry (the
+ * same walk `lib/db.js`'s `require('better-sqlite3')` takes), so even a duplicated copy elsewhere
+ * in node_modules could not become a second SQLite library on the bus db (see the module doc).
+ * `null` when unresolvable — the interactive half is then empty, never an error.
+ */
+function sqlite(): SqliteCtor | null {
+  if (sqliteCtor === undefined) {
     try {
-      const name = 'node:sqlite';
-      sqliteMod = (await import(name)) as SqliteModule;
+      const busEntry = createRequire(import.meta.url).resolve('wicked-bus');
+      sqliteCtor = createRequire(busEntry)('better-sqlite3') as SqliteCtor;
     } catch {
-      sqliteMod = null;
+      sqliteCtor = null;
     }
   }
-  return sqliteMod;
+  return sqliteCtor;
 }
 
 /** One-line human summary of a core frame (best-effort; `raw` carries the whole frame). */
@@ -128,12 +150,12 @@ async function interactiveEntries(
   projectId: string,
 ): Promise<ActivityEntry[]> {
   if (busDbPath === null) return [];
-  const mod = await sqlite();
-  if (mod === null) return [];
+  const Database = sqlite();
+  if (Database === null) return [];
   let db: SqliteDatabase | null = null;
   const entries: ActivityEntry[] = [];
   try {
-    db = new mod.DatabaseSync(busDbPath, { readOnly: true });
+    db = new Database(busDbPath, { readonly: true, fileMustExist: true });
     const rows = db
       .prepare(
         `SELECT event_id, event_type, payload, emitted_at FROM events
