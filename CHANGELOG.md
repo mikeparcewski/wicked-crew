@@ -10,6 +10,47 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **F-E2E-021 — `GET /projects/:id/activity` opened the bus with a SECOND SQLite library and tore
+  the daemon's bus connections (#541).** The activity feed read `bus.db` through Node's bundled
+  SQLite (`node:sqlite`, read-only, opened and closed per request) while the daemon held six
+  long-lived better-sqlite3 connections on the same file. SQLite's locks are POSIX advisory locks —
+  released for the WHOLE process when ANY descriptor for the file is closed — and a second library
+  instance does not know about the first's connections, so that close dropped every lock the seams
+  held. The next short-lived external emitter (`wicked-bus emit`, what wicked-estate spawns after an
+  index) then took the EXCLUSIVE lock on its own close, checkpointed, and unlinked `bus.db-wal`/`-shm`
+  under the seams: their polls decayed into `database disk image is malformed` every 2 s for the life
+  of the daemon (relay + draft/edit/demo/chat seams dead), crew's own emissions went into a ghost WAL
+  nobody else could see, and with enough interleaved writes the on-disk `bus.db` itself ended up
+  failing `PRAGMA integrity_check` (external `wicked-bus emit`s then fail with the same error). Fix:
+  the feed reads through the better-sqlite3 module instance wicked-bus itself loads (resolved from
+  wicked-bus's own entry). Rule: **one SQLite library per database file per process.** Regression
+  test drives the exact sequence with the real `wicked-bus emit` CLI as the external emitter.
+  **Remediation for a daemon already showing the loop** — the fix prevents recurrence, it cannot
+  repair a torn store: exit the daemon WITHOUT closing its bus connections (crew's SIGTERM/SIGINT
+  path already does exactly that — `process.exit` with no `close()`; a graceful close of the last
+  ghost connection would checkpoint the ghost WAL into the file), then restart on a build with this
+  fix; if `PRAGMA integrity_check` on `bus.db` fails from a fresh process, the store is torn —
+  restore or rotate it.
+
+### Added
+- **Connection-fatal bus subscriber errors now reach `GET /diagnostics.recentErrors` (#542 — the
+  visibility half of F-E2E-021).** Every wicked-bus seam (interactive relay / draft / edit / demo /
+  chat, the project `/ws` bridge, the QE gate feed) logged its subscriber errors through `log` →
+  `app.log.warn`, and the diagnostics error ring folds error-level lines only — so six dead
+  subscribers looping on `database disk image is malformed` for hours left `recentErrors: []`. A
+  shared reporter (`src/interactive/bus-subscriber-errors.ts`) keeps each seam's own warn line for
+  ordinary errors and escalates a connection-fatal one (`SQLITE_CORRUPT` / `SQLITE_NOTADB` /
+  `SQLITE_IOERR*`, or wicked-bus's `WB-014 SUBSCRIBER_DB_UNUSABLE`) to `logError` → `app.log.error`
+  on the 1st and every 30th consecutive occurrence, with the count, whether it is the subscriber
+  connection (poll) or the seam's handler, and the operator remediation (restart — the daemon's
+  shutdown exits without closing bus connections; a `bus.db` failing `PRAGMA integrity_check` from a
+  fresh process is torn and must be restored/rotated). A fatal error more than two poll intervals
+  after the previous one starts a new outage and escalates at its 1st again. **Scope: the error-level
+  log line and `/diagnostics.recentErrors` only** — `/health` stays unconditional and the studio Health
+  rail does not read `recentErrors`; a `/diagnostics.bus` findings block and the studio fold are the
+  wave-7 follow-up.
+
 ## [0.7.32] — 2026-09-12
 
 Release train (hotfix after the clean-run Phase 2 blocker) — **core-ts 0.7.23 / studio 0.5.8 /
