@@ -47,8 +47,14 @@ import type {
 import { basename } from 'node:path';
 import { DELIVER_PHASE_ID } from '../core/deliver.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
-import type { QeAcceptanceState, QeManifestSummary } from './ledger.js';
-import { readAcceptanceState, summarizeManifest } from './ledger.js';
+import type {
+  QeAcceptanceState,
+  QeAttribution,
+  QeManifestSummary,
+  ReadSubject,
+  RunLinkage,
+} from './ledger.js';
+import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
@@ -191,10 +197,21 @@ export function resolveAcceptanceGate(
     };
   }
   if (state.verdict === null) {
+    if (state.ledgerVerdicts === 0) {
+      return {
+        ...base,
+        satisfied: false,
+        reason: `QE ledger at ${state.root} records no verdict (missing ⇒ deny)`,
+      };
+    }
+    // The ledger has verdicts — none of them is THIS run's (F-E2E-013). A verdict that
+    // predates the run, or belongs to a QE run nothing ties to it, is evidence about the repo's
+    // past, not about this run; serving it as the run's PASS was the regression.
+    const why = state.attribution.kind === 'none' ? state.attribution.reason : 'not attributed';
     return {
       ...base,
       satisfied: false,
-      reason: `QE ledger at ${state.root} records no verdict (missing ⇒ deny)`,
+      reason: `QE ledger at ${state.root} holds no verdict attributed to this run — ${why} (unattributed ⇒ deny)`,
     };
   }
   if (verdict === null) {
@@ -208,7 +225,14 @@ export function resolveAcceptanceGate(
     };
   }
 
-  const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer}`;
+  // HOW the verdict is this run's rides the reason (review of #539, F6): an inferred lifetime
+  // linkage must read differently from a writer's stamp or a caller's pin — and when several QE
+  // runs are attributed, the reader must know the answer was resolved deny-dominates across them.
+  const breadth =
+    state.attributedVerdicts > 1
+      ? `; ${state.attributedVerdicts} QE runs are attributed to this run — deny-dominates across their newest verdicts`
+      : '';
+  const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
     case 'PASS':
       return { ...base, satisfied: true, reason: `PASS — ${cite}` };
@@ -269,6 +293,19 @@ export interface AcceptanceView {
       qeRunId: string;
     } | null;
     manifest: QeManifestSummary | null;
+    /**
+     * How `verdict` was tied to THIS run (`pinned` by `?qeRun`, `stamped` with the run id by the
+     * writer, or a QE run inside the run's lifetime) — or `none`, with the reason naming what the
+     * ledger does hold. The body never serves a repo-wide "newest verdict" as the run's (F-E2E-013).
+     */
+    attribution: QeAttribution;
+    /** How many live verdicts the whole ledger holds, attributed or not. */
+    ledgerVerdicts: number;
+    /**
+     * How many QE runs are attributed to this run — the deny-dominates set `verdict` was resolved
+     * over (each contributes its newest verdict; any non-PASS among them denies). 0 when none.
+     */
+    attributedVerdicts: number;
     error?: string;
   } | null;
   gate: AcceptanceGateResolution;
@@ -283,8 +320,105 @@ export interface AcceptanceView {
 }
 
 /**
- * Assemble the acceptance view for one crew run: read the ledger (lazy read —
- * the fallback that needs no bus), resolve the gate, and attach the freshest
+ * The frames that close a run's lifetime — one per terminal `SessionStatus` the engine defines
+ * (wicked-core `src/domain.rs`: `Completed`, `Failed`, `Cancelled`), spelled as the engine emits
+ * them (`src/event.rs` `event_to_json`: `sessionCompleted`, `sessionFailed`, `runCancelled`).
+ * Pinned from the source, not from memory: the first cut named a `sessionCancelled` frame the
+ * engine never emits, so a CANCELLED run's window never closed and any later QE PASS on the repo
+ * was attributed to it (review of #539, F1). `runOrphaned` is deliberately absent — an orphaned
+ * run is still `executing` and resumable, not finished.
+ */
+export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'sessionCompleted',
+  'sessionFailed',
+  'runCancelled',
+]);
+
+/**
+ * The terminal frames the engine will NOT resume from: `resume_run_inner` returns a `Completed` or
+ * `Cancelled` run's status unchanged (wicked-core `src/actor.rs`, the `Completed | Cancelled`
+ * early return) and re-dispatches only a `Failed` one. So once one of these is recorded the window
+ * is closed for good; `sessionFailed` alone can be followed by a `resumed` frame (r2 review, N1).
+ */
+export const FINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['sessionCompleted', 'runCancelled']);
+
+/**
+ * The frames that prove a run is LIVE AGAIN after a non-final terminal frame — the engine emits
+ * each of them only for a run it is actively driving (wicked-core `src/event.rs` `event_to_json`):
+ *   - `resumed` — emitted by `confirm_gate` when a human approves a gate (`src/actor.rs`, the only
+ *     `CoreEvent::Resumed` emission). NOT by the failed-run resume path: `resume_run_inner` emits
+ *     no frame of its own (r3 review, N3 — an earlier comment here claimed otherwise);
+ *   - `unitDispatched` / `unitExecuting` / `toolExecutorDispatched` — `dispatch_unit`'s frames, the
+ *     first thing a rescued run records after `POST /runs/:id/resume` re-dispatches its cursor unit;
+ *   - `unitDistributed` — a (re)distribution for a unit, run-scoped and live-only as well.
+ * `unitDone` / `unitDenied` / `unitPlanned` are deliberately NOT here: a straggling completion or
+ * denial frame after a failure is not evidence the run went on (F4).
+ */
+export const REOPEN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'resumed',
+  'unitDispatched',
+  'unitExecuting',
+  'toolExecutorDispatched',
+  'unitDistributed',
+]);
+
+/**
+ * The crew run's lifetime as its durable event log records it — the window a QE run must have
+ * started inside to count as this run's evidence (F-E2E-013).
+ *
+ * `startedAt` is the capture time of the `sessionStarted` frame (the earliest frame's, for a log
+ * that lacks one). `finishedAt` follows the frames IN LOG ORDER: a terminal frame closes the window
+ * at its capture time; a later {@link REOPEN_EVENT_TYPES} frame reopens it — a FAILED run is
+ * resumable under the same id (`POST /runs/:id/resume` → engine `resume_run_inner`, which
+ * re-dispatches the cursor unit and runs the run on to its own `sessionCompleted`), so QE evidence
+ * recorded after the rescue is that run's, whether the run is still executing (its execution
+ * frames reopen the window — r3 review, N3) or has since completed (r2 review, N1).
+ * `sessionCompleted` / `runCancelled` are FINAL: the engine refuses to resume either, so nothing
+ * after them reopens the window. Any other frame is ignored — a straggling non-terminal frame
+ * after the end does not reopen anything (F4). A log with no terminal frame (or one whose last
+ * terminal frame was followed by execution) belongs to a live run, whose window stays open. A
+ * `null` or empty log places the run nowhere in time, so it can link nothing — and when the log
+ * could not be READ (`unreadable`), the linkage carries that cause so the denial names it instead
+ * of "no sessionStarted" (F5).
+ *
+ * Chosen over gating on `session.status`: the log is what the route already reads for this
+ * purpose, it needs no second engine call, and it yields the same answer — a rescued run's
+ * persisted status is non-terminal from its re-dispatch until its next terminal frame, which is
+ * exactly the span between the reopening frame and the frame that closes the scan again.
+ */
+export function runWindowFromEvents(
+  events: RecordedEvent[] | null,
+  runId: string,
+  unreadable?: string,
+): RunLinkage {
+  if (unreadable !== undefined) return { runId, startedAt: null, finishedAt: null, logUnreadable: unreadable };
+  if (events === null || events.length === 0) return { runId, startedAt: null, finishedAt: null };
+  const at = (e: RecordedEvent): number | null =>
+    typeof e.ts === 'number' && Number.isFinite(e.ts) ? e.ts : null;
+  const started = events.find((e) => e.type === 'sessionStarted');
+  let startedAt = started !== undefined ? at(started) : null;
+  if (startedAt === null) {
+    for (const e of events) {
+      const t = at(e);
+      if (t !== null && (startedAt === null || t < startedAt)) startedAt = t;
+    }
+  }
+  let finishedAt: number | null = null;
+  for (const e of events) {
+    if (TERMINAL_EVENT_TYPES.has(e.type)) {
+      finishedAt = at(e) ?? finishedAt;
+      if (FINAL_EVENT_TYPES.has(e.type)) break; // nothing the engine emits after these reopens the run
+    } else if (REOPEN_EVENT_TYPES.has(e.type) && finishedAt !== null) {
+      finishedAt = null; // a failed run rescued and executing again: live until its next terminal frame
+    }
+  }
+  return { runId, startedAt, finishedAt };
+}
+
+/**
+ * Assemble the acceptance view for one crew run: read the run's event log,
+ * read the ledger SCOPED TO THIS RUN (a read-only canonical-JSON read — the
+ * fallback that needs no bus), resolve the gate, and attach the freshest
  * matching bus event when the opt-in subscription has seen one.
  */
 export async function buildAcceptanceView(opts: {
@@ -309,13 +443,26 @@ export async function buildAcceptanceView(opts: {
   const phases = acceptancePhaseIds(opts.workflow);
   const required = phases.length > 0;
 
-  const state =
-    opts.repo !== null
-      ? await readAcceptanceState(
-          opts.repo.root_path,
-          opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : undefined,
-        )
-      : null;
+  // The run's durable event log, read FIRST: it is both the conformance section's enforcement
+  // record and the ledger read's linkage — a verdict is this run's only if its QE run falls inside
+  // the lifetime the log records (or the writer stamped the run id). An unreadable or absent log
+  // means an unknown window, and an unknown window links nothing (F-E2E-013).
+  let eventRows: RecordedEvent[] | null = null;
+  let eventsError: string | undefined;
+  if (opts.events !== undefined) {
+    try {
+      eventRows = await opts.events(opts.runId);
+    } catch (err) {
+      eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
+      eventsError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const subject: ReadSubject =
+    opts.qeRunId !== undefined
+      ? { qeRunId: opts.qeRunId }
+      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
+
+  const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
   const gate = resolveAcceptanceGate(required, state);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
@@ -330,14 +477,6 @@ export async function buildAcceptanceView(opts: {
     }
   } else {
     claimsError = 'claims loader not wired';
-  }
-  let eventRows: RecordedEvent[] | null = null;
-  if (opts.events !== undefined) {
-    try {
-      eventRows = await opts.events(opts.runId);
-    } catch {
-      eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
-    }
   }
   const conformance = resolveConformance({
     runId: opts.runId,
@@ -394,6 +533,9 @@ export async function buildAcceptanceView(opts: {
                   }
                 : null,
             manifest: state.manifest !== null ? summarizeManifest(state.manifest) : null,
+            attribution: state.attribution,
+            ledgerVerdicts: state.ledgerVerdicts,
+            attributedVerdicts: state.attributedVerdicts,
             ...(state.error !== undefined ? { error: state.error } : {}),
           }
         : null,

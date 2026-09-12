@@ -14,11 +14,15 @@ import {
   acceptancePhaseIds,
   resolveAcceptanceGate,
   resolveRunWorkflow,
+  runWindowFromEvents,
+  FINAL_EVENT_TYPES,
+  REOPEN_EVENT_TYPES,
+  TERMINAL_EVENT_TYPES,
   VERDICT_TO_STATUS,
 } from '../src/qe/acceptance.js';
 import type { QeAcceptanceState } from '../src/qe/ledger.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
-import type { SessionView, WorkflowDef } from '../src/core/types.js';
+import type { RecordedEvent, SessionView, WorkflowDef } from '../src/core/types.js';
 
 /** A minimal ledger state carrying one verdict. */
 function stateWith(verdict: string, reason: string | null = null): QeAcceptanceState {
@@ -39,6 +43,9 @@ function stateWith(verdict: string, reason: string | null = null): QeAcceptanceS
     },
     manifest: null,
     manifestPath: null,
+    attribution: { kind: 'run-window', qeRunId: 'r-1', qeRunStartedAt: '2026-08-12T00:00:00Z' },
+    ledgerVerdicts: 1,
+    attributedVerdicts: 1,
   };
 }
 
@@ -91,6 +98,9 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
+      attribution: { kind: 'none', reason: 'no ledger' },
+      ledgerVerdicts: 0,
+      attributedVerdicts: 0,
     });
     expect(res.satisfied).toBe(false);
     expect(res.reason).toContain('/repo/.wicked-qe');
@@ -107,10 +117,13 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
-      error: 'SQLITE_CORRUPT: database disk image is malformed',
+      attribution: { kind: 'none', reason: 'the ledger could not be read' },
+      ledgerVerdicts: 0,
+      attributedVerdicts: 0,
+      error: 'verdicts/7ae4f27c.json: not valid JSON (Unexpected end of JSON input)',
     });
     expect(res.satisfied).toBe(false);
-    expect(res.reason).toContain('SQLITE_CORRUPT');
+    expect(res.reason).toContain('verdicts/7ae4f27c.json: not valid JSON');
     expect(res.reason).toMatch(/unreadable ⇒ deny/);
   });
 
@@ -122,9 +135,40 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
+      attribution: { kind: 'none', reason: 'the ledger records no verdict' },
+      ledgerVerdicts: 0,
+      attributedVerdicts: 0,
     });
     expect(res.satisfied).toBe(false);
     expect(res.reason).toMatch(/records no verdict/);
+  });
+
+  it("denies a ledger whose verdicts are none of THIS run's, naming what it holds (F-E2E-013)", () => {
+    // The regression: a repo's committed legacy ledger held a two-month-old PASS, and a run that
+    // recorded no evidence was served it as its own. "Has verdicts" and "has this run's verdict"
+    // are different facts, and the denial must say which one failed.
+    const res = resolveAcceptanceGate(true, {
+      root: '/repo/.wicked-testing',
+      found: true,
+      run: null,
+      verdict: null,
+      manifest: null,
+      manifestPath: null,
+      attribution: {
+        kind: 'none',
+        reason:
+          'the ledger holds 1 verdict, newest PASS (v-old) at 2026-07-15T22:00:00.000Z, recorded ' +
+          'before this run started (2026-09-12T04:17:21.914Z); none is stamped with run 4f67808a',
+      },
+      ledgerVerdicts: 1,
+      attributedVerdicts: 0,
+    });
+    expect(res).toMatchObject({ satisfied: false, verdict: null, runStatus: null });
+    expect(res.reason).toMatch(/no verdict attributed to this run/);
+    expect(res.reason).toContain('before this run started');
+    expect(res.reason).toMatch(/unattributed ⇒ deny/);
+    // Not the "empty ledger" wording — that remedy (run QE) is the wrong one here.
+    expect(res.reason).not.toMatch(/records no verdict/);
   });
 
   it('satisfies on a clean PASS, citing the verdict', () => {
@@ -231,5 +275,234 @@ describe('resolveRunWorkflow', () => {
 
   it('a bare deliver-only sequence resolves nothing rather than a phantom empty def', () => {
     expect(resolveRunWorkflow(view('wf-abc123', ['deliver']), registry)).toBeNull();
+  });
+});
+
+describe('runWindowFromEvents — the run lifetime the ledger read links against (review of #539: F1, F4, F5)', () => {
+  const T = (iso: string): number => Date.parse(iso);
+  const ev = (type: string, ts: number, seq: number): RecordedEvent =>
+    ({ type, session: 'r', ts, seq }) as unknown as RecordedEvent;
+
+  it("pins the engine's terminal frames from its source — runCancelled, never a `sessionCancelled` it does not emit", () => {
+    // wicked-core domain.rs: terminal SessionStatus = Completed | Failed | Cancelled;
+    // event.rs event_to_json: sessionCompleted | sessionFailed | runCancelled. runOrphaned is
+    // NOT terminal (the run is still executing and resumable).
+    expect([...TERMINAL_EVENT_TYPES].sort()).toEqual(['runCancelled', 'sessionCompleted', 'sessionFailed']);
+    expect(TERMINAL_EVENT_TYPES.has('sessionCancelled')).toBe(false);
+    expect(TERMINAL_EVENT_TYPES.has('runOrphaned')).toBe(false);
+  });
+
+  it("closes the window at the engine's real cancel frame (F1)", () => {
+    // The observed failure: a run cancelled at 01:05 kept an OPEN window, so a QE PASS recorded
+    // at 02:17 was attributed to it.
+    const w = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('runCancelled', T('2026-08-12T01:05:00Z'), 2)],
+      'r',
+    );
+    expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T01:05:00Z') });
+  });
+
+  it('a straggling non-terminal frame after the terminal one does not reopen the window (F4)', () => {
+    const w = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('heartbeat', T('2026-08-12T01:06:00Z'), 3),
+        ev('unitDone', T('2026-08-12T01:07:00Z'), 4),
+      ],
+      'r',
+    );
+    expect(w.startedAt).toBe(T('2026-08-12T01:00:00Z'));
+    expect(w.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+  });
+
+  it('a FAILED run that is RESUMED is live again until its next terminal frame (r2 N1)', () => {
+    // POST /runs/:id/resume on a failed run → engine resume_run_inner re-dispatches the SAME run on
+    // to sessionCompleted. The window must reach that completion, not stop at the failure — QE
+    // evidence recorded after the rescue is this run's. (A `resumed` frame is what gate approval
+    // emits; the resume path itself emits none — see the engine-shape cases below.)
+    const w = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+        ev('unitExecuting', T('2026-08-12T02:01:00Z'), 4),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 5),
+      ],
+      'r',
+    );
+    expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T03:00:00Z') });
+  });
+
+  it("the engine's REAL rescue shape emits no `resumed`: the rescued run's first execution frame reopens the window (r3 N3)", () => {
+    // resume_run_inner emits nothing of its own; the next frames are dispatch_unit's
+    // (unitDispatched → unitExecuting → toolExecutorDispatched). While the rescued run is still
+    // executing there is no later terminal frame to overwrite the failure with — the reopen has to
+    // come from the execution frame itself, or the live segment reads "finished <fail time>".
+    expect([...REOPEN_EVENT_TYPES].sort()).toEqual([
+      'resumed',
+      'toolExecutorDispatched',
+      'unitDispatched',
+      'unitDistributed',
+      'unitExecuting',
+    ]);
+    const live = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitDispatched', T('2026-08-12T02:00:00Z'), 3),
+        ev('unitExecuting', T('2026-08-12T02:00:01Z'), 4),
+      ],
+      'r',
+    );
+    expect(live).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: null });
+    // …and once that rescued run completes, the window closes at ITS completion.
+    const done = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitExecuting', T('2026-08-12T02:01:00Z'), 3),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 4),
+      ],
+      'r',
+    );
+    expect(done.finishedAt).toBe(T('2026-08-12T03:00:00Z'));
+    // A tool-phase rescue reopens on toolExecutorDispatched just the same.
+    const tool = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('toolExecutorDispatched', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(tool.finishedAt).toBeNull();
+  });
+
+  it('a failure followed by NOTHING stays closed at the failure', () => {
+    const w = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2)],
+      'r',
+    );
+    expect(w.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+  });
+
+  it('a resumed run with no terminal frame yet is live (window open)', () => {
+    const w = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(w.finishedAt).toBeNull();
+  });
+
+  it('sessionCompleted and runCancelled are FINAL — the engine refuses to resume either, so nothing after them reopens', () => {
+    expect([...FINAL_EVENT_TYPES].sort()).toEqual(['runCancelled', 'sessionCompleted']);
+    const cancelled = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('runCancelled', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 4),
+      ],
+      'r',
+    );
+    expect(cancelled.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    // Execution frames after a FINAL frame do not reopen either (the engine never emits them
+    // there; a corrupt or replayed log must not be able to revive a cancelled run).
+    const cancelledThenUnit = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('runCancelled', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitExecuting', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(cancelledThenUnit.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    const completed = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionCompleted', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(completed.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    // A `resumed` with nothing to reopen (a gate approval on a live run) is a no-op.
+    const gated = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('resumed', T('2026-08-12T01:10:00Z'), 2)],
+      'r',
+    );
+    expect(gated.finishedAt).toBeNull();
+  });
+
+  it('keeps the window open for a live run (no terminal frame yet)', () => {
+    const w = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('unitExecuting', T('2026-08-12T01:01:00Z'), 2)],
+      'r',
+    );
+    expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: null });
+  });
+
+  it('falls back to the earliest frame when the log carries no sessionStarted', () => {
+    const w = runWindowFromEvents(
+      [ev('unitPlanned', T('2026-08-12T01:02:00Z'), 1), ev('unitExecuting', T('2026-08-12T01:01:00Z'), 2)],
+      'r',
+    );
+    expect(w.startedAt).toBe(T('2026-08-12T01:01:00Z'));
+  });
+
+  it('an absent or empty log places the run nowhere — and is not "unreadable"', () => {
+    expect(runWindowFromEvents(null, 'r')).toEqual({ runId: 'r', startedAt: null, finishedAt: null });
+    expect(runWindowFromEvents([], 'r')).toEqual({ runId: 'r', startedAt: null, finishedAt: null });
+  });
+
+  it('an UNREADABLE log carries its cause instead of masquerading as an empty one (F5)', () => {
+    const w = runWindowFromEvents(null, 'r', 'event-log read binding missing (older addon)');
+    expect(w).toEqual({
+      runId: 'r',
+      startedAt: null,
+      finishedAt: null,
+      logUnreadable: 'event-log read binding missing (older addon)',
+    });
+  });
+});
+
+describe('resolveAcceptanceGate — the linkage rides the reason (review of #539: F6, F2)', () => {
+  it('labels an inferred lifetime linkage as INFERRED, not stamped', () => {
+    const res = resolveAcceptanceGate(true, stateWith('PASS'));
+    expect(res.satisfied).toBe(true);
+    expect(res.reason).toContain("INFERRED from this run's lifetime");
+    expect(res.reason).toContain('not stamped by the writer');
+    expect(res.reason).not.toContain('QE runs are attributed');
+  });
+
+  it("names a writer's stamp and a caller's pin for what they are", () => {
+    const stamped = resolveAcceptanceGate(true, {
+      ...stateWith('PASS'),
+      attribution: { kind: 'stamped', qeRunId: 'r-1' },
+    });
+    expect(stamped.reason).toContain('stamped crew_run_id');
+    expect(stamped.reason).not.toContain('INFERRED');
+    const pinned = resolveAcceptanceGate(true, {
+      ...stateWith('PASS'),
+      attribution: { kind: 'pinned', qeRunId: 'r-1' },
+    });
+    expect(pinned.reason).toContain('caller-asserted linkage');
+    expect(pinned.reason).not.toContain('INFERRED');
+  });
+
+  it('says when the answer was resolved deny-dominates across several attributed QE runs (F2)', () => {
+    const res = resolveAcceptanceGate(true, {
+      ...stateWith('FAIL', 'scenario X: step 3 asserted 200, got 500'),
+      attributedVerdicts: 2,
+    });
+    expect(res).toMatchObject({ satisfied: false, verdict: 'FAIL' });
+    expect(res.reason).toContain('2 QE runs are attributed to this run');
+    expect(res.reason).toContain('deny-dominates across their newest verdicts');
+    expect(res.reason).toContain('scenario X');
   });
 });

@@ -10,6 +10,69 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **F-E2E-011 (crew half) — onboarding is now proven against the REAL engine, not a stubbed
+  launch.** crew#533 (F-2R2-010) made `seatsForWorkflow('onboarding')` return `[]` and pinned it with
+  a unit test over a stubbed `launchRun`; nothing ever handed the seeded def plus `clis: []` to the
+  engine, so its composition with wicked-core's plan-time seat check
+  (`distribute_units_against_benched`, #449) shipped unseen — on 0.7.31 + core-ts 0.7.22 every
+  `Register & onboard` failed ~1 s
+  after launch ("council distribution failed: no eligible seat … every configured seat is benched")
+  before a unit ran, on every repo. `tests/integration/onboarding-launch.test.ts` registers a scratch
+  git repo over `POST /repos` (the studio's path), lets the daemon launch onboarding with the seat
+  pool it hands the engine in production (none), and requires the run to get PAST distribution to
+  its first tool unit — `sessionStarted.cliCount === 0`, no seat refusal, `index` dispatched and the
+  (shimmed, temp-dir) `wicked-estate` actually invoked with the run's bound `{repo_root}` /
+  `{code_graph_db}`, run `completed`. `seatsForWorkflow()` is unchanged (F-2R2-010 stays fixed); the
+  engine side — tool-only plans need no seat — is wicked-core's F-E2E-011 fix, and this test is red
+  until that engine is the one CI builds.
+- **F-E2E-013 — `GET /runs/:id/acceptance` is READ-ONLY and never attributes a verdict the run did
+  not produce.** The route opened the repo's QE ledger as a `DomainStore` and "healed" its index:
+  on a checkout carrying a committed legacy `.wicked-testing/` that CREATED `wicked-qe.db` (+ WAL/
+  SHM) inside the customer's clone, ran a stale-run sweep, bulk-inserted every canonical row
+  (failing on legacy scenarios without `format_version` — the `[wicked-ledger] SQLite write failed`
+  lines), and then served the store's newest verdict as the run's: an onboarding run that failed at
+  plan time answered `gate.verdict: PASS` with a July-2026 QE verdict. The reader
+  (`src/qe/ledger.ts`) now reads the ledger's canonical JSON directly — the ledger's own JSON-only
+  semantics (`*.json`, in-flight `.tmp.*` skipped, soft-deleted dropped, `created_at` desc) —
+  creates, modifies and removes nothing (byte-identical tree, `git status --porcelain` empty), and
+  scopes the read to THE RUN: a verdict is attributed when the caller pins its QE run (`?qeRun=`),
+  when the ledger run/verdict is stamped `crew_run_id` with the crew run id (what a QE writer
+  inside a governed run sees as `WICKED_RUN_ID`), or when its QE run started inside the crew run's
+  recorded lifetime (`sessionStarted` → terminal frame, from the durable event log); the newest
+  attributed verdict governs. Nothing attributed ⇒ `acceptance.verdict: null`, `gate.verdict: null`,
+  and a denial naming what the ledger DOES hold ("holds 1 verdict, newest PASS (…) at …, recorded
+  before this run started (…)"); a record that is not valid JSON is surfaced as
+  `acceptance.error` + "unreadable ⇒ deny", never skipped into a cleaner answer. The body gains
+  `acceptance.attribution` (`pinned` | `stamped` | `run-window` | `none` + reason) and
+  `acceptance.ledgerVerdicts` (additive). Tests: `tests/integration/acceptance-readonly.test.ts`
+  (clean checkout byte-identical + "no ledger"; committed legacy ledger byte-identical, old PASS not
+  attached to a fresh run nor to the observed onboarding shape; pin + containing-lifetime positive
+  controls; truncated record ⇒ named deny), plus the re-storied route / functional / reader suites.
+  - Review round (independent adversarial review of #539, F1–F6): the run's lifetime closes at the
+    FIRST terminal frame anywhere in its log, and the terminal set is pinned from the engine's
+    source — `sessionCompleted` / `sessionFailed` / **`runCancelled`** (the first cut named a
+    `sessionCancelled` frame the engine never emits, so a cancelled run's window never closed and
+    any later QE PASS on the repo was attributed to it — F1); a non-terminal frame after the
+    terminal one never reopens the window (F4); deny-dominates holds ACROSS the attributed QE runs
+    (each QE run's newest verdict is its current judgment; any non-PASS among them denies — a later
+    PASS on scenario Y cannot mask a FAIL on scenario X inside the same crew run — F2), with
+    `acceptance.attributedVerdicts` (additive) counting that set; a QE run with no dated run row is
+    never placed by inference — stamp or pin only — and the denial says how many were skipped (F3);
+    an unreadable event log is named as such instead of "no sessionStarted" (F5); `run-window`
+    linkage is labelled **INFERRED** in `gate.reason` (`describeAttribution`), so an operator can
+    tell it from a writer's `crew_run_id` stamp or a caller's pin (F6 — garden's QE runner stamping
+    `WICKED_RUN_ID` is a wave-7 follow-up). Round 2 (N1): a `resumed` frame after `sessionFailed`
+    REOPENS the window until the run's next terminal frame — a failed run rescued with
+    `POST /runs/:id/resume` completes under the same id, and the QE evidence it records after the
+    rescue is its own (the first-terminal rule had denied it as "outside this run's lifetime");
+    `sessionCompleted` and `runCancelled` stay final, because the engine refuses to resume either.
+    Round 3 (N3): the reopen also fires on the rescued run's first execution frame
+    (`unitDispatched` / `unitExecuting` / `toolExecutorDispatched` / `unitDistributed`) — the
+    engine's resume path emits no `resumed` frame (that frame is gate approval's), so a rescued
+    run's LIVE segment no longer reads as closed at the failure while it is still executing.
+
 ## [0.7.31] — 2026-09-12
 
 Release train (wave 6) — **core-ts 0.7.22 / studio 0.5.8 / garden 12.34.0 / interactive 0.9.1 /

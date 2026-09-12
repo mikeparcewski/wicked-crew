@@ -4,19 +4,23 @@
 // server, a real registered git repo whose worktree carries the REAL ledger garden's 6b run left
 // behind, a real governed run launched over POST /runs against a user-registered workflow that
 // declares the acceptance requirement (`verified_evidence: true`) — and the gate resolution read
-// back over GET /runs/:id/acceptance FLIPS when the ledger's newest verdict flips:
+// back over GET /runs/:id/acceptance follows what the ledger records ABOUT THIS RUN (F-E2E-013):
 //
-//   PASS fixture  → gate { required: true, satisfied: true,  verdict: PASS }
-//   FAIL recorded → gate { required: true, satisfied: false, verdict: FAIL } (deny-dominates)
+//   pre-existing PASS (months old)           → gate { required: true, satisfied: false, verdict: null }
+//                                              — the repo has evidence; this run produced none
+//   FAIL by a QE run started inside the run  → gate { required: true, satisfied: false, verdict: FAIL }
+//   PASS stamped with the crew run id        → gate { required: true, satisfied: true,  verdict: PASS }
+//   ?qeRun=<the old PASS>                    → still addressable — history is not rewritten
 //
-// The FAIL is created through the wicked-ledger API itself — the same store the QE pipeline
-// writes — not by hand-editing files, so the flip exercises the real data contract both ways.
+// The FAIL and PASS are created through the wicked-ledger API itself — the same store the QE
+// pipeline writes — not by hand-editing files, so the flips exercise the real data contract, and
+// the read side never writes: the run's `.wicked-testing/` gains no `wicked-qe.db` from a GET.
 //
 // Two engine behaviors this test deliberately RIDES rather than works around:
 //  - wicked-core auto-pins its built-in evidence floor onto any `verified_evidence` phase with no
 //    validator (FINDING-055), and the stub CLI produces no evidence, so the RUN itself ends
 //    `failed` — the engine's own gate deny-dominating at its layer. The acceptance route reads
-//    regardless of run status: what the QE ledger says about the REPO is a different question from
+//    regardless of run status: what the QE ledger says about THIS RUN is a different question from
 //    how the run went, and 6a's gate answers the former.
 //  - registerRepo requires a real git repository, so the workspace is `git init`ed.
 
@@ -24,16 +28,21 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { CreateInput } from 'wicked-ledger';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { EVIDENCE_FLOOR_PIN } from '../../src/core/deliver.js';
 import { createServer } from '../../src/api/server.js';
+import { CREW_RUN_ID_FIELD } from '../../src/qe/ledger.js';
+import type { RecordedEvent } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
+/** The 6b QE run the fixture records (its PASS verdict landed 2026-08-12T02:31:41Z). */
+const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -141,8 +150,24 @@ afterAll(async () => {
   removeScratch(dir);
 });
 
+/** The crew run's recorded lifetime, from its durable log — what a QE run must have started inside. */
+async function runWindow(): Promise<{ startedAt: number; finishedAt: number }> {
+  const { body } = await getJson(`/api/v1/runs/${runId}/events`);
+  const events = body['events'] as RecordedEvent[];
+  const started = events.find((e) => e.type === 'sessionStarted');
+  expect(started, 'the run must have recorded sessionStarted').toBeDefined();
+  // The engine's terminal frames, as it spells them (wicked-core event.rs): NOT `sessionCancelled`.
+  const last = events[events.length - 1]!;
+  expect(['sessionCompleted', 'sessionFailed', 'runCancelled']).toContain(last.type);
+  return { startedAt: started!.ts, finishedAt: last.ts };
+}
+
+/** The QE runs the tests below record, in order — later cases reason about earlier ones. */
+let failRunId: string;
+let stampedRunId: string;
+
 describe('functional: the 6a acceptance gate over a real daemon + real ledger', () => {
-  it('resolves the governed run as SATISFIED while the ledger holds the PASS', async () => {
+  it("does NOT attribute the ledger's pre-existing PASS to the run — the run recorded no evidence (F-E2E-013)", async () => {
     const { status, body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
     expect(status).toBe(200);
 
@@ -150,29 +175,42 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
     // the phase sequence (the engine reports an instance workflow id).
     expect(body['requirement']).toEqual({ declared: true, phases: ['accept'] });
     expect(body['repo']).toMatchObject({ name: 'qe-accept-ws', rootPath: workspace });
+    // The ledger IS found and reported — as what the repo holds, not as this run's evidence.
     expect(body['acceptance']).toMatchObject({
       ledgerDir: '.wicked-testing',
       found: true,
-      verdict: { verdict: 'PASS', reviewer: 'wicked-garden-qe-acceptance-test-reviewer' },
-      manifest: { manifestVersion: '1.1.0', artifactCount: 9 },
+      verdict: null,
+      qeRun: null,
+      manifest: null,
+      ledgerVerdicts: 1,
+      attribution: { kind: 'none' },
     });
-    expect(body['gate']).toMatchObject({
-      required: true,
-      satisfied: true,
-      verdict: 'PASS',
-      runStatus: 'passed',
-    });
+    expect(body['gate']).toMatchObject({ required: true, satisfied: false, verdict: null, runStatus: null });
+    const reason = (body['gate'] as { reason: string }).reason;
+    expect(reason).toMatch(/no verdict attributed to this run/);
+    expect(reason).toContain('newest PASS');
+    expect(reason).toContain('before this run started');
+
+    // And the GET wrote nothing into the checkout: no derived index materialised on a read.
+    for (const stray of ['wicked-qe.db', 'wicked-qe.db-wal', 'wicked-qe.db-shm']) {
+      expect(existsSync(join(workspace, '.wicked-testing', stray)), `${stray} created by a GET`).toBe(false);
+    }
   });
 
-  it('FLIPS to denied when a FAIL verdict is recorded through the ledger API', async () => {
-    // The same write path the QE pipeline uses: run row + FAIL verdict row.
+  it('attributes a FAIL recorded by a QE run that started INSIDE the run — and denies (deny-dominates)', async () => {
+    // The same write path the QE pipeline uses: run row + FAIL verdict row. The QE run's start is
+    // placed inside the crew run's lifetime, as a pipeline running in one of its units would be.
+    const { startedAt } = await runWindow();
     const { createDomainStore } = await import('wicked-ledger');
     const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
-    const passRun = store.list('runs')[0]!;
+    // The WRITER owns the derived index: the fixture ships JSON-only, so the pipeline side builds
+    // it before writing — the read side never does this on its behalf any more (F-E2E-013).
+    store.rebuildIndex();
+    const passRun = store.get('runs', QE_RUN_ID)!;
     const failRun = store.create('runs', {
       project_id: passRun.project_id,
       scenario_id: passRun.scenario_id,
-      started_at: new Date().toISOString(),
+      started_at: new Date(startedAt + 1).toISOString(),
       status: 'running',
     });
     store.update('runs', failRun.id, { status: 'failed', finished_at: new Date().toISOString() });
@@ -182,6 +220,7 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
       reviewer: 'functional-6a',
       reason: 'induced failure: step 2 asserted exit 0, observed exit 1',
     });
+    failRunId = failRun.id;
 
     const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
     expect(body['gate']).toMatchObject({
@@ -190,13 +229,93 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
       verdict: 'FAIL',
       runStatus: 'failed',
     });
-    expect((body['gate'] as { reason: string }).reason).toContain('induced failure');
+    const reason = (body['gate'] as { reason: string }).reason;
+    expect(reason).toContain('induced failure');
+    // The linkage is INFERRED from the run's lifetime, and the reason says so (F6).
+    expect(reason).toContain('INFERRED from this run\'s lifetime');
     expect(body['acceptance']).toMatchObject({
       verdict: { verdict: 'FAIL', reviewer: 'functional-6a' },
+      attribution: { kind: 'run-window', qeRunId: failRun.id },
+      ledgerVerdicts: 2,
+      attributedVerdicts: 1,
+    });
+  });
+
+  it('a later PASS STAMPED with the crew run id on ANOTHER QE run is attributed — but does not lift the FAIL (deny-dominates across QE runs, F2)', async () => {
+    // A QE writer inside a governed run sees the run id as WICKED_RUN_ID; recording it on the ledger
+    // run is the explicit linkage. This one starts AFTER the crew run finished (a post-hoc review),
+    // which the lifetime rule alone would not attribute — the stamp does. It is a DIFFERENT QE run
+    // (another scenario) than the one that failed, so its PASS must not mask that FAIL: both QE
+    // runs are this crew run's, and one of them still says FAIL.
+    const { finishedAt } = await runWindow();
+    const { createDomainStore } = await import('wicked-ledger');
+    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    const passRun = store.get('runs', QE_RUN_ID)!;
+    const stampedRun = store.create('runs', {
+      project_id: passRun.project_id,
+      scenario_id: passRun.scenario_id,
+      started_at: new Date(Math.max(Date.now(), finishedAt + 1)).toISOString(),
+      finished_at: new Date(Math.max(Date.now(), finishedAt + 2)).toISOString(),
+      status: 'passed',
+      [CREW_RUN_ID_FIELD]: runId,
+    } as unknown as CreateInput<'runs'>);
+    store.create('verdicts', {
+      run_id: stampedRun.id,
+      verdict: 'PASS',
+      reviewer: 'functional-6a-review',
+      reason: 'all assertions pass (scenario Y)',
+    });
+    stampedRunId = stampedRun.id;
+
+    const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
+    // Two attributed QE runs; the newest non-PASS among their newest verdicts governs.
+    expect(body['gate']).toMatchObject({ required: true, satisfied: false, verdict: 'FAIL', runStatus: 'failed' });
+    const reason = (body['gate'] as { reason: string }).reason;
+    expect(reason).toContain('2 QE runs are attributed to this run');
+    expect(reason).toContain('deny-dominates across their newest verdicts');
+    expect(body['acceptance']).toMatchObject({
+      verdict: { verdict: 'FAIL', reviewer: 'functional-6a' },
+      attribution: { kind: 'run-window', qeRunId: failRunId },
+      ledgerVerdicts: 3,
+      attributedVerdicts: 2,
+    });
+  });
+
+  it('once the failing QE run is re-reviewed PASS, every attributed QE run passes and the gate satisfies', async () => {
+    // Supersession stays PER QE RUN: the re-review is the failing run's newest verdict, so the
+    // deny-dominates set is now {PASS, PASS} and the newest PASS governs.
+    const { createDomainStore } = await import('wicked-ledger');
+    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    store.create('verdicts', {
+      run_id: failRunId,
+      verdict: 'PASS',
+      reviewer: 'functional-6a-rereview',
+      reason: 're-review: the failing step was environmental; all assertions pass',
     });
 
-    // …and the original PASS run is still addressable — history is not rewritten.
-    const pinned = await getJson(`/api/v1/runs/${runId}/acceptance?qeRun=${passRun.id}`);
+    const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
+    expect(body['gate']).toMatchObject({ required: true, satisfied: true, verdict: 'PASS', runStatus: 'passed' });
+    expect((body['gate'] as { reason: string }).reason).toContain('2 QE runs are attributed to this run');
+    expect(body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', reviewer: 'functional-6a-rereview' },
+      attribution: { kind: 'run-window', qeRunId: failRunId },
+      ledgerVerdicts: 4,
+      attributedVerdicts: 2,
+    });
+    // The stamped QE run is still addressable on its own.
+    const pinned = await getJson(`/api/v1/runs/${runId}/acceptance?qeRun=${stampedRunId}`);
+    expect(pinned.body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', reviewer: 'functional-6a-review' },
+      attribution: { kind: 'pinned', qeRunId: stampedRunId },
+    });
+  });
+
+  it('the historical PASS stays addressable by explicit pin — history is not rewritten', async () => {
+    const pinned = await getJson(`/api/v1/runs/${runId}/acceptance?qeRun=${QE_RUN_ID}`);
     expect(pinned.body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
+    expect(pinned.body['acceptance']).toMatchObject({
+      verdict: { qeRunId: QE_RUN_ID, reviewer: 'wicked-garden-qe-acceptance-test-reviewer' },
+      attribution: { kind: 'pinned', qeRunId: QE_RUN_ID },
+    });
   });
 });
