@@ -22,6 +22,7 @@
 
 import { broadcast } from '../events/bus.js';
 import type { CoreEvent } from '../core/types.js';
+import { busSubscriberErrorReporter } from '../interactive/bus-subscriber-errors.js';
 
 /** Crew's bus DOMAIN COLUMN value — the product-scoped plugin name, matching the repo precedent
  *  (`INTERACTIVE_DOMAIN = 'wicked-interactive'`). The EVENT TYPES carry the §4 grammar's bare
@@ -52,6 +53,8 @@ export interface ProjectBusOptions {
   /** Poll cadence for the /ws bridge subscriber, ms (tests shorten it). */
   pollIntervalMs?: number;
   log?: (msg: string) => void;
+  /** Error-level logger for connection-fatal subscriber errors (the /diagnostics ring folds it); defaults to `log`. */
+  logError?: (msg: string) => void;
 }
 
 /**
@@ -132,11 +135,13 @@ export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<Pro
           ts: event.emitted_at,
         } as unknown as CoreEvent);
       },
-      onError: (err, event) => {
-        log(
+      onError: busSubscriberErrorReporter({
+        describe: (err, event) =>
           `[projects] /ws bridge error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
-        );
-      },
+        log,
+        logError: opts.logError,
+        pollIntervalMs: opts.pollIntervalMs ?? 2000,
+      }),
     });
   } catch (err) {
     log(
