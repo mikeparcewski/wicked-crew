@@ -39,6 +39,8 @@ function stateWith(verdict: string, reason: string | null = null): QeAcceptanceS
     },
     manifest: null,
     manifestPath: null,
+    attribution: { kind: 'run-window', qeRunId: 'r-1', qeRunStartedAt: '2026-08-12T00:00:00Z' },
+    ledgerVerdicts: 1,
   };
 }
 
@@ -91,6 +93,8 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
+      attribution: { kind: 'none', reason: 'no ledger' },
+      ledgerVerdicts: 0,
     });
     expect(res.satisfied).toBe(false);
     expect(res.reason).toContain('/repo/.wicked-qe');
@@ -107,10 +111,12 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
-      error: 'SQLITE_CORRUPT: database disk image is malformed',
+      attribution: { kind: 'none', reason: 'the ledger could not be read' },
+      ledgerVerdicts: 0,
+      error: 'verdicts/7ae4f27c.json: not valid JSON (Unexpected end of JSON input)',
     });
     expect(res.satisfied).toBe(false);
-    expect(res.reason).toContain('SQLITE_CORRUPT');
+    expect(res.reason).toContain('verdicts/7ae4f27c.json: not valid JSON');
     expect(res.reason).toMatch(/unreadable ⇒ deny/);
   });
 
@@ -122,9 +128,38 @@ describe('resolveAcceptanceGate', () => {
       verdict: null,
       manifest: null,
       manifestPath: null,
+      attribution: { kind: 'none', reason: 'the ledger records no verdict' },
+      ledgerVerdicts: 0,
     });
     expect(res.satisfied).toBe(false);
     expect(res.reason).toMatch(/records no verdict/);
+  });
+
+  it("denies a ledger whose verdicts are none of THIS run's, naming what it holds (F-E2E-013)", () => {
+    // The regression: a repo's committed legacy ledger held a two-month-old PASS, and a run that
+    // recorded no evidence was served it as its own. "Has verdicts" and "has this run's verdict"
+    // are different facts, and the denial must say which one failed.
+    const res = resolveAcceptanceGate(true, {
+      root: '/repo/.wicked-testing',
+      found: true,
+      run: null,
+      verdict: null,
+      manifest: null,
+      manifestPath: null,
+      attribution: {
+        kind: 'none',
+        reason:
+          'the ledger holds 1 verdict, newest PASS (v-old) at 2026-07-15T22:00:00.000Z, recorded ' +
+          'before this run started (2026-09-12T04:17:21.914Z); none is stamped with run 4f67808a',
+      },
+      ledgerVerdicts: 1,
+    });
+    expect(res).toMatchObject({ satisfied: false, verdict: null, runStatus: null });
+    expect(res.reason).toMatch(/no verdict attributed to this run/);
+    expect(res.reason).toContain('before this run started');
+    expect(res.reason).toMatch(/unattributed ⇒ deny/);
+    // Not the "empty ledger" wording — that remedy (run QE) is the wrong one here.
+    expect(res.reason).not.toMatch(/records no verdict/);
   });
 
   it('satisfies on a clean PASS, citing the verdict', () => {

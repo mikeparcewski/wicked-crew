@@ -47,7 +47,13 @@ import type {
 import { basename } from 'node:path';
 import { DELIVER_PHASE_ID } from '../core/deliver.js';
 import { DELIVERABLE_FLOOR_PHASE_ID } from '../core/deliverable-floor.js';
-import type { QeAcceptanceState, QeManifestSummary } from './ledger.js';
+import type {
+  QeAcceptanceState,
+  QeAttribution,
+  QeManifestSummary,
+  ReadSubject,
+  RunLinkage,
+} from './ledger.js';
 import { readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
 import type { RunConformance } from './conformance.js';
@@ -191,10 +197,21 @@ export function resolveAcceptanceGate(
     };
   }
   if (state.verdict === null) {
+    if (state.ledgerVerdicts === 0) {
+      return {
+        ...base,
+        satisfied: false,
+        reason: `QE ledger at ${state.root} records no verdict (missing ⇒ deny)`,
+      };
+    }
+    // The ledger has verdicts — none of them is THIS run's (F-E2E-013). A verdict that
+    // predates the run, or belongs to a QE run nothing ties to it, is evidence about the repo's
+    // past, not about this run; serving it as the run's PASS was the regression.
+    const why = state.attribution.kind === 'none' ? state.attribution.reason : 'not attributed';
     return {
       ...base,
       satisfied: false,
-      reason: `QE ledger at ${state.root} records no verdict (missing ⇒ deny)`,
+      reason: `QE ledger at ${state.root} holds no verdict attributed to this run — ${why} (unattributed ⇒ deny)`,
     };
   }
   if (verdict === null) {
@@ -269,6 +286,14 @@ export interface AcceptanceView {
       qeRunId: string;
     } | null;
     manifest: QeManifestSummary | null;
+    /**
+     * How `verdict` was tied to THIS run (`pinned` by `?qeRun`, `stamped` with the run id by the
+     * writer, or a QE run inside the run's lifetime) — or `none`, with the reason naming what the
+     * ledger does hold. The body never serves a repo-wide "newest verdict" as the run's (F-E2E-013).
+     */
+    attribution: QeAttribution;
+    /** How many live verdicts the whole ledger holds, attributed or not. */
+    ledgerVerdicts: number;
     error?: string;
   } | null;
   gate: AcceptanceGateResolution;
@@ -282,9 +307,44 @@ export interface AcceptanceView {
   busEvent: QeGateEventEntry | null;
 }
 
+/** The frames that close a run's lifetime when one of them is the log's LAST entry. */
+const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'sessionCompleted',
+  'sessionFailed',
+  'sessionCancelled',
+]);
+
 /**
- * Assemble the acceptance view for one crew run: read the ledger (lazy read —
- * the fallback that needs no bus), resolve the gate, and attach the freshest
+ * The crew run's lifetime as its durable event log records it — the window a QE run must have
+ * started inside to count as this run's evidence (F-E2E-013).
+ *
+ * `startedAt` is the capture time of the `sessionStarted` frame (the earliest frame's, for a log
+ * that lacks one); `finishedAt` is the last frame's capture time when that frame is terminal — a
+ * log that ends mid-flight belongs to a live run, whose window stays open. A `null` or empty log
+ * places the run nowhere in time, so it can link nothing: evidence that cannot be placed inside
+ * the run is not the run's evidence.
+ */
+export function runWindowFromEvents(events: RecordedEvent[] | null, runId: string): RunLinkage {
+  if (events === null || events.length === 0) return { runId, startedAt: null, finishedAt: null };
+  const at = (e: RecordedEvent): number | null =>
+    typeof e.ts === 'number' && Number.isFinite(e.ts) ? e.ts : null;
+  const started = events.find((e) => e.type === 'sessionStarted');
+  let startedAt = started !== undefined ? at(started) : null;
+  if (startedAt === null) {
+    for (const e of events) {
+      const t = at(e);
+      if (t !== null && (startedAt === null || t < startedAt)) startedAt = t;
+    }
+  }
+  const last = events[events.length - 1]!;
+  const finishedAt = TERMINAL_EVENT_TYPES.has(last.type) ? at(last) : null;
+  return { runId, startedAt, finishedAt };
+}
+
+/**
+ * Assemble the acceptance view for one crew run: read the run's event log,
+ * read the ledger SCOPED TO THIS RUN (a read-only canonical-JSON read — the
+ * fallback that needs no bus), resolve the gate, and attach the freshest
  * matching bus event when the opt-in subscription has seen one.
  */
 export async function buildAcceptanceView(opts: {
@@ -309,13 +369,24 @@ export async function buildAcceptanceView(opts: {
   const phases = acceptancePhaseIds(opts.workflow);
   const required = phases.length > 0;
 
-  const state =
-    opts.repo !== null
-      ? await readAcceptanceState(
-          opts.repo.root_path,
-          opts.qeRunId !== undefined ? { qeRunId: opts.qeRunId } : undefined,
-        )
-      : null;
+  // The run's durable event log, read FIRST: it is both the conformance section's enforcement
+  // record and the ledger read's linkage — a verdict is this run's only if its QE run falls inside
+  // the lifetime the log records (or the writer stamped the run id). An unreadable or absent log
+  // means an unknown window, and an unknown window links nothing (F-E2E-013).
+  let eventRows: RecordedEvent[] | null = null;
+  if (opts.events !== undefined) {
+    try {
+      eventRows = await opts.events(opts.runId);
+    } catch {
+      eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
+    }
+  }
+  const subject: ReadSubject =
+    opts.qeRunId !== undefined
+      ? { qeRunId: opts.qeRunId }
+      : { run: runWindowFromEvents(eventRows, opts.runId) };
+
+  const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
   const gate = resolveAcceptanceGate(required, state);
 
   // The conformance half. Loader failures are NAMED, not flattened into an empty list — the
@@ -330,14 +401,6 @@ export async function buildAcceptanceView(opts: {
     }
   } else {
     claimsError = 'claims loader not wired';
-  }
-  let eventRows: RecordedEvent[] | null = null;
-  if (opts.events !== undefined) {
-    try {
-      eventRows = await opts.events(opts.runId);
-    } catch {
-      eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
-    }
   }
   const conformance = resolveConformance({
     runId: opts.runId,
@@ -394,6 +457,8 @@ export async function buildAcceptanceView(opts: {
                   }
                 : null,
             manifest: state.manifest !== null ? summarizeManifest(state.manifest) : null,
+            attribution: state.attribution,
+            ledgerVerdicts: state.ledgerVerdicts,
             ...(state.error !== undefined ? { error: state.error } : {}),
           }
         : null,

@@ -10,6 +10,47 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **F-E2E-011 (crew half) — onboarding is now proven against the REAL engine, not a stubbed
+  launch.** crew#533 (F-2R2-010) made `seatsForWorkflow('onboarding')` return `[]` and pinned it with
+  a unit test over a stubbed `launchRun`; nothing ever handed the seeded def plus `clis: []` to the
+  engine, so its composition with wicked-core's plan-time seat check
+  (`distribute_units_against_benched`, #449) shipped unseen — on 0.7.31 + core-ts 0.7.22 every
+  `Register & onboard` failed ~1 s
+  after launch ("council distribution failed: no eligible seat … every configured seat is benched")
+  before a unit ran, on every repo. `tests/integration/onboarding-launch.test.ts` registers a scratch
+  git repo over `POST /repos` (the studio's path), lets the daemon launch onboarding with the seat
+  pool it hands the engine in production (none), and requires the run to get PAST distribution to
+  its first tool unit — `sessionStarted.cliCount === 0`, no seat refusal, `index` dispatched and the
+  (shimmed, temp-dir) `wicked-estate` actually invoked with the run's bound `{repo_root}` /
+  `{code_graph_db}`, run `completed`. `seatsForWorkflow()` is unchanged (F-2R2-010 stays fixed); the
+  engine side — tool-only plans need no seat — is wicked-core's F-E2E-011 fix, and this test is red
+  until that engine is the one CI builds.
+- **F-E2E-013 — `GET /runs/:id/acceptance` is READ-ONLY and never attributes a verdict the run did
+  not produce.** The route opened the repo's QE ledger as a `DomainStore` and "healed" its index:
+  on a checkout carrying a committed legacy `.wicked-testing/` that CREATED `wicked-qe.db` (+ WAL/
+  SHM) inside the customer's clone, ran a stale-run sweep, bulk-inserted every canonical row
+  (failing on legacy scenarios without `format_version` — the `[wicked-ledger] SQLite write failed`
+  lines), and then served the store's newest verdict as the run's: an onboarding run that failed at
+  plan time answered `gate.verdict: PASS` with a July-2026 QE verdict. The reader
+  (`src/qe/ledger.ts`) now reads the ledger's canonical JSON directly — the ledger's own JSON-only
+  semantics (`*.json`, in-flight `.tmp.*` skipped, soft-deleted dropped, `created_at` desc) —
+  creates, modifies and removes nothing (byte-identical tree, `git status --porcelain` empty), and
+  scopes the read to THE RUN: a verdict is attributed when the caller pins its QE run (`?qeRun=`),
+  when the ledger run/verdict is stamped `crew_run_id` with the crew run id (what a QE writer
+  inside a governed run sees as `WICKED_RUN_ID`), or when its QE run started inside the crew run's
+  recorded lifetime (`sessionStarted` → terminal frame, from the durable event log); the newest
+  attributed verdict governs. Nothing attributed ⇒ `acceptance.verdict: null`, `gate.verdict: null`,
+  and a denial naming what the ledger DOES hold ("holds 1 verdict, newest PASS (…) at …, recorded
+  before this run started (…)"); a record that is not valid JSON is surfaced as
+  `acceptance.error` + "unreadable ⇒ deny", never skipped into a cleaner answer. The body gains
+  `acceptance.attribution` (`pinned` | `stamped` | `run-window` | `none` + reason) and
+  `acceptance.ledgerVerdicts` (additive). Tests: `tests/integration/acceptance-readonly.test.ts`
+  (clean checkout byte-identical + "no ledger"; committed legacy ledger byte-identical, old PASS not
+  attached to a fresh run nor to the observed onboarding shape; pin + containing-lifetime positive
+  controls; truncated record ⇒ named deny), plus the re-storied route / functional / reader suites.
+
 ## [0.7.31] — 2026-09-12
 
 Release train (wave 6) — **core-ts 0.7.22 / studio 0.5.8 / garden 12.34.0 / interactive 0.9.1 /

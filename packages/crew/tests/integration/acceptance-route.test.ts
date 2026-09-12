@@ -1,12 +1,14 @@
 // `GET /runs/:id/acceptance` — the acceptance gate's read surface (Phase 6a).
 //
 // Pins the route contract over a REAL ledger (the committed 6b fixture): a governed run whose
-// repo carries a PASS ledger reads satisfied; the same requirement over a repo with NO ledger — or
-// a run with no repo at all — reads denied with a reason naming the remedy; an ungoverned run is
-// vacuously satisfied and labeled as such. Engine reads (`sessionsDetail`, `listRepos`) are
-// stubbed exactly as gate-route.test.ts stubs them, because the branch matrix here is over run
-// shape × ledger state, not over engine behavior — the functional test drives the same route
-// through a real stub-engine run.
+// lifetime contains the repo's PASS reads satisfied; the same requirement over a repo with NO
+// ledger — or a run with no repo at all — reads denied with a reason naming the remedy; an
+// ungoverned run is vacuously satisfied and labeled as such; and (F-E2E-013) a FRESH run over the
+// same ledger is NOT handed the repo's older PASS — a verdict is this run's only when its QE run
+// is stamped with the run id or started inside the run's recorded lifetime. Engine reads
+// (`sessionsDetail`, `listRepos`, `runEvents`) are stubbed exactly as gate-route.test.ts stubs
+// them, because the branch matrix here is over run shape × ledger state × run lifetime, not over
+// engine behavior — the functional test drives the same route through a real stub-engine run.
 //
 // The last block proves the OPT-IN bus seam end to end: a server created with qeGateEvents enabled
 // against a temp bus db sees a `wicked.qe.gate.passed` emitted through the real wicked-bus API
@@ -21,16 +23,23 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
-import type { RepoEntry, SessionView } from '../../src/core/types.js';
+import type { RecordedEvent, RepoEntry, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 const QE_RUN_ID = '7ec47687-fb15-4592-bf69-5121359f8bab';
+/** The fixture's QE run started 2026-08-12T02:17:34.799Z and its verdict landed at 02:31:41Z. */
+const BEFORE_FIXTURE = Date.parse('2026-08-12T02:00:00.000Z');
+const AFTER_FIXTURE = Date.parse('2026-08-12T03:00:00.000Z');
 
 const GOVERNED = 'governed-run';
 const UNGOVERNED = 'ungoverned-run';
 const REPOLESS = 'repoless-run';
 const BARE_REPO_RUN = 'bare-repo-run';
+/** A governed run over the SAME ledger that started today — the fixture is not its evidence. */
+const FRESH = 'fresh-run';
+/** A run whose event log records nothing — no lifetime, so no linkage. */
+const NO_HISTORY = 'no-history-run';
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -46,6 +55,24 @@ function view(id: string, workflowId: string, repoRef: string | null): SessionVi
 
 function repoEntry(id: string, rootPath: string): RepoEntry {
   return { id, name: id, root_path: rootPath, default_branch: 'main', registered_at: 0 };
+}
+
+function ev(type: string, session: string, ts: number, seq: number): RecordedEvent {
+  return { type, session, ts, seq } as unknown as RecordedEvent;
+}
+
+/** Each run's durable log — its lifetime is what the ledger read links against. */
+function historyOf(runId: string): RecordedEvent[] {
+  switch (runId) {
+    case FRESH:
+      // Started now, still live: everything the fixture holds predates it.
+      return [ev('sessionStarted', runId, Date.now(), 1)];
+    case NO_HISTORY:
+      return [];
+    default:
+      // Started before the fixture's QE run, completed after its verdict: contains it.
+      return [ev('sessionStarted', runId, BEFORE_FIXTURE, 1), ev('sessionCompleted', runId, AFTER_FIXTURE, 2)];
+  }
 }
 
 beforeAll(async () => {
@@ -65,11 +92,14 @@ beforeAll(async () => {
     view(UNGOVERNED, 'survey-repo', 'repo-ledger'),
     view(REPOLESS, 'feature', null),
     view(BARE_REPO_RUN, 'feature', 'repo-bare'),
+    view(FRESH, 'feature', 'repo-ledger'),
+    view(NO_HISTORY, 'feature', 'repo-ledger'),
   ];
   adapter.listRepos = async () => [
     repoEntry('repo-ledger', withLedger),
     repoEntry('repo-bare', bare),
   ];
+  adapter.runEvents = async (runId: string) => historyOf(runId);
 
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
@@ -100,7 +130,7 @@ describe('GET /runs/:id/acceptance', () => {
     expect(res.body['error']).toBe('Run not found');
   });
 
-  it('serves the ledger verdict + manifest summary and satisfies the gate on PASS', async () => {
+  it('serves the ledger verdict + manifest summary and satisfies the gate on a PASS inside the run', async () => {
     const res = await getAcceptance(GOVERNED);
     expect(res.status).toBe(200);
     expect(res.body['requirement']).toEqual({ declared: true, phases: ['test'] });
@@ -111,6 +141,8 @@ describe('GET /runs/:id/acceptance', () => {
       verdict: { verdict: 'PASS', reviewer: 'wicked-garden-qe-acceptance-test-reviewer' },
       qeRun: { id: QE_RUN_ID, status: 'passed' },
       manifest: { manifestVersion: '1.1.0', artifactCount: 9, scenarioName: 'csv-stats-basic' },
+      attribution: { kind: 'run-window', qeRunId: QE_RUN_ID },
+      ledgerVerdicts: 1,
     });
     expect(res.body['gate']).toMatchObject({
       required: true,
@@ -120,10 +152,52 @@ describe('GET /runs/:id/acceptance', () => {
     });
   });
 
+  it("does NOT attribute the repo's older PASS to a fresh run that recorded no evidence (F-E2E-013)", async () => {
+    // The regression, as observed: an onboarding run that failed at plan time was answered with a
+    // July QE PASS from wicked-core's committed legacy ledger — `gate.verdict: PASS` for a run
+    // nothing in that ledger knows about. The ledger is still reported (found, how many verdicts,
+    // what the newest is) — as what the REPO holds, not as this run's evidence.
+    const res = await getAcceptance(FRESH);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({
+      ledgerDir: '.wicked-testing',
+      found: true,
+      verdict: null,
+      qeRun: null,
+      manifest: null,
+      ledgerVerdicts: 1,
+      attribution: { kind: 'none' },
+    });
+    const reason = field<{ attribution: { reason: string } }>(res.body, 'acceptance').attribution.reason;
+    expect(reason).toContain('newest PASS');
+    expect(reason).toContain('before this run started');
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: false, verdict: null, runStatus: null });
+    expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/no verdict attributed to this run/);
+    expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/unattributed ⇒ deny/);
+  });
+
+  it('links nothing for a run with no recorded history — and says that is why', async () => {
+    const res = await getAcceptance(NO_HISTORY);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({ found: true, verdict: null, attribution: { kind: 'none' } });
+    expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/start is not recorded/);
+    expect(res.body['gate']).toMatchObject({ satisfied: false, verdict: null });
+  });
+
+  it("an explicit ?qeRun pin attributes on the caller's say-so — even for a fresh run", async () => {
+    const res = await getAcceptance(FRESH, `?qeRun=${QE_RUN_ID}`);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', qeRunId: QE_RUN_ID },
+      attribution: { kind: 'pinned', qeRunId: QE_RUN_ID },
+    });
+    expect(res.body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
+  });
+
   it('denies a governed run whose repo has no ledger — missing evidence, with the probed path', async () => {
     const res = await getAcceptance(BARE_REPO_RUN);
     expect(res.status).toBe(200);
-    expect(res.body['acceptance']).toMatchObject({ found: false, verdict: null });
+    expect(res.body['acceptance']).toMatchObject({ found: false, verdict: null, ledgerVerdicts: 0 });
     expect(res.body['gate']).toMatchObject({ required: true, satisfied: false, verdict: null });
     expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/no QE ledger at .*bare/);
   });
@@ -143,7 +217,7 @@ describe('GET /runs/:id/acceptance', () => {
     expect(res.body['requirement']).toEqual({ declared: false, phases: [] });
     expect(res.body['gate']).toMatchObject({ required: false, satisfied: true });
     expect(field<{ reason: string }>(res.body, 'gate').reason).toMatch(/no acceptance requirement/);
-    // The read is still honest about what the ledger holds — display, not gate input.
+    // The read is still honest about what the ledger holds FOR THIS RUN — display, not gate input.
     expect(field<{ verdict: unknown }>(res.body, 'acceptance').verdict).toMatchObject({ verdict: 'PASS' });
   });
 
