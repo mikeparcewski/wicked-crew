@@ -147,6 +147,14 @@ export interface AgentSession {
   clis: string[];
   status: SessionStatus;
   human_confirm: HumanConfirm;
+  /**
+   * Whether the run's deliver phase may push and open its PR WITHOUT a human confirming it
+   * first (F-E2E-030; additive). `false` — the engine pauses before the `deliver` Tool unit
+   * whatever `human_confirm` says; `true` — the launch opted out explicitly (`deliverGate:
+   * 'auto'`). ABSENT on runs from an engine that predates the deliver gate (wicked-core-ts <
+   * 0.7.24): such an engine delivers unattended — render no gate promise for it.
+   */
+  auto_deliver?: boolean;
   unit_ix: number;
   attempt: number;
   workdir: string | null;
@@ -3000,6 +3008,18 @@ export interface LaunchRunBody {
    * omit the field entirely against pre-0.18 servers.
    */
   deliver?: 'pr' | 'none';
+  /**
+   * Who confirms the deliver phase (F-E2E-030; additive). `'human'` — the default when omitted:
+   * the ENGINE pauses before the composed `deliver` Tool unit pushes the run branch and opens the
+   * PR, whatever `humanConfirm` says (the push leaves the machine under the daemon's active gh
+   * account, so it is confirmed unless the caller opts out). `'auto'` — the caller's EXPLICIT
+   * opt-out: the push and PR follow verify unattended; a client sending it must name the posture
+   * "auto-deliver" to its operator. `humanConfirm: 'none'` is NOT an opt-out (it is that field's
+   * default and typo fallback). Requires wicked-core-ts ≥ 0.7.24 / crew ≥ 0.7.33 for the gate to
+   * exist at all — read `AgentSession.auto_deliver` to learn whether the engine knows it. An
+   * older daemon's launch schema rejects the field with a 400 — omit it against such servers.
+   */
+  deliverGate?: 'human' | 'auto';
   /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with

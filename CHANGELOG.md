@@ -50,6 +50,17 @@ mentioned only where a daemon release depends on them.
   log line and `/diagnostics.recentErrors` only** — `/health` stays unconditional and the studio Health
   rail does not read `recentErrors`; a `/diagnostics.bus` findings block and the studio fold are the
   wave-7 follow-up.
+- **`deliverGate: 'human' | 'auto'` on `POST /runs` (acceptance finding F-E2E-030).** Run
+  `0ab5ccb8` launched under the studio's default posture (`humanConfirm: before:1`) pushed its
+  branch and opened wicked-studio#268 with no human gate, under whatever gh account the daemon
+  held. The ENGINE now gates the composed `deliver` Tool unit by default (wicked-core#456:
+  `LaunchOptions.autoDeliver`, core-ts ≥ 0.7.24). The daemon maps ONLY an explicit
+  `deliverGate: 'auto'` to the engine's opt-out (`LaunchRunInput.autoDeliver: true`); omitted,
+  `'human'`, and `humanConfirm: 'none'` all leave the gate in place — the wire never has to say
+  "gate me" to be gated. Unknown values 400. Additive: `LaunchRunBody.deliverGate` and
+  `AgentSession.auto_deliver?: boolean` (absent on runs from an engine that predates the gate)
+  on `wicked-crew-api-types`; the adapter sends `autoDeliver` to the addon only when true, so an
+  older addon (which has no deliver gate to opt out of) behaves exactly as before.
 
 ## [0.7.32] — 2026-09-12
 

@@ -41,6 +41,15 @@ export interface LaunchRunInput {
   entityMode?: string;
   /** Human-confirm gate policy: `none` (default) | `all` | `before:<ord>`. */
   humanConfirm?: string;
+  /**
+   * EXPLICIT opt-out of the engine's deliver gate (F-E2E-030). The composed `deliver` Tool phase
+   * pauses for a human before it pushes the run branch and opens the PR — whatever `humanConfirm`
+   * says — unless this is `true` (wicked-core `LaunchSpec.auto_deliver`). The HTTP boundary sets
+   * it ONLY from an explicit `deliverGate: 'auto'` on `POST /runs`; omitted, `false`, and
+   * `deliverGate: 'human'` all reach the engine as the gate. Never derived from `humanConfirm`:
+   * `none` is that field's default and typo fallback, not a statement about delivery.
+   */
+  autoDeliver?: boolean;
   /** Id of a registered repo to run within. Omit for a repo-less run. */
   repoRef?: string;
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */

@@ -104,6 +104,56 @@ describe('POST /runs deliver option (crew#293)', () => {
     expect(input.deliver).toBe('pr');
   });
 
+  // F-E2E-030 — the deliver gate: the engine confirms the push by default; only an explicit
+  // `deliverGate: 'auto'` reaches the adapter as `autoDeliver: true`.
+  it('deliverGate:"auto" threads autoDeliver: true to launchRun (the explicit opt-out)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'auto' },
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.deliver).toBe('pr');
+    expect(input.autoDeliver).toBe(true);
+  });
+
+  it('omitting deliverGate, or sending "human", leaves autoDeliver OFF the input — the gate is the engine default', async () => {
+    for (const extra of [{}, { deliverGate: 'human' }]) {
+      mockAdapter.launchRun.mockClear();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/runs',
+        payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', ...extra },
+      });
+      expect(res.statusCode).toBe(201);
+      const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+      expect('autoDeliver' in input).toBe(false);
+    }
+  });
+
+  it('humanConfirm:"none" is NOT a deliver-gate opt-out (it is that field\'s default and typo fallback)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', humanConfirm: 'none' },
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.humanConfirm).toBe('none');
+    expect('autoDeliver' in input).toBe(false);
+  });
+
+  it('400 on an unknown deliverGate — "human" and "auto" are the only two', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'yolo' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(mockAdapter.launchRun).not.toHaveBeenCalled();
+  });
+
   it('omitting deliver on a REPO-LESS workflow launch leaves the field off entirely (crew#393)', async () => {
     const res = await app.inject({
       method: 'POST',

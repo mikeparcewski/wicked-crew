@@ -470,6 +470,12 @@ export const LaunchSchema = z.object({
    *  defaults to `"pr"` (flippable via the `deliverDefault` setting), everything else to
    *  `"none"` — see the resolution below. */
   deliver: z.enum(['pr', 'none']).optional(),
+  /** F-E2E-030 — who confirms the deliver phase. `'human'` (the default when omitted): the engine
+   *  pauses before the composed `deliver` Tool unit pushes and opens the PR, whatever
+   *  `humanConfirm` says. `'auto'`: the caller's EXPLICIT opt-out — the push and PR follow verify
+   *  unattended, under the daemon's active gh account; a UI sending it must name the posture
+   *  "auto-deliver" to its operator. Additive; an older daemon's schema rejects it with a 400. */
+  deliverGate: z.enum(['human', 'auto']).optional(),
   /** DES-UX-001 §8.3 (CREW-UX-3) — the run this launch retries. Must name an EXISTING run id
    *  (the route checks the store and 400s with a named error otherwise); persisted via the
    *  `run.launched` audit entry + retry index and echoed as `AgentSession.retry_of`. */
@@ -1345,6 +1351,10 @@ export function registerRoutes(
     };
     if (b.entityMode !== undefined) input.entityMode = b.entityMode;
     if (b.humanConfirm !== undefined) input.humanConfirm = b.humanConfirm;
+    // F-E2E-030: only the explicit `'auto'` opts out of the engine's deliver gate. `'human'` and
+    // an omitted field both leave `autoDeliver` off the input — the gate is the engine's default,
+    // so the wire never has to say "gate me" to be gated.
+    if (b.deliverGate === 'auto') input.autoDeliver = true;
     if (b.repoRef !== undefined) input.repoRef = b.repoRef;
     if (b.workflow !== undefined) input.workflow = b.workflow;
     if (b.projectId !== undefined) {
