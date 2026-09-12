@@ -1230,6 +1230,18 @@ export class CoreAdapter {
     return this.core.ping();
   }
 
+  /**
+   * What THIS daemon's engine addon can do — served on `GET /health.capabilities` so a client
+   * (the studio composer) promises only what the deployment keeps. `deliverGate`: the engine
+   * pauses before the composed `deliver` phase unless the launch opted out (F-E2E-030,
+   * wicked-core-ts ≥ 0.7.24). Version-derived like the other addon probes above — a napi object
+   * silently ignores fields an older addon does not declare, so the version is the only honest
+   * signal until the field lands.
+   */
+  engineCapabilities(): { deliverGate: boolean } {
+    return { deliverGate: addonAtLeast(0, 7, 24) };
+  }
+
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {

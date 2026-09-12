@@ -144,6 +144,17 @@ describe('POST /runs deliver option (crew#293)', () => {
     expect('autoDeliver' in input).toBe(false);
   });
 
+  it('400 on deliverGate with deliver:"none" — nothing to gate, said loudly', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'none', deliverGate: 'auto' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).toMatch(/no deliver phase to gate/);
+    expect(mockAdapter.launchRun).not.toHaveBeenCalled();
+  });
+
   it('400 on an unknown deliverGate — "human" and "auto" are the only two', async () => {
     const res = await app.inject({
       method: 'POST',
@@ -338,5 +349,37 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect(input.deliver).toBe('pr');
+  });
+});
+
+// F-E2E-030 — `GET /health.capabilities.deliverGate`: the composer promises the gate only when the
+// deployment keeps it.
+describe('GET /health capabilities (F-E2E-030)', () => {
+  it('reports the engine probe when the adapter has one', async () => {
+    const app = buildApp({
+      launchRun: vi.fn(),
+      getSettings: vi.fn(),
+      getWorkflow: vi.fn(),
+      ping: vi.fn().mockResolvedValue('ok'),
+      engineCapabilities: vi.fn().mockReturnValue({ deliverGate: true }),
+    } as unknown as MockAdapter);
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'ok', ping: 'ok', capabilities: { deliverGate: true } });
+    await app.close();
+  });
+
+  it('reports NO deliver gate when the adapter cannot probe the addon — never an invented capability', async () => {
+    const app = buildApp({
+      launchRun: vi.fn(),
+      getSettings: vi.fn(),
+      getWorkflow: vi.fn(),
+      ping: vi.fn().mockResolvedValue('ok'),
+    } as unknown as MockAdapter);
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(res.json().capabilities).toEqual({ deliverGate: false });
+    await app.close();
   });
 });

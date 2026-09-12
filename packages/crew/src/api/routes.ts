@@ -493,6 +493,12 @@ export const LaunchSchema = z.object({
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
+}).refine((b) => b.deliverGate === undefined || b.deliver !== 'none', {
+  // F-E2E-030: a deliver-gate posture on a launch that declines delivery is a contradiction the
+  // caller should hear about, not a silent no-op. (A launch that OMITS `deliver` may still
+  // resolve to no deliver unit — repo-less, free-text, read-only def; the field is then inert.)
+  message: 'deliverGate has no meaning with deliver: "none" — there is no deliver phase to gate',
+  path: ['deliverGate'],
 }).refine((b) => b.campaignId === undefined || b.groupLabel === undefined, {
   message:
     'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)',
@@ -879,7 +885,14 @@ export function registerRoutes(
   // null / [] for the rest ("where declared", never invented). See src/api/endpoint-manifest.ts.
   app.get(`${V}/health`, { config: { manifest: { statusCodes: [200] } } }, async () => {
     const ping = await adapter.ping();
-    return { status: 'ok', version: PKG_VERSION, ping };
+    // F-E2E-030: what this deployment can keep. A composer reads `capabilities.deliverGate`
+    // before it promises "pauses at the deliver gate"; a stub-driven route set without the
+    // probe honestly reports no gate.
+    const capabilities =
+      typeof adapter.engineCapabilities === 'function'
+        ? adapter.engineCapabilities()
+        : { deliverGate: false };
+    return { status: 'ok', version: PKG_VERSION, ping, capabilities };
   });
 
   // The daemon's self-knowledge surface (diagnostics): what is deployed, what it stores, what

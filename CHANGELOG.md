@@ -59,8 +59,13 @@ mentioned only where a daemon release depends on them.
   `'human'`, and `humanConfirm: 'none'` all leave the gate in place — the wire never has to say
   "gate me" to be gated. Unknown values 400. Additive: `LaunchRunBody.deliverGate` and
   `AgentSession.auto_deliver?: boolean` (absent on runs from an engine that predates the gate)
-  on `wicked-crew-api-types`; the adapter sends `autoDeliver` to the addon only when true, so an
-  older addon (which has no deliver gate to opt out of) behaves exactly as before.
+  on `wicked-crew-api-types` **0.37.0** (bumped here; the release train tags `api-types-v0.37.0`);
+  `deliverGate` with `deliver: "none"` is a 400 (nothing to gate). The adapter sends `autoDeliver`
+  to the addon only when true, so an older addon (which has no deliver gate to opt out of) behaves
+  exactly as before — and **`GET /health` gains `capabilities: { deliverGate: boolean }`**
+  (`HealthResponse` declared in api-types 0.37.0), version-derived from the installed addon
+  (≥ 0.7.24), so a composer promises "pauses at the deliver gate" only when the deployment keeps
+  it and never sends `deliverGate` to a daemon that would reject it.
 
 ## [0.7.32] — 2026-09-12
 

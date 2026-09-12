@@ -137,6 +137,24 @@ export type RoutingInfo =
   | { method: 'evaluator_distinct'; winner: string; was: string }
   | { method: 'tool' };
 
+/**
+ * `GET /health` (api-types 0.37.0 — the shape was previously undeclared here; `status`,
+ * `version` and `ping` are unchanged since 0.1). `capabilities` (additive) names what the
+ * running daemon + its engine addon can actually do, so a client never promises a behaviour the
+ * deployment cannot keep:
+ *   - `deliverGate` — the engine pauses before the composed `deliver` phase pushes and opens the
+ *     PR unless the launch said `deliverGate: 'auto'` (F-E2E-030; wicked-core-ts ≥ 0.7.24).
+ *     `false` (or the whole object absent — a daemon before 0.7.33) ⇒ delivery follows verify
+ *     UNATTENDED; a composer must say so instead of promising a gate, and must not send
+ *     `deliverGate` (an older daemon's launch schema rejects it).
+ */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  ping: string;
+  capabilities?: { deliverGate: boolean };
+}
+
 /** A run (`AgentSession`). */
 export interface AgentSession {
   id: string;
@@ -149,7 +167,7 @@ export interface AgentSession {
   human_confirm: HumanConfirm;
   /**
    * Whether the run's deliver phase may push and open its PR WITHOUT a human confirming it
-   * first (F-E2E-030; additive). `false` — the engine pauses before the `deliver` Tool unit
+   * first (F-E2E-030; api-types 0.37.0, additive). `false` — the engine pauses before the `deliver` Tool unit
    * whatever `human_confirm` says; `true` — the launch opted out explicitly (`deliverGate:
    * 'auto'`). ABSENT on runs from an engine that predates the deliver gate (wicked-core-ts <
    * 0.7.24): such an engine delivers unattended — render no gate promise for it.
@@ -3009,7 +3027,7 @@ export interface LaunchRunBody {
    */
   deliver?: 'pr' | 'none';
   /**
-   * Who confirms the deliver phase (F-E2E-030; additive). `'human'` — the default when omitted:
+   * Who confirms the deliver phase (F-E2E-030; api-types 0.37.0, additive). `'human'` — the default when omitted:
    * the ENGINE pauses before the composed `deliver` Tool unit pushes the run branch and opens the
    * PR, whatever `humanConfirm` says (the push leaves the machine under the daemon's active gh
    * account, so it is confirmed unless the caller opts out). `'auto'` — the caller's EXPLICIT
