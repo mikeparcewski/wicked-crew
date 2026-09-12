@@ -253,6 +253,9 @@ describe('crew#418 A — a deliver lift collision strands the run, end-to-end th
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
     });
     expect(launch.status).toBe(201);
     const runId = (launch.body as { runId: string }).runId;

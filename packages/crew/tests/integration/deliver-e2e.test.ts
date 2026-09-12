@@ -245,6 +245,9 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
       // deliver DELIBERATELY OMITTED — the crew#393 default must engage it.
     });
     expect(launch.status).toBe(201);
@@ -279,6 +282,9 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
       deliver: 'none',
     });
     expect(launch.status).toBe(201);
