@@ -282,9 +282,7 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
-      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
-      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
-      deliverGate: 'auto',
+      // No deliverGate here: `deliver: 'none'` has no deliver phase to gate, and #543's schema refuses the pair.
       deliver: 'none',
     });
     expect(launch.status).toBe(201);
