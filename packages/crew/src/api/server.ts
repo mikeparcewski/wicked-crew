@@ -364,7 +364,11 @@ export async function createServer(
   // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
   // so a seat signed in from the System page is eligible on the very next launch.
   const rosterWithStanding = rosterWithStandingFactory({ seatHealth });
-  adapter.setRosterProvider(rosterWithStanding);
+  // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
+  // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
+  if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {
+    adapter.setRosterProvider(rosterWithStanding);
+  }
 
   // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
   // a malformed token file or a configured-but-unimplemented OIDC block must
