@@ -24,6 +24,8 @@
  * `deny_unknown_fields`), so the stamp is additive there and effective on the wave-6 engine.
  */
 
+import type { CampaignDef } from './types.js';
+
 /** The crew-only readings `GET /roster` adds to a registry seat — never handed to the engine. */
 export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
   'health',
@@ -114,6 +116,32 @@ export function engineRosterJson(clisJson: string): string {
   }
   if (!Array.isArray(parsed)) return clisJson;
   return JSON.stringify(toEngineRoster(parsed));
+}
+
+/**
+ * Translate a `CampaignDef` for the engine (F-086). Every node's `run_spec.clis` goes through
+ * {@link toEngineRoster} — the ONLY seat list the def carries (`CampaignDef` has no def-level
+ * roster; `campaigns/plan.ts` stamps the roster per node). `CoreAdapter.launchCampaign` used to
+ * `JSON.stringify(def)` verbatim, so a def built from `rosterWithStanding()` (`POST /testing/recon`)
+ * reached core-ts ≥ 0.7.22 (wicked-core#449) with crew's `health {status}` intact and the engine
+ * refused it ("defJson is not a valid CampaignDef: missing field `usable`") — the campaign seam now
+ * translates exactly as `launchRun` does through {@link engineRosterJson}.
+ *
+ * Non-mutating: the caller's def, nodes and run_specs are left as built (the route's audit record
+ * and the recon response read them after the launch). A node whose `clis` is not an array passes
+ * through unchanged so the engine reports its own parse error, the {@link engineRosterJson} rule.
+ */
+export function engineCampaignDef(def: CampaignDef): CampaignDef {
+  return {
+    ...def,
+    nodes: def.nodes.map((node) => ({
+      ...node,
+      run_spec: {
+        ...node.run_spec,
+        clis: Array.isArray(node.run_spec.clis) ? toEngineRoster(node.run_spec.clis) : node.run_spec.clis,
+      },
+    })),
+  };
 }
 
 /** The seat keys of a roster the ENGINE would convene — every seat not benched by its `health`. */

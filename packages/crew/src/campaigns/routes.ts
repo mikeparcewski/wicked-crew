@@ -92,7 +92,9 @@ export const LaunchCampaignSchema = z
 export interface CampaignRoutesDeps extends RollupDeps {
   audit: AuditLog;
   actorOf: (req: FastifyRequest & { actor?: Actor }) => Actor;
-  /** The default council roster for agent scenarios (already parsed). */
+  /** The default council roster for agent scenarios (already parsed) — WITH crew's standing
+   *  (`council_eligible` …), which the adapter translates into the engine's per-seat `health` at
+   *  launch, per node (`core/engine-roster.ts` `engineCampaignDef`, F-086). */
   roster: () => unknown[];
 }
 

@@ -4137,7 +4137,11 @@ export function registerRoutes(
   registerCampaignRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // The roster WITH crew's standing (F-086 — parity with POST /runs and POST /testing/*): the
+    // adapter turns `council_eligible` into the engine's per-seat bench at launch, per campaign
+    // node (`core/engine-roster.ts` `engineCampaignDef`), so a signed-out seat is never convened
+    // by a campaign node either.
+    roster: () => rosterWithStanding(),
     groupIndex,
     // Wave 6 (F-7R2-014): the registered test sets ride beside the campaigns + groups.
     testSets,
@@ -4159,7 +4163,9 @@ export function registerRoutes(
   registerGovernanceSteeringRoutes(app, adapter, {
     audit,
     actorOf,
-    roster: () => CoreAdapter.roster(),
+    // Standing too (F-086 parity): the steering-author run launches through `launchRun`, whose
+    // roster translation (`engineRosterJson`) already benches `council_eligible: false` seats.
+    roster: () => rosterWithStanding(),
     // So the steering-author run's `run.launched` entry stamps `created_at` live too (Copilot #466).
     runTimingIndex,
   });
