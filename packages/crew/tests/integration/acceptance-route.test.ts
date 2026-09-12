@@ -17,7 +17,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { cpSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +40,16 @@ const BARE_REPO_RUN = 'bare-repo-run';
 const FRESH = 'fresh-run';
 /** A run whose event log records nothing — no lifetime, so no linkage. */
 const NO_HISTORY = 'no-history-run';
+/** Cancelled (the engine's `runCancelled` frame) BEFORE the fixture's QE run started (review F1). */
+const CANCELLED = 'cancelled-run';
+/** Failed before the QE run, then a straggling non-terminal frame — must not reopen the window (F4). */
+const POST_TERMINAL = 'post-terminal-run';
+/** A run whose event log cannot be read at all (F5). */
+const UNREADABLE_LOG = 'unreadable-log-run';
+/** A run that contains TWO QE runs: run B FAILED at 02:25, run A (the fixture) PASSED later at 02:31 (F2). */
+const CROSS_RUN = 'cross-run';
+const BEFORE_QE_RUN = Date.parse('2026-08-12T01:00:00.000Z');
+const CANCEL_AT = Date.parse('2026-08-12T01:05:00.000Z');
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -69,6 +79,17 @@ function historyOf(runId: string): RecordedEvent[] {
       return [ev('sessionStarted', runId, Date.now(), 1)];
     case NO_HISTORY:
       return [];
+    case CANCELLED:
+      // The engine's cancel frame is `runCancelled` (wicked-core event.rs) — not `sessionCancelled`.
+      return [ev('sessionStarted', runId, BEFORE_QE_RUN, 1), ev('runCancelled', runId, CANCEL_AT, 2)];
+    case POST_TERMINAL:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('heartbeat', runId, CANCEL_AT + 60_000, 3),
+      ];
+    case UNREADABLE_LOG:
+      throw new Error('event-log read binding missing (older addon)');
     default:
       // Started before the fixture's QE run, completed after its verdict: contains it.
       return [ev('sessionStarted', runId, BEFORE_FIXTURE, 1), ev('sessionCompleted', runId, AFTER_FIXTURE, 2)];
@@ -84,6 +105,40 @@ beforeAll(async () => {
   cpSync(join(FIXTURE, '.wicked-testing'), join(withLedger, '.wicked-testing'), { recursive: true });
   const bare = join(dir, 'bare');
   mkdirSync(bare);
+  // A third workspace: the fixture PLUS a second QE run (B) that started 02:20 and FAILED at 02:25 —
+  // canonical JSON written as the ledger writes it (the reader reads files, not a store).
+  const crossRun = join(dir, 'cross-run');
+  mkdirSync(crossRun);
+  cpSync(join(FIXTURE, '.wicked-testing'), join(crossRun, '.wicked-testing'), { recursive: true });
+  writeFileSync(
+    join(crossRun, '.wicked-testing', 'runs', 'qe-run-b.json'),
+    JSON.stringify({
+      id: 'qe-run-b',
+      project_id: 'da838fff-9bd7-45df-a452-853516bdd7ae',
+      scenario_id: 'other-scenario',
+      started_at: '2026-08-12T02:20:00.000Z',
+      finished_at: '2026-08-12T02:25:00.000Z',
+      status: 'failed',
+      created_at: '2026-08-12T02:20:00.000Z',
+      updated_at: '2026-08-12T02:25:00.000Z',
+      deleted: 0,
+      deleted_at: null,
+    }),
+  );
+  writeFileSync(
+    join(crossRun, '.wicked-testing', 'verdicts', 'fail-run-b.json'),
+    JSON.stringify({
+      id: 'fail-run-b',
+      run_id: 'qe-run-b',
+      verdict: 'FAIL',
+      reviewer: 'route-test',
+      reason: 'scenario X: step 3 asserted 200, got 500',
+      created_at: '2026-08-12T02:25:00.000Z',
+      updated_at: '2026-08-12T02:25:00.000Z',
+      deleted: 0,
+      deleted_at: null,
+    }),
+  );
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
   adapter.sessionsDetail = async () => [
@@ -94,10 +149,15 @@ beforeAll(async () => {
     view(BARE_REPO_RUN, 'feature', 'repo-bare'),
     view(FRESH, 'feature', 'repo-ledger'),
     view(NO_HISTORY, 'feature', 'repo-ledger'),
+    view(CANCELLED, 'feature', 'repo-ledger'),
+    view(POST_TERMINAL, 'feature', 'repo-ledger'),
+    view(UNREADABLE_LOG, 'feature', 'repo-ledger'),
+    view(CROSS_RUN, 'feature', 'repo-cross'),
   ];
   adapter.listRepos = async () => [
     repoEntry('repo-ledger', withLedger),
     repoEntry('repo-bare', bare),
+    repoEntry('repo-cross', crossRun),
   ];
   adapter.runEvents = async (runId: string) => historyOf(runId);
 
@@ -150,6 +210,9 @@ describe('GET /runs/:id/acceptance', () => {
       verdict: 'PASS',
       runStatus: 'passed',
     });
+    // The linkage is inferred from the run's lifetime, and the reason says so (review F6).
+    expect(field<{ reason: string }>(res.body, 'gate').reason).toContain("INFERRED from this run's lifetime");
+    expect(field<{ attributedVerdicts: number }>(res.body, 'acceptance').attributedVerdicts).toBe(1);
   });
 
   it("does NOT attribute the repo's older PASS to a fresh run that recorded no evidence (F-E2E-013)", async () => {
@@ -225,6 +288,58 @@ describe('GET /runs/:id/acceptance', () => {
     const res = await getAcceptance(GOVERNED, `?qeRun=${QE_RUN_ID}`);
     expect(res.status).toBe(200);
     expect(field<{ verdict: { qeRunId: string } }>(res.body, 'acceptance').verdict.qeRunId).toBe(QE_RUN_ID);
+  });
+
+  it("a CANCELLED run's window closes at the engine's `runCancelled` frame — a later QE PASS is not its evidence (review F1)", async () => {
+    // Reproduced in review: cancel 01:05, QE PASS 02:17 → attributed, gate PASS. The first cut
+    // named a `sessionCancelled` frame the engine never emits, so the window never closed.
+    const res = await getAcceptance(CANCELLED);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({ found: true, verdict: null, qeRun: null, attributedVerdicts: 0, attribution: { kind: 'none' } });
+    const reason = field<{ attribution: { reason: string } }>(res.body, 'acceptance').attribution.reason;
+    expect(reason).toMatch(/outside this run's lifetime/);
+    expect(reason).toContain('finished 2026-08-12T01:05:00.000Z');
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: false, verdict: null, runStatus: null });
+  });
+
+  it('a non-terminal frame after the terminal one does not reopen the window (review F4)', async () => {
+    const res = await getAcceptance(POST_TERMINAL);
+    expect(res.body['acceptance']).toMatchObject({ verdict: null, attributedVerdicts: 0, attribution: { kind: 'none' } });
+    expect(field<{ attribution: { reason: string } }>(res.body, 'acceptance').attribution.reason).toContain(
+      'finished 2026-08-12T01:05:00.000Z',
+    );
+    expect(res.body['gate']).toMatchObject({ satisfied: false, verdict: null });
+  });
+
+  it('an UNREADABLE event log is named as the cause — not "no sessionStarted" (review F5)', async () => {
+    const res = await getAcceptance(UNREADABLE_LOG);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({ verdict: null, attribution: { kind: 'none' } });
+    const reason = field<{ reason: string }>(res.body, 'gate').reason;
+    expect(reason).toContain("the run's event log could not be read (event-log read binding missing (older addon))");
+    expect(reason).not.toContain('no sessionStarted');
+    expect(res.body['gate']).toMatchObject({ satisfied: false, verdict: null });
+    // The conformance half already reads the same failure as unverifiable enforcement.
+    expect(field<{ enforcement: { status: string } }>(res.body, 'conformance').enforcement.status).toBe('unverifiable');
+  });
+
+  it('deny-dominates ACROSS the attributed QE runs: a later PASS on run A does not mask a FAIL on run B (review F2)', async () => {
+    const res = await getAcceptance(CROSS_RUN);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({
+      ledgerVerdicts: 2,
+      attributedVerdicts: 2,
+      verdict: { id: 'fail-run-b', verdict: 'FAIL', qeRunId: 'qe-run-b' },
+      qeRun: { id: 'qe-run-b', status: 'failed' },
+      attribution: { kind: 'run-window', qeRunId: 'qe-run-b' },
+    });
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: false, verdict: 'FAIL', runStatus: 'failed' });
+    const reason = field<{ reason: string }>(res.body, 'gate').reason;
+    expect(reason).toContain('scenario X');
+    expect(reason).toContain('2 QE runs are attributed to this run');
+    // Each QE run stays individually addressable: the fixture run's PASS by pin.
+    const pinned = await getAcceptance(CROSS_RUN, `?qeRun=${QE_RUN_ID}`);
+    expect(pinned.body['acceptance']).toMatchObject({ verdict: { verdict: 'PASS' }, attribution: { kind: 'pinned' }, attributedVerdicts: 1 });
   });
 });
 

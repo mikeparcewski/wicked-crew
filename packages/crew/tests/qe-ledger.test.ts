@@ -25,6 +25,7 @@ import {
   CREW_RUN_ID_FIELD,
   DEFAULT_QE_LEDGER_DIRNAME,
   LEGACY_QE_LEDGER_DIRNAME,
+  describeAttribution,
   qeLedgerDirName,
   qeLedgerRoot,
   readAcceptanceState,
@@ -162,6 +163,7 @@ describe('readAcceptanceState', () => {
     expect(state.found).toBe(true);
     expect(state.error).toBeUndefined();
     expect(state.ledgerVerdicts).toBe(1);
+    expect(state.attributedVerdicts).toBe(1);
     expect(state.attribution).toEqual({
       kind: 'run-window',
       qeRunId: QE_RUN_ID,
@@ -196,6 +198,7 @@ describe('readAcceptanceState', () => {
     expect(state.error).toBeUndefined();
     // The ledger's contents are reported — as what it holds, not as this run's evidence.
     expect(state.ledgerVerdicts).toBe(1);
+    expect(state.attributedVerdicts).toBe(0);
     expect(state.verdict).toBeNull();
     expect(state.run).toBeNull();
     expect(state.manifest).toBeNull();
@@ -368,5 +371,136 @@ describe('readAcceptanceState', () => {
     expect(state.error).toBeUndefined();
     expect(state.ledgerVerdicts).toBe(1);
     expect(state.verdict?.id).toBe(QE_VERDICT_ID);
+  });
+});
+
+describe('readAcceptanceState — review of #539 (F1-adjacent windows, F2, F3, F5, F6)', () => {
+  const T = (iso: string): number => Date.parse(iso);
+  /** A canonical verdict row as the ledger writes it. */
+  const verdictRow = (id: string, run_id: string, verdict: string, created_at: string) => ({
+    id,
+    run_id,
+    verdict,
+    reviewer: 'qe-ledger-test',
+    reason: `${verdict} by test`,
+    created_at,
+    updated_at: created_at,
+    deleted: 0,
+    deleted_at: null,
+  });
+  /** A canonical run row as the ledger writes it. */
+  const runRow = (id: string, started_at: string, status: string) => ({
+    id,
+    project_id: 'da838fff-9bd7-45df-a452-853516bdd7ae',
+    scenario_id: 'other-scenario',
+    started_at,
+    finished_at: started_at,
+    status,
+    created_at: started_at,
+    updated_at: started_at,
+    deleted: 0,
+    deleted_at: null,
+  });
+  const writeRow = (ws: string, table: string, row: { id: string } & Record<string, unknown>): void => {
+    writeFileSync(join(ws, DEFAULT_QE_LEDGER_DIRNAME, table, `${row.id}.json`), JSON.stringify(row, null, 2));
+  };
+
+  it('a window closed BEFORE the QE run started links nothing — the cancelled-run shape (F1)', async () => {
+    // The route derives this window from the engine's `runCancelled` frame; here the reader is
+    // handed the resulting closed window directly: cancelled 01:05, fixture QE run started 02:17.
+    const ws = workspaceWithLedger();
+    const state = await readAcceptanceState(ws, {
+      run: { runId: 'cancelled', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T01:05:00Z') },
+    });
+    expect(state.verdict).toBeNull();
+    expect(state.attributedVerdicts).toBe(0);
+    expect((state.attribution as { reason: string }).reason).toMatch(/outside this run's lifetime/);
+    expect((state.attribution as { reason: string }).reason).toContain('finished 2026-08-12T01:05:00.000Z');
+  });
+
+  it('deny-dominates ACROSS attributed QE runs: a later PASS on run A does not mask an earlier FAIL on run B (F2)', async () => {
+    const ws = workspaceWithLedger();
+    // QE run B (another scenario) started 02:20 inside the same crew run and FAILED at 02:25; the
+    // fixture's run A PASSED at 02:31 — newer, but a different QE run.
+    writeRow(ws, 'runs', runRow('qe-run-b', '2026-08-12T02:20:00.000Z', 'failed'));
+    writeRow(ws, 'verdicts', verdictRow('fail-run-b', 'qe-run-b', 'FAIL', '2026-08-12T02:25:00.000Z'));
+
+    const state = await readAcceptanceState(ws, runBefore());
+    expect(state.ledgerVerdicts).toBe(2);
+    expect(state.attributedVerdicts).toBe(2);
+    expect(state.verdict?.id).toBe('fail-run-b');
+    expect(state.run?.id).toBe('qe-run-b');
+    expect(state.attribution).toEqual({
+      kind: 'run-window',
+      qeRunId: 'qe-run-b',
+      qeRunStartedAt: '2026-08-12T02:20:00.000Z',
+    });
+
+    // Supersession stays PER QE RUN: once run B is re-reviewed PASS, every attributed run passes
+    // and the newest PASS governs.
+    writeRow(ws, 'verdicts', verdictRow('rereview-run-b', 'qe-run-b', 'PASS', '2026-08-12T02:45:00.000Z'));
+    const healed = await readAcceptanceState(ws, runBefore());
+    expect(healed.attributedVerdicts).toBe(2);
+    expect(healed.verdict?.id).toBe('rereview-run-b');
+
+    // And a crew run whose window closed before run B started never sees run B at all.
+    const closedEarly = await readAcceptanceState(ws, {
+      run: { runId: 'early', startedAt: T('2026-08-12T02:00:00Z'), finishedAt: T('2026-08-12T02:19:00Z') },
+    });
+    expect(closedEarly.attributedVerdicts).toBe(1);
+    expect(closedEarly.verdict?.id).toBe(QE_VERDICT_ID);
+  });
+
+  it('never places a QE run by inference without a DATED run row — a verdict alone cannot say when its run ran (F3)', async () => {
+    const ws = workspaceWithLedger();
+    // A verdict whose `runs/<id>.json` is absent, RECORDED inside a live crew run that started
+    // after the fixture's QE run. The pre-fix reader fell back to the verdict's created_at and
+    // attributed it (the "ghost" probe).
+    writeRow(ws, 'verdicts', verdictRow('ghost-verdict', 'ghost-run', 'PASS', '2026-08-12T02:35:00.000Z'));
+    const live = await readAcceptanceState(ws, {
+      run: { runId: 'late-live', startedAt: T('2026-08-12T02:30:00Z'), finishedAt: null },
+    });
+    expect(live.verdict).toBeNull();
+    expect(live.attributedVerdicts).toBe(0);
+    expect(live.ledgerVerdicts).toBe(2);
+    const reason = (live.attribution as { reason: string }).reason;
+    expect(reason).toContain('across 2 QE runs');
+    expect(reason).toContain('1 QE run has no dated run row and cannot be placed by inference');
+
+    // The dated fixture run still attributes to a run that contains it; the ghost never does.
+    const contained = await readAcceptanceState(ws, runBefore());
+    expect(contained.attributedVerdicts).toBe(1);
+    expect(contained.verdict?.id).toBe(QE_VERDICT_ID);
+
+    // …but a STAMP places it, dated row or not.
+    writeRow(ws, 'verdicts', {
+      ...verdictRow('ghost-stamped', 'ghost-run-2', 'PASS', '2026-08-12T02:36:00.000Z'),
+      [CREW_RUN_ID_FIELD]: 'late-live',
+    });
+    const stamped = await readAcceptanceState(ws, {
+      run: { runId: 'late-live', startedAt: T('2026-08-12T02:30:00Z'), finishedAt: null },
+    });
+    expect(stamped.attribution).toEqual({ kind: 'stamped', qeRunId: 'ghost-run-2' });
+    expect(stamped.run).toBeNull(); // the row is still missing; the stamp is on the verdict
+  });
+
+  it("names an UNREADABLE event log as the reason nothing can be placed — not 'no sessionStarted' (F5)", async () => {
+    const ws = workspaceWithLedger();
+    const state = await readAcceptanceState(ws, {
+      run: { runId: 'x', startedAt: null, finishedAt: null, logUnreadable: 'event-log read binding missing (older addon)' },
+    });
+    expect(state.verdict).toBeNull();
+    const reason = (state.attribution as { reason: string }).reason;
+    expect(reason).toContain("the run's event log could not be read (event-log read binding missing (older addon))");
+    expect(reason).not.toContain('no sessionStarted');
+  });
+
+  it('describeAttribution labels the inferred kind as INFERRED and names stamp and pin (F6)', () => {
+    expect(describeAttribution({ kind: 'run-window', qeRunId: 'q', qeRunStartedAt: '2026-08-12T02:17:34.799Z' })).toBe(
+      "INFERRED from this run's lifetime — QE run q started 2026-08-12T02:17:34.799Z inside it; not stamped by the writer",
+    );
+    expect(describeAttribution({ kind: 'stamped', qeRunId: 'q' })).toContain(`stamped ${CREW_RUN_ID_FIELD}`);
+    expect(describeAttribution({ kind: 'pinned', qeRunId: 'q' })).toContain('caller-asserted');
+    expect(describeAttribution({ kind: 'none', reason: 'why' })).toBe('why');
   });
 });

@@ -50,6 +50,20 @@ mentioned only where a daemon release depends on them.
   (clean checkout byte-identical + "no ledger"; committed legacy ledger byte-identical, old PASS not
   attached to a fresh run nor to the observed onboarding shape; pin + containing-lifetime positive
   controls; truncated record ⇒ named deny), plus the re-storied route / functional / reader suites.
+  - Review round (independent adversarial review of #539, F1–F6): the run's lifetime closes at the
+    FIRST terminal frame anywhere in its log, and the terminal set is pinned from the engine's
+    source — `sessionCompleted` / `sessionFailed` / **`runCancelled`** (the first cut named a
+    `sessionCancelled` frame the engine never emits, so a cancelled run's window never closed and
+    any later QE PASS on the repo was attributed to it — F1); a non-terminal frame after the
+    terminal one never reopens the window (F4); deny-dominates holds ACROSS the attributed QE runs
+    (each QE run's newest verdict is its current judgment; any non-PASS among them denies — a later
+    PASS on scenario Y cannot mask a FAIL on scenario X inside the same crew run — F2), with
+    `acceptance.attributedVerdicts` (additive) counting that set; a QE run with no dated run row is
+    never placed by inference — stamp or pin only — and the denial says how many were skipped (F3);
+    an unreadable event log is named as such instead of "no sessionStarted" (F5); `run-window`
+    linkage is labelled **INFERRED** in `gate.reason` (`describeAttribution`), so an operator can
+    tell it from a writer's `crew_run_id` stamp or a caller's pin (F6 — garden's QE runner stamping
+    `WICKED_RUN_ID` is a wave-7 follow-up).
 
 ## [0.7.31] — 2026-09-12
 

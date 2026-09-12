@@ -26,7 +26,11 @@
  * is served only when it can be tied to that run — see {@link ReadSubject}.
  * "The newest PASS in the store" is not evidence about a run that recorded
  * none (the regression: an onboarding run that failed at plan time was shown a
- * two-month-old PASS from the repo's committed legacy ledger).
+ * two-month-old PASS from the repo's committed legacy ledger). Among the QE
+ * runs that ARE this run's, deny-dominates holds ACROSS them: each QE run's
+ * newest verdict is its current judgment, and one non-PASS among those denies
+ * (review of #539, F2 — a later PASS on scenario Y must not mask a FAIL on
+ * scenario X inside the same crew run).
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -51,7 +55,8 @@ export const LEGACY_QE_LEDGER_DIRNAME = '.wicked-testing';
  * (and/or verdict) it records: the crew run id the engine hands every worker as
  * `WICKED_RUN_ID`. Canonical JSON preserves any field a writer supplies, so this
  * needs no ledger schema change; a record carrying it is attributed to that run
- * regardless of timing.
+ * regardless of timing. (garden's QE runner does not stamp it yet — a wave-7
+ * follow-up; until then lifetime linkage below is the inferred fallback.)
  */
 export const CREW_RUN_ID_FIELD = 'crew_run_id';
 
@@ -94,8 +99,18 @@ export interface RunLinkage {
    * the run's evidence).
    */
   startedAt: number | null;
-  /** Epoch millis the run reached a terminal state; `null` while it is live (window open). */
+  /**
+   * Epoch millis the run reached a terminal state — the FIRST terminal frame in
+   * its log (`sessionCompleted` / `sessionFailed` / `runCancelled`); `null`
+   * while it is live (window open).
+   */
   finishedAt: number | null;
+  /**
+   * Set when the run's event log could not be read at all (the read binding
+   * threw) — a different fact from "the log records no start", with a
+   * different remedy, so the denial names it (review of #539, F5).
+   */
+  logUnreadable?: string;
 }
 
 /**
@@ -111,12 +126,33 @@ export type ReadSubject = { qeRunId: string } | { run: RunLinkage };
 export type QeAttribution =
   /** The caller pinned the QE run (`?qeRun=`); its newest verdict is served. */
   | { kind: 'pinned'; qeRunId: string }
-  /** The ledger run (or verdict) carries `crew_run_id` naming this crew run. */
+  /** The ledger run (or one of its verdicts) carries `crew_run_id` naming this crew run. */
   | { kind: 'stamped'; qeRunId: string }
-  /** The QE run started inside this crew run's recorded lifetime. */
+  /** INFERRED: the QE run started inside this crew run's recorded lifetime (not stamped by the writer). */
   | { kind: 'run-window'; qeRunId: string; qeRunStartedAt: string }
   /** Nothing in the ledger is this run's evidence; `reason` says what the ledger does hold. */
   | { kind: 'none'; reason: string };
+
+/**
+ * One line a human can read on `gate.reason`: HOW the served verdict was tied to
+ * the run, with the inferred kind labelled as such — an operator must be able to
+ * tell "the writer said so" from "it happened while the run was live".
+ */
+export function describeAttribution(a: QeAttribution): string {
+  switch (a.kind) {
+    case 'pinned':
+      return `pinned to QE run ${a.qeRunId} by ?qeRun — caller-asserted linkage`;
+    case 'stamped':
+      return `QE run ${a.qeRunId} is stamped ${CREW_RUN_ID_FIELD} with this run's id by the writer`;
+    case 'run-window':
+      return (
+        `INFERRED from this run's lifetime — QE run ${a.qeRunId} started ${a.qeRunStartedAt} inside it; ` +
+        `not stamped by the writer`
+      );
+    default:
+      return a.reason;
+  }
+}
 
 /**
  * The acceptance-relevant slice of a repo's ledger, scoped to one subject.
@@ -134,7 +170,11 @@ export interface QeAcceptanceState {
   found: boolean;
   /** The QE run the served verdict belongs to, when resolvable. */
   run: RunRecord | null;
-  /** The governing verdict row for the subject — the newest among those attributed to it. */
+  /**
+   * The governing verdict for the subject: among the attributed QE runs' newest
+   * verdicts, the newest non-PASS if there is one (deny-dominates), else the
+   * newest PASS.
+   */
   verdict: VerdictRecord | null;
   /** The public evidence manifest for that run, when present and parseable. */
   manifest: EvidenceManifest | null;
@@ -144,6 +184,11 @@ export interface QeAcceptanceState {
   attribution: QeAttribution;
   /** How many live verdicts the ledger holds in total — the repo-level picture the scoped read was carved from. */
   ledgerVerdicts: number;
+  /**
+   * How many QE runs are attributed to the subject (each contributes its newest
+   * verdict to the deny-dominates set `verdict` was resolved over). 1 for a pin.
+   */
+  attributedVerdicts: number;
   /** Read-layer failure detail (a record could not be read or parsed). */
   error?: string;
 }
@@ -230,18 +275,31 @@ interface Picked {
   verdict: VerdictRecord | null;
   run: RunRecord | null;
   attribution: QeAttribution;
+  attributedVerdicts: number;
+}
+
+/** One QE run as the ledger holds it: its newest verdict, its run row, and whether anything of it is stamped. */
+interface QeRunEntry {
+  newest: VerdictRecord;
+  run: RunRecord | null;
+  stamped: boolean;
 }
 
 /**
  * Pick the verdict attributable to `subject` from the ledger's live verdicts
  * (newest first), resolving each verdict's run lazily.
  *
- * An explicit pin serves that QE run's newest verdict. Otherwise a verdict is
- * ATTRIBUTED when its run (or the verdict itself) is stamped with this crew
- * run's id, or when its QE run started inside the crew run's lifetime; among
- * everything attributed the NEWEST governs — a QE run re-reviewed after its
- * manifest was built keeps the newer verdict row, as before. Nothing else in
- * the store is this run's evidence, however recent or however green.
+ * An explicit pin serves that QE run's newest verdict. Otherwise the ledger is
+ * folded to one entry PER QE RUN (its newest verdict — a QE run re-reviewed
+ * after its manifest was built keeps the newer row, as before), and a QE run
+ * is ATTRIBUTED when its run row or any of its verdicts is stamped with this
+ * crew run's id, or when its run row is dated and that start falls inside the
+ * crew run's lifetime. A QE run with no dated run row is never placed by
+ * inference (review of #539, F3): a verdict's own `created_at` says when it
+ * was RECORDED, not when the QE run ran, and using it would attribute more
+ * eagerly, not less. Across the attributed set deny-dominates holds: the newest
+ * non-PASS governs when there is one, else the newest PASS (F2). Nothing else
+ * in the store is this run's evidence, however recent or however green.
  */
 function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject): Picked {
   if ('qeRunId' in subject) {
@@ -251,68 +309,104 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
         verdict: null,
         run: null,
         attribution: { kind: 'none', reason: `QE run ${subject.qeRunId} has no verdict recorded` },
+        attributedVerdicts: 0,
       };
     }
     return {
       verdict,
       run: getCanonical<RunRecord>(root, 'runs', verdict.run_id),
       attribution: { kind: 'pinned', qeRunId: verdict.run_id },
+      attributedVerdicts: 1,
     };
   }
 
-  const { runId, startedAt, finishedAt } = subject.run;
+  const { runId, startedAt, finishedAt, logUnreadable } = subject.run;
   if (verdicts.length === 0) {
-    return { verdict: null, run: null, attribution: { kind: 'none', reason: 'the ledger records no verdict' } };
+    return {
+      verdict: null,
+      run: null,
+      attribution: { kind: 'none', reason: 'the ledger records no verdict' },
+      attributedVerdicts: 0,
+    };
   }
 
-  // Resolve each verdict's run once.
-  const runs = new Map<string, RunRecord | null>();
-  const runOf = (v: VerdictRecord): RunRecord | null => {
-    if (!runs.has(v.run_id)) runs.set(v.run_id, getCanonical<RunRecord>(root, 'runs', v.run_id));
-    return runs.get(v.run_id) ?? null;
-  };
+  // Fold to one entry per QE run, in newest-verdict order (verdicts are newest first, so the
+  // first verdict seen for a run is its newest, and Map insertion order keeps runs newest-first).
+  const byRun = new Map<string, QeRunEntry>();
+  for (const v of verdicts) {
+    let entry = byRun.get(v.run_id);
+    if (entry === undefined) {
+      entry = { newest: v, run: getCanonical<RunRecord>(root, 'runs', v.run_id), stamped: false };
+      byRun.set(v.run_id, entry);
+    }
+    if (stampedCrewRun(v) === runId) entry.stamped = true;
+  }
+  for (const entry of byRun.values()) {
+    if (stampedCrewRun(entry.run) === runId) entry.stamped = true;
+  }
 
   const windowEnd = finishedAt ?? Date.now();
-  // `verdicts` is newest first, so the first attributed one is the governing one.
-  for (const v of verdicts) {
-    const run = runOf(v);
-    if (stampedCrewRun(run) === runId || stampedCrewRun(v) === runId) {
-      return { verdict: v, run, attribution: { kind: 'stamped', qeRunId: v.run_id } };
+  const attributed: Array<{ verdict: VerdictRecord; run: RunRecord | null; attribution: QeAttribution }> = [];
+  let undatedRuns = 0;
+  for (const [qeRunId, e] of byRun) {
+    if (e.stamped) {
+      attributed.push({ verdict: e.newest, run: e.run, attribution: { kind: 'stamped', qeRunId } });
+      continue;
     }
     if (startedAt === null) continue;
-    // The QE run's own start is the linkage instant; a run row that is missing or undated
-    // falls back to when the verdict was recorded, which is necessarily later than the QE
-    // run started and so can only make the check STRICTER, never attribute too eagerly.
-    const at = epoch(run?.started_at) ?? epoch(run?.created_at) ?? epoch(v.created_at);
-    if (at !== null && at >= startedAt && at <= windowEnd) {
-      return {
-        verdict: v,
-        run,
-        attribution: {
-          kind: 'run-window',
-          qeRunId: v.run_id,
-          qeRunStartedAt: new Date(at).toISOString(),
-        },
-      };
+    // The QE run's own start (the row's `started_at`, else its `created_at`) is the linkage
+    // instant. No dated run row ⇒ no inferred linkage: this QE run can only be attributed by
+    // stamp or pin, and is counted so the denial can say so.
+    const at = epoch(e.run?.started_at) ?? epoch(e.run?.created_at);
+    if (at === null) {
+      undatedRuns++;
+      continue;
     }
+    if (at >= startedAt && at <= windowEnd) {
+      attributed.push({
+        verdict: e.newest,
+        run: e.run,
+        attribution: { kind: 'run-window', qeRunId, qeRunStartedAt: new Date(at).toISOString() },
+      });
+    }
+  }
+
+  if (attributed.length > 0) {
+    // Deny-dominates ACROSS the attributed QE runs: any newest-per-run non-PASS governs (the
+    // newest such, so the reason cites the latest failure); only when every attributed QE run's
+    // newest verdict is PASS does the newest PASS govern.
+    const denying = attributed.find((a) => a.verdict.verdict !== 'PASS');
+    const pick = denying ?? attributed[0]!;
+    return { ...pick, attributedVerdicts: attributed.length };
   }
 
   // Nothing attributed. Say what the ledger DOES hold, so the answer is checkable.
   const newest = verdicts[0]!;
   const held =
-    `the ledger holds ${verdicts.length} verdict${verdicts.length === 1 ? '' : 's'}, ` +
+    `the ledger holds ${verdicts.length} verdict${verdicts.length === 1 ? '' : 's'} across ${byRun.size} QE run${byRun.size === 1 ? '' : 's'}, ` +
     `newest ${newest.verdict} (${newest.id}) at ${newest.created_at}`;
+  const notStamped = `none is stamped with run ${runId}`;
+  const undated =
+    undatedRuns > 0
+      ? `; ${undatedRuns} QE run${undatedRuns === 1 ? ' has' : 's have'} no dated run row and cannot be placed by inference`
+      : '';
+  const none = (reason: string): Picked => ({
+    verdict: null,
+    run: null,
+    attribution: { kind: 'none', reason },
+    attributedVerdicts: 0,
+  });
+  if (logUnreadable !== undefined) {
+    return none(
+      `${held}; ${notStamped}, and the run's event log could not be read (${logUnreadable}), ` +
+        `so no verdict can be placed inside its lifetime${undated}`,
+    );
+  }
   if (startedAt === null) {
-    return {
-      verdict: null,
-      run: null,
-      attribution: {
-        kind: 'none',
-        reason:
-          `${held}; none is stamped with run ${runId}, and the run's start is not recorded ` +
-          `(no sessionStarted in its event log), so no verdict can be placed inside it`,
-      },
-    };
+    return none(
+      `${held}; ${notStamped}, and the run's start is not recorded ` +
+        `(no sessionStarted in its event log), so no verdict can be placed inside its lifetime${undated}`,
+    );
   }
   const started = new Date(startedAt).toISOString();
   const newestAt = epoch(newest.created_at);
@@ -322,14 +416,7 @@ function attribute(root: string, verdicts: VerdictRecord[], subject: ReadSubject
       : `outside this run's lifetime (started ${started}${
           finishedAt !== null ? `, finished ${new Date(finishedAt).toISOString()}` : ', still live'
         })`;
-  return {
-    verdict: null,
-    run: null,
-    attribution: {
-      kind: 'none',
-      reason: `${held}, recorded ${placement}; none is stamped with run ${runId}`,
-    },
-  };
+  return none(`${held}, recorded ${placement}; ${notStamped}${undated}`);
 }
 
 /**
@@ -357,6 +444,7 @@ export async function readAcceptanceState(
     manifestPath: null,
     attribution: { kind: 'none', reason: 'no ledger' },
     ledgerVerdicts: 0,
+    attributedVerdicts: 0,
   };
   // Probe before reading: a read must not install an empty ledger into a repo
   // that never had one, and a missing root is its own answer.
@@ -370,6 +458,7 @@ export async function readAcceptanceState(
     state.verdict = picked.verdict;
     state.run = picked.run;
     state.attribution = picked.attribution;
+    state.attributedVerdicts = picked.attributedVerdicts;
     if (picked.verdict !== null) {
       state.manifestPath = join(root, 'evidence', picked.verdict.run_id, 'manifest.json');
       state.manifest = await readManifest(state.manifestPath);
@@ -384,6 +473,7 @@ export async function readAcceptanceState(
     state.manifest = null;
     state.manifestPath = null;
     state.attribution = { kind: 'none', reason: `the ledger could not be read: ${state.error}` };
+    state.attributedVerdicts = 0;
   }
   return state;
 }

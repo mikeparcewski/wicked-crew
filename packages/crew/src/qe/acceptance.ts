@@ -54,7 +54,7 @@ import type {
   ReadSubject,
   RunLinkage,
 } from './ledger.js';
-import { readAcceptanceState, summarizeManifest } from './ledger.js';
+import { describeAttribution, readAcceptanceState, summarizeManifest } from './ledger.js';
 import type { QeGateCache, QeGateEventEntry } from './gate-events.js';
 import type { RunConformance } from './conformance.js';
 import { resolveConformance } from './conformance.js';
@@ -225,7 +225,14 @@ export function resolveAcceptanceGate(
     };
   }
 
-  const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer}`;
+  // HOW the verdict is this run's rides the reason (review of #539, F6): an inferred lifetime
+  // linkage must read differently from a writer's stamp or a caller's pin — and when several QE
+  // runs are attributed, the reader must know the answer was resolved deny-dominates across them.
+  const breadth =
+    state.attributedVerdicts > 1
+      ? `; ${state.attributedVerdicts} QE runs are attributed to this run — deny-dominates across their newest verdicts`
+      : '';
+  const cite = `verdict ${state.verdict.id} by ${state.verdict.reviewer} (${describeAttribution(state.attribution)}${breadth})`;
   switch (verdict) {
     case 'PASS':
       return { ...base, satisfied: true, reason: `PASS — ${cite}` };
@@ -294,6 +301,11 @@ export interface AcceptanceView {
     attribution: QeAttribution;
     /** How many live verdicts the whole ledger holds, attributed or not. */
     ledgerVerdicts: number;
+    /**
+     * How many QE runs are attributed to this run — the deny-dominates set `verdict` was resolved
+     * over (each contributes its newest verdict; any non-PASS among them denies). 0 when none.
+     */
+    attributedVerdicts: number;
     error?: string;
   } | null;
   gate: AcceptanceGateResolution;
@@ -307,11 +319,19 @@ export interface AcceptanceView {
   busEvent: QeGateEventEntry | null;
 }
 
-/** The frames that close a run's lifetime when one of them is the log's LAST entry. */
-const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+/**
+ * The frames that close a run's lifetime — one per terminal `SessionStatus` the engine defines
+ * (wicked-core `src/domain.rs`: `Completed`, `Failed`, `Cancelled`), spelled as the engine emits
+ * them (`src/event.rs` `event_to_json`: `sessionCompleted`, `sessionFailed`, `runCancelled`).
+ * Pinned from the source, not from memory: the first cut named a `sessionCancelled` frame the
+ * engine never emits, so a CANCELLED run's window never closed and any later QE PASS on the repo
+ * was attributed to it (review of #539, F1). `runOrphaned` is deliberately absent — an orphaned
+ * run is still `executing` and resumable, not finished.
+ */
+export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
   'sessionCompleted',
   'sessionFailed',
-  'sessionCancelled',
+  'runCancelled',
 ]);
 
 /**
@@ -319,12 +339,19 @@ const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
  * started inside to count as this run's evidence (F-E2E-013).
  *
  * `startedAt` is the capture time of the `sessionStarted` frame (the earliest frame's, for a log
- * that lacks one); `finishedAt` is the last frame's capture time when that frame is terminal — a
- * log that ends mid-flight belongs to a live run, whose window stays open. A `null` or empty log
- * places the run nowhere in time, so it can link nothing: evidence that cannot be placed inside
- * the run is not the run's evidence.
+ * that lacks one); `finishedAt` is the capture time of the FIRST terminal frame found anywhere in
+ * the log — once a run has ended, no later frame (a straggling non-terminal one, or a second
+ * terminal one after a resume of a failed run) reopens the window (F1 hardening, F4). A log with
+ * no terminal frame belongs to a live run, whose window stays open. A `null` or empty log places
+ * the run nowhere in time, so it can link nothing — and when the log could not be READ (`unreadable`),
+ * the linkage carries that cause so the denial names it instead of "no sessionStarted" (F5).
  */
-export function runWindowFromEvents(events: RecordedEvent[] | null, runId: string): RunLinkage {
+export function runWindowFromEvents(
+  events: RecordedEvent[] | null,
+  runId: string,
+  unreadable?: string,
+): RunLinkage {
+  if (unreadable !== undefined) return { runId, startedAt: null, finishedAt: null, logUnreadable: unreadable };
   if (events === null || events.length === 0) return { runId, startedAt: null, finishedAt: null };
   const at = (e: RecordedEvent): number | null =>
     typeof e.ts === 'number' && Number.isFinite(e.ts) ? e.ts : null;
@@ -336,8 +363,12 @@ export function runWindowFromEvents(events: RecordedEvent[] | null, runId: strin
       if (t !== null && (startedAt === null || t < startedAt)) startedAt = t;
     }
   }
-  const last = events[events.length - 1]!;
-  const finishedAt = TERMINAL_EVENT_TYPES.has(last.type) ? at(last) : null;
+  let finishedAt: number | null = null;
+  for (const e of events) {
+    if (!TERMINAL_EVENT_TYPES.has(e.type)) continue;
+    const t = at(e);
+    if (t !== null && (finishedAt === null || t < finishedAt)) finishedAt = t;
+  }
   return { runId, startedAt, finishedAt };
 }
 
@@ -374,17 +405,19 @@ export async function buildAcceptanceView(opts: {
   // the lifetime the log records (or the writer stamped the run id). An unreadable or absent log
   // means an unknown window, and an unknown window links nothing (F-E2E-013).
   let eventRows: RecordedEvent[] | null = null;
+  let eventsError: string | undefined;
   if (opts.events !== undefined) {
     try {
       eventRows = await opts.events(opts.runId);
-    } catch {
+    } catch (err) {
       eventRows = null; // unreadable log ⇒ unverifiable enforcement, by resolveConformance's rule
+      eventsError = err instanceof Error ? err.message : String(err);
     }
   }
   const subject: ReadSubject =
     opts.qeRunId !== undefined
       ? { qeRunId: opts.qeRunId }
-      : { run: runWindowFromEvents(eventRows, opts.runId) };
+      : { run: runWindowFromEvents(eventRows, opts.runId, eventsError) };
 
   const state = opts.repo !== null ? await readAcceptanceState(opts.repo.root_path, subject) : null;
   const gate = resolveAcceptanceGate(required, state);
@@ -459,6 +492,7 @@ export async function buildAcceptanceView(opts: {
             manifest: state.manifest !== null ? summarizeManifest(state.manifest) : null,
             attribution: state.attribution,
             ledgerVerdicts: state.ledgerVerdicts,
+            attributedVerdicts: state.attributedVerdicts,
             ...(state.error !== undefined ? { error: state.error } : {}),
           }
         : null,

@@ -156,10 +156,15 @@ async function runWindow(): Promise<{ startedAt: number; finishedAt: number }> {
   const events = body['events'] as RecordedEvent[];
   const started = events.find((e) => e.type === 'sessionStarted');
   expect(started, 'the run must have recorded sessionStarted').toBeDefined();
+  // The engine's terminal frames, as it spells them (wicked-core event.rs): NOT `sessionCancelled`.
   const last = events[events.length - 1]!;
-  expect(['sessionCompleted', 'sessionFailed', 'sessionCancelled']).toContain(last.type);
+  expect(['sessionCompleted', 'sessionFailed', 'runCancelled']).toContain(last.type);
   return { startedAt: started!.ts, finishedAt: last.ts };
 }
+
+/** The QE runs the tests below record, in order — later cases reason about earlier ones. */
+let failRunId: string;
+let stampedRunId: string;
 
 describe('functional: the 6a acceptance gate over a real daemon + real ledger', () => {
   it("does NOT attribute the ledger's pre-existing PASS to the run — the run recorded no evidence (F-E2E-013)", async () => {
@@ -215,6 +220,7 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
       reviewer: 'functional-6a',
       reason: 'induced failure: step 2 asserted exit 0, observed exit 1',
     });
+    failRunId = failRun.id;
 
     const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
     expect(body['gate']).toMatchObject({
@@ -223,18 +229,24 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
       verdict: 'FAIL',
       runStatus: 'failed',
     });
-    expect((body['gate'] as { reason: string }).reason).toContain('induced failure');
+    const reason = (body['gate'] as { reason: string }).reason;
+    expect(reason).toContain('induced failure');
+    // The linkage is INFERRED from the run's lifetime, and the reason says so (F6).
+    expect(reason).toContain('INFERRED from this run\'s lifetime');
     expect(body['acceptance']).toMatchObject({
       verdict: { verdict: 'FAIL', reviewer: 'functional-6a' },
       attribution: { kind: 'run-window', qeRunId: failRun.id },
       ledgerVerdicts: 2,
+      attributedVerdicts: 1,
     });
   });
 
-  it('a later PASS STAMPED with the crew run id satisfies — the writer named the run, timing aside', async () => {
+  it('a later PASS STAMPED with the crew run id on ANOTHER QE run is attributed — but does not lift the FAIL (deny-dominates across QE runs, F2)', async () => {
     // A QE writer inside a governed run sees the run id as WICKED_RUN_ID; recording it on the ledger
     // run is the explicit linkage. This one starts AFTER the crew run finished (a post-hoc review),
-    // which the lifetime rule alone would not attribute — the stamp does.
+    // which the lifetime rule alone would not attribute — the stamp does. It is a DIFFERENT QE run
+    // (another scenario) than the one that failed, so its PASS must not mask that FAIL: both QE
+    // runs are this crew run's, and one of them still says FAIL.
     const { finishedAt } = await runWindow();
     const { createDomainStore } = await import('wicked-ledger');
     const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
@@ -251,16 +263,50 @@ describe('functional: the 6a acceptance gate over a real daemon + real ledger', 
       run_id: stampedRun.id,
       verdict: 'PASS',
       reviewer: 'functional-6a-review',
-      reason: 'all assertions pass on re-review',
+      reason: 'all assertions pass (scenario Y)',
+    });
+    stampedRunId = stampedRun.id;
+
+    const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
+    // Two attributed QE runs; the newest non-PASS among their newest verdicts governs.
+    expect(body['gate']).toMatchObject({ required: true, satisfied: false, verdict: 'FAIL', runStatus: 'failed' });
+    const reason = (body['gate'] as { reason: string }).reason;
+    expect(reason).toContain('2 QE runs are attributed to this run');
+    expect(reason).toContain('deny-dominates across their newest verdicts');
+    expect(body['acceptance']).toMatchObject({
+      verdict: { verdict: 'FAIL', reviewer: 'functional-6a' },
+      attribution: { kind: 'run-window', qeRunId: failRunId },
+      ledgerVerdicts: 3,
+      attributedVerdicts: 2,
+    });
+  });
+
+  it('once the failing QE run is re-reviewed PASS, every attributed QE run passes and the gate satisfies', async () => {
+    // Supersession stays PER QE RUN: the re-review is the failing run's newest verdict, so the
+    // deny-dominates set is now {PASS, PASS} and the newest PASS governs.
+    const { createDomainStore } = await import('wicked-ledger');
+    const store = createDomainStore({ root: join(workspace, '.wicked-testing') });
+    store.create('verdicts', {
+      run_id: failRunId,
+      verdict: 'PASS',
+      reviewer: 'functional-6a-rereview',
+      reason: 're-review: the failing step was environmental; all assertions pass',
     });
 
     const { body } = await getJson(`/api/v1/runs/${runId}/acceptance`);
-    // Newest attributed verdict governs: the stamped PASS is newer than the in-window FAIL.
     expect(body['gate']).toMatchObject({ required: true, satisfied: true, verdict: 'PASS', runStatus: 'passed' });
+    expect((body['gate'] as { reason: string }).reason).toContain('2 QE runs are attributed to this run');
     expect(body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', reviewer: 'functional-6a-rereview' },
+      attribution: { kind: 'run-window', qeRunId: failRunId },
+      ledgerVerdicts: 4,
+      attributedVerdicts: 2,
+    });
+    // The stamped QE run is still addressable on its own.
+    const pinned = await getJson(`/api/v1/runs/${runId}/acceptance?qeRun=${stampedRunId}`);
+    expect(pinned.body['acceptance']).toMatchObject({
       verdict: { verdict: 'PASS', reviewer: 'functional-6a-review' },
-      attribution: { kind: 'stamped', qeRunId: stampedRun.id },
-      ledgerVerdicts: 3,
+      attribution: { kind: 'pinned', qeRunId: stampedRunId },
     });
   });
 
