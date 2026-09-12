@@ -10,6 +10,24 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.32] — 2026-09-12
+
+Release train (hotfix after the clean-run Phase 2 blocker) — **core-ts 0.7.23 / studio 0.5.8 /
+api-types 0.36.0 / bridges 1.1.1.** Pins the published `wicked-core-ts` `^0.7.23` engine
+(wicked-core #452 / #453): **F-7R3-001** — quota-exhausted / rate-limited / not-installed /
+timeout-streak seats are benched for the RUN (a refusal-frame classifier decides; `BenchedSeat.reason`
+is free text to render, never parse; `UnitEvidence.judge_refusals` is additive) so
+`evaluator_distinct` never seats a dead seat, and **F-E2E-011 (engine half)** — tool-only plans need
+no CLI seat, so an empty eligible set is no longer refused when every unit is `executor: tool` (the
+onboarding fix the crew half below proves against the real engine). Bundles the same published
+`wicked-studio` 0.5.8 skin as 0.7.31 (built against `wicked-crew-api-types` 0.36.0), keeps
+`wicked-crew-api-types` 0.36.0 (not re-bumped, not re-tagged; the `BenchedSeat.reason` doc refresh is
+a wave-7 api-types cut) and `agent-acp-bridges` `^1.1.1` and `wicked-interactive@^0.9.1` unchanged.
+
+What merged since 0.7.31 — **#539** (F-E2E-011 crew half: the onboarding launch test against
+the real engine; F-E2E-013: the read-only, run-scoped `GET /runs/:id/acceptance`). Every entry below
+belongs to it.
+
 ### Fixed
 
 - **F-E2E-011 (crew half) — onboarding is now proven against the REAL engine, not a stubbed
@@ -25,8 +43,9 @@ mentioned only where a daemon release depends on them.
   its first tool unit — `sessionStarted.cliCount === 0`, no seat refusal, `index` dispatched and the
   (shimmed, temp-dir) `wicked-estate` actually invoked with the run's bound `{repo_root}` /
   `{code_graph_db}`, run `completed`. `seatsForWorkflow()` is unchanged (F-2R2-010 stays fixed); the
-  engine side — tool-only plans need no seat — is wicked-core's F-E2E-011 fix, and this test is red
-  until that engine is the one CI builds.
+  engine side — tool-only plans need no seat — is wicked-core's F-E2E-011 fix (wicked-core #453),
+  which the `wicked-core-ts` `^0.7.23` pin of this release ships; crew's CI builds core-ts from core
+  main, so the test was red until #453 landed there.
 - **F-E2E-013 — `GET /runs/:id/acceptance` is READ-ONLY and never attributes a verdict the run did
   not produce.** The route opened the repo's QE ledger as a `DomainStore` and "healed" its index:
   on a checkout carrying a committed legacy `.wicked-testing/` that CREATED `wicked-qe.db` (+ WAL/
@@ -2250,7 +2269,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.31...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.32...HEAD
+[0.7.32]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...v0.7.29
