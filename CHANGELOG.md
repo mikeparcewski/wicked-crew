@@ -168,6 +168,22 @@ mentioned only where a daemon release depends on them.
   rows as tampering. Wire note: `skills.stale-rules` and `current.rules` / `current.drift` are
   emitted ahead of their `wicked-crew-api-types` declaration (the next api-types cut adds them;
   `tests/wire-contract.test.ts` carves the pending finding kind out until then).
+- **F-086 — a campaign built from the roster WITH crew's standing launches on core-ts ≥ 0.7.22.**
+  `POST /testing/recon` with two or more repos registers an engine campaign whose node
+  `run_spec.clis` came from `rosterWithStanding()` — every seat decorated with crew's `health
+  {status}`, `auth`, `council_eligible` readings — and `CoreAdapter.launchCampaign` handed that def
+  to the engine verbatim. core-ts 0.7.22 (wicked-core#449) parses `AgenticCli.health` as
+  `{usable, reason?}`, so the launch was refused (`defJson is not a valid CampaignDef: missing
+  field \`usable\``) and the recon answered 500 where a 201 was owed (crew main CI red at 537c296;
+  `tests/integration/recon-fanout-campaign.test.ts`). The campaign seam now translates every node's
+  roster exactly as `launchRun` does (`engineCampaignDef` beside `engineRosterJson` in
+  `core/engine-roster.ts`): crew's readings are stripped and `council_eligible: false` becomes the
+  engine's per-seat bench verdict — on a copy, so the route's audit record and the recon response
+  still read the def as built. Parity rides along: `POST /campaigns` (and the steering-author
+  launch) now take the roster WITH standing like `POST /runs` and `POST /testing/*`, so a campaign
+  node benches a signed-out seat instead of convening it. Wire note: the def the engine persists
+  (`GET /campaigns/:id` → `def.nodes[].run_spec.clis`) carries the engine-shaped `health {usable}`
+  from now on, never crew's readings.
 
 ## [0.7.30] — 2026-09-11
 

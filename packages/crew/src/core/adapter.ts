@@ -35,7 +35,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
-import { engineRosterJson } from './engine-roster.js';
+import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
@@ -1482,9 +1482,15 @@ export class CoreAdapter {
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
+    // The roster crew hands the ENGINE (F-086, the campaign half of wave 6's `core/engine-roster.ts`):
+    // a def built from `rosterWithStanding()` carries crew's `health {status}` / `auth` /
+    // `council_eligible` readings on every node's `run_spec.clis`; core-ts ≥ 0.7.22 parses `health`
+    // as `{usable, reason?}` and refuses the def ("missing field `usable`"). Translate per node
+    // exactly as `launchRun` does — on a copy, never the caller's def (the route reads it after this).
+    const engineDef = engineCampaignDef(def);
     // The campaign's DAG-node runs are launched INSIDE the engine (their ids are minted there), so
     // the campaign is what the daemon can account for: pinned under `def.id` until its terminal frame.
-    return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(def)));
+    return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(engineDef)));
   }
 
   /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —

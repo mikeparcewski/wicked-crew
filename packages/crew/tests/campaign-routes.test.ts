@@ -13,6 +13,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CampaignsUnsupportedError, CoreAdapter } from '../src/core/adapter.js';
+import { toEngineRoster } from '../src/core/engine-roster.js';
 import { createServer } from '../src/api/server.js';
 import type { Campaign, CampaignDef, WorkflowDef } from '../src/core/types.js';
 import { removeScratch } from './setup/scratch.js';
@@ -129,6 +130,31 @@ describe('POST /campaigns', () => {
       'campaign-camp-ok-a',
       'campaign-camp-ok-b',
     ]);
+  });
+
+  it('the default roster for agent scenarios carries crew’s STANDING (F-086 parity with POST /runs)', async () => {
+    // Before F-086 this dep was the RAW registry roster, so a campaign node convened a signed-out
+    // seat that POST /runs would have benched. The seam's translation of that standing into the
+    // engine's `health {usable}` is pinned by tests/campaign-seam-engine-roster.test.ts — this
+    // instance-level stub sees the def as BUILT, which is exactly where the standing must be.
+    unsupported = false;
+    launched = null;
+    const res = await post('/api/v1/campaigns', {
+      id: 'camp-standing',
+      scenarios: [{ id: 'n', agent: { problem: 'survey the repo' } }],
+    });
+    expect(res.status).toBe(201);
+    const got = launched as unknown as { def: CampaignDef } | null;
+    const seats = got!.def.nodes[0]!.run_spec.clis as Array<Record<string, unknown>>;
+    expect(seats.length).toBeGreaterThan(0);
+    for (const seat of seats) {
+      expect(typeof seat['council_eligible'], `${String(seat['key'])} carries a standing verdict`).toBe('boolean');
+      expect(typeof seat['auth'], `${String(seat['key'])} carries its auth reading`).toBe('string');
+    }
+    // And that standing IS what the engine translation keys on: every seat gets a bench verdict.
+    for (const seat of toEngineRoster(seats) as Array<Record<string, unknown>>) {
+      expect(typeof (seat['health'] as { usable?: unknown }).usable).toBe('boolean');
+    }
   });
 
   it('400s a mapping reject with the mapper’s own message (the 1022-byte rule reaches the wire)', async () => {
