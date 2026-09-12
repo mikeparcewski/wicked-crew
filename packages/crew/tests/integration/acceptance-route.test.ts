@@ -50,6 +50,12 @@ const UNREADABLE_LOG = 'unreadable-log-run';
 const CROSS_RUN = 'cross-run';
 const BEFORE_QE_RUN = Date.parse('2026-08-12T01:00:00.000Z');
 const CANCEL_AT = Date.parse('2026-08-12T01:05:00.000Z');
+/** Failed 01:05, RESUMED 02:30 (after the fixture's QE run started 02:17 — in the rescuable gap), completed 03:00 (r2 N1). */
+const RESUMED_GAP = 'resumed-gap-run';
+/** Failed 01:05, RESUMED 02:00 (the QE run 02:17 falls inside the resumed segment), completed 03:00 (r2 N1). */
+const RESUMED_SEGMENT = 'resumed-segment-run';
+/** Failed 01:05, resumed 01:30, completed 02:00 — BEFORE the QE run started: closed for good (r2 N1). */
+const RESUMED_DONE_EARLY = 'resumed-done-early-run';
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -90,6 +96,28 @@ function historyOf(runId: string): RecordedEvent[] {
       ];
     case UNREADABLE_LOG:
       throw new Error('event-log read binding missing (older addon)');
+    case RESUMED_GAP:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('resumed', runId, Date.parse('2026-08-12T02:30:00.000Z'), 3),
+        ev('sessionCompleted', runId, AFTER_FIXTURE, 4),
+      ];
+    case RESUMED_SEGMENT:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('resumed', runId, BEFORE_FIXTURE, 3),
+        ev('unitExecuting', runId, BEFORE_FIXTURE + 1000, 4),
+        ev('sessionCompleted', runId, AFTER_FIXTURE, 5),
+      ];
+    case RESUMED_DONE_EARLY:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('resumed', runId, Date.parse('2026-08-12T01:30:00.000Z'), 3),
+        ev('sessionCompleted', runId, BEFORE_FIXTURE, 4),
+      ];
     default:
       // Started before the fixture's QE run, completed after its verdict: contains it.
       return [ev('sessionStarted', runId, BEFORE_FIXTURE, 1), ev('sessionCompleted', runId, AFTER_FIXTURE, 2)];
@@ -153,6 +181,9 @@ beforeAll(async () => {
     view(POST_TERMINAL, 'feature', 'repo-ledger'),
     view(UNREADABLE_LOG, 'feature', 'repo-ledger'),
     view(CROSS_RUN, 'feature', 'repo-cross'),
+    view(RESUMED_GAP, 'feature', 'repo-ledger'),
+    view(RESUMED_SEGMENT, 'feature', 'repo-ledger'),
+    view(RESUMED_DONE_EARLY, 'feature', 'repo-ledger'),
   ];
   adapter.listRepos = async () => [
     repoEntry('repo-ledger', withLedger),
@@ -340,6 +371,38 @@ describe('GET /runs/:id/acceptance', () => {
     // Each QE run stays individually addressable: the fixture run's PASS by pin.
     const pinned = await getAcceptance(CROSS_RUN, `?qeRun=${QE_RUN_ID}`);
     expect(pinned.body['acceptance']).toMatchObject({ verdict: { verdict: 'PASS' }, attribution: { kind: 'pinned' }, attributedVerdicts: 1 });
+  });
+
+  it('a FAILED run that was RESUMED and completed owns the QE run recorded inside its resumed segment (r2 N1)', async () => {
+    // POST /runs/:id/resume on a failed run continues the SAME run to sessionCompleted; r2's
+    // "first terminal frame" rule froze the window at the failure and denied the rescued run's
+    // own evidence as "outside this run's lifetime".
+    const res = await getAcceptance(RESUMED_SEGMENT);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', qeRunId: QE_RUN_ID },
+      attribution: { kind: 'run-window', qeRunId: QE_RUN_ID },
+      attributedVerdicts: 1,
+    });
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: true, verdict: 'PASS' });
+  });
+
+  it('…and a QE run started in the gap between the failure and the resume is attributed too — the run was rescuable', async () => {
+    const res = await getAcceptance(RESUMED_GAP);
+    expect(res.body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', qeRunId: QE_RUN_ID },
+      attribution: { kind: 'run-window' },
+    });
+    expect(res.body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
+  });
+
+  it('a resumed run whose FINAL completion predates the QE run is closed for good (r2 N1)', async () => {
+    const res = await getAcceptance(RESUMED_DONE_EARLY);
+    expect(res.body['acceptance']).toMatchObject({ verdict: null, attributedVerdicts: 0, attribution: { kind: 'none' } });
+    const reason = field<{ attribution: { reason: string } }>(res.body, 'acceptance').attribution.reason;
+    expect(reason).toMatch(/outside this run's lifetime/);
+    expect(reason).toContain('finished 2026-08-12T02:00:00.000Z');
+    expect(res.body['gate']).toMatchObject({ satisfied: false, verdict: null });
   });
 });
 

@@ -15,6 +15,7 @@ import {
   resolveAcceptanceGate,
   resolveRunWorkflow,
   runWindowFromEvents,
+  FINAL_EVENT_TYPES,
   TERMINAL_EVENT_TYPES,
   VERDICT_TO_STATUS,
 } from '../src/qe/acceptance.js';
@@ -300,19 +301,76 @@ describe('runWindowFromEvents — the run lifetime the ledger read links against
     expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T01:05:00Z') });
   });
 
-  it('closes at the FIRST terminal frame anywhere in the log — later frames never reopen it (F4)', () => {
+  it('a straggling non-terminal frame after the terminal one does not reopen the window (F4)', () => {
     const w = runWindowFromEvents(
       [
         ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
         ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
         ev('heartbeat', T('2026-08-12T01:06:00Z'), 3),
-        ev('resumed', T('2026-08-12T01:07:00Z'), 4),
-        ev('sessionCompleted', T('2026-08-12T01:30:00Z'), 5),
+        ev('unitDone', T('2026-08-12T01:07:00Z'), 4),
       ],
       'r',
     );
     expect(w.startedAt).toBe(T('2026-08-12T01:00:00Z'));
     expect(w.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+  });
+
+  it('a FAILED run that is RESUMED is live again until its next terminal frame (r2 N1)', () => {
+    // POST /runs/:id/resume on a failed run → engine resume_run_inner emits `resumed` and runs the
+    // SAME run on to sessionCompleted. The window must reach that completion, not stop at the
+    // failure — QE evidence recorded after the rescue is this run's.
+    const w = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+        ev('unitExecuting', T('2026-08-12T02:01:00Z'), 4),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 5),
+      ],
+      'r',
+    );
+    expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T03:00:00Z') });
+  });
+
+  it('a resumed run with no terminal frame yet is live (window open)', () => {
+    const w = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(w.finishedAt).toBeNull();
+  });
+
+  it('sessionCompleted and runCancelled are FINAL — the engine refuses to resume either, so nothing after them reopens', () => {
+    expect([...FINAL_EVENT_TYPES].sort()).toEqual(['runCancelled', 'sessionCompleted']);
+    const cancelled = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('runCancelled', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 4),
+      ],
+      'r',
+    );
+    expect(cancelled.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    const completed = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionCompleted', T('2026-08-12T01:05:00Z'), 2),
+        ev('resumed', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(completed.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    // A `resumed` with nothing to reopen (a gate approval on a live run) is a no-op.
+    const gated = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('resumed', T('2026-08-12T01:10:00Z'), 2)],
+      'r',
+    );
+    expect(gated.finishedAt).toBeNull();
   });
 
   it('keeps the window open for a live run (no terminal frame yet)', () => {

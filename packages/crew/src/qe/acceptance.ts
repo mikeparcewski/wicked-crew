@@ -335,16 +335,34 @@ export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The terminal frames the engine will NOT resume from: `resume_run_inner` returns a `Completed` or
+ * `Cancelled` run's status unchanged (wicked-core `src/actor.rs`, the `Completed | Cancelled`
+ * early return) and re-dispatches only a `Failed` one. So once one of these is recorded the window
+ * is closed for good; `sessionFailed` alone can be followed by a `resumed` frame (r2 review, N1).
+ */
+export const FINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['sessionCompleted', 'runCancelled']);
+
+/**
  * The crew run's lifetime as its durable event log records it — the window a QE run must have
  * started inside to count as this run's evidence (F-E2E-013).
  *
  * `startedAt` is the capture time of the `sessionStarted` frame (the earliest frame's, for a log
- * that lacks one); `finishedAt` is the capture time of the FIRST terminal frame found anywhere in
- * the log — once a run has ended, no later frame (a straggling non-terminal one, or a second
- * terminal one after a resume of a failed run) reopens the window (F1 hardening, F4). A log with
- * no terminal frame belongs to a live run, whose window stays open. A `null` or empty log places
- * the run nowhere in time, so it can link nothing — and when the log could not be READ (`unreadable`),
- * the linkage carries that cause so the denial names it instead of "no sessionStarted" (F5).
+ * that lacks one). `finishedAt` follows the frames IN LOG ORDER: a terminal frame closes the window
+ * at its capture time; a later `resumed` frame reopens it — a FAILED run is resumable under the
+ * same id (`POST /runs/:id/resume` → engine `resume_run_inner`, which emits `resumed` and runs the
+ * run on to its own `sessionCompleted`), so QE evidence recorded after the rescue is that run's
+ * (r2 review, N1). `sessionCompleted` / `runCancelled` are FINAL: the engine refuses to resume
+ * either, so nothing after them reopens the window. Any other frame is ignored — a straggling
+ * non-terminal frame after the end does not reopen anything (F4). A log with no terminal frame (or
+ * one whose last terminal frame was resumed from) belongs to a live run, whose window stays open.
+ * A `null` or empty log places the run nowhere in time, so it can link nothing — and when the log
+ * could not be READ (`unreadable`), the linkage carries that cause so the denial names it instead
+ * of "no sessionStarted" (F5).
+ *
+ * Chosen over gating on `session.status`: the log is what the route already reads for this
+ * purpose, it needs no second engine call, and it yields the same answer — a resumed run's
+ * persisted status is non-terminal until its next terminal frame, which is exactly when the scan
+ * closes the window again.
  */
 export function runWindowFromEvents(
   events: RecordedEvent[] | null,
@@ -365,9 +383,12 @@ export function runWindowFromEvents(
   }
   let finishedAt: number | null = null;
   for (const e of events) {
-    if (!TERMINAL_EVENT_TYPES.has(e.type)) continue;
-    const t = at(e);
-    if (t !== null && (finishedAt === null || t < finishedAt)) finishedAt = t;
+    if (TERMINAL_EVENT_TYPES.has(e.type)) {
+      finishedAt = at(e) ?? finishedAt;
+      if (FINAL_EVENT_TYPES.has(e.type)) break; // nothing the engine emits after these reopens the run
+    } else if (e.type === 'resumed' && finishedAt !== null) {
+      finishedAt = null; // a failed run rescued: live again until its next terminal frame
+    }
   }
   return { runId, startedAt, finishedAt };
 }

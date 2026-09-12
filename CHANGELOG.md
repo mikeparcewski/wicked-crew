@@ -63,7 +63,11 @@ mentioned only where a daemon release depends on them.
     an unreadable event log is named as such instead of "no sessionStarted" (F5); `run-window`
     linkage is labelled **INFERRED** in `gate.reason` (`describeAttribution`), so an operator can
     tell it from a writer's `crew_run_id` stamp or a caller's pin (F6 — garden's QE runner stamping
-    `WICKED_RUN_ID` is a wave-7 follow-up).
+    `WICKED_RUN_ID` is a wave-7 follow-up). Round 2 (N1): a `resumed` frame after `sessionFailed`
+    REOPENS the window until the run's next terminal frame — a failed run rescued with
+    `POST /runs/:id/resume` completes under the same id, and the QE evidence it records after the
+    rescue is its own (the first-terminal rule had denied it as "outside this run's lifetime");
+    `sessionCompleted` and `runCancelled` stay final, because the engine refuses to resume either.
 
 ## [0.7.31] — 2026-09-12
 
