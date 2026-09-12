@@ -56,6 +56,10 @@ const RESUMED_GAP = 'resumed-gap-run';
 const RESUMED_SEGMENT = 'resumed-segment-run';
 /** Failed 01:05, resumed 01:30, completed 02:00 — BEFORE the QE run started: closed for good (r2 N1). */
 const RESUMED_DONE_EARLY = 'resumed-done-early-run';
+/** The engine's REAL rescue shape, still LIVE: failed 01:05, then dispatch_unit's frames at 02:00 — no `resumed`, no terminal yet (r3 N3). */
+const RESCUED_LIVE = 'rescued-live-run';
+/** The engine's REAL rescue shape, completed: failed 01:05, unitExecuting 02:01, sessionCompleted 03:00 — no `resumed` (r3 N3). */
+const RESCUED_DONE = 'rescued-done-run';
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -117,6 +121,20 @@ function historyOf(runId: string): RecordedEvent[] {
         ev('sessionFailed', runId, CANCEL_AT, 2),
         ev('resumed', runId, Date.parse('2026-08-12T01:30:00.000Z'), 3),
         ev('sessionCompleted', runId, BEFORE_FIXTURE, 4),
+      ];
+    case RESCUED_LIVE:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('unitDispatched', runId, BEFORE_FIXTURE, 3),
+        ev('unitExecuting', runId, BEFORE_FIXTURE + 1000, 4),
+      ];
+    case RESCUED_DONE:
+      return [
+        ev('sessionStarted', runId, BEFORE_QE_RUN, 1),
+        ev('sessionFailed', runId, CANCEL_AT, 2),
+        ev('unitExecuting', runId, BEFORE_FIXTURE + 60_000, 3),
+        ev('sessionCompleted', runId, AFTER_FIXTURE, 4),
       ];
     default:
       // Started before the fixture's QE run, completed after its verdict: contains it.
@@ -184,6 +202,8 @@ beforeAll(async () => {
     view(RESUMED_GAP, 'feature', 'repo-ledger'),
     view(RESUMED_SEGMENT, 'feature', 'repo-ledger'),
     view(RESUMED_DONE_EARLY, 'feature', 'repo-ledger'),
+    view(RESCUED_LIVE, 'feature', 'repo-ledger'),
+    view(RESCUED_DONE, 'feature', 'repo-ledger'),
   ];
   adapter.listRepos = async () => [
     repoEntry('repo-ledger', withLedger),
@@ -403,6 +423,25 @@ describe('GET /runs/:id/acceptance', () => {
     expect(reason).toMatch(/outside this run's lifetime/);
     expect(reason).toContain('finished 2026-08-12T02:00:00.000Z');
     expect(res.body['gate']).toMatchObject({ satisfied: false, verdict: null });
+  });
+
+  it("a rescued run that is STILL EXECUTING owns the QE run recorded in its live segment — the engine's real shape has no `resumed` (r3 N3)", async () => {
+    // resume_run_inner emits no frame; the rescued run's next frames are dispatch_unit's. Until
+    // this fix the live segment read "finished <fail time>" and the QE PASS at 02:17 was denied.
+    const res = await getAcceptance(RESCUED_LIVE);
+    expect(res.status).toBe(200);
+    expect(res.body['acceptance']).toMatchObject({
+      verdict: { verdict: 'PASS', qeRunId: QE_RUN_ID },
+      attribution: { kind: 'run-window', qeRunId: QE_RUN_ID },
+      attributedVerdicts: 1,
+    });
+    expect(res.body['gate']).toMatchObject({ required: true, satisfied: true, verdict: 'PASS' });
+  });
+
+  it('…and once that rescued run completes, its window closes at ITS completion (no `resumed` frame needed)', async () => {
+    const res = await getAcceptance(RESCUED_DONE);
+    expect(res.body['acceptance']).toMatchObject({ verdict: { verdict: 'PASS' }, attribution: { kind: 'run-window' } });
+    expect(res.body['gate']).toMatchObject({ satisfied: true, verdict: 'PASS' });
   });
 });
 

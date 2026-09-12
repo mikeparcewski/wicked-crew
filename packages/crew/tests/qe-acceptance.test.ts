@@ -16,6 +16,7 @@ import {
   resolveRunWorkflow,
   runWindowFromEvents,
   FINAL_EVENT_TYPES,
+  REOPEN_EVENT_TYPES,
   TERMINAL_EVENT_TYPES,
   VERDICT_TO_STATUS,
 } from '../src/qe/acceptance.js';
@@ -316,9 +317,10 @@ describe('runWindowFromEvents — the run lifetime the ledger read links against
   });
 
   it('a FAILED run that is RESUMED is live again until its next terminal frame (r2 N1)', () => {
-    // POST /runs/:id/resume on a failed run → engine resume_run_inner emits `resumed` and runs the
-    // SAME run on to sessionCompleted. The window must reach that completion, not stop at the
-    // failure — QE evidence recorded after the rescue is this run's.
+    // POST /runs/:id/resume on a failed run → engine resume_run_inner re-dispatches the SAME run on
+    // to sessionCompleted. The window must reach that completion, not stop at the failure — QE
+    // evidence recorded after the rescue is this run's. (A `resumed` frame is what gate approval
+    // emits; the resume path itself emits none — see the engine-shape cases below.)
     const w = runWindowFromEvents(
       [
         ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
@@ -330,6 +332,59 @@ describe('runWindowFromEvents — the run lifetime the ledger read links against
       'r',
     );
     expect(w).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: T('2026-08-12T03:00:00Z') });
+  });
+
+  it("the engine's REAL rescue shape emits no `resumed`: the rescued run's first execution frame reopens the window (r3 N3)", () => {
+    // resume_run_inner emits nothing of its own; the next frames are dispatch_unit's
+    // (unitDispatched → unitExecuting → toolExecutorDispatched). While the rescued run is still
+    // executing there is no later terminal frame to overwrite the failure with — the reopen has to
+    // come from the execution frame itself, or the live segment reads "finished <fail time>".
+    expect([...REOPEN_EVENT_TYPES].sort()).toEqual([
+      'resumed',
+      'toolExecutorDispatched',
+      'unitDispatched',
+      'unitDistributed',
+      'unitExecuting',
+    ]);
+    const live = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitDispatched', T('2026-08-12T02:00:00Z'), 3),
+        ev('unitExecuting', T('2026-08-12T02:00:01Z'), 4),
+      ],
+      'r',
+    );
+    expect(live).toEqual({ runId: 'r', startedAt: T('2026-08-12T01:00:00Z'), finishedAt: null });
+    // …and once that rescued run completes, the window closes at ITS completion.
+    const done = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitExecuting', T('2026-08-12T02:01:00Z'), 3),
+        ev('sessionCompleted', T('2026-08-12T03:00:00Z'), 4),
+      ],
+      'r',
+    );
+    expect(done.finishedAt).toBe(T('2026-08-12T03:00:00Z'));
+    // A tool-phase rescue reopens on toolExecutorDispatched just the same.
+    const tool = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2),
+        ev('toolExecutorDispatched', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(tool.finishedAt).toBeNull();
+  });
+
+  it('a failure followed by NOTHING stays closed at the failure', () => {
+    const w = runWindowFromEvents(
+      [ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1), ev('sessionFailed', T('2026-08-12T01:05:00Z'), 2)],
+      'r',
+    );
+    expect(w.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
   });
 
   it('a resumed run with no terminal frame yet is live (window open)', () => {
@@ -356,6 +411,17 @@ describe('runWindowFromEvents — the run lifetime the ledger read links against
       'r',
     );
     expect(cancelled.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
+    // Execution frames after a FINAL frame do not reopen either (the engine never emits them
+    // there; a corrupt or replayed log must not be able to revive a cancelled run).
+    const cancelledThenUnit = runWindowFromEvents(
+      [
+        ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),
+        ev('runCancelled', T('2026-08-12T01:05:00Z'), 2),
+        ev('unitExecuting', T('2026-08-12T02:00:00Z'), 3),
+      ],
+      'r',
+    );
+    expect(cancelledThenUnit.finishedAt).toBe(T('2026-08-12T01:05:00Z'));
     const completed = runWindowFromEvents(
       [
         ev('sessionStarted', T('2026-08-12T01:00:00Z'), 1),

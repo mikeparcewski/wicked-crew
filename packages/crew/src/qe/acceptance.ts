@@ -343,26 +343,48 @@ export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
 export const FINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['sessionCompleted', 'runCancelled']);
 
 /**
+ * The frames that prove a run is LIVE AGAIN after a non-final terminal frame — the engine emits
+ * each of them only for a run it is actively driving (wicked-core `src/event.rs` `event_to_json`):
+ *   - `resumed` — emitted by `confirm_gate` when a human approves a gate (`src/actor.rs`, the only
+ *     `CoreEvent::Resumed` emission). NOT by the failed-run resume path: `resume_run_inner` emits
+ *     no frame of its own (r3 review, N3 — an earlier comment here claimed otherwise);
+ *   - `unitDispatched` / `unitExecuting` / `toolExecutorDispatched` — `dispatch_unit`'s frames, the
+ *     first thing a rescued run records after `POST /runs/:id/resume` re-dispatches its cursor unit;
+ *   - `unitDistributed` — a (re)distribution for a unit, run-scoped and live-only as well.
+ * `unitDone` / `unitDenied` / `unitPlanned` are deliberately NOT here: a straggling completion or
+ * denial frame after a failure is not evidence the run went on (F4).
+ */
+export const REOPEN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'resumed',
+  'unitDispatched',
+  'unitExecuting',
+  'toolExecutorDispatched',
+  'unitDistributed',
+]);
+
+/**
  * The crew run's lifetime as its durable event log records it — the window a QE run must have
  * started inside to count as this run's evidence (F-E2E-013).
  *
  * `startedAt` is the capture time of the `sessionStarted` frame (the earliest frame's, for a log
  * that lacks one). `finishedAt` follows the frames IN LOG ORDER: a terminal frame closes the window
- * at its capture time; a later `resumed` frame reopens it — a FAILED run is resumable under the
- * same id (`POST /runs/:id/resume` → engine `resume_run_inner`, which emits `resumed` and runs the
- * run on to its own `sessionCompleted`), so QE evidence recorded after the rescue is that run's
- * (r2 review, N1). `sessionCompleted` / `runCancelled` are FINAL: the engine refuses to resume
- * either, so nothing after them reopens the window. Any other frame is ignored — a straggling
- * non-terminal frame after the end does not reopen anything (F4). A log with no terminal frame (or
- * one whose last terminal frame was resumed from) belongs to a live run, whose window stays open.
- * A `null` or empty log places the run nowhere in time, so it can link nothing — and when the log
+ * at its capture time; a later {@link REOPEN_EVENT_TYPES} frame reopens it — a FAILED run is
+ * resumable under the same id (`POST /runs/:id/resume` → engine `resume_run_inner`, which
+ * re-dispatches the cursor unit and runs the run on to its own `sessionCompleted`), so QE evidence
+ * recorded after the rescue is that run's, whether the run is still executing (its execution
+ * frames reopen the window — r3 review, N3) or has since completed (r2 review, N1).
+ * `sessionCompleted` / `runCancelled` are FINAL: the engine refuses to resume either, so nothing
+ * after them reopens the window. Any other frame is ignored — a straggling non-terminal frame
+ * after the end does not reopen anything (F4). A log with no terminal frame (or one whose last
+ * terminal frame was followed by execution) belongs to a live run, whose window stays open. A
+ * `null` or empty log places the run nowhere in time, so it can link nothing — and when the log
  * could not be READ (`unreadable`), the linkage carries that cause so the denial names it instead
  * of "no sessionStarted" (F5).
  *
  * Chosen over gating on `session.status`: the log is what the route already reads for this
- * purpose, it needs no second engine call, and it yields the same answer — a resumed run's
- * persisted status is non-terminal until its next terminal frame, which is exactly when the scan
- * closes the window again.
+ * purpose, it needs no second engine call, and it yields the same answer — a rescued run's
+ * persisted status is non-terminal from its re-dispatch until its next terminal frame, which is
+ * exactly the span between the reopening frame and the frame that closes the scan again.
  */
 export function runWindowFromEvents(
   events: RecordedEvent[] | null,
@@ -386,8 +408,8 @@ export function runWindowFromEvents(
     if (TERMINAL_EVENT_TYPES.has(e.type)) {
       finishedAt = at(e) ?? finishedAt;
       if (FINAL_EVENT_TYPES.has(e.type)) break; // nothing the engine emits after these reopens the run
-    } else if (e.type === 'resumed' && finishedAt !== null) {
-      finishedAt = null; // a failed run rescued: live again until its next terminal frame
+    } else if (REOPEN_EVENT_TYPES.has(e.type) && finishedAt !== null) {
+      finishedAt = null; // a failed run rescued and executing again: live until its next terminal frame
     }
   }
   return { runId, startedAt, finishedAt };

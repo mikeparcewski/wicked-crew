@@ -68,6 +68,10 @@ mentioned only where a daemon release depends on them.
     `POST /runs/:id/resume` completes under the same id, and the QE evidence it records after the
     rescue is its own (the first-terminal rule had denied it as "outside this run's lifetime");
     `sessionCompleted` and `runCancelled` stay final, because the engine refuses to resume either.
+    Round 3 (N3): the reopen also fires on the rescued run's first execution frame
+    (`unitDispatched` / `unitExecuting` / `toolExecutorDispatched` / `unitDistributed`) — the
+    engine's resume path emits no `resumed` frame (that frame is gate approval's), so a rescued
+    run's LIVE segment no longer reads as closed at the failure while it is still executing.
 
 ## [0.7.31] — 2026-09-12
 
