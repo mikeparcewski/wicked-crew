@@ -33,6 +33,24 @@ mentioned only where a daemon release depends on them.
   fix; if `PRAGMA integrity_check` on `bus.db` fails from a fresh process, the store is torn —
   restore or rotate it.
 
+### Added
+- **Connection-fatal bus subscriber errors now reach `GET /diagnostics.recentErrors` (#542 — the
+  visibility half of F-E2E-021).** Every wicked-bus seam (interactive relay / draft / edit / demo /
+  chat, the project `/ws` bridge, the QE gate feed) logged its subscriber errors through `log` →
+  `app.log.warn`, and the diagnostics error ring folds error-level lines only — so six dead
+  subscribers looping on `database disk image is malformed` for hours left `recentErrors: []`. A
+  shared reporter (`src/interactive/bus-subscriber-errors.ts`) keeps each seam's own warn line for
+  ordinary errors and escalates a connection-fatal one (`SQLITE_CORRUPT` / `SQLITE_NOTADB` /
+  `SQLITE_IOERR*`, or wicked-bus's `WB-014 SUBSCRIBER_DB_UNUSABLE`) to `logError` → `app.log.error`
+  on the 1st and every 30th consecutive occurrence, with the count, whether it is the subscriber
+  connection (poll) or the seam's handler, and the operator remediation (restart — the daemon's
+  shutdown exits without closing bus connections; a `bus.db` failing `PRAGMA integrity_check` from a
+  fresh process is torn and must be restored/rotated). A fatal error more than two poll intervals
+  after the previous one starts a new outage and escalates at its 1st again. **Scope: the error-level
+  log line and `/diagnostics.recentErrors` only** — `/health` stays unconditional and the studio Health
+  rail does not read `recentErrors`; a `/diagnostics.bus` findings block and the studio fold are the
+  wave-7 follow-up.
+
 ## [0.7.32] — 2026-09-12
 
 Release train (hotfix after the clean-run Phase 2 blocker) — **core-ts 0.7.23 / studio 0.5.8 /
