@@ -1365,6 +1365,7 @@ export async function startInteractiveDemoSubscriber(
         `[interactive-demo] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
       log,
       logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
     }),
   });
 
@@ -1381,6 +1382,7 @@ export async function startInteractiveDemoSubscriber(
         `[interactive-demo] feedback handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
       log,
       logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
     }),
   });
 

@@ -140,6 +140,7 @@ export async function startProjectBus(opts: ProjectBusOptions = {}): Promise<Pro
           `[projects] /ws bridge error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
         log,
         logError: opts.logError,
+        pollIntervalMs: opts.pollIntervalMs ?? 2000,
       }),
     });
   } catch (err) {

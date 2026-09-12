@@ -899,6 +899,7 @@ export async function startInteractiveEditSubscriber(
         `[interactive-edit] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
       log,
       logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
     }),
   });
 

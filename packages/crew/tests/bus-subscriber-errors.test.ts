@@ -1,11 +1,14 @@
 // F-E2E-021 (visibility half) — a dead bus subscriber connection must reach the diagnostics error
 // ring. The seams log through `log` (warn); the ring folds ERROR-level lines only. The reporter keeps
 // every seam's own warn line for ordinary errors and escalates connection-fatal ones to `logError`
-// on the 1st and every ESCALATE_EVERY-th consecutive repeat, with the count.
+// on the 1st and every ESCALATE_EVERY-th consecutive repeat, with the count; a fatal error more than
+// NEW_OUTAGE_AFTER_POLLS poll intervals after the previous one is a new outage (count restarts).
 
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_POLL_INTERVAL_MS,
   ESCALATE_EVERY,
+  NEW_OUTAGE_AFTER_POLLS,
   busSubscriberErrorReporter,
   isBusConnectionFatal,
 } from '../src/interactive/bus-subscriber-errors.js';
@@ -67,7 +70,7 @@ describe('busSubscriberErrorReporter', () => {
     expect(error).toEqual([]);
   });
 
-  it('escalates a connection-fatal error to logError on the 1st and every ESCALATE_EVERY-th consecutive repeat, warn in between, with the count', () => {
+  it('escalates a poll-side connection-fatal error to logError on the 1st and every ESCALATE_EVERY-th consecutive repeat, warn in between, with the count and the torn-store remediation', () => {
     const warn: string[] = [];
     const error: string[] = [];
     const onError = busSubscriberErrorReporter({ describe: describeLine, log: (m) => warn.push(m), logError: (m) => error.push(m) });
@@ -75,12 +78,31 @@ describe('busSubscriberErrorReporter', () => {
     expect(error).toHaveLength(3);
     expect(error[0]).toContain('[seam] handler error on event ?: database disk image is malformed');
     expect(error[0]).toContain('bus subscriber connection UNUSABLE (1 consecutive)');
+    expect(error[0]).toContain('this seam receives no events');
     expect(error[1]).toContain(`UNUSABLE (${ESCALATE_EVERY} consecutive)`);
     expect(error[2]).toContain(`UNUSABLE (${ESCALATE_EVERY * 2} consecutive)`);
-    expect(error[0]).toMatch(/receives no events until the daemon reopens the bus/);
+    // the remediation names the safe action AND the torn-store case, never a reopen
+    expect(error[0]).toMatch(/restart the daemon/);
+    expect(error[0]).toMatch(/exits WITHOUT closing bus connections/);
+    expect(error[0]).toMatch(/PRAGMA integrity_check/);
+    expect(error[0]).toMatch(/the store is torn/);
+    expect(error[0]).not.toMatch(/reopen/);
     expect(error[0]).toMatch(/F-E2E-021/);
     expect(warn).toHaveLength(ESCALATE_EVERY * 2 - 3);
     expect(warn[0]).toContain('UNUSABLE (2 consecutive)');
+  });
+
+  it('names a connection-fatal error thrown inside the handler (event present) as such, still error-level on the 1st', () => {
+    const warn: string[] = [];
+    const error: string[] = [];
+    const onError = busSubscriberErrorReporter({ describe: describeLine, log: (m) => warn.push(m), logError: (m) => error.push(m) });
+    onError(sqliteError('SQLITE_NOTADB', 'file is not a database'), { event_id: 9 });
+    expect(error).toHaveLength(1);
+    expect(error[0]).toContain('[seam] handler error on event 9: file is not a database');
+    expect(error[0]).toContain('connection-fatal SQLite error inside the handler for event 9 (1 consecutive)');
+    expect(error[0]).toContain("the seam's own store or the bus is unusable");
+    expect(error[0]).not.toContain('receives no events');
+    expect(warn).toEqual([]);
   });
 
   it('treats wicked-bus WB-014 like the driver code and resets the count after an ordinary error', () => {
@@ -98,6 +120,51 @@ describe('busSubscriberErrorReporter', () => {
       expect.stringContaining('(2 consecutive)'),
       '[seam] handler error on event 1: handler threw',
     ]);
+  });
+
+  it('a second outage after a quiet recovery escalates at its 1st error again (time-based reset via the last fatal)', () => {
+    const warn: string[] = [];
+    const error: string[] = [];
+    let clock = 1_000_000;
+    const pollIntervalMs = 2000;
+    const onError = busSubscriberErrorReporter({
+      describe: describeLine,
+      log: (m) => warn.push(m),
+      logError: (m) => error.push(m),
+      pollIntervalMs,
+      now: () => clock,
+    });
+    // outage 1: three consecutive polls, one interval apart — one escalation, count climbs
+    onError(sqliteError('SQLITE_IOERR_READ', 'disk I/O error'), null);
+    clock += pollIntervalMs;
+    onError(sqliteError('SQLITE_IOERR_READ', 'disk I/O error'), null);
+    clock += pollIntervalMs;
+    onError(sqliteError('SQLITE_IOERR_READ', 'disk I/O error'), null);
+    expect(error).toHaveLength(1);
+    expect(warn.map((l) => l.match(/\((\d+) consecutive\)/)?.[1])).toEqual(['2', '3']);
+    // exactly the boundary (NEW_OUTAGE_AFTER_POLLS intervals) still counts as the same outage
+    clock += NEW_OUTAGE_AFTER_POLLS * pollIntervalMs;
+    onError(sqliteError('SQLITE_IOERR_READ', 'disk I/O error'), null);
+    expect(error).toHaveLength(1);
+    expect(warn[warn.length - 1]).toContain('(4 consecutive)');
+    // hours of healthy polls (onError is never called on a good poll), then a new outage
+    clock += 3 * 60 * 60 * 1000;
+    onError(sqliteError('SQLITE_CORRUPT'), null);
+    expect(error).toHaveLength(2);
+    expect(error[1]).toContain('UNUSABLE (1 consecutive)');
+  });
+
+  it('uses the default poll interval when a seam passes none', () => {
+    const warn: string[] = [];
+    const error: string[] = [];
+    let clock = 0;
+    const onError = busSubscriberErrorReporter({ describe: describeLine, log: (m) => warn.push(m), logError: (m) => error.push(m), now: () => clock });
+    onError(sqliteError('SQLITE_CORRUPT'), null);
+    clock += NEW_OUTAGE_AFTER_POLLS * DEFAULT_POLL_INTERVAL_MS + 1;
+    onError(sqliteError('SQLITE_CORRUPT'), null);
+    expect(error).toHaveLength(2);
+    expect(error[1]).toContain('(1 consecutive)');
+    expect(warn).toEqual([]);
   });
 
   it('falls back to log when no logError is wired (a seam started without the daemon logger)', () => {

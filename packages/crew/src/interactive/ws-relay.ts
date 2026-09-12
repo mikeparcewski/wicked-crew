@@ -180,6 +180,7 @@ export async function startInteractiveWsRelay(
           `[interactive-relay] relay error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
         log,
         logError: opts.logError,
+        pollIntervalMs: opts.pollIntervalMs ?? 2000,
       }),
     });
   } catch (err) {

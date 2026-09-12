@@ -227,6 +227,7 @@ export async function startQeGateSubscriber(
         `[qe-gate-events] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
       log,
       logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 5000,
     }),
   });
 

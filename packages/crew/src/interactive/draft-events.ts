@@ -1300,6 +1300,7 @@ export async function startInteractiveDraftSubscriber(
         `[interactive-draft] handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
       log,
       logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
     }),
   });
 
