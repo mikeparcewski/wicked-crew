@@ -50,6 +50,7 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { readDocHead } from './chat-events.js';
@@ -310,6 +311,16 @@ export interface InteractiveEditOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
+  /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
+   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
+   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
+  skillHeld?: SkillHeld;
   /** The docs root a handoff's doc manifest is read from — the KIND GATE only (CREW-UX-9):
    *  a doc whose manifest says `kind: "demo"` is the demo seam's to answer (a demo refines by
    *  re-authoring `demo.spec.mjs` + re-recording, assist SKILL.md Step 8c — a storyboard
@@ -377,9 +388,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -397,6 +416,7 @@ export async function startInteractiveEditSubscriber(
   opts: InteractiveEditOptions = {},
 ): Promise<InteractiveEditSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
+  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   let bus: typeof import('wicked-bus');
   try {
@@ -428,7 +448,10 @@ export async function startInteractiveEditSubscriber(
   // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
   // instead of failing the first launch obscurely.
   try {
-    await adapter.registerWorkflow(INTERACTIVE_EDIT_WORKFLOW_DEF);
+    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
+    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
+    log(draftSkillArmLine('interactive-edit', draftSkillHeld));
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_EDIT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-edit] could not register the '${INTERACTIVE_EDIT_WORKFLOW}' workflow — ` +
@@ -804,13 +827,26 @@ export async function startInteractiveEditSubscriber(
         // `project` axis (the reliably-available axis on this seam). An unfiled handoff leaves it
         // undefined, so the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope
         // here — the launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: editProblem(
-          handoff,
-          handoffPath,
-          handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
-        ),
+        problem:
+          editProblem(
+            handoff,
+            handoffPath,
+            handoff.projectId !== undefined ? { project: handoff.projectId } : undefined,
+          ) +
+          // The quality floor on a revision (draft-skill.ts): the edited fragments are what land,
+          // so the self-check runs on each item's output_path — no page budget applies to a fragment
+          // (the document's count is the service's to keep), no snapshot rides this leg.
+          (draftSkillHeld
+            ? ' ' +
+              draftQualityClause(
+                'each item\'s output_path from the handoff file',
+                { pages: null, exact: false, source: 'unknown' },
+                [],
+                { revision: true, style: 'doc' },
+              )
+            : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_EDIT_WORKFLOW,
         // The 7b surface: a project-bound doc's governed edits are FILED — the run lands in
         // the project's activity feed instead of floating unattributed.

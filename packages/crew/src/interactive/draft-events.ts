@@ -41,6 +41,7 @@ import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, pageBudgetFor, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { runDirInsideRepo, snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -533,6 +534,16 @@ export interface InteractiveDraftOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
+  /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
+   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
+   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
+  skillHeld?: SkillHeld;
   /** Repo-snapshot size budget in bytes (CREW-UX-8 v4; default ~200MB — see
    *  {@link snapshotRepo}). A repo over budget degrades the launch to ungrounded, narrated.
    *  Tests shrink it to exercise the degradation path without a 200MB fixture. */
@@ -602,9 +613,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -622,6 +641,7 @@ export async function startInteractiveDraftSubscriber(
   opts: InteractiveDraftOptions = {},
 ): Promise<InteractiveDraftSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
+  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   let bus: typeof import('wicked-bus');
   try {
@@ -653,7 +673,10 @@ export async function startInteractiveDraftSubscriber(
   // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
   // instead of failing the first launch obscurely.
   try {
-    await adapter.registerWorkflow(INTERACTIVE_DRAFT_WORKFLOW_DEF);
+    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
+    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
+    log(draftSkillArmLine('interactive-draft', draftSkillHeld));
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-draft] could not register the '${INTERACTIVE_DRAFT_WORKFLOW}' workflow — ` +
@@ -1189,20 +1212,32 @@ export async function startInteractiveDraftSubscriber(
         // axis (the reliably-available axis on this seam). An unfiled doc leaves it undefined, so
         // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
         // launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: draftProblem(
-          doc,
-          outPath,
-          undefined,
-          doc.projectId !== undefined ? { project: doc.projectId } : undefined,
-          decision !== undefined
-            ? {
-                subjects,
-                ...(decision.source === 'none' ? { unnamedAmong: decision.memberCount } : {}),
-              }
-            : undefined,
-        ),
+        problem:
+          draftProblem(
+            doc,
+            outPath,
+            undefined,
+            doc.projectId !== undefined ? { project: doc.projectId } : undefined,
+            decision !== undefined
+              ? {
+                  subjects,
+                  ...(decision.source === 'none' ? { unnamedAmong: decision.memberCount } : {}),
+                }
+              : undefined,
+          ) +
+          // The quality floor's inputs (draft-skill.ts) — only when the skill rides the phases,
+          // since the clause names a launcher only that skill's snapshot provides.
+          (draftSkillHeld
+            ? ' ' +
+              draftQualityClause(
+                outPath,
+                pageBudgetFor(doc.brief, doc.style),
+                subjects.flatMap((s) => (s.snapshotDir !== undefined ? [s.snapshotDir] : [])),
+                { style: doc.style },
+              )
+            : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the

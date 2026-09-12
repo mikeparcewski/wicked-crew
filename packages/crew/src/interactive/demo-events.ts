@@ -124,18 +124,41 @@ import { busSubscriberErrorReporter } from './bus-subscriber-errors.js';
 // ── Vocabulary constants (interactive's, verbatim — src/service/events.js is the truth) ──────
 
 export const DEMO_REQUESTED = 'wicked.interactive.demo.requested';
+/**
+ * The recorder's FAILURE, typed (F-RECON-013 companion; wicked-interactive PR #224 — F-RECON-012):
+ * ONE `RecorderError` shape the service serialises identically on three surfaces, and the one crew
+ * consumes is the bus frame — `wicked.interactive.status.posted` with the existing SeamStatusPayload
+ * fields plus the error FLATTENED beside `state: "error"`:
+ *
+ *   { document_id, project_id?, ts, state: "error", message,
+ *     code, source: "recorder", retryable: false, error, remedy,
+ *     browser?, missing?, install_command?, playwright_version?, browsers_path?, executable_path?,
+ *     step?: { index, label },   // recording_step_failed only
+ *     cause? }
+ *
+ * Codes: `recorder_browser_missing` · `recorder_browser_install_failed` · `recorder_launch_failed` ·
+ * `recording_spec_missing` · `recording_spec_invalid` · `recording_step_failed` · `recording_failed`
+ * (all `retryable: false`) · `recording_in_flight` (the ONLY `retryable: true`). Crew relays `code` +
+ * `remedy` (+ `step`) into the thread-adjacent diagnostics — an error-level line for
+ * `GET /diagnostics.recentErrors` naming the doc's spec run — and keeps the last failure per doc on
+ * the subscription handle. Crew never replays: this seam emits no `demo.requested` of its own on a
+ * failure (a `retryable: false` frame is terminal by contract; "Re-record" is the user's one retry).
+ */
+export const RECORDER_ERROR_SOURCE = 'recorder';
 
 /** Exact-type filters with a domain guard — no wildcards. The seam listens on TWO topics:
  *  doc.created (kind:demo — author the first spec) and feedback.processed (demo-kind docs —
  *  re-author it). */
 export const INTERACTIVE_DEMO_BUS_FILTER = `${DOC_CREATED}@${INTERACTIVE_DOMAIN}`;
 export const INTERACTIVE_DEMO_FEEDBACK_BUS_FILTER = `${FEEDBACK_PROCESSED}@${INTERACTIVE_DOMAIN}`;
+export const INTERACTIVE_DEMO_RECORDER_BUS_FILTER = `${STATUS_POSTED}@${INTERACTIVE_DOMAIN}`;
 
 /** Dedicated durable-cursor identities — NOT the draft/edit/chat seams', so every interactive
  *  seam advances an independent cursor and stopping one never strands another. The two demo
  *  subscriptions get their own cursors too: they filter different types. */
 export const INTERACTIVE_DEMO_BUS_PLUGIN = 'wicked-crew-interactive-demo';
 export const INTERACTIVE_DEMO_FEEDBACK_BUS_PLUGIN = 'wicked-crew-interactive-demo-feedback';
+export const INTERACTIVE_DEMO_RECORDER_BUS_PLUGIN = 'wicked-crew-interactive-demo-recorder';
 
 /** The one file the whole demo pipeline pivots on (interactive demo.js `DEMO_SPEC`):
  *  `recordDemo` refuses to record until `<docDir>/demo.spec.mjs` exists. */
@@ -332,6 +355,86 @@ export function parseDemoDocCreated(eventType: string, payload: unknown): DemoDo
   return { documentId, url, brief, ...(projectId !== undefined ? { projectId } : {}) };
 }
 
+/** The typed recorder failure as crew reads it off `status.posted` (see {@link RECORDER_ERROR_SOURCE}). */
+export interface DemoRecordingFailure {
+  documentId: string;
+  projectId?: string;
+  version?: number;
+  error: {
+    /** The contract's `code` (a stable machine token). */
+    kind: string;
+    /** The contract's `error` (the cause sentence), else its `message` with the "Recording failed: " prefix stripped. */
+    message: string;
+    remedy?: string;
+    retryable: boolean;
+    installCommand?: string;
+    browser?: string;
+    missing?: string[];
+    step?: { index: number; label: string };
+    cause?: string;
+  };
+}
+
+/** The recorder's own error kind for the fresh-install cause (matches interactive's preflight). */
+export const RECORDER_BROWSER_MISSING = 'recorder_browser_missing';
+
+/**
+ * Read a `status.posted` frame as a recorder failure: `state: "error"` + `source: "recorder"` + a
+ * string `code`. Anything else — a seam's own narration (crew's `wi-crew` producer included), a
+ * plain error status without the typed fields — is `null`.
+ */
+export function parseRecorderError(eventType: string, payload: unknown): DemoRecordingFailure | null {
+  if (eventType !== STATUS_POSTED) return null;
+  if (typeof payload !== 'object' || payload === null) return null;
+  const p = payload as Record<string, unknown>;
+  if (p['state'] !== 'error' || p['source'] !== RECORDER_ERROR_SOURCE || typeof p['code'] !== 'string' || p['code'].trim() === '') return null;
+  const documentId = p['document_id'];
+  if (typeof documentId !== 'string' || !DOC_NAME.test(documentId)) return null;
+  const rawMessage = typeof p['message'] === 'string' ? p['message'] : '';
+  const message =
+    typeof p['error'] === 'string' && p['error'].trim() !== ''
+      ? oneLine(p['error'], 600)
+      : rawMessage.trim() !== ''
+        ? oneLine(rawMessage.replace(/^Recording failed:\s*/i, ''), 600)
+        : 'the recorder failed';
+  const step = p['step'];
+  const stepOut =
+    typeof step === 'object' && step !== null && typeof (step as { index?: unknown }).index === 'number' && typeof (step as { label?: unknown }).label === 'string'
+      ? { index: (step as { index: number }).index, label: oneLine((step as { label: string }).label, 200) }
+      : undefined;
+  const missing = Array.isArray(p['missing']) ? p['missing'].filter((m): m is string => typeof m === 'string') : undefined;
+  const out: DemoRecordingFailure = {
+    documentId,
+    error: {
+      kind: p['code'].trim(),
+      message,
+      retryable: p['retryable'] === true,
+      ...(typeof p['remedy'] === 'string' && p['remedy'].trim() !== '' ? { remedy: oneLine(p['remedy'], 400) } : {}),
+      ...(typeof p['install_command'] === 'string' && p['install_command'].trim() !== '' ? { installCommand: oneLine(p['install_command'], 400) } : {}),
+      ...(typeof p['browser'] === 'string' && p['browser'] !== '' ? { browser: p['browser'] } : {}),
+      ...(missing !== undefined && missing.length > 0 ? { missing } : {}),
+      ...(stepOut !== undefined ? { step: stepOut } : {}),
+      ...(typeof p['cause'] === 'string' && p['cause'].trim() !== '' ? { cause: oneLine(p['cause'], 400) } : {}),
+    },
+  };
+  if (typeof p['project_id'] === 'string' && p['project_id'] !== '') out.projectId = p['project_id'];
+  if (typeof p['version'] === 'number' && Number.isInteger(p['version']) && p['version'] >= 0) out.version = p['version'];
+  return out;
+}
+
+/** The one diagnostics line for a relayed recorder failure: doc, spec run, code, cause, step, remedy. */
+export function recorderFailureLine(f: DemoRecordingFailure, runId?: string): string {
+  return (
+    `[interactive-demo] recording FAILED for doc ${f.documentId}` +
+    (runId !== undefined ? ` (spec run ${runId})` : '') +
+    `: ${f.error.kind} — ${f.error.message}` +
+    (f.error.step !== undefined ? ` [step ${f.error.step.index}: ${f.error.step.label}]` : '') +
+    (f.error.remedy !== undefined ? `. Remedy: ${f.error.remedy}` : '') +
+    (f.error.installCommand !== undefined && f.error.installCommand !== f.error.remedy ? ` (${f.error.installCommand})` : '') +
+    (f.error.retryable ? '. Retryable.' : '. Not retryable — Re-record fails the same way until this is fixed.')
+  );
+}
+
 /**
  * The first-spec run's problem statement (the engine scopes it per phase and folds each
  * phase's instructions on top). Carries the doc identity, the target URL VERBATIM, the brief
@@ -469,6 +572,10 @@ export interface InteractiveDemoOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
   /** The docs root a doc's workspace lives under — where the finished spec is INSTALLED and
    *  where the feedback leg reads the manifest kind + current spec. Default: the
    *  shared-default resolution (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`);
@@ -497,6 +604,8 @@ export interface InteractiveDemoSubscription {
   ledger: InteractiveHandoffLedger;
   /** Documents with a demo run currently in flight (either leg). */
   inFlightDocs(): string[];
+  /** The last typed recorder failure relayed for a doc (F-RECON-013 companion), or `undefined`. */
+  recorderFailure(documentId: string): (DemoRecordingFailure & { at: string; runId?: string }) | undefined;
 }
 
 interface InFlight {
@@ -540,9 +649,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -1026,7 +1143,7 @@ export async function startInteractiveDemoSubscriber(
       .launchRun({
         problem: input.problem,
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: input.workflow,
         // A project-bound doc's governed run is FILED (the engine attaches the crew.run
         // membership atomically with the launch); an unfiled doc launches with the key OMITTED
@@ -1348,6 +1465,50 @@ export async function startInteractiveDemoSubscriber(
     });
   }
 
+  // F-RECON-013 companion: the recorder's typed failure (wicked-interactive PR #224 — one
+  // `RecorderError` flattened beside `state: "error"` on `status.posted`). Before it, a failed
+  // recording was a bus dead letter (3 identical retries in 4 s) plus Playwright's raw ASCII box on
+  // the thread — nothing reached the run's diagnostics and nothing named the one-line remedy. The
+  // thread already carries the service's own error status (the frame IS the thread line), so crew
+  // relays it where the thread cannot reach: `GET /diagnostics.recentErrors` (an error-level line
+  // naming the doc's spec run, the code, the step and the remedy) and the handle
+  // (`recorderFailure(doc)`). Crew emits NOTHING back for it — no `demo.requested`, no second
+  // status: a `retryable: false` frame is terminal by contract and must never be replayed.
+  const recorderFailures = new Map<string, DemoRecordingFailure & { at: string; runId?: string }>();
+  const logError = opts.logError ?? log;
+  function handleRecorderStatus(event: BusEvent): void {
+    // Our own narration rides the same topic: never read a `wi-crew` frame as the recorder's.
+    if ((event as { producer_id?: string | null }).producer_id === INTERACTIVE_PRODUCER) return;
+    const failure = parseRecorderError(event.event_type, event.payload);
+    if (failure === null) return;
+    // The first spec authoring is ledgered under the bare doc id (a re-author under `<doc>:v<N>`).
+    const specRun = ledger.get(failure.documentId);
+    const record = {
+      ...failure,
+      at: new Date().toISOString(),
+      ...(specRun !== undefined ? { runId: specRun.runId } : {}),
+    };
+    recorderFailures.set(failure.documentId, record);
+    logError(recorderFailureLine(failure, record.runId));
+  }
+
+  const subRecorder = bus.subscribe({
+    db,
+    plugin: INTERACTIVE_DEMO_RECORDER_BUS_PLUGIN,
+    filter: INTERACTIVE_DEMO_RECORDER_BUS_FILTER,
+    cursor_init: 'latest',
+    pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    maxRetries: 0,
+    handler: (event: BusEvent) => handleRecorderStatus(event),
+    onError: busSubscriberErrorReporter({
+      describe: (err, event) =>
+        `[interactive-demo] recorder status handler error on event ${String(event?.event_id ?? '?')}: ${err.message}`,
+      log,
+      logError: opts.logError,
+      pollIntervalMs: opts.pollIntervalMs ?? 2000,
+    }),
+  });
+
   const subCreated = bus.subscribe({
     db,
     plugin: INTERACTIVE_DEMO_BUS_PLUGIN,
@@ -1389,6 +1550,7 @@ export async function startInteractiveDemoSubscriber(
   return {
     ledger,
     inFlightDocs: () => [...new Set([...inFlight.values()].map((f) => f.documentId))],
+    recorderFailure: (documentId: string) => recorderFailures.get(documentId),
     stop: async () => {
       closed = true; // a handler mid-snapshot sees this and never launches
       offCoreEvents();
@@ -1398,6 +1560,7 @@ export async function startInteractiveDemoSubscriber(
       }
       await subCreated.stop();
       await subFeedback.stop();
+      await subRecorder.stop();
     },
   };
 }

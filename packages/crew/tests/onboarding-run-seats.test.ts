@@ -63,6 +63,16 @@ describe('seatsForWorkflow', () => {
     expect(adapter.seatsForWorkflow('feature')).toEqual(ROSTER);
     expect(adapter.seatsForWorkflow('no-such-workflow')).toEqual(ROSTER);
   });
+
+  it('F-RECON-002/003: once the daemon wires a roster provider, agent workflows get the roster WITH standing (launchRun then benches council_eligible:false); tool-only stays []', () => {
+    const standing = ROSTER.map((s) => (s.key === 'codex' ? { ...s, auth: 'signed_out', council_eligible: false } : { ...s, council_eligible: true }));
+    expect(adapter.launchRoster()).toEqual(ROSTER); // no provider yet → the raw registry
+    adapter.setRosterProvider(() => standing.map((s) => ({ ...s })));
+    expect(adapter.launchRoster()).toEqual(standing);
+    expect(adapter.seatsForWorkflow('feature')).toEqual(standing);
+    expect(adapter.seatsForWorkflow('no-such-workflow')).toEqual(standing);
+    expect(adapter.seatsForWorkflow('onboarding')).toEqual([]);
+  });
 });
 
 describe('launchOnboardingRun', () => {

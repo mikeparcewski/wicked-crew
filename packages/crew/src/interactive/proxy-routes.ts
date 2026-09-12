@@ -51,6 +51,8 @@ import {
   type DocGroundingStore,
 } from './doc-grounding.js';
 import { projectDocsRoot } from './project-root.js';
+import { CHAT_POSTED, isAnswerableDocKind, isIterationAsk, readDocHead } from './chat-events.js';
+import { DOC_NAME } from './draft-events.js';
 
 /** The bridge route whose request crew reads before forwarding (F-046) — exact path, any query. */
 export const DOC_CREATE_PATH = '/api/docs';
@@ -135,6 +137,15 @@ export const CREATE_UNDETERMINED = {
     'exist; list the project\'s documents before creating it again',
 } as const;
 
+/** The 502 a UI emit earns when the bridge dropped the connection AFTER the body was sent (F-RECON-013
+ *  gate path): the event may or may not have landed on the bus — the thread will show it if it did. */
+export const EMIT_UNDETERMINED = {
+  code: 'emit_undetermined',
+  error:
+    'the interactive bridge dropped the connection after the event was sent — it may or may not have ' +
+    'landed; reload the thread before sending it again',
+} as const;
+
 /** Thrown by `forwardCreate` — carries whether the request had already reached the bridge. */
 interface CreateForwardError extends Error {
   createDispatched?: boolean;
@@ -159,6 +170,77 @@ export interface PreparedCreate {
 export function isDocCreate(method: string | undefined, target: string): boolean {
   const path = target.split('?')[0] ?? target;
   return method === 'POST' && path === DOC_CREATE_PATH;
+}
+
+/** The bridge's UI-emit route — where the studio posts `chat.posted` (an ask) and the like. */
+export const DOC_EVENTS_PATH = '/api/events';
+/** An emit body is small JSON; anything bigger is not a chat message. */
+export const DOC_EVENTS_BODY_MAX = 1024 * 1024;
+
+/** `true` for the bridge's UI-emit request (method + exact path, query ignored). */
+export function isDocEventsPost(method: string | undefined, target: string): boolean {
+  const path = target.split('?')[0] ?? target;
+  return method === 'POST' && path === DOC_EVENTS_PATH;
+}
+
+/**
+ * Crew's 422 on an ask no seam can answer (F-RECON-013): a `chat.posted` USER ask on a document
+ * whose manifest kind has no answering seam — today `demo`, whose storyboard is re-authored from
+ * STEP feedback (highlight a step) and re-recorded, never revised from a thread ask. The bridge
+ * would have accepted the emit (200) and the chat seam would have declined it in a log line, so
+ * the thread showed "generating" until its silence budget blamed the service. Refused HERE, before
+ * the bridge sees it, so the sender learns at once — the studio's own send-failure path renders
+ * `error`; `code` and `remedy` are for a skin that wants to say more.
+ */
+export interface InteractiveAskRefusal {
+  error: string;
+  code: 'ask_unsupported_for_doc_kind';
+  document_id: string;
+  doc_kind: string;
+  remedy: string;
+}
+
+/** The refusal for an ask on a doc of `kind`, or `null` when a seam answers that kind
+ *  (chat-events.ts `isAnswerableDocKind`). */
+export function askRefusalFor(documentId: string, kind: string): InteractiveAskRefusal | null {
+  if (isAnswerableDocKind(kind)) return null;
+  if (kind === 'demo') {
+    return {
+      code: 'ask_unsupported_for_doc_kind',
+      document_id: documentId,
+      doc_kind: kind,
+      error:
+        'asks on demo storyboards are not supported yet — a demo is re-authored from step feedback, not ' +
+        'from the thread. Nothing was sent.',
+      remedy:
+        'highlight the step to change and send that as feedback (the demo seam re-authors the spec and ' +
+        're-records), or use Re-record to retry the recording as authored.',
+    };
+  }
+  return {
+    code: 'ask_unsupported_for_doc_kind',
+    document_id: documentId,
+    doc_kind: kind,
+    error: `asks on documents of kind '${kind}' have no answering seam on this daemon. Nothing was sent.`,
+    remedy: 'open the document in the surface that owns its kind, or create a source document for a governed draft.',
+  };
+}
+
+/** The body a `chat.posted` emit must carry to be an ASK this gate judges (anything else passes). */
+export function askOf(raw: Buffer): { documentId: string; text: string } | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(raw.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof body !== 'object' || body === null) return null;
+  const b = body as { event_type?: unknown; payload?: unknown };
+  if (b.event_type !== CHAT_POSTED || typeof b.payload !== 'object' || b.payload === null) return null;
+  const pl = b.payload as { role?: unknown; text?: unknown; document_id?: unknown };
+  if (pl.role !== 'user' || typeof pl.text !== 'string' || typeof pl.document_id !== 'string') return null;
+  if (!DOC_NAME.test(pl.document_id) || !isIterationAsk(pl.text)) return null;
+  return { documentId: pl.document_id, text: pl.text };
 }
 
 async function readBody(stream: IncomingMessage, max: number): Promise<Buffer | null> {
@@ -395,8 +477,11 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
       const target = (req.raw.url ?? '').replace(prefixRe, '') || '/';
 
       // F-046: the doc create is read and validated HERE before the bridge sees it (module doc).
-      // Everything else stays socket-to-socket transport.
+      // F-RECON-013: so is a UI emit — a `chat.posted` ASK on a doc whose kind no seam answers is
+      // refused with a typed 422 instead of reaching the bus to be declined in a log line. Every
+      // other request stays socket-to-socket transport.
       let create: PreparedCreate | null = null;
+      let buffered: Pick<PreparedCreate, 'body' | 'contentType'> | null = null;
       let createToken: number | undefined;
       const grounding = deps.grounding;
       if (grounding !== undefined && isDocCreate(req.method, target)) {
@@ -407,10 +492,27 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         // The seams may see this doc's `doc.created` before the bridge has answered with its
         // name: mark the create in flight so they wait for the binding (doc-grounding.ts).
         if (create.binding !== undefined) createToken = grounding.beginCreate(projectId);
+        buffered = create;
+      } else if (isDocEventsPost(req.method, target)) {
+        const raw = await readBody(req.raw, DOC_EVENTS_BODY_MAX);
+        if (raw === null) return reply.code(413).send({ error: `event body exceeds ${DOC_EVENTS_BODY_MAX} bytes` });
+        const ask = askOf(raw);
+        // Fail-open on a doc this daemon cannot read (no manifest, not under this root): the bridge
+        // and the seams decide, exactly as before — the gate speaks only when the kind is KNOWN.
+        const head = ask === null ? null : readDocHead(root, ask.documentId);
+        const refusal = ask !== null && head !== null ? askRefusalFor(ask.documentId, head.kind) : null;
+        if (refusal !== null) {
+          deps.log?.(
+            `interactive ask on ${refusal.document_id} (project ${projectId}, kind '${refusal.doc_kind}') refused ` +
+              `before the bridge: ${refusal.code} — nothing emitted`,
+          );
+          return reply.code(422).send(refusal);
+        }
+        buffered = { body: raw, contentType: req.headers['content-type'] ?? 'application/json' };
       }
       const send = (b: LiveBridge): Promise<void> =>
-        create !== null
-          ? forwardCreate(req, reply, b, target, prefix, create, grounding, root, deps.log)
+        buffered !== null
+          ? forwardCreate(req, reply, b, target, prefix, buffered, create !== null ? grounding : undefined, root, deps.log)
           : forward(req, reply, b, target, prefix);
 
       try {
@@ -424,6 +526,10 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
           if (create !== null && (err as CreateForwardError).createDispatched === true && !reply.raw.headersSent) {
             deps.log?.(`interactive create for project ${projectId} was dispatched but the bridge dropped the connection: ${(err as Error).message}`);
             return reply.code(502).send(CREATE_UNDETERMINED);
+          }
+          if (buffered !== null && (err as CreateForwardError).createDispatched === true && !reply.raw.headersSent) {
+            deps.log?.(`interactive emit for project ${projectId} was dispatched but the bridge dropped the connection: ${(err as Error).message}`);
+            return reply.code(502).send(EMIT_UNDETERMINED);
           }
           // The cached bridge died between the pid check and the connect (an operator killed it,
           // a crash). Invalidate and let `ensure` restart it — ONE retry, so a genuinely broken
@@ -476,7 +582,7 @@ function forwardCreate(
   bridge: LiveBridge,
   target: string,
   prefix: string,
-  create: PreparedCreate,
+  create: Pick<PreparedCreate, 'body' | 'contentType'> & Partial<Pick<PreparedCreate, 'binding'>>,
   grounding: DocGroundingStore | undefined,
   docsRoot: string,
   log?: (msg: string) => void,

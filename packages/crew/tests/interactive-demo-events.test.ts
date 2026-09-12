@@ -47,6 +47,9 @@ import {
   demoReauthorIdempotencyKey,
   specSelfCheck,
   startInteractiveDemoSubscriber,
+  RECORDER_ERROR_SOURCE,
+  RECORDER_BROWSER_MISSING,
+  parseRecorderError,
 } from '../src/interactive/demo-events.js';
 import { DOC_CREATED, STATUS_POSTED, INTERACTIVE_PRODUCER, parseSourceDocCreated } from '../src/interactive/draft-events.js';
 import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
@@ -794,6 +797,82 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     // stop() with the run in flight sweeps its snapshot.
     await sub!.stop();
     expect(fileExists(join(dir, 'demos', 'checkout-demo', 'repos'))).toBe(false);
+  });
+
+  it('F-RECON-013 companion: the recorder\'s typed RecorderError on status.posted (interactive PR #224) is relayed — an ERROR-level line for recentErrors naming code/step/remedy + the spec run, the handle remembers it, and crew emits NOTHING back (never a replay)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('checkout-demo');
+    const errors: string[] = [];
+    const sub = await startSub(engine, { logError: (m: string) => errors.push(m) });
+    armProbe(bus);
+    await emitDocCreated(bus);
+    await waitFor(() => engine.launches.length === 1);
+    const runId = engine.launches[0]!.sessionId;
+    const before = probeEvents.length;
+
+    const db = bus.openDb({ db_path: busDb });
+    const config = bus.loadConfig({ db_path: busDb });
+    // The service's frame, byte-for-byte the PR #224 shape (the thread renders THIS line itself).
+    bus.emit(db, config, {
+      event_type: STATUS_POSTED,
+      domain: 'wicked-interactive',
+      subdomain: 'status',
+      payload: {
+        document_id: 'checkout-demo', project_id: 'proj-7', ts: new Date().toISOString(), state: 'error',
+        message: "Recording failed: the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg. Run `wicked-interactive doctor --install`, then Re-record.",
+        code: RECORDER_BROWSER_MISSING, source: RECORDER_ERROR_SOURCE, retryable: false,
+        error: "the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg",
+        remedy: 'wicked-interactive doctor --install', browser: 'chromium-headless-shell', missing: ['chromium-headless-shell', 'ffmpeg'],
+        install_command: 'node "/x/node_modules/playwright/cli.js" install chromium-headless-shell', playwright_version: '1.63.0', browsers_path: null,
+      },
+      producer_id: 'wi-service',
+    });
+    await waitFor(() => sub.recorderFailure('checkout-demo') !== undefined);
+    const failure = sub.recorderFailure('checkout-demo')!;
+    expect(failure.error).toEqual({
+      kind: RECORDER_BROWSER_MISSING, retryable: false,
+      message: "the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg",
+      remedy: 'wicked-interactive doctor --install', installCommand: 'node "/x/node_modules/playwright/cli.js" install chromium-headless-shell',
+      browser: 'chromium-headless-shell', missing: ['chromium-headless-shell', 'ffmpeg'],
+    });
+    expect(failure.runId).toBe(runId);
+    expect(failure.projectId).toBe('proj-7');
+    // recentErrors: the ring folds ERROR-level lines — this one names the run, the code, the remedy, and that Re-record will not help.
+    const line = errors.find((e) => e.includes('recording FAILED for doc checkout-demo'))!;
+    expect(line).toContain(`spec run ${runId}`);
+    expect(line).toContain(RECORDER_BROWSER_MISSING);
+    expect(line).toContain('Remedy: wicked-interactive doctor --install');
+    expect(line).toContain('Not retryable');
+    // Crew emitted NOTHING for it: no demo.requested replay, no crew status about the failure (the
+    // service's frame IS the thread line). The seam's own heartbeat for the still-open spec run may
+    // tick in this window — that is narration about the RUN, not about the recorder.
+    await new Promise((r) => setTimeout(r, 200));
+    const ours = probeEvents.slice(before).filter((e) => e.producer_id === INTERACTIVE_PRODUCER);
+    expect(ours.filter((e) => e.event_type === 'wicked.interactive.demo.requested')).toEqual([]);
+    expect(ours.filter((e) => JSON.stringify(e.payload).includes(RECORDER_BROWSER_MISSING))).toEqual([]);
+    expect(engine.launches.length).toBe(1);
+
+    // A step failure carries the step; our OWN error narration on the same topic is never read as the recorder's.
+    bus.emit(db, config, {
+      event_type: STATUS_POSTED, domain: 'wicked-interactive', subdomain: 'status',
+      payload: { document_id: 'checkout-demo', ts: new Date().toISOString(), state: 'error', message: 'Recording failed: step 3 failed', code: 'recording_step_failed', source: 'recorder', retryable: false, error: 'the step timed out', remedy: 'fix the step and Re-record', step: { index: 3, label: 'Open the scope' } },
+      producer_id: 'wi-service',
+    });
+    await waitFor(() => sub.recorderFailure('checkout-demo')?.error.kind === 'recording_step_failed');
+    expect(sub.recorderFailure('checkout-demo')!.error.step).toEqual({ index: 3, label: 'Open the scope' });
+    expect(errors.at(-1)).toContain('[step 3: Open the scope]');
+  });
+
+  it('parseRecorderError: only state:error + source:recorder + a string code; `error` beats the prefixed `message`; rejections', () => {
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'recording_failed', message: 'Recording failed: boom', retryable: false })).toEqual({
+      documentId: 'd', error: { kind: 'recording_failed', message: 'boom', retryable: false },
+    });
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'recording_in_flight', error: 'busy', retryable: true })!.error.retryable).toBe(true);
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', message: 'a plain seam error' })).toBeNull();
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'working', source: 'recorder', code: 'x' })).toBeNull();
+    expect(parseRecorderError(STATUS_POSTED, { document_id: '../x', state: 'error', source: 'recorder', code: 'x' })).toBeNull();
+    expect(parseRecorderError(DEMO_REQUESTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'x' })).toBeNull();
   });
 
   it('finalize is copy-THEN-emit: installs the spec into the doc workspace, then demo.requested, then complete', async () => {
