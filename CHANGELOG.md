@@ -10,6 +10,29 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.31] — 2026-09-12
+
+Release train (wave 6) — **core-ts 0.7.22 / studio 0.5.8 / garden 12.34.0 / interactive 0.9.1 /
+api-types 0.36.0 / bridges 1.1.1.** Pins the published `wicked-core-ts` `^0.7.22` engine
+(wicked-core #448 / #449 — wave-6 governance: the worker remote-write fence + credential / ssh strip,
+health-aware routing with `degradedReason`, the default repo-checks floor + judge or an honest
+UNGATED gate, the `auth_failed` / `unauthenticated` fallback kinds, the run branch + worktree
+retention; its `AgenticCli.health {usable, reason?}` shape is what F-086 below translates at every
+launch seam), bundles the published `wicked-studio` 0.5.8 skin (built against `wicked-crew-api-types`
+0.36.0: the governed "New test" journey, the Test landing reading this daemon's top-level
+`test_sets`, honest UNGATED / degraded gate cards, the branch-sourced files view), rides with
+`wicked-garden` 12.34.0 (the qe `author` / `review` verified-test contract the `qe-author-tests`
+workflow routes to), and keeps `wicked-interactive@^0.9.1` and `agent-acp-bridges` `^1.1.1`
+unchanged since 0.7.30. The sibling workspace package `wicked-crew-api-types` 0.36.0 was published on
+the #536 merge (`api-types-v0.36.0`) and is not re-tagged here.
+
+What merged since 0.7.30 — **#535** (F-083: a generation published under older portability rules is
+accepted with a `skills.stale-rules` warning), **#536** (wave 6: the governed `qe-author-tests`
+workflow + `POST /testing/author`, test sets, the branch-sourced diff, reassign on `awaiting_human`,
+the roster → engine translation, the interactive docs index, `refused[]` with `source`, the
+credential-probe `auth`, api-types 0.36.0), **#537** (F-086: the campaign seam translates roster
+standing). Every entry below belongs to one of them.
+
 ### Added
 
 - **"New test" is a governed QE workflow, not a free-text plan (wave 6 — F-7R2-003/004/005/008/012/
@@ -165,9 +188,9 @@ mentioned only where a daemon release depends on them.
   rewritten). Rule for maintainers (review L1): the identity's digest covers the rule TABLE, not the
   detector code — bump `PORTABILITY_RULES_VERSION` (and regenerate the parity fixture) whenever
   detector semantics change so a row could derive differently, or the next upgrade refuses those
-  rows as tampering. Wire note: `skills.stale-rules` and `current.rules` / `current.drift` are
-  emitted ahead of their `wicked-crew-api-types` declaration (the next api-types cut adds them;
-  `tests/wire-contract.test.ts` carves the pending finding kind out until then).
+  rows as tampering. Wire note: `skills.stale-rules` and `current.rules` / `current.drift` landed on
+  main ahead of their `wicked-crew-api-types` declaration; `wicked-crew-api-types` 0.36.0 (above, in
+  this release) declares them and `tests/wire-contract.test.ts` pins the finding kind both ways.
 - **F-086 — a campaign built from the roster WITH crew's standing launches on core-ts ≥ 0.7.22.**
   `POST /testing/recon` with two or more repos registers an engine campaign whose node
   `run_spec.clis` came from `rosterWithStanding()` — every seat decorated with crew's `health
@@ -179,9 +202,11 @@ mentioned only where a daemon release depends on them.
   roster exactly as `launchRun` does (`engineCampaignDef` beside `engineRosterJson` in
   `core/engine-roster.ts`): crew's readings are stripped and `council_eligible: false` becomes the
   engine's per-seat bench verdict — on a copy, so the route's audit record and the recon response
-  still read the def as built. Parity rides along: `POST /campaigns` (and the steering-author
-  launch) now take the roster WITH standing like `POST /runs` and `POST /testing/*`, so a campaign
-  node benches a signed-out seat instead of convening it. Wire note: the def the engine persists
+  still read the def as built. Not parity only: `POST /campaigns` and the steering-author launch now
+  take the roster WITH crew's standing and bench every ineligible seat — signed out, inactive after
+  a seat-level error, not enabled for council (disabled), or benched by recent councils — up front,
+  exactly as `POST /runs` and `POST /testing/*` already do; a campaign node or a steering-author run
+  never convenes a seat crew already knows cannot answer. Wire note: the def the engine persists
   (`GET /campaigns/:id` → `def.nodes[].run_spec.clis`) carries the engine-shaped `health {usable}`
   from now on, never crew's readings.
 
@@ -2162,7 +2187,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.31...HEAD
+[0.7.31]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.27...v0.7.28
