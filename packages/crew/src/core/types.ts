@@ -23,6 +23,8 @@ export type * from 'wicked-crew-api-types';
 
 import type { SystemSettings } from 'wicked-crew-api-types';
 
+import { DEFAULT_BASE_SKILL_REF } from '../skills/base-skill.js';
+
 /** The run id of the onboarding run started when a repo was registered. */
 export interface RepoOnboardRef {
   repoId: string;
@@ -189,4 +191,9 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
+  // crew#554 (wicked-core#468) — every governed agent unit follows the cross-CLI discipline skill
+  // by default; a snapshot that lacks it WARNS (runs proceed without the directive) until the
+  // operator flips the policy to `'require'` (the engine then refuses such launches at intake).
+  baseSkillRef: DEFAULT_BASE_SKILL_REF,
+  baseSkillPolicy: 'warn',
 };

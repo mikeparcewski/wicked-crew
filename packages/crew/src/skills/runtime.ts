@@ -77,6 +77,7 @@ import { join } from 'node:path';
 import type { LaunchNotice } from '../core/adapter.js';
 import type { CoreEvent, SkillManifest } from '../core/types.js';
 import { applySkillsSnapshotEnv, BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from './engine-env.js';
+import { applyBaseSkillEnv, BASE_SKILL_REF_ENGINE_ENV, baseSkillPosture, normalizeBaseSkillRef, type BaseSkillConfig, type BaseSkillPolicy, type BaseSkillPosture } from './base-skill.js';
 import { SKILLS_SOURCE_ENV, type PluginSource } from './plugin-source.js';
 import { REFUSED_DIRNAME } from './root-names.js';
 import { SkillsSourceUnavailableError, type CurrentSnapshot, type SkillsStore } from './store.js';
@@ -172,7 +173,8 @@ export { REFUSED_DIRNAME };
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
-export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules';
+/** `skills.base-skill` (crew#554): the configured base skill is not in the published generation — a warning under `baseSkillPolicy: 'warn'`, an error under `'require'`. */
+export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill';
 
 export interface SkillsHealthFinding {
   kind: SkillsHealthFindingKind;
@@ -194,11 +196,16 @@ export interface SkillsHealth {
    *  `null` when `disabled`. */
   stateHome: string | null;
   findings: SkillsHealthFinding[];
+  /** The BASE skill posture (crew#554 / core#468): the role-keyed discipline skill the engine is
+   *  handed as `WICKED_BASE_SKILL_REF` for the next launch, judged against `current` — or `null`
+   *  when the setting is off (`baseSkillRef: ""`) or the seam is `disabled`. Its finding (when the
+   *  generation lacks the skill) also rides `findings`. Additive. */
+  baseSkill: BaseSkillPosture | null;
 }
 
 /** The `skills` block a daemon booted WITHOUT the seam reports. */
 export function disabledSkillsHealth(): SkillsHealth {
-  return { state: 'disabled', root: null, current: null, engineInput: null, stateHome: null, findings: [] };
+  return { state: 'disabled', root: null, current: null, engineInput: null, stateHome: null, findings: [], baseSkill: null };
 }
 
 /**
@@ -222,11 +229,78 @@ export class SkillsRuntime {
   private readonly log: (message: string) => void;
   private readonly bootSnapshot: string | undefined;
   private lastHealth: SkillsHealth = disabledSkillsHealth();
+  /** The base skill setting (crew#554) — `null` until `configureBaseSkill` runs (boot reads settings.json first). */
+  private baseSkillConfig: BaseSkillConfig | null = null;
+  private lastBaseSkill: BaseSkillPosture | null = null;
+  /** The last `skills.base-skill` message logged — the seam says a finding once per change, not per re-export. */
+  private lastBaseSkillLogged: string | null = null;
 
   constructor(opts: SkillsRuntimeOptions) {
     this.store = opts.store;
     this.log = opts.log;
     this.bootSnapshot = 'bootSnapshot' in opts ? opts.bootSnapshot : BOOT_SKILLS_SNAPSHOT;
+  }
+
+  /**
+   * Take the base skill setting (crew#554 — `SystemSettings.baseSkillRef` / `baseSkillPolicy`) and
+   * apply it NOW: at boot (before `apply`, so the ladder's outcome re-judges it) and on every
+   * `PUT /settings` that changes it. `baseSkillRef: ""` (or blank) is OFF — the engine variable is
+   * deleted. Answers the posture applied.
+   */
+  configureBaseSkill(settings: { baseSkillRef?: string | undefined; baseSkillPolicy?: BaseSkillPolicy | undefined }): BaseSkillPosture | null {
+    this.baseSkillConfig = { ref: normalizeBaseSkillRef(settings.baseSkillRef), policy: settings.baseSkillPolicy ?? 'warn' };
+    return this.refreshBaseSkill();
+  }
+
+  /** The base skill posture the engine is handed right now — `null` when off or unconfigured. */
+  baseSkill(): BaseSkillPosture | null {
+    return this.lastBaseSkill;
+  }
+
+  /**
+   * Re-judge the base skill against the CURRENT published generation and the editor catalog, and
+   * export (or delete) `WICKED_BASE_SKILL_REF` accordingly (base-skill.ts). Called by every ladder
+   * outcome (`record`), after every publish, after a baseline refresh (the catalog moved, so
+   * `inCatalog` did) and on a settings change. Never throws: a generation whose metadata will not
+   * re-read counts as "nothing known to be handed" — under `warn` that unsets the variable and
+   * warns; under `require` the engine refuses at intake, which is the policy's whole point.
+   */
+  refreshBaseSkill(): BaseSkillPosture | null {
+    const config = this.baseSkillConfig;
+    if (config === null) return null;
+    let published: { gen: number; skills: string[] } | null = null;
+    if (this.lastHealth.state === 'published') {
+      try {
+        published = this.store.currentSnapshotSkills();
+      } catch {
+        published = null;
+      }
+    }
+    const inCatalog = (name: string): boolean => {
+      try {
+        const entry = this.store.manifest().skills[name];
+        return entry !== undefined && entry.enabled;
+      } catch {
+        return false;
+      }
+    };
+    const posture = baseSkillPosture(config, published, inCatalog);
+    applyBaseSkillEnv(posture);
+    this.lastBaseSkill = posture;
+    const message = posture?.finding?.message ?? null;
+    // Say it once per CHANGE, and only once the ladder has run: before `apply` the seam is
+    // `disabled` by construction, so a boot-order judgement ("no published snapshot") would log a
+    // warning the first ladder outcome contradicts a moment later. The variable is still applied.
+    const settled = this.lastHealth.state !== 'disabled';
+    if (settled && message !== this.lastBaseSkillLogged) {
+      if (message !== null) {
+        this.log(`[skills] skills.base-skill: ${message} (${BASE_SKILL_REF_ENGINE_ENV} ${posture?.engineInput === null ? 'unset' : `= ${posture?.engineInput}`})`);
+      } else if (this.lastBaseSkillLogged !== null && posture !== null) {
+        this.log(`[skills] skills.base-skill: cleared — "${posture.name}" is handed from generation ${posture.gen ?? '?'} (${BASE_SKILL_REF_ENGINE_ENV} = ${posture.name})`);
+      }
+      this.lastBaseSkillLogged = message;
+    }
+    return posture;
   }
 
   /**
@@ -252,7 +326,9 @@ export class SkillsRuntime {
 
   health(): SkillsHealth {
     const base = this.lastHealth;
-    if (base.state !== 'published' && base.state !== 'blocked') return base;
+    // The base skill posture rides EVERY state (crew#554): under fallback / config-error nothing is
+    // known to be handed, which is exactly what the operator must see beside the ladder's finding.
+    if (base.state !== 'published' && base.state !== 'blocked') return this.withBaseSkill(base);
     let manifest: SkillManifest;
     try {
       manifest = this.store.manifest();
@@ -262,7 +338,7 @@ export class SkillsRuntime {
       // never touches the engine input: whatever is exported stays exported until a restart re-runs
       // the ladder, and the finding says so.
       const cause = err instanceof Error ? err.message : String(err);
-      return {
+      return this.withBaseSkill({
         state: 'config-error',
         root: base.root,
         current: null,
@@ -275,10 +351,18 @@ export class SkillsRuntime {
             message: `manifest.json cannot be read: ${cause} — the skills store is unusable (every /skills request fails) until it is fixed; ${SKILLS_SNAPSHOT_ENGINE_ENV} still exports what the last boot or publish set (${base.engineInput ?? 'unset'}) until the daemon restarts`,
           },
         ],
-      };
+        baseSkill: null,
+      });
     }
     const source = sourceFinding(manifest);
-    return source === null ? base : { ...base, findings: [...base.findings, source] };
+    return this.withBaseSkill(source === null ? base : { ...base, findings: [...base.findings, source] });
+  }
+
+  /** The reported block carries the base skill posture and its finding (crew#554) — the seam's one answer to "is the discipline skill handed". */
+  private withBaseSkill(health: SkillsHealth): SkillsHealth {
+    const posture = this.lastBaseSkill;
+    const findings = posture?.finding === null || posture?.finding === undefined ? health.findings : [...health.findings, posture.finding];
+    return { ...health, findings, baseSkill: posture };
   }
 
   /** Boot entry point. Never throws; never fails open (module header). Idempotent: a seeded, published root is only re-verified. */
@@ -307,6 +391,7 @@ export class SkillsRuntime {
             engineInput: '',
             stateHome: canonicalCrewStateHome(),
             findings: [{ kind: 'skills.config', severity: 'error', message: detail }],
+          baseSkill: null,
           });
         }
         this.log(
@@ -321,6 +406,7 @@ export class SkillsRuntime {
           engineInput: restored ?? null,
           stateHome: canonicalCrewStateHome(),
           findings: [{ kind: 'skills.fallback', severity: 'warning', message }],
+          baseSkill: null,
         });
       }
       const refusal = refusalPath(root, 'skills.config');
@@ -333,6 +419,7 @@ export class SkillsRuntime {
         engineInput: refusal,
         stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.config', severity: 'error', message }],
+          baseSkill: null,
       });
     }
     if (ready.seeded) this.log(`[skills] seeded ${root} from ${ready.source === null ? 'a source the seed did not record' : describeSeedSource(ready.source)}`);
@@ -353,6 +440,7 @@ export class SkillsRuntime {
         engineInput: refusal,
         stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.blocked', severity: 'error', message }],
+          baseSkill: null,
       });
       this.logSourceWarning(blocked);
       return blocked;
@@ -419,10 +507,12 @@ export class SkillsRuntime {
         engineInput: refusal,
         stateHome: canonicalCrewStateHome(),
         findings: [{ kind: 'skills.config', severity: 'error', message }],
+          baseSkill: null,
       });
     }
     if (current === null) {
       this.store.live.exported(null);
+      this.refreshBaseSkill();
       return null;
     }
     applySkillsSnapshotEnv(current.path);
@@ -458,12 +548,16 @@ export class SkillsRuntime {
       engineInput: current.path,
       stateHome: canonicalCrewStateHome(),
       findings: stale === null ? [] : [stale],
+          baseSkill: null,
     });
   }
 
   /** Store the ladder's outcome; answer it as `health()` reports it (the live `skills.source` warning included). */
   private record(health: SkillsHealth): SkillsHealth {
     this.lastHealth = health;
+    // The base skill is judged against THIS outcome (crew#554): a generation just published (or
+    // refused) changes what the engine is handed, so the variable follows the ladder every time.
+    this.refreshBaseSkill();
     return this.health();
   }
 }

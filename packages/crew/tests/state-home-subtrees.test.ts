@@ -331,6 +331,15 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
     expect(realpathSync(handed)).toBe(handed);
     expect(lstatSync(handed).isDirectory()).toBe(true);
     const skills = ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
-    expect(skills).toMatchObject({ state: 'published', stateHome: canonical, engineInput: handed, findings: [] });
+    // The ONE ladder outcome, plus the shipped BASE skill default's warning (crew#554): the fixture does not
+    // ship `wicked-garden-governed-worker`, so under `warn` it is "not handed" — and WICKED_BASE_SKILL_REF is
+    // therefore NOT exported either: the snapshot path stays the one variable the engine is handed.
+    expect(skills).toMatchObject({
+      state: 'published',
+      stateHome: canonical,
+      engineInput: handed,
+      findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' })],
+    });
+    expect(process.env['WICKED_BASE_SKILL_REF']).toBeUndefined();
   });
 });

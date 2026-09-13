@@ -438,6 +438,12 @@ export async function createServer(
       }),
       log: (m) => app.log.warn(m),
     });
+    // The base skill setting (crew#554 / wicked-core#468) is applied BEFORE the ladder runs, so
+    // `apply`'s outcome re-judges it against whatever generation it exports: `WICKED_BASE_SKILL_REF`
+    // is set when the generation holds the skill (or `baseSkillPolicy: 'require'` says always),
+    // deleted otherwise — the engine reads it at intake, per launch. Re-applied by PUT /settings
+    // and by every publish / refresh (skills/runtime.ts).
+    skillsRuntime.configureBaseSkill(bootSettings);
     await skillsRuntime.apply();
   }
 

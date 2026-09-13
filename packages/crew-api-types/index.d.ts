@@ -162,6 +162,14 @@ export interface HealthResponse {
    * shows it as the blocker it is; `status` stays `ok` — the daemon is up, it refuses to launch.
    */
   warnings?: HealthWarning[];
+  /**
+   * The BASE skill posture for the NEXT launch (crew#554; additive) — what a composer's confirm
+   * line renders as `discipline skill: <name> gen N` (or `MISSING — runs will be refused at
+   * intake` under `baseSkillPolicy: 'require'`, `MISSING — runs proceed without it` under
+   * `'warn'`). `null` when the setting is off or the skills seam is disabled; absent on a daemon
+   * before this field. Cached by the daemon — reading it costs no I/O.
+   */
+  baseSkill?: BaseSkillPosture | null;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -389,6 +397,14 @@ export interface WorkUnit {
    * before the field existed, and on an older engine.
    */
   executes_code?: boolean;
+  /**
+   * The BASE skill this unit follows (wicked-core#468; additive, skip-if-none on the wire): the
+   * run's role-keyed discipline skill, copied onto every AGENT unit at plan time (never a Tool
+   * unit). The unit header renders it with the unit's `role` as `discipline: <name> §<role> gen N`,
+   * `N` from the unit's `skillsSnapshotHanded.gen` frame. Absent on runs without one, on units
+   * planned before the field existed, and on an older engine.
+   */
+  base_skill_ref?: string | null;
 }
 
 /** A run plus its ordered units (`SessionView`) — the shape `GET /runs` returns. */
@@ -985,6 +1001,15 @@ export interface UnitDispatchedEvent {
   session: string;
   ord: number;
   attempt: number;
+  /**
+   * The BASE skill directive this dispatch carries (wicked-core#468; additive): the run's
+   * role-keyed discipline skill and the `§<role>` section the unit was told to follow. Emitted
+   * unconditionally by an engine that has it — `null` when the run declares none; ABSENT on an
+   * older engine. The generation it is handed from is the same unit's `skillsSnapshotHanded.gen`
+   * (the handoff is where the generation is known truthfully). A run page renders
+   * `discipline: <name> §<role> gen N`.
+   */
+  baseSkill?: { name: string; role: 'creator' | 'evaluator' | 'neutral' } | null;
 }
 
 /** §3 B3 — token/cost burn for one unit run. `costUsd` is `null` when no cost is known. */
@@ -2401,6 +2426,9 @@ export interface SkillMutationResult extends SkillAnalyzeResult {
  *  (`snapshot: null`), not a 409. */
 export interface SkillPublishResult extends SkillAnalyzeResult {
   snapshot: { gen: number; path: string; contentHash: string; skills: number } | null;
+  /** The BASE skill posture AFTER this publish (crew#554): `present: false` with a `finding` is the
+   *  "published a snapshot without the discipline skill" warning. Absent on a daemon before it. */
+  baseSkill?: BaseSkillPosture | null;
 }
 
 /** `POST /skills/refresh-baseline` 200 body — the three-way merge per FILE (baseline_old /
@@ -2422,6 +2450,9 @@ export interface SkillRefreshResult extends SkillAnalyzeResult {
   removed: string[];
   /** Skills flagged `conflict` by this refresh. */
   conflicts: string[];
+  /** The BASE skill posture AFTER this refresh (crew#554): a refresh moves the CATALOG, not the handed
+   *  generation, so `inCatalog: true, present: false` reads "publish to hand it". Absent on a daemon before it. */
+  baseSkill?: BaseSkillPosture | null;
 }
 
 /** The 409 body of a `/skills` mutation whose `expectedRevision` is stale — a CAS conflict, the
@@ -3240,6 +3271,15 @@ export interface WorkflowDef {
   phases: PhaseDef[];
   /** True for built-in workflows that have dedicated entry points and must not appear in the work-mode selector. */
   is_system?: boolean;
+  /**
+   * The BASE skill every agent phase of THIS workflow follows (wicked-core#468; additive, engine
+   * ≥ the release carrying it — an older engine's strict def parser refuses the key). The engine
+   * leads every unit prompt with `Invoke your skill "<base>" … and follow its §<role> section`
+   * before the phase's `skill_ref` directive. Absent ⇒ the daemon's `SystemSettings.baseSkillRef`
+   * default (exported as `WICKED_BASE_SKILL_REF`); `""` ⇒ an explicit opt-out for this workflow.
+   * Gated at intake: a launch whose snapshot lacks the skill is refused before any unit is planned.
+   */
+  base_skill_ref?: string | null;
 }
 
 /** Top-level requirements_graph.json artifact (schema 1.0.0). */
@@ -3366,6 +3406,26 @@ export interface SystemSettings {
    * launches (those are always `'none'`).
    */
   deliverDefault?: 'pr' | 'none';
+  /**
+   * The BASE skill every governed agent unit follows (crew#554 / wicked-core#468; additive): the
+   * frontmatter name the daemon exports as the engine-config default `WICKED_BASE_SKILL_REF`, so
+   * the engine leads EVERY unit prompt with `Invoke your skill "<base>" … and follow its §<role>
+   * section` (`creator` | `evaluator` | `neutral`) ahead of the phase's own `skill_ref` directive.
+   * A workflow def's own `base_skill_ref` overrides it (`""` there = opt-out for that workflow).
+   * Shipped default `"wicked-garden-governed-worker"`; `""` = OFF (the variable is deleted).
+   * Absent reads as the shipped default.
+   */
+  baseSkillRef?: string;
+  /**
+   * What a published snapshot WITHOUT the base skill means (crew#554; additive). `'warn'` (the
+   * default): the daemon exports the variable ONLY when the current generation holds the skill —
+   * otherwise runs proceed without the discipline directive and `GET /diagnostics.skills` carries a
+   * `skills.base-skill` WARNING (a fresh install lacks the skill until the garden that ships it is
+   * published). `'require'`: the variable is always exported and the engine REFUSES every launch at
+   * intake until a generation holding the skill is published (`POST /runs` → 422
+   * `base_skill_refused`); the finding is an `error`.
+   */
+  baseSkillPolicy?: 'warn' | 'require';
   /**
    * The stall watchdog's DETECTION threshold (crew#287; api-types 0.18.0 — previously a
    * daemon-local extension): minutes a run in `executing` may go without ANY engine event on the
@@ -4761,14 +4821,19 @@ export interface DiagnosticsSkillsFinding {
    *  crew#535) = the CURRENT generation was published under OTHER portability rules than the daemon
    *  now runs — accepted (the snapshot is never rewritten; the runtime stays `published`), the rows
    *  that now derive differently are named (`SkillsManifestResponse.current.drift`), and a publish
-   *  records the running rules and clears it. */
+   *  records the running rules and clears it; `skills.base-skill` (crew#554 / wicked-core#468) =
+   *  the configured BASE skill (`SystemSettings.baseSkillRef`) is not in the current generation —
+   *  a `warning` under `baseSkillPolicy: 'warn'` (runs proceed without the discipline directive),
+   *  an `error` under `'require'` (the engine refuses every launch at intake); cleared by a publish
+   *  that hands it. Also carried as `DiagnosticsSkills.baseSkill.finding`. */
   kind:
     | 'skills.fallback'
     | 'skills.blocked'
     | 'skills.config'
     | 'skills.source'
     | 'skills.manifest'
-    | 'skills.stale-rules';
+    | 'skills.stale-rules'
+    | 'skills.base-skill';
   severity: 'warning' | 'error';
   message: string;
 }
@@ -4797,6 +4862,50 @@ export interface DiagnosticsSkills {
    *  layout. `null` only when `disabled`. */
   stateHome: string | null;
   findings: DiagnosticsSkillsFinding[];
+  /** The BASE skill posture (crew#554) — the System page's "discipline skill" row beside the skills
+   *  generation; its `finding` (when the generation lacks the skill) also rides `findings`. `null`
+   *  when the setting is off or the seam is `disabled`. A daemon before this field omits the key
+   *  (read it as `null`). */
+  baseSkill: BaseSkillPosture | null;
+}
+
+/**
+ * The BASE skill in force for the next launch (crew#554 — the launcher half of wicked-core#468).
+ * The engine leads EVERY agent unit's prompt with one role-keyed directive naming this skill and
+ * the unit's `§<role>` section; a launch whose handed snapshot lacks it is refused at intake. The
+ * daemon judges the setting against the CURRENT published generation and exports
+ * `WICKED_BASE_SKILL_REF` per `policy` (see `SystemSettings.baseSkillPolicy`). Carried by
+ * `GET /health.baseSkill`, `GET /diagnostics.skills.baseSkill`, `POST /skills/publish` and
+ * `POST /skills/refresh-baseline` results, and the 422 `base_skill_refused` launch body.
+ */
+export interface BaseSkillPosture {
+  /** The frontmatter name (`wicked-garden-governed-worker` by default). */
+  name: string;
+  policy: 'warn' | 'require';
+  /** The published generation the engine is handed holds the skill — the intake admission passes. */
+  present: boolean;
+  /** The editor catalog holds the skill enabled — the NEXT publish hands it. */
+  inCatalog: boolean;
+  /** The generation judged (`current`), or `null` when nothing is published. */
+  gen: number | null;
+  /** What `WICKED_BASE_SKILL_REF` is exported as right now: the name, or `null` = unset (runs proceed without a base skill). */
+  engineInput: string | null;
+  /** The `skills.base-skill` finding when the generation lacks the skill (`warning` under `warn`, `error` under `require`); `null` when it holds it. */
+  finding: DiagnosticsSkillsFinding | null;
+}
+
+/**
+ * `POST /runs` **422** (crew#554): the engine refused the launch AT INTAKE because the handed skills
+ * snapshot lacks the run's base skill (`SkillsError::BaseSkillRefused` — `baseSkillPolicy:
+ * 'require'`, or a workflow def's own `base_skill_ref`). Nothing was planned or persisted; no run
+ * id exists. `error` is the engine's message naming the skill; `baseSkill` is the daemon's posture
+ * at refusal time; `remedy` names the fix (publish a generation holding it, or relax the policy).
+ */
+export interface BaseSkillRefusedResponse {
+  code: 'base_skill_refused';
+  error: string;
+  baseSkill: BaseSkillPosture | null;
+  remedy: string;
 }
 
 // ── Diagnostics — the state-home classification (additive; wicked-core#411 / wicked-crew#497) ───

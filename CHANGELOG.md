@@ -11,6 +11,37 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Added
+- **The BASE skill default + disclosure (#554 — the launcher half of wicked-core#468; needs the
+  wicked-core release that carries `base_skill_ref` / `WICKED_BASE_SKILL_REF`; no pin change here).**
+  Every governed agent unit is now told to follow ONE role-keyed discipline skill —
+  `wicked-garden-governed-worker` (garden#1131) — ahead of its phase `skill_ref`: the engine leads
+  every unit prompt with `Invoke your skill "<base>" … and follow its §<role> section` and refuses a
+  launch AT INTAKE when the handed snapshot lacks the skill. Crew owns the default and what a missing
+  skill means: `SystemSettings.baseSkillRef` (shipped `"wicked-garden-governed-worker"`, `""` = off)
+  and `baseSkillPolicy: 'warn' | 'require'` (shipped **`warn`**). Under `warn` the daemon exports the
+  engine variable ONLY when the CURRENT published generation holds the skill — a fresh install (no
+  garden shipping it yet) runs WITHOUT the directive and raises a `skills.base-skill` WARNING in
+  `GET /diagnostics.skills` (a visible warning, never a dead Send); under `require` the variable is
+  always exported and the engine refuses every launch at intake until a generation holding it is
+  published (the finding is an `error`). Applied at boot, on every `PUT /settings` naming either key
+  (validated: a skill-name shape / the two policies — a typo is a 400), after every publish and after
+  every baseline refresh — the engine reads it at intake per launch, so no restart seam.
+  Disclosure: `GET /health.baseSkill` (the composer's confirm line — `discipline skill: <name> gen N`
+  / `MISSING — runs will be refused at intake` / `MISSING — runs proceed without it`),
+  `GET /diagnostics.skills.baseSkill` + `findings` (the System page), `POST /skills/publish` and
+  `POST /skills/refresh-baseline` results carry `baseSkill` (a refresh moves the catalog, not the
+  handed generation: `inCatalog: true, present: false` reads "publish to hand it"), and a launch the
+  engine refuses for the base skill is a typed **422** `{ code: 'base_skill_refused', error,
+  baseSkill, remedy }` instead of a generic 400. Wire (`wicked-crew-api-types`, additive):
+  `SystemSettings.baseSkillRef` / `baseSkillPolicy`, `WorkflowDef.base_skill_ref` (a def's own
+  override; `""` = opt-out for that workflow), `WorkUnit.base_skill_ref`,
+  `UnitDispatchedEvent.baseSkill {name, role} | null` (the run page's `discipline: <name> §<role> gen
+  N`, `N` from the same unit's `skillsSnapshotHanded.gen`), `HealthResponse.baseSkill`,
+  `DiagnosticsSkills.baseSkill`, `DiagnosticsSkillsFinding.kind` `skills.base-skill`,
+  `BaseSkillPosture`, `BaseSkillRefusedResponse`. The builtin overlays are NOT rewritten: the
+  engine-config default reaches every workflow (built-in, drop-in, prose-planned) through the one
+  variable, and a workflow's own `base_skill_ref` overrides it — so the shipped mirrors stay
+  byte-identical to core's. Studio renders the new fields in a follow-up.
 - **State-home preflight — an entry the worker Read fence cannot classify is a CONFIGURATION error the
   daemon says at boot, reports on `GET /diagnostics` and `GET /health`, and answers `POST /runs` 409
   for; never again a "triage judge errored" gate at the run's first worker (wicked-crew#497,
