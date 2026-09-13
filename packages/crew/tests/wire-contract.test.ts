@@ -28,6 +28,7 @@ import type { QeAuthorPlan } from '../src/qe/author-workflow.js';
 import type { TestSet } from '../src/qe/test-sets.js';
 import type { TestingAuthorSchema } from '../src/api/testing.js';
 import { councilOutcomeSuffix } from '../src/interactive/council-outcome.js';
+import { NO_ELIGIBLE_SEAT_CODE, noEligibleSeatBody } from '../src/core/engine-roster.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { GateCacheEntry } from '../src/api/gate-cache.js';
 import type { ElicitationEntry } from '../src/api/elicitation-cache.js';
@@ -291,9 +292,50 @@ const RECORDED_UNIT_DISTRIBUTED = {
   dissent: 0,
   degradedReason: '4 of 5 seats benched: codex (signed out — launcher), pi (unauthenticated — ballot), copilot (signed out — launcher), opencode (dispatch budget — ballot)',
   seatConstraint: null,
+  distinctnessFallback: null,
 };
 respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED>();
 respondsWith<UnitDistributedEventJson, typeof RECORDED_UNIT_DISTRIBUTED>();
+
+// ── Hardening S5 (wicked-core#461 / crew#556): `unitDistributed.distinctnessFallback` ──────────────
+// The engine adds the evaluator ≠ creator fallback as a REQUIRED key of `UnitDistributedEventJson`
+// (`'creator_seat' | null`, emitted unconditionally). Crew CI builds `wicked-core-ts` from core MAIN
+// while the npm pin lags, so the contract must hold against BOTH shapes at once — which is why the
+// contract declares the field OPTIONAL (`?: 'creator_seat' | null`): an engine frame WITH the key
+// (core main) and one WITHOUT it (the current pin) both satisfy it. `UnitDistributedEventJsonWithFallback`
+// is the post-#461 napi shape spelled out here, so this file proves the core-main direction on the
+// pinned addon too (and keeps proving it once the pin catches up, when the two types coincide).
+type UnitDistributedEventJsonWithFallback = UnitDistributedEventJson & {
+  distinctnessFallback: 'creator_seat' | null;
+};
+// The engine's post-#461 frame satisfies the contract (the field REQUIRED there, optional here) …
+respondsWith<Wire.UnitDistributedEvent, UnitDistributedEventJsonWithFallback>();
+respondsWith<Wire.CoreEvent, UnitDistributedEventJsonWithFallback>();
+// … the recorded null-spelled frame satisfies the post-#461 napi shape (the CI-on-core-main case) …
+respondsWith<UnitDistributedEventJsonWithFallback, typeof RECORDED_UNIT_DISTRIBUTED>();
+// … and a frame with the fallback POPULATED (a review unit kept on the single eligible seat — the
+// bench-free single-seat roster, where `degradedReason` stays null and this key is the only
+// disclosure) satisfies both the contract and the napi shape, with the closed token set.
+const RECORDED_UNIT_DISTRIBUTED_FALLBACK = {
+  type: 'unitDistributed' as const,
+  session: 'b86c14c1-e295-4659-8a30-51b4ec1ac589',
+  ord: 3,
+  cli: 'claude',
+  routingMethod: 'evaluator_distinct' as const,
+  agreementPct: null,
+  returned: null,
+  seated: null,
+  dissent: null,
+  degradedReason: null,
+  seatConstraint: null,
+  distinctnessFallback: 'creator_seat' as const,
+};
+respondsWith<Wire.UnitDistributedEvent, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
+respondsWith<UnitDistributedEventJsonWithFallback, typeof RECORDED_UNIT_DISTRIBUTED_FALLBACK>();
+respondsWith<Wire.UnitDistributedEvent['distinctnessFallback'], 'creator_seat' | null | undefined>();
+// The typed `POST /runs` 409 for the engine's `NoEligibleSeat` intake refusal (same PR).
+respondsWith<Wire.NoEligibleSeatBody, ReturnType<typeof noEligibleSeatBody>>();
+respondsWith<Wire.NoEligibleSeatBody['code'], typeof NO_ELIGIBLE_SEAT_CODE>();
 // The new frames relay through the CoreEvent-typed seams and narrow on `type`.
 respondsWith<Wire.CoreEvent, Wire.WorkerToolCallDeniedEvent>();
 respondsWith<Wire.GateEvidenceEvent, Wire.WorkerToolCallDeniedEvent>();
@@ -356,8 +398,13 @@ describe('wave 6 wire shapes (api-types 0.36.0)', () => {
     // The teeth are the compile-time assertions above; these keep the literal live and prove the
     // narrator reads the EMITTED spelling (a consumer of `degraded_reason` saw undefined pre-0.36).
     expect(Object.keys(RECORDED_UNIT_DISTRIBUTED).sort()).toEqual(
-      ['agreementPct', 'cli', 'degradedReason', 'dissent', 'ord', 'returned', 'routingMethod', 'seatConstraint', 'seated', 'session', 'type'].sort(),
+      ['agreementPct', 'cli', 'degradedReason', 'dissent', 'distinctnessFallback', 'ord', 'returned', 'routingMethod', 'seatConstraint', 'seated', 'session', 'type'].sort(),
     );
+    // (core#461) The fallback key is spelled `null`, never absent, on the engine that emits it …
+    expect(RECORDED_UNIT_DISTRIBUTED.distinctnessFallback).toBeNull();
+    expect('distinctnessFallback' in RECORDED_UNIT_DISTRIBUTED).toBe(true);
+    // … and reads `'creator_seat'` when a review unit stays on its creator's seat.
+    expect(RECORDED_UNIT_DISTRIBUTED_FALLBACK.distinctnessFallback).toBe('creator_seat');
     expect(RECORDED_UNIT_DISTRIBUTED.degradedReason).toContain('4 of 5 seats benched');
     expect(councilOutcomeSuffix(RECORDED_UNIT_DISTRIBUTED as unknown as Wire.CoreEvent)).toContain('4 of 5 seats benched: codex (signed out — launcher)');
     // The deprecated aliases are OPTIONAL: a frame without them satisfies the contract (asserted

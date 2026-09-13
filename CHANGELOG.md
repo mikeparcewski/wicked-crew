@@ -42,6 +42,42 @@ mentioned only where a daemon release depends on them.
   engine-config default reaches every workflow (built-in, drop-in, prose-planned) through the one
   variable, and a workflow's own `base_skill_ref` overrides it — so the shipped mirrors stay
   byte-identical to core's. Studio renders the new fields in a follow-up.
+- **`unitDistributed.distinctnessFallback` mirrored; `POST /runs` answers the engine's typed
+  `NoEligibleSeat` intake refusal as a 409 (wicked-crew#556; wicked-core#461 / wicked-core#473,
+  hardening S5).** The engine adds the evaluator ≠ creator fallback as a FIELD of `unitDistributed`:
+  `distinctnessFallback: 'creator_seat' | null` — `'creator_seat'` when a review/test unit STAYS on a
+  seat that built what it checks because no eligible seat distinct from the builders admits it (a
+  single-eligible-seat roster, or a bench that emptied the pool), `null` otherwise, emitted
+  unconditionally (the `seatConstraint` rule) and REQUIRED in `wicked-core-ts`'s
+  `UnitDistributedEventJson`. Crew CI builds `wicked-core-ts` from wicked-core `main`, and
+  `tests/wire-contract.test.ts` pins the contract against that type and a recorded frame, so the
+  contract gains the field first — OPTIONAL on crew's side (`distinctnessFallback?: 'creator_seat' |
+  null`, a consumer guards with `== null`): frames from the pinned engine (no key) and from the
+  release carrying #461 (`null`, never absent) both satisfy it, so this lands green on either and
+  wicked-core#473 can merge after it with no red window (zero-red order). The recorded frame carries
+  `distinctnessFallback: null`; a second recorded frame carries `'creator_seat'` on an
+  `evaluator_distinct` arm; the post-#461 napi shape is spelled out in the test so the core-main
+  direction is proven on the pinned addon too. Same engine release: `launch_run` refuses a plan that
+  needs a seat on a roster whose EVERY seat the launcher benched (`health.usable: false` — crew's
+  `council_eligible: false`) synchronously, by name, as the typed `NoEligibleSeat` — `no eligible seat
+  for <run>: N of N seats benched: <seat> (<cause> — launcher), … — sign a seat in, or add one, before
+  launching`. `POST /runs` mapped that text to **400** (the generic `busy ? 409 : 400` arm — not a 5xx,
+  as #556 first said); now it answers **409** `{ code: 'no_eligible_seat', error, runId, benched,
+  remedy }` (`core/engine-roster.ts` `parseNoEligibleSeat` / `noEligibleSeatBody`; `NoEligibleSeatBody`
+  in api-types): the body is well-formed and the same request succeeds once a seat is signed in — the
+  conflict is with the roster's standing, the `state_home_unregistered` rule — and the engine is
+  healthy and said no. `benched` names every seat with its class (signed out / quota / not installed).
+  The engine-busy refusal keeps its bare 409, an unrecognised message its 400; 409 was already declared
+  on the route, and the endpoint manifest now also declares the **422** `base_skill_refused` arm #554
+  added (it answered 422 without declaring it). Nothing user-facing changes beyond that status; the studio
+  disclosure of `'creator_seat'` beside the routing line is a studio follow-up (the run page reads
+  `degradedReason`, which stays `null` on a bench-free single-seat roster, so today the fallback would
+  be invisible there). `wicked-core-ts` pin deliberately unchanged (`^0.7.24`); `wicked-crew-api-types`
+  additive (`UnitDistributedEvent.distinctnessFallback?`, the loose `CoreEvent` alias,
+  `NoEligibleSeatBody`), its cut rides the release train. Tests: `tests/wire-contract.test.ts` (both
+  shapes at compile time + the runtime key list), `tests/no-eligible-seat-route.test.ts` (the
+  recogniser: the engine shape and nothing else; the route: typed 409, busy stays 409, unknown stays
+  400, an eligible roster still launches).
 - **State-home preflight — an entry the worker Read fence cannot classify is a CONFIGURATION error the
   daemon says at boot, reports on `GET /diagnostics` and `GET /health`, and answers `POST /runs` 409
   for; never again a "triage judge errored" gate at the run's first worker (wicked-crew#497,

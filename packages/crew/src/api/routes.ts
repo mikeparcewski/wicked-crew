@@ -89,6 +89,7 @@ import {
 } from '../projects/state-home-preflight.js';
 import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import type { EvalRunStore } from './eval-store.js';
+import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { composeDeliverText, factsFromRun, framedDeliverText, runUrlFor } from '../core/deliver-text.js';
@@ -1360,10 +1361,13 @@ export function registerRoutes(
           requestType: 'LaunchRunBody',
           responseType: '{ runId: string }',
           // 404/409: unknown project / unknown campaignId (wicked-studio#27) /
-          // archived-or-synthesized project + busy engine (see the catch below); 400: zod
-          // reject or a retryOf naming no existing run; 501: campaignId attach on an engine
-          // addon without the campaign bindings ("upgrade the engine").
-          statusCodes: [201, 400, 404, 409, 501],
+          // archived-or-synthesized project + busy engine + the state-home blocker
+          // (`state_home_unregistered`) + a roster with no eligible seat (`no_eligible_seat`,
+          // wicked-core#461 — see the catch below); 400: zod reject or a retryOf naming no
+          // existing run; 422: the base-skill intake refusal (`base_skill_refused`, crew#554);
+          // 501: campaignId attach on an engine addon without the campaign bindings ("upgrade
+          // the engine").
+          statusCodes: [201, 400, 404, 409, 422, 501],
         },
       },
     },
@@ -1555,6 +1559,16 @@ export function registerRoutes(
                   remedy: STATE_HOME_REMEDY,
                 },
           );
+      }
+      // wicked-core#461 / crew#556: the engine's typed `NoEligibleSeat` intake refusal — the plan
+      // needs a seat and every seat of the roster was benched by the launcher (signed out / quota /
+      // not installed). A 409 with a typed body, not the 400 the generic arm below answered: the
+      // request is well-formed and succeeds unchanged once a seat is signed in — the conflict is
+      // with the roster's standing (the `state_home_unregistered` rule) — and not a 5xx: the engine
+      // is healthy and said no, naming every seat and its cause.
+      const noSeat = parseNoEligibleSeat(msg);
+      if (noSeat !== null) {
+        return reply.code(409).send(noEligibleSeatBody(msg, noSeat));
       }
       // An unknown/archived project is a state conflict on a real resource, not a malformed
       // request: 404/409 per the projects error mapping; anything else keeps the launch 400/409.
