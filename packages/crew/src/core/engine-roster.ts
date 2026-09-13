@@ -144,6 +144,50 @@ export function engineCampaignDef(def: CampaignDef): CampaignDef {
   };
 }
 
+/** `POST /runs` 409 `code` when the engine refuses a launch for want of an eligible seat (crew#556). */
+export const NO_ELIGIBLE_SEAT_CODE = 'no_eligible_seat' as const;
+
+/** The remedy in operator terms — the engine's own closing clause, plus where the standing shows. */
+export const NO_ELIGIBLE_SEAT_REMEDY =
+  'Sign a seat in (or add one to the roster) and launch again — GET /api/v1/roster shows each ' +
+  "seat's standing and why it is not council-eligible.";
+
+/**
+ * wicked-core#461's typed `NoEligibleSeat` intake refusal, as its Display reaches crew through the
+ * napi rejection: `no eligible seat for <run>: <benched> — sign a seat in, or add one, before
+ * launching`. The engine raises it synchronously at `launch_run` when the plan needs a seat and every
+ * seat of a non-empty roster was benched by the launcher (`health.usable: false` — crew's
+ * `council_eligible: false`, stamped by {@link toEngineRoster}); nothing is persisted, nothing
+ * reaches the wire. The napi seam carries only the message, so the recogniser is the message's
+ * shape (the `isEngineStateHomeRefusal` rule); a message of any other shape is not this refusal.
+ */
+export function parseNoEligibleSeat(message: string): { runId: string; benched: string } | null {
+  const m = /^no eligible seat for (\S+): (.+?) — sign a seat in, or add one, before launching$/s.exec(
+    message.trim(),
+  );
+  return m === null ? null : { runId: m[1]!, benched: m[2]! };
+}
+
+/** The typed 409 body (`NoEligibleSeatBody` in wicked-crew-api-types) for a recognised refusal. */
+export function noEligibleSeatBody(
+  message: string,
+  refused: { runId: string; benched: string },
+): {
+  error: string;
+  code: typeof NO_ELIGIBLE_SEAT_CODE;
+  runId: string;
+  benched: string;
+  remedy: string;
+} {
+  return {
+    error: message,
+    code: NO_ELIGIBLE_SEAT_CODE,
+    runId: refused.runId,
+    benched: refused.benched,
+    remedy: NO_ELIGIBLE_SEAT_REMEDY,
+  };
+}
+
 /** The seat keys of a roster the ENGINE would convene — every seat not benched by its `health`. */
 export function eligibleSeatKeys(seats: readonly unknown[]): string[] {
   const out: string[] = [];

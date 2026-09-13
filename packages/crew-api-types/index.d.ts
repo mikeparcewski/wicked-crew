@@ -805,6 +805,9 @@ export interface CoreEvent {
   degradedReason?: string | null;
   degraded_reason?: string | null;
   seatConstraint?: string | null;
+  /** `unitDistributed` (wicked-core#461): the evaluator ≠ creator fallback as a field — see
+   *  `UnitDistributedEvent.distinctnessFallback`. */
+  distinctnessFallback?: 'creator_seat' | null;
   /** `gateEvaluated` (wave 6, F-7R2-005): `true` when NOTHING gated the unit — render as UNGATED. */
   ungated?: boolean;
   /** `gateEvaluated` (wave 6): why, when `ungated`. */
@@ -1748,6 +1751,20 @@ export interface UnitDistributedEvent {
   /** WHY the candidate seats were narrowed BEFORE the council voted (core#401): a non-portable
    *  skill constrained the unit to a claude seat. `null` when every roster seat was a candidate. */
   seatConstraint: string | null;
+  /**
+   * The evaluator ≠ creator DISCLOSURE as a field (wicked-core#461, crew#556): `'creator_seat'` when a
+   * review/test unit STAYS on a seat that built what it checks because no eligible seat distinct from
+   * the builders admits it — a single-eligible-seat roster, or a bench that emptied the pool
+   * (`degradedReason` then says which; on a bench-free single-seat roster it stays `null`, so this
+   * field is the ONLY disclosure). `null` otherwise. The fallback seat is always a still-eligible one:
+   * a benched or dead seat is never the fallback.
+   *
+   * OPTIONAL on this side of the wire deliberately: the engine emits the key unconditionally (`null`,
+   * never absent — the `seatConstraint` rule) from the wicked-core release carrying #461 on, but an
+   * older engine does not send it at all, and this contract must read frames from both. Consumers
+   * guard with `== null`, never `=== undefined`.
+   */
+  distinctnessFallback?: 'creator_seat' | null;
   /** @deprecated api-types 0.36.0 — the engine emits `routingMethod`; removed in 0.37. */
   routing_method?: 'council' | 'degraded' | 'evaluator_distinct' | 'tool';
   /** @deprecated api-types 0.36.0 — the engine emits `agreementPct`; removed in 0.37. */
@@ -4974,6 +4991,28 @@ export interface StateHomeBlockerBody {
   code: 'state_home_unregistered';
   stateHome: string | null;
   unregistered: DiagnosticsStateHomeEntry[];
+  remedy: string;
+}
+
+/**
+ * The `POST /runs` **409** body when the engine refuses the launch at intake because the roster has
+ * NO eligible seat (`code: 'no_eligible_seat'`; wicked-core#461's typed `NoEligibleSeat`, crew#556):
+ * the plan needs a seat and every configured seat was benched by the launcher — signed out, out of
+ * quota, not installed (crew's `council_eligible: false` → the engine's `health.usable: false`).
+ * Nothing was persisted, nothing reached the wire. A 409, not a 400: the body is well-formed and the
+ * same request succeeds once a seat is signed in — the conflict is with the roster's current
+ * standing (the `state_home_unregistered` rule), and not a 5xx: the engine is healthy and said no.
+ */
+export interface NoEligibleSeatBody {
+  /** The engine's own text: `no eligible seat for <run>: <benched> — sign a seat in, or add one, …`. */
+  error: string;
+  code: 'no_eligible_seat';
+  /** The refused run id (never persisted). */
+  runId: string;
+  /** The bench, seat by seat with its cause — `"2 of 2 seats benched: codex (signed out — launcher),
+   *  copilot (quota exhausted — launcher)"` — the engine's `benched_summary`, verbatim. */
+  benched: string;
+  /** What to do, in operator terms. */
   remedy: string;
 }
 
