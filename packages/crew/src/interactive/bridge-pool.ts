@@ -91,18 +91,33 @@ export const LINEAGE_MAX_HOPS = 16;
  *
  * F-081 (acceptance): the `^0.8.1` floor was a COMPILED constant, so the daemon never picked up
  * wicked-interactive 0.9.0 (2026-09-02) and would not have picked up 0.9.1 — a silent freeze the
- * caret was never meant to be. The default range now follows 0.9.1 (the exporter honours the
+ * caret was never meant to be. The default range moved to 0.9.1 then (the exporter honours the
  * author's page geometry — F-050; `DELETE /api/docs/:doc` retire exists), and an operator or a test
- * rig can override the RANGE with `WICKED_INTERACTIVE_SPEC` (a semver range — `^0.9.1`, `0.9.1`,
- * `>=0.9.1 <1.0.0`; never a tag, a path or a different package), validated at resolution and
+ * rig can override the RANGE with `WICKED_INTERACTIVE_SPEC` (a semver range — `^0.9.2`, `0.9.2`,
+ * `>=0.9.2 <1.0.0`; never a tag, a path or a different package), validated at resolution and
  * reported on the boot line. An invalid value is IGNORED with a named warning — the default floor
  * is the safe reading, and a daemon must not start bridges against `latest` because a variable
  * was mistyped.
+ *
+ * 0.9.2 (wicked-interactive #224 — F-RECON-012 / F-RECON-014): the default range follows 0.9.2
+ * because crew's demo seam now READS the recorder's typed contract, which 0.9.1 does not speak.
+ * The recorder preflights and PROVISIONS its Playwright browser (a missing executable is a typed,
+ * terminal error — never the 3-retries-in-4-seconds dead-letter loop), and every recorder failure
+ * is a `RecorderError` on the wire: `wicked.interactive.status.posted {state: "error", source:
+ * "recorder", code, error, remedy, install_command, step?, retryable: false}` with the stable codes
+ * `recorder_browser_missing` · `recorder_browser_install_failed` · `recorder_launch_failed` ·
+ * `recording_spec_missing` · `recording_spec_invalid` · `recording_step_failed` · `recording_failed`
+ * · `recording_in_flight` — the frame `interactive/demo-events.ts` relays to
+ * `GET /diagnostics.recentErrors` (F-RECON-013 companion). `POST /api/events` refuses a second
+ * `demo.requested` for a doc mid-recording (`409 recording_in_flight`), `GET /api/preflight` carries
+ * the recorder snapshot, and `wicked-interactive doctor [--install]` is the operator remedy. A 0.9.1
+ * bridge answers the same routes WITHOUT the typed frames, so a daemon pinned back through
+ * `WICKED_INTERACTIVE_SPEC` gets the boot warning and an untyped thread on recorder failure.
  */
 /** The package crew starts as the interactive bridge — named in CODE exactly once. */
 const INTERACTIVE_PACKAGE = 'wicked-interactive';
 /** The range crew needs when nothing overrides it (see F-081 above). */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.9.1';
+export const INTERACTIVE_DEFAULT_RANGE = '^0.9.2';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */

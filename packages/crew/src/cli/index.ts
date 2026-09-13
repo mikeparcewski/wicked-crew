@@ -256,12 +256,13 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     `[crew] interactive bridge: npx ${interactive.spec} (${interactive.source === 'env' ? `${INTERACTIVE_SPEC_ENV} override` : 'default range'})` +
       (interactive.rejected === undefined
         ? ''
-        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.9.1, 0.9.1, >=0.9.1 <1.0.0) and was ignored`),
+        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.9.2, 0.9.2, >=0.9.2 <1.0.0) and was ignored`),
   );
   if (interactive.belowFloor === true) {
     console.warn(
       `[crew] ${INTERACTIVE_SPEC_ENV}=${interactive.range} is BELOW crew's need floor ${INTERACTIVE_DEFAULT_RANGE}: the override is ` +
-        'honoured, but routes crew calls may be missing on that release (DELETE /api/docs/:doc retire arrived in 0.9.1)',
+        'honoured, but routes and frames crew relies on may be missing on that release (DELETE /api/docs/:doc retire arrived in 0.9.1; ' +
+        'the recorder preflight and the typed RecorderError frames the demo seam relays arrived in 0.9.2)',
     );
   }
   const crewVersion = crewPackageVersion();
