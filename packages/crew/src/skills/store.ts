@@ -1061,6 +1061,21 @@ export class SkillsStore {
     return this.verifyCurrent(link, target);
   }
 
+  /**
+   * The skill rows of the VERIFIED current generation — what the engine's intake admission judges
+   * a run's `skill_ref`s and `base_skill_ref` against (crew#554 / core#468) — as `{gen, skills}`,
+   * or `null` before the first publish. Reads `snapshot.json` at the verified path through the
+   * same structural check every reader uses; a generation that verifies but whose metadata will
+   * not re-read is answered as `null` (nothing is KNOWN to be handed), never as an empty catalog.
+   */
+  currentSnapshotSkills(): { gen: number; skills: string[] } | null {
+    const current = this.currentSnapshot();
+    if (current === null) return null;
+    const meta = this.readSnapshotMetadata(current.path);
+    if (typeof meta === 'string') return null;
+    return { gen: current.gen, skills: meta.parsed.skills.map((row) => row.name) };
+  }
+
   private verifyCurrent(link: string, target: string): CurrentSnapshot {
     const invalid = (detail: string): never => {
       throw new SkillsCurrentInvalidError(link, detail);

@@ -458,7 +458,18 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
       expect(real.startsWith(join(canonicalCrewStateHome(), SKILLS_DIRNAME, 'snapshots') + '/')).toBe(true);
       const skills = await diagnostics(app);
-      expect(skills).toEqual({ state: 'published', root, current: { gen: 1, path: real }, engineInput: real, stateHome: canonicalCrewStateHome(), findings: [] });
+      // The shipped BASE skill default (crew#554) rides the boot: the fixture catalog does not ship
+      // `wicked-garden-governed-worker`, so under the default `warn` policy the posture is
+      // "not handed" (engine variable unset) and the ONE finding is its warning.
+      expect(skills).toEqual({
+        state: 'published',
+        root,
+        current: { gen: 1, path: real },
+        engineInput: real,
+        stateHome: canonicalCrewStateHome(),
+        findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' })],
+        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, policy: 'warn', present: false, gen: 1, engineInput: null }),
+      });
       // The root lives under THIS state home — never under the operator's real one.
       expect(readdirSync(dir)).toContain('skills');
       expect(real.startsWith(join(homedir(), '.wicked-crew'))).toBe(false);
@@ -524,7 +535,10 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
             severity: 'warning',
             message: `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`,
           },
+          // …and the shipped BASE skill default's warning (crew#554): the fixture does not ship it.
+          expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' }),
         ],
+        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: 1, engineInput: null }),
       });
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
@@ -547,8 +561,11 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(skills.engineInput).toBe(BOOT_SKILLS_SNAPSHOT ?? null); // diagnostics say what the env actually holds
       expect(skills.stateHome).toBe(canonicalCrewStateHome()); // REPORTED for humans whatever the skills outcome — never an engine input (v3.4 §2)
       expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
-      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
+      // The ladder's finding, then the shipped BASE skill default's (crew#554): with no plugin there is
+      // no generation that could hold it, so under `warn` it is "not handed" — a second warning.
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback', 'skills.base-skill']);
       expect(skills.findings[0]?.message).toContain('install wicked-garden first');
+      expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: null });
       expect(existsSync(join(dir, 'skills'))).toBe(false); // a seed with no source creates nothing
     } finally {
       await app.close();
@@ -570,7 +587,8 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect((res.json() as SkillsManifestResponse).current).toBeNull();
       const skills = await diagnostics(app);
       expect(skills).toMatchObject({ state: 'blocked', root, current: null, engineInput: refusalPath(root, 'skills.blocked') });
-      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.blocked']);
+      // The ladder's error, then the shipped BASE skill default's warning (crew#554) — nothing published, nothing handed.
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.blocked', 'skills.base-skill']);
       expect(skills.findings[0]?.message).toContain('missing-plugin-manifest');
     } finally {
       await app.close();
@@ -588,7 +606,8 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect((await app.inject({ method: 'GET', url: '/api/v1/skills' })).statusCode).toBe(503);
       const skills = await diagnostics(app);
       expect(skills).toMatchObject({ state: 'config-error', root, engineInput: refusalPath(root, 'skills.config') });
-      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.config']);
+      // The ladder's error, then the shipped BASE skill default's warning (crew#554) — a refused root hands nothing.
+      expect(skills.findings.map((f) => f.kind)).toEqual(['skills.config', 'skills.base-skill']);
       expect(skills.findings[0]?.message).toContain('not a skills manifest');
     } finally {
       await app.close();

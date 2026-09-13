@@ -33,6 +33,7 @@ import type {
   CampaignDef,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
+import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
 import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
@@ -2708,6 +2709,18 @@ export class CoreAdapter {
       if ('deliverDefault' in parsed) {
         const d = parsed.deliverDefault;
         if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
+      }
+      // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
+      // skill name (`""` = off) and `'warn' | 'require'`. A hand-edited anything-else falls back to
+      // the shipped default rather than exporting garbage as the engine's `WICKED_BASE_SKILL_REF`
+      // (which would refuse every launch at intake by a name nobody typed).
+      if ('baseSkillRef' in parsed) {
+        const r = parsed.baseSkillRef;
+        if (typeof r !== 'string' || !BASE_SKILL_REF_SHAPE.test(r.trim())) delete parsed.baseSkillRef;
+      }
+      if ('baseSkillPolicy' in parsed) {
+        const p = parsed.baseSkillPolicy;
+        if (p !== 'warn' && p !== 'require') delete parsed.baseSkillPolicy;
       }
       // Skin-owned `studio.*` blobs (crew#325): the same per-key cap the PUT /settings route
       // enforces. The write cap alone cannot hold it — `updateSettings` reads through here, so a

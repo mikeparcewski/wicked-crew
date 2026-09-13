@@ -87,6 +87,7 @@ import {
   stateHomeBlockerBody,
   type StateHomeWatch,
 } from '../projects/state-home-preflight.js';
+import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -926,11 +927,15 @@ export function registerRoutes(
       stateHome === null
         ? []
         : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }));
+    // crew#554: the BASE skill posture for the next launch — the composer's confirm line
+    // ("discipline skill: <name> gen N" / "MISSING — …"). Cached by the skills runtime: no I/O.
+    const baseSkill = runtime.skills?.baseSkill() ?? null;
     return {
       status: 'ok',
       version: PKG_VERSION,
       ping,
       capabilities,
+      baseSkill,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
   });
@@ -1558,6 +1563,18 @@ export function registerRoutes(
       }
       if (b.projectId !== undefined && /archived|'default'|synthesized/i.test(msg)) {
         return reply.code(409).send({ error: msg });
+      }
+      // crew#554 / wicked-core#468: the engine refused the launch AT INTAKE because the handed
+      // skills snapshot lacks the run's BASE skill (`SkillsError::BaseSkillRefused` — the message
+      // names the skill and "refused at intake"). Nothing was planned or persisted. A typed 422 so a
+      // composer renders a clear card (skill, policy, remedy) instead of a generic launch 400.
+      if (/\bbase skill\b.*\brefused at intake\b/is.test(msg)) {
+        const posture = runtime.skills?.baseSkill() ?? null;
+        const remedy =
+          posture !== null && posture.inCatalog
+            ? `the skill is in the catalog — POST /skills/publish hands it to the next launch; or set baseSkillPolicy "warn" (PUT /settings) to run without the discipline directive`
+            : `install a wicked-garden that ships the skill, POST /skills/refresh-baseline, then POST /skills/publish; or set baseSkillPolicy "warn" (PUT /settings) to run without the discipline directive`;
+        return reply.code(422).send({ code: 'base_skill_refused', error: msg, baseSkill: posture, remedy });
       }
       const busy = /busy|in flight|already/i.test(msg);
       return reply.code(busy ? 409 : 400).send({ error: msg });
@@ -3801,6 +3818,26 @@ export function registerRoutes(
           .send({ error: "deliverDefault must be 'pr' or 'none'" });
       }
     }
+    // baseSkillRef / baseSkillPolicy (crew#554 / wicked-core#468): the discipline skill EVERY
+    // governed unit is told to follow, and what a snapshot without it means. Both decide whether
+    // launches carry the directive or are refused at intake, so a typo is a 400, never a silently
+    // dropped key. The name is exported to the engine verbatim: a skill-name shape only.
+    if (Object.hasOwn(patch, 'baseSkillRef')) {
+      const r = patch.baseSkillRef;
+      if (typeof r !== 'string' || !BASE_SKILL_REF_SHAPE.test(r.trim())) {
+        return reply.code(400).send({
+          error: 'baseSkillRef must be a skill name (lowercase letters, digits, "-", "_", ":", ".", up to 128 chars — e.g. "wicked-garden-governed-worker"), or "" to turn the base skill off',
+        });
+      }
+    }
+    if (Object.hasOwn(patch, 'baseSkillPolicy')) {
+      const p = patch.baseSkillPolicy;
+      if (typeof p !== 'string' || !BASE_SKILL_POLICIES.has(p)) {
+        return reply.code(400).send({
+          error: "baseSkillPolicy must be 'warn' (runs proceed without a missing base skill, with a diagnostics warning) or 'require' (the engine refuses launches at intake until the published snapshot holds it)",
+        });
+      }
+    }
     // Skin-owned keys (crew#323): allowed through, but VALIDATED rather than trusted. The
     // daemon does not read these values, so the only two things it can check are the two that
     // can hurt it — a value it cannot persist, and a value big enough to bloat settings.json.
@@ -3840,6 +3877,8 @@ export function registerRoutes(
       'workerStallEscalateAction',
       'workerStallMaxEscalations',
       'deliverDefault',
+      'baseSkillRef',
+      'baseSkillPolicy',
     ];
     const safe: Partial<import('../core/types.js').CrewSystemSettings> = {};
     for (const key of allowed) {
@@ -3864,6 +3903,12 @@ export function registerRoutes(
     // WICKED_WORKER_HOME per worker spawn — never cached — so this alone makes the change live
     // at the next spawn: no daemon restart, no engine restart.
     applyWorkerConfigRoot(settings.worker_config_root);
+    // Re-judge and re-export the BASE skill (crew#554) — the engine reads WICKED_BASE_SKILL_REF at
+    // intake, per launch, so this alone makes a changed name or policy live at the next launch.
+    // Only when the patch named either key: an unrelated settings write must not re-log the seam.
+    if (Object.hasOwn(safe, 'baseSkillRef') || Object.hasOwn(safe, 'baseSkillPolicy')) {
+      runtime.skills?.configureBaseSkill(settings);
+    }
     // (No skills re-apply: the skills root is not a setting — skills/runtime.ts, codex round 5.)
     // `changed` names every persisted key, engine and `studio.*` alike; `ignored` (present only
     // when there is one) is where a dropped unknown key stops being invisible.

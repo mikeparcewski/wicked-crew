@@ -290,7 +290,11 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       const parsed = SkillRevisionSchema.safeParse(req.body);
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, () => {
-        const result = store().refreshBaseline(parsed.data.expectedRevision);
+        const runtime = runtimeOf();
+        const refreshed = runtime.store.refreshBaseline(parsed.data.expectedRevision);
+        // A refresh moves the CATALOG, not the handed generation (crew#554): re-judge the base skill
+        // so the result says "in the catalog — publish to hand it" (or still missing) honestly.
+        const result = { ...refreshed, baseSkill: runtime.refreshBaseSkill() };
         recordMutation(req, 'skills.refreshed', {
           baseline: result.baseline,
           plugin_version: result.plugin_version,
@@ -314,15 +318,20 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       if (!parsed.success) return invalidBody(reply, parsed.error);
       return guarded(reply, async () => {
         const runtime = runtimeOf();
-        const result = await runtime.store.publish(parsed.data.expectedRevision);
+        const published = await runtime.store.publish(parsed.data.expectedRevision);
         // The published snapshot is what the engine consumes — export its real path now.
-        if (result.snapshot !== null) runtime.afterPublish();
+        if (published.snapshot !== null) runtime.afterPublish();
+        // …and say whether the generation the engine is now handed holds the BASE skill (crew#554):
+        // a publish that lacks it is the moment the operator learns runs go without the discipline
+        // directive (`warn`) or will be refused at intake (`require`).
+        const result = { ...published, baseSkill: runtime.baseSkill() };
         recordMutation(req, 'skills.published', {
           verdict: result.verdict,
           gen: result.snapshot?.gen ?? null,
           contentHash: result.snapshot?.contentHash ?? null,
           blocking: result.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`),
           revision: result.revision,
+          ...(result.baseSkill !== null && !result.baseSkill.present ? { baseSkillMissing: result.baseSkill.name } : {}),
         });
         return result;
       });
