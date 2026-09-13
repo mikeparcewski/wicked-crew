@@ -10,6 +10,7 @@ import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../projects/state-home-preflight.js';
 import { CrewBusError, resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
 import {
   applyEmitOrigin,
@@ -236,6 +237,20 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // so the default daemon is byte-identical; the explicit per-store env overrides
   // (WICKED_CREW_PROJECT_GRAPH_ROOT, WICKED_CREW_PROJECT_SETTINGS) still outrank this.
   setCrewStateHome(stateHomeOfDb(opts.dbPath));
+  // wicked-core#411 / crew#497 (F-RC1-011): refuse to boot with a `WICKED_*` root variable pointed
+  // inside that state home — BEFORE the engine spawns and before any seam seeds anything there
+  // (`createServer` re-asserts it for library boots). The rig's `WICKED_WORKFLOWS_DIR=<state
+  // home>/workflows` made crew seed drop-in defs into an entry the fence could not classify, and
+  // every worker launch was refused — at each run's first worker, while the daemon booted green.
+  // The message names the variable, the entry it would create and the remedy; exit 1 like every
+  // other configuration error above.
+  try {
+    assertWickedRootsOutsideStateHome(process.env, crewStateHome());
+  } catch (err) {
+    if (!(err instanceof StateHomePlacementError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   const { crewBus } = opts;
   console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
   // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —

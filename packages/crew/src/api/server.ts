@@ -58,6 +58,8 @@ import { registeredSkillRefs } from '../skills/core-closure.js';
 import type { PluginSource } from '../skills/plugin-source.js';
 import { assertSkillsRootFenced } from '../skills/root-fence.js';
 import { SkillsRuntime } from '../skills/runtime.js';
+import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../skills/engine-env.js';
+import { assertWickedRootsOutsideStateHome, StateHomeWatch } from '../projects/state-home-preflight.js';
 import { resolveSkillsRoot, SkillsStore } from '../skills/store.js';
 import { uvSyncBaseline, type VenvProvisioner } from '../skills/venv.js';
 import {
@@ -413,6 +415,14 @@ export async function createServer(
   // installed plugin is the logged fallback (engine input unset); a blocked first publish or a
   // corrupt root points the engine at a refusal path so launches fail loudly (skills/runtime.ts).
   // Awaited: a first publish provisions the baseline env before it returns.
+  //
+  // wicked-core#411 / crew#497 (F-RC1-011): a `WICKED_*` root variable pointed INSIDE the state
+  // home is a configuration error the boot REFUSES — the same posture as an unfenced skills root
+  // below. The rig set `WICKED_WORKFLOWS_DIR=<state home>/workflows`: crew seeded the interactive-*
+  // drop-in defs there, the fence's registry could not classify the entry, and every worker launch
+  // was refused — discovered at each run's first worker. Judged here, before any seam creates
+  // anything under those roots (`serve` asserts the same rule before the engine spawns).
+  assertWickedRootsOutsideStateHome(process.env, crewStateHome());
   let skillsRuntime: SkillsRuntime | undefined;
   if (options?.skills?.disabled !== true) {
     const source = options?.skills?.source;
@@ -429,6 +439,32 @@ export async function createServer(
       log: (m) => app.log.warn(m),
     });
     await skillsRuntime.apply();
+  }
+
+  // The state-home PREFLIGHT (wicked-core#411 / crew#497; F-RC1-011, F-RC2-020): an entry under the
+  // state home that core's fence registry cannot classify refuses EVERY worker launch — and until
+  // now the daemon booted green over it, the refusal surfacing at each run's first worker as a
+  // "triage judge errored" gate. Surveyed HERE, after the skills seam decided which snapshot the
+  // engine is handed (the fence derives the state home from that path), through the engine's own
+  // classification when the addon carries it and crew's registry copy otherwise; ONE error-level
+  // line per entry (the pino tee lands it in `/diagnostics.recentErrors`, which showed nothing
+  // before — F-RC2-027); reported live on `/diagnostics.stateHome` and `/health.warnings`; and
+  // `POST /runs` answers 409 while it refuses launches. The daemon still SERVES — studio must load
+  // and show the blocker — it refuses to launch.
+  const stateHomeWatch = new StateHomeWatch({
+    dbPath: typeof adapter.dbPath === 'string' && adapter.dbPath !== '' ? adapter.dbPath : null,
+    snapshotPath: () => {
+      const v = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+      return v === undefined || v === '' ? null : v;
+    },
+    engine: CoreAdapter.stateHomePreflighter(),
+  });
+  const stateHomeAtBoot = await stateHomeWatch.refresh();
+  for (const finding of stateHomeAtBoot.findings) {
+    app.log.error(`[state-home] ${finding.message}`);
+  }
+  if (stateHomeAtBoot.error !== null) {
+    app.log.warn(`[state-home] the state-home preflight could not classify (${stateHomeAtBoot.source}): ${stateHomeAtBoot.error}`);
   }
 
   // The project seam (DES-PROJECT-001): the bus handle for post-commit event emission + the
@@ -1263,6 +1299,8 @@ export async function createServer(
       interactiveBridgeBusDataDir: options?.interactiveBridge?.busDataDir ?? null,
       docGrounding,
       ...(skillsRuntime !== undefined ? { skills: skillsRuntime } : {}),
+      // wicked-core#411 / crew#497: the live state-home classification the routes report and gate on.
+      stateHome: stateHomeWatch,
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),
