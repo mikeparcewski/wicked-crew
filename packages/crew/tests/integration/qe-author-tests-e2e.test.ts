@@ -383,13 +383,64 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     const wf = await getJson(`/api/v1/workflows/${QE_AUTHOR_TESTS_WORKFLOW}`);
     expect(wf.status).toBe(200);
 
-    const run = await waitForRun(runId, (s) => TERMINAL.has(String(s['status'])), 'terminal status', 480_000);
-    expect(run.session['status']).toBe('failed');
-    expect(run.session['delivery']).toBe('none');
     // Nothing was produced, so nothing ships: under the stub engine the run is refused at the first
     // skill-routed unit when no skills root is available (this rig has none), and otherwise at the
     // author's evidence floor / verify's `produced=0` refusal — every one of those is a rejection
-    // BEFORE the deliver phase, which therefore never ran. The units the def planned are the def's.
+    // BEFORE the deliver phase, which therefore never ran. Since wicked-core #477 (core#464) the
+    // rungs differ in HOW the run rests: a FOLD denial — the author's pinned evidence floor (or,
+    // with wicked-core #476, the creator's repo-checks floor) — no longer ends the run `failed`; it
+    // PARKS `awaiting_human` at the engine's escalation gate with `gateEscalated.condition:
+    // 'floor_failed'`, and the terminal state is decided there (a reject cancels). A dispatch-time
+    // refusal or verify's Tool exit ≠ 0 (the RED case above) is not a fold denial and still ends
+    // `failed`. Whichever rung refuses: nothing reaches the origin, no PR-equivalent exists.
+    let run = await waitForRun(
+      runId,
+      (s) => TERMINAL.has(String(s['status'])) || s['status'] === 'awaiting_human',
+      'terminal status or the escalation gate',
+      480_000,
+    );
+    if (run.session['status'] === 'awaiting_human') {
+      const { body: evBody } = await getJson(`/api/v1/runs/${runId}/events`);
+      // UNTYPED on purpose: the additive `gateEscalated` fields reach crew's wire types with #559;
+      // this pins the ENGINE's contract, not the mirror.
+      const events = evBody['events'] as Array<Record<string, unknown>>;
+      const gates = events.filter((e) => e['type'] === 'gateEscalated');
+      expect(gates.length, 'the pause is a denial gate').toBeGreaterThanOrEqual(1);
+      const gate = gates[gates.length - 1]!;
+      expect(gate['condition']).toBe('floor_failed');
+      // The floor family `actor.rs::denial_class` folds into `floor_failed`: the rung the stub
+      // reaches is the author's pinned evidence floor; the creator repo-checks floor is the other.
+      expect(['pinned_validator', 'substance', 'deliverables', 'repo_checks', 'repo_checks_timeout']).toContain(gate['denialSource']);
+      expect(gate['defGate']).toBe(false);
+      const denied = run.units.find((u) => u.ord === gate['ord']);
+      expect(denied?.status, 'the denied unit is rejected while the run waits').toBe('rejected');
+      expect(denied?.id.endsWith(':deliver'), 'the refusing rung is BEFORE deliver').toBe(false);
+      expect(events.some((e) => e['type'] === 'sessionFailed')).toBe(false);
+      expect(run.session['delivery']).toBe('none');
+      expect(originBranches()).not.toContain(`wicked/${runId}`);
+      // REJECT the gate → the engine cancels the run. core#456: a DIRTY tree is retained (and the
+      // wire says so), a clean one is reaped — the frame and the disk must agree. The author
+      // produced nothing, but the creator's repo-checks floor (wicked-core#476) may have
+      // provisioned into the tree before denying, so which of the two it is belongs to the
+      // engine; the invariant is that the wire never claims a retention the disk does not show
+      // (or the reverse), and that no `sessionFailed` was ever booked.
+      const decided = await postJson(`/api/v1/runs/${runId}/gate`, { approve: false });
+      expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+      expect(decided.body['status']).toBe('cancelled');
+      run = await waitForRun(runId, (s) => TERMINAL.has(String(s['status'])), 'terminal status after the gate reject', 120_000);
+      expect(run.session['status']).toBe('cancelled');
+      const { body: trailBody } = await getJson(`/api/v1/runs/${runId}/events`);
+      const trail = trailBody['events'] as Array<Record<string, unknown>>;
+      expect(trail[trail.length - 1]?.['type'], 'the cancel is the terminal frame').toBe('runCancelled');
+      expect(trail.some((e) => e['type'] === 'sessionFailed')).toBe(false);
+      const retained = trail.some((e) => e['type'] === 'worktreeRetained');
+      const workdir = run.session['workdir'];
+      expect(retained, 'retained on the wire ⇔ the worktree is still on disk').toBe(typeof workdir === 'string' && existsSync(workdir));
+    } else {
+      // A dispatch-time refusal or a Tool-executor exit ≠ 0 is not a fold denial: still terminal.
+      expect(run.session['status']).toBe('failed');
+    }
+    expect(run.session['delivery']).toBe('none');
     const planned = run.units.sort((a, b) => a.ord - b.ord).map((u) => u.id.slice(u.id.indexOf(':') + 1));
     expect(planned.slice(0, 4)).toEqual(['recon', 'author', QE_VERIFY_PHASE_ID, 'review']);
     expect(run.units.some((u) => u.status === 'rejected')).toBe(true);
