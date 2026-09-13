@@ -50,7 +50,7 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "undici": "^6.28.0",
-    "vitest": "^3.2.6",
+    "vitest": "^5.0.0",
     "wicked-crew-api-types": "*",
     "wicked-studio": "^0.5.9"
   },
