@@ -153,6 +153,23 @@ export interface HealthResponse {
   version: string;
   ping: string;
   capabilities?: { deliverGate: boolean };
+  /**
+   * Blockers the daemon reports while it still SERVES (additive; wicked-core#411 / wicked-crew#497).
+   * One kind today — `state-home.unregistered`: the daemon's state home holds an entry the worker
+   * Read fence cannot classify, so every governed launch would be refused and `POST /runs` answers
+   * **409** `state_home_unregistered` until it is gone (`GET /diagnostics.stateHome` has the
+   * detail). ABSENT when there is nothing to say, and on a daemon before this field. A composer
+   * shows it as the blocker it is; `status` stays `ok` — the daemon is up, it refuses to launch.
+   */
+  warnings?: HealthWarning[];
+}
+
+/** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
+export interface HealthWarning {
+  /** `state-home.unregistered` today; open for later kinds. */
+  kind: string;
+  severity: 'warning' | 'error';
+  message: string;
 }
 
 /** A run (`AgentSession`). */
@@ -4632,6 +4649,10 @@ export interface DiagnosticsResponse {
   skills: DiagnosticsSkills;
   /** Whether the engine's governance evidence is LANDING (api-types 0.31.0, crew#495) — see `DiagnosticsGovernance`. */
   governance: DiagnosticsGovernance;
+  /** The state-home classification (additive; wicked-core#411 / wicked-crew#497) — see
+   *  `DiagnosticsStateHome`. `null` on a daemon booted without the watch (some tests); ABSENT on a
+   *  daemon before this field. */
+  stateHome?: DiagnosticsStateHome | null;
 }
 
 // ── Diagnostics — governance store + dead letters (api-types 0.31.0, crew#495 / F-022) ─────────
@@ -4776,6 +4797,75 @@ export interface DiagnosticsSkills {
    *  layout. `null` only when `disabled`. */
   stateHome: string | null;
   findings: DiagnosticsSkillsFinding[];
+}
+
+// ── Diagnostics — the state-home classification (additive; wicked-core#411 / wicked-crew#497) ───
+//
+// The worker Read fence over the daemon state home is an EXPLICIT registry (design v3.1 §1): an
+// entry it does not classify refuses the launch by name, fail closed. Right — but it used to fire
+// at the run's FIRST WORKER, after a planning council and the intake gate, labelled "triage judge
+// errored", while the daemon booted green (F-RC1-011, F-RC2-020, F-032/F-033). Now the daemon
+// surveys the state home at boot and on every read of this block, logs one error line per entry
+// (`recentErrors`), warns on `GET /health`, and answers `POST /runs` 409 `state_home_unregistered`
+// while a handed snapshot derives a state home with such an entry; the engine refuses at intake.
+
+/** One entry the state-home registry cannot classify. */
+export interface DiagnosticsStateHomeEntry {
+  /** The entry's name as listed. */
+  name: string;
+  /** Its absolute path on the daemon host. */
+  path: string;
+  /** `state-home` — a top-level entry; `skills-root` — a child of `<state home>/skills` that is
+   *  neither the read slot (`snapshots`) nor a registered denied child. */
+  level: 'state-home' | 'skills-root';
+}
+
+/** One finding of the state-home survey — the same text `GET /health.warnings[]` carries. */
+export interface DiagnosticsStateHomeFinding {
+  kind: 'state-home.unregistered';
+  severity: 'error';
+  message: string;
+}
+
+/**
+ * `GET /diagnostics` → `stateHome`: which state home the worker Read fence classifies, every entry
+ * it cannot classify there, who classified, and whether that refuses launches. Honest throughout:
+ * a field the daemon cannot answer is `null`, never invented.
+ */
+export interface DiagnosticsStateHome {
+  /** The state home surveyed, or `null` when neither input yields one. */
+  stateHome: string | null;
+  /** `snapshot` — derived from the handed `WICKED_SKILLS_SNAPSHOT` by its
+   *  `<state home>/skills/snapshots/<gen>` shape (the directory the fence classifies); `db` — the
+   *  core db's parent, surveyed for information when no snapshot is handed. */
+  derivedFrom: 'snapshot' | 'db' | null;
+  /** Who classified: the engine (`Core.preflightStateHome`, the fence's own code), crew's registry
+   *  copy on an addon without it, or nobody (`unavailable`: no db path and no snapshot). */
+  source: 'engine' | 'crew' | 'unavailable';
+  unregistered: DiagnosticsStateHomeEntry[];
+  /** `true` exactly when a HANDED snapshot derives a state home with unregistered entries — the
+   *  condition the engine refuses every launch on, and what `POST /runs` answers 409 for. */
+  refusesLaunches: boolean;
+  findings: DiagnosticsStateHomeFinding[];
+  /** What to do, in operator terms — the same text the 409 body and every finding end with. */
+  remedy: string;
+  /** Why the survey could not run (an unresolvable snapshot, an unlistable directory), or `null`. */
+  error: string | null;
+  /** When this survey was taken (unix ms). */
+  checkedAt: number;
+}
+
+/**
+ * The `POST /runs` **409** body while the state home refuses launches (`code:
+ * 'state_home_unregistered'`): the configuration error as fields — every entry and the remedy —
+ * so a composer can show the blocker instead of a bare string.
+ */
+export interface StateHomeBlockerBody {
+  error: string;
+  code: 'state_home_unregistered';
+  stateHome: string | null;
+  unregistered: DiagnosticsStateHomeEntry[];
+  remedy: string;
 }
 
 // ── Memory proposal queue (DES-MEM-FACETED-001 §5.0, api-types 0.21.0) ─────────

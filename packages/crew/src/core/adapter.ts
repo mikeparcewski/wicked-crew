@@ -354,6 +354,13 @@ interface CoreConstructor {
   /** Replay a dead-letter outbox (the engine's NDJSON spool records) into the estate store at
    *  `dbPath`; resolves to a JSON `{ read, replayed, failed: [{ line, reason }] }` report. */
   replayEmitOutbox?(outboxPath: string, dbPath: string): Promise<string>;
+  /** The state-home PREFLIGHT (wicked-core#411 / crew#497; wicked-core-ts ≥ the release carrying
+   *  it): survey the state home the worker Read fence classifies and report every entry its
+   *  registry cannot classify — resolves to the JSON `{ stateHome, derivedFrom, unregistered,
+   *  refusesLaunches, error, remedy }`. Optional for the same reason as the statics above: the
+   *  pinned addon predates it, and crew classifies with its own registry copy until it lands
+   *  (`projects/state-home-preflight.ts`). */
+  preflightStateHome?(snapshotPath: string | null, dbPath: string): Promise<string>;
 }
 
 /** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
@@ -1132,6 +1139,17 @@ export class CoreAdapter {
       if (!Number.isInteger(n) || n < 0) throw new Error(`eventStoreCount answered a non-count: ${raw}`);
       return n;
     };
+  }
+
+  /**
+   * The engine's state-home preflight (wicked-core#411 / crew#497), or `null` on an addon without
+   * `Core.preflightStateHome` — crew's `StateHomeWatch` then classifies with its own registry copy
+   * and says so (`source: 'crew'`), never a fabricated clean answer.
+   */
+  static stateHomePreflighter(): ((snapshotPath: string | null, dbPath: string) => Promise<string>) | null {
+    const fn = Core.preflightStateHome;
+    if (typeof fn !== 'function') return null;
+    return (snapshotPath: string | null, dbPath: string): Promise<string> => fn.call(Core, snapshotPath, dbPath);
   }
 
   /** Whether the installed addon can replay a dead-letter outbox (`Core.replayEmitOutbox`, crew#495). */

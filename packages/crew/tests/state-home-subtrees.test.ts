@@ -40,6 +40,8 @@ import {
   SNAPSHOTS_DIRNAME,
 } from '../src/skills/store.js';
 import { noVenv, UV_CACHE_DIRNAME } from '../src/skills/venv.js';
+import { STATE_HOME_ROOT_ENVS } from '../src/projects/state-home-preflight.js';
+import { STATE_HOME_ENTRY_NAMES, STATE_HOME_ENTRY_PREFIXES } from '../src/projects/state-home-registry.js';
 import { removeScratch } from './setup/scratch.js';
 import { FIXTURE_PLUGIN } from './support/skills-fixture.js';
 
@@ -56,6 +58,10 @@ interface RegistryEntry {
   owner: 'crew' | 'engine' | 'operator';
   source: string;
   worker_read: string;
+  /** wicked-core#411 / crew#497: the OPERATOR variable whose target creates this entry under the
+   *  state home (never a `join(<state home>, …)` in src/) — registered so a pre-existing placement is
+   *  fenced rather than refusing every launch; the boot refuses to point the variable there. */
+  env?: string;
   /** The ONE child a worker may read beneath (its resolved generation only) — the skills entry. */
   read_slot?: string;
   /** Children core denies by rule; `x/y-*` is a prefix glob for entries under child `x`. */
@@ -187,8 +193,48 @@ describe('STATIC — every state-home join in src/ names a registered entry', ()
     for (const e of registry.entries) {
       if (e.owner !== 'crew') continue;
       const key = e.name ?? (e.prefix as string);
+      if (e.env !== undefined) {
+        // wicked-core#411 / crew#497: placed by an OPERATOR variable, never by a join in src/. The
+        // exemption is exact — the variable must be one the boot preflight REFUSES to point inside
+        // the state home, so this daemon never seeds the entry there itself and an existing placement
+        // is fenced rather than refusing every launch.
+        expect(
+          STATE_HOME_ROOT_ENVS.map((r) => r.variable),
+          `registry entry ${key} (crew, env ${e.env}) names a variable the boot does not refuse inside the state home — add it to STATE_HOME_ROOT_ENVS (projects/state-home-preflight.ts) or drop the entry`,
+        ).toContain(e.env);
+        continue;
+      }
       expect([...found].some((f) => f === key || f.startsWith(key)), `registry entry ${key} (crew) has no join in src/`).toBe(true);
     }
+  });
+
+  it('every variable the boot refuses inside the state home has a registered env entry, and vice versa (wicked-core#411 / crew#497)', () => {
+    // Both directions: a refused variable whose entry is unregistered would still refuse every
+    // launch when an OLD placement exists; a registered env entry whose variable is not refused
+    // would let this daemon seed an unreadable store under the fence.
+    const registered = registry.entries.filter((e) => e.env !== undefined).map((e) => e.env as string).sort();
+    expect(registered).toEqual(STATE_HOME_ROOT_ENVS.map((r) => r.variable).slice().sort());
+    for (const e of registry.entries) {
+      if (e.env === undefined) continue;
+      expect(e.owner).toBe('crew');
+      expect(e.name, `env entry ${e.env} must claim an exact name, not a prefix`).toBeDefined();
+      expect(e.source).toContain(e.env);
+      expect(e.worker_read).toMatch(/refuses to BOOT/);
+    }
+  });
+});
+
+describe("crew's src/ copy of the registry names (projects/state-home-registry.ts) equals the fixture (wicked-core#411 / crew#497)", () => {
+  // `src/` cannot read `tests/fixtures/`, yet the daemon classifies its state home at BOOT (the
+  // fallback for an addon without `Core.preflightStateHome`). Same doctrine as skills/root-names.ts:
+  // src/ carries the names, this test holds them equal to the fixture, so the two cannot drift.
+  it('names: the exact top-level names, no more and no fewer', () => {
+    const fixtureNames = registry.entries.flatMap((e) => (e.name !== undefined ? [e.name] : [])).sort();
+    expect([...STATE_HOME_ENTRY_NAMES].sort()).toEqual(fixtureNames);
+  });
+  it('prefixes: the file-with-sidecars claims, no more and no fewer', () => {
+    const fixturePrefixes = registry.entries.flatMap((e) => (e.prefix !== undefined ? [e.prefix] : [])).sort();
+    expect([...STATE_HOME_ENTRY_PREFIXES].sort()).toEqual(fixturePrefixes);
   });
 });
 

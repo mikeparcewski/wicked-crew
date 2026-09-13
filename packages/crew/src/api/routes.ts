@@ -80,6 +80,13 @@ import { isSteeringAuthorRun, landSteeringProposal } from './steering-landing.js
 import { registerTestingRoutes } from './testing.js';
 import { registerSkillsRoutes } from './skills.js';
 import { disabledSkillsHealth, type SkillsRuntime } from '../skills/runtime.js';
+import {
+  STATE_HOME_BLOCKER_CODE,
+  STATE_HOME_REMEDY,
+  isEngineStateHomeRefusal,
+  stateHomeBlockerBody,
+  type StateHomeWatch,
+} from '../projects/state-home-preflight.js';
 import type { EvalRunStore } from './eval-store.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
@@ -701,6 +708,12 @@ export interface RuntimeDeps {
    *  (seeded from the installed plugin, published); a directly-driven route set gets none and
    *  `/skills*` answers 503 unless a test injects one over a fixture root. */
   skills?: SkillsRuntime;
+  /** The live state-home classification (wicked-core#411 / crew#497) — `createServer` surveys the
+   *  daemon state home at boot and hands the watch here; the routes re-survey on demand, report it
+   *  on `/diagnostics.stateHome` + `/health.warnings`, and answer `POST /runs` 409 while a handed
+   *  snapshot derives a state home with an entry the fence cannot classify. A directly-driven route
+   *  set (tests) gets none: no survey, no warning, no gate — never a fabricated clean answer. */
+  stateHome?: StateHomeWatch;
   /** The document ↔ run binding (wave 6, F-4R2-006) read off the interactive seams' handoff ledgers —
    *  `createServer` builds one over the four ledger sources; a directly-driven route set gets an
    *  EMPTY one (`document_id: null` on every run). */
@@ -903,7 +916,23 @@ export function registerRoutes(
       typeof adapter.engineCapabilities === 'function'
         ? adapter.engineCapabilities()
         : { deliverGate: false };
-    return { status: 'ok', version: PKG_VERSION, ping, capabilities };
+    // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
+    // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
+    // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
+    // per probe (two readdirs) so an entry that appears after boot is reported without a restart;
+    // the field is ABSENT when there is nothing to say, and on a route set booted without the watch.
+    const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
+    const warnings =
+      stateHome === null
+        ? []
+        : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }));
+    return {
+      status: 'ok',
+      version: PKG_VERSION,
+      ping,
+      capabilities,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
   });
 
   // The daemon's self-knowledge surface (diagnostics): what is deployed, what it stores, what
@@ -960,6 +989,11 @@ export function registerRoutes(
         // Is the governance evidence LANDING (crew#495): the store, the records on it, the dead
         // letters — with a `governance.deadletter` finding the moment the outbox holds one.
         governance,
+        // The state-home classification (wicked-core#411 / crew#497): which state home the worker
+        // Read fence classifies, every entry it cannot classify there (top level and skills root),
+        // who classified (the engine, or crew's registry copy on an older addon) and whether that
+        // refuses launches — re-surveyed per read. `null` on a route set booted without the watch.
+        stateHome: runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null,
       };
     },
   );
@@ -1334,6 +1368,18 @@ export function registerRoutes(
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
     const b = parsed.data;
+    // wicked-core#411 / crew#497: the state-home blocker, judged BEFORE anything is resolved or
+    // committed. While the handed skills snapshot derives a state home with an entry the worker
+    // Read fence cannot classify, the engine refuses this launch at intake (and an engine before
+    // that fix refused it at the run's first worker, after councils and the intake gate) — so the
+    // daemon answers the typed 409 itself, naming every entry and the remedy, until they are gone.
+    // Re-surveyed per launch: the entries named are the ones there NOW.
+    if (runtime.stateHome !== undefined) {
+      const stateHome = await runtime.stateHome.refresh();
+      if (stateHome.refusesLaunches) {
+        return reply.code(409).send(stateHomeBlockerBody(stateHome));
+      }
+    }
     const input: LaunchRunInput = {
       problem: b.problem,
       sessionId: b.sessionId ?? randomUUID(),
@@ -1485,6 +1531,26 @@ export function registerRoutes(
       return reply.code(201).send({ runId });
     } catch (err) {
       const msg = message(err);
+      // The engine's own intake refusal (wicked-core#411 `StateHomeConfigError`) is a configuration
+      // error, not a malformed request: the same typed 409 the pre-check above answers, over a fresh
+      // survey — the pre-check saw a clean state home (or an addon that could not classify), the
+      // engine did not.
+      if (isEngineStateHomeRefusal(msg)) {
+        const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
+        return reply
+          .code(409)
+          .send(
+            stateHome !== null && stateHome.unregistered.length > 0
+              ? stateHomeBlockerBody(stateHome)
+              : {
+                  error: msg,
+                  code: STATE_HOME_BLOCKER_CODE,
+                  stateHome: stateHome?.stateHome ?? null,
+                  unregistered: [],
+                  remedy: STATE_HOME_REMEDY,
+                },
+          );
+      }
       // An unknown/archived project is a state conflict on a real resource, not a malformed
       // request: 404/409 per the projects error mapping; anything else keeps the launch 400/409.
       if (b.projectId !== undefined && /project.*not registered/i.test(msg)) {

@@ -10,6 +10,59 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **State-home preflight — an entry the worker Read fence cannot classify is a CONFIGURATION error the
+  daemon says at boot, reports on `GET /diagnostics` and `GET /health`, and answers `POST /runs` 409
+  for; never again a "triage judge errored" gate at the run's first worker (wicked-crew#497,
+  wicked-core#411; acceptance findings F-RC1-011, F-RC2-020, F-005/F-032/F-033).** Core's fence over
+  the daemon state home is an explicit registry (`tests/fixtures/state-home-subtrees.json`, mirrored
+  byte for byte); an entry it does not classify refused the launch by name — right, but at the FIRST
+  WORKER, after a planning council and the intake gate, labelled a judge error with an "Approve to
+  retry" that could only fail again, while the daemon booted green (`/health` ok, `recentErrors: []`).
+  Twice in one day that cost every governed run on a host: the acceptance rig's
+  `WICKED_WORKFLOWS_DIR=<state home>/workflows` (crew seeded the interactive-* drop-in defs there) and a
+  `skills.fixture-debris-…` directory left in the operator's live state home. Now
+  (`src/projects/state-home-preflight.ts`, `src/projects/state-home-registry.ts`):
+  (1) `createServer` SURVEYS the state home the handed `WICKED_SKILLS_SNAPSHOT` derives — through the
+  engine's own classification (`Core.preflightStateHome`, the wicked-core release carrying #411) when
+  the installed addon has it, through crew's copy of the registry names otherwise (`source: 'crew'`;
+  held equal to the fixture by test) — and logs ONE error line per entry (`/diagnostics.recentErrors`);
+  (2) `GET /diagnostics` gains an additive `stateHome` block (the state home, `derivedFrom`, `source`,
+  every `unregistered` entry with its `level` — top level or skills root — `refusesLaunches`,
+  `findings`, `remedy`, `error`, `checkedAt`), re-surveyed per read so an entry that appears AFTER boot
+  is reported without a restart; (3) `GET /health` gains an additive `warnings[]` (`kind:
+  'state-home.unregistered'`, `severity: 'error'`) — `status` stays `ok`: the daemon SERVES, studio
+  must load and show the blocker; (4) `POST /runs` answers **409** `{ code: 'state_home_unregistered',
+  error, stateHome, unregistered[], remedy }` while a handed snapshot derives a state home with such an
+  entry — nothing resolved, nothing launched — and the engine's own intake refusal (core's typed
+  `StateHomeConfigError`) maps onto the same 409 instead of a 400; (5) `serve` / `start` / `resume` —
+  and `createServer` for library boots — REFUSE to boot (`StateHomePlacementError`, exit 1) when
+  `WICKED_WORKFLOWS_DIR`, `WICKED_STEERING_INBOX_DIR` or `WICKED_INTERACTIVE_ROOT` points inside the
+  state home, naming the variable, the entry it would create and the remedy — before the engine spawns
+  and before anything is seeded there; (6) the registry (both fixtures, identical) gains the three
+  entries those variables can place — `workflows`, `steering-inbox`, `interactive` — each carrying an
+  `env` field, so a PRE-EXISTING placement is fenced (denied) rather than refusing every launch;
+  `tests/state-home-subtrees.test.ts` exempts `env` entries from the "backed by a join" rule only when
+  the variable is one the boot refuses, and holds both directions equal. Every message is in operator
+  terms — the entry, the state home, the variable, what to do — and none cites a repository fixture path.
+  Debris is deliberately NOT patterned: a quarantine-by-rename inside the state home is what the fence
+  must refuse — move it out. **Behaviour changes:** a boot with one of the three variables inside the
+  state home now exits 1 (it used to start and refuse every worker launch); `POST /runs` answers 409
+  (not 201-then-fail, nor 400 on the engine's refusal) while the state home holds an unregistered entry;
+  `GET /health` and `GET /diagnostics` carry the additive fields above. Works on the pinned
+  `wicked-core-ts` `^0.7.24` (crew classifies; the engine still refuses at the first worker until its
+  release) and takes the engine's classification + intake refusal the moment the wicked-core release
+  carrying #411 is pinned — the pin is deliberately unchanged here. The sibling `wicked-crew-api-types`
+  declares `HealthResponse.warnings`, `DiagnosticsResponse.stateHome` (`DiagnosticsStateHome`,
+  `DiagnosticsStateHomeEntry`, `DiagnosticsStateHomeFinding`) and `StateHomeBlockerBody` additively; its
+  cut rides the release train. Tests: `tests/state-home-preflight.test.ts` (the pure rules: boot
+  refusal per variable, the survey at both levels, snapshot-shape derivation, the watch over an engine /
+  a failing engine / no engine, the 409 body, the engine-refusal recogniser), `tests/state-home-routes.test.ts`
+  (a real `createServer` over a scratch state home: boot error lines, `/diagnostics.stateHome`,
+  `/health.warnings`, `POST /runs` 409 → repair → 201 without a restart, the engine refusal → 409, and
+  the boot refusal), `tests/state-home-subtrees.test.ts` (the `env` exemption, both directions, and the
+  src/ registry copy equal to the fixture).
+
 ## [0.7.33] — 2026-09-13
 
 Release train (RC1 — the last cut before the acceptance freeze) — **core-ts 0.7.24 / studio 0.5.9 /
