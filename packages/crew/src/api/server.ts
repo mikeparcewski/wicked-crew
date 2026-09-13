@@ -49,6 +49,8 @@ import { CoreAdapter } from '../core/adapter.js';
 import type { CoreEvent } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { SeatHealthTracker } from './seat-health.js';
+import { rosterWithStandingFactory } from './roster-standing.js';
+import { ChatTurnIndex } from './chat-turns.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
@@ -356,6 +358,17 @@ export async function createServer(
     signalLog: daemonSignalLog,
     log: (m) => app.log.warn(m),
   });
+  // THE roster accessor (F-RECON-002/003, `api/roster-standing.ts`): the registry roster WITH this
+  // tracker's standing, built ONCE and handed to every launch path — the routes (below, through
+  // `runtime.rosterWithStanding`), the four interactive seams (`roster`), and the adapter's own
+  // launches (`setRosterProvider` → `seatsForWorkflow` / `wicked-crew start`). Read at call time,
+  // so a seat signed in from the System page is eligible on the very next launch.
+  const rosterWithStanding = rosterWithStandingFactory({ seatHealth });
+  // Runtime-guarded, not typed away: the integration suites drive `createServer` over PARTIAL fake
+  // adapters (cast to `CoreAdapter`) that never grew this method — the real adapter always has it.
+  if (typeof (adapter as { setRosterProvider?: unknown }).setRosterProvider === 'function') {
+    adapter.setRosterProvider(rosterWithStanding);
+  }
 
   // The identity/actor seam (task #88). Resolved ONCE, before any hook exists:
   // a malformed token file or a configured-but-unimplemented OIDC block must
@@ -766,6 +779,10 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.draftDir !== undefined ? { draftDir: o.draftDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       onRunFiled: fileRun,
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
       // proxy recorded it in.
@@ -799,6 +816,10 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.editDir !== undefined ? { editDir: o.editDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       // The demo-kind gate (CREW-UX-9): a demo doc's step feedback is the demo seam's — but
       // only when that seam is actually up. Probed per event (the demo seam arms below), so an
       // un-armed demo seam gets an honest error status instead of a silent, unanswerable drop.
@@ -831,6 +852,8 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.demoDir !== undefined ? { demoDir: o.demoDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       onRunFiled: fileRun,
       groundingStore: docGrounding,
@@ -862,6 +885,10 @@ export async function createServer(
       ...(o.ledgerPath !== undefined ? { ledgerPath: o.ledgerPath } : {}),
       ...(o.chatDir !== undefined ? { chatDir: o.chatDir } : {}),
       ...(o.clisJson !== undefined ? { clisJson: o.clisJson } : {}),
+      // The roster WITH standing when no override is set (F-RECON-002/003).
+      roster: rosterWithStanding,
+      // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
+      skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       ...(o.queueSweepMs !== undefined ? { queueSweepMs: o.queueSweepMs } : {}),
       ...(o.landingGateMs !== undefined ? { landingGateMs: o.landingGateMs } : {}),
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
@@ -977,6 +1004,10 @@ export async function createServer(
   // the scratch root of an engine-side reap, finishing a `DELETE`'s closing window, or cancelling
   // an open still in flight (the index is a small state machine; see `chat-scope.ts`).
   const chatScopes = new ChatScopeIndex();
+  // Chat turns (F-RECON-017): which seats are mid-turn in which chat, folded from the same
+  // CoreEvent stream below; `POST /chats/:id/messages` refuses a send to a busy seat and the
+  // chat frames leave here stamped with the `turn_id` they answer.
+  const chatTurns = new ChatTurnIndex();
   // Boot reaper (crew#502 hardening, W6): the scratch namespaces of daemons that died without
   // closing their chats (`<tmp>/wicked-crew-chats/<pid>-*` with a dead pid) are removed once, here,
   // under the same real-directory/ownership checks a live close applies. Not under vitest: the
@@ -994,6 +1025,9 @@ export async function createServer(
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
     }
+    // Stamp BEFORE folding: the closing `chatReply` is the frame most worth correlating.
+    const stamped = chatTurns.decorate(event);
+    chatTurns.observe(event);
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
     // (Copilot on #301).
@@ -1004,7 +1038,7 @@ export async function createServer(
     skillsRuntime?.observe(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
-    broadcast(projectId !== undefined ? ({ ...event, project_id: projectId } as CoreEvent) : event);
+    broadcast(projectId !== undefined ? ({ ...stamped, project_id: projectId } as CoreEvent) : stamped);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
@@ -1202,11 +1236,14 @@ export async function createServer(
     { audit, authMode: auth.mode },
     {
       seatHealth,
+      // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
+      rosterWithStanding,
       retryIndex,
       groupIndex,
       runTimingIndex,
       guidanceIndex,
       chatScopes,
+      chatTurns,
       deliveryIndex,
       // Wave 6: the doc↔run binding (F-4R2-006) and the registered test sets (F-7R2-014).
       docRuns,

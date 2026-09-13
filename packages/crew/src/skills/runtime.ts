@@ -234,6 +234,22 @@ export class SkillsRuntime {
    * baseline is the installer copy (design v3.6). Only a seeded root (`published` / `blocked`) has a
    * current baseline to judge; the other rungs have no manifest, or one their own finding condemns.
    */
+  /**
+   * Does the PUBLISHED snapshot the engine is handed hold (and enable) skill `name`? The interactive
+   * seams gate their `skill_ref` on this (interactive/draft-skill.ts): the engine refuses a run whose
+   * `skill_ref` the snapshot lacks, so a seam must know before it stamps. `false` on every non-published
+   * state (fallback, blocked, config-error, disabled) and on an unreadable manifest — never a guess.
+   */
+  holdsSkill(name: string): boolean {
+    if (this.lastHealth.state !== 'published') return false;
+    try {
+      const entry = this.store.manifest().skills[name];
+      return entry !== undefined && entry.enabled;
+    } catch {
+      return false;
+    }
+  }
+
   health(): SkillsHealth {
     const base = this.lastHealth;
     if (base.state !== 'published' && base.state !== 'blocked') return base;

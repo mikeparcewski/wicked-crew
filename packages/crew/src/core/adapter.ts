@@ -1033,6 +1033,26 @@ export class CoreAdapter {
     this.deliverApiOrigin = get;
   }
 
+  /**
+   * The roster a launch THIS adapter originates should carry — the daemon's roster WITH crew's
+   * standing (`api/roster-standing.ts`) once `createServer` wires it, else the raw registry.
+   * F-RECON-002/003: the onboarding launch (`seatsForWorkflow`) and `wicked-crew start` handed the
+   * engine `CoreAdapter.roster()` undecorated, so `launchRun`'s `engineRosterJson` had no
+   * `council_eligible` to bench on and signed-out seats were convened. Resolved LAZILY, like the
+   * origin above: the adapter exists before the tracker that knows the seats' standing does.
+   */
+  private rosterProvider: (() => unknown[]) | null = null;
+
+  /** Hand the adapter the daemon's standing roster accessor (see `launchRoster`). */
+  setRosterProvider(get: () => unknown[]): void {
+    this.rosterProvider = get;
+  }
+
+  /** The seat pool a launch from this adapter carries: standing-decorated when wired, else raw. */
+  launchRoster(): unknown[] {
+    return this.rosterProvider !== null ? this.rosterProvider() : CoreAdapter.roster();
+  }
+
   constructor(opts: CoreAdapterOptions) {
     // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
     // `WICKED_BUS_EXEC` + `WICKED_BUS_DB` from the process env at spawn time (wicked-core actor::run),
@@ -2077,9 +2097,11 @@ export class CoreAdapter {
    */
   seatsForWorkflow(workflowId: string): unknown[] {
     const def = this.getWorkflow(workflowId);
-    if (def === null || def.phases.length === 0) return CoreAdapter.roster();
+    // The roster WITH standing when the daemon wired one (F-RECON-002/003) — `launchRun` then
+    // benches `council_eligible: false` seats through `engineRosterJson`.
+    if (def === null || def.phases.length === 0) return this.launchRoster();
     const toolOnly = def.phases.every((p) => p.executor?.type === 'tool');
-    return toolOnly ? [] : CoreAdapter.roster();
+    return toolOnly ? [] : this.launchRoster();
   }
 
   /** Return the onboarding run id for a repo (undefined if not launched this session). */

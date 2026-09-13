@@ -11,6 +11,35 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **F-RECON-002 / F-RECON-003 — the interactive seams, the onboarding launch and `wicked-crew start`
+  handed the engine the RAW registry roster, so signed-out seats were convened and even elected.**
+  `rosterWithStanding()` was a closure inside `registerRoutes`: only `POST /runs`, `/testing/*`,
+  campaigns and steering launched with crew's standing (`auth`, `council_eligible`), which
+  `engineRosterJson` turns into the engine's per-seat bench. `interactive/*-events.ts` (`rosterOf →
+  CoreAdapter.roster()`), `CoreAdapter.seatsForWorkflow` and `cli start` did not — every interactive
+  council seated signed-out codex/pi/copilot (9–19 `councilSeatFailed`, 57–112 s of dead ballots per
+  run) and one council elected signed-out pi, which failed its unit and fell over to claude. Fix: ONE
+  shared accessor (`api/roster-standing.ts`, `rosterWithStandingFactory`) built by `createServer` over
+  its `SeatHealthTracker` and handed to the routes (`runtime.rosterWithStanding`), the four seams
+  (`roster` option) and the adapter (`setRosterProvider` → `launchRoster()`, which `seatsForWorkflow`
+  and `wicked-crew start` now use). A signed-out seat reaches the engine as `health {usable: false,
+  reason: "signed out"}` on every launch path — proven per seam and at the napi boundary.
+- **F-RECON-013 — an ask on a demo storyboard went to no seam; the thread showed "generating" + "send
+  failed" and blamed the service.** The chat seam declined demo-kind (and any foreign-kind) docs in a
+  log line. Now (1) the interactive proxy refuses a real ask (`chat.posted`, role user, not the
+  feedback-batch echo) on a doc whose readable manifest kind has no answering seam with a typed
+  **422** `{ code: "ask_unsupported_for_doc_kind", error, document_id, doc_kind, remedy }` BEFORE the
+  bridge sees it (fail-open on an unreadable doc — the seams decide, as before), and (2) a frame that
+  still reaches the bus gets an honest `state: "error"` status on the thread naming what to do instead
+  (highlight a step → the demo seam re-authors and re-records; Re-record). No ledger row either way.
+- **F-RECON-017 — a message sent mid-turn was queued silently and its reply rendered under the wrong
+  bubble.** `POST /chats/:id/messages` now consults a per-chat turn index (`api/chat-turns.ts`, folded
+  from `chatReply` / `chatSessionFailed` / `chatClosed`): a send that targets a seat still answering is
+  refused with **409** `{ code: "turn_in_flight", chatId, turn: { turnId, seats, busy, startedAt,
+  ageMs, excerpt } }` — targeting only idle seats passes, so a stalled seat never blocks a follow-up to
+  the one that answered — the 202 carries `turnId`, and every `chatDelta` / `chatReply` /
+  `chatSessionFailed` frame on `/ws` is stamped `turn_id` while its seat is mid-turn. A turn whose
+  frames were lost goes stale after 15 min and never wedges the chat; `DELETE /chats/:id` clears it.
 - **F-E2E-021 — `GET /projects/:id/activity` opened the bus with a SECOND SQLite library and tore
   the daemon's bus connections (#541).** The activity feed read `bus.db` through Node's bundled
   SQLite (`node:sqlite`, read-only, opened and closed per request) while the daemon held six
@@ -34,6 +63,28 @@ mentioned only where a daemon release depends on them.
   restore or rotate it.
 
 ### Added
+- **The recorder's typed failure reaches `GET /diagnostics.recentErrors` (F-RECON-013 companion of
+  wicked-interactive PR #224 / F-RECON-012).** The demo seam consumes the service's `RecorderError` —
+  `wicked.interactive.status.posted` with `state: "error"`, `source: "recorder"`, `code`, `error`,
+  `remedy`, `install_command`, `step?` … flattened beside the seam-status fields — and writes one
+  error-level line naming the doc, its spec run, the code, the step and the remedy (the ring folds it),
+  keeping the last failure per doc on the subscription handle (`recorderFailure(doc)`). Crew emits
+  nothing back: a `retryable: false` frame is terminal and is never replayed. Crew's own `wi-crew`
+  frames on the topic are never read as the recorder's.
+- **The `wicked-garden-draft` quality floor governs the interactive drafting phases — when the
+  published skills snapshot holds it (garden ≥ 12.35.0, garden PR #1127).** `interactive-draft`,
+  `interactive-edit` and `interactive-chat` phases carried `skill_ref: null`, so no skill owned
+  drafting and no contrast / page-budget / claims self-check ran (F-RECON-007/008/009). Each seam now
+  asks the daemon's skills runtime (`SkillsRuntime.holdsSkill`) at arm time: held ⇒ the agent phases
+  carry `skill_ref: "wicked-garden-draft"` and the task names what the skill's `## Runtime` self-check
+  needs — the page budget read from the brief/style (`interactive/draft-skill.ts` `pageBudgetFor`),
+  the repository snapshot dir(s) as `--repo`, and the exact launcher command on the SAVED file; not
+  held ⇒ the phases stay unstamped, the run proceeds without the floor as before, and the arm log says
+  so and names the fix (upgrade garden, republish, restart). **Why gated:** the engine resolves
+  `skill_ref` against the published snapshot at PLAN time and REFUSES a run whose snapshot lacks it
+  ("the skills snapshot at … does not hold the skills this run requires …; enable and republish them
+  (or fix the workflow's skill_ref)") — an unconditional stamp would refuse every interactive run on an
+  older garden.
 - **Connection-fatal bus subscriber errors now reach `GET /diagnostics.recentErrors` (#542 — the
   visibility half of F-E2E-021).** Every wicked-bus seam (interactive relay / draft / edit / demo /
   chat, the project `/ws` bridge, the QE gate feed) logged its subscriber errors through `log` →

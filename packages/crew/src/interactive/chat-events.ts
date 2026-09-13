@@ -68,6 +68,7 @@ import {
   narrationStamps,
 } from './draft-events.js';
 import { InteractiveHandoffLedger } from './ledger.js';
+import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, withDraftSkill, type SkillHeld } from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -280,6 +281,23 @@ export function isAnswerableDocKind(kind: string): boolean {
   return kind === 'source' || kind === 'doc';
 }
 
+/** The thread's answer to an ask on a doc no seam answers (F-RECON-013) — demo gets the specific
+ *  remedy, any other foreign kind the generic one. Mirrors the proxy's 422 (`askRefusalFor`). */
+export function foreignKindAskMessage(kind: string): string {
+  if (kind === 'demo') {
+    return (
+      'Asks on demo storyboards are not supported yet — a demo is re-authored from STEP feedback, not from ' +
+      'the thread. Nothing was launched for this message. To change the demo, highlight the step and send ' +
+      'that as feedback (the demo seam re-authors the spec and re-records); to retry the recording as ' +
+      'authored, use Re-record.'
+    );
+  }
+  return (
+    `Asks on documents of kind '${kind}' have no answering seam on this daemon — nothing was launched for ` +
+    'this message.'
+  );
+}
+
 /**
  * The run's problem statement (the engine scopes it per phase and folds each phase's
  * instructions on top). Carries everything ask-specific: identity, the flattened ask, the
@@ -338,6 +356,16 @@ export interface InteractiveChatOptions {
   /** Seat roster JSON for the governed run (default: the production council roster).
    *  The functional-test harness passes a deterministic stub seat here. */
   clisJson?: string;
+  /** The roster accessor used when `clisJson` is not set — the server wires the daemon's roster
+   *  WITH crew's standing (`api/roster-standing.ts`, F-RECON-002/003) so a signed-out seat reaches
+   *  the engine benched (`health {usable: false, reason}`) instead of being convened or elected. */
+  roster?: () => unknown[];
+  /** Does the daemon's PUBLISHED skills snapshot hold (and enable) a skill? Consulted ONCE at arm time
+   *  for `wicked-garden-draft` (interactive/draft-skill.ts): held ⇒ the drafting phases carry the
+   *  skill_ref and the task names the self-check's inputs; not held ⇒ the run proceeds without the
+   *  quality floor and the arm log says so (the engine would refuse a skill_ref the snapshot lacks).
+   *  Default: `() => false` (a caller without a skills runtime has no snapshot to hold anything). */
+  skillHeld?: SkillHeld;
   /** The docs root an ask's doc is read from. Default: the shared-default resolution
    *  (`WICKED_INTERACTIVE_ROOT` › `~/wicked-interactive/docs`); the server wires the
    *  per-project `interactiveRoot` setting through here so a project on its own root
@@ -418,9 +446,17 @@ function defaultStateDir(): string {
   return crewStateHome();
 }
 
-/** The production council roster, resolved lazily through the adapter's own class so this module
- *  never imports the native addon at runtime (unit tests pass `clisJson` and a fake adapter). */
-function rosterOf(adapter: CoreAdapter): unknown[] {
+/** The council roster a launch carries when no `clisJson` override is set. F-RECON-002/003: the
+ *  server injects `roster` — the daemon's roster WITH standing (`api/roster-standing.ts`), so
+ *  `launchRun`'s `engineRosterJson` benches signed-out seats instead of convening (or electing)
+ *  them. Without an injected accessor the adapter's own `launchRoster()` is asked (the same
+ *  standing when the daemon wired it); the raw registry, resolved lazily through the adapter's
+ *  class so this module never imports the native addon at runtime, is the last resort (unit tests
+ *  pass `clisJson` and a fake adapter). */
+function rosterOf(adapter: CoreAdapter, roster?: () => unknown[]): unknown[] {
+  if (roster !== undefined) return roster();
+  const own = (adapter as unknown as { launchRoster?: () => unknown[] }).launchRoster;
+  if (typeof own === 'function') return own.call(adapter);
   return (adapter.constructor as unknown as { roster(): unknown[] }).roster();
 }
 
@@ -439,6 +475,7 @@ export async function startInteractiveChatSubscriber(
   opts: InteractiveChatOptions = {},
 ): Promise<InteractiveChatSubscription | null> {
   const log = opts.log ?? ((m: string) => console.error(m));
+  let draftSkillHeld = false; // set at arm time (draft-skill.ts); read at launch for the task clause
 
   let bus: typeof import('wicked-bus');
   try {
@@ -470,7 +507,10 @@ export async function startInteractiveChatSubscriber(
   // persisted/hot-registered (FINDING-002 ordering), so a drifted def fails the arm loudly
   // instead of failing the first launch obscurely.
   try {
-    await adapter.registerWorkflow(INTERACTIVE_CHAT_WORKFLOW_DEF);
+    // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
+    draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
+    log(draftSkillArmLine('interactive-chat', draftSkillHeld));
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_CHAT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-chat] could not register the '${INTERACTIVE_CHAT_WORKFLOW}' workflow — ` +
@@ -854,14 +894,22 @@ export async function startInteractiveChatSubscriber(
         // axis (the reliably-available axis on this seam). An unfiled ask leaves it undefined, so
         // the clause is omitted. Phase 6: thread cli/repo (no single cli is in scope here — the
         // launch carries the whole council roster via `clisJson`, not one assigned seat).
-        problem: chatProblem(
-          ask,
-          currentPath,
-          outPath,
-          ask.projectId !== undefined ? { project: ask.projectId } : undefined,
-        ),
+        problem:
+          chatProblem(
+            ask,
+            currentPath,
+            outPath,
+            ask.projectId !== undefined ? { project: ask.projectId } : undefined,
+          ) +
+          // The quality floor on a revision (draft-skill.ts): the revised COMPLETE document lands at
+          // outPath, so the self-check runs there; the page budget is the one the document already
+          // has (count its pages — the manifest carries no style), no snapshot rides this leg.
+          (draftSkillHeld
+            ? ' ' +
+              draftQualityClause(outPath, { pages: null, exact: false, source: 'unknown' }, [], { revision: true })
+            : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter)),
+        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_CHAT_WORKFLOW,
         // A project-bound doc's governed revision is FILED (same contract as the sibling
         // seams); an unbound doc launches with the key OMITTED — an unfiled governed run,
@@ -1030,8 +1078,19 @@ export async function startInteractiveChatSubscriber(
       return;
     }
     if (!isAnswerableDocKind(doc.kind)) {
+      // F-RECON-013: NOT a silent decline. The proxy refuses such an ask with a typed 422 before it
+      // reaches the bus (proxy-routes.ts `askRefusalFor`); one that still arrives (an older skin, a
+      // direct bridge client) gets an honest `error` status on the thread — the thread would
+      // otherwise sit on "generating" until its silence budget blamed the service. No ledger row:
+      // nothing was answered, and a replay must be judged again.
+      emitStatus({
+        ...docScope(ask.documentId, ask.projectId),
+        state: 'error',
+        message: foreignKindAskMessage(doc.kind),
+      });
       log(
-        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not this seam's to answer`,
+        `[interactive-chat] doc ${ask.documentId} has kind '${doc.kind}' — demo (and other foreign-kind) docs are not ` +
+          `this seam's to answer; the ask was declined on the thread with an error status, not dropped`,
       );
       return;
     }

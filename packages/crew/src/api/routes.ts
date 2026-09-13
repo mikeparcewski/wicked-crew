@@ -33,7 +33,6 @@ import type {
   PolicyLandingResult,
   RejectProposalResponse,
   RetireMemoryResponse,
-  RosterSeat,
   SessionStatus,
   SessionView,
   SteeringType,
@@ -42,7 +41,9 @@ import { execCapped, ExecOutputTooLarge } from '../core/exec.js';
 import { callEstateTool, EstateMcpError } from '../core/estate-mcp-client.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
-import { chatSeatAdmission, seatStanding } from './seat-standing.js';
+import { chatSeatAdmission } from './seat-standing.js';
+import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
+import { ChatTurnIndex } from './chat-turns.js';
 import {
   ChatScopeIndex,
   chatScopeDeps,
@@ -613,6 +614,10 @@ export interface RuntimeDeps {
    *  `chatClosed` frames (so a reclaimed chat's scratch root goes with it); a directly-driven
    *  route set gets a fresh one. */
   chatScopes?: ChatScopeIndex;
+  /** Per-chat turn index (F-RECON-017) — `createServer` feeds one from the CoreEvent fold so
+   *  `POST /chats/:id/messages` refuses a send to a seat still mid-turn; a directly-driven route
+   *  set gets a fresh one (tests fold frames into it themselves). */
+  chatTurns?: ChatTurnIndex;
   /** Run→delivered-PR index (CREW-UX-8, crew#321) — `createServer` hydrates one from the audit
    *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
    *  fresh one. */
@@ -654,6 +659,11 @@ export interface RuntimeDeps {
   /** Seat sign-in presence probe (seat sign-in) — injectable so route tests never read the
    *  developer's real dotfiles. Defaults to the file/env heuristic in seat-signin.ts. */
   signedIn?: (seatKey: string, workerConfigRoot?: string) => boolean | null;
+  /** The roster WITH crew's standing (`api/roster-standing.ts`) — `createServer` injects its single
+   *  instance so the routes, the interactive seams and the adapter's own launches all bench the
+   *  same seats (F-RECON-002/003); a directly-driven route set builds one over `seatHealth` +
+   *  `signedIn` above. */
+  rosterWithStanding?: RosterWithStanding;
   /** The `/ws` fan-out, for the few routes that say something to a thread themselves (a refused
    *  chat seat, F-2R2-007). Absent (unit tests, library use) = nothing is broadcast. */
   broadcast?: (frame: CoreEvent) => void;
@@ -751,6 +761,7 @@ export function registerRoutes(
   const runTimingIndex = runtime.runTimingIndex ?? new RunTimingIndex();
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
+  const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
   // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
@@ -997,46 +1008,15 @@ export function registerRoutes(
   });
 
   // The council seats for the launch form (static production roster), each carrying its RUNTIME
-  // health (crew#274). The roster is declarative — every configured seat is listed — and `health`
-  // is what the platform has observed: default active with no message; inactive + the error
-  // excerpt after a seat-level failure, until an ok output or the recovery probe flips it back.
-  // Existing fields ride through verbatim (the seat still round-trips into `clisJson` on launch)
-  // — the spread is deliberately NOT a field whitelist, which is what lets the engine's
-  // `login_invocation` (seat sign-in, wicked-core PR#278) pass through untouched. Each seat also
-  // gains `signed_in`: the cheap file/env presence heuristic, computed against the LIVE
-  // `WICKED_WORKER_HOME` env — the same value the engine reads at the next worker spawn, kept
-  // current by `applyWorkerConfigRoot` at boot and on every settings change.
-  //
-  // Each seat ALSO carries its STANDING (F-2R2-009): `auth` re-reads `signed_in` for what it means
-  // (a `signed_out` codex is benched on its first ballot; a `not_required` opencode answers on its
-  // free tier), and `council_eligible` says what a council would do with the seat as far as the
-  // daemon can tell. `POST /chats` seats its defaults through the SAME standing, so the roster and
-  // the chat never disagree about a seat.
-  const rosterWithStanding = (): RosterSeat[] => {
-    const workerRoot = process.env['WICKED_WORKER_HOME'];
-    return (CoreAdapter.roster() as RosterSeat[]).map((seat) => {
-      const key = String(seat.key);
-      const health = seatHealth.healthFor(key);
-      const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
-      return {
-        ...seat,
-        health,
-        signed_in: signed,
-        // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
-        // prediction learns from what the engine actually did with the seat (#533 review, F-1).
-        ...seatStanding(
-          seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
-          signed,
-          health,
-          seatHealth.councilBenchFor(key),
-          // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
-          // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
-          // `council_eligible`, and the evidence rides on the wire.
-          seatHealth.authFailureFor(key),
-        ),
-      };
-    });
-  };
+  // health (crew#274) and its STANDING (F-2R2-009) — `api/roster-standing.ts` is the ONE accessor
+  // every launch path shares (F-RECON-002/003: the interactive seams, the adapter's onboarding
+  // launch and `wicked-crew start` used to hand the engine the RAW registry roster, so signed-out
+  // seats were convened and even elected). `createServer` injects the daemon's single instance
+  // (built over the same `seatHealth`); a directly-driven route set builds an equivalent one here.
+  // `POST /chats` seats its defaults through the SAME standing, so the roster and the chat never
+  // disagree about a seat.
+  const rosterWithStanding: RosterWithStanding =
+    runtime.rosterWithStanding ?? rosterWithStandingFactory({ seatHealth, signedIn });
   app.get(`${V}/roster`, async () => ({ roster: rosterWithStanding() }));
 
   // Open a file/folder with the OS default application (crew#273) — the studio Files tab's
@@ -2191,15 +2171,36 @@ export function registerRoutes(
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
   }).strict();
+  // F-RECON-017: a message sent while a targeted seat is still answering the previous one is
+  // REFUSED, not queued. The engine queues silently (the worker gets the text the instant the
+  // previous turn's final block lands) and its reply frames carry no message correlation, so the
+  // recon saw Q2's reply render under Q3's bubble. The daemon's own turn index (`chat-turns.ts`)
+  // is the record: 409 `turn_in_flight` names the turn and the busy seats — a send that targets
+  // only IDLE seats passes (a stalled seat never blocks a follow-up to the one that answered) —
+  // and the 202 returns the `turnId` the reply frames are stamped with (`turn_id`) on `/ws`.
   app.post(`${V}/chats/:id/messages`, async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = ChatMessageSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
+    const inFlight = chatTurns.inFlight(id, parsed.data.targets);
+    if (inFlight !== null) {
+      const ageS = Math.round(inFlight.ageMs / 1000);
+      return reply.code(409).send({
+        code: 'turn_in_flight',
+        error:
+          `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering the previous ` +
+          `message in this chat (turn ${inFlight.turnId}, ${ageS}s ago: “${inFlight.excerpt}”) — wait for the ` +
+          `reply, or target only idle seats. Nothing was sent.`,
+        chatId: id,
+        turn: inFlight,
+      });
+    }
     try {
       const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
-      return reply.code(202).send({ seats });
+      const turn = chatTurns.begin(id, seats, parsed.data.text);
+      return reply.code(202).send({ seats, ...(turn !== null ? { turnId: turn.turnId } : {}) });
     } catch (err) {
       const msg = message(err);
       return reply.code(/no warm seats/.test(msg) ? 409 : 400).send({ error: msg });
@@ -2277,6 +2278,7 @@ export function registerRoutes(
     // (crew#502); the id stays parked until the engine's `chatClosed` is observed, so a delayed
     // close can never land on a chat that reused it (Copilot, #518).
     chatScopes.beginClose(id);
+    chatTurns.closed(id);
     try {
       await adapter.chatClose(id);
       return { ok: true };

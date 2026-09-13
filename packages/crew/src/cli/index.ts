@@ -502,7 +502,9 @@ async function main(): Promise<void> {
     const input: LaunchRunInput = {
       problem,
       sessionId: flag(argv, '--session') ?? randomUUID(),
-      clisJson: JSON.stringify(CoreAdapter.roster()),
+      // The roster WITH the daemon's standing (F-RECON-002/003): `bootstrap` started the server,
+      // which wired the adapter's roster provider — a signed-out seat is benched here too.
+      clisJson: JSON.stringify(adapter.launchRoster()),
     };
     if (humanConfirm !== undefined) input.humanConfirm = humanConfirm;
     if (workflow !== undefined) input.workflow = workflow;

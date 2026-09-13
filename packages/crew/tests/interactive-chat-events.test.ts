@@ -629,12 +629,26 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     seedDoc('kindless-doc'); // the real source-doc manifest shape: no kind field at all
     const sub = await startSub(engine);
     subs.push(sub!);
+    armProbe(bus);
 
-    await emitChatPosted(bus, 'demo-doc');
+    await emitChatPosted(bus, 'demo-doc', { project_id: 'proj-7' });
     await emitChatPosted(bus, 'never-created');
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length).toBe(0);
     expect(sub!.ledger.size()).toBe(0);
+    // F-RECON-013: the demo ask is DECLINED ON THE THREAD (an error status naming what to do instead) —
+    // not dropped into a log line while the canvas shows "generating". The unknown doc stays silent
+    // (nothing to post to).
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER && (e.payload as { state?: string }).state === 'error'),
+    );
+    const declined = probeEvents.filter((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error');
+    expect(declined.length).toBe(1);
+    const pl = declined[0]!.payload as { document_id: string; project_id?: string; message: string };
+    expect(pl.document_id).toBe('demo-doc');
+    expect(pl.project_id).toBe('proj-7');
+    expect(pl.message).toMatch(/demo storyboards are not supported yet/);
+    expect(pl.message).toMatch(/highlight the step/);
 
     // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
     await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });

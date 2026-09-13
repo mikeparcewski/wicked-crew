@@ -71,6 +71,12 @@ const server = createServer((req, res) => {
     return res.writeHead(200, {'content-type':'application/json'})
       .end(JSON.stringify({ url: req.url, method: req.method, auth: req.headers.authorization ?? null }));
   }
+  if (url.pathname === '/api/events' && req.method === 'POST') {  // the UI emit: echoes what arrived
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    return req.on('end', () => res.writeHead(200, {'content-type':'application/json'})
+      .end(JSON.stringify({ ok: true, event_id: 251, received: body })));
+  }
   if (url.pathname === '/api/echo') {    // proves the request BODY streamed through
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -510,4 +516,50 @@ describe('interactive proxy — doc create interception (F-046)', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { received: Record<string, unknown> }).received.repo_ref).toBe('wicked-studio');
   }, 30_000);
+});
+
+describe('F-RECON-013 — a chat ask on a demo doc is refused with a typed 422 BEFORE the bridge sees it', () => {
+  const ask = (documentId: string, text = 'The recording failed — what do I do now to get the demo recorded?') =>
+    JSON.stringify({ event_type: 'wicked.interactive.chat.posted', payload: { role: 'user', text, document_id: documentId, source_message_id: 'dmsg-9' } });
+  const post = (project: string, body: string) =>
+    fetch(`${base}/api/v1/projects/${project}/interactive/api/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+
+  function seed(root: string, name: string, kind?: string): void {
+    mkdirp(join(root, name), { recursive: true });
+    writeFileSync(join(root, name, 'versions.json'), JSON.stringify({ ...(kind !== undefined ? { kind } : {}), head: 0, versions: [{ version: 0, html_file: '_v0.html' }] }));
+    writeFileSync(join(root, name, '_v0.html'), '<section>x</section>');
+  }
+
+  it('demo doc: 422 ask_unsupported_for_doc_kind with the remedy, nothing emitted; source doc + kindless doc + unknown doc: forwarded to the bridge', async () => {
+    const boundRoot = join(dir, 'bound-docs');
+    seed(boundRoot, 'a-demo', 'demo');
+    seed(boundRoot, 'a-source', 'source');
+    seed(boundRoot, 'kindless');
+
+    const refused = await post('p-bound', ask('a-demo'));
+    expect(refused.status).toBe(422);
+    const body = (await refused.json()) as { code: string; error: string; document_id: string; doc_kind: string; remedy: string };
+    expect(body.code).toBe('ask_unsupported_for_doc_kind');
+    expect(body.document_id).toBe('a-demo');
+    expect(body.doc_kind).toBe('demo');
+    expect(body.error).toMatch(/demo storyboards are not supported yet/);
+    expect(body.remedy).toMatch(/highlight the step/);
+
+    for (const doc of ['a-source', 'kindless', 'never-created']) {
+      const ok = await post('p-bound', ask(doc));
+      expect(ok.status, doc).toBe(200);
+      const echoed = (await ok.json()) as { ok: boolean; received: string };
+      expect(echoed.ok).toBe(true);
+      expect(JSON.parse(echoed.received)).toEqual(JSON.parse(ask(doc))); // the body reached the bridge byte-for-byte
+    }
+  });
+
+  it('the feedback-batch ECHO on a demo doc is not an ask — forwarded (transcript fidelity); so is a non-chat emit', async () => {
+    const boundRoot = join(dir, 'bound-docs');
+    seed(boundRoot, 'echo-demo', 'demo');
+    const echo = await post('p-bound', ask('echo-demo', 'Feedback on 1 place in this document:\n1. [w-3] slow down here'));
+    expect(echo.status).toBe(200);
+    const rerecord = await post('p-bound', JSON.stringify({ event_type: 'wicked.interactive.demo.requested', payload: { document_id: 'echo-demo' } }));
+    expect(rerecord.status).toBe(200);
+  });
 });

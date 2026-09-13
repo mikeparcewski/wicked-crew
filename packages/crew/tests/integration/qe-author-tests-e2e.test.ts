@@ -260,6 +260,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       workflow: 'qe-author-tests-e2e-green',
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
       // deliver DELIBERATELY OMITTED — a repo-scoped code-work def delivers by default (crew#393).
     });
     expect(launch.status).toBe(201);
@@ -339,6 +342,9 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
       workflow: 'qe-author-tests-e2e-red',
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
     });
     expect(launch.status).toBe(201);
     const runId = (launch.body as { runId: string }).runId;
