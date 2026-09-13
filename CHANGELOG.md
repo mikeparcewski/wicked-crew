@@ -175,6 +175,24 @@ and `/ws` chat frames are stamped `turn_id`; the demo seam relays wicked-interac
 `skill_ref: "wicked-garden-draft"` when the published snapshot holds it). Every entry below belongs
 to one of them.
 
+### Changed
+- **The real-engine integration tests follow the engine's gate-on-denial contract (wicked-core#477,
+  core#464 — fixes #560).** Crew CI builds `wicked-core-ts` from wicked-core `main`, and since
+  `82fffbc` every fold denial (a policy deny, the pinned-validator / substance / deliverable /
+  repo-checks floors, the worktree guard, a boundary deny) parks the run `awaiting_human` at an
+  `escalation` gate on the denied unit instead of ending it `failed` — including under
+  `humanConfirm: 'none'`. The three tests that pinned the old ungated terminal
+  (`tests/integration/governance-deny.test.ts`, `qe-acceptance-functional.test.ts`, and the
+  "produced nothing" case of `qe-author-tests-e2e.test.ts`) now assert the pause AND its class on
+  the wire (`gateEscalated.condition: 'verdict_not_pass'` from `governance` for the SC-005 policy
+  deny; `'floor_failed'` from `pinned_validator` for the evidence floor), that `unitDenied` still
+  precedes the gate and no `sessionFailed` is booked, then REJECT the gate over
+  `POST /runs/:id/gate` and assert the terminal `cancelled` (`runCancelled` is the last frame; a
+  clean tree is reaped, so no `worktreeRetained` — core#456). Every invariant the tests protected
+  stands: the denied unit stays `rejected` with its denial on record, nothing behind it runs,
+  nothing delivers. Tests only — no daemon behaviour, no wire type (the seven additive
+  `gateEscalated` fields are #559) and no `wicked-core-ts` pin change.
+
 ### Fixed
 - **F-RECON-002 / F-RECON-003 — the interactive seams, the onboarding launch and `wicked-crew start`
   handed the engine the RAW registry roster, so signed-out seats were convened and even elected.**

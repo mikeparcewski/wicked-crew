@@ -18,10 +18,16 @@
 //
 // Two engine behaviors this test deliberately RIDES rather than works around:
 //  - wicked-core auto-pins its built-in evidence floor onto any `verified_evidence` phase with no
-//    validator (FINDING-055), and the stub CLI produces no evidence, so the RUN itself ends
-//    `failed` — the engine's own gate deny-dominating at its layer. The acceptance route reads
-//    regardless of run status: what the QE ledger says about THIS RUN is a different question from
-//    how the run went, and 6a's gate answers the former.
+//    validator (FINDING-055; since wicked-core#414 the def pins it explicitly), and the stub CLI
+//    produces no evidence, so the accept unit is DENIED by that floor — the engine's own gate
+//    deny-dominating at its layer. Since wicked-core #477 (core#464) a floor denial no longer ends
+//    the run `failed`: it PARKS `awaiting_human` at the engine's `escalation` gate
+//    (`gateEscalated.condition: 'floor_failed'`, source `pinned_validator`), so this test asserts
+//    that pause and its class, then REJECTS the gate over POST /runs/:id/gate — the run's terminal
+//    state is `cancelled` (`runCancelled`; the tree is clean, so the worktree is reaped, not
+//    retained — core#456). The acceptance route reads regardless of run status: what the QE ledger
+//    says about THIS RUN is a different question from how the run went, and 6a's gate answers the
+//    former.
 //  - registerRepo requires a real git repository, so the workspace is `git init`ed.
 
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
@@ -86,6 +92,25 @@ async function getJson(path: string): Promise<{ status: number; body: Record<str
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+/** Poll `GET /runs/:id` (≤ ~30 s) until the run's status satisfies `settled`; returns the last status seen. */
+async function pollStatus(settled: (status: string) => boolean): Promise<string> {
+  let status = '';
+  for (let i = 0; i < 300 && !settled(status); i++) {
+    const { body } = await getJson(`/api/v1/runs/${runId}`);
+    status = String((body['run'] as { session?: { status?: string } } | undefined)?.session?.status ?? '');
+    if (!settled(status)) await new Promise((r) => setTimeout(r, 100));
+  }
+  return status;
+}
+
+/** The run's durable event trail, oldest first — UNTYPED on purpose: the seven additive
+ *  `gateEscalated` fields (`denialSource`, `defGate`, `restored`, …) reach crew's wire types with
+ *  #559; this test pins the ENGINE's contract, not the mirror. */
+async function runEvents(): Promise<Array<Record<string, unknown>>> {
+  const { body } = await getJson(`/api/v1/runs/${runId}/events`);
+  return body['events'] as Array<Record<string, unknown>>;
+}
+
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'qe-accept-func-'));
 
@@ -133,15 +158,56 @@ beforeAll(async () => {
   expect(launchRes.status).toBe(201);
   runId = ((await launchRes.json()) as { runId: string }).runId;
 
-  // Wait for the run to reach a terminal state (the stub unit is denied by the explicitly
-  // pinned evidence floor, so `failed` is the expected terminus).
-  let status = '';
-  for (let i = 0; i < 300 && !TERMINAL.has(status); i++) {
-    const { body } = await getJson(`/api/v1/runs/${runId}`);
-    status = String((body['run'] as { session?: { status?: string } } | undefined)?.session?.status ?? '');
-    if (!TERMINAL.has(status)) await new Promise((r) => setTimeout(r, 100));
-  }
-  expect(TERMINAL.has(status), `run must reach a terminal state (got '${status}')`).toBe(true);
+  // The stub unit is denied by the explicitly pinned evidence floor. wicked-core #477 (core#464):
+  // the denial PARKS the run at the escalation gate instead of ending it `failed` — assert the
+  // pause AND its class, then reject the gate so the run reaches the terminal state the suite
+  // below reads against.
+  let status = await pollStatus((s) => TERMINAL.has(s) || s === 'awaiting_human');
+  expect(status, `run must park at the evidence-floor escalation gate (got '${status}')`).toBe('awaiting_human');
+  const parked = await getJson(`/api/v1/runs/${runId}`);
+  const units = (parked.body['run'] as { units: Array<{ id: string; ord: number; status: string; denial_reason: string | null }> }).units;
+  const accept = units.find((u) => u.id.endsWith(':accept'));
+  expect(accept, 'the def\'s accept phase is planned').toBeDefined();
+  expect(accept!.status, 'the denied unit is rejected while the run waits').toBe('rejected');
+  expect(String(accept!.denial_reason ?? '')).not.toBe('');
+  // The gate names its class — `floor_failed` from the `pinned_validator` layer, engine-authored
+  // (`defGate: false`); no guard restore is involved (`restored: false`, nothing discarded).
+  const events = await runEvents();
+  const escalated = events.filter((e) => e['type'] === 'gateEscalated');
+  expect(escalated, 'one escalation for the one denied unit').toHaveLength(1);
+  expect(escalated[0]).toMatchObject({
+    ord: accept!.ord,
+    condition: 'floor_failed',
+    denialSource: 'pinned_validator',
+    defGate: false,
+    restored: false,
+    discarded: [],
+  });
+  // `unitDenied` is still emitted and precedes the gate; no `sessionFailed` is ever booked for a
+  // denial (#477's exit criterion: no failure without a decided gate).
+  const deniedIx = events.findIndex((e) => e['type'] === 'unitDenied' && e['ord'] === accept!.ord);
+  expect(deniedIx).toBeGreaterThanOrEqual(0);
+  expect(deniedIx).toBeLessThan(events.findIndex((e) => e['type'] === 'gateEscalated'));
+  expect(events.some((e) => e['type'] === 'sessionFailed')).toBe(false);
+
+  // REJECT (approve:false) → the engine cancels the run. The stub wrote nothing, so the tree is
+  // clean and the worktree is reaped rather than retained (core#456: only a DIRTY tree is kept).
+  const decided = await fetch(`${baseUrl}/api/v1/runs/${runId}/gate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approve: false }),
+  });
+  const decidedBody = (await decided.json()) as Record<string, unknown>;
+  expect(decided.status, `POST /runs/${runId}/gate → ${JSON.stringify(decidedBody)}`).toBe(200);
+  expect(decidedBody['status']).toBe('cancelled');
+  status = await pollStatus((s) => TERMINAL.has(s));
+  expect(status, `run must reach a terminal state after the gate reject (got '${status}')`).toBe('cancelled');
+  const trail = await runEvents();
+  expect(trail[trail.length - 1]?.['type'], 'the cancel is the terminal frame').toBe('runCancelled');
+  expect(trail.some((e) => e['type'] === 'worktreeRetained'), 'clean tree → reaped, not retained').toBe(false);
+  // The denied unit stays denied after the cancel — a reject decides the run, not the denial.
+  const cancelled = await getJson(`/api/v1/runs/${runId}`);
+  expect((cancelled.body['run'] as { units: Array<{ id: string; status: string }> }).units.find((u) => u.id.endsWith(':accept'))?.status).toBe('rejected');
 }, 60000);
 
 afterAll(async () => {
