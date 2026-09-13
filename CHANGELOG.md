@@ -10,6 +10,51 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.33] — 2026-09-13
+
+Release train (RC1 — the last cut before the acceptance freeze) — **core-ts 0.7.24 / studio 0.5.9 /
+api-types 0.37.0 / bus 2.3.4 / interactive 0.9.2 / garden 12.35.0 / bridges 1.1.1.** Pins the
+published `wicked-core-ts` `^0.7.24` engine (wicked-core #456 — acceptance findings F-E2E-030 /
+F-E2E-029 / F-E2E-028: **the deliver phase is human-gated by default** — the engine pauses before the
+`deliver` Tool unit whatever `human_confirm` says, the prompt names the branch, the repo and the gh
+account that will push, and `LaunchOptions.autoDeliver` is the ONLY opt-out — the `deliverGate` wire
+below maps onto it; **floor provisioning** — the repo-checks floor installs the declared dependencies
+INTO the run worktree with a frozen lockfile before running checks, and a failed install is an
+environment finding, never a bare ENOENT denial; a **best-effort install fence** refuses
+package-manager invocations whose effective directory escapes the worktree — advisory, disclosed as
+`workerToolCallDenied` with the `install fence:` prefix — and every distributed agent unit emits an
+additive `sandboxPosture {posture: 'os' | 'advisory'}`; **cancel keeps a worktree holding uncommitted
+work** (`worktreeRetained`); `awaitingHuman.gateKind` is additive), bundles the published
+`wicked-studio` 0.5.9 skin (built against `wicked-crew-api-types` 0.37.0: the Archive control for
+terminal runs — studio #268, the harness-delivered fix for studio#219 — and the composer's
+deliver-gate posture — studio #269: "First gate" pauses at the deliver gate, "No gates ·
+auto-deliver" is the only auto posture, the run page names the gate from `auto_deliver`, and the
+composer promises the gate only when `GET /health.capabilities.deliverGate` says this daemon keeps
+it), pins `wicked-bus` `^2.3.4` (WB-014 `SUBSCRIBER_DB_UNUSABLE` + `handle.getHealth()` — the typed
+dead-connection signal #542 below escalates), follows `wicked-interactive@^0.9.2` (the demo recorder
+preflights and PROVISIONS its browser and reports every failure as a typed `RecorderError` frame —
+F-RECON-012/014 — which the demo seam relays; every text block carries a `data-wid` — F-RECON-004; no
+phantom versions — F-RECON-005; `INTERACTIVE_DEFAULT_RANGE` moves `^0.9.1` → `^0.9.2`, the
+`WICKED_INTERACTIVE_SPEC` override and its below-floor warning unchanged), rides with `wicked-garden`
+12.35.0 (the `wicked-garden-draft` quality floor the interactive drafting phases route to when the
+published snapshot holds it — F-RECON-007/008/009), and keeps `agent-acp-bridges` `^1.1.1`
+unchanged. The sibling workspace package `wicked-crew-api-types` 0.37.0 was published on the #543
+merge (`api-types-v0.37.0`) and is not re-tagged here.
+
+What merged since 0.7.32 — **#541** (F-E2E-021 root cause: one SQLite library per database file per
+process — the activity feed no longer opens `bus.db` through `node:sqlite`), **#542** (F-E2E-021
+visibility: connection-fatal bus subscriber errors reach `/diagnostics.recentErrors`), **#543**
+(F-E2E-030 wire: `deliverGate` on `POST /runs`, `GET /health.capabilities.deliverGate`, api-types
+0.37.0), **#544** (F-RECON-002/003: every launch seam — the interactive seams, the onboarding
+launch, `wicked-crew start` — hands the engine the roster WITH crew's standing, so a signed-out seat
+is benched everywhere; F-RECON-013: a real ask on a doc kind no seam answers is a typed **422**
+`ask_unsupported_for_doc_kind` and a frame that still reaches the bus gets an honest error status;
+F-RECON-017: a mid-turn send to a busy seat is a **409** `turn_in_flight`, the 202 carries `turnId`
+and `/ws` chat frames are stamped `turn_id`; the demo seam relays wicked-interactive 0.9.2's typed
+`RecorderError` to `/diagnostics.recentErrors`; the interactive drafting phases carry
+`skill_ref: "wicked-garden-draft"` when the published snapshot holds it). Every entry below belongs
+to one of them.
+
 ### Fixed
 - **F-RECON-002 / F-RECON-003 — the interactive seams, the onboarding launch and `wicked-crew start`
   handed the engine the RAW registry roster, so signed-out seats were convened and even elected.**
@@ -2377,7 +2422,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.32...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.33...HEAD
+[0.7.33]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.32...v0.7.33
 [0.7.32]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.29...v0.7.30

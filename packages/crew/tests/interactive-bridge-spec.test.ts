@@ -35,14 +35,15 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(INTERACTIVE_SPEC).not.toBe('wicked-interactive');
   });
 
-  it('floors at 0.9.1 — the exporter honours the author\'s page geometry (F-050) and DELETE /api/docs/:doc retire exists (F-081)', () => {
+  it('floors at 0.9.2 — the recorder preflights/provisions its browser and fails with a typed RecorderError the demo seam relays (F-RECON-012/013/014), on top of F-050 page geometry and DELETE /api/docs/:doc retire (F-081)', () => {
     const range = INTERACTIVE_SPEC.split('@')[1] ?? '';
     expect(range).toBe(INTERACTIVE_DEFAULT_RANGE);
     const m = /^\^?(\d+)\.(\d+)\.(\d+)/.exec(range);
     expect(m, `unparseable range: ${range}`).not.toBeNull();
     const [maj, min, pat] = [Number(m![1]), Number(m![2]), Number(m![3])];
-    // 0.8.x never picked up 0.9.0 (F-081: the caret was a compiled constant — a silent freeze).
-    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 1);
+    // 0.8.x never picked up 0.9.0 (F-081: the caret was a compiled constant — a silent freeze); 0.9.1
+    // answers the recorder routes without the typed frames (F-RECON-012/014 shipped in 0.9.2).
+    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 2);
   });
 
   it('WICKED_INTERACTIVE_SPEC overrides the RANGE when it is a semver range; anything else is ignored and NAMED (F-081)', () => {
@@ -58,12 +59,14 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.8.1' })).toEqual({ spec: 'wicked-interactive@0.8.1', range: '0.8.1', source: 'env', belowFloor: true });
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.8.1' }).belowFloor).toBe(true);
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '>=0.9.0 <1.0.0' }).belowFloor).toBe(true);
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.1' }).belowFloor).toBeUndefined();
+    // 0.9.1 is now BELOW the floor (no typed RecorderError frames) — honoured, flagged.
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.1' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.2' }).belowFloor).toBeUndefined();
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.10.0-rc.1' }).belowFloor).toBeUndefined();
     // An upper-bound-only range has no floor to compare — accepted, not flagged.
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });
     // A tag, an x-range, a union, a path, a different package, a whole spec: not a floor within the package.
-    for (const bad of ['latest', 'next', '0.9', '0.9.x', '*', '^0.9.1 || ^1.0.0', '/srv/interactive', 'wicked-interactive@^0.9.1', 'other-pkg']) {
+    for (const bad of ['latest', 'next', '0.9', '0.9.x', '*', '^0.9.2 || ^1.0.0', '/srv/interactive', 'wicked-interactive@^0.9.2', 'other-pkg']) {
       expect(validInteractiveRange(bad), bad).toBe(false);
       const r = resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: bad });
       expect(r, bad).toEqual({ spec: INTERACTIVE_SPEC, range: INTERACTIVE_DEFAULT_RANGE, source: 'default', rejected: bad });
