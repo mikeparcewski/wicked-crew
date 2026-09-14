@@ -29,6 +29,7 @@ import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
   type: string;
@@ -171,6 +172,7 @@ beforeAll(async () => {
   // REAL engine — stub: false. The stub engine has no ACP runner, so only the production
   // spawn exercises the elicitation path end-to-end.
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: false });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

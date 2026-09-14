@@ -34,6 +34,7 @@ import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const RUN_ID = 'it-dead-seat-distribution-1';
 const WORKFLOW_ID = 'dead-seat-distribution-wf';
@@ -104,6 +105,7 @@ beforeAll(async () => {
   );
 
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: false });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

@@ -1,10 +1,10 @@
 // The BASE skill (crew#554 — the launcher half of wicked-core#468): every governed agent unit is
 // told to follow ONE role-keyed discipline skill; the engine refuses a launch at intake when the
 // handed snapshot lacks it. Crew owns the default (`SystemSettings.baseSkillRef`, shipped as
-// `wicked-garden-governed-worker`) and the missing-skill policy (`baseSkillPolicy: 'warn' |
-// 'require'`, default `warn`): under `warn` the engine variable is exported ONLY when the published
-// generation holds the skill (a fresh install warns, runs proceed without the directive); under
-// `require` it is always exported and the engine refuses at intake.
+// `wicked-garden-governed-worker`) and the missing-skill policy — `baseSkillPolicy: 'require'`,
+// the ONLY value since D-8/D-8b (FIX-IT-ALL L4-⑧): the engine variable is ALWAYS exported and the
+// engine refuses a launch at intake when the handed generation lacks the skill; `'warn'` (env left
+// unset, runs proceed UNGROUNDED, a /health warning the only signal) is deleted and 400s.
 //
 // Pure posture → runtime over the fixture store (boot, policy flip, add + publish flips the
 // posture, off) → the routes (PUT /settings validation + re-export, GET /health, GET /diagnostics,
@@ -66,7 +66,7 @@ describe('baseSkillPosture — the pure judgement', () => {
   const nothing = () => false;
 
   it('an empty (or blank) name is OFF: no posture, and the env is deleted', () => {
-    expect(baseSkillPosture({ ref: '', policy: 'warn' }, { gen: 3, skills: [GOVERNED] }, nothing)).toBeNull();
+    expect(baseSkillPosture({ ref: '', policy: 'require' }, { gen: 3, skills: [GOVERNED] }, nothing)).toBeNull();
     expect(baseSkillPosture({ ref: '   ', policy: 'require' }, null, nothing)).toBeNull();
     process.env[BASE_SKILL_REF_ENGINE_ENV] = 'stale';
     applyBaseSkillEnv(null);
@@ -75,35 +75,29 @@ describe('baseSkillPosture — the pure judgement', () => {
   });
 
   it('present in the published generation: exported, no finding, "discipline skill: <name> gen N" (the name is trimmed)', () => {
-    const p = baseSkillPosture({ ref: ` ${GOVERNED} `, policy: 'warn' }, { gen: 3, skills: ['wicked-garden-beta', GOVERNED] }, holds(GOVERNED));
-    expect(p).toEqual({ name: GOVERNED, policy: 'warn', present: true, inCatalog: true, gen: 3, engineInput: GOVERNED, finding: null });
+    const p = baseSkillPosture({ ref: ` ${GOVERNED} `, policy: 'require' }, { gen: 3, skills: ['wicked-garden-beta', GOVERNED] }, holds(GOVERNED));
+    expect(p).toEqual({ name: GOVERNED, policy: 'require', present: true, inCatalog: true, gen: 3, engineInput: GOVERNED, finding: null });
     applyBaseSkillEnv(p);
     expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
     expect(describeBaseSkill(p)).toBe(`discipline skill: ${GOVERNED} gen 3`);
   });
 
-  it('missing under warn: NOT exported, a warning naming the generation and the remedy — publish when it is in the catalog, install+refresh+publish when it is not', () => {
-    const inCatalog = baseSkillPosture({ ref: GOVERNED, policy: 'warn' }, { gen: 3, skills: ['wicked-garden-beta'] }, holds(GOVERNED));
-    expect(inCatalog).toMatchObject({ present: false, inCatalog: true, gen: 3, engineInput: null });
-    expect(inCatalog?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'warning' });
-    expect(inCatalog?.finding?.message).toContain('gen 3');
-    expect(inCatalog?.finding?.message).toContain('proceed WITHOUT the discipline directive');
-    expect(inCatalog?.finding?.message).toContain('POST /skills/publish hands it');
-    expect(describeBaseSkill(inCatalog)).toBe(`discipline skill: ${GOVERNED} MISSING — runs proceed without it`);
-    const noSnapshot = baseSkillPosture({ ref: GOVERNED, policy: 'warn' }, null, nothing);
-    expect(noSnapshot).toMatchObject({ present: false, inCatalog: false, gen: null, engineInput: null });
-    expect(noSnapshot?.finding?.message).toContain('no published snapshot is handed to the engine');
-    expect(noSnapshot?.finding?.message).toContain('POST /skills/refresh-baseline, then POST /skills/publish');
-    applyBaseSkillEnv(noSnapshot);
-    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBeUndefined();
-  });
-
-  it('missing under require: exported anyway (the engine refuses at intake), an ERROR that says so', () => {
+  it('missing: exported anyway (the engine refuses at intake), an ERROR that says so and names the explicit off switch — publish when it is in the catalog, install+refresh+publish when it is not', () => {
     const p = baseSkillPosture({ ref: GOVERNED, policy: 'require' }, { gen: 3, skills: ['wicked-garden-beta'] }, nothing);
-    expect(p).toMatchObject({ present: false, engineInput: GOVERNED });
+    expect(p).toMatchObject({ present: false, inCatalog: false, engineInput: GOVERNED });
     expect(p?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'error' });
     expect(p?.finding?.message).toContain('REQUIRED');
     expect(p?.finding?.message).toContain('refuses every launch at intake');
+    expect(p?.finding?.message).toContain('POST /skills/refresh-baseline, then POST /skills/publish');
+    expect(p?.finding?.message).toContain('set baseSkillRef ""');
+    expect(p?.finding?.message).not.toContain('baseSkillPolicy "warn"');
+    // D-8b: there is NO policy that leaves the env unset while the skill is missing.
+    const inCatalog = baseSkillPosture({ ref: GOVERNED, policy: 'require' }, { gen: 3, skills: ['wicked-garden-beta'] }, holds(GOVERNED));
+    expect(inCatalog).toMatchObject({ present: false, inCatalog: true, gen: 3, engineInput: GOVERNED });
+    expect(inCatalog?.finding?.message).toContain('POST /skills/publish hands it');
+    const noSnapshot = baseSkillPosture({ ref: GOVERNED, policy: 'require' }, null, nothing);
+    expect(noSnapshot).toMatchObject({ present: false, gen: null, engineInput: GOVERNED });
+    expect(noSnapshot?.finding?.message).toContain('no published snapshot is handed to the engine');
     applyBaseSkillEnv(p);
     expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
     expect(describeBaseSkill(p)).toBe(`discipline skill: ${GOVERNED} MISSING — runs will be refused at intake`);
@@ -130,33 +124,33 @@ describe('SkillsRuntime — the base skill follows the ladder, the policy, and e
 
   const baseSkillLines = () => lines.filter((l) => l.startsWith('[skills] skills.base-skill:'));
 
-  it('the shipped default over a fresh catalog WITHOUT the skill: boot leaves the env unset, warns ONCE, and the finding rides health() — a visible warning, never a dead Send', async () => {
+  it('the shipped default over a fresh catalog WITHOUT the skill: boot EXPORTS the env (the engine refuses launches at intake), errors ONCE, and the finding rides health() — never a silent ungrounded run (D-8b)', async () => {
     expect(DEFAULT_SETTINGS.baseSkillRef).toBe(GOVERNED);
-    expect(DEFAULT_SETTINGS.baseSkillPolicy).toBe('warn');
+    expect(DEFAULT_SETTINGS.baseSkillPolicy).toBe('require');
     delete process.env[BASE_SKILL_REF_ENGINE_ENV];
     // Configured BEFORE the ladder (the boot order in createServer): the outcome re-judges it.
     runtime.configureBaseSkill(DEFAULT_SETTINGS);
-    expect(runtime.baseSkill()).toMatchObject({ name: GOVERNED, present: false, gen: null, engineInput: null });
+    expect(runtime.baseSkill()).toMatchObject({ name: GOVERNED, present: false, gen: null, engineInput: GOVERNED });
     const health = await runtime.apply();
     expect(health.state).toBe('published');
     expect(health.current?.gen).toBe(1);
-    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBeUndefined();
-    expect(health.baseSkill).toMatchObject({ name: GOVERNED, policy: 'warn', present: false, inCatalog: false, gen: 1, engineInput: null });
-    expect(health.baseSkill?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'warning' });
+    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
+    expect(health.baseSkill).toMatchObject({ name: GOVERNED, policy: 'require', present: false, inCatalog: false, gen: 1, engineInput: GOVERNED });
+    expect(health.baseSkill?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'error' });
     expect(health.findings.filter((f) => f.kind === 'skills.base-skill')).toHaveLength(1);
     expect(runtime.health().findings.some((f) => f.kind === 'skills.base-skill')).toBe(true);
     // Said ONCE, after the ladder ran (the pre-boot judgement is applied silently — it would only
     // be contradicted a moment later), and once per CHANGE of the finding, not once per re-export.
     expect(baseSkillLines()).toHaveLength(1);
     expect(baseSkillLines()[0]).toContain('gen 1');
-    expect(baseSkillLines()[0]).toContain(`${BASE_SKILL_REF_ENGINE_ENV} unset`);
+    expect(baseSkillLines()[0]).toContain(`${BASE_SKILL_REF_ENGINE_ENV} = ${GOVERNED}`);
     runtime.refreshBaseSkill();
     runtime.refreshBaseSkill();
     expect(baseSkillLines()).toHaveLength(1);
   });
 
-  it('a skill the generation HOLDS is exported with no finding; flipping to require over a missing one exports it and raises an error; "" turns it off', async () => {
-    runtime.configureBaseSkill({ baseSkillRef: SHIPPED, baseSkillPolicy: 'warn' });
+  it('a skill the generation HOLDS is exported with no finding; a missing one is exported too and raises an error; "" turns it off', async () => {
+    runtime.configureBaseSkill({ baseSkillRef: SHIPPED, baseSkillPolicy: 'require' });
     const health = await runtime.apply();
     expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(SHIPPED);
     expect(health.baseSkill).toMatchObject({ name: SHIPPED, present: true, inCatalog: true, gen: 1, engineInput: SHIPPED, finding: null });
@@ -188,11 +182,12 @@ describe('SkillsRuntime — the base skill follows the ladder, the policy, and e
       rev,
     );
     expect(added.verdict).not.toBe('blocked');
-    // The catalog moved, the handed generation did not: still unset, but the warning now says "publish".
+    // The catalog moved, the handed generation did not: still exported (the engine keeps refusing),
+    // but the error's remedy now says "publish".
     const staged = runtime.refreshBaseSkill();
-    expect(staged).toMatchObject({ present: false, inCatalog: true, gen: 1, engineInput: null });
+    expect(staged).toMatchObject({ present: false, inCatalog: true, gen: 1, engineInput: GOVERNED });
     expect(staged?.finding?.message).toContain('POST /skills/publish hands it');
-    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBeUndefined();
+    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
 
     const published = await s.store.publish(added.revision);
     expect(published.snapshot?.gen).toBe(2);
@@ -255,24 +250,25 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
     restoreEnv();
   });
 
-  it('GET /settings carries the shipped defaults; GET /health and GET /diagnostics disclose the posture (missing → warning, env unset)', async () => {
+  it('GET /settings carries the shipped defaults; GET /health and GET /diagnostics disclose the posture (missing → error, env exported)', async () => {
     const settings = settingsOf(await app!.inject({ method: 'GET', url: '/api/v1/settings' }));
     expect(settings.baseSkillRef).toBe(GOVERNED);
-    expect(settings.baseSkillPolicy).toBe('warn');
+    expect(settings.baseSkillPolicy).toBe('require');
     const h = await health();
-    expect(h.baseSkill).toMatchObject({ name: GOVERNED, policy: 'warn', present: false, gen: 1, engineInput: null });
+    expect(h.baseSkill).toMatchObject({ name: GOVERNED, policy: 'require', present: false, gen: 1, engineInput: GOVERNED });
     expect(h.baseSkill?.finding?.kind).toBe('skills.base-skill');
     const d = await diagnosticsSkills();
     expect(d.state).toBe('published');
     expect(d.baseSkill).toEqual(h.baseSkill);
     expect(d.findings.filter((f) => f.kind === 'skills.base-skill')).toHaveLength(1);
-    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBeUndefined();
+    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
   });
 
-  it('PUT /settings 400s a bad policy, a non-string name and a name that is not a skill name — env untouched', async () => {
+  it('PUT /settings 400s a bad policy (incl. the deleted "warn" — D-8b), a non-string name and a name that is not a skill name — env untouched', async () => {
     process.env[BASE_SKILL_REF_ENGINE_ENV] = 'before';
     for (const [payload, key] of [
       [{ baseSkillPolicy: 'bogus' }, 'baseSkillPolicy'],
+      [{ baseSkillPolicy: 'warn' }, 'baseSkillPolicy'],
       [{ baseSkillPolicy: 7 }, 'baseSkillPolicy'],
       [{ baseSkillRef: 42 }, 'baseSkillRef'],
       [{ baseSkillRef: 'has a space' }, 'baseSkillRef'],
@@ -316,16 +312,16 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
     expect((await health()).baseSkill).toBeNull();
   });
 
-  it('POST /skills/publish and POST /skills/refresh-baseline answer the posture after the operation — a publish without the skill is the warning moment', async () => {
+  it('POST /skills/publish and POST /skills/refresh-baseline answer the posture after the operation — a publish without the skill is the error moment (env stays exported; the engine refuses)', async () => {
     bump(s); // boot published gen 1 over this tree; an UNCHANGED publish would answer gen 1 `unchanged` (DES-L6 PR-L6-1) — change it so this one mints gen 2
     const rev = await revision();
     const published = await app!.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: rev } });
     expect(published.statusCode).toBe(200);
     const body = published.json() as SkillPublishResult;
     expect(body.snapshot?.gen).toBe(2);
-    expect(body.baseSkill).toMatchObject({ name: GOVERNED, present: false, gen: 2, engineInput: null });
-    expect(body.baseSkill?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'warning' });
-    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBeUndefined();
+    expect(body.baseSkill).toMatchObject({ name: GOVERNED, present: false, gen: 2, engineInput: GOVERNED });
+    expect(body.baseSkill?.finding).toMatchObject({ kind: 'skills.base-skill', severity: 'error' });
+    expect(process.env[BASE_SKILL_REF_ENGINE_ENV]).toBe(GOVERNED);
 
     const refreshed = await app!.inject({ method: 'POST', url: '/api/v1/skills/refresh-baseline', payload: { expectedRevision: await revision() } });
     expect(refreshed.statusCode).toBe(200);
@@ -341,6 +337,7 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
     expect(body.error).toBe(ENGINE_REFUSAL);
     expect(body.baseSkill).toMatchObject({ name: GOVERNED, present: false });
     expect(body.remedy).toContain('POST /skills/refresh-baseline, then POST /skills/publish');
-    expect(body.remedy).toContain('baseSkillPolicy "warn"');
+    expect(body.remedy).toContain('baseSkillRef ""');
+    expect(body.remedy).not.toContain('baseSkillPolicy "warn"');
   });
 });

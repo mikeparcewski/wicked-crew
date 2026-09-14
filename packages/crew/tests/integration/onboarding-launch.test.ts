@@ -29,6 +29,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, RepoEntry, SessionView } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 /** The engine's plan-time refusal this finding is about — must never appear for a tool-only plan. */
@@ -85,6 +86,7 @@ beforeAll(async () => {
   // ever needed — onboarding plans no agent unit — and the plan/distribute path is the SAME code
   // the production engine runs).
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

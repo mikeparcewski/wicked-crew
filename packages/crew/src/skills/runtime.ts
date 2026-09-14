@@ -173,7 +173,7 @@ export { REFUSED_DIRNAME };
 export type SkillsHealthState = 'published' | 'fallback' | 'blocked' | 'config-error' | 'disabled';
 
 /** `skills.stale-rules` (F-083) is emitted ahead of its `wicked-crew-api-types` declaration — the next api-types cut adds it to `DiagnosticsSkillsFinding.kind`. */
-/** `skills.base-skill` (crew#554): the configured base skill is not in the published generation — a warning under `baseSkillPolicy: 'warn'`, an error under `'require'`. */
+/** `skills.base-skill` (crew#554 / DES-L4 PR-⑧): the configured base skill is not in the published generation — an ERROR (the engine refuses launches at intake; `'require'` is the only policy). */
 export type SkillsHealthFindingKind = 'skills.fallback' | 'skills.blocked' | 'skills.config' | 'skills.source' | 'skills.manifest' | 'skills.stale-rules' | 'skills.base-skill';
 
 export interface SkillsHealthFinding {
@@ -248,7 +248,7 @@ export class SkillsRuntime {
    * deleted. Answers the posture applied.
    */
   configureBaseSkill(settings: { baseSkillRef?: string | undefined; baseSkillPolicy?: BaseSkillPolicy | undefined }): BaseSkillPosture | null {
-    this.baseSkillConfig = { ref: normalizeBaseSkillRef(settings.baseSkillRef), policy: settings.baseSkillPolicy ?? 'warn' };
+    this.baseSkillConfig = { ref: normalizeBaseSkillRef(settings.baseSkillRef), policy: settings.baseSkillPolicy ?? 'require' };
     return this.refreshBaseSkill();
   }
 

@@ -604,7 +604,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
     // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
     // then propose its durable learnings — BOTH faceted MEMORIES and repo POLICIES — as inert estate
-    // MCP `proposal.submit` proposals a human later reviews.
+    // `proposal.submit` proposals (through garden's estate shim) a human later reviews.
     //
     // ONE workflow, not four. "Go multi-workflow" is realized as multi-PHASE composition inside a
     // single governed run, NOT as separate churn-analysis / hotspot-read / derive-memories /
@@ -625,7 +625,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // The METHOD lives in the garden skill `wicked-garden-repo-learn`, referenced per-phase by
     // `skill_ref` — the engine emits only a short `Invoke your skill "wicked-garden:repo-learn"…`
     // directive and the worker loads SKILL.md from the installed plugin. The bounded git-churn
-    // sampling, the estate MCP tool names, and the proposal payload schemas that used to sit inline as
+    // sampling, the estate tool names (reached through the shim), and the proposal payload schemas that used to sit inline as
     // ~600-column prose now live in that skill; the inline `instructions` here are a one-line phase
     // ORIENTATION only. That matters because a governed worker's prompt rides a single PTY line capped
     // at 1022 bytes (>=1023B is SILENTLY discarded — wicked-core execute_wrapped.rs), and the planner
@@ -633,16 +633,17 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     // the line. Crew-only (NOT core-seeded), so the overlay write is the only def the engine resolves
     // — no core mirror, and deliberately NOT in builtin-overlay-shadow's MIRRORED_IDS.
     //
-    // The worker's estate MCP already opens the operator GLOBAL memory store and permits
-    // `proposal.submit` under `--readonly` (a safe write, provenance server-stamped from WICKED_RUN_*),
+    // The shim's `wicked-estate-mcp --readonly` opens the operator GLOBAL memory store and permits
+    // `proposal.submit` (a safe write, provenance server-stamped from the WICKED_RUN_* markers on the
+    // worker env — DES-L4 PR-③/⑦; there is no CLI-registered estate MCP on the worker any more),
     // so proposals land in the same queue the studio Memories/Policies surfaces review. Onboarding IS
     // about the repo, so the skill tags learnings `repo:`/`project:`.
     id: 'capture-learnings',
     is_system: true,
     phases: [
       { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-      { id: 'hotspots', kind: 'recon', instructions: 'Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it via the estate MCP to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
-      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate MCP proposals per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'hotspots', kind: 'recon', instructions: "Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it through the estate shim (`wicked-garden run scripts/_estate_client.py --readonly call …`, the skill's grounding path) to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate proposals through the shim's `propose` per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -2768,16 +2769,29 @@ export class CoreAdapter {
         if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
       }
       // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
-      // skill name (`""` = off) and `'warn' | 'require'`. A hand-edited anything-else falls back to
-      // the shipped default rather than exporting garbage as the engine's `WICKED_BASE_SKILL_REF`
-      // (which would refuse every launch at intake by a name nobody typed).
+      // skill name (`""` = off) and `'require'`, the ONLY policy. A hand-edited baseSkillRef of any
+      // other shape falls back to the shipped default rather than exporting garbage as the engine's
+      // `WICKED_BASE_SKILL_REF` (which would refuse every launch at intake by a name nobody typed).
+      // baseSkillPolicy is different: the `'warn'` rung is DELETED, not disabled (DES-L4 PR-⑧, D-8b),
+      // and a settings.json written by crew ≤ 0.7.34 carries `warn` once its first PUT /settings
+      // merged the old default into the file. That value is REFUSED by name, loudly — the daemon must
+      // never boot reporting `warn` while behaving `require` — and the shipped default applies.
       if ('baseSkillRef' in parsed) {
         const r = parsed.baseSkillRef;
         if (typeof r !== 'string' || !BASE_SKILL_REF_SHAPE.test(r.trim())) delete parsed.baseSkillRef;
       }
       if ('baseSkillPolicy' in parsed) {
-        const p = parsed.baseSkillPolicy;
-        if (p !== 'warn' && p !== 'require') delete parsed.baseSkillPolicy;
+        const p: unknown = parsed.baseSkillPolicy;
+        if (p !== 'require') {
+          delete parsed.baseSkillPolicy;
+          console.error(
+            `[settings] refused baseSkillPolicy ${JSON.stringify(p)} in ${settingsFilePath()}: 'require' is the ` +
+              `only accepted value. The 'warn' rung was deleted in crew 0.7.35 — it ran seats UNGROUNDED — and a ` +
+              `settings.json written by an earlier crew carries it once PUT /settings merged the old default in. ` +
+              `The daemon reads 'require' (the base skill is required at intake); remove the key from the file, ` +
+              `or set baseSkillRef "" to turn the base skill off explicitly. Nothing else in settings.json is affected.`,
+          );
+        }
       }
       // Skin-owned `studio.*` blobs (crew#325): the same per-key cap the PUT /settings route
       // enforces. The write cap alone cannot hold it — `updateSettings` reads through here, so a

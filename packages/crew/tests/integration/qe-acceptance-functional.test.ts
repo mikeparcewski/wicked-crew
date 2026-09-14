@@ -45,6 +45,7 @@ import { createServer } from '../../src/api/server.js';
 import { CREW_RUN_ID_FIELD } from '../../src/qe/ledger.js';
 import type { RecordedEvent } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/qe-ledger-pass', import.meta.url));
 /** The 6b QE run the fixture records (its PASS verdict landed 2026-08-12T02:31:41Z). */
@@ -127,6 +128,7 @@ beforeAll(async () => {
 
   // Boot the daemon in-process against the STUB engine (no real LLM), real HTTP surface.
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

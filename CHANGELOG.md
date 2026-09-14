@@ -92,6 +92,21 @@ mentioned only where a daemon release depends on them.
   free-text problem — a sentence-splitter contract the engine deletes in 0.7.27 (core#393). Both
   now assert engine-version-tolerant shapes (≥ 1 planned unit, `unitDone` = `unitPlanned`, unit
   ords `1..n`), so crew main stays green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
+<!-- fixall L4 -->
+- **`baseSkillPolicy` is `require` — the only value; `warn` is DELETED (D-8 / D-8b, FIX-IT-ALL
+  L4-⑧; F-RC1-045/086 product half).** Under `warn` a published generation that lacked
+  `wicked-garden-governed-worker` left `WICKED_BASE_SKILL_REF` unset, so every seat ran UNGROUNDED —
+  no launcher env, no estate shim reachable — with a `/health` warning as the only signal. Now the
+  engine variable is always exported and a launch whose generation lacks the skill is refused at
+  intake (422 `base_skill_refused`, remedy: publish / install+refresh+publish, or `baseSkillRef: ""`
+  to turn the base skill off explicitly). `PUT /settings {baseSkillPolicy:"warn"}` → 400;
+  `GET /health.baseSkill.policy` reads `"require"`. The `capture-learnings` def's phase text and
+  comments now name the estate SHIM (`wicked-garden run scripts/_estate_client.py --readonly …`) as
+  the grounding path — the CLI-registered estate MCP a claude worker used to be handed is gone
+  (wicked-core PR-⑦). A `settings.json` written by crew ≤ 0.7.34 that still carries
+  `baseSkillPolicy: "warn"` is REFUSED by name at read — the daemon boots `require` and logs the file
+  and the one accepted value; it never reports `warn` while behaving `require`. Rides
+  `wicked-core-ts ^0.7.26` (pinned by L10-2.8).
 
 <!-- fixall L5 -->
 - **Chat correctness, the crew half (DES-L5 wave 1 "chat first", journey P6; crew #503 / F-085 = F-RC1-112 = F-RECON-018, crew #562 / F-RC1-110 + F-RC1-111, crew #563 crew half, F-E2E-041; requires `wicked-core-ts` ≥ 0.7.26).**

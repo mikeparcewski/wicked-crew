@@ -46,6 +46,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { GovernancePolicy } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const POLL_INTERVAL_MS = 50;
 const RUN_TIMEOUT_MS = 15000;
@@ -135,6 +136,7 @@ describe.runIf(GOV_CAPABLE)('SC-005: verdict-gated governance deny blocks a run 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'crew-gov-'));
     adapter = new CoreAdapter({ dbPath: join(dir, 'gov.db'), stub: true });
+    baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
     app = await createServer(adapter);
     await app.listen({ port: 0, host: '127.0.0.1' });
     const addr = app.server.address();
