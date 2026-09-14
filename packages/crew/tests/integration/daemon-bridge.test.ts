@@ -139,10 +139,14 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     expect(body.runId).toBe(RUN_ID);
   });
 
-  it('streams sessionStarted → unitPlanned×2 → unitDistributed → awaitingHuman over WS', async () => {
+  it('streams sessionStarted → unitPlanned (≥1) → unitDistributed → awaitingHuman over WS', async () => {
     const gate = await waitForFrame((f) => f.type === 'awaitingHuman', 'awaitingHuman');
     expect(has('sessionStarted')).toBe(true);
-    expect(count('unitPlanned')).toBe(2);
+    // Engine-version-tolerant (wicked-core D-11, core-ts 0.7.27): a free-text problem plans ONE
+    // unit from 0.7.27 (the brief verbatim) and one per sentence before it — this suite runs
+    // against whichever core-ts is installed, so it pins "at least one planned unit", not the
+    // sentence count. The gate below still pauses BEFORE unit 1 on both.
+    expect(count('unitPlanned')).toBeGreaterThanOrEqual(1);
     expect(has('unitDistributed')).toBe(true);
     expect(gate.session).toBe(RUN_ID);
     expect(gate.ord).toBe(1);
@@ -183,7 +187,9 @@ describe('daemon bridge over core-ts (stub engine)', () => {
     const gates = frames.filter((f) => f.type === 'gateDecided');
     expect(gates.length).toBeGreaterThanOrEqual(1);
     expect(gates.every((g) => g.allow === true)).toBe(true);
-    expect(count('unitDone')).toBe(2);
+    // One `unitDone` per planned unit — whatever the engine's planner made of the prose.
+    expect(count('unitDone')).toBeGreaterThanOrEqual(1);
+    expect(count('unitDone')).toBe(count('unitPlanned'));
   });
 
   it('GET /runs/:id/units/u1/output returns the captured stub transcript', async () => {
