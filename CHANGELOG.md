@@ -75,6 +75,16 @@ mentioned only where a daemon release depends on them.
   (new `core/versions.ts`), never consulting a socket — the daemon on a port is
   `GET /api/v1/diagnostics` (crew#499); the usage line says so. No daemon service install (D-17).
 
+- **`GET /repos/:id/requirements` serves the evidence-gated artifact only — the second SQLite library
+  is gone (crew#548, F-RC1-041 — FIX-IT-ALL L10-3).** `api/requirements.ts` opened the repo's code-graph
+  store through `node:sqlite` (read-only, per request) while the engine holds the same file open
+  through its own rusqlite — the F-E2E-021 class (one SQLite library per db file per process,
+  crew#541) on the code graph instead of the bus. The store index path, the `node:sqlite` loader and
+  the WAL-mtime TTL are DELETED; the artifact `wicked-core domain-graph` regenerates is the one
+  source and `RequirementsPage.source` always reads `'artifact'` (the `'store'` arm stays in the wire
+  type for older daemons). **Behaviour change (BC-64):** a repo whose domain-graph never passed its
+  coverage bar answers the existing 404 (`requirements_graph.json not generated`) where the live store
+  used to answer — not on any RC2 journey. A guard test keeps `node:sqlite` out of `src/`.
 ## [0.7.34] — 2026-09-14
 
 Release train 1 (pipeline hardening, step 3) — **core-ts 0.7.25 / studio 0.5.9 / api-types 0.37.0 /

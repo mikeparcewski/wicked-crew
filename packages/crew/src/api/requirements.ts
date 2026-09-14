@@ -1,41 +1,42 @@
 /**
- * REQUIREMENTS SERVICE — server-side search + operator overrides over the LIVE
- * estate store, with the `requirements_graph.json` artifact as fallback.
+ * REQUIREMENTS SERVICE — server-side search + operator overrides over the evidence-gated
+ * `requirements_graph.json` artifact.
  *
- * Why the store is primary: the artifact is an evidence-gated SNAPSHOT — it only
- * regenerates when `wicked-core domain-graph` passes its coverage bar, so mid-extraction
- * it can lag the store by hours (observed: a UI serving day-old placeholder titles while
- * the store held thousands of validated statements). Requirements content lives in
- * estate (`nodes.requirement` + RULE-* annotations); the UI reads that truth directly
- * (read-only `node:sqlite`) and falls back to the artifact for repos without a store
- * or on runtimes without the sqlite builtin.
+ * ONE source (crew#548, F-RC1-041 — FIX-IT-ALL L10-3): until 0.7.35 this module ALSO opened the
+ * repo's code-graph store through a second SQLite library (`node:sqlite`, read-only, per request)
+ * and served the live `nodes.requirement` rows first, falling back to the artifact. The engine
+ * holds the same file open in-process through its own rusqlite (`getCoverageReportForRepo`), and
+ * a second library on one SQLite file in one process is the F-E2E-021 class that corrupted the
+ * bus db (one library per db file per process — crew#541). The store path is DELETED: the
+ * artifact `wicked-core domain-graph` regenerates when its coverage bar passes is the only
+ * source, and `RequirementsPage.source` always reads `'artifact'`. Named loss: a repo whose
+ * domain-graph never passed its coverage bar answers the existing 404 ("requirements_graph.json
+ * not generated") where the live store used to answer — the observed lag the old header cited as
+ * the reason the store went primary; not on any RC2 journey (register BC-64). Live freshness, if
+ * wanted later, is ONE additive core-ts read (`requirementsIndexJson`), never a second library.
  *
  * Why server-side: 15k+ requirements — shipping them to the browser for JS-side
  * filtering is not search. The daemon builds a flat index (cached, invalidated on
- * store/artifact mtime with a small TTL guard against WAL-churn thrash), and queries
- * run here: tokenized AND-match over id/domain/title/statements, risk + domain
- * filters, offset/limit pagination.
+ * artifact/overrides mtime), and queries run here: tokenized AND-match over
+ * id/domain/title/statements, risk + domain filters, offset/limit pagination.
  *
  * Why an OVERRIDES sidecar: the artifact is DERIVED (regenerated from the estate
  * store), so operator edits written into it would be clobbered on the next
  * `domain-graph` run. Edits live in `requirements_overrides.json` beside the artifact,
- * keyed `domain::reqId` (store-built indexes key by the estate SymbolId), and are
- * merged at read time — the overlay survives regeneration and keeps provenance honest
- * (`riskSource: operator` vs `data`).
+ * keyed `domain::reqId`, and are merged at read time — the overlay survives
+ * regeneration and keeps provenance honest (`riskSource: operator` vs `data`).
  *
  * ORPHANED OVERRIDES: an override key matches by exact string, so a key the corpus no
- * longer mints simply stops matching — silently. That happens on an estate id-scheme
- * migration (a full re-extract re-keys method/field SymbolIds; module-level ids
- * survive) and on artifact regeneration that renames a domain or reqId. The index
- * therefore COUNTS the keys that matched no row and surfaces the count as
- * `orphanedOverrides` on every page, so the edits' existence is never invisible. It
- * does NOT re-key them: the old→new mapping is estate's to define, and guessing it
- * here would attach an operator's risk note to the wrong symbol.
+ * longer mints simply stops matching — silently. That happens on an artifact regeneration
+ * that renames a domain or reqId. The index therefore COUNTS the keys that matched no row
+ * and surfaces the count as `orphanedOverrides` on every page, so the edits' existence is
+ * never invisible. It does NOT re-key them: guessing the mapping here would attach an
+ * operator's risk note to the wrong requirement.
  */
 import { readFile, writeFile, rename, mkdir, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-import { codeGraphDb, requirementsGraph, requirementsOverrides } from '../core/repoPaths.js';
+import { requirementsGraph, requirementsOverrides } from '../core/repoPaths.js';
 import type { RepoEntry } from '../core/types.js';
 
 interface ArtifactRequirement {
@@ -111,11 +112,9 @@ interface IndexEntry {
 interface RepoIndex {
   entries: IndexEntry[];
   byKey: Map<string, IndexEntry>;
-  /** mtime of whichever source built this index (store db+wal, or artifact). */
+  /** mtime of the artifact that built this index. */
   sourceMtimeMs: number;
-  fromStore: boolean;
   overridesMtimeMs: number;
-  builtAtMs: number;
   total: number;
   /** Override keys that matched NO row — stale after a re-index/migration (module header). */
   orphanedOverrides: number;
@@ -132,10 +131,6 @@ function countOrphanedOverrides(
 }
 
 const RISK_RE = /risk/i;
-const RISK_PREFIX = '[RISK]';
-/** WAL churn during extraction touches the db every few seconds — don't rebuild a
- * 15k-row index per keystroke; a fresh-enough index is authoritative for this long. */
-const REBUILD_TTL_MS = 5_000;
 
 // Paths come from `repoPaths` — this module used to spell the code-graph path itself, which is
 // one of the five copies FINDING-069 was made of. It takes the whole `RepoEntry` rather than a
@@ -164,152 +159,15 @@ async function readOverrides(repo: RepoEntry): Promise<Record<string, Requiremen
 const cache = new Map<string, RepoIndex>();
 let tmpSeq = 0;
 
-/** Minimal surface of the `node:sqlite` builtin (typed locally: the project's
- * @types/node predates it; the import is resolved dynamically at runtime). */
-interface SqliteDatabase {
-  prepare(sql: string): { all(): unknown[] };
-  close(): void;
-}
-interface SqliteModule {
-  DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => SqliteDatabase;
-}
-
-/** Lazily resolved sqlite builtin — absent on older Node runtimes → artifact fallback. */
-let sqliteMod: SqliteModule | null | undefined;
-async function sqlite(): Promise<SqliteModule | null> {
-  if (sqliteMod === undefined) {
-    try {
-      const name = 'node:sqlite';
-      sqliteMod = (await import(name)) as SqliteModule;
-    } catch {
-      sqliteMod = null;
-    }
-  }
-  return sqliteMod;
-}
-
-interface StoreRow {
-  sym: string;
-  name: string | null;
-  file: string | null;
-  requirement: string;
-  validated: number;
-}
-
-/** Build the index from the LIVE estate store (read-only). Returns null when the
- * store can't serve (no db, no sqlite builtin, schema mismatch) — caller falls back. */
-async function buildStoreIndex(
-  repo: RepoEntry,
-  sourceMtime: number,
-  ovMtime: number,
-): Promise<RepoIndex | null> {
-  const mod = await sqlite();
-  if (mod === null) return null;
-  const overrides = await readOverrides(repo);
-  let db: SqliteDatabase | null = null;
-  const entries: IndexEntry[] = [];
-  const byKey = new Map<string, IndexEntry>();
-  try {
-    db = new mod.DatabaseSync(codeGraphDb(repo), { readOnly: true });
-    const rules = new Map<number, { statement: string; confidence: number | null }[]>();
-    for (const r of db
-      .prepare("SELECT node_sym, value, confidence FROM annotations WHERE key LIKE 'RULE-%'")
-      .all() as { node_sym: number; value: string | null; confidence: number | null }[]) {
-      const list = rules.get(r.node_sym) ?? [];
-      list.push({ statement: r.value ?? '', confidence: r.confidence });
-      rules.set(r.node_sym, list);
-    }
-    const rows = db
-      .prepare(
-        `SELECT n.symbol AS sid, s.sym AS sym, n.name, n.file, n.requirement,
-                n.requirement_validated AS validated
-         FROM nodes n JOIN symbols s ON s.sid = n.symbol
-         WHERE n.requirement IS NOT NULL AND n.requirement != ''`,
-      )
-      .all() as (StoreRow & { sid: number })[];
-    for (const row of rows) {
-      const key = row.sym;
-      const ov = overrides[key];
-      const file = row.file ?? '';
-      const slash = file.lastIndexOf('/');
-      const domain = slash > 0 ? file.slice(0, slash) : '(root)';
-      const dataRisk = row.requirement.startsWith(RISK_PREFIX);
-      const risk = ov?.risk !== undefined ? ov.risk : dataRisk;
-      const riskSource: RequirementSummary['riskSource'] =
-        ov?.risk !== undefined ? 'operator' : dataRisk ? 'data' : null;
-      const title = ov?.title ?? (row.name !== null && row.name !== '' ? row.name : key);
-      const nodeRules = rules.get(row.sid) ?? [];
-      const summary: RequirementSummary = {
-        key,
-        domain,
-        reqId: key,
-        title,
-        category: categoryOf(file),
-        statement: row.requirement,
-        status: ov?.status ?? (row.validated === 1 ? 'validated' : 'active'),
-        risk,
-        riskSource,
-        edited: ov !== undefined,
-      };
-      const source: ArtifactRequirement = {
-        title,
-        description: file,
-        status: summary.status,
-        legacy_components: file === '' ? [] : [file],
-        business_rules: nodeRules,
-      };
-      const haystack =
-        `${key} ${domain} ${title} ${row.requirement} ${nodeRules.map((r) => r.statement).join(' ')} ${ov?.notes ?? ''}`.toLowerCase();
-      const entry: IndexEntry = { summary, haystack, source };
-      entries.push(entry);
-      byKey.set(key, entry);
-    }
-  } catch {
-    return null; // schema drift or unreadable store — artifact fallback
-  } finally {
-    db?.close();
-  }
-  return {
-    entries,
-    byKey,
-    sourceMtimeMs: sourceMtime,
-    fromStore: true,
-    overridesMtimeMs: ovMtime,
-    builtAtMs: Date.now(),
-    total: entries.length,
-    orphanedOverrides: countOrphanedOverrides(overrides, byKey),
-  };
-}
-
+/** The artifact-built index for `repo` — cached, rebuilt when the artifact or the overrides
+ * sidecar changes mtime; `null` when the artifact does not exist yet (the route's 404). */
 async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
-  const db = codeGraphDb(repo);
-  const [dbMtime, walMtime, artMtime, ovMtime] = await Promise.all([
-    mtimeMs(db),
-    mtimeMs(`${db}-wal`),
+  const [artMtime, ovMtime] = await Promise.all([
     mtimeMs(requirementsGraph(repo)),
     mtimeMs(requirementsOverrides(repo)),
   ]);
-  const storeMtime = Math.max(dbMtime, walMtime);
-
+  if (artMtime < 0) return null; // no artifact — requirements not generated yet
   const cached = cache.get(repo.root_path);
-  // TTL applies ONLY to store-built indexes: extraction WAL churn changes the db
-  // mtime every few seconds and must not trigger a rebuild per request. Artifact
-  // mtime changes only on regen, so artifact-built indexes always mtime-check.
-  if (cached?.fromStore === true && Date.now() - cached.builtAtMs < REBUILD_TTL_MS) return cached;
-
-  if (storeMtime >= 0) {
-    if (cached && cached.sourceMtimeMs === storeMtime && cached.overridesMtimeMs === ovMtime) {
-      cached.builtAtMs = Date.now();
-      return cached;
-    }
-    const fromStore = await buildStoreIndex(repo, storeMtime, ovMtime);
-    if (fromStore !== null) {
-      cache.set(repo.root_path, fromStore);
-      return fromStore;
-    }
-  }
-
-  if (artMtime < 0) return null; // no store, no artifact — requirements not generated yet
   if (cached && cached.sourceMtimeMs === artMtime && cached.overridesMtimeMs === ovMtime) {
     return cached;
   }
@@ -364,9 +222,7 @@ async function buildIndex(repo: RepoEntry): Promise<RepoIndex | null> {
     entries,
     byKey,
     sourceMtimeMs: artMtime,
-    fromStore: false,
     overridesMtimeMs: ovMtime,
-    builtAtMs: Date.now(),
     total: entries.length,
     orphanedOverrides: countOrphanedOverrides(overrides, byKey),
   };
@@ -390,11 +246,9 @@ export interface RequirementsPage {
   limit: number;
   items: RequirementSummary[];
   /**
-   * Which of the two sources served this corpus. The module header explains why that
-   * matters operationally — the artifact is an evidence-gated snapshot that can lag the
-   * live store by hours, and a UI serving stale placeholder titles while the store held
-   * thousands of validated statements is an observed failure, not a hypothetical. Without
-   * this the caller cannot tell which one it is looking at. (FINDING-065)
+   * Which source served this corpus. Always `'artifact'` since 0.7.35 (crew#548 — the live-store
+   * read through a second SQLite library is gone; module header); the `'store'` arm stays in the
+   * wire type (`wicked-crew-api-types`) for readers of older daemons. (FINDING-065)
    */
   source: 'store' | 'artifact';
   /**
@@ -433,7 +287,7 @@ export async function listRequirements(
     offset: query.offset,
     limit: query.limit,
     items: matched.slice(query.offset, query.offset + query.limit),
-    source: index.fromStore ? 'store' : 'artifact',
+    source: 'artifact',
     orphanedOverrides: index.orphanedOverrides,
   };
 }
