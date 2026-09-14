@@ -51,6 +51,7 @@ import { resolveCursorUnit } from '../core/cursor.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
+import { ChatTranscriptStore } from './chat-transcripts.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
@@ -1050,6 +1051,10 @@ export async function createServer(
   // CoreEvent stream below; `POST /chats/:id/messages` refuses a send to a busy seat and the
   // chat frames leave here stamped with the `turn_id` they answer.
   const chatTurns = new ChatTurnIndex();
+  // Chat transcripts at rest (DES-L5, D-13): one JSONL per LIVE chat under `<state home>/chats/`,
+  // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
+  // `GET /chats/:id.messages`.
+  const chatTranscripts = new ChatTranscriptStore();
   // Boot reaper (crew#502 hardening, W6): the scratch namespaces of daemons that died without
   // closing their chats (`<tmp>/wicked-crew-chats/<pid>-*` with a dead pid) are removed once, here,
   // under the same real-directory/ownership checks a live close applies. Not under vitest: the
@@ -1059,6 +1064,9 @@ export async function createServer(
     if (reaped.length > 0) {
       app.log.info(`chat scratch: reaped ${reaped.length} namespace(s) of dead daemons: ${reaped.join(', ')}`);
     }
+    // No chat survives a restart (the engine's seat pool is in memory), so every transcript on
+    // disk at boot is an orphan — cleared here, under the same not-under-vitest guard.
+    chatTranscripts.clearAll();
   }
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
@@ -1066,9 +1074,14 @@ export async function createServer(
     seatHealth.ingest(event);
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
+      // ONE mechanism for DELETE / idle / pool_cap alike: the transcript goes with the chat.
+      chatTranscripts.drop(event.chat);
     }
-    // Stamp BEFORE folding: the closing `chatReply` is the frame most worth correlating.
+    // Stamp BEFORE folding: the closing `chatReply` is the frame most worth correlating — and the
+    // one the transcript records (only a stamped reply is persisted; a straggler after the close
+    // carries no `turn_id` and cannot recreate the file).
     const stamped = chatTurns.decorate(event);
+    chatTranscripts.observe(stamped);
     chatTurns.observe(event);
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
@@ -1286,6 +1299,7 @@ export async function createServer(
       guidanceIndex,
       chatScopes,
       chatTurns,
+      chatTranscripts,
       deliveryIndex,
       // Wave 6: the doc↔run binding (F-4R2-006) and the registered test sets (F-7R2-014).
       docRuns,

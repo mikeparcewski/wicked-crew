@@ -33,6 +33,8 @@ export const STATE_HOME_ENTRY_NAMES: ReadonlyArray<string> = [
   'interactive-drafts',
   'interactive-edit-ledger.json',
   'interactive-edits',
+  // DES-L5 (D-13): the chat transcripts at rest — `src/api/chat-transcripts.ts`.
+  'chats',
   // Placed by an OPERATOR variable, never by a `join(<state home>, …)` in src/ (the `env` field
   // on the fixture entry): registered so a pre-existing placement is fenced rather than refusing
   // every launch; `assertWickedRootsOutsideStateHome` refuses to BOOT with the variable pointed

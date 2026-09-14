@@ -126,6 +126,13 @@
       "worker_read": "none (explicit extra write root per run)"
     },
     {
+      "name": "chats",
+      "kind": "dir",
+      "owner": "crew",
+      "source": "src/api/chat-transcripts.ts — join(crewStateHome(), 'chats')",
+      "worker_read": "none"
+    },
+    {
       "name": "workflows",
       "kind": "dir",
       "owner": "crew",

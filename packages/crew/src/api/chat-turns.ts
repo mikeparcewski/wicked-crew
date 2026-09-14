@@ -21,8 +21,14 @@
  *    delta/reply under the message it answers instead of the newest bubble.
  *
  * A turn whose frames were lost (an engine restart, a seat reaped without a frame) must never wedge
- * the chat: a turn older than `staleAfterMs` (default 15 min — three engine turn budgets) is treated
- * as ended by every read, and reported in the 409's `stale` reason when it is what let a send pass.
+ * the chat: a turn older than `staleAfterMs` (default three engine turn budgets — `3 ×
+ * WICKED_CHAT_TURN_SECS`, 30 min at the engine's 600 s default; DES-L5 R16) is treated as ended by
+ * every read, and reported in the 409's `stale` reason when it is what let a send pass.
+ *
+ * DES-L5 (F-E2E-041): `begin` runs BEFORE the engine call, in the same tick as `inFlight`, so two
+ * racing sends cannot both pass the predicate and early `chatDelta`s are stamped; `reconcile` then
+ * squares the reserved audience with the seats the engine actually reached, and `abort` retracts a
+ * turn whose send the engine refused.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -55,8 +61,35 @@ export interface ChatTurnInFlight {
 }
 
 export const CHAT_TURN_EXCERPT_CHARS = 120;
-/** Three engine turn budgets (300 s each): a turn this old with no closing frame is lost, not live. */
-export const CHAT_TURN_STALE_AFTER_MS = 15 * 60_000;
+
+/**
+ * The engine's per-turn chat budget default (wicked-core `chat_timeout`, DES-L5 R16 — 600 s, a
+ * hypothesis re-derived in the P6 re-run). The constant MIRRORS core's; the variable is the same
+ * one core-ts reads in this process, so the two agree on any deployment that sets it, and a drift
+ * of the default is a text bug in whichever side moved.
+ */
+export const CHAT_TURN_BUDGET_SECS_DEFAULT = 600;
+/** How many engine turn budgets a turn may outlive with no closing frame before it reads as lost. */
+export const CHAT_TURN_STALE_BUDGETS = 3;
+
+/** The per-turn chat budget in seconds: `WICKED_CHAT_TURN_SECS` (a positive integer), else 600. */
+export function chatTurnBudgetSecs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['WICKED_CHAT_TURN_SECS'];
+  const n = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : CHAT_TURN_BUDGET_SECS_DEFAULT;
+}
+
+/**
+ * Three engine turn budgets, derived from the SAME variable the engine reads: a turn this old with
+ * no closing frame is lost, not live. Consequence (accepted, DES-L5 R16): a turn whose frames were
+ * lost wedges its seat for 30 min at the default (was 15) before `inFlight` treats it as ended —
+ * lost frames are an engine-restart class, and a restart empties the pool anyway.
+ */
+export function chatTurnStaleAfterMs(env: NodeJS.ProcessEnv = process.env): number {
+  return CHAT_TURN_STALE_BUDGETS * chatTurnBudgetSecs(env) * 1000;
+}
+/** The stale ceiling at module load, from the daemon's environment (kept for readers of the constant). */
+export const CHAT_TURN_STALE_AFTER_MS = chatTurnStaleAfterMs();
 
 /** The frame kinds that carry a seat's progress on a turn (`chat` + `cliKey` fields). */
 const SEAT_PROGRESS_FRAMES: ReadonlySet<string> = new Set(['chatDelta', 'chatReply', 'chatSessionFailed']);
@@ -76,7 +109,7 @@ export class ChatTurnIndex {
 
   constructor(opts: { now?: () => number; staleAfterMs?: number } = {}) {
     this.now = opts.now ?? Date.now;
-    this.staleAfterMs = opts.staleAfterMs ?? CHAT_TURN_STALE_AFTER_MS;
+    this.staleAfterMs = opts.staleAfterMs ?? chatTurnStaleAfterMs();
   }
 
   /** Drop turns whose frames were lost (see the module doc); returns the survivors. */
@@ -111,7 +144,12 @@ export class ChatTurnIndex {
     return null;
   }
 
-  /** Open a turn for the seats a send reached. An empty seat list opens nothing (nothing to wait for). */
+  /**
+   * Open a turn for the seats a send is ABOUT to reach (the audience `inFlight` was asked about —
+   * DES-L5: called before the engine call, so the window between the predicate and the record is
+   * closed and early frames are stamped); `reconcile` squares it with the engine's answer. An empty
+   * seat list opens nothing (nothing to wait for).
+   */
   begin(chatId: string, seats: readonly string[], text: string): ChatTurn | null {
     const unique = [...new Set(seats)];
     if (unique.length === 0) return null;
@@ -127,6 +165,36 @@ export class ChatTurnIndex {
     list.push(turn);
     this.turns.set(chatId, list);
     return turn;
+  }
+
+  /**
+   * The engine's answer to the send `begin` reserved `turnId` for: `seats` become what the engine
+   * reached; `pending` keeps the reserved seats the engine confirmed and still answering, plus any
+   * seat the engine added that was never reserved — a reserved seat the engine did NOT reach is
+   * dropped (nothing will ever answer for it). An empty answer ends the turn. Returns the turn, or
+   * `null` when it is no longer live.
+   */
+  reconcile(chatId: string, turnId: string, engineSeats: readonly string[]): ChatTurn | null {
+    const turn = this.live(chatId).find((t) => t.turnId === turnId);
+    if (turn === undefined) return null;
+    const reached = [...new Set(engineSeats)];
+    const reserved = turn.seats;
+    turn.pending = [
+      ...turn.pending.filter((s) => reached.includes(s)),
+      ...reached.filter((s) => !reserved.includes(s)),
+    ];
+    turn.seats = reached;
+    this.live(chatId); // prunes an emptied turn
+    return turn.pending.length > 0 ? turn : null;
+  }
+
+  /** The engine REFUSED the send `begin` reserved `turnId` for: nothing is answering — retract it. */
+  abort(chatId: string, turnId: string): void {
+    const list = this.turns.get(chatId);
+    if (list === undefined) return;
+    const kept = list.filter((t) => t.turnId !== turnId);
+    if (kept.length === 0) this.turns.delete(chatId);
+    else this.turns.set(chatId, kept);
   }
 
   /** The live turn a seat of a chat is answering, if any. */

@@ -44,6 +44,7 @@ import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { chatSeatAdmission } from './seat-standing.js';
 import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
+import type { ChatTranscriptStore } from './chat-transcripts.js';
 import {
   ChatScopeIndex,
   chatScopeDeps,
@@ -627,6 +628,9 @@ export interface RuntimeDeps {
    *  `POST /chats/:id/messages` refuses a send to a seat still mid-turn; a directly-driven route
    *  set gets a fresh one (tests fold frames into it themselves). */
   chatTurns?: ChatTurnIndex;
+  /** DES-L5 (D-13): the chat transcript at rest — `GET /chats/:id.messages`. Absent ⇒ nothing is
+   *  persisted and the field is omitted (a directly-driven route in tests). */
+  chatTranscripts?: ChatTranscriptStore;
   /** Run→delivered-PR index (CREW-UX-8, crew#321) — `createServer` hydrates one from the audit
    *  trail so a restarted daemon still echoes `delivery`; a directly-driven route set gets a
    *  fresh one. */
@@ -777,6 +781,7 @@ export function registerRoutes(
   const guidanceIndex = runtime.guidanceIndex ?? new GuidanceIndex();
   const chatScopes = runtime.chatScopes ?? new ChatScopeIndex();
   const chatTurns = runtime.chatTurns ?? new ChatTurnIndex();
+  const chatTranscripts = runtime.chatTranscripts;
   const deliveryIndex = runtime.deliveryIndex ?? new DeliveryIndex();
   // Wave 6: the doc↔run binding and the registered test sets — `createServer` injects the real
   // ones; a directly-driven route set gets an empty index (every run `document_id: null`, no sets).
@@ -2281,7 +2286,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
     }
-    const inFlight = chatTurns.inFlight(id, parsed.data.targets);
+    // DES-L5 §5-c (F-E2E-041): the audience is decided HERE — the named targets, else the engine's
+    // warm seats — so the turn can be opened BEFORE the engine call, in the same tick as the
+    // predicate below: two racing sends can no longer both pass `inFlight` during the await, and a
+    // `chatDelta` that lands before `chatSend` resolves is already stamped with its `turn_id`.
+    const audience = parsed.data.targets ?? (await adapter.chatSeats(id));
+    if (audience.length === 0) {
+      return reply.code(409).send({ error: `chat '${id}' has no warm seats — open it first` });
+    }
+    const inFlight = chatTurns.inFlight(id, audience);
     if (inFlight !== null) {
       const ageS = Math.round(inFlight.ageMs / 1000);
       return reply.code(409).send({
@@ -2294,11 +2307,20 @@ export function registerRoutes(
         turn: inFlight,
       });
     }
+    // Sync, same tick as `inFlight`: the window is closed before anything yields.
+    const turn = chatTurns.begin(id, audience, parsed.data.text);
     try {
       const seats = await adapter.chatSend(id, parsed.data.text, parsed.data.targets);
-      const turn = chatTurns.begin(id, seats, parsed.data.text);
+      if (turn !== null) {
+        // The engine's answer is the truth: the reserved audience is squared with the seats it
+        // reached, and the operator's message joins the transcript with exactly those seats.
+        chatTurns.reconcile(id, turn.turnId, seats);
+        chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
+      }
       return reply.code(202).send({ seats, ...(turn !== null ? { turnId: turn.turnId } : {}) });
     } catch (err) {
+      // Nothing went out: the reservation is retracted so the next send is not refused for it.
+      if (turn !== null) chatTurns.abort(id, turn.turnId);
       const msg = message(err);
       return reply.code(/no warm seats/.test(msg) ? 409 : 400).send({ error: msg });
     }
@@ -2362,6 +2384,9 @@ export function registerRoutes(
           seats: await adapter.chatSeats(id),
           scope: chatScopes.get(id) ?? null,
           refused: chatScopes.refusedOf(id) ?? null,
+          // DES-L5 (D-13): the transcript so far, append order — `[]` before the first persisted
+          // turn; the file goes with the chat on `chatClosed`, so a reclaimed id answers `[]` too.
+          ...(chatTranscripts !== undefined ? { messages: chatTranscripts.read(id) } : {}),
         };
       } catch (err) {
         return reply.code(400).send({ error: message(err) });

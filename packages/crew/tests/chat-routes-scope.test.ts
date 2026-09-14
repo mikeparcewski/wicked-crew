@@ -91,7 +91,10 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     const agents = readFileSync(join(body.scope.cwd, 'AGENTS.md'), 'utf8');
     expect(agents).toContain('/srv/repos/alpha');
     expect(agents).toMatch(/READ-ONLY/);
-    expect(agents).toMatch(/wicked-estate MCP/);
+    // DES-L5 §5-a: the grounding names the handed garden skills over the read-only estate shim — never an MCP server.
+    expect(agents).toMatch(/## Grounding/);
+    expect(agents).toContain('`wicked-garden-mem`');
+    expect(agents).not.toMatch(/MCP/);
     expect(existsSync(join(body.scope.cwd, 'CLAUDE.md'))).toBe(true);
     // What the engine was handed.
     expect(chatOpen).toHaveBeenCalledTimes(1);
