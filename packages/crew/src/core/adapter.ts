@@ -147,6 +147,14 @@ export function readOverlayWorkflows(
   return out;
 }
 
+// The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
+// require even though this daemon is ESM. This module is the ONLY place that
+// touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
+// `subscribe` seam has a blast radius of exactly one file. Declared ABOVE the
+// helpers that use it (review-L10-593 nit 3: a default parameter read it before
+// its declaration in source order — fine at call time, a reader trap).
+const require = createRequire(import.meta.url);
+
 /** The gate-hook binary's file name on this host. */
 export const WICKED_CORE_EXE_NAME = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
 
@@ -169,29 +177,20 @@ export function wickedCoreTsPlatformPackage(platform: string = process.platform,
 /**
  * The `wicked-core` hook binary BUNDLED inside this install's platform package (core#405, F-009 —
  * FIX-IT-ALL L10-9 crew half; core-ts ≥ 0.7.26 ships it beside the `.node`, stamped
- * `wickedCoreVersion` = the engine semver the addon's gate compares against `--version`). Resolved
- * from the package's own directory — `require.resolve('<pkg>/package.json')` when its exports map
- * allows it, else the resolver's candidate dirs (the sidestep `installedPackageVersion` uses) — so
- * the binary is the one that shipped WITH this addon, never a stale copy in the operator's home.
- * `undefined` when no platform package resolves or it carries no binary (a pre-0.7.26 package).
+ * `wickedCoreVersion` = the engine semver the addon's gate compares against `--version`). ONE lookup
+ * (review-L10-593 nit 2, D2): the resolver's candidate `node_modules` dirs for this module — the
+ * same sidestep `installedPackageVersion` uses, because a platform package's exports map may not
+ * expose `./package.json` — checked for `<dir>/<pkg>/<exe>`. The binary found is the one that shipped
+ * WITH this addon, never a stale copy in the operator's home. `undefined` when no platform package
+ * resolves or it carries no binary (a pre-0.7.26 package).
  */
 export function bundledWickedCoreExe(
   exeName: string = WICKED_CORE_EXE_NAME,
   pkg: string | undefined = wickedCoreTsPlatformPackage(),
-  resolver: { resolve: (id: string) => string; paths: (id: string) => string[] | null } = {
-    resolve: (id) => require.resolve(id),
-    paths: (id) => require.resolve.paths(id),
-  },
+  resolvePaths: (id: string) => string[] | null = (id) => require.resolve.paths(id),
 ): string | undefined {
   if (pkg === undefined) return undefined;
-  const { existsSync } = require('node:fs') as typeof import('node:fs');
-  try {
-    const p = join(dirname(resolver.resolve(`${pkg}/package.json`)), exeName);
-    if (existsSync(p)) return p;
-  } catch {
-    // exports map without ./package.json, or the package is not installed — try the dirs below
-  }
-  for (const dir of resolver.paths(pkg) ?? []) {
+  for (const dir of resolvePaths(pkg) ?? []) {
     const p = join(dir, pkg, exeName);
     if (existsSync(p)) return p;
   }
@@ -224,15 +223,9 @@ function locateWickedCoreExe(): string | undefined {
   for (const dir of pathDirs) {
     candidates.push(join(dir, exeName));
   }
-  const { existsSync } = require('node:fs') as typeof import('node:fs');
   return candidates.find((p) => existsSync(p));
 }
 
-// The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
-// require even though this daemon is ESM. This module is the ONLY place that
-// touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
-// `subscribe` seam has a blast radius of exactly one file.
-const require = createRequire(import.meta.url);
 
 // ── Governance methods (crew#40/42) ──────────────────────────────────────────
 // These instance methods are present on the napi `Core` class after the Rust

@@ -41,30 +41,16 @@ describe('bundledWickedCoreExe — the binary inside the platform package, or no
     return { nm, pkgDir };
   }
 
-  it('resolves through the package.json when the exports map allows it', () => {
+  it('finds the binary through the resolver candidate dirs (one lookup — the exports map may not expose ./package.json)', () => {
     const { nm, pkgDir } = fakeInstall(true);
-    const found = bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', {
-      resolve: (id) => join(nm, id),
-      paths: () => [],
-    });
-    expect(found).toBe(join(pkgDir, WICKED_CORE_EXE_NAME));
-  });
-
-  it('falls back to the resolver candidate dirs when package.json is not exported', () => {
-    const { nm, pkgDir } = fakeInstall(true);
-    const found = bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', {
-      resolve: () => {
-        throw new Error('ERR_PACKAGE_PATH_NOT_EXPORTED');
-      },
-      paths: () => ['/nowhere/node_modules', nm],
-    });
+    const found = bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', () => ['/nowhere/node_modules', nm]);
     expect(found).toBe(join(pkgDir, WICKED_CORE_EXE_NAME));
   });
 
   it('a pre-0.7.26 platform package (no binary) and a missing package both yield undefined — the home-dir ladder takes over', () => {
     const { nm } = fakeInstall(false);
-    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', { resolve: (id) => join(nm, id), paths: () => [nm] })).toBeUndefined();
-    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', { resolve: () => { throw new Error('MODULE_NOT_FOUND'); }, paths: () => null })).toBeUndefined();
-    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, undefined, { resolve: () => 'x', paths: () => [] })).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', () => [nm])).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', () => null)).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, undefined, () => [nm])).toBeUndefined();
   });
 });
