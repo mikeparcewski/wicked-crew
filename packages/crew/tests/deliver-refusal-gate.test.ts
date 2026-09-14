@@ -17,7 +17,8 @@
 //   - the refusal classifies `script_refusal`, non-recoverable — no post-hoc lift is offered;
 //   - the strand path stays what it is (the exemption, pinned as a regression control);
 //   - the launch the DES exercises omits `humanConfirm` (the arm must not depend on it).
-// The engine half is observable only through a real-engine launch — owed by PR-L9-crew (`it.todo`).
+// The engine half is observable only through a real-engine launch — it lives in
+// `tests/integration/deliver-revision-e2e.test.ts` (row 6.9).
 
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -306,5 +307,6 @@ describe('DES-L9 deliver refusal → escalation gate: the crew half (PR-L9-crew-
   // deliver gate → approve → `stepFailed` → `awaitingHuman{gateKind: "escalation"}` (0 `sessionFailed`)
   // → fix the stub login → approve → `sessionCompleted`; the remote branch gained exactly one commit
   // (DES-L9 §7). Needs core-ts 0.7.27 (PR-L9-core) under crew — until then the run ends `sessionFailed`.
-  it.todo('NOT_FIXED_YET (DES-L9 §7, PR-L9-core 0.7.27 + PR-L9-crew): real-engine launch — a deliver refusal parks at awaitingHuman{gateKind: escalation}, approve after the fix completes the run');
+  // (flipped out of `it.todo` — the real-engine revision journey now runs in
+  // `tests/integration/deliver-revision-e2e.test.ts`, row 6.9, on core-ts 0.7.27 under crew.)
 });

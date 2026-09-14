@@ -111,32 +111,6 @@ function normalized(def: WorkflowDef): unknown {
 }
 
 /**
- * DES-L9 BC-60 (crew #601 ↔ wicked-core #522): the `bug.fix` sweep `instructions` land on BOTH
- * carriers, but this suite compares the mirror with core MAIN (`WICKED_CORE_REF: main` in CI), which
- * gains the field only when #522 merges. Exactly ONE pending difference is tolerated, in ONE
- * direction: the mirror carries `BUG_FIX_SWEEP_INSTRUCTIONS` while core's `fix` phase has no
- * `instructions` yet. A different literal, the field on another phase, or the reverse direction
- * still fails. Row 6.9 (the `^0.7.27` pin PR) DELETES this function once core main carries the line.
- */
-function withoutPendingBugFixInstructions(id: string, served: WorkflowDef, core: WorkflowDef): WorkflowDef {
-  if (id !== 'bug') return served;
-  const coreFix = core.phases.find((p) => p.id === 'fix');
-  const servedFix = served.phases.find((p) => p.id === 'fix');
-  if (coreFix === undefined || servedFix === undefined) return served;
-  if (coreFix.instructions !== undefined && coreFix.instructions !== null) return served; // core carries it: byte-identical again
-  if (servedFix.instructions !== BUG_FIX_SWEEP_INSTRUCTIONS) return served;
-  return {
-    ...served,
-    phases: served.phases.map((p) => {
-      if (p.id !== 'fix') return p;
-      const copy = { ...p } as Record<string, unknown>;
-      delete copy['instructions'];
-      return copy as unknown as typeof p;
-    }),
-  };
-}
-
-/**
  * Mirrors checked against core's JSON.
  *
  * `feature`/`bug`/`migration` are mirrors crew never writes. The others are core's DROP-INS, which
@@ -184,21 +158,20 @@ describe.skipIf(SKIP_CORE_CHECKS)('mirror matches wicked-core', () => {
     it(`${id} is field-for-field identical to workflows/${id}.json`, () => {
       const served = adapter.listWorkflows().find((w) => w.id === id);
       expect(served, `${id} must be served`).toBeDefined();
-      expect(normalized(withoutPendingBugFixInstructions(id, served!, coreDefs[id]!))).toEqual(normalized(coreDefs[id]!));
+      expect(normalized(served!)).toEqual(normalized(coreDefs[id]!));
     });
   }
 
-  it('the bug.fix tolerance is exactly one field in one direction — any other drift still fails', () => {
-    const core = coreDefs['bug']!;
+  // DES-L9 BC-60, row 6.9: the `bug.fix` sweep `instructions` is on BOTH carriers now — core-ts 0.7.27
+  // is published and core main's `workflows/bug.json` carries the field, so the field-for-field loop
+  // above compares the mirror with a core that has it (no tolerance; a bridge function existed in
+  // crew #601 only for the window between #522 landing and 0.7.27 publishing — deleted here so any
+  // real mirror drift fails). This positive check keeps the literal explicit on both sides.
+  it('the bug.fix sweep instructions are byte-identical on the mirror and core (BC-60, both carriers)', () => {
     const served = adapter.listWorkflows().find((w) => w.id === 'bug')!;
-    // The mirror carries the literal (BC-60, both carriers).
+    const coreFix = coreDefs['bug']!.phases.find((p) => p.id === 'fix')!;
     expect(served.phases.find((p) => p.id === 'fix')!.instructions).toBe(BUG_FIX_SWEEP_INSTRUCTIONS);
-    // A different literal on the mirror is NOT tolerated.
-    const drifted: WorkflowDef = { ...served, phases: served.phases.map((p) => (p.id === 'fix' ? { ...p, instructions: 'something else' } : p)) };
-    expect(normalized(withoutPendingBugFixInstructions('bug', drifted, core))).not.toEqual(normalized(core));
-    // Nor is the field on any other phase.
-    const spread: WorkflowDef = { ...served, phases: served.phases.map((p) => (p.id === 'verify' ? { ...p, instructions: BUG_FIX_SWEEP_INSTRUCTIONS } : p)) };
-    expect(normalized(withoutPendingBugFixInstructions('bug', spread, core))).not.toEqual(normalized(core));
+    expect(coreFix.instructions).toBe(BUG_FIX_SWEEP_INSTRUCTIONS);
   });
 
   it('reports the evidence floor on exactly the phases core gates', () => {
