@@ -10,6 +10,76 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.34] — 2026-09-14
+
+Release train 1 (pipeline hardening, step 3) — **core-ts 0.7.25 / studio 0.5.9 / api-types 0.37.0 /
+bus 2.3.4 / interactive 0.9.2 / garden 12.36.0 / bridges 1.1.1.** Pins the published
+`wicked-core-ts` `^0.7.25` engine (wicked-core #471 / #472 / #473 / #476 / #477 / #478 — the
+hardening lanes S8 / S6 / S5 / S4a / S1 / S7, whose crew halves are #555 / #557 / #558 / #567 below):
+**every denial pauses the run at an `escalation` gate instead of failing it** (`gateKind:
+'escalation'`; Approve retries the same unit, Approve + steer amends it, Reject cancels and keeps a
+dirty worktree — an unattended campaign parks `awaiting_human` there; wicked-core #484 tracks the
+auto-decider); the `fix` phase runs a **creator floor** (provision + typecheck + lint + test inside
+its worktree — a red floor denies before the evaluator), a floor **timeout is classified**
+`timed_out` (denial source `repo_checks_timeout`), never a failure, and **baseline-diff** means a
+failure the base branch already has never denies — only a regression does; **bench-on-abstention**
+(a dead-class ballot or a dispatcher abstention benches the seat; a dead-seat worker exit takes the
+failover ladder to the `dead_seat` escalation gate, never `sessionFailed`), the creator-seat fallback
+is disclosed as `unitDistributed.distinctnessFallback`, and a roster with no eligible seat is refused
+synchronously at intake as the typed `NoEligibleSeat`; **state-home preflight** at engine boot
+(`preflightStateHome`) and an intake refusal that names the unregistered entry and its remedy; the
+**estate shim allowlist** — read-only estate CLI subcommands and the `--readonly`, store-pinned shim
+run in governed units, writes and unknown verbs are denied fail-closed, every deny names the tool,
+the command and the remedy — which **requires `wicked-garden` ≥ 12.36.0** (garden #1130 / #1134;
+the same garden release ships the `wicked-garden-governed-worker` skill crew's `baseSkillRef`
+default names, garden #1131); and the **role-keyed BASE skill directive** (`base_skill_ref` /
+`WICKED_BASE_SKILL_REF`, default OFF in the engine — crew turns it on **warn-first**, #557 below).
+Bundles the unchanged published `wicked-studio` 0.5.9 skin (bundle marker 0.5.9 — no studio change
+this train) and keeps `wicked-bus` `^2.3.4`, `wicked-interactive@^0.9.2` and `agent-acp-bridges`
+`^1.1.1` unchanged. The sibling workspace package `wicked-crew-api-types` stays at the published
+0.37.0 in this cut: the additive declarations #555 / #557 / #558 made on `main`
+(`HealthResponse.warnings` + `.baseSkill`, `DiagnosticsResponse.stateHome`,
+`DiagnosticsSkills.baseSkill`, `UnitDistributedEvent.distinctnessFallback`, `StateHomeBlockerBody`,
+`BaseSkillRefusedResponse`, `NoEligibleSeatBody`) cut as their own `api-types-v*` tag in a
+follow-up; studio renders them then.
+
+What merged since 0.7.33 — **#555** (the state-home fence blocker is said at boot, carried on
+`GET /health.warnings` and `GET /diagnostics.stateHome`, and answered **409**
+`state_home_unregistered` on `POST /runs`; a `WICKED_*` root placed inside the state home refuses to
+boot), **#557** (the BASE discipline skill default `wicked-garden-governed-worker` with
+`baseSkillPolicy` shipped **`warn`**: a published generation without the skill runs WITHOUT the
+directive and raises a visible `skills.base-skill` warning; `require` refuses every launch at intake;
+the engine's refusal is a typed **422** `base_skill_refused`), **#558**
+(`unitDistributed.distinctnessFallback` mirrored; the engine's `NoEligibleSeat` intake refusal
+answered **409** `no_eligible_seat`), **#567** (the real-engine integration rigs follow the engine's
+gate-on-denial contract — tests only). Every entry below belongs to one of them.
+
+### Changed
+- **`wicked-core-ts` pin `^0.7.24` → `^0.7.25`** (root and `packages/crew`; the lockfile resolves
+  the six 0.7.25 packages — the main package and its five platform binaries). The three `Added`
+  entries below were written against `^0.7.24` and say so ("no pin change here" / "pin deliberately
+  unchanged"); this release is the pin move they wait for, so the engine half of each — the intake
+  refusal for a missing BASE skill, the engine's own state-home classification + intake refusal, the
+  typed `NoEligibleSeat` — is live on the installed addon from 0.7.34 on. The engine's behaviour
+  changes are listed above. `tests/fixtures/core-workflow-skill-refs.json` regenerated from
+  `core-ts-v0.7.25` (refs unchanged).
+- **The real-engine integration tests follow the engine's gate-on-denial contract (wicked-core#477,
+  core#464 — fixes #560).** Crew CI builds `wicked-core-ts` from wicked-core `main`, and since
+  `82fffbc` every fold denial (a policy deny, the pinned-validator / substance / deliverable /
+  repo-checks floors, the worktree guard, a boundary deny) parks the run `awaiting_human` at an
+  `escalation` gate on the denied unit instead of ending it `failed` — including under
+  `humanConfirm: 'none'`. The three tests that pinned the old ungated terminal
+  (`tests/integration/governance-deny.test.ts`, `qe-acceptance-functional.test.ts`, and the
+  "produced nothing" case of `qe-author-tests-e2e.test.ts`) now assert the pause AND its class on
+  the wire (`gateEscalated.condition: 'verdict_not_pass'` from `governance` for the SC-005 policy
+  deny; `'floor_failed'` from `pinned_validator` for the evidence floor), that `unitDenied` still
+  precedes the gate and no `sessionFailed` is booked, then REJECT the gate over
+  `POST /runs/:id/gate` and assert the terminal `cancelled` (`runCancelled` is the last frame; a
+  clean tree is reaped, so no `worktreeRetained` — core#456). Every invariant the tests protected
+  stands: the denied unit stays `rejected` with its denial on record, nothing behind it runs,
+  nothing delivers. Tests only — no daemon behaviour, no wire type (the seven additive
+  `gateEscalated` fields are #559) and no `wicked-core-ts` pin change.
+
 ### Added
 - **The BASE skill default + disclosure (#554 — the launcher half of wicked-core#468; needs the
   wicked-core release that carries `base_skill_ref` / `WICKED_BASE_SKILL_REF`; no pin change here).**
@@ -174,24 +244,6 @@ and `/ws` chat frames are stamped `turn_id`; the demo seam relays wicked-interac
 `RecorderError` to `/diagnostics.recentErrors`; the interactive drafting phases carry
 `skill_ref: "wicked-garden-draft"` when the published snapshot holds it). Every entry below belongs
 to one of them.
-
-### Changed
-- **The real-engine integration tests follow the engine's gate-on-denial contract (wicked-core#477,
-  core#464 — fixes #560).** Crew CI builds `wicked-core-ts` from wicked-core `main`, and since
-  `82fffbc` every fold denial (a policy deny, the pinned-validator / substance / deliverable /
-  repo-checks floors, the worktree guard, a boundary deny) parks the run `awaiting_human` at an
-  `escalation` gate on the denied unit instead of ending it `failed` — including under
-  `humanConfirm: 'none'`. The three tests that pinned the old ungated terminal
-  (`tests/integration/governance-deny.test.ts`, `qe-acceptance-functional.test.ts`, and the
-  "produced nothing" case of `qe-author-tests-e2e.test.ts`) now assert the pause AND its class on
-  the wire (`gateEscalated.condition: 'verdict_not_pass'` from `governance` for the SC-005 policy
-  deny; `'floor_failed'` from `pinned_validator` for the evidence floor), that `unitDenied` still
-  precedes the gate and no `sessionFailed` is booked, then REJECT the gate over
-  `POST /runs/:id/gate` and assert the terminal `cancelled` (`runCancelled` is the last frame; a
-  clean tree is reaped, so no `worktreeRetained` — core#456). Every invariant the tests protected
-  stands: the denied unit stays `rejected` with its denial on record, nothing behind it runs,
-  nothing delivers. Tests only — no daemon behaviour, no wire type (the seven additive
-  `gateEscalated` fields are #559) and no `wicked-core-ts` pin change.
 
 ### Fixed
 - **F-RECON-002 / F-RECON-003 — the interactive seams, the onboarding launch and `wicked-crew start`
@@ -2560,7 +2612,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.33...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.34...HEAD
+[0.7.34]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.33...v0.7.34
 [0.7.33]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.32...v0.7.33
 [0.7.32]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.30...v0.7.31
