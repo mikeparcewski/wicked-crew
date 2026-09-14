@@ -40,6 +40,30 @@ import {
 } from '../../src/qe/author-workflow.js';
 import type { TestSet } from '../../src/qe/test-sets.js';
 import { removeScratch } from '../setup/scratch.js';
+import { createRequire } from 'node:module';
+
+/**
+ * Is the installed `wicked-core-ts` at least `maj.min.pat`? A tests-only twin of the adapter's
+ * private `addonAtLeast` (same numeric MAJOR.MINOR.PATCH prefix rule; unparseable ⇒ false), so the
+ * L1 mirror expectations below key on the engine actually under test — crew CI builds the addon from
+ * core main, a local run uses the published pin — without exporting a src symbol for a test.
+ */
+function coreTsAtLeast(maj: number, min: number, pat: number): boolean {
+  try {
+    const pkg = createRequire(import.meta.url)('wicked-core-ts/package.json') as { version?: string };
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(pkg.version ?? '');
+    if (!m) return false;
+    const got = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const want = [maj, min, pat];
+    for (let i = 0; i < 3; i += 1) {
+      if (got[i]! > want[i]!) return true;
+      if (got[i]! < want[i]!) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -277,21 +301,31 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(unitIds).toEqual(['recon', 'author', QE_VERIFY_PHASE_ID, 'review', 'deliver']);
     expect(run.units.every((u) => u.status === 'done')).toBe(true);
 
-    // (0) L1 mirror-first (FIX-IT-ALL L8-0b; DES-L1 PR-1A, api-types 0.38.0 `GateEvaluatedEvent
-    //     .evaluatorVerdict`): the review unit is an Evaluator-role agent phase, so once the engine
-    //     parses its `VERDICT:` line (wicked-core-ts ≥ 0.7.27; the stub runner answers `VERDICT: PASS`)
-    //     every `gateEvaluated` frame of this GREEN run carries `evaluatorVerdict: 'PASS'` for the
-    //     review unit and `null` for the creator/tool units. TODAY the engine emits no such key.
-    //     TOLERANT on purpose — NOT_FIXED_YET: tighten the review unit's frame to `'PASS'` when crew
-    //     pins 0.7.27 (a `'FAIL'`, or any other token, on a GREEN run is wrong on every engine).
+    // (0) L1 mirror-first for core #513 (FIX-IT-ALL L8-0b; DES-L1 PR-1A, api-types 0.38.0
+    //     `GateEvaluatedEvent.evaluatorVerdict`) — fixed at core-ts 0.7.27: the review unit is an
+    //     Evaluator-role agent phase, so the engine parses its `VERDICT:` line (the stub runner answers
+    //     `VERDICT: PASS`) and every `gateEvaluated` frame of this GREEN run carries
+    //     `evaluatorVerdict: 'PASS'` for the review unit and `null` for the creator/tool units. On an
+    //     engine before 0.7.27 the key is absent — the same run stays green under the tolerant read.
+    //     Version-guarded so this file passes on BOTH engines (crew CI builds core-ts from core main);
+    //     a `'FAIL'`, or any other token, on a GREEN run is wrong on every engine.
     {
       const { body: evBody } = await getJson(`/api/v1/runs/${runId}/events`);
       const events = evBody['events'] as Array<Record<string, unknown>>;
       const review = run.units.find((u) => u.id.endsWith(':review'))!;
-      for (const g of events.filter((e) => e['type'] === 'gateEvaluated')) {
-        expect(['PASS', null, undefined], `gateEvaluated ord ${String(g['ord'])} evaluatorVerdict`).toContain(g['evaluatorVerdict']);
-        if (g['ord'] !== review.ord) expect([null, undefined]).toContain(g['evaluatorVerdict']);
+      const gates = events.filter((e) => e['type'] === 'gateEvaluated');
+      expect(gates.length).toBeGreaterThan(0);
+      for (const g of gates) {
+        const verdict = g['evaluatorVerdict'] ?? null;
+        if (g['ord'] === review.ord) {
+          if (coreTsAtLeast(0, 7, 27)) expect(verdict, `review unit ord ${String(g['ord'])} evaluatorVerdict`).toBe('PASS');
+          else expect(['PASS', null], `review unit ord ${String(g['ord'])} evaluatorVerdict (pre-0.7.27 engine: tolerant)`).toContain(verdict);
+        } else {
+          expect(verdict, `non-evaluator unit ord ${String(g['ord'])} evaluatorVerdict`).toBeNull();
+        }
       }
+      // The layer denies into the GATE, never the run: a green run has no verdict_not_pass escalation.
+      expect(events.filter((e) => e['type'] === 'gateEscalated' && e['denialSource'] === 'evaluator_verdict')).toEqual([]);
     }
 
     // (1) The VERIFY phase RAN the produced e2e under the repository's own harness — the marker the
