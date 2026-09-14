@@ -7,7 +7,6 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  FALLBACK_WINDOW_MS,
   SeatHealthTracker,
 } from '../src/api/seat-health.js';
 import type { CoreEvent } from '../src/core/types.js';
