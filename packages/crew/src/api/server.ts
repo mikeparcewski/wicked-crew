@@ -14,7 +14,7 @@ import { AuditLog } from './audit.js';
 import { EvalRunStore } from './eval-store.js';
 import { RetryIndex } from './retry-index.js';
 import { GroupIndex } from './group-index.js';
-import { RunTimingIndex } from './run-timing-index.js';
+import { RunTimingIndex, recordRunLaunched } from './run-timing-index.js';
 import { GuidanceIndex } from './guidance-index.js';
 import { ChatScopeIndex, reapStaleChatNamespaces } from './chat-scope.js';
 import {
@@ -23,6 +23,7 @@ import {
   gitRunBranchIsEmpty,
   gitWorktreeIsClean,
   prUrlFrom,
+  canDeliverResolver,
   type VacuityProbes,
 } from './delivery-index.js';
 import { DeliveryDerivationCache } from './delivery-cache.js';
@@ -46,7 +47,7 @@ import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../inte
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
 import { CoreAdapter } from '../core/adapter.js';
-import type { CoreEvent } from '../core/types.js';
+import type { Actor, CoreEvent } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
@@ -69,6 +70,9 @@ import {
 } from '../core/types.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js';
+
+/** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
+const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -502,12 +506,25 @@ export async function createServer(
     retryIndex.hydrateFromLaunchEntries(launchEntries);
     groupIndex.hydrateFromLaunchEntries(launchEntries);
     runTimingIndex.hydrateFromLaunchEntries(launchEntries);
+    // `ended_at` (crew#496 / studio#230): the `run.ended` entries this daemon wrote at terminal
+    // frames — one more filtered scan, same try, same best-effort. Nothing is re-emitted at boot: a
+    // run that terminalled with no entry (pre-field, or the crash window between the engine's
+    // status write and the synchronous record below) stays undated.
+    runTimingIndex.hydrateFromEndedEntries(await audit.readAll({ action: 'run.ended' }));
   } catch (err) {
     app.log.warn(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
+  }
+  // Onboarding runs launch inside the adapter (`_doOnboardingLaunch`), never through POST /runs — so
+  // they had no `run.launched` entry and no `created_at` (crew#496). The adapter reports each one
+  // here, after the engine accepted it, and the SAME recorder every launch route uses dates it.
+  if (typeof (adapter as Partial<CoreAdapter>).setOnRunLaunched === 'function') {
+    adapter.setOnRunLaunched((runId, detail) => {
+      recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail);
+    });
   }
   // Operator guidance (CREW-UX-7, DES-UX-002 §7.2): same durable pattern — hydrated from the
   // trail's `guidance.set` entries so notes survive a daemon restart.
@@ -536,10 +553,17 @@ export async function createServer(
       async (repoRef) => (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path,
     ),
   };
+  // Def-awareness (crew#481 / D-14): ONE predicate — `runCanDeliver` over the run's resolved def —
+  // shared by this cache (GET /runs, GET /runs/:id, the resume 409) and the campaigns rollup below,
+  // so a completed capture-learnings/onboarding run reads `delivery: 'none'` on every surface. A
+  // read-time derivation over the run record + the registry: existing records flip at their next
+  // read, nothing is written, the `run.delivered` trail is untouched.
+  const canDeliver = canDeliverResolver(() => adapter.listWorkflows(), (m) => app.log.warn(m));
   const deliveryCache = new DeliveryDerivationCache({
     listViews: () => adapter.sessionsDetail(),
     probes: vacuityProbes,
     isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+    canDeliver,
     log: (m) => app.log.warn(m),
     // Non-probe derivation throws are defects — error level, so the diagnostics ring sees them.
     logError: (m) => app.log.error(m),
@@ -583,7 +607,7 @@ export async function createServer(
       // The durable record first, then the read-side index — the same write order as
       // `guidance.set`, so the index can only LAG a crash (rehydrated at next boot), never
       // hold a record the trail does not.
-      audit.record('run.delivered', { id: 'daemon', kind: 'system', trust: 'admin' }, {
+      audit.record('run.delivered', DAEMON_ACTOR, {
         runId,
         detail: { url },
       });
@@ -1104,6 +1128,19 @@ export async function createServer(
       (event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') &&
       session !== undefined
     ) {
+      // `ended_at` (crew#496 / studio#230; api-types 0.38.0): the durable record first (`run.ended`),
+      // then the index — the `run.delivered` write order. Synchronous, on the frame, so the DTO dates
+      // the run the instant it terminals. IDEMPOTENT per run: a resume/retry re-terminal (or any
+      // second terminal frame) finds the run already dated and writes nothing; a restart re-reads the
+      // trail (newest entry wins) instead of re-emitting. The one hole — a crash between the engine's
+      // status write and this record — leaves that run ABSENT, never null (the wire contract).
+      if (runTimingIndex.endedAtFor(session) === undefined) {
+        const endedTs = audit.record('run.ended', DAEMON_ACTOR, {
+          runId: session,
+          detail: { status: event.type },
+        });
+        if (endedTs > 0) runTimingIndex.setEnded(session, endedTs);
+      }
       void resolveRunDelivery(session)
         .then(() => deliveryCache.warm(session))
         // Wave 6 (F-7R2-014): a terminal `qe-author-tests` run registers its TEST SET — the
@@ -1312,6 +1349,7 @@ export async function createServer(
       worktreeExists: vacuityProbes.worktreeExists,
       worktreeIsClean: vacuityProbes.worktreeIsClean,
       runBranchIsEmpty: vacuityProbes.runBranchIsEmpty,
+      canDeliver,
       errorRing,
       studioRoot,
       dropDocLedgerRows,

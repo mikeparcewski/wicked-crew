@@ -103,6 +103,13 @@ describe('resolveAcceptanceGate', () => {
       attributedVerdicts: 0,
     });
     expect(res.satisfied).toBe(false);
+    // F-E2E-034 (L8-8C): the reason names what THIS gate reads — the QE ledger — and points at the
+    // run's own evidence; it no longer claims "no acceptance evidence recorded" for a bug run whose
+    // repo-check/evaluator evidence lives on GET /runs/:id/evidence. Verdict unchanged (deny).
+    expect(res.reason).toContain('no QE run has recorded a verdict for this repository');
+    expect(res.reason).toContain('this gate reads the QE ledger only');
+    expect(res.reason).toContain('GET /runs/:id/evidence');
+    expect(res.reason).not.toContain('no acceptance evidence recorded');
     expect(res.reason).toContain('/repo/.wicked-qe');
     expect(res.reason).toMatch(/missing ⇒ deny/);
   });

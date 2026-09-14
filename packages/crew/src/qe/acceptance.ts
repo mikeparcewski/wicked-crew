@@ -191,10 +191,17 @@ export function resolveAcceptanceGate(
     };
   }
   if (!state.found) {
+    // F-E2E-034: say what THIS gate reads — the QE ledger — and only that. `required` is true for
+    // engine-gated defs too (`bug.verify`, `feature.test`), so "no acceptance evidence recorded"
+    // was false for a bug run whose repo-check and evaluator evidence sits on GET /runs/:id/evidence.
+    // Verdict unchanged: missing ⇒ deny (deny-dominates).
     return {
       ...base,
       satisfied: false,
-      reason: `no QE ledger at ${state.root} — no acceptance evidence recorded (missing ⇒ deny)`,
+      reason:
+        `no QE ledger at ${state.root} — no QE run has recorded a verdict for this repository; ` +
+        'this gate reads the QE ledger only (the run\'s own repo-check and evaluator evidence is on ' +
+        'GET /runs/:id/evidence) (missing ⇒ deny)',
     };
   }
   if (state.error !== undefined) {

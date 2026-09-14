@@ -29,6 +29,8 @@ function toSeconds(millis: number): number {
 
 export class RunTimingIndex {
   private readonly runToCreatedAt = new Map<string, number>();
+  /** runId → terminal instant, unix SECONDS (`AgentSession.ended_at`; api-types 0.38.0, crew#496). */
+  private readonly runToEndedAt = new Map<string, number>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -74,6 +76,39 @@ export class RunTimingIndex {
   /** The run's launch time in unix SECONDS, or `undefined` (the DTO spells that as an ABSENT field). */
   createdAtFor(runId: string): number | undefined {
     return this.runToCreatedAt.get(runId);
+  }
+
+  /**
+   * Consume pre-read `run.ended` entries (crew#496 / studio#230) — the daemon records one when it
+   * sees a run's terminal frame (`sessionCompleted` | `sessionFailed` | `runCancelled`). The run's
+   * FIRST terminal instant wins, the same rule the live {@link setEnded} applies: the trail answers
+   * newest first, so the OLDEST entry per run (the last one seen) is kept — a resume/retry
+   * re-terminal recorded after a hydrate failure never moves an already-dated run either way.
+   * `ts <= 0` stamps nothing. One more filtered scan at boot, in the same try as the `run.launched`
+   * scan (DES-L8 §5 PR-8B).
+   */
+  hydrateFromEndedEntries(entries: AuditEntry[]): void {
+    for (const entry of entries) {
+      if (typeof entry.runId !== 'string' || typeof entry.ts !== 'number' || entry.ts <= 0) continue;
+      this.runToEndedAt.set(entry.runId, toSeconds(entry.ts)); // newest-first trail ⇒ the oldest wins
+    }
+  }
+
+  /**
+   * Record a run's terminal instant (unix MILLIS — the `run.ended` audit entry's own `ts`, so the
+   * live answer and the post-restart rehydrate agree to the second). Idempotent per run: the first
+   * stamp wins — a second terminal frame (resume, retry) re-stamps nothing.
+   */
+  setEnded(runId: string, endedAtMillis: number): void {
+    if (this.runToEndedAt.has(runId)) return;
+    this.runToEndedAt.set(runId, toSeconds(endedAtMillis));
+  }
+
+  /** The run's terminal time in unix SECONDS, or `undefined` (ABSENT on the wire — never null,
+   *  never fabricated: a live run, a pre-field run, a run that terminalled before THIS daemon
+   *  booted, a lost trail). */
+  endedAtFor(runId: string): number | undefined {
+    return this.runToEndedAt.get(runId);
   }
 }
 

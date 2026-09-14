@@ -78,8 +78,10 @@ export const EXACT_NAME_NOTE =
   'returns no matches even when the symbol exists. An empty `matches` means "no symbol by that ' +
   'exact name", never "not in this project".';
 
-/** `wicked-estate`, overridable exactly as `WICKED_CORE_EXE` overrides `wicked-core` in routes.ts. */
-function estateExe(env: NodeJS.ProcessEnv = process.env): string {
+/** `wicked-estate`, overridable exactly as `WICKED_CORE_EXE` overrides `wicked-core` in routes.ts.
+ *  Exported (DES-L8 PR-8D) so the repo-graph route's `stats` spawn rides the same override the
+ *  project-graph refresh and its test stub already use — one spelling of which binary answers. */
+export function estateExe(env: NodeJS.ProcessEnv = process.env): string {
   return env['WICKED_ESTATE_EXE'] ?? 'wicked-estate';
 }
 
