@@ -10,8 +10,10 @@
 //   allowed. Under ReadOnly / pre-build postures the same target is advisory (workerToolCallDenied).
 //
 // What this file pins TODAY (passes on every engine): the frame SHAPE the daemon will relay — the
-// recorded 11-key frame of that class in `fixtures/engine-frames-0.38.0.json` satisfies api-types
-// 0.38.0 and carries the (condition, denialSource) pair the studio copy table keys on — and the
+// DES-SHAPED 11-key frame of that class in `fixtures/engine-frames-0.38.0.json` (the key set and the
+// `false` / `[]` / `null` conventions are the engine's `to_json`; the class pair is DES-L4 R8; the
+// `verdictSummary` prose is the design's, NOT a recording — nothing here pins that text) satisfies
+// api-types 0.38.0 and carries the (condition, denialSource) pair the studio copy table keys on — and the
 // crew-side inventory fact that makes ② safe to merge: no crew test asks a worker to `mkdir` outside
 // its boundary (the one `mkdir -p e2e tests` in the qe-author e2e is inside the worktree), so ②
 // cannot break crew CI and no existing expectation has to flip.
@@ -36,7 +38,7 @@ describe('L4 ② expectation — a creator `mkdir -p <outside the boundary>` par
   const recorded = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Record<string, unknown>;
   const frame = recorded['gateEscalatedCreatorMkdirOutside'] as GateEscalatedEvent;
 
-  it('the frame the daemon will relay: gateEscalated{boundary_deny × input_governance} on the creator, engine-authored, nothing to restore', () => {
+  it('the DES-shaped frame the daemon will relay: gateEscalated{boundary_deny × input_governance} on the creator, engine-authored, nothing to restore', () => {
     expect(frame.type).toBe('gateEscalated');
     expect(frame.condition).toBe('boundary_deny');
     expect(frame.denialSource).toBe('input_governance');
@@ -47,8 +49,8 @@ describe('L4 ② expectation — a creator `mkdir -p <outside the boundary>` par
     expect(frame.restored).toBe(false);
     expect(frame.discarded).toEqual([]);
     expect(frame.suggestionRef).toBeNull();
-    expect(frame.verdictSummary).toMatch(/mkdir -p/);
-    expect(frame.verdictSummary).not.toMatch(/tried to write outside its workspace/);
+    // No assertion on `verdictSummary`: the fixture's sentence is the design's wording, and pinning
+    // it here could only ever agree with itself — the engine's text lands with L4 ②.
   });
 
   it('the (condition, denialSource) pair is one the studio copy table must key on — distinct from the hook-veto arm whose source is ""', () => {

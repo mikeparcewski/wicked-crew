@@ -896,9 +896,12 @@ respondsWith<'skills_mirror' extends keyof Wire.SystemSettings ? never : true, t
 
 // ── api-types 0.38.0 — the frames the engine already emits, RECORDED (FIX-IT-ALL L8-0b) ─────────
 // `tests/fixtures/engine-frames-0.38.0.json` is the record (key set + spellings from wicked-core
-// 425de81 `event.rs::to_json`); the literals below are the same frames as TypeScript so `satisfies`
-// pins them against the 0.38.0 declarations at compile time. The runtime block asserts the record
-// and the pins agree byte-for-byte and that the 11-key gate frame is exactly 11 keys — a key the
+// 425de81 `event.rs::to_json`; the guard-class and hook-veto gate frames, `sandboxPosture` and
+// `worktreeRetained` mirror the engine's own `to_json` tests — the creator-mkdir and dead_seat gate
+// frames are DES-SHAPED: same key set and conventions, prose from DES-L4 R8 / DES-L3 §4). The
+// literals below are the recorded frames as TypeScript so `satisfies` pins them against the 0.38.0
+// declarations at compile time. The runtime block asserts the record and the pins agree
+// byte-for-byte and that every gate frame is exactly 11 fields + `type` = 12 JSON keys — a key the
 // engine renames, drops or adds shows up here before any skin reads it.
 const RECORDED_GATE_ESCALATED = {
   type: 'gateEscalated',
@@ -967,7 +970,7 @@ respondsWith<
   }
 >();
 
-describe('api-types 0.38.0 — recorded engine frames (FIX-IT-ALL L8-0b)', () => {
+describe('api-types 0.38.0 — recorded + DES-shaped engine frames (FIX-IT-ALL L8-0b)', () => {
   const fixturePath = fileURLToPath(new URL('./fixtures/engine-frames-0.38.0.json', import.meta.url));
   const recorded = JSON.parse(readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
 
@@ -978,7 +981,7 @@ describe('api-types 0.38.0 — recorded engine frames (FIX-IT-ALL L8-0b)', () =>
     expect(recorded['worktreeRetained']).toEqual(RECORDED_WORKTREE_RETAINED);
   });
 
-  it('gateEscalated carries exactly the 11 keys the engine emits, in the camelCase the contract spells; `null` / `[]` / `""` are present, never absent', () => {
+  it('gateEscalated carries exactly the 11 fields + `type` the engine emits (the two recorded and the two DES-shaped frames alike), in the camelCase the contract spells; `null` / `[]` / `""` are present, never absent', () => {
     const KEYS = ['attempt', 'condition', 'defGate', 'denialSource', 'discarded', 'ord', 'outputCaptured', 'restored', 'session', 'suggestionRef', 'type', 'verdictSummary'];
     for (const name of ['gateEscalated', 'gateEscalatedHookVeto', 'gateEscalatedCreatorMkdirOutside', 'gateEscalatedDeadSeat']) {
       const frame = recorded[name] as Record<string, unknown>;
@@ -988,7 +991,7 @@ describe('api-types 0.38.0 — recorded engine frames (FIX-IT-ALL L8-0b)', () =>
     }
     expect((recorded['gateEscalatedHookVeto'] as Record<string, unknown>)['denialSource']).toBe('');
     expect((recorded['gateEscalatedHookVeto'] as Record<string, unknown>)['suggestionRef']).toBeNull();
-    // The two classes the step-0 expectations name (L3 dead_seat · L4 boundary_deny × input_governance).
+    // The two DES-shaped classes the step-0 expectations name (L3 dead_seat · L4 boundary_deny × input_governance).
     expect(recorded['gateEscalatedDeadSeat']).toMatchObject({ condition: 'dead_seat', denialSource: 'dead_seat', attempt: 0, defGate: false });
     expect(recorded['gateEscalatedCreatorMkdirOutside']).toMatchObject({ condition: 'boundary_deny', denialSource: 'input_governance' });
   });

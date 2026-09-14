@@ -17,6 +17,13 @@
 // `tests/wire-contract.test.ts` asserts every 0.38.0 `GateDecision` body is assignable to the
 // schema's INPUT type (extra optional keys are assignable) — so only the RUNTIME strictness and the
 // adapter arity can drift; this file watches those.
+//
+// Contract for L1 PR-2 (so its flip is not a false red): the route pins below spread ALL FIVE
+// positionals — `confirmGate(id, approve, amend, action, amendScope)` with an explicit `undefined`
+// for an absent `amend` / `action` / `amendScope` — because `toEqual` on the recorded argument array
+// checks its LENGTH too; a 4-arg call for a body without `amendScope` would read as a mismatch. The
+// disagreement pin asks only that SOME zod issue names both `action` and `approve` in its message
+// (DES-L1: "400 naming it") — the refine may sit at the object root or on the `action` path.
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -75,11 +82,12 @@ describe('GateSchema — the 0.38.0 GateDecision arms (DES-L1 PR-2)', () => {
 
   it.fails('NOT_FIXED_YET (L1 PR-2): an `action` / `approve` DISAGREEMENT is refused by a rule that names `action` and `approve` — not by the strict-object arm', () => {
     // `request_changes` requires `approve: false`. Today the strict object refuses the unknown key
-    // (path `[]`, "Unrecognized key(s)") — the wrong reason; the expectation is the L1 refine.
+    // ("Unrecognized key(s) in object: 'action'" — a message that never says `approve`) — the wrong
+    // reason; the expectation is the L1 refine, wherever it attaches (object root or the `action` path).
     const r = GateSchema.safeParse({ approve: true, action: 'request_changes' });
     expect(r.success).toBe(false);
     if (r.success) return;
-    expect(r.error.issues.some((i) => i.path[0] === 'action' && /approve/i.test(i.message))).toBe(true);
+    expect(r.error.issues.some((i) => /action/i.test(i.message) && /approve/i.test(i.message))).toBe(true);
   });
 });
 

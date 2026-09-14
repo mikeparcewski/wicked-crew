@@ -1,5 +1,5 @@
 {
-  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly (mirrored from its own to_json tests); the values are illustrative. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys.",
+  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly. RECORDED (mirrored from the engine's own to_json tests): gateEscalated, gateEscalatedHookVeto, sandboxPosture, worktreeRetained. DES-SHAPED (the engine emits them after L4 PR-② / L3 PR-3A; same key set and conventions, verdictSummary prose from DES-L4 R8 / DES-L3 §4 — not a recording): gateEscalatedCreatorMkdirOutside, gateEscalatedDeadSeat. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys.",
   "gateEscalated": {
     "type": "gateEscalated",
     "session": "run-1",
@@ -11,7 +11,12 @@
     "defGate": false,
     "outputCaptured": true,
     "restored": true,
-    "discarded": [{ "status": "A", "path": "evidence/repro.md" }],
+    "discarded": [
+      {
+        "status": "A",
+        "path": "evidence/repro.md"
+      }
+    ],
     "suggestionRef": "refs/wicked/suggestions/run-1/2/0"
   },
   "gateEscalatedHookVeto": {
