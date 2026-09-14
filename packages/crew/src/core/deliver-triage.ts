@@ -102,9 +102,12 @@ export interface DeliverFailureTriage {
 
 const APPLY_FAILED = /deliver: the lift onto [^\n]*? could not be applied cleanly/;
 /** A `deliver: …` line of the script's — at the start, after a newline, or after the engine's
- *  `Worker FAILED on unit N (triage: …): ` framing. The classifier's informational
+ *  framing: `Worker FAILED on unit N (triage: …): ` (today's terminal path) and, since the DES-L9
+ *  F1 arm (wicked-core-ts ≥ 0.7.27), `deliver refused on unit N: ` — the parked unit's
+ *  `denial_reason`, which the post-hoc route and `deliver-text.ts` classify. `: ` covers both
+ *  framings (the `): ` form ends with it). The classifier's informational
  *  `deliver: EXCLUDED (<reason>): <path>` lines are not refusals and do not count. */
-const SCRIPT_REFUSAL = /(?:^|\n|\): )deliver: (?!EXCLUDED \()/;
+const SCRIPT_REFUSAL = /(?:^|\n|: )deliver: (?!EXCLUDED \()/;
 
 const ENGINE = (kind: DeliverFailureKind): DeliverFailureTriage => ({
   kind,

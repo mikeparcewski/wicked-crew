@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DELIVER_TITLE_MAX,
+  boundedTitle,
   composeDeliverText,
   deliverTitle,
   factsFromRun,
@@ -295,14 +296,18 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('| `fix` | build | creator | claude | auto | approved |');
     expect(body).toContain('| `verify` | test | evaluator | pi | human if verdict not pass | approved |');
     expect(body).toContain('| `deliver` | build | neutral | tool | auto | this PR |');
-    // Repo checks WITH their exit codes (a failing and a timed-out one are reported as such).
-    expect(body).toContain('| typecheck | `npm run typecheck` | 0 | 6.9s |');
-    expect(body).toContain('| lint | `npm run lint` | 0 | 6.1s |');
-    expect(body).toContain('| test | `npm run test` | 1 | 79.2s |');
-    expect(body).toContain('| e2e | `npm run e2e` | timed out | 600.0s |');
-    // The evaluator verdict.
-    expect(body).toContain('## Evaluator verdict');
-    expect(body).toContain('- `verify` (pi): **approved**');
+    // Repo checks WITH the phase whose floor ran them, their exit codes (a failing and a timed-out
+    // one are reported as such) and the engine's classification of a non-zero exit (DES-L9).
+    expect(body).toContain('| phase | check | command | exit | classification | duration |');
+    expect(body).toContain('| `verify` | typecheck | `npm run typecheck` | 0 | — | 6.9s |');
+    expect(body).toContain('| `verify` | lint | `npm run lint` | 0 | — | 6.1s |');
+    expect(body).toContain('| `verify` | test | `npm run test` | 1 | unclassified | 79.2s |');
+    expect(body).toContain('| `verify` | e2e | `npm run e2e` | timed out | unclassified | 600.0s |');
+    // The evaluator GATE: a clean pass reads as such.
+    expect(body).toContain('## Evaluator gate');
+    expect(body).toContain('- `verify` (pi): passed its gate');
+    expect(body).not.toContain('## Evaluator verdict');
+    expect(body.endsWith('Merge stays human: the phase opens the PR, never merges it.')).toBe(true);
     // The footer.
     expect(body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
     expect(body).toContain('Merge stays human');
@@ -357,6 +362,55 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('- `verify` (pi): **denied** — tests \\| red: 3 failures');
     expect(body).toContain('| `verify` | test | evaluator | pi | human if verdict not pass | denied |');
   });
+
+  // DES-L9 (review-benchmark-prs D3): the engine's own classification of a non-zero exit rides the
+  // table — `floor_env_mismatch` is never read as "tests fail".
+  it('prints the engine’s classification of a failed check and names the phase whose floor ran it', () => {
+    const v = runView();
+    const verify = v.units.find((u) => u.id.endsWith(':verify'))!;
+    const rc = (verify as WorkUnit & { repo_checks: { checks: Array<Record<string, unknown>> } }).repo_checks;
+    rc.checks = rc.checks.map((c) => (c['name'] === 'test' ? { ...c, classification: 'floor_env_mismatch' } : c));
+    const { body } = composeDeliverText(factsFromRun(v, null));
+    expect(body).toContain('| `verify` | test | `npm run test` | 1 | floor_env_mismatch | 79.2s |');
+    const facts = factsFromRun(v, null);
+    expect(facts.checks!.find((c) => c.name === 'test')).toMatchObject({ phase: 'verify', classification: 'floor_env_mismatch' });
+    expect(facts.checks!.find((c) => c.name === 'lint')).toMatchObject({ phase: 'verify', classification: null });
+  });
+
+  // DES-L9 / crew#550: a revision names the PR its commits landed on — this text rides that PR.
+  it('names the revised pull request when the run revises one', () => {
+    const { body } = composeDeliverText(factsFromRun(runView(), null, { revisesPr: { number: 273, url: 'https://github.com/o/r/pull/273' } }));
+    expect(body).toContain("- Revises pull request [#273](https://github.com/o/r/pull/273) — this run's commits were pushed onto its branch; no new PR was opened.");
+    expect(composeDeliverText(factsFromRun(runView(), null)).body).not.toContain('Revises pull request');
+  });
+});
+
+// DES-L9 §5 (crew#550 P-1): the 72-char cut lands at the last word boundary OUTSIDE any quoted or
+// bracketed phrase — the #273 headline was severed inside `'sign a seat in'`.
+describe('boundedTitle — cuts outside quoted or bracketed phrases (DES-L9)', () => {
+  it('cuts at the last word boundary OUTSIDE a quoted or bracketed phrase (crew#550 P-1)', () => {
+    // The #273 headline: the old cut landed inside `'sign a seat in'`.
+    const line = "Run failure card: headline truncated at '(Failed):' and 'sign a seat in' when the failed unit is a seat sign-in";
+    const title = boundedTitle(line);
+    expect(title.length).toBeLessThanOrEqual(72);
+    expect(title).toBe("Run failure card: headline truncated at '(Failed):' and…");
+    // A parenthesised phrase that would straddle the cut is dropped whole.
+    const parens = `${'word '.repeat(9)}(a parenthetical remark that runs well past the seventy-two column limit) tail`;
+    const t2 = boundedTitle(parens);
+    expect(t2).toBe(`${'word '.repeat(8)}word…`);
+    // An apostrophe inside a word is not a quote: `daemon's` never opens a phrase.
+    const apos = "Fix the daemon's gh login handling when the active account flips between sessions again";
+    const t3 = boundedTitle(apos);
+    expect(t3.length).toBeLessThanOrEqual(72);
+    expect(t3.startsWith("Fix the daemon's gh login handling when the active account flips")).toBe(true);
+    // No depth-0 boundary at all inside the room ⇒ any word boundary, still never mid-word.
+    const allQuoted = `"${'quoted words '.repeat(10)}"`;
+    const t4 = boundedTitle(allQuoted);
+    expect(t4.length).toBeLessThanOrEqual(72);
+    expect(t4.endsWith('…')).toBe(true);
+    expect(allQuoted.startsWith(t4.slice(0, -1))).toBe(true);
+    expect(allQuoted[t4.length - 1]).toBe(' ');
+  });
 });
 
 describe('composeDeliverText from the workflow definition (the script’s embedded fallback)', () => {
@@ -381,7 +435,7 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
     expect(body).toContain('From the workflow definition at launch');
     expect(body).toContain('Every phase before `deliver` had passed its gate');
     expect(body).toContain('## Repo checks\n\n_Not available at composition time');
-    expect(body).toContain('## Evaluator verdict\n\n_Not available at composition time');
+    expect(body).toContain('## Evaluator gate\n\n_Not available at composition time');
     expect(body).toContain(`run \`${RUN_ID}\`. Merge stays human`);
   });
 

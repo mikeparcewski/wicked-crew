@@ -85,7 +85,10 @@ describe('deliverPrScript (the hardened field script)', () => {
   // crew#418/#432 — a rejected push happens after the run work was committed. Both a remote
   // branch race and auth/transport/hook failures must strand recoverably for a post-hoc retry.
   it('marks every push failure as a recoverable LIFT-CONFLICT', () => {
-    expect(script).toContain('if PUSHOUT=$(git push -u origin "$B" 2>&1); then');
+    // DES-L9: one push seam — the new-PR push (`-u origin "$B"`) or, for a revision, the refspec
+    // onto the PR's head branch — captured the same way, so every failure takes the arms below.
+    expect(script).toContain('_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
+    expect(script).toContain('if PUSHOUT=$(_push 2>&1); then');
     expect(script).toMatch(/\*non-fast-forward\*[^\n]*LIFT-CONFLICT[^\n]*non-fast-forward[^\n]*nothing was pushed/);
     // The catch-all carries the same marker — auth/network/hook failures preserve committed work.
     const plainArm = script.split('\n').find((l) => l.includes('deliver: git push of $B failed'))!;
@@ -233,7 +236,9 @@ describe('deliverPrScript (the hardened field script)', () => {
   // a default branch that moved past it. Pinned as script properties; driven for real (delivers on a
   // matching pin, refuses on a moved one with the worktree untouched) in deliver-script-exec.test.ts.
   it('pins the engine-verified base: refuses when origin/<default> moved past WICKED_DELIVER_VERIFIED_BASE, before staging (wicked-core#431)', () => {
-    expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then');
+    // DES-L9: new-PR mode only — a revision keeps the PR's history (the engine's lift is Skipped for
+    // a branch with its own commits, so no verified base is pinned there).
+    expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then');
     expect(script).toContain('T=$(git rev-parse --verify -q "$D^{commit}" || true)');
     expect(script).toMatch(
       /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: the engine verified this work against[^\n]*exit 1; \}/,
@@ -315,12 +320,56 @@ describe('deliverPrScript (the hardened field script)', () => {
   // differing (or unreadable) active login the phase REFUSES — `deliver: identity mismatch — …;
   // nothing was staged, committed or pushed …` — and the `gh auth switch` is DELETED: the daemon's
   // push identity is what its gh (or GH_TOKEN) holds, disclosed at the deliver gate, never flipped
-  // at push time (crew #549, F-RC1-010). Today the script still switches, so this is `it.fails`;
-  // PR-L9-crew turns it red on landing — flip to `it` there (the plain assertion above stays).
-  it.fails('NOT_FIXED_YET (DES-L9 D-18, PR-L9-crew): the identity guard REFUSES on a mismatch — no `gh auth switch` in the script', () => {
+  // at push time (crew #549, F-RC1-010). FIXED by PR-L9-crew: the switch is gone, the refusal is in.
+  it('FIXED (DES-L9 D-18, PR-L9-crew): the identity guard REFUSES on a mismatch — no `gh auth switch` in the script', () => {
     expect(script).not.toContain('gh auth switch');
     expect(script).toContain('deliver: identity mismatch');
     expect(script).toContain('nothing was staged, committed or pushed');
+    // The identity is read ONCE, before the fetch, so the refusal is the phase's whole output.
+    expect(script.indexOf('L=$(gh api user -q .login')).toBeLessThan(script.indexOf('git fetch origin'));
+    // Unset ⇒ disclosed, never silent.
+    expect(script).toContain('GH_ACCOUNT not set — not pinned');
+    expect(script).toContain('GH_ACCOUNT pinned by GH_TOKEN');
+    expect(script).toContain('GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it');
+  });
+
+  // DES-L9 / crew#550 — REVISION mode: the script pushes onto the PR's head branch and never
+  // opens a second PR; a moved or vanished head is refused BEFORE staging, without a strand marker.
+  it('REVISION mode pushes onto the PR branch, comments the record, refuses a moved head without a marker', () => {
+    const rev = deliverPrScript('revise it', {
+      runId: 'r-1',
+      revisesPr: { number: 273, headRef: 'wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595', url: 'https://github.com/o/r/pull/273' },
+    });
+    expect(rev).toContain("PRNUM='273'");
+    expect(rev).toContain("TARGET='wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595'");
+    expect(rev).toContain("PRURL='https://github.com/o/r/pull/273'");
+    expect(rev).toContain('git merge-base --is-ancestor "origin/$TARGET" "$B"');
+    const moved = rev.split('\n').find((l) => l.includes("branch moved since this run based on it"))!;
+    expect(moved).not.toContain('LIFT-CONFLICT');
+    expect(moved).toContain("deliver: pull request #$PRNUM's branch moved — refused; nothing was pushed");
+    expect(rev).toContain('no longer exists on the remote; nothing was staged, committed or pushed');
+    expect(rev).toContain('the run added no commit on top of PR #$PRNUM');
+    expect(rev).toContain('gh pr comment "$PRNUM" --body-file "$TD/body"');
+    expect(rev).toContain('gh pr view "$PRNUM" --json state -q .state');
+    // The rebase onto the default branch and the verified-base check are new-PR-mode only.
+    expect(rev).toContain('if [ -z "$TARGET" ]; then\nif ! git rebase "$D" "$B"; then');
+    expect(rev).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then');
+    // No revision ⇒ empty inputs, byte-identical script otherwise.
+    expect(script).toContain("PRNUM=''");
+    expect(script).toContain("TARGET=''");
+    // Unsafe inputs are refused at compose time — never spliced.
+    expect(() => deliverPrScript('x', { revisesPr: { number: 1, headRef: "a'b", url: 'https://github.com/o/r/pull/1' } })).toThrow(/head branch name/);
+    expect(() => deliverPrScript('x', { revisesPr: { number: 1, headRef: 'ok', url: 'javascript:alert(1)' } })).toThrow(/pull request URL/);
+    expect(() => deliverPrScript('x', { revisesPr: { number: 0, headRef: 'ok', url: 'https://github.com/o/r/pull/1' } })).toThrow(/pull request number/);
+  });
+
+  // F-BM-002 (crew#579): the scratch DIRECTORIES are excluded at enumeration — one git call, one
+  // line per directory — never a fork per file for a path the classifier would exclude anyway.
+  it('excludes the scratch directories at enumeration and reports each once with a count (F-BM-002)', () => {
+    expect(script).toContain("git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage'");
+    expect(script).toContain('for SD in tmp .tmp scratch .cache coverage; do');
+    expect(script).toContain('deliver: EXCLUDED (scratch-dir): $SD/ ($N files)');
+    expect(script.indexOf('for SD in tmp')).toBeLessThan(script.indexOf('while IFS= read -r -d "" F; do'));
   });
 
   // crew#317: the overlay def that shipped run d1bc72c2 began `set -e` with NO pipefail, which

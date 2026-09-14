@@ -41,8 +41,17 @@
  *
  * One deliberate change from the field version: NO gh account is baked into crew code (the
  * overlay guarded a personal account). Instead, when the `GH_ACCOUNT` env var is set the script
- * compares it against `gh api user -q .login` and runs
- * `gh auth switch --hostname github.com --user "$GH_ACCOUNT"` only when they differ.
+ * compares it against `gh api user -q .login` and REFUSES when they differ (DES-L9 D-18, crew#549):
+ * the daemon's push identity is what its gh — or an exported `GH_TOKEN` — holds, disclosed on the
+ * deliver gate card, never switched at push time (the switch this replaced pushed under whatever
+ * account it could flip to, and a 403 hard-failed the run). Unset ⇒ whatever gh holds, said aloud.
+ *
+ * REVISION mode (DES-L9 / crew#550, `POST /runs {revisesPr}`): the run was based on an OPEN pull
+ * request's head branch; the script pushes `wicked/<run>` onto `refs/heads/<that branch>` (the PR
+ * gains exactly the run's commits — no rebase onto the default branch, no `gh pr create`), proves
+ * the remote tip, comments the run record on the PR and prints the PR's URL last. A head that moved
+ * or vanished since the run based on it is REFUSED before anything is staged (no LIFT-CONFLICT
+ * marker — a re-push cannot succeed; the operator launches a new revision or rebases by hand).
  *
  * Merge stays human: the phase opens the PR, never merges it.
  *
@@ -75,6 +84,8 @@
  *     {@link deliverPrPhase}.
  */
 
+import { execFile } from 'node:child_process';
+import { childEnvWithBootEstateDb } from './governance-store.js';
 import type { PhaseDef, WorkflowDef } from './types.js';
 import {
   composeEmbeddedDeliverText,
@@ -129,6 +140,112 @@ export interface DeliverScriptOptions {
   /** The launching daemon's own origin (`http://127.0.0.1:7701`). When set, the script first asks
    *  it for the run-derived text; unset (or unreachable) ⇒ the embedded fallback. */
   apiOrigin?: string | null;
+  /** DES-L9 / crew#550 — REVISION mode: the open pull request this run revises. The script pushes
+   *  `wicked/<run>` onto `refs/heads/<headRef>` (the PR gains exactly the run's commits), proves the
+   *  remote tip, comments the run record on the PR and prints `url` last; no `gh pr create`. */
+  revisesPr?: RevisedPullRequest | null;
+  /** The daemon's configured push identity (`GH_ACCOUNT`) for the gate card; `null` = unset. */
+  ghAccount?: string | null;
+  /** Whether `GH_TOKEN` is exported in the daemon environment — presence only, never the value. */
+  ghTokenPinned?: boolean;
+}
+
+/** The pull request a revision run pushes onto (DES-L9). `headRef` is a same-repository branch. */
+export interface RevisedPullRequest {
+  number: number;
+  headRef: string;
+  url: string;
+}
+
+/** A branch name the script may splice into a single-quoted literal and hand to git: the ref
+ *  charset git accepts for `wicked/<run>`-style heads, no `..`, no leading `-`, no quotes. */
+const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+export function isSafeRefName(name: string): boolean {
+  return SAFE_REF.test(name) && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock');
+}
+
+/** The one shape a PR URL may take before it is baked into the script and printed as the phase's
+ *  last line (crew re-derives "delivered" from that line — `prUrlFrom`). */
+const SAFE_PR_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/[0-9]+$/;
+
+/** The `bug` def's `fix` phase instructions — the SAME literal wicked-core's `bug_def()` carries
+ *  (`BUG_FIX_SWEEP_INSTRUCTIONS`, DES-L9 BC-60 / core#432): both carriers are live (`deliver:pr`
+ *  plans from this mirror, `deliver:none` from core's def), so one string, pinned by a test. Short
+ *  (≤ 90 ASCII bytes) on purpose — the PTY carrier's whole prompt is 1000 B and core's budget test
+ *  keeps ≥ 300 B of intent headroom. */
+export const BUG_FIX_SWEEP_INSTRUCTIONS =
+  'Update every consumer of behaviour this fix retires or changes: tests, docs, comments.';
+
+/** What `gh pr view` answers for a revision target (DES-L9 `resolvePullRequest`). */
+export interface ResolvedPullRequest extends RevisedPullRequest {
+  state: string;
+}
+
+export type PullRequestResolution =
+  | { ok: true; pr: ResolvedPullRequest }
+  | { ok: false; error: string };
+
+/** The exec seam `resolvePullRequest` reads `gh` through — injectable so tests answer without gh. */
+export type GhExec = (
+  args: string[],
+  opts: { cwd: string; timeoutMs: number },
+) => Promise<{ stdout: string; stderr: string; code: number | null }>;
+
+const defaultGhExec: GhExec = (args, opts) =>
+  new Promise((resolve) => {
+    // The daemon's governance-store variables never ride into a child (crew#495): the boot value is
+    // restored and the exported store URL is stripped, the same helper every other spawn site uses.
+    execFile('gh', args, { cwd: opts.cwd, timeout: opts.timeoutMs, encoding: 'utf8', env: childEnvWithBootEstateDb(process.env) }, (err, stdout, stderr) => {
+      const code = err === null ? 0 : typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null;
+      resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code });
+    });
+  });
+
+/**
+ * Resolve `revisesPr` (a PR number) to the head branch the run will base on and push to — the
+ * daemon's job, since the engine has no GitHub client (DES-L9 §2). Bounded to 5 s; every failure
+ * is a NAMED refusal (the route answers 409), never a silent second PR:
+ *  - not OPEN (merged / closed) — only an open pull request can be revised;
+ *  - a fork PR (`isCrossRepository`) — the run's clone cannot push to another repository's branch;
+ *  - a head branch name the script cannot splice safely;
+ *  - `gh` unavailable, unauthenticated, timed out or answering anything but the JSON asked for.
+ */
+export async function resolvePullRequest(
+  repoRoot: string,
+  number: number,
+  exec: GhExec = defaultGhExec,
+): Promise<PullRequestResolution> {
+  if (!Number.isInteger(number) || number <= 0) return { ok: false, error: `revisesPr must be a positive pull request number (got ${number})` };
+  let out: { stdout: string; stderr: string; code: number | null };
+  try {
+    out = await exec(['pr', 'view', String(number), '--json', 'headRefName,state,isCrossRepository,url'], { cwd: repoRoot, timeoutMs: 5000 });
+  } catch (err) {
+    return { ok: false, error: `gh could not read PR #${number}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (out.code !== 0) {
+    const why = (out.stderr || out.stdout).trim().split('\n').slice(-2).join(' ').slice(0, 300);
+    return { ok: false, error: `gh could not read PR #${number}: ${why || (out.code === null ? 'gh timed out or could not be spawned' : `exit ${out.code}`)}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out.stdout);
+  } catch {
+    return { ok: false, error: `gh could not read PR #${number}: its answer was not the JSON asked for` };
+  }
+  const r = (parsed ?? {}) as Record<string, unknown>;
+  const headRef = r['headRefName'];
+  const state = r['state'];
+  const url = r['url'];
+  if (typeof headRef !== 'string' || typeof state !== 'string' || typeof url !== 'string') {
+    return { ok: false, error: `gh could not read PR #${number}: headRefName / state / url missing from its answer` };
+  }
+  if (state !== 'OPEN') return { ok: false, error: `revisesPr #${number} is ${state} — only an open pull request can be revised` };
+  if (r['isCrossRepository'] === true) {
+    return { ok: false, error: `revisesPr #${number} is a fork pull request (its head lives in another repository) — only a same-repository branch can be revised` };
+  }
+  if (!isSafeRefName(headRef)) return { ok: false, error: `revisesPr #${number}'s head branch name cannot be used as a push target: ${JSON.stringify(headRef)}` };
+  if (!SAFE_PR_URL.test(url)) return { ok: false, error: `revisesPr #${number}: gh answered a URL that is not a pull request URL (${url.slice(0, 120)})` };
+  return { ok: true, pr: { number, headRef, url, state } };
 }
 
 /**
@@ -240,6 +357,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
       repoRef: null,
       phases: [],
       runUrl: null,
+      revisesPr: opts.revisesPr == null ? null : { number: opts.revisesPr.number, url: opts.revisesPr.url },
     });
   // The EMBEDDED fallback is bounded (`EMBEDDED_INTENT_CAP`): this script is one argv entry, and an
   // unbounded intent could exceed the platform's single-argument limit and E2BIG the phase before
@@ -254,6 +372,17 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
   // strict path segment (only `[A-Za-z0-9._~%-]` survive, so the single-quoted literal is safe);
   // otherwise derived from the branch at run time and percent-encoded byte-wise by the script.
   const runIdSegment = runId === '' ? '' : urlPathSegment(runId);
+  // Revision inputs (DES-L9): fail CLOSED at compose time on anything the script could not splice
+  // safely — a revision that silently fell back to a new PR is the duplicate the field is for.
+  const revises = opts.revisesPr ?? null;
+  if (revises !== null) {
+    if (!Number.isInteger(revises.number) || revises.number <= 0) throw new Error(`revisesPr: not a pull request number: ${String(revises.number)}`);
+    if (!isSafeRefName(revises.headRef)) throw new Error(`revisesPr #${revises.number}: head branch name cannot be a push target: ${JSON.stringify(revises.headRef)}`);
+    if (!SAFE_PR_URL.test(revises.url)) throw new Error(`revisesPr #${revises.number}: not a pull request URL: ${JSON.stringify(revises.url)}`);
+  }
+  const prNum = revises === null ? '' : String(revises.number);
+  const target = revises === null ? '' : revises.headRef;
+  const prUrl = revises === null ? '' : revises.url;
   return [
     'set -euo pipefail',
     // The engine concatenates the child's stdout and THEN its stderr, so anything git writes to
@@ -261,9 +390,24 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // into stdout for the whole phase keeps the output in true chronological order and makes the
     // final `echo "$URL"` genuinely last.
     'exec 2>&1',
-    // Account guard — env-driven, never a name baked into crew code. Unset ⇒ whatever account
-    // gh already holds is used as-is.
-    'if [ -n "${GH_ACCOUNT:-}" ]; then L=$(gh api user -q .login); [ "$L" = "$GH_ACCOUNT" ] || gh auth switch --hostname github.com --user "$GH_ACCOUNT"; fi',
+    // IDENTITY (DES-L9 D-18, crew#549 / F-RC1-010) — read ONCE, up front, before anything is
+    // fetched, staged or pushed, so the refusal is the phase's WHOLE output (the engine's head-150
+    // carries it). With GH_ACCOUNT set, a differing or unreadable active login REFUSES: the
+    // daemon's push identity is what its gh (or an exported GH_TOKEN — then `gh api user` IS the
+    // token's login) holds, disclosed on the gate card, never switched at push time. Unset ⇒
+    // today's behaviour, now said aloud. No account name is baked into crew code (env-driven).
+    'L=$(gh api user -q .login 2>/dev/null || true)',
+    'if [ -n "${GH_ACCOUNT:-}" ]; then',
+    '  [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — GH_ACCOUNT is $GH_ACCOUNT but gh\'s active login is ${L:-unreadable}; nothing was staged, committed or pushed. Fix the daemon\'s gh login (switch gh\'s active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase"; exit 1; }',
+    '  if [ -n "${GH_TOKEN:-}" ]; then echo "deliver: pushing as $L (GH_ACCOUNT pinned by GH_TOKEN)"; else echo "deliver: pushing as $L (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)"; fi',
+    'elif [ -n "$L" ]; then echo "deliver: pushing as $L (GH_ACCOUNT not set — not pinned)"',
+    'else echo "deliver: pushing as an unknown login (gh not authenticated; GH_ACCOUNT not set — not pinned)"; fi',
+    // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
+    // validated against a strict charset before it is spliced into a single-quoted literal. Empty
+    // TARGET ⇒ today's new-PR delivery.
+    `PRNUM='${prNum}'`,
+    `TARGET='${target}'`,
+    `PRURL='${prUrl}'`,
     // (a) The run branch: wicked/<worktree-basename> (the engine names run worktrees by run id),
     // falling back to the currently checked-out branch when that ref does not exist.
     'R=$(basename "$PWD")',
@@ -287,6 +431,21 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // would put one branch's work on another and push a branch that never saw it. Refuse instead.
     'C=$(git branch --show-current)',
     '[ "$C" = "$B" ] || { echo "deliver: the worktree is on \'$C\' but the run branch is \'$B\' — refusing to commit one branch\'s work onto another; nothing was pushed"; exit 1; }',
+    // REVISION MODE (DES-L9 / crew#550): the run was based on origin/$TARGET — the open PR's head.
+    // The target must still exist and must still be an ANCESTOR of the run branch: a head that
+    // moved since the mint (another push to the PR) cannot be fast-forwarded to $B, and a re-push
+    // could never succeed — so this is a REFUSAL before staging (no LIFT-CONFLICT marker; the
+    // operator launches a new revision on the current head or rebases by hand), not a strand. The
+    // short trailing `deliver:` line survives the engine's tail-250 excerpt after the fetch chatter
+    // (review F-527-001), so crew classifies it. The default branch can never be a revision target.
+    'if [ -n "$TARGET" ]; then',
+    '  case "$TARGET" in ""|main|master|"$DEF") echo "deliver: refusing to revise pull request #$PRNUM — its head branch \'$TARGET\' is the default branch; nothing was staged, committed or pushed"; exit 1;; esac',
+    // Asked of the REMOTE (`ls-remote`), not of the clone's `origin/*` refs — a plain fetch never
+    // prunes a branch deleted after the PR merged, so the local ref would still resolve and the
+    // push would silently RE-CREATE the branch under a closed PR.
+    '  git ls-remote --exit-code --heads origin "$TARGET" >/dev/null 2>&1 && git rev-parse --verify -q "origin/$TARGET^{commit}" >/dev/null || { echo "deliver: pull request #$PRNUM\'s branch origin/$TARGET no longer exists on the remote; nothing was staged, committed or pushed"; exit 1; }',
+    '  git merge-base --is-ancestor "origin/$TARGET" "$B" || { echo "deliver: pull request #$PRNUM\'s branch moved since this run based on it (origin/$TARGET is no longer an ancestor of $B); nothing was staged, committed or pushed — launch a new revision on the current head, or rebase $B onto origin/$TARGET by hand and approve to retry"; echo "deliver: pull request #$PRNUM\'s branch moved — refused; nothing was pushed"; exit 1; }',
+    'fi',
     // (a2) VERIFIED-BASE PIN (wicked-core#431 / #433). Before this script runs, the engine LIFTED the
     // run's work onto the remote default branch's tip and re-ran the repository's checks when the
     // lift changed the tree; it hands the tip it verified against as WICKED_DELIVER_VERIFIED_BASE
@@ -303,7 +462,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // the line (review F-527-001): the engine keeps head-150 + tail-250 chars of the WHOLE output, and
     // this line follows the fetch's chatter, so a marker at its head would be elided while a trailing
     // one always lands in the tail — as the LIFT-CONFLICT push-failure line below already does.
-    'if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]; then',
+    'if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then',
     '  T=$(git rev-parse --verify -q "$D^{commit}" || true)',
     `  [ "$T" = "$WICKED_DELIVER_VERIFIED_BASE" ] || { echo "deliver: the engine verified this work against $WICKED_DELIVER_VERIFIED_BASE but $D is now \${T:-unresolvable} — refusing to rebase past the verified base; approve to retry the deliver phase (the engine lifts onto the new tip and re-runs the repository checks before pushing). Nothing was staged, committed or pushed; ${DELIVER_BASE_MOVED_MARKER} ($D now \${T:-unresolvable}, verified $WICKED_DELIVER_VERIFIED_BASE)"; exit 1; }`,
     'fi',
@@ -448,6 +607,15 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // still fully auditable in the phase output (retained + served on the run wire), never
     // laundered. `git add` here never touches the untracked recovery sentinel: it was removed
     // above, before this pass.
+    //
+    // F-BM-002 (crew#579): the top-level scratch DIRECTORIES — the engine's own `tmp/` (the
+    // repo-checks floor's `tmp/wicked-checks`, the worker's pytest temp, node's compile cache; 35 k
+    // files on one benchmark run) and the other four — are excluded AT ENUMERATION with git
+    // pathspecs and reported ONCE with a count, never walked file-by-file with a fork per file.
+    // The per-file `*/tmp/*` arm below still catches a nested scratch dir.
+    'for SD in tmp .tmp scratch .cache coverage; do',
+    '  if [ -d "$SD" ]; then N=$(git ls-files --others --exclude-standard -- "$SD" | wc -l | tr -d " "); if [ "${N:-0}" -gt 0 ]; then echo "deliver: EXCLUDED (scratch-dir): $SD/ ($N files)"; fi; fi',
+    'done',
     'while IFS= read -r -d "" F; do',
     '  [ -n "$F" ] || continue',
     '  BN=${F##*/}; RN=""',
@@ -462,7 +630,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     '  case "/$F" in */tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*) [ -n "$RN" ] || RN="scratch-dir";; esac',
     '  if [ -z "$RN" ]; then SZ=$(wc -c < "$F" 2>/dev/null || echo 0); [ "${SZ:-0}" -gt 1048576 ] && RN="oversize-1mib"; fi',
     '  if [ -n "$RN" ]; then echo "deliver: EXCLUDED ($RN): $F"; else git add -- "$F"; fi',
-    'done < <(git ls-files --others --exclude-standard -z)',
+    "done < <(git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage')",
     // Only commit when something is staged — a run that committed incrementally (core#280's
     // liveness contract) leaves a clean tree and must not gain an empty commit here.
     // `--cleanup=whitespace`, NOT git's default for `-F`: an operator/repo `commit.cleanup=strip`
@@ -471,9 +639,12 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"',
     // (c2) NOTHING TO DELIVER — no staged work AND no commits of its own. Fail LOUDLY before the
     // remote is touched: an empty ref pushed under a run id is worse than a failed phase.
+    'if [ -n "$TARGET" ]; then A=$(git rev-list --count "origin/$TARGET..$B"); [ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run added no commit on top of PR #$PRNUM"; exit 1; }; else',
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change ($B is not ahead of $D); nothing was pushed"; exit 1; }',
-    // (c3) Rebase onto origin's default branch so the PR opens mergeable.
+    'fi',
+    // (c3) Rebase onto origin's default branch so the PR opens mergeable — NEW-PR mode only: a
+    // revision keeps the PR's own history and pushes its commits on top of the PR head as-is.
     //
     // crew#418 B — the CHANGELOG collision magnet: two runs that both append to CHANGELOG's
     // `[Unreleased]` section conflict on the rebase BY CONSTRUCTION, though their added bullet
@@ -489,6 +660,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // run's committed work is safe on its branch, so crew reinterprets THIS refusal as `completed`
     // + `delivery: 'stranded'` (recoverable via POST /runs/:id/deliver) rather than a run failure.
     '_rebasing() { [ -d "$(git rev-parse --git-path rebase-merge 2>/dev/null)" ] || [ -d "$(git rev-parse --git-path rebase-apply 2>/dev/null)" ]; }',
+    'if [ -z "$TARGET" ]; then',
     'if ! git rebase "$D" "$B"; then',
     // A rebase that failed WITHOUT leaving in-progress state never started — a preflight error
     // (bad ref, unexpected worktree state), not a conflict. Fail LOUD rather than fall through to
@@ -528,11 +700,15 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // that WAS ahead can come out of a rebase carrying nothing of its own.
     'A=$(git rev-list --count "$D..$B")',
     '[ "$A" -ge 1 ] || { echo "deliver: nothing to deliver — the run produced no committed change (after rebasing onto $D, $B carries no commit of its own); nothing was pushed"; exit 1; }',
+    'fi',
     // (d) Push. Any push failure happens AFTER the work was committed and its branch was proven
     // ahead. It is therefore a recoverable lift failure, whether the remote branch moved, auth
     // returned 403, the transport is down, or a hook rejected it. Preserve git's own output AND
     // print the marker last, so crew strands the run and POST /runs/:id/deliver can retry it.
-    'if PUSHOUT=$(git push -u origin "$B" 2>&1); then echo "$PUSHOUT"; else',
+    // A revision pushes the run branch ONTO the PR's head branch (`$B:refs/heads/$TARGET`) — the
+    // PR gains exactly the run's commits; a rejection there is the same recoverable strand.
+    '_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }',
+    'if PUSHOUT=$(_push 2>&1); then echo "$PUSHOUT"; else',
     '  echo "$PUSHOUT"',
     '  case "$PUSHOUT" in',
     `    *non-fast-forward*|*"fetch first"*|*"[rejected]"*|*"Updates were rejected"*) : > "$S"; echo "${DELIVER_LIFT_CONFLICT_MARKER} — push of $B was rejected because the remote branch moved (non-fast-forward); rebase and re-run; nothing was pushed"; exit 1;;`,
@@ -543,16 +719,32 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     // `| tail -1` threw away everything gh said but one line and made the phase's verdict a
     // property of a shell option; a gh failure now fails the phase carrying gh's own message.
     // Title and body are the composed text (c1-text) — never `--fill` (crew#524).
-    'if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then echo "$OUT"; echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1; fi',
-    'echo "$OUT"',
+    // REVISION (DES-L9): no PR is opened — the one that exists gained the commits. Done is
+    // re-derived from the REMOTE: origin/$TARGET must now be exactly $B. The PR's state is read
+    // and disclosed (a PR merged or closed in the window is a warning, not a failure — the commits
+    // landed, and a refusal here would loop "nothing to deliver" on the retry). The run record then
+    // rides `gh pr comment` (the body the PR-create path would have used); a comment failure is
+    // printed, not fatal — the commit message carries the same record.
+    'if [ -n "$TARGET" ]; then',
+    '  git fetch -q origin "$TARGET"',
+    '  RT=$(git rev-parse "origin/$TARGET"); LT=$(git rev-parse "$B")',
+    '  [ "$RT" = "$LT" ] || { echo "deliver: origin/$TARGET is at ${RT:0:10} after the push, not at $B (${LT:0:10}) — refusing to report a delivery the remote does not show"; exit 1; }',
+    '  ST=$(gh pr view "$PRNUM" --json state -q .state 2>/dev/null || true)',
+    '  if [ "$ST" = "OPEN" ]; then echo "deliver: pull request #$PRNUM is OPEN and its branch $TARGET is at $B"; else echo "deliver: warning — pull request #$PRNUM reads ${ST:-unknown} (not OPEN) after the push; the commits landed on origin/$TARGET"; fi',
+    '  if COUT=$(gh pr comment "$PRNUM" --body-file "$TD/body" 2>&1); then echo "deliver: run record commented on pull request #$PRNUM"; else echo "$COUT"; echo "deliver: could not comment on pull request #$PRNUM — the commits landed; the record is in the commit message"; fi',
+    '  URL="$PRURL"',
+    'else',
+    '  if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then echo "$OUT"; echo "deliver: gh pr create failed for $B — no PR was opened"; exit 1; fi',
+    '  echo "$OUT"',
     // (f) DONE IS RE-DERIVED, NOT ASSERTED — twice, from two independent facts, before the phase
     // is allowed to report a delivery:
     //   1. gh actually produced a PR URL (an exit code alone is a claim, not evidence);
     //   2. the ref ON THE REMOTE is ahead of origin's default branch by at least one commit.
-    "URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1 || true)",
-    '[ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
-    'P=$(git rev-list --count "$D..origin/$B")',
-    '[ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
+    "  URL=$(printf '%s\\n' \"$OUT\" | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | tail -1 || true)",
+    '  [ -n "$URL" ] || { echo "deliver: gh pr create exited 0 but produced no PR URL for $B — refusing to report a delivery nothing can be pointed at"; exit 1; }',
+    '  P=$(git rev-list --count "$D..origin/$B")',
+    '  [ "$P" -ge 1 ] || { echo "deliver: $B is not ahead of $D on the remote after the push — refusing to report a delivery with no commits"; exit 1; }',
+    'fi',
     'echo "$URL"',
   ].join('\n');
 }
@@ -597,6 +789,10 @@ export function deliverPrPhase(
     id: DELIVER_PHASE_ID,
     kind: 'build',
     executor: { type: 'tool', cmd: ['bash', '-lc', deliverPrScript(intent, opts)] },
+    // DES-L9: the deliver GATE card text — what the push will do and under which identity, with
+    // the pin source named (F9). The engine folds `instructions` onto the unit description after
+    // ` ||| ` (core `plan_from_def`), and `advance_or_pause` prints the description on the gate.
+    instructions: deliverGateInstructions(opts),
     gate_type: null,
     gate: 'auto',
     executes_code: false,
@@ -608,6 +804,29 @@ export function deliverPrPhase(
     allowed_skills: [],
     validator_pin: EVIDENCE_FLOOR_PIN,
   };
+}
+
+/**
+ * What the deliver gate card says (DES-L9 §4): the push target — onto the revised PR's branch, or a
+ * new PR — and the push identity with its pin source: `GH_ACCOUNT` pinned by an exported `GH_TOKEN`
+ * (then `gh api user` IS the token's login and the script refuses on a difference), `GH_ACCOUNT`
+ * from the gh keyring (the login can flip between this check and the push — export `GH_TOKEN` to
+ * pin it), or unset (pushes as whatever login gh holds). Never the token, never a live probe.
+ */
+export function deliverGateInstructions(opts: DeliverScriptOptions): string {
+  const pr = opts.revisesPr ?? null;
+  const target =
+    pr !== null
+      ? `Pushes wicked/<run> onto pull request #${pr.number} (branch ${pr.headRef}); no new PR.`
+      : 'Pushes the run branch wicked/<run> to origin and opens a pull request; merge stays human.';
+  const account = opts.ghAccount ?? null;
+  const who =
+    account !== null && account !== ''
+      ? opts.ghTokenPinned === true
+        ? `Push identity: GH_ACCOUNT=${account}, pinned by GH_TOKEN — the phase refuses if gh's login differs at push time.`
+        : `Push identity: GH_ACCOUNT=${account} from the gh keyring — the login can change between the check and the push; export GH_TOKEN to pin it. The phase refuses if gh's login differs.`
+      : 'Push identity: GH_ACCOUNT is not set — pushes as whatever login gh holds.';
+  return `${target} ${who}`;
 }
 
 /**
@@ -629,6 +848,12 @@ export function deliverPrPhase(
 export interface DeliverLaunchContext {
   repoRef?: string | null;
   apiOrigin?: string | null;
+  /** DES-L9: the open PR this run revises — the deliver phase pushes onto its branch. */
+  revisesPr?: RevisedPullRequest | null;
+  /** The daemon's `GH_ACCOUNT` (for the gate card); `null` = unset. */
+  ghAccount?: string | null;
+  /** Whether `GH_TOKEN` is exported in the daemon environment (presence only). */
+  ghTokenPinned?: boolean;
 }
 
 export function composeDeliverWorkflow(
@@ -650,6 +875,7 @@ export function composeDeliverWorkflow(
   // Truncate the run-id TAIL, keeping the base+marker prefix intact (Copilot on #303).
   const composedId = `${base.id}-deliver-${safeRunId}`.slice(0, 128);
   const apiOrigin = launch.apiOrigin ?? null;
+  const revisesPr = launch.revisesPr ?? null;
   const facts = factsFromWorkflow({
     runId,
     intent,
@@ -657,6 +883,7 @@ export function composeDeliverWorkflow(
     repoRef: launch.repoRef ?? null,
     phases: base.phases,
     runUrl: runUrlFor(apiOrigin, runId),
+    revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
   });
   return {
     // No `is_system` on purpose: core's overlay/register schema rejects unknown fields, and the
@@ -664,7 +891,14 @@ export function composeDeliverWorkflow(
     id: composedId,
     phases: [
       ...base.phases,
-      deliverPrPhase(last !== undefined ? [last.id] : [], intent, { runId, facts, apiOrigin }),
+      deliverPrPhase(last !== undefined ? [last.id] : [], intent, {
+        runId,
+        facts,
+        apiOrigin,
+        revisesPr,
+        ghAccount: launch.ghAccount ?? null,
+        ghTokenPinned: launch.ghTokenPinned === true,
+      }),
     ],
   };
 }

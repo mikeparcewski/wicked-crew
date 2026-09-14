@@ -45,14 +45,20 @@ export interface DeliverPhaseFact {
   outcome: string;
 }
 
-/** One repo check the verify phase ran (`typecheck` / `lint` / `test`), as the engine recorded it. */
+/** One repo check a phase's floor ran (`typecheck` / `lint` / `test`), as the engine recorded it. */
 export interface DeliverCheckFact {
+  /** The phase whose floor ran it (`verify`, `deliver`, …) — DES-L9. */
+  phase: string;
   name: string;
   command: string;
   exitCode: number | null;
   durationMs: number | null;
   timedOut: boolean;
   spawnError: string | null;
+  /** The engine's verdict on a non-zero exit (api-types 0.38.0 `RepoCheckRun.classification`) —
+   *  `floor_env_mismatch` / `pre_existing_in_sandbox` / … — so a reader never sees "tests fail"
+   *  over a run the engine itself excused (review-benchmark-prs D3). `null` when none. */
+  classification: string | null;
 }
 
 /** An evaluator-role phase's recorded verdict. */
@@ -84,6 +90,8 @@ export interface DeliverTextFacts {
    */
   checksNote: string | null;
   verdicts: DeliverVerdictFact[];
+  /** DES-L9: the open pull request this run REVISES (its commits land there; no new PR). */
+  revisesPr?: { number: number; url: string } | null;
 }
 
 export interface DeliverText {
@@ -151,13 +159,43 @@ export function deliverTitle(intent: string, runId: string): string {
   return boundedTitle(line === '' ? oneLine(`wicked-crew run ${oneLine(runId)}`) : line);
 }
 
-/** `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ 72 characters. */
-function boundedTitle(line: string): string {
+/** Characters that OPEN a quoted or bracketed phrase, and what closes each. */
+const OPENERS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', '`': '`', '“': '”', '‘': '’' };
+
+/**
+ * `line` whole when it fits, else cut at a word boundary with a single `…` — ≤ 72 characters —
+ * choosing the LAST boundary at nesting depth 0: never inside a quoted or bracketed phrase (crew#550
+ * P-1: `… truncated at '(Failed):' and 'sign a seat…`). A straight apostrophe opens a quote only
+ * after a space or at the start (so `daemon's` is a word, not a quote). When no depth-0 boundary
+ * exists inside the room, any word boundary is taken; a single 72+ character token is cut hard.
+ */
+export function boundedTitle(line: string): string {
   if (line.length <= DELIVER_TITLE_MAX) return line;
   const room = DELIVER_TITLE_MAX - 1; // one character is the ellipsis
   const head = line.slice(0, room + 1); // one past the room: a space HERE means the room ends a word
-  const cut = head.lastIndexOf(' ');
-  // A single 72+ character token has no boundary to cut at; then — and only then — it is cut hard.
+  const stack: string[] = [];
+  let lastAnyCut = -1;
+  let lastDepth0Cut = -1;
+  for (let i = 0; i < head.length; i += 1) {
+    const c = head[i]!;
+    if (c === ' ') {
+      lastAnyCut = i;
+      if (stack.length === 0) lastDepth0Cut = i;
+      continue;
+    }
+    const top = stack[stack.length - 1];
+    if (top !== undefined && c === top) {
+      stack.pop();
+      continue;
+    }
+    if (c === "'") {
+      if (i === 0 || head[i - 1] === ' ') stack.push("'");
+      continue;
+    }
+    const closer = OPENERS[c];
+    if (closer !== undefined) stack.push(closer);
+  }
+  const cut = lastDepth0Cut > 0 ? lastDepth0Cut : lastAnyCut;
   const kept = (cut > 0 ? head.slice(0, cut) : head.slice(0, room)).replace(/[\s,;:(\-–—]+$/u, '');
   return `${kept}…`;
 }
@@ -289,6 +327,10 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     f.repoRef !== null && f.repoRef !== '' ? `repo ${code(f.repoRef)}` : null,
   ].filter((s): s is string => s !== null);
   if (where.length > 0) out.push(`- ${where.join(' · ')}`);
+  if (f.revisesPr !== undefined && f.revisesPr !== null) {
+    // DES-L9: a revision names the PR it lands on — this text rides that PR as a comment.
+    out.push(`- Revises pull request [#${f.revisesPr.number}](${f.revisesPr.url}) — this run's commits were pushed onto its branch; no new PR was opened.`);
+  }
   out.push('');
 
   out.push('## Phases', '');
@@ -325,22 +367,33 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
             'script was found, or the workflow has no verify phase)._',
     );
   } else {
-    out.push('| check | command | exit | duration |', '|---|---|---|---|');
+    // DES-L9: WHICH phase's floor ran the check and the engine's own classification of a non-zero
+    // exit (`floor_env_mismatch` — the checks cannot run under the floor's sandbox on this host;
+    // `pre_existing_in_sandbox` — the base fails the same way), so "exit 1" is never read as
+    // "tests fail" when the engine itself excused it (review-benchmark-prs D3).
+    out.push('| phase | check | command | exit | classification | duration |', '|---|---|---|---|---|---|');
     for (const c of f.checks) {
-      out.push(`| ${cell(c.name)} | ${code(c.command)} | ${cell(exitLabel(c))} | ${duration(c.durationMs)} |`);
+      out.push(
+        `| ${code(c.phase)} | ${cell(c.name)} | ${code(c.command)} | ${cell(exitLabel(c))} | ${cell(classificationLabel(c))} | ${duration(c.durationMs)} |`,
+      );
     }
   }
   out.push('');
 
-  out.push('## Evaluator verdict', '');
+  // DES-L9: the EVALUATOR GATE — what the distinct evaluator seat concluded about the creator's
+  // work, as the engine recorded it: `passed its gate` for a clean pass, else the recorded status
+  // with the evaluator's own findings (`denial_reason` — the `VERDICT:` line's text) beside it.
+  out.push('## Evaluator gate', '');
   if (f.source === 'workflow') {
     out.push('_Not available at composition time — the run record has it._');
   } else if (f.verdicts.length === 0) {
     out.push('_This workflow has no evaluator phase._');
   } else {
     for (const v of f.verdicts) {
-      const reason = v.reason !== null && v.reason.trim() !== '' ? ` — ${cell(v.reason, 400)}` : '';
-      out.push(`- ${code(v.phase)} (${cell(v.seat ?? 'seat unknown')}): **${cell(v.verdict)}**${reason}`);
+      const hasReason = v.reason !== null && v.reason.trim() !== '';
+      const passed = !hasReason && /^(done|approved|passed?)$/i.test(v.verdict.trim());
+      const outcome = passed ? 'passed its gate' : `**${cell(v.verdict)}**${hasReason ? ` — ${cell(v.reason, 400)}` : ''}`;
+      out.push(`- ${code(v.phase)} (${cell(v.seat ?? 'seat unknown')}): ${outcome}`);
     }
   }
   out.push('');
@@ -351,6 +404,12 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     `Delivered by ${FOOTER_LINK} run ${code(f.runId)}. Merge stays human: the phase opens the PR, never merges it.`,
   );
   return { title, body: out.join('\n') };
+}
+
+/** The classification cell: the engine's word for a non-zero exit, `—` for a pass or none. */
+function classificationLabel(c: DeliverCheckFact): string {
+  if (c.classification !== null && c.classification.trim() !== '') return c.classification;
+  return c.exitCode === 0 ? '—' : c.exitCode === null && !c.timedOut && c.spawnError === null ? '—' : 'unclassified';
 }
 
 /** The one shape both carriers speak: title, blank line, body, trailing newline. */
@@ -391,6 +450,7 @@ interface EngineRepoChecks {
     duration_ms?: number;
     timed_out?: boolean;
     spawn_error?: string | null;
+    classification?: string | null;
   }>;
 }
 
@@ -438,13 +498,16 @@ function checksNoteOf(unit: WorkUnit): string | null {
 function checksOf(unit: WorkUnit): DeliverCheckFact[] {
   const rc = (unit as WorkUnit & { repo_checks?: EngineRepoChecks | null }).repo_checks;
   if (rc === null || rc === undefined || !Array.isArray(rc.checks)) return [];
+  const phase = phaseIdOf(unit);
   return rc.checks.map((c) => ({
+    phase,
     name: c.name ?? '—',
     command: Array.isArray(c.argv) ? c.argv.join(' ') : '—',
     exitCode: typeof c.exit_code === 'number' ? c.exit_code : null,
     durationMs: typeof c.duration_ms === 'number' ? c.duration_ms : null,
     timedOut: c.timed_out === true,
     spawnError: typeof c.spawn_error === 'string' ? c.spawn_error : null,
+    classification: typeof c.classification === 'string' && c.classification !== '' ? c.classification : null,
   }));
 }
 
@@ -476,7 +539,7 @@ export function baseWorkflowId(workflowId: string, runId: string): string {
 export function factsFromRun(
   view: SessionView,
   runUrl: string | null,
-  resolved: { workflowId?: string | null } = {},
+  resolved: { workflowId?: string | null; revisesPr?: { number: number; url: string } | null } = {},
 ): DeliverTextFacts {
   const s = view.session;
   const units = [...view.units].sort((a, b) => a.ord - b.ord);
@@ -511,6 +574,7 @@ export function factsFromRun(
         verdict: u.phase_status ?? u.status,
         reason: u.denial_reason,
       })),
+    revisesPr: resolved.revisesPr ?? null,
   };
 }
 
@@ -522,6 +586,7 @@ export function factsFromWorkflow(input: {
   repoRef: string | null;
   phases: PhaseDef[];
   runUrl: string | null;
+  revisesPr?: { number: number; url: string } | null;
 }): DeliverTextFacts {
   return {
     runId: input.runId,
@@ -541,6 +606,7 @@ export function factsFromWorkflow(input: {
     checks: null,
     checksNote: null,
     verdicts: [],
+    revisesPr: input.revisesPr ?? null,
   };
 }
 

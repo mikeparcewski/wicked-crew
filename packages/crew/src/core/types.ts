@@ -54,6 +54,22 @@ export interface LaunchRunInput {
   autoDeliver?: boolean;
   /** Id of a registered repo to run within. Omit for a repo-less run. */
   repoRef?: string;
+  /**
+   * DES-L9 / crew#550 (`revisesPr`): the head BRANCH of the open pull request this run revises,
+   * resolved by the HTTP boundary from the PR number via `gh pr view` — the engine bases the run
+   * worktree on `origin/<baseRef>` (wicked-core `LaunchSpec.base_ref`, core-ts ≥ 0.7.27) and the
+   * composed deliver phase pushes the run's commits onto that branch instead of opening a second
+   * PR. Crew-INTERNAL: never on the wire (`LaunchRunBody` carries `revisesPr` only). The adapter
+   * fails CLOSED on an addon without the field — an older engine would base on the default branch
+   * and push a duplicate PR.
+   */
+  baseRef?: string;
+  /**
+   * The pull request `baseRef` was resolved from (DES-L9): number, head branch and URL — carried
+   * to the deliver phase so its script pushes `wicked/<run>` onto `refs/heads/<headRef>`, proves
+   * the tip, comments the run record on the PR (`gh pr comment`) and prints the PR URL last.
+   */
+  revisesPr?: { number: number; headRef: string; url: string };
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
   /**

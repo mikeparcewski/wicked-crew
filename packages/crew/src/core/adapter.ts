@@ -35,7 +35,7 @@ import type {
 import { DEFAULT_SETTINGS } from './types.js';
 import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
 import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
 import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
@@ -586,7 +586,10 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'triage', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'reproduce', kind: 'test', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['triage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'fix', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
+      // DES-L9 (BC-60, core#432): the retired-behaviour sweep — the SAME literal core's `bug_def()` carries (wicked-core #522); pinned by a test
+      // so the two carriers cannot drift. `builtin-overlay-shadow.test.ts` tolerates exactly this one field while core MAIN has not merged #522
+      // (crew CI compares this mirror with core main); row 6.9 (the `^0.7.27` pin) removes that tolerance.
+      { id: 'fix', kind: 'build', instructions: BUG_FIX_SWEEP_INSTRUCTIONS, gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
     ],
   },
@@ -1350,8 +1353,14 @@ export class CoreAdapter {
    * silently ignores fields an older addon does not declare, so the version is the only honest
    * signal until the field lands.
    */
-  engineCapabilities(): { deliverGate: boolean } {
-    return { deliverGate: addonAtLeast(0, 7, 24) };
+  engineCapabilities(): { deliverGate: boolean; revisesPr: boolean } {
+    return {
+      deliverGate: addonAtLeast(0, 7, 24),
+      // DES-L9 / crew#550: `LaunchRunBody.revisesPr` needs the engine's `LaunchSpec.base_ref`
+      // (wicked-core-ts ≥ 0.7.27) — an older addon would base on the default branch and push a
+      // duplicate PR, so the route fails closed and the composer hides the affordance.
+      revisesPr: addonAtLeast(0, 7, 27),
+    };
   }
 
   /** Launch an interactive, resumable run → the run id. */
@@ -1377,6 +1386,18 @@ export class CoreAdapter {
       (opts as LaunchOptions & { autoDeliver?: boolean }).autoDeliver = true;
     }
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
+    if (input.baseRef !== undefined) {
+      // DES-L9 / crew#550: the revised PR's head branch as the run's base (`LaunchSpec.base_ref`,
+      // wicked-core-ts ≥ 0.7.27). Fail CLOSED on an older addon — napi ignores undeclared fields,
+      // and a run silently based on the default branch would push a DUPLICATE pull request.
+      if (!addonAtLeast(0, 7, 27)) {
+        throw new Error(
+          'revisesPr needs wicked-core-ts >= 0.7.27; the installed addon would silently ignore the ' +
+            'base and the run would open a second pull request instead of revising the first',
+        );
+      }
+      (opts as LaunchOptions & { baseRef?: string }).baseRef = input.baseRef;
+    }
     if (input.projectId !== undefined) {
       // Fail CLOSED on an old addon: silently dropping projectId would launch an unfiled run the
       // caller believed was filed — the exact failure §2.2 exists to prevent.
@@ -1509,6 +1530,11 @@ export class CoreAdapter {
           composed = composeDeliverWorkflow(composed, input.sessionId, input.problem, {
             repoRef: input.repoRef ?? null,
             apiOrigin: this.deliverApiOrigin?.() ?? null,
+            // DES-L9: the revised PR (push target) and the push identity for the gate card —
+            // GH_ACCOUNT's value and whether GH_TOKEN is exported (presence only, never the value).
+            revisesPr: input.revisesPr ?? null,
+            ghAccount: process.env['GH_ACCOUNT'] ?? null,
+            ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
           });
         }
       }
