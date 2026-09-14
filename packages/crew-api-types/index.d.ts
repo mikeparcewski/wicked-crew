@@ -147,12 +147,18 @@ export type RoutingInfo =
  *     `false` (or the whole object absent — a daemon before 0.7.33) ⇒ delivery follows verify
  *     UNATTENDED; a composer must say so instead of promising a gate, and must not send
  *     `deliverGate` (an older daemon's launch schema rejects it).
+ *   - `revisesPr` (api-types 0.38.0, additive) — the daemon accepts `LaunchRunBody.revisesPr`
+ *     (crew#550). Absent or `false` ⇒ a composer must NOT send it (an older daemon's launch
+ *     schema rejects it with a 400) and says "this daemon cannot revise a PR" instead.
+ *
+ * The object is the named {@link HealthCapabilities} since 0.38.0 — the same shape 0.37.0 declared
+ * inline, so nothing a 0.37.0 client compiled against moves.
  */
 export interface HealthResponse {
   status: string;
   version: string;
   ping: string;
-  capabilities?: { deliverGate: boolean };
+  capabilities?: HealthCapabilities;
   /**
    * Blockers the daemon reports while it still SERVES (additive; wicked-core#411 / wicked-crew#497).
    * One kind today — `state-home.unregistered`: the daemon's state home holds an entry the worker
@@ -170,6 +176,21 @@ export interface HealthResponse {
    * before this field. Cached by the daemon — reading it costs no I/O.
    */
   baseSkill?: BaseSkillPosture | null;
+}
+
+/**
+ * `GET /health.capabilities` (api-types 0.38.0 — named; 0.37.0 declared the same shape inline on
+ * {@link HealthResponse}). What the running daemon + its engine addon can actually do; every key
+ * is a promise the deployment keeps, so a client reads it before offering the behaviour.
+ */
+export interface HealthCapabilities {
+  /** See {@link HealthResponse} — the engine's deliver gate exists (wicked-core-ts ≥ 0.7.24). */
+  deliverGate: boolean;
+  /**
+   * `LaunchRunBody.revisesPr` is accepted (crew#550; crew ≥ 0.7.36). ABSENT on a daemon before
+   * the field — read as `false`: do not send `revisesPr` to such a daemon.
+   */
+  revisesPr?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -334,6 +355,23 @@ export interface AgentSession {
    */
   created_at?: number;
   /**
+   * When this run reached a TERMINAL status — unix SECONDS (api-types 0.38.0; crew#496 / studio#230).
+   * Mirrors {@link created_at}: daemon-derived at DTO assembly on BOTH `GET /runs` and
+   * `GET /runs/:id` from a `run.ended` audit entry the daemon records when it sees the run's
+   * terminal frame (`sessionCompleted` | `sessionFailed` | `runCancelled`), joined like
+   * {@link retry_of} / {@link guidance} and hydrated from the same trail scan at boot. Together with
+   * {@link created_at} ("started" ≡ "created" — the ONE launch instant) it gives a run its own clock;
+   * a skin prefers these over the moment it happened to attach.
+   *
+   * ABSENT — never `null`, never fabricated — when the daemon has no `run.ended` entry: a run
+   * still live, a run that terminalled before this field existed or before THIS daemon booted
+   * (no re-emission at boot), a lost trail, or the one crash window between the engine's status
+   * write and the daemon's synchronous audit record. Read with `typeof === 'number'`; a duration
+   * or a "finished N minutes ago" MUST be omitted for an undated run, never derived from now.
+   * Distinct from {@link finished_at} (engine-side unix MILLIS, retention bookkeeping).
+   */
+  ended_at?: number;
+  /**
    * The interactive DOCUMENT this run answered (wave 6, F-4R2-006 root fix; api-types 0.36.0) —
    * daemon-joined at DTO assembly on `GET /runs` and `GET /runs/:id` from the interactive seams'
    * handoff ledgers (the system of record for "this handoff was answered by this run"), so a skin
@@ -471,6 +509,14 @@ export interface OnboardRef {
  * the message — no operator hand-edit involved.
  */
 export interface SeatHealth {
+  /**
+   * `inactive` is NO LONGER PRODUCED from crew 0.7.36 (api-types 0.38.0 doc; DES-L3 R5): the daemon
+   * stopped flipping a seat on `stepFailed{workerError}`, on quota/401/timeout phrases and on
+   * repeated ACP fallback — seat standing is the engine's per-run ballot bench
+   * (`AgentSession.benched_seats`) plus the seat's own auth refusal (`RosterSeat.auth`). The token
+   * stays in the union so a daemon before 0.7.36 still parses; a reader treats it exactly as
+   * before (a seat-level error, recovery by the probe or a restart).
+   */
   status: 'active' | 'inactive';
   /** Bounded excerpt of the last seat-level error; present while `inactive`. */
   message?: string;
@@ -555,12 +601,18 @@ export interface RosterSeat {
    * `councilSeatFailed` evidence (`non_zero_exit` / `timed_out`, the derivative `benched` kind
    * excluded), folded over a bounded window (`window_ms`) and cleared by the seat's next ok unit
    * output. `council_eligible` is false while it is present.
+   *
+   * @deprecated ABSENT from crew 0.7.36 (DES-L3 R5b): the daemon-wide council-failure ledger is
+   * retired — the engine benches a dead seat per run at its own ballot threshold and the run DTO
+   * carries the bench (`AgentSession.benched_seats`). Removed from this contract one minor later;
+   * a reader must tolerate absence today.
    */
   council_bench?: RosterSeatCouncilBench;
   [k: string]: unknown;
 }
 
-/** `RosterSeat.council_bench` (api-types 0.35.0). */
+/** `RosterSeat.council_bench` (api-types 0.35.0).
+ *  @deprecated ABSENT from crew 0.7.36 (see {@link RosterSeat.council_bench}); removed one minor later. */
 export interface RosterSeatCouncilBench {
   /** Primary ballot failures inside the window. */
   failures: number;
@@ -661,6 +713,26 @@ export interface GateInfo {
 export interface GateDecision {
   approve: boolean;
   amend?: string;
+  /**
+   * The decision ARM (api-types 0.38.0, additive; DES-L1 PR-1B / crew PR-2, crew ≥ 0.7.36 on
+   * wicked-core-ts ≥ 0.7.27). Absent = today's two-arm mapping: `approve: true` approves (retry
+   * the same unit, `amend` steers it), `approve: false` rejects (cancels the run, keeps a dirty
+   * worktree). `'request_changes'` — an ESCALATION gate only: rewind to the most recent creator
+   * phase at or before the gated unit, hand it the evaluator's findings (+ `amend` as the note)
+   * and re-dispatch it (`unitReworkAmended{scope: 'request_changes'}` → `resumed` →
+   * `unitDispatched{attempt: last + 1}`); requires `approve: false` — a disagreement between
+   * `action` and `approve` answers 400, a gate with no creator phase before it 409. An older
+   * daemon's strict schema rejects the key with a 400 — omit it against such servers.
+   */
+  action?: 'approve' | 'request_changes' | 'reject';
+  /**
+   * Where an approve's `amend` lands (api-types 0.38.0, additive; same release as `action`).
+   * Absent = `'cursor'` (today: the gated unit's description). `'creator'` — the first creator
+   * phase at or after the cursor receives it (`unitReworkAmended{scope: 'creator'}`) while the
+   * cursor dispatches unamended: the intake steer that must reach the fix phase, not triage.
+   * Identical text already present on the target is not appended twice.
+   */
+  amendScope?: 'cursor' | 'creator';
 }
 
 /**
@@ -679,6 +751,12 @@ export interface ReassignRequest {
  * fields cover the frames the daemon and the studio inspect; the index
  * signature keeps the shape additive-safe so new variants pass through
  * untouched (DES-STUDIO-001 §2.1, §5.1).
+ *
+ * Exact per-frame shapes for consumers that narrow on `type`: the cockpit
+ * {@link InsightEvent} union, the gate-evidence {@link GateEvidenceEvent}
+ * union, and — typed in api-types 0.38.0 as the engine already emits them —
+ * the 11-key {@link GateEscalatedEvent}, {@link SandboxPostureEvent} and
+ * {@link WorktreeRetainedEvent}.
  */
 export interface CoreEvent {
   type: string;
@@ -982,8 +1060,20 @@ export interface RecordedEvent extends CoreEvent {
    * is required and spans every frame of the run; that one is optional and scoped to a stream. The
    * name is inherited from the wire and narrowed here rather than renamed, because the wire is what
    * `runEvents` returns.
+   *
+   * Across a daemon RESTART the counter is re-seeded from the trail's highest `seq` + 1, so `seq`
+   * stays strictly increasing over the whole trail — but two records of one run may be separated
+   * by an engine that lost every in-flight frame in between (api-types 0.38.0; crew#513).
    */
   seq: number;
+  /**
+   * Stamped `true` on exactly ONE record per restart: the first frame a fresh engine writes for a
+   * run whose trail already existed (wicked-core `event_log.rs`; api-types 0.38.0, crew#513). Every
+   * other record omits the key — never `false`. A timeline reads it as a "daemon restarted here"
+   * boundary: frames the previous process never wrote are not coming, and the run's `ended_at` may
+   * be absent for that reason.
+   */
+  daemonRestarted?: true;
 }
 
 /**
@@ -1011,8 +1101,13 @@ export interface UnitDispatchedEvent {
    * older engine. The generation it is handed from is the same unit's `skillsSnapshotHanded.gen`
    * (the handoff is where the generation is known truthfully). A run page renders
    * `discipline: <name> §<role> gen N`.
+   *
+   * `handed` (api-types 0.38.0, additive; wicked-core#479 — typed AHEAD of its producer, which
+   * lands in the wave-3 core-ts): `true` when the admitted snapshot holds the base skill and the
+   * carrier delivered it (the skill form is not `Unloaded`); `false` when the run only NAMED it.
+   * ABSENT ⇒ UNKNOWN (an engine before the field) — render `gen ?`, never "not handed".
    */
-  baseSkill?: { name: string; role: 'creator' | 'evaluator' | 'neutral' } | null;
+  baseSkill?: { name: string; role: 'creator' | 'evaluator' | 'neutral'; handed?: boolean } | null;
 }
 
 /** §3 B3 — token/cost burn for one unit run. `costUsd` is `null` when no cost is known. */
@@ -1127,6 +1222,16 @@ export interface GateEvaluatedEvent {
    *  validator gated it) — `"no eligible judge seat distinct from creator \`claude\` (roster: …;
    *  benched: …)"`. `null` when a judge ran or none was wanted; absent on an older engine. */
   judgeSkippedReason?: string | null;
+  /**
+   * The evaluator's own `VERDICT:` token (api-types 0.38.0, additive; DES-L1 PR-1A, wicked-core-ts
+   * ≥ 0.7.27): after trimming leading decoration, the LAST line whose first token is `VERDICT`
+   * decides — `"PASS"`, `"FAIL"`, or whatever token the seat wrote (`"CONDITIONAL"` is not PASS).
+   * Parsed for an Evaluator-role agent unit only; `null` for creator / neutral / tool units and
+   * when no such line exists (then `denial.source` is `evaluator_verdict` and the gate escalates
+   * `verdict_not_pass`). ABSENT on an engine before the field — a reader treats absent as "not
+   * parsed", never as PASS.
+   */
+  evaluatorVerdict?: string | null;
 }
 
 /** Foundation wave: session started with enriched context. */
@@ -1279,13 +1384,83 @@ export interface ValidationPinAttachedEvent {
   criterion: string;
 }
 
-/** P2 — a HumanConfirmIf gate escalated to human review. */
+/**
+ * P2 — a HumanConfirmIf gate escalated to human review. Since wicked-core#464 every fold DENIAL
+ * parks the run here too (followed by `awaitingHuman{gateKind: 'escalation'}`), and `condition`
+ * names the CLASS: `evaluator_mutated_worktree` (the worktree guard) · `boundary_deny` (input
+ * governance refused a tool call) · `dead_seat` (the seat is unusable — signed out / not installed /
+ * benched) · `floor_failed` (a deterministic floor: repo checks, pinned validator, substance,
+ * deliverables) · `verdict_not_pass` (the layer-2 judge, a worker failure, or — wicked-core-ts ≥
+ * 0.7.27 — the evaluator's own `VERDICT` line), or a def-declared `human_confirm_if` condition
+ * (`defGate: true`). `verdictSummary` is the denial reason.
+ *
+ * The six additive keys (api-types 0.38.0 — the engine has emitted all eleven since wicked-core#464;
+ * `event.rs::GateEscalated`) carry what a decision arm needs without re-reading the unit. ABSENT
+ * on a daemon whose engine predates them; when present they are ALWAYS all present.
+ */
 export interface GateEscalatedEvent {
   type: 'gateEscalated';
   session: string;
   ord: number;
   condition: string;
   verdictSummary: string;
+  /** The attempt whose output — persisted as the unit's REJECTED transcript — this gate reviews. */
+  attempt?: number;
+  /**
+   * The raw denial LAYER token (`gateEvaluated.denial.source`): `worktree_guard` ·
+   * `input_governance` · `dead_seat` · `repo_checks` · `repo_checks_timeout` · `pinned_validator`
+   * · `substance` · `deliverables` · `agent_validator` · `worker_failure` · `evaluator_verdict`
+   * (0.7.27) · `governance`. `""` (EMPTY) = a hook veto whose source identity was folded away
+   * (`actor.rs` `boundary_deny` arm with no structured denial) — a reader keys copy on
+   * `(condition, denialSource)` and treats `""` beside `boundary_deny` as input governance.
+   */
+  denialSource?: string;
+  /** `true` when the unit's OWN def declared this escalation (`human_confirm_if`); `false` = engine-authored. */
+  defGate?: boolean;
+  /** The phase produced output text — the precondition of an "accept the captured output" arm. */
+  outputCaptured?: boolean;
+  /**
+   * The worktree guard's restore outcome, mirroring {@link WorktreeRestoredEvent} — meaningful for
+   * `evaluator_mutated_worktree` only; `false` / `[]` / `null` for every other class.
+   */
+  restored?: boolean;
+  /** The paths the restore discarded (`git status --porcelain` status + path), as {@link WorktreeRestoredEvent.discarded}. */
+  discarded?: { status: string; path: string }[];
+  /** The `refs/wicked/suggestions/<run>/<ord>/<attempt>` ref holding the discarded changes; `null` when none. */
+  suggestionRef?: string | null;
+}
+
+/**
+ * F-E2E-039 (api-types 0.38.0; emitted since wicked-core `pipeline.rs` armed it): the containment
+ * POSTURE a unit's worker actually ran under, once per dispatch, so a skin can say it instead of
+ * implying an OS sandbox that was never armed. `os` — the registry seat record arms an OS write
+ * boundary (macOS `sandbox-exec` / Linux `bwrap`); `advisory` — the record arms none, so
+ * containment is the worktree guard plus the command-text fences, which a shell can evade.
+ * `reason` is the engine's sentence naming the deciding record/flag.
+ */
+export interface SandboxPostureEvent {
+  type: 'sandboxPosture';
+  session: string;
+  ord: number;
+  /** The registry seat key. */
+  cli: string;
+  posture: 'os' | 'advisory';
+  reason: string;
+}
+
+/**
+ * F-RC1-064 / F-E2E-028 (api-types 0.38.0; emitted since wicked-core#456): a TERMINAL run's
+ * worktree was KEPT because it holds uncommitted work the run branch does not carry — named on the
+ * wire so a skin can point the operator at the path. Cancel and the terminal reap apply the same
+ * rule; the retention window (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`) then reaps it clean-only. A
+ * clean tree is reaped and emits nothing. Session-level (no `ord`).
+ */
+export interface WorktreeRetainedEvent {
+  type: 'worktreeRetained';
+  session: string;
+  /** The kept worktree's absolute path (the engine's; a skin never resolves it). */
+  path: string;
+  reason: string;
 }
 
 /** P2 — a tool-executor command was dispatched (non-agent unit). */
@@ -1394,6 +1569,47 @@ export interface RepoCheckRun {
   /** The last 4 KiB of each stream — the evidence, verbatim. */
   stdoutTail: string;
   stderrTail: string;
+  /**
+   * The baseline-diff floor's evidence (api-types 0.38.0 — the seven keys the engine has emitted
+   * since wicked-core#469 / #476, `repo_checks.rs::CheckRun` with `serde(default,
+   * skip_serializing_if)`): each ABSENT when the engine has nothing to say (an older engine, a
+   * passing check, no base comparison). `boundS` — the EFFECTIVE wall-clock bound the check ran
+   * under, seconds (base × host-load factor); `boundNote` — how it was derived, for the operator.
+   */
+  boundS?: number;
+  boundNote?: string | null;
+  /**
+   * Failure identifiers streamed off the runner's output (`test a::b ... FAILED`, ` FAIL file >
+   * name`, `path: error TS1234: …`) — what the baseline diff compares. Absent/empty when the
+   * runner's format is not one the scanner knows (the diff then compares exit codes).
+   */
+  failureIds?: string[];
+  /**
+   * Set when the check FAILED and the same check was run on the base (`base`): `regression` (head
+   * failures absent on the base — denies) or `pre_existing_in_sandbox` (equal failure sets — never
+   * this change's doing); `floor_env_mismatch` was emitted by engines before wicked-core-ts 0.7.27
+   * and is retired. An OPEN string — new tokens may follow; `null`/absent when the check passed,
+   * timed out, could not run, or no base comparison was possible (the check then denies as before).
+   */
+  classification?: string | null;
+  /** Head failures that ALSO fail on the base (never this change's doing). */
+  preExisting?: string[];
+  /** Head failures ABSENT on the base — the regressions that deny. */
+  regressions?: string[];
+  /** The same check run on the run BASE, when the floor ran it; `null`/absent otherwise. */
+  base?: RepoCheckBaseRun | null;
+}
+
+/**
+ * `RepoCheckRun.base` — the same check on the run base (api-types 0.38.0; wicked-core
+ * `repo_checks.rs::BaseRun`). Typed as an OPEN object this release; the engine emits `head` (the
+ * base commit), `cached` (read back from this run's cache), `run` (a nested check run, absent when
+ * the base could not be run) and `error` (why not: export failed, the base declares no such check,
+ * its install failed, the repo opted out — the head check then denies fail-closed). The fields are
+ * named in the next minor (DES-L2 2C); read them through `unknown` narrowing until then.
+ */
+export interface RepoCheckBaseRun {
+  [k: string]: unknown;
 }
 
 /** wicked-core F-039 — the engine ran the repository's OWN checks in the worktree for the def's
@@ -1665,6 +1881,15 @@ export interface UnitReworkAmendedEvent {
   amendment: string;
   /** The unit's description after the amendment was injected. */
   updatedDescription: string;
+  /**
+   * WHICH unit received the text and WHY (api-types 0.38.0, additive; DES-L1 PR-1B, wicked-core-ts ≥
+   * 0.7.27): `'cursor'` — the gated unit, today's approve-with-steer (`GateDecision.amendScope`
+   * absent or `'cursor'`); `'creator'` — the first creator phase at/after the cursor
+   * (`amendScope: 'creator'`); `'request_changes'` — the creator phase the gate rewound to, and
+   * `amendment` then carries the evaluator's full findings + the operator's note. ABSENT on an
+   * engine before the field — read as `'cursor'`.
+   */
+  scope?: 'cursor' | 'creator' | 'request_changes';
 }
 
 /** P2 — a worker's ApplyStepResult arrived and output is ready to be gated. Fires before GateDecided.
@@ -2137,6 +2362,11 @@ export interface SkillBaselineRecord {
  *     the portable form names that skill (`wicked-garden-<x>`) instead;
  *   - `requires-harness:claude` — the author declared `metadata.requires-harness: claude` in the
  *     frontmatter: the skill genuinely needs the Claude harness (not an authoring defect).
+ *   - `claude-dispatch` (api-types 0.38.0; crew ≥ 0.7.36, DES-L6 D-21) — the body CALLS a Claude
+ *     Code dispatch primitive (`Task(`, `Skill(`, `context: fork`, `AskUserQuestion`, `TaskCreate`)
+ *     that no other seat has: a pi/opencode/codex worker cannot follow it. The portable form is the
+ *     plain-prose Hand-off paragraph. Reported by the publisher; garden's lint fails the same
+ *     skill (12.38.0). An older daemon never emits the token.
  */
 export type SkillPortabilityReason =
   | 'plugin-root'
@@ -2144,7 +2374,8 @@ export type SkillPortabilityReason =
   | 'cwd-script'
   | 'relative-link'
   | 'cross-skill-path'
-  | 'requires-harness:claude';
+  | 'requires-harness:claude'
+  | 'claude-dispatch';
 
 /** Per-reason portability of a skill (F-079, api-types 0.34.0) — reported beside `portable`. */
 export interface SkillPortability {
@@ -2446,6 +2677,14 @@ export interface SkillPublishResult extends SkillAnalyzeResult {
   /** The BASE skill posture AFTER this publish (crew#554): `present: false` with a `finding` is the
    *  "published a snapshot without the discipline skill" warning. Absent on a daemon before it. */
   baseSkill?: BaseSkillPosture | null;
+  /**
+   * `true` when the publish found NOTHING to publish (api-types 0.38.0; crew#547 / DES-L6, crew ≥
+   * 0.7.36): the effective tree's `contentHash` equals the current generation's, so no new
+   * `snapshots/<gen>/` was minted, `current` did not move and `snapshot` is the CURRENT generation
+   * (its `gen` unchanged). ABSENT (never `false`) on a publish that staged a generation, and on a
+   * daemon before the field — a skin shows "already published as gen N", not a new generation.
+   */
+  unchanged?: true;
 }
 
 /** `POST /skills/refresh-baseline` 200 body — the three-way merge per FILE (baseline_old /
@@ -3104,6 +3343,18 @@ export interface LaunchRunBody {
    */
   deliverGate?: 'human' | 'auto';
   /**
+   * REVISE an existing pull request instead of opening a new one (api-types 0.38.0, additive;
+   * crew#550 / DES-L9, crew ≥ 0.7.36 on wicked-core-ts ≥ 0.7.27): the number of an OPEN same-repo PR.
+   * The daemon resolves its head branch (`gh pr view` in the registered clone), the engine bases the
+   * run's worktree on that head, and the deliver phase pushes exactly the run's commits to that
+   * branch and comments the run record on the PR — no second PR, no rebase. Needs `repoRef` and
+   * `workflow` (400 without), a resolved `deliver: 'pr'` (409 otherwise; an explicit
+   * `deliver: 'none'` is a 400), and the PR must be OPEN and not from a fork (409 naming why).
+   * Send it ONLY when `GET /health.capabilities.revisesPr === true` — an older daemon's strict
+   * launch schema rejects the key with a 400.
+   */
+  revisesPr?: number;
+  /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with
    * a named error), never a silently unrecorded lineage. The daemon persists it, echoes it
@@ -3361,7 +3612,15 @@ export interface CodeGraphEdge { src: string; tgt: string; }
 export interface CodeGraphData {
   nodes: CodeGraphNode[];
   edges: CodeGraphEdge[];
+  /** Counts of the SERVED SLICE (`graph-view --limit`, `SystemSettings.graphNodeLimit`) — what is in `nodes`/`edges`. */
   stats: { nodeCount: number; edgeCount: number; fileCount: number };
+  /**
+   * Whole-graph counts (api-types 0.38.0, additive; crew#505 / F-RC1-100): what the repository's
+   * estate database holds in total, from `wicked-estate stats`, so a tile can read "150 of 5,470
+   * symbols shown" instead of presenting the slice as the repo. ABSENT when the stats line did not
+   * parse or on a daemon before the field — then only the slice is known; never substitute `stats`.
+   */
+  totals?: { nodes: number; edges: number; files: number };
 }
 
 /**
@@ -3493,6 +3752,18 @@ export interface SystemSettings {
    * forward-additive, §5.1), so a skin's own state MUST ride this namespace to persist.
    */
   [key: `studio.${string}`]: unknown;
+}
+
+/**
+ * `GET /settings` → 200 (api-types 0.38.0 — the body's first named type; the shape `{ settings }`
+ * is unchanged since 0.1). `path` (additive; DES-L10 PR-L10-6, crew ≥ 0.7.35) is the ABSOLUTE
+ * path of the settings file the daemon reads and writes (`WICKED_CREW_SYSTEM_SETTINGS` honoured),
+ * so a skin names the real file instead of a guessed default. ABSENT on a daemon before the field
+ * — render "the daemon's settings file", never a fabricated path.
+ */
+export interface SettingsResponse {
+  settings: SystemSettings;
+  path?: string;
 }
 
 // ── Requirements management (server-side search + overrides; crew api/requirements.ts) ──
@@ -4129,6 +4400,31 @@ export interface ChatListResponse {
   chats: ChatSummary[];
 }
 
+/**
+ * Token/cost burn of ONE seat's chat turn (api-types 0.38.0; DES-L5, crew ≥ 0.7.35 on wicked-core-ts
+ * ≥ 0.7.26) — mirrors the engine's `Usage` (`workflow.rs`) as `chatReply.usage`: `null` on bridges
+ * that emit no usage (pi, agy). `costUsd` is `null` when no price is known — never `0`.
+ */
+export interface ChatUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number | null;
+}
+
+/**
+ * One record of a chat's persisted transcript (api-types 0.38.0; DES-L5 D-13): the daemon appends
+ * the operator's message and every seat's reply to `<state home>/chats/<id>.jsonl` for the CHAT'S
+ * LIFETIME (dropped on `chatClosed`, cleared at boot) and serves them on `GET /chats/:id.messages`
+ * in append order. `at` is epoch millis; `turnId` is always present (only turn-stamped frames are
+ * persisted). A `seat` record's `ok: false` text names the reason (a budget eviction reads
+ * "exceeded the N s turn budget … target it on your next message to re-seat it").
+ */
+export type ChatTranscriptRecord =
+  | { at: number; turnId: string; kind: 'user'; text: string; seats: string[] }
+  | { at: number; turnId: string; kind: 'seat'; cliKey: string; text: string; ok: boolean; usage: ChatUsage | null };
+
 /** `GET /chats/:id` → 200. */
 export interface ChatDetailResponse {
   chatId: string;
@@ -4139,6 +4435,12 @@ export interface ChatDetailResponse {
    *  the admission copy survives a reload; `null` for a chat this daemon did not open; absent on a
    *  daemon predating the field. */
   refused?: ChatSeatRefusal[] | null;
+  /**
+   * The chat's transcript so far (api-types 0.38.0, additive; DES-L5, crew ≥ 0.7.35) — `[]` for a
+   * chat with no persisted turn yet; ABSENT on a daemon predating the field (a rejoin then shows
+   * "session continues" without history). Unbounded — a reply may be up to the engine's cap.
+   */
+  messages?: ChatTranscriptRecord[];
 }
 
 // ── Project code graph (DES-PROJECT-001; the co-located multi-repo graph) ──────

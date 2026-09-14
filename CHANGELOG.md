@@ -11,6 +11,32 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Changed
+- **`wicked-crew-api-types` 0.38.0** (additive over 0.37.0 — the wave-1 train's ONE api-types
+  release; FIX-IT-ALL L8 PR-0, the field list adjudicated across every lane's design). Publishes the
+  declarations made on `main` since 0.7.34 (#555 / #557 / #558: `HealthResponse.warnings?` /
+  `.baseSkill?`, `DiagnosticsResponse.stateHome?`, `DiagnosticsSkills.baseSkill`,
+  `UnitDistributedEvent.distinctnessFallback?`, `StateHomeBlockerBody`, `BaseSkillRefusedResponse`,
+  `NoEligibleSeatBody`) and types, ahead of their crew/core releases, what the sibling lanes emit —
+  every field OPTIONAL, Rust `Option` → `| null`, nothing removed: `GateDecision.action?`
+  (`approve | request_changes | reject`) + `.amendScope?` (`cursor | creator`),
+  `GateEvaluatedEvent.evaluatorVerdict?`, `UnitReworkAmendedEvent.scope?`; `RepoCheckRun` +
+  `boundS?` / `boundNote?` / `failureIds?` / `classification?` (open string) / `preExisting?` /
+  `regressions?` / `base?: RepoCheckBaseRun | null` (open object); `RosterSeat.council_bench` +
+  `RosterSeatCouncilBench` `@deprecated` (absent from crew 0.7.36) and the `SeatHealth.status` doc
+  ("`inactive` no longer produced"); `UnitDispatchedEvent.baseSkill.handed?` (typed ahead of
+  wicked-core#479's producer — absent ⇒ unknown); `ChatUsage`, `ChatTranscriptRecord`,
+  `ChatDetailResponse.messages?`; `SkillPublishResult.unchanged?: true` and
+  `SkillPortabilityReason` + `'claude-dispatch'`; the 11-key `GateEscalatedEvent` (+ `attempt?`,
+  `denialSource?` — `""` = a folded-away hook veto —, `defGate?`, `outputCaptured?`, `restored?`,
+  `discarded?`, `suggestionRef?`), `SandboxPostureEvent`, `WorktreeRetainedEvent`,
+  `AgentSession.ended_at?` (unix seconds; absent, never fabricated), `RecordedEvent.daemonRestarted?:
+  true`, `CodeGraphData.totals?`; `LaunchRunBody.revisesPr?` and the named `HealthCapabilities {
+  deliverGate; revisesPr? }` (0.37.0's inline object, unchanged in shape); `SettingsResponse {
+  settings; path? }` — the `GET /settings` body's first named type. Deliberately NOT in this
+  release: `demo_steps`' removal and `reasons?` / `side_effects?` (non-additive → 0.39.0, wave 4),
+  a `chatReply` d.ts type, `treeHash`, `baseRef`. The daemon's `endpoint-manifest.json` re-stamps
+  `apiTypesVersion` 0.38.0 (codegen only — no route changed). Tag `api-types-v0.38.0`
+  (`release-api-types.yml`); studio 0.5.10 pins it and re-vendors its byte-pinned mirrors.
 - **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
 
 ### Fixed
