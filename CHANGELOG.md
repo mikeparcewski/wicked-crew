@@ -10,6 +10,14 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Added
+- **`GET /settings` names the settings file the daemon actually reads and writes — additive `path`
+  (crew#494 crew half, F-007 — FIX-IT-ALL L10-6).** The System page showed a LITERAL settings path;
+  `settingsFilePath()` (`WICKED_CREW_SYSTEM_SETTINGS` honoured, else the config-dir default) never
+  reached the wire. `{ settings, path }` — `path` as `wicked-crew-api-types` 0.38.0 types
+  `SettingsResponse.path?` (adjudicated §4.6: `path`, not `settings_path`); studio renders it (L8).
+  No behaviour change beyond the new field.
+
 ### Changed
 - **`wicked-crew-api-types` 0.38.0** (additive over 0.37.0 — the wave-1 train's ONE api-types
   release; FIX-IT-ALL L8 PR-0, the field list adjudicated across every lane's design). Publishes the
