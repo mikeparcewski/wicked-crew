@@ -1067,9 +1067,10 @@ describe('api-types 0.38.0 — recorded + DES-shaped engine frames (FIX-IT-ALL L
     expect(frame['denialReason']).toBe((frame['denial'] as Record<string, unknown>)['reason']);
     // A 0.7.26 engine's 19-key frame is still a valid GateEvaluatedEvent (`evaluatorVerdict?` is optional) —
     // the tolerant read `evaluatorVerdict ?? null` is what a consumer keys on across both engines.
-    const { evaluatorVerdict: _dropped, ...nineteen } = RECORDED_GATE_EVALUATED_EVALUATOR_VERDICT;
-    const older: Wire.GateEvaluatedEvent = nineteen;
-    expect(older.evaluatorVerdict ?? null).toBeNull();
+    const nineteen: Wire.GateEvaluatedEvent = { ...RECORDED_GATE_EVALUATED_EVALUATOR_VERDICT };
+    delete nineteen.evaluatorVerdict;
+    expect(Object.keys(nineteen)).toHaveLength(KEYS.length - 1);
+    expect(nineteen.evaluatorVerdict ?? null).toBeNull();
   });
 
   it('gateEscalated carries exactly the 11 fields + `type` the engine emits (the two recorded and the two DES-shaped frames alike), in the camelCase the contract spells; `null` / `[]` / `""` are present, never absent', () => {
