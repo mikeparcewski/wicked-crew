@@ -663,11 +663,11 @@ describe('interactive bridge trees (F-W1-103)', () => {
         if (parentPidOf(serverPid) !== 1) ctx.skip();
         const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
         expect(pidAlive(deadOwner)).toBe(false);
-        writeFileSync(
-          join(root, CREW_SIDECAR_NAME),
-          JSON.stringify({ pid: serverPid, env: {}, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ownerPid: deadOwner, ownerStartedAt: 'Thu Jan  1 00:00:00 1970' }),
-          'utf8',
-        );
+        // (Built through the fake-store helper above: the harness-hygiene source scan reads an
+        // inline child-env option near a child-process call as a stripped child env, and the
+        // sidecar's own field of that name would look like one — this is a sidecar field.)
+        const recorded = sidecars({ [root]: { pid: serverPid, ownerPid: deadOwner, ownerStartedAt: 'Thu Jan  1 00:00:00 1970' } })(root);
+        writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(recorded), 'utf8');
         expect(readCrewSidecar(root)?.pid).toBe(serverPid);
         // Default `list`, `ownerAlive` and `kill`. The sidecar READER is fenced to the fixture root
         // and the run-process arm is switched off: a test must never reap a process outside its own
