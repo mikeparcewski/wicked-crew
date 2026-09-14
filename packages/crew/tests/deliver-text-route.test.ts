@@ -129,8 +129,9 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     expect(text!.body).toContain('| `fix` | build | creator | claude | auto | approved |');
     expect(text!.body).toContain('| `verify` | test | evaluator | pi | human if verdict not pass | approved |');
     expect(text!.body).toContain('| `deliver` | build | neutral | tool | auto | this PR |');
-    expect(text!.body).toContain('| test | `npm run test` | 0 | 1.5s |');
-    expect(text!.body).toContain('- `verify` (pi): **approved**');
+    expect(text!.body).toContain('| `verify` | test | `npm run test` | 0 | — | 1.5s |');
+    // DES-L9: the evaluator GATE reads a clean pass as such.
+    expect(text!.body).toContain('- `verify` (pi): passed its gate');
     expect(text!.body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
   });
 

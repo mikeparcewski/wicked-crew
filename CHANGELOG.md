@@ -28,6 +28,50 @@ mentioned only where a daemon release depends on them.
   until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
   (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
   `LaunchCampaignBody.denialGate?`.
+<!-- fixall L9 -->
+- **Revise a pull request from a run (`revisesPr`), a deliver identity that refuses instead of
+  switching, deliver text that reads right, and a deliver sweep that no longer walks the engine's
+  scratch (DES-L9 r2 §5 PR-L9-crew; crew #549 = F-RC1-010 / F-RC2-026/036, crew #550 = F-RC1-043 /
+  F-RC1-061, crew #579 = F-BM-002, review-benchmark-prs D3; BC-57, BC-59, BC-60).** Needs
+  wicked-core-ts ≥ 0.7.27 for the engine half (`LaunchSpec.base_ref`, the deliver-refusal arm).
+  (a) `POST /runs {revisesPr: N}` (api-types 0.38.0) — an OPEN same-repository pull request's head
+  branch becomes the run's base and the push target: the daemon resolves it via `gh pr view` (5 s;
+  not OPEN / a fork / gh failure ⇒ 409 by name; `deliver: "none"` ⇒ 400; a launch this daemon
+  resolved to `none` via `deliverDefault` ⇒ 409), hands the engine `baseRef` (crew-internal; FAIL-
+  CLOSED on an addon < 0.7.27 — an older engine would base on the default branch and open a
+  duplicate PR), records `run.launched.detail.revisesPr` (the retry index hydrates it), and the
+  composed deliver phase pushes `wicked/<run>` onto `refs/heads/<head>` — the PR gains exactly the
+  run's commits, no rebase onto the default branch, no second PR — proves the remote tip, comments
+  the run record on the PR (`gh pr comment`; a comment failure is printed, not fatal) and prints
+  the PR URL last. A head that moved or vanished since the run based on it is REFUSED before
+  staging (no `LIFT-CONFLICT` marker — a re-push cannot succeed); the moved-head refusal ends with
+  a short `deliver:` line so it survives the engine's tail excerpt. A stranded revision's post-hoc
+  `POST /runs/:id/deliver` re-checks the PR is OPEN and re-pushes to THAT branch. `GET
+  /health.capabilities.revisesPr` (engine ≥ 0.7.27) tells composers whether to offer it.
+  (b) IDENTITY (D-18): the `gh auth switch` is DELETED. With `GH_ACCOUNT` set, a deliver whose
+  active gh login differs — or cannot be read — REFUSES up front (`deliver: identity mismatch —
+  GH_ACCOUNT is <a> but gh's active login is <b|unreadable>; nothing was staged, committed or
+  pushed. …`); the engine's arm parks the run at an escalation gate (approve re-runs the phase).
+  Unset = today, now disclosed in the phase output (`deliver: pushing as <login> (GH_ACCOUNT not
+  set — not pinned)`). The deliver GATE card names the push target and the identity with its pin
+  source (`pinned by GH_TOKEN` / `from the gh keyring — export GH_TOKEN to pin it` / `not set`).
+  (c) TEXT: the 72-char title / commit-subject cut lands at the last word boundary OUTSIDE any
+  quoted or bracketed phrase (crew #550 P-1 — `… truncated at '(Failed):' and 'sign a seat…`);
+  the repo-checks table gains `phase` and the engine's `classification` (`floor_env_mismatch` is
+  no longer read as "tests fail" — review-benchmark-prs D3); "Evaluator verdict" becomes
+  "Evaluator gate" (`passed its gate` / the recorded status with the evaluator's findings). The
+  run link is unchanged (loopback-only, DES-L9 §10). The conventional title prefix and the
+  commit trailer are PARKED on `fixall/L9-crew-titles` pending the user's register rows.
+  (d) SWEEP (F-BM-002, crew #579): the untracked-file classifier excludes the
+  top-level scratch directories (`tmp/ .tmp/ scratch/ .cache/ coverage/`) AT ENUMERATION with git
+  pathspecs and reports each once with a count — never a fork per file for a path it excludes;
+  the engine's `tmp/wicked-checks` and a worker's pytest temp no longer take hours. (e) `bug.fix`
+  carries the retired-behaviour sweep `instructions` — the same literal wicked-core's `bug_def()`
+  carries, pinned by a test. `deliver-triage.ts` accepts the engine arm's `deliver refused on unit
+  N: ` framing. Tests: the three #578 NOT_FIXED_YET pins flip to `it`; script tests drive identity
+  (mismatch / unreadable / match / pinned / unset), revision (push onto the PR branch, moved head,
+  vanished head, nothing on top, comment), the scratch-dir exclusion; resolver, schema refines and
+  the 409s, the retry-index hydrate, the gate-card text, the title/body composer.
 
 ## [0.7.35] — 2026-09-14
 

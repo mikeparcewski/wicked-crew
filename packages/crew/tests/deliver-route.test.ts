@@ -379,7 +379,8 @@ describe('GET /health capabilities (F-E2E-030)', () => {
     } as unknown as MockAdapter);
     await app.ready();
     const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
-    expect(res.json().capabilities).toEqual({ deliverGate: false });
+    // DES-L9: `revisesPr` rides beside `deliverGate` — a stub-driven route set honestly reports neither.
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false });
     await app.close();
   });
 });

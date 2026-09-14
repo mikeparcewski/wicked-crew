@@ -43,7 +43,7 @@ const PR_BRANCH = 'wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595';
  *  output (the block runs before `git fetch`), so `stepFailed.detail` carries it verbatim. */
 const REFUSAL =
   "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is someone-else; nothing was " +
-  "staged, committed or pushed. Fix the daemon's gh login (gh auth switch, or GH_TOKEN in the daemon environment) " +
+  "staged, committed or pushed. Fix the daemon's gh login (switch gh's active account, or export GH_TOKEN in the daemon environment) " +
   'and approve to retry the deliver phase';
 
 /** DES-L9 §4 — the gate prompt the arm parks with. */
@@ -257,7 +257,7 @@ describe('DES-L9 deliver refusal → escalation gate: the crew half (PR-L9-crew-
   // health reads `stepFailed.detail`, the bare snippet, and is unaffected) — answers null: the refusal
   // is neither classified `script_refusal` nor marked non-recoverable. One side flips it: the engine
   // frames with `(deliver): ` (PR-L9-core) or the rule accepts `: deliver: ` (PR-L9-crew).
-  it.fails('NOT_FIXED_YET (DES-L9 §5 framing ↔ deliver-triage line rule): the parked unit’s denial_reason classifies script_refusal, non-recoverable — no post-hoc lift is offered', () => {
+  it('FIXED (PR-L9-crew; DES-L9 §5 framing ↔ deliver-triage line rule): the parked unit’s denial_reason classifies script_refusal, non-recoverable — no post-hoc lift is offered', () => {
     const deliver = view().units.find((u) => u.id.endsWith(':deliver'))!;
     expect(deliver.denial_reason).toMatch(/^deliver refused on unit 5: deliver: identity mismatch/);
     expect(triageDeliverFailure(deliver.denial_reason)).toEqual({

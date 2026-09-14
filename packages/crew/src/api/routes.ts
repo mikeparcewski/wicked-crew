@@ -94,6 +94,7 @@ import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.j
 import { ProjectSettingsStore } from '../projects/settings.js';
 import { boundOrigin, InteractiveBridgePool } from '../interactive/bridge-pool.js';
 import { composeDeliverText, factsFromRun, framedDeliverText, runUrlFor } from '../core/deliver-text.js';
+import { resolvePullRequest as resolvePullRequestViaGh, type PullRequestResolution } from '../core/deliver.js';
 import type { DocGroundingStore } from '../interactive/doc-grounding.js';
 import { registerInteractiveProxy } from '../interactive/proxy-routes.js';
 import { registerInteractiveDocDelete } from '../interactive/doc-delete-routes.js';
@@ -501,6 +502,13 @@ export const LaunchSchema = z.object({
    *  sharing a label form one `RunGroup` on `GET /campaigns`. Persisted/echoed like
    *  `campaignId` (as `AgentSession.group_label`). */
   groupLabel: z.string().min(1).max(200).optional(),
+  /** DES-L9 / crew#550 (api-types 0.38.0) — REVISE an OPEN same-repository pull request: its head
+   *  branch becomes the run's base and the deliver phase pushes the run's commits onto it (no
+   *  second PR), commenting the run record. Needs `repoRef` + `workflow` and `deliver: "pr"`
+   *  (explicit `"none"` is a 400; a daemon that resolves the omitted field to `none` is a 409).
+   *  Resolved via `gh pr view` at launch — not OPEN / a fork / gh failure ⇒ 409, nothing launched.
+   *  Send it only when `GET /health.capabilities.revisesPr === true` (engine ≥ 0.7.27). */
+  revisesPr: z.number().int().positive().optional(),
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
@@ -514,6 +522,12 @@ export const LaunchSchema = z.object({
   message:
     'campaignId and groupLabel are mutually exclusive — a run files onto ONE grouping surface (an existing campaign, or a label group)',
   path: ['groupLabel'],
+}).refine((b) => b.revisesPr === undefined || (b.repoRef !== undefined && b.workflow !== undefined), {
+  message: 'revisesPr needs repoRef and workflow — a revision bases a repo-scoped, def-driven run on the pull request\'s branch',
+  path: ['revisesPr'],
+}).refine((b) => b.revisesPr === undefined || b.deliver !== 'none', {
+  message: 'revisesPr needs deliver: "pr" — a launch that declines delivery has no phase to push the revision with',
+  path: ['revisesPr'],
 });
 
 /** `POST /runs/:id/gate` (api-types 0.38.0 `GateDecision`; DES-L1 PR-2). Additive arms: `action`
@@ -620,6 +634,9 @@ export interface SecurityDeps {
  * injectable so tests never actually open anything).
  */
 export interface RuntimeDeps {
+  /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
+   *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
+  resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   seatHealth?: SeatHealthTracker;
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
@@ -839,6 +856,8 @@ export function registerRoutes(
   /** Repo root for a repo ref, from the registry — shared by the reprovision path below. */
   const repoRootOf = async (repoRef: string): Promise<string | undefined> =>
     (await adapter.listRepos()).find((r) => r.id === repoRef)?.root_path;
+  /** DES-L9: PR number → head branch, through `gh pr view` unless the runtime injected an answerer. */
+  const resolvePullRequest = runtime.resolvePullRequest ?? resolvePullRequestViaGh;
   // The run-DTO joins (DES-UX-001 §8.2/§8.3, DES-UX-002 §7.2): `project_id` from the membership
   // record — `null` = genuinely unfiled, so the field is ALWAYS present on served runs —
   // `retry_of` from the lineage index and `guidance` from the guidance index, each set only
@@ -937,7 +956,7 @@ export function registerRoutes(
     const capabilities =
       typeof adapter.engineCapabilities === 'function'
         ? adapter.engineCapabilities()
-        : { deliverGate: false };
+        : { deliverGate: false, revisesPr: false };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
     // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
@@ -1482,6 +1501,35 @@ export function registerRoutes(
       deliverDefaulted = true;
     }
     if (deliver === 'pr') input.deliver = 'pr';
+    // DES-L9 / crew#550 — REVISION: `revisesPr` names an OPEN same-repository pull request whose
+    // head branch becomes the run's base (`baseRef`, crew-internal → the engine's
+    // `LaunchSpec.base_ref`) and the push target of the composed deliver phase — the PR gains
+    // exactly the run's commits, no second PR. Resolved HERE via `gh pr view` (5 s; the engine has
+    // no GitHub client) and refused by name on anything but OPEN + same repo. Judged AFTER the
+    // deliver resolution (F5): a launch this daemon resolved to `none` (deliverDefault) has no
+    // phase to push with — a revision that pushes nothing would be a silent no-op.
+    let revisesPr: { number: number; headRef: string; url: string } | undefined;
+    if (b.revisesPr !== undefined) {
+      if (deliver !== 'pr') {
+        return reply.code(409).send({
+          error: `revisesPr needs deliver: pr — this daemon resolved the launch to none (deliverDefault); send deliver: "pr"`,
+        });
+      }
+      const revisedRepo = b.repoRef;
+      if (revisedRepo === undefined) {
+        // Unreachable past the schema refine; kept so the type narrows honestly.
+        return reply.code(400).send({ error: 'revisesPr needs repoRef' });
+      }
+      const root = await repoRootOf(revisedRepo);
+      if (root === undefined) {
+        return reply.code(404).send({ error: `repoRef names an unknown repo: ${revisedRepo}` });
+      }
+      const resolved = await resolvePullRequest(root, b.revisesPr);
+      if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
+      revisesPr = { number: b.revisesPr, headRef: resolved.pr.headRef, url: resolved.pr.url };
+      input.baseRef = revisesPr.headRef;
+      input.revisesPr = revisesPr;
+    }
     // Retry lineage (DES-UX-001 §8.3): `retryOf` must name an EXISTING run — recording lineage
     // to a run that never existed would be provenance pointing at nothing, so the launch fails
     // loudly (400, before anything is committed) rather than filing a dangling edge.
@@ -1536,12 +1584,16 @@ export function registerRoutes(
         // CREW-UX-3: the trail is the durable record of lineage — the retry index (and a
         // restarted daemon's hydrate) reads it back from exactly this entry.
         ...(b.retryOf !== undefined ? { retryOf: b.retryOf } : {}),
+        // DES-L9: the revised PR (number, head branch, URL) — the retry index (and a restarted
+        // daemon's hydrate) reads it back from here so a stranded revision re-pushes to THAT PR.
+        ...(revisesPr !== undefined ? { revisesPr, baseRef: revisesPr.headRef } : {}),
         // wicked-studio#27: the trail is likewise the durable record of the group attach —
         // the group index (and a restarted daemon's hydrate) reads it back from here.
         ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
         ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
+      if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
       else if (b.groupLabel !== undefined) groupIndex.set(runId, { label: b.groupLabel });
       if (b.projectId !== undefined) {
@@ -1760,7 +1812,10 @@ export function registerRoutes(
       // The workflow DEFINITION (a user-registered workflow's view carries the engine instance id).
       const def = resolveRunWorkflow(run, listWorkflowsSafe());
       const text = composeDeliverText(
-        factsFromRun(decorateRun(run), runUrlFor(origin, id), { workflowId: def?.id ?? null }),
+        factsFromRun(decorateRun(run), runUrlFor(origin, id), {
+          workflowId: def?.id ?? null,
+          revisesPr: retryIndex.revisesPrFor(id) ?? null,
+        }),
       );
       return reply.type('text/plain; charset=utf-8').send(framedDeliverText(text));
     },
@@ -1863,6 +1918,9 @@ export function registerRoutes(
       // the throwaway down after the lift.
       let result: DeliverScriptResult | undefined;
       let worktreeGone = false;
+      // DES-L9: a stranded REVISION re-pushes onto its PR's branch (re-checked OPEN via the same
+      // resolver), never a new PR; a PR that closed meanwhile is a named 409.
+      let revisionRefused: string | undefined;
       try {
         // The worktree admin (reprovision), the deliver spawn, AND the throwaway teardown all run
         // under the per-repo lock, so a second stranded run in this repo cannot touch
@@ -1887,10 +1945,28 @@ export function registerRoutes(
             // holds (the fallback), and names this daemon so the script can re-ask at delivery.
             const origin = boundOrigin(app.server.address());
             const def = resolveRunWorkflow(run, listWorkflowsSafe());
+            const revising = retryIndex.revisesPrFor(id);
+            let revisesPr: { number: number; headRef: string; url: string } | null = null;
+            if (revising !== undefined) {
+              const revisedRoot = await repoRootOf(repoRef);
+              const again =
+                revisedRoot === undefined
+                  ? ({ ok: false, error: `repo ${repoRef} is no longer registered — cannot re-check pull request #${revising.number}` } as const)
+                  : await resolvePullRequest(revisedRoot, revising.number);
+              if (!again.ok) {
+                revisionRefused = again.error;
+                return;
+              }
+              revisesPr = { number: revising.number, headRef: again.pr.headRef, url: again.pr.url };
+            }
             result = await deliverExec(workdir, s.problem ?? undefined, {
               runId: id,
               apiOrigin: origin,
-              facts: factsFromRun(run, runUrlFor(origin, id), { workflowId: def?.id ?? null }),
+              facts: factsFromRun(run, runUrlFor(origin, id), {
+                workflowId: def?.id ?? null,
+                revisesPr: revisesPr === null ? null : { number: revisesPr.number, url: revisesPr.url },
+              }),
+              revisesPr,
             });
           } finally {
             if (cw !== null) await cw(); // tear the throwaway down whether the lift succeeded or threw
@@ -1905,6 +1981,9 @@ export function registerRoutes(
         return reply.code(409).send({
           error: `run ${id}'s worktree is gone (${s.workdir}) — nothing left to deliver`,
         });
+      }
+      if (revisionRefused !== undefined) {
+        return reply.code(409).send({ error: revisionRefused });
       }
       if (result === undefined) {
         // Unreachable: the lock body assigns `result` on every path that is not `worktreeGone`.

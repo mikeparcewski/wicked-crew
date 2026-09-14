@@ -44,7 +44,7 @@ const roots: string[] = [];
  * A bare origin + a clone on `main` + a run worktree on `wicked/<RUN_ID>` — the exact shape
  * `repo::create_worktree` leaves behind: a branch cut from the base tip with a CLEAN tree.
  */
-function fixture(opts: { worktree?: boolean; defaultBranch?: string } = {}): Fixture {
+function fixture(opts: { worktree?: boolean; defaultBranch?: string; fromRef?: string } = {}): Fixture {
   const branch = opts.defaultBranch ?? 'main';
   const root = mkdtempSync(join(tmpdir(), 'crew-deliver-'));
   roots.push(root);
@@ -74,8 +74,25 @@ function fixture(opts: { worktree?: boolean; defaultBranch?: string } = {}): Fix
   if (opts.worktree === false) return { workdir: clone, clone, origin, root };
 
   const workdir = join(root, RUN_ID);
-  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, branch);
+  git(clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, workdir, opts.fromRef ?? branch);
   return { workdir, clone, origin, root };
+}
+
+/** DES-L9 — the PR this run revises: a `wicked/prior-run` branch on origin, one commit on top of main,
+ *  fetched into the clone so `origin/wicked/prior-run` resolves. Returns its head sha. */
+const PR_BRANCH = 'wicked/prior-run';
+const PR = { number: 273, headRef: PR_BRANCH, url: 'https://github.com/o/r/pull/273' };
+function prBranchOnOrigin(root: string, origin: string): string {
+  const other = join(root, 'other');
+  execFileSync('git', ['clone', '-q', origin, other]);
+  git(other, 'config', 'user.email', 'prior@test');
+  git(other, 'config', 'user.name', 'prior');
+  git(other, 'checkout', '-q', '-b', PR_BRANCH);
+  writeFileSync(join(other, 'pr.txt'), 'the prior run\n');
+  git(other, 'add', '-A');
+  git(other, 'commit', '-qm', 'fix: the prior run');
+  git(other, 'push', '-q', 'origin', PR_BRANCH);
+  return git(other, 'rev-parse', 'HEAD').trim();
 }
 
 /** Behaviour knobs the fake `gh` reads out of the environment. */
@@ -86,6 +103,12 @@ interface GhStub {
   succeedWith?: string;
   /** `gh api user -q .login` output. */
   login?: string;
+  /** Make `gh api user` FAIL (exit 1, nothing on stdout) — an unauthenticated gh. */
+  apiFails?: boolean;
+  /** What `gh pr view N --json state -q .state` answers (default `OPEN`). */
+  prState?: string;
+  /** stderr text + exit 1 from `gh pr comment`. */
+  commentFailWith?: string;
 }
 
 /**
@@ -99,7 +122,7 @@ interface GhStub {
 async function runDeliver(
   fx: Fixture,
   opts: { intent?: string; gh?: GhStub; env?: Record<string, string>; script?: DeliverScriptOptions } = {},
-): Promise<{ status: number; output: string; lastLine: string; pr: PrCreateCall | null }> {
+): Promise<{ status: number; output: string; lastLine: string; pr: PrCreateCall | null; comment: string | null; ghCalls: string[] }> {
   const home = join(fx.root, 'home');
   const bin = join(fx.root, 'bin');
   if (!existsSync(bin)) mkdirSync(bin, { recursive: true });
@@ -111,15 +134,23 @@ async function runDeliver(
     join(bin, 'gh'),
     [
       '#!/bin/sh',
+      // Every call is logged — the identity tests assert the script never runs `gh auth switch`.
+      'printf "%s\\n" "$*" >> "$GH_STUB_RECORD.calls"',
       'case "$1" in',
-      '  api) echo "${GH_STUB_LOGIN:-tester}";;',
+      '  api) if [ -n "${GH_STUB_API_FAIL:-}" ]; then echo "gh: not logged in" >&2; exit 1; fi; echo "${GH_STUB_LOGIN:-tester}";;',
       '  auth) echo "gh: switched account";;',
       '  pr)',
+      '    case "$2" in',
+      // DES-L9 revision mode: `gh pr view N --json state -q .state` and `gh pr comment N --body-file`.
+      '      view) echo "${GH_STUB_PR_STATE:-OPEN}";;',
+      '      comment) BF=""; while [ $# -gt 0 ]; do case "$1" in --body-file) BF="$2"; shift;; esac; shift; done; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.comment"; fi; if [ -n "${GH_STUB_COMMENT_FAIL:-}" ]; then echo "$GH_STUB_COMMENT_FAIL" >&2; exit 1; fi; echo "https://github.com/o/r/pull/273#issuecomment-1";;',
+      '      *)',
       // Record what the PR was opened WITH (crew#524): the title and the body file's content.
-      '    T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done',
-      '    printf "%s\\n" "$T" > "$GH_STUB_RECORD.title"; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.body"; fi; printf "%s\\n" "$*" > "$GH_STUB_RECORD.argv"',
-      '    if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
-      '    echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
+      '        T=""; BF=""; while [ $# -gt 0 ]; do case "$1" in --title) T="$2"; shift;; --body-file) BF="$2"; shift;; esac; shift; done',
+      '        printf "%s\\n" "$T" > "$GH_STUB_RECORD.title"; if [ -n "$BF" ]; then cp "$BF" "$GH_STUB_RECORD.body"; fi; printf "%s\\n" "$*" > "$GH_STUB_RECORD.argv"',
+      '        if [ -n "${GH_STUB_FAIL:-}" ]; then echo "$GH_STUB_FAIL" >&2; exit 1; fi',
+      '        echo "${GH_STUB_OUT:-https://github.com/o/r/pull/7}";;',
+      '    esac;;',
       '  *) echo "gh: unexpected $*" >&2; exit 2;;',
       'esac',
       'exit 0',
@@ -147,6 +178,12 @@ async function runDeliver(
           GH_STUB_FAIL: opts.gh?.failWith ?? '',
           GH_STUB_OUT: opts.gh?.succeedWith ?? '',
           GH_STUB_LOGIN: opts.gh?.login ?? 'tester',
+          GH_STUB_API_FAIL: opts.gh?.apiFails === true ? '1' : '',
+          GH_STUB_PR_STATE: opts.gh?.prState ?? '',
+          GH_STUB_COMMENT_FAIL: opts.gh?.commentFailWith ?? '',
+          // DES-L9: the identity block reads GH_TOKEN's PRESENCE for its disclosure line — keep the
+          // fixture deterministic whatever the developer's shell exported.
+          GH_TOKEN: '',
           ...opts.env,
         },
       },
@@ -165,7 +202,11 @@ async function runDeliver(
         argv: readFileSync(`${record}.argv`, 'utf8').replace(/\n$/, ''),
       }
     : null;
-  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', pr };
+  const comment = existsSync(`${record}.comment`) ? readFileSync(`${record}.comment`, 'utf8') : null;
+  const ghCalls = existsSync(`${record}.calls`)
+    ? readFileSync(`${record}.calls`, 'utf8').trimEnd().split('\n').filter(Boolean)
+    : [];
+  return { status: res.status, output, lastLine: lines[lines.length - 1] ?? '', pr, comment, ghCalls };
 }
 
 /** What the fake `gh pr create` was called with. */
@@ -289,13 +330,167 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): bus.db-wal');
     expect(r.output).toContain('deliver: EXCLUDED (denylisted-name): SECRETS.PEM');
     expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
-    expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/lcov.info');
+    // F-BM-002: a scratch DIRECTORY is excluded at enumeration and reported once, with a count.
+    expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/ (1 files)');
+    expect(r.output).not.toContain('coverage/lcov.info');
     expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');
     // Skipped, never deleted — the excluded files remain untracked in the worktree for the operator.
     const status = git(fx.workdir, 'status', '--porcelain');
     for (const p of ['bus.db', 'socket.path', 'deploy.key', 'coverage/', 'rec.bin']) {
       expect(status).toContain(p);
     }
+  }, 60_000);
+
+  // ── DES-L9 D-18 — IDENTITY (crew#549 / F-RC1-010) ─────────────────────────────────────────────
+  it('REFUSES up front when GH_ACCOUNT differs from gh’s active login — nothing staged, nothing pushed, no `gh auth switch`', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+
+    const r = await runDeliver(fx, { gh: { login: 'someone-else' }, env: { GH_ACCOUNT: 'release-bot' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(
+      "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is someone-else; nothing was staged, committed or pushed. Fix the daemon's gh login (switch gh's active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase",
+    );
+    // The refusal IS the whole output — it runs before the fetch, so the engine's head excerpt carries it.
+    expect(r.output.trim().startsWith('deliver: identity mismatch')).toBe(true);
+    expect(originBranches(fx)).toEqual(['main']);
+    // Refused BEFORE staging: the work is still untracked in a KEPT worktree, ready for the retry.
+    expect(git(fx.workdir, 'status', '--porcelain')).toContain('?? work.ts');
+    expect(existsSync(fx.workdir)).toBe(true);
+    // The account is never switched — the daemon's identity is disclosed, not flipped.
+    expect(r.ghCalls.some((c) => c.startsWith('auth'))).toBe(false);
+    expect(r.ghCalls).toEqual(['api user -q .login']);
+  }, 60_000);
+
+  it('REFUSES when GH_ACCOUNT is set and gh cannot say who it is (unauthenticated)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+
+    const r = await runDeliver(fx, { gh: { apiFails: true }, env: { GH_ACCOUNT: 'release-bot' } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain("GH_ACCOUNT is release-bot but gh's active login is unreadable; nothing was staged");
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it('pushes when GH_ACCOUNT matches, saying which identity and whether GH_TOKEN pins it', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    const pinned = await runDeliver(fx, { gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot', GH_TOKEN: 'ghp_stub' } });
+    expect(pinned.status).toBe(0);
+    expect(pinned.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned by GH_TOKEN)');
+    expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
+
+    const fx2 = fixture();
+    writeFileSync(join(fx2.workdir, 'work.ts'), 'export const z = 3;\n');
+    const keyring = await runDeliver(fx2, { gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot' } });
+    expect(keyring.status).toBe(0);
+    expect(keyring.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned)');
+    expect(keyring.output).not.toContain('by GH_TOKEN');
+  }, 60_000);
+
+  it('with GH_ACCOUNT unset it pushes as whatever gh holds — and SAYS so (not pinned)', async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.workdir, 'work.ts'), 'export const z = 3;\n');
+    const r = await runDeliver(fx, { gh: { login: 'whoever' } });
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('deliver: pushing as whoever (GH_ACCOUNT not set — not pinned)');
+  }, 60_000);
+
+  // ── DES-L9 / crew#550 — REVISION mode ───────────────────────────────────────────────────────
+  it('REVISION: pushes exactly the run’s commits onto the PR’s branch, opens no PR, comments the record, prints the PR URL last', async () => {
+    const fx = fixture({ worktree: false });
+    const prHead = prBranchOnOrigin(fx.root, fx.origin);
+    // The engine's mint for a revision: fetch, then the run branch cut from origin/<PR head>.
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    expect(existsSync(join(revised.workdir, 'pr.txt'))).toBe(true);
+    writeFileSync(join(revised.workdir, 'pr.txt'), 'the prior run\nrevised after review\n');
+
+    const r = await runDeliver(revised, { intent: 'Revise PR #273 — the review said REQUEST CHANGES', script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status).toBe(0);
+    expect(r.lastLine).toBe(PR.url);
+    // The PR's branch gained EXACTLY the run's one commit on top of its old head; no run branch on origin.
+    expect(git(fx.origin, 'rev-list', '--count', `${prHead}..${PR_BRANCH}`).trim()).toBe('1');
+    expect(originBranches(fx).sort()).toEqual(['main', PR_BRANCH].sort());
+    expect(git(fx.origin, 'log', '-1', '--format=%s', PR_BRANCH).trim()).toBe('Revise PR #273 — the review said REQUEST CHANGES');
+    // No `gh pr create`; the run record rode `gh pr comment`.
+    expect(r.pr).toBeNull();
+    expect(r.ghCalls.some((c) => c.startsWith('pr create'))).toBe(false);
+    expect(r.ghCalls).toContain('pr view 273 --json state -q .state');
+    expect(r.comment).not.toBeNull();
+    expect(r.comment).toContain('Revises pull request [#273](https://github.com/o/r/pull/273)');
+    expect(r.output).toContain('deliver: pull request #273 is OPEN and its branch wicked/prior-run is at wicked/' + RUN_ID);
+    expect(r.output).toContain('deliver: run record commented on pull request #273');
+  }, 60_000);
+
+  it('REVISION: a PR head that MOVED since the run based on it is refused before staging — no marker, nothing pushed', async () => {
+    const fx = fixture({ worktree: false });
+    const prHead = prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    writeFileSync(join(revised.workdir, 'pr.txt'), 'the prior run\nrevised\n');
+    // …meanwhile someone pushes to the PR.
+    const other = join(fx.root, 'other');
+    writeFileSync(join(other, 'moved.txt'), 'moved\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-qm', 'the PR moved');
+    git(other, 'push', '-q', 'origin', PR_BRANCH);
+    const movedHead = git(other, 'rev-parse', 'HEAD').trim();
+
+    const r = await runDeliver(revised, { script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(
+      `deliver: pull request #273's branch moved since this run based on it (origin/${PR_BRANCH} is no longer an ancestor of wicked/${RUN_ID}); nothing was staged, committed or pushed — launch a new revision on the current head, or rebase wicked/${RUN_ID} onto origin/${PR_BRANCH} by hand and approve to retry`,
+    );
+    expect(r.lastLine).toBe("deliver: pull request #273's branch moved — refused; nothing was pushed");
+    expect(r.output).not.toContain('LIFT-CONFLICT');
+    expect(git(fx.origin, 'rev-parse', PR_BRANCH).trim()).toBe(movedHead);
+    expect(git(revised.workdir, 'status', '--porcelain')).toContain(' M pr.txt'); // refused before staging
+    expect(prHead).not.toBe(movedHead);
+  }, 60_000);
+
+  it('REVISION: a PR head that VANISHED is refused; a run that added nothing on top of the PR is refused', async () => {
+    const fx = fixture({ worktree: false });
+    prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+
+    // Nothing on top: a clean tree level with the PR head.
+    const nothing = await runDeliver(revised, { script: { runId: RUN_ID, revisesPr: PR } });
+    expect(nothing.status, nothing.output).not.toBe(0);
+    expect(nothing.output).toContain('deliver: nothing to deliver — the run added no commit on top of PR #273');
+
+    // Vanished: the PR branch is deleted on origin (merged and cleaned up).
+    git(fx.origin, 'update-ref', '-d', `refs/heads/${PR_BRANCH}`);
+    writeFileSync(join(revised.workdir, 'pr.txt'), 'the prior run\nrevised\n');
+    const gone = await runDeliver(revised, { script: { runId: RUN_ID, revisesPr: PR } });
+    expect(gone.status).not.toBe(0);
+    expect(gone.output).toContain(`deliver: pull request #273's branch origin/${PR_BRANCH} no longer exists on the remote; nothing was staged, committed or pushed`);
+    expect(gone.output).not.toContain('LIFT-CONFLICT');
+    expect(originBranches(fx)).toEqual(['main']);
+  }, 60_000);
+
+  it('REVISION: a failed comment is disclosed, not fatal — the commits landed', async () => {
+    const fx = fixture({ worktree: false });
+    prBranchOnOrigin(fx.root, fx.origin);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    const revised = { ...fx, workdir: join(fx.root, RUN_ID) };
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, revised.workdir, `origin/${PR_BRANCH}`);
+    writeFileSync(join(revised.workdir, 'pr.txt'), 'the prior run\nrevised\n');
+
+    const r = await runDeliver(revised, { gh: { commentFailWith: 'HTTP 502', prState: 'MERGED' }, script: { runId: RUN_ID, revisesPr: PR } });
+
+    expect(r.status).toBe(0);
+    expect(r.lastLine).toBe(PR.url);
+    expect(r.output).toContain('deliver: could not comment on pull request #273 — the commits landed; the record is in the commit message');
+    expect(r.output).toContain('deliver: warning — pull request #273 reads MERGED (not OPEN) after the push; the commits landed on origin/wicked/prior-run');
   }, 60_000);
 
   it('takes the run’s OWN commits when the tree is already clean — no empty commit', async () => {
@@ -490,21 +685,24 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(originBranches(fx)).not.toContain(`wicked/${RUN_ID}`);
   }, 60_000);
 
-  it('honours the GH_ACCOUNT guard without baking a name in', async () => {
+  it('honours the GH_ACCOUNT guard without baking a name in — a match pushes, a mismatch REFUSES (DES-L9 D-18)', async () => {
     const fx = fixture();
     writeFileSync(join(fx.workdir, 'work.ts'), 'export const q = 5;\n');
 
-    // Same account ⇒ no switch.
+    // Same account ⇒ pushes, disclosing the identity; never a switch.
     const same = await runDeliver(fx, { gh: { login: 'someone' }, env: { GH_ACCOUNT: 'someone' } });
     expect(same.status).toBe(0);
+    expect(same.output).toContain('deliver: pushing as someone (GH_ACCOUNT pinned)');
     expect(same.output).not.toContain('switched account');
 
-    // Different account ⇒ the switch runs.
+    // Different account ⇒ REFUSED up front (the `gh auth switch` this replaced is gone).
     const fx2 = fixture();
     writeFileSync(join(fx2.workdir, 'work.ts'), 'export const q = 6;\n');
     const other = await runDeliver(fx2, { gh: { login: 'someone' }, env: { GH_ACCOUNT: 'other' } });
-    expect(other.status).toBe(0);
-    expect(other.output).toContain('switched account');
+    expect(other.status).not.toBe(0);
+    expect(other.output).not.toContain('switched account');
+    expect(other.output).toContain("deliver: identity mismatch — GH_ACCOUNT is other but gh's active login is someone");
+    expect(originBranches(fx2)).toEqual(['main']);
   }, 90_000);
 });
 
