@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+<!-- fixall L1 -->
+- **The gate accepts `action: approve | request_changes | reject` and `amendScope: cursor | creator`
+  (DES-L1 PR-2; api-types 0.38.0 `GateDecision`; core #459 / #465).** `POST /runs/:id/gate` grows the
+  two additive keys; a disagreement between `action` and `approve` (or an `amendScope` on a reject)
+  is a 400 naming the fields; the route passes all five positionals to `CoreAdapter.confirmGate(runId,
+  approve, amend?, action?, amendScope?)` and the audit detail names the arm. `request_changes` sends a
+  NOT-PASS review back to the creator phase with the findings in context (wicked-core PR-1B); on an
+  engine older than core-ts 0.7.27 the arms fail CLOSED (a 409 naming the engine) instead of being
+  silently dropped by the napi call. `tests/gate-arms.test.ts` tripwires flipped `it.fails` → `it`.
+
 ## [0.7.35] — 2026-09-14
 
 FIX-IT-ALL wave 1 (release train step 3) — **core-ts 0.7.26 / studio 0.5.10 / api-types 0.38.0 /

@@ -8,10 +8,10 @@
 // phase at/after the cursor. The daemon passes both through `CoreAdapter.confirmGate(runId,
 // approve, amend?, action?, amendScope?)`.
 //
-// TODAY the daemon's `GateSchema` is `.strict()` over `{approve, amend}` and `confirmGate` has
-// arity 3, so every case below marked NOT_FIXED_YET is written with `it.fails`: it PASSES while the
-// arms are refused and starts FAILING the moment L1 PR-2 lands — that failure is the flip signal
-// (`it.fails` → `it` in the same PR). The unmarked cases pin today's contract and must never move.
+// L1 PR-2 landed the arms: `GateSchema` accepts `action` / `amendScope` (two refines name a
+// disagreement), the route passes all five positionals and `confirmGate` has arity 5. The cases
+// marked FIXED were the NOT_FIXED_YET `it.fails` tripwires written before the code (L8-0b) —
+// flipped to `it` in the PR that landed them. The unmarked cases pin the pre-existing contract.
 //
 // Why a wire-level expectation and not a fixture: the compile-time side already holds —
 // `tests/wire-contract.test.ts` asserts every 0.38.0 `GateDecision` body is assignable to the
@@ -66,12 +66,12 @@ describe('GateSchema — the 0.38.0 GateDecision arms (DES-L1 PR-2)', () => {
     expect(GateSchema.safeParse({}).success).toBe(false);
   });
 
-  it.fails('NOT_FIXED_YET (L1 PR-2, crew 0.7.36): `action: request_changes` with `approve: false` parses', () => {
+  it('FIXED (L1 PR-2, crew 0.7.36): `action: request_changes` with `approve: false` parses', () => {
     const body: GateDecision = { approve: false, action: 'request_changes', amend: 'the fix must add a regression test' };
     expect(GateSchema.safeParse(body).success).toBe(true);
   });
 
-  it.fails('NOT_FIXED_YET (L1 PR-2): `amendScope: creator` on an approve parses; the explicit `action: approve` / `reject` spellings parse', () => {
+  it('FIXED (L1 PR-2): `amendScope: creator` on an approve parses; the explicit `action: approve` / `reject` spellings parse', () => {
     const scoped: GateDecision = { approve: true, amend: 'land the steer on the fix phase', amendScope: 'creator' };
     expect(GateSchema.safeParse(scoped).success).toBe(true);
     const explicitApprove: GateDecision = { approve: true, action: 'approve' };
@@ -80,7 +80,7 @@ describe('GateSchema — the 0.38.0 GateDecision arms (DES-L1 PR-2)', () => {
     expect(GateSchema.safeParse(explicitReject).success).toBe(true);
   });
 
-  it.fails('NOT_FIXED_YET (L1 PR-2): an `action` / `approve` DISAGREEMENT is refused by a rule that names `action` and `approve` — not by the strict-object arm', () => {
+  it('FIXED (L1 PR-2): an `action` / `approve` DISAGREEMENT is refused by a rule that names `action` and `approve` — not by the strict-object arm', () => {
     // `request_changes` requires `approve: false`. Today the strict object refuses the unknown key
     // ("Unrecognized key(s) in object: 'action'" — a message that never says `approve`) — the wrong
     // reason; the expectation is the L1 refine, wherever it attaches (object root or the `action` path).
@@ -142,7 +142,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     expect(recorded[0]!.detail).toMatchObject({ approve: false, status: 'executing' });
   });
 
-  it.fails('NOT_FIXED_YET (L1 PR-2): `{approve: false, action: request_changes, amend}` → 200 and confirmGate(id, false, amend, "request_changes", undefined); the audit detail names the arm', async () => {
+  it('FIXED (L1 PR-2): `{approve: false, action: request_changes, amend}` → 200 and confirmGate(id, false, amend, "request_changes", undefined); the audit detail names the arm', async () => {
     const res = await gate('run-gated', { approve: false, action: 'request_changes', amend: 'add the missing null check' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);
@@ -150,7 +150,7 @@ describe('POST /runs/:id/gate — the arms reach the adapter (DES-L1 PR-2)', () 
     expect(recorded[0]!.detail).toMatchObject({ approve: false, action: 'request_changes' });
   });
 
-  it.fails('NOT_FIXED_YET (L1 PR-2): `{approve: true, amend, amendScope: creator}` → 200 and confirmGate(id, true, amend, undefined, "creator")', async () => {
+  it('FIXED (L1 PR-2): `{approve: true, amend, amendScope: creator}` → 200 and confirmGate(id, true, amend, undefined, "creator")', async () => {
     const res = await gate('run-gated', { approve: true, amend: 'prefer the existing helper', amendScope: 'creator' });
     expect(res.statusCode).toBe(200);
     expect(confirmCalls).toHaveLength(1);

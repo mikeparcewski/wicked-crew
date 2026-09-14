@@ -1542,9 +1542,27 @@ export class CoreAdapter {
     return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
-  /** Resolve a human gate: approve (optional amend) or reject → the status token. */
-  confirmGate(runId: string, approve: boolean, amend?: string): Promise<string> {
-    return this.handedToEngine('run', runId, () => this.core.confirmGate(runId, approve, amend));
+  /** Resolve a human gate: approve (optional amend) / request changes / reject → the status token.
+   *  (DES-L1 PR-2) `action` and `amendScope` are the 0.7.27 arms: on an older addon a napi call
+   *  would silently DROP them — a `request_changes` would run as a plain reject — so they fail
+   *  CLOSED on version (the `extraWriteRoots` / `projectGraph` doctrine); absent, the call is the
+   *  three-arg one every engine understands. */
+  confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string> {
+    return this.handedToEngine('run', runId, () => {
+      if (action === undefined && amendScope === undefined) {
+        return this.core.confirmGate(runId, approve, amend);
+      }
+      if (!addonAtLeast(0, 7, 27)) {
+        throw new Error(
+          `the gate arms \`action\` / \`amendScope\` need wicked-core-ts >= 0.7.27 (installed engine is older) — approve or reject without them`,
+        );
+      }
+      // The 0.7.27 binding takes the two trailing optionals; typed here until the pin moves.
+      const core = this.core as unknown as {
+        confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string>;
+      };
+      return core.confirmGate(runId, approve, amend, action, amendScope);
+    });
   }
 
   /** Cancel a run → the status token. */
