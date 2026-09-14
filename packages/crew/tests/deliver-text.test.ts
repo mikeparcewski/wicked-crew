@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DELIVER_TITLE_MAX,
   boundedTitle,
+  conventionalPrefix,
   composeDeliverText,
   deliverTitle,
   factsFromRun,
@@ -296,6 +297,8 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('| `fix` | build | creator | claude | auto | approved |');
     expect(body).toContain('| `verify` | test | evaluator | pi | human if verdict not pass | approved |');
     expect(body).toContain('| `deliver` | build | neutral | tool | auto | this PR |');
+    // DES-L9: the title carries the workflow's conventional prefix (`bug` → `fix:`).
+    expect(title.startsWith('fix: Found by the seed-surfaces suite')).toBe(true);
     // Repo checks WITH the phase whose floor ran them, their exit codes (a failing and a timed-out
     // one are reported as such) and the engine's classification of a non-zero exit (DES-L9).
     expect(body).toContain('| phase | check | command | exit | classification | duration |');
@@ -307,7 +310,8 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
     expect(body).toContain('## Evaluator gate');
     expect(body).toContain('- `verify` (pi): passed its gate');
     expect(body).not.toContain('## Evaluator verdict');
-    expect(body.endsWith('Merge stays human: the phase opens the PR, never merges it.')).toBe(true);
+    // The commit trailer (review-benchmark-prs D4) is the message's last paragraph.
+    expect(body.endsWith(`\n\nDelivered-By: wicked-crew run ${RUN_ID}`)).toBe(true);
     // The footer.
     expect(body).toContain(`Delivered by [wicked-crew](https://wc.wickedagile.com) run \`${RUN_ID}\`.`);
     expect(body).toContain('Merge stays human');
@@ -385,9 +389,37 @@ describe('composeDeliverText from the persisted run (GET /runs/:id/deliver-text)
   });
 });
 
-// DES-L9 §5 (crew#550 P-1): the 72-char cut lands at the last word boundary OUTSIDE any quoted or
-// bracketed phrase — the #273 headline was severed inside `'sign a seat in'`.
-describe('boundedTitle — cuts outside quoted or bracketed phrases (DES-L9)', () => {
+// DES-L9 (crew#550 P-1, review-benchmark-prs D1): the conventional prefix, the bare-URL headline
+// and the depth-0 cut.
+describe('deliverTitle — conventional prefix, no bare-URL titles, cuts outside quoted phrases (DES-L9)', () => {
+  it('prefixes from the workflow, never twice, never on a free-text run or the run-id fallback', () => {
+    expect(deliverTitle('add the attention-reason helper', RUN_ID, 'bug')).toBe('fix: add the attention-reason helper');
+    expect(deliverTitle('add the attention-reason helper', RUN_ID, 'feature')).toBe('feat: add the attention-reason helper');
+    expect(deliverTitle('add the attention-reason helper', RUN_ID, 'migration')).toBe('refactor: add the attention-reason helper');
+    expect(deliverTitle('add the attention-reason helper', RUN_ID, 'survey-repo')).toBe('chore: add the attention-reason helper');
+    expect(deliverTitle('add the attention-reason helper', RUN_ID, null)).toBe('add the attention-reason helper');
+    expect(deliverTitle('fix(deliver): already conventional', RUN_ID, 'bug')).toBe('fix(deliver): already conventional');
+    expect(deliverTitle('feat!: breaking', RUN_ID, 'bug')).toBe('feat!: breaking');
+    expect(deliverTitle('docs: explain the gate', RUN_ID, 'bug')).toBe('docs: explain the gate');
+    // review-L9-603 M1: a free-form `word: ` is NOT a conventional type — the workflow's prefix applies.
+    expect(deliverTitle('wip: half done', RUN_ID, 'bug')).toBe('fix: wip: half done');
+    expect(deliverTitle('note: see the thread', RUN_ID, 'feature')).toBe('feat: note: see the thread');
+    expect(deliverTitle('todo: later', RUN_ID, 'survey-repo')).toBe('chore: todo: later');
+    expect(deliverTitle('', RUN_ID, 'bug')).toBe(`wicked-crew run ${RUN_ID}`);
+    expect(conventionalPrefix('bug')).toBe('fix');
+    expect(conventionalPrefix(undefined)).toBe('chore');
+  });
+
+  it('never titles a PR with a bare issue URL — the issue it names becomes the headline and a Refs link', () => {
+    const url = 'https://github.com/mikeparcewski/wicked-studio/issues/227';
+    expect(deliverTitle(url, RUN_ID, 'bug')).toBe('fix: resolve mikeparcewski/wicked-studio#227');
+    expect(deliverTitle(`${url}\n\nBump astro past the advisory.`, RUN_ID, 'bug')).toBe('fix: Bump astro past the advisory.');
+    expect(deliverTitle(`<${url}>`, RUN_ID)).toBe('resolve mikeparcewski/wicked-studio#227');
+    expect(deliverTitle('https://example.com/not-github', RUN_ID)).toBe(`wicked-crew run ${RUN_ID}`);
+    expect(issueRefs(`${url}\nfix it`).refs).toEqual(['mikeparcewski/wicked-studio#227']);
+    expect(issueRefs(`${url}\nfix it`).fixes).toEqual([]);
+  });
+
   it('cuts at the last word boundary OUTSIDE a quoted or bracketed phrase (crew#550 P-1)', () => {
     // The #273 headline: the old cut landed inside `'sign a seat in'`.
     const line = "Run failure card: headline truncated at '(Failed):' and 'sign a seat in' when the failed unit is a seat sign-in";
@@ -427,7 +459,8 @@ describe('composeDeliverText from the workflow definition (the script’s embedd
 
   it('knows the intent, the issue links, the run and the phase list — and says what it cannot know', () => {
     expect(facts.source).toBe('workflow');
-    expect(title).toBe(deliverTitle(INTENT, RUN_ID));
+    expect(title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
+    expect(title.startsWith('fix: ')).toBe(true);
     expect(body).toContain('\nFixes #214\n');
     expect(body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:7701/runs/${RUN_ID})`);
     expect(body).toContain('workflow `bug` · repo `wicked-studio`');
@@ -537,7 +570,7 @@ describe('composeEmbeddedDeliverText — issue refs from the FULL intent, text b
     expect(longIntent.length).toBeGreaterThan(EMBEDDED_INTENT_CAP);
     expect(longIntent.indexOf('fixes #214')).toBeGreaterThan(EMBEDDED_INTENT_CAP);
     const { title, body } = composeEmbeddedDeliverText(facts);
-    expect(title).toBe(deliverTitle(longIntent, RUN_ID));
+    expect(title).toBe(deliverTitle(longIntent, RUN_ID, 'bug'));
     expect(body).toContain('\nFixes #214\n');
     expect(body).toContain('Refs: #211'); // `wicked-studio#211` on a wicked-studio delivery (W3-K2)
     // The TEXT is still bounded and the cut is disclosed — the reference is not what was cut.
@@ -556,5 +589,26 @@ describe('composeEmbeddedDeliverText — issue refs from the FULL intent, text b
   it('is byte-identical to composeDeliverText when the intent fits the cap', () => {
     const short = factsFromWorkflow({ runId: RUN_ID, intent: INTENT, workflowId: 'bug', repoRef: 'wicked-studio', phases: [], runUrl: null });
     expect(composeEmbeddedDeliverText(short)).toEqual(composeDeliverText(short));
+  });
+});
+
+// BC-72 / BC-73 (L9-D1 / L9-D4): the GENERATED text is bounded — a closed prefix set and a trailer that
+// names the run id and nothing else (never an account, never a path), whatever the intent carries.
+describe('BC-72 / BC-73 — the generated title prefix and trailer carry no identity and no path', () => {
+  it('the prefix is one of a closed set and the trailer is exactly `Delivered-By: wicked-crew run <id>`', () => {
+    const hostile = 'fix the thing for someone@example.invalid under /opt/someone and $HOME/secrets';
+    for (const wf of ['bug', 'feature', 'migration', 'survey-repo', 'anything-else']) {
+      const t = deliverTitle(hostile, RUN_ID, wf);
+      expect(t.split(': ')[0]).toMatch(/^(fix|feat|refactor|chore)$/);
+    }
+    const { body } = composeDeliverText(factsFromRun(runView(), null));
+    const trailer = body.split('\n\n').pop()!;
+    expect(trailer).toBe(`Delivered-By: wicked-crew run ${RUN_ID}`);
+    expect(trailer).not.toMatch(/@|\/opt\/|\$HOME/);
+    // The trailer is derived from the run id alone — a hostile id is flattened to one line.
+    const odd = runView();
+    odd.session.id = 'r`1\nx /opt/nope @who';
+    const oddBody = composeDeliverText(factsFromRun(odd, null)).body;
+    expect(oddBody.split('\n\n').pop()).toBe('Delivered-By: wicked-crew run r`1 x /opt/nope @who');
   });
 });

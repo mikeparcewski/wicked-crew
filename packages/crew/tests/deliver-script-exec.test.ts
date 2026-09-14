@@ -431,6 +431,8 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.comment).toContain('Revises pull request [#273](https://github.com/o/r/pull/273)');
     expect(r.output).toContain('deliver: pull request #273 is OPEN and its branch wicked/prior-run is at wicked/' + RUN_ID);
     expect(r.output).toContain('deliver: run record commented on pull request #273');
+    // The commit message carries the git trailer naming the pipeline (review-benchmark-prs D4).
+    expect(git(fx.origin, 'log', '-1', '--format=%b', PR_BRANCH)).toContain(`Delivered-By: wicked-crew run ${RUN_ID}`);
   }, 60_000);
 
   it('REVISION: a PR head that MOVED since the run based on it is refused before staging — no marker, nothing pushed', async () => {
@@ -775,7 +777,9 @@ describe('deliver script — composed PR text (crew#524)', () => {
     expect(r.output).toContain(`deliver: the daemon at ${daemon.origin} did not answer with the run record — using the launch-time PR text`);
     const expected = composeDeliverText(facts);
     expect(r.pr!.title).toBe(expected.title);
-    expect(r.pr!.title).toBe(deliverTitle(INTENT, RUN_ID));
+    // BC-72: the `bug` workflow's conventional prefix rides the fallback title too.
+    expect(r.pr!.title).toBe(deliverTitle(INTENT, RUN_ID, 'bug'));
+    expect(r.pr!.title.startsWith('fix: ')).toBe(true);
     expect(r.pr!.title.length).toBeLessThanOrEqual(72);
     expect(r.pr!.title.endsWith('…')).toBe(true); // word-boundary cut, never `…aga`
     expect(r.pr!.body).toBe(`${expected.body}\n`);
