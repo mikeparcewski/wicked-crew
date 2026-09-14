@@ -376,7 +376,17 @@ describe('the scratch root and its statement', () => {
     expect(agents).toContain('/srv/repos/beta');
     expect(agents).toMatch(/READ-ONLY/);
     expect(agents).toMatch(/Do NOT modify/);
-    expect(agents).toMatch(/wicked-estate MCP/);
+    // DES-L5 §5-a (D-7): the grounding path is the handed garden skills over the read-only estate
+    // shim — never a CLI-registered MCP server (deleted in core-ts 0.7.26; a false promise on
+    // every non-claude seat) — plus the answer contract (P6 criterion 5).
+    expect(agents).toMatch(/## Grounding/);
+    expect(agents).toContain('`wicked-garden-mem`');
+    expect(agents).toContain('`wicked-garden-search`');
+    expect(agents).toContain('always pass `--readonly`');
+    expect(agents).not.toMatch(/MCP/);
+    expect(agents).toMatch(/## Answer format/);
+    expect(agents).toMatch(/"Work State", "Next Move"/);
+    expect(agents).toMatch(/say so in one line/);
     expect(agents).toContain('`r-gone`');
     expect(agents).toContain('project `p1`');
     // Idempotent: a second prepare over the same root does not throw.
@@ -457,7 +467,8 @@ describe('the scratch root and its statement', () => {
       dangling: [],
     });
     expect(text).toMatch(/None\./);
-    expect(text).toContain('No code graph is attached: nothing to bind');
+    expect(text).toContain('No code graph is bound: nothing to bind — read the repositories directly and say so.');
+    expect(text).not.toMatch(/MCP/);
     expect(text).not.toMatch(/## Project/);
   });
 

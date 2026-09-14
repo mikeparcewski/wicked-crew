@@ -216,7 +216,9 @@ export function chatScopeDeps(adapter: CoreAdapter): ChatScopeDeps {
 }
 
 /** The route's own id rule, re-applied here: the id becomes ONE path segment under the base. */
-const CHAT_ID = /^[A-Za-z0-9._-]+$/;
+/** The chat-id guard — the ONE sanitizer a chat id passes before it names anything on disk (the
+ *  scratch root here, the transcript file in `chat-transcripts.ts`): no separators, no spaces. */
+export const CHAT_ID = /^[A-Za-z0-9._-]+$/;
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -527,16 +529,29 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
       '',
     );
   }
-  lines.push('## Code graph', '');
+  // DES-L5 §5-a (D-7 / D1): the grounding path is the wicked-garden skills handed to this session
+  // and the read-only estate shim they run on EVERY seat — never a CLI-registered MCP server (the
+  // second transport only claude had, deleted in core-ts 0.7.26; naming it here was a false
+  // promise on every other seat and an org-allowlist gamble on claude). No ladder, no detection,
+  // no allowlist: the statement names the one path and the read-only rule.
+  lines.push('## Grounding', '');
   lines.push(
+    'Use the wicked-garden skills handed to this session — `wicked-garden-mem` (recall / answer over',
+    'memory and knowledge) and `wicked-garden-search` (blast-radius / lineage / hotspots) — to find',
+    'symbols and relationships before grepping: they reach the code graph through the read-only',
+    'estate shim on every seat; always pass `--readonly`.',
     scope.graph.bound
-      ? 'A READ-ONLY wicked-estate MCP server over the code graph is attached to this session: use its ' +
-          'search / blast-radius / lineage tools to find symbols and relationships before grepping. ' +
-          (scope.graph.repoLabel !== undefined
-            ? `The repository is indexed under the label \`${scope.graph.repoLabel}\`. `
-            : '') +
-          `(${scope.graph.reason})`
-      : `No code graph is attached: ${scope.graph.reason}`,
+      ? `The graph is bound to \`${scope.graph.repoLabel ?? 'this scope'}\` (${scope.graph.reason}).`
+      : `No code graph is bound: ${scope.graph.reason} — read the repositories directly and say so.`,
+    '',
+  );
+  // DES-L5 §5-a (P6 criterion 5): the reply is the answer — an agent's own handoff artefact
+  // ("## Work State / ## Next Move / ## Relevant Files") leaked into a chat reply verbatim.
+  lines.push('## Answer format', '');
+  lines.push(
+    'Reply with the answer itself: no working notes or status blocks (no "Work State", "Next Move"',
+    'or "Relevant Files" sections), no tool monologue, no compaction notices. Cite files by their',
+    'full path. If a claim could not be grounded, say so in one line rather than asserting it.',
     '',
   );
   if (scope.projectId !== undefined) {
