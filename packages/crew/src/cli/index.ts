@@ -28,7 +28,7 @@ import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import { versionLines } from '../core/versions.js';
-import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, resolveDaemonPort } from './port.js';
+import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
 import type { LaunchRunInput } from '../core/types.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
@@ -564,7 +564,8 @@ async function main(): Promise<void> {
     // resolved like every other (F-W1-101): `--port`, else CREW_PORT, else the default.
     const port = resolveDaemonPort(argv);
     if (!Number.isFinite(port) || !Number.isInteger(port) || port < 1 || port > 65535) {
-      console.error(`--port / ${DAEMON_PORT_ENV} must be an integer between 1 and 65535 (got: ${flag(argv, '--port') ?? process.env[DAEMON_PORT_ENV] ?? '(missing)'})`);
+      const given = daemonPortSource(argv);
+      console.error(`--port / ${DAEMON_PORT_ENV} must be an integer between 1 and 65535 (got: ${given.raw ?? '(missing)'} from ${given.from})`);
       process.exit(1);
     }
     await runMcpServer(port);

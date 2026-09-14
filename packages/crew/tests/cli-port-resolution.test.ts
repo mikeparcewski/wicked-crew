@@ -9,14 +9,14 @@
 // right one on port B — never touching the real default port 7701, and (d) `--help` on a subcommand.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, resolveDaemonPort } from '../src/cli/port.js';
+import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from '../src/cli/port.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, '..', 'dist', 'cli', 'index.js');
@@ -58,12 +58,27 @@ describe('resolveDaemonPort — the one place the daemon port is decided', () =>
     expect(DEFAULT_DAEMON_PORT).toBe(7701);
     // serve's own semantics, unchanged: an EMPTY CREW_PORT is Number('') === 0 (an ephemeral listen port).
     expect(resolveDaemonPort([], { [DAEMON_PORT_ENV]: '' })).toBe(0);
+    // The source names where the value came from — what error text prints instead of re-reading the env.
+    expect(daemonPortSource(['--port', 'x'], { [DAEMON_PORT_ENV]: '5151' })).toEqual({ raw: 'x', from: '--port' });
+    expect(daemonPortSource([], { [DAEMON_PORT_ENV]: '5151' })).toEqual({ raw: '5151', from: DAEMON_PORT_ENV });
+    expect(daemonPortSource([], {})).toEqual({ raw: undefined, from: 'default' });
   });
 
-  it('cli/index.ts reads CREW_PORT nowhere itself and resolves every port through the resolver (serve, gate, status)', () => {
-    const src = readFileSync(join(HERE, '..', 'src', 'cli', 'index.ts'), 'utf8');
-    expect(src.match(/process\.env\[['"]CREW_PORT['"]\]/g) ?? []).toEqual([]);
-    expect((src.match(/resolveDaemonPort\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
+  it('no src/cli module but port.ts reads CREW_PORT — directly or through DAEMON_PORT_ENV — and index.ts resolves every port through the resolver', () => {
+    // review-L10-604 MED: a display-only `process.env[DAEMON_PORT_ENV]` slipped past a guard that
+    // only knew the quoted spelling — so the guard matches the indirect spelling too, and every
+    // module under src/cli/ except the resolver itself.
+    const cliDir = join(HERE, '..', 'src', 'cli');
+    const READ = /process\.env\s*\[\s*(['"]CREW_PORT['"]|DAEMON_PORT_ENV)\s*\]|process\.env\.CREW_PORT/g;
+    const offenders: string[] = [];
+    for (const f of readdirSync(cliDir)) {
+      if (!f.endsWith('.ts') || f === 'port.ts') continue;
+      const text = readFileSync(join(cliDir, f), 'utf8');
+      for (const m of text.match(READ) ?? []) offenders.push(`${f}: ${m}`);
+    }
+    expect(offenders).toEqual([]);
+    const src = readFileSync(join(cliDir, 'index.ts'), 'utf8');
+    expect((src.match(/resolveDaemonPort\(/g) ?? []).length).toBeGreaterThanOrEqual(4);
     // No verb keeps its own `?? 7701` / `: 7701` fallback: the default lives in one constant.
     expect(src.match(/[:?]\s*7701\b/g) ?? []).toEqual([]);
   });

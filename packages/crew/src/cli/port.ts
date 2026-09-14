@@ -21,8 +21,28 @@ function flagValue(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
+/** Where the daemon port came from and the raw spelling — for messages that name the input. */
+export interface DaemonPortSource {
+  /** The raw value as given (`--port` argument or the env variable), or `undefined` for the default. */
+  raw: string | undefined;
+  from: '--port' | typeof DAEMON_PORT_ENV | 'default';
+}
+
+/**
+ * The one read of `--port` / `CREW_PORT` (review-L10-604 MED: a display-only
+ * `process.env[DAEMON_PORT_ENV]` in the `mcp` error text was a second read of the same variable —
+ * every consumer, including error text, goes through here).
+ */
+export function daemonPortSource(args: string[], env: NodeJS.ProcessEnv = process.env): DaemonPortSource {
+  const fromArgs = flagValue(args, '--port');
+  if (fromArgs !== undefined) return { raw: fromArgs, from: '--port' };
+  const fromEnv = env[DAEMON_PORT_ENV];
+  if (fromEnv !== undefined) return { raw: fromEnv, from: DAEMON_PORT_ENV };
+  return { raw: undefined, from: 'default' };
+}
+
 /** `--port <n>` › `CREW_PORT` › 7701 — the one place the daemon port is decided. */
 export function resolveDaemonPort(args: string[], env: NodeJS.ProcessEnv = process.env): number {
-  const raw = flagValue(args, '--port') ?? env[DAEMON_PORT_ENV];
+  const { raw } = daemonPortSource(args, env);
   return raw !== undefined ? Number(raw) : DEFAULT_DAEMON_PORT;
 }

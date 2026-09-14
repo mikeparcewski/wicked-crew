@@ -143,6 +143,17 @@ mentioned only where a daemon release depends on them.
 <!-- fixall L5 -->
 - **Chat scope statement hands ONE worked grounding command, not a noun (R-L5-1, text-only, D1; wave-1 P6 gate NO-GO on criterion 1 — `verdicts/recon-w1-grounding.md` Q1/Q4 cause #1; F-W1-001, F-W1-006).** The `## Grounding` section written into every chat scratch root's `AGENTS.md` / `CLAUDE.md` said "they reach the code graph through the read-only estate shim on every seat; always pass `--readonly`" — no binary, no args, no tool. The claude seat obeyed it literally (attached `--readonly` to a `Skill` call, then grepped); opencode ran nothing. For a graph-BOUND chat the section now carries one copy-pasteable line a seat can run in its shell on any carrier — `wicked-garden run scripts/_estate_client.py --readonly call '{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}'` (`name`, the estate MCP's own key and the shim's `search()` spelling; `{"query"}` returned 0 matches in P6) — plus "`wicked-garden` is first on PATH; the store is pinned by `WICKED_ESTATE_DB`", the other tools that take the same form (`BlastRadius` / `Lineage` `{"symbol"}`, `RankHotspots` `{"limit"}`) and "always pass `--readonly`". Nothing else new: no second path, no MCP mention, no skill names (a `Skill` call is what the seat substituted for the command). An UNBOUND chat keeps "No code graph is bound: <reason> — read the repositories directly and say so" and is handed no command (nothing pins the store, the call would be refused). Tests: the Grounding section is a pinned snapshot, the command's exact spelling is pinned, and the section stays under the 1022-byte PTY canonical-line budget (the statement is a file attachment, not a PTY prompt — the budget is asserted anyway). `CHAT_GROUNDING_COMMAND` is exported for the tests.
 
+<!-- fixall L10 -->
+- **`wicked-crew status` / `gate` resolve the daemon port exactly as `serve` does — `--port`, else
+  `CREW_PORT`, else 7701 — through ONE shared resolver (`cli/port.ts`); `status --help` / `gate --help`
+  print usage and exit 0 (F-W1-101, wave-1 gate P1 — FIX-IT-ALL L10).** On a host whose daemon listens
+  on `CREW_PORT=<other>`, `status` queried the DEFAULT port, found a stranger's daemon there and exited
+  0 reporting ANOTHER daemon's runs; `status --help` answered "Unknown command". `serve`'s boot and
+  every daemon-client verb (`gate`, `status`, `mcp`) now import the same `resolveDaemonPort()` — a test
+  pins that no `src/cli` module but `port.ts` reads `CREW_PORT` (directly or through `DAEMON_PORT_ENV`)
+  and that no private `7701` fallback remains. The no-daemon remedy wording is unchanged (it names the
+  port that was resolved).
+
 ## [0.7.35] — 2026-09-14
 
 FIX-IT-ALL wave 1 (release train step 3) — **core-ts 0.7.26 / studio 0.5.10 / api-types 0.38.0 /
