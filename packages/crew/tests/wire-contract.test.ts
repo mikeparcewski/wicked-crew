@@ -932,6 +932,62 @@ const RECORDED_GATE_ESCALATED_HOOK_VETO = {
   discarded: [],
   suggestionRef: null,
 } satisfies Wire.GateEscalatedEvent;
+/**
+ * RECORDED from wicked-core b190f63 (PR #513, DES-L1 PR-1A): the fold read the Evaluator unit's OWN
+ * `VERDICT: FAIL` line — `condition: verdict_not_pass` × `denialSource: evaluator_verdict`, the
+ * findings in `verdictSummary`, engine-authored (`defGate: false`), output captured, nothing to
+ * restore. The (condition, denialSource) pair the studio copy table keys on for the review-failed
+ * gate; distinct from the judge's deny (`agent_validator`) and the second pass's (`evaluator`).
+ */
+const RECORDED_GATE_ESCALATED_EVALUATOR_VERDICT = {
+  type: 'gateEscalated',
+  session: 'run-1',
+  ord: 4,
+  condition: 'verdict_not_pass',
+  verdictSummary: "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL",
+  attempt: 0,
+  denialSource: 'evaluator_verdict',
+  defGate: false,
+  outputCaptured: true,
+  restored: false,
+  discarded: [],
+  suggestionRef: null,
+} satisfies Wire.GateEscalatedEvent;
+/**
+ * RECORDED from the same fold: the `gateEvaluated` frame that precedes it — 0.38.0's 20th key
+ * `evaluatorVerdict: 'FAIL'` (the evaluator's own token; `null` on every unit the layer does not
+ * read and when the evaluator wrote no line — then `denial.source === 'evaluator_verdict'` with the
+ * contract text), `combined: false`, `denial` the machine-readable twin of `denialReason`.
+ */
+const RECORDED_GATE_EVALUATED_EVALUATOR_VERDICT = {
+  type: 'gateEvaluated',
+  session: 'run-1',
+  ord: 4,
+  criterion: null,
+  hasDeterministicFloor: false,
+  deterministicPass: true,
+  agentVerdict: null,
+  agentReasoning: null,
+  evaluatorPass: true,
+  evaluatorPolicies: [],
+  denialReason: "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL",
+  denial: {
+    source: 'evaluator_verdict',
+    reason: "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL",
+    claimId: null,
+    ruleIds: [],
+    deniedTool: null,
+    phase: 'unit-4',
+  },
+  combined: false,
+  judgeCli: null,
+  judgeDistinct: null,
+  ungated: true,
+  ungatedReason: "no deterministic floor: no pinned validator; repo checks do not apply to an unbound run (no worktree); no judge: no pinned validator convened one and the unit did not change the tree; evaluator policies: none applied (default-allow)",
+  floorNote: "no pinned validator; repo checks do not apply to an unbound run (no worktree)",
+  judgeSkippedReason: null,
+  evaluatorVerdict: 'FAIL',
+} satisfies Wire.GateEvaluatedEvent;
 const RECORDED_SANDBOX_POSTURE = {
   type: 'sandboxPosture',
   session: 'run-1',
@@ -977,8 +1033,44 @@ describe('api-types 0.38.0 — recorded + DES-shaped engine frames (FIX-IT-ALL L
   it('the fixture IS the compile-time pins, byte for byte', () => {
     expect(recorded['gateEscalated']).toEqual(RECORDED_GATE_ESCALATED);
     expect(recorded['gateEscalatedHookVeto']).toEqual(RECORDED_GATE_ESCALATED_HOOK_VETO);
+    expect(recorded['gateEscalatedEvaluatorVerdict']).toEqual(RECORDED_GATE_ESCALATED_EVALUATOR_VERDICT);
+    expect(recorded['gateEvaluatedEvaluatorVerdict']).toEqual(RECORDED_GATE_EVALUATED_EVALUATOR_VERDICT);
     expect(recorded['sandboxPosture']).toEqual(RECORDED_SANDBOX_POSTURE);
     expect(recorded['worktreeRetained']).toEqual(RECORDED_WORKTREE_RETAINED);
+  });
+
+  // FIX-IT-ALL L1 mirror-first for core #513 (DES-L1 PR-1A, D-9). Fixed at core-ts 0.7.27: the
+  // recorded frames are what the fold emits when an Evaluator agent unit's own output ends
+  // `VERDICT: FAIL` — denied INTO THE ESCALATION GATE (never sessionFailed), the reviewer's words in
+  // `verdictSummary`, and `gateEvaluated.evaluatorVerdict` the 20th key. A 0.7.26 engine emits the
+  // 19-key gateEvaluated frame and never this (condition, denialSource) pair; both are recorded
+  // here so the skins can build against the shape before the engine that emits it is pinned.
+  it('the evaluator-verdict gate: gateEscalated{verdict_not_pass × evaluator_verdict}, engine-authored, output captured, nothing to restore; the findings ride verdictSummary', () => {
+    const frame = recorded['gateEscalatedEvaluatorVerdict'] as Record<string, unknown>;
+    expect(frame).toMatchObject({ condition: 'verdict_not_pass', denialSource: 'evaluator_verdict', defGate: false, outputCaptured: true, restored: false, discarded: [], suggestionRef: null });
+    expect(frame['verdictSummary']).toMatch(/^the evaluator's verdict is FAIL\n/);
+    expect(frame['verdictSummary']).toMatch(/\nVERDICT: FAIL$/);
+    // The pair is distinct from every other recorded gate class the copy table keys on.
+    const pairs = ['gateEscalated', 'gateEscalatedHookVeto', 'gateEscalatedCreatorMkdirOutside', 'gateEscalatedDeadSeat'].map((n) => {
+      const f = recorded[n] as Record<string, unknown>;
+      return `${String(f['condition'])}×${String(f['denialSource'])}`;
+    });
+    expect(pairs).not.toContain('verdict_not_pass×evaluator_verdict');
+  });
+
+  it('gateEvaluated carries `evaluatorVerdict` as its 20th key (0.38.0): the token the evaluator wrote, `null` never absent; `denial` is the twin with `source: evaluator_verdict`', () => {
+    const frame = recorded['gateEvaluatedEvaluatorVerdict'] as Record<string, unknown>;
+    const KEYS = ['agentReasoning', 'agentVerdict', 'combined', 'criterion', 'denial', 'denialReason', 'deterministicPass', 'evaluatorPass', 'evaluatorPolicies', 'evaluatorVerdict', 'floorNote', 'hasDeterministicFloor', 'judgeCli', 'judgeDistinct', 'judgeSkippedReason', 'ord', 'session', 'type', 'ungated', 'ungatedReason'];
+    expect(Object.keys(frame).sort()).toEqual(KEYS);
+    expect(frame).toMatchObject({ evaluatorVerdict: 'FAIL', combined: false });
+    expect((frame['denial'] as Record<string, unknown>)['source']).toBe('evaluator_verdict');
+    expect(frame['denialReason']).toBe((frame['denial'] as Record<string, unknown>)['reason']);
+    // A 0.7.26 engine's 19-key frame is still a valid GateEvaluatedEvent (`evaluatorVerdict?` is optional) —
+    // the tolerant read `evaluatorVerdict ?? null` is what a consumer keys on across both engines.
+    const nineteen: Wire.GateEvaluatedEvent = { ...RECORDED_GATE_EVALUATED_EVALUATOR_VERDICT };
+    delete nineteen.evaluatorVerdict;
+    expect(Object.keys(nineteen)).toHaveLength(KEYS.length - 1);
+    expect(nineteen.evaluatorVerdict ?? null).toBeNull();
   });
 
   it('gateEscalated carries exactly the 11 fields + `type` the engine emits (the two recorded and the two DES-shaped frames alike), in the camelCase the contract spells; `null` / `[]` / `""` are present, never absent', () => {

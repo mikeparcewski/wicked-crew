@@ -1,5 +1,5 @@
 {
-  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly. RECORDED (mirrored from the engine's own to_json tests): gateEscalated, gateEscalatedHookVeto, sandboxPosture, worktreeRetained. DES-SHAPED (the engine emits them after L4 PR-② / L3 PR-3A; same key set and conventions, verdictSummary prose from DES-L4 R8 / DES-L3 §4 — not a recording): gateEscalatedCreatorMkdirOutside, gateEscalatedDeadSeat. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys.",
+  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly. RECORDED (mirrored from the engine's own to_json tests): gateEscalated, gateEscalatedHookVeto, sandboxPosture, worktreeRetained. DES-SHAPED (the engine emits them after L4 PR-② / L3 PR-3A; same key set and conventions, verdictSummary prose from DES-L4 R8 / DES-L3 §4 — not a recording): gateEscalatedCreatorMkdirOutside, gateEscalatedDeadSeat. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys. RECORDED from wicked-core b190f63 (PR #513, DES-L1 PR-1A — the evaluator-verdict layer): gateEscalatedEvaluatorVerdict and gateEvaluatedEvaluatorVerdict are the two frames the fold emits for an Evaluator unit whose own output ends `VERDICT: FAIL` (actor::substance_gate_tests::an_evaluator_fail_verdict_denies_into_the_escalation_gate, printed via CoreEvent::to_json); session/ord/phase renamed to run-1 / 4 / unit-4, every other byte the engine's. `evaluatorVerdict` is the 20th gateEvaluated key (api-types 0.38.0 types it); an engine before core-ts 0.7.27 emits the 19-key frame.",
   "gateEscalated": {
     "type": "gateEscalated",
     "session": "run-1",
@@ -60,6 +60,49 @@
     "restored": false,
     "discarded": [],
     "suggestionRef": null
+  },
+  "gateEscalatedEvaluatorVerdict": {
+    "attempt": 0,
+    "condition": "verdict_not_pass",
+    "defGate": false,
+    "denialSource": "evaluator_verdict",
+    "discarded": [],
+    "ord": 4,
+    "outputCaptured": true,
+    "restored": false,
+    "session": "run-1",
+    "suggestionRef": null,
+    "type": "gateEscalated",
+    "verdictSummary": "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL"
+  },
+  "gateEvaluatedEvaluatorVerdict": {
+    "agentReasoning": null,
+    "agentVerdict": null,
+    "combined": false,
+    "criterion": null,
+    "denial": {
+      "claimId": null,
+      "deniedTool": null,
+      "phase": "unit-4",
+      "reason": "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL",
+      "ruleIds": [],
+      "source": "evaluator_verdict"
+    },
+    "denialReason": "the evaluator's verdict is FAIL\nReviewed the fix.\n- the regression test is missing\n- src/app.ts still reads `buggy`\nVERDICT: FAIL",
+    "deterministicPass": true,
+    "evaluatorPass": true,
+    "evaluatorPolicies": [],
+    "evaluatorVerdict": "FAIL",
+    "floorNote": "no pinned validator; repo checks do not apply to an unbound run (no worktree)",
+    "hasDeterministicFloor": false,
+    "judgeCli": null,
+    "judgeDistinct": null,
+    "judgeSkippedReason": null,
+    "ord": 4,
+    "session": "run-1",
+    "type": "gateEvaluated",
+    "ungated": true,
+    "ungatedReason": "no deterministic floor: no pinned validator; repo checks do not apply to an unbound run (no worktree); no judge: no pinned validator convened one and the unit did not change the tree; evaluator policies: none applied (default-allow)"
   },
   "sandboxPosture": {
     "type": "sandboxPosture",
