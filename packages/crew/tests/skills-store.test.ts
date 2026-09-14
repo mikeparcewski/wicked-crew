@@ -27,11 +27,11 @@ import {
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { inBundleClosure, pluginBundleFiles } from '../src/skills/bundle.js';
 import { containedPath, SkillPathError } from '../src/skills/contain.js';
-import { applySkillsSnapshotEnv } from '../src/skills/engine-env.js';
+import { applySkillsSnapshotEnv, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { PluginSourceSymlinkError, pluginSourceAt } from '../src/skills/plugin-source.js';
 import { PORTABILITY_RULES_IDENTITY } from '../src/skills/refs.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
@@ -3362,4 +3362,151 @@ describe('a generation published under OLDER portability rules is ACCEPTED, neve
       expect(msg).toContain('(0 row(s) moved)');
       expect(storeOver(s).manifest().skills['wicked-garden-alpha']?.portable).toBe(false);
     }));
+});
+
+describe('publish latency (DES-L6 PR-L6-1; crew#547 items 1-3, F-E2E-042): the `unchanged` fast path, the verify memo, holdsSkill from the published rows', () => {
+  const generations = (root: string): string[] => readdirSync(join(root, 'snapshots')).filter((n) => /^\d{6}$/.test(n)).sort();
+  const publishLines = (warnings: string[]): string[] => warnings.filter((w) => w.startsWith('[skills] publish: '));
+
+  it('a second publish with nothing changed answers unchanged: true — the CURRENT generation, same hash, the provisioner NOT called, no generation minted, current unmoved, revision unchanged — and its timing line names it', async () => {
+    let provisions = 0;
+    const sc = scaffold({
+      provisionVenv: async (dir, opts) => {
+        provisions += 1;
+        return noVenv(dir, opts);
+      },
+    });
+    try {
+      sc.store.seed();
+      const r1 = await sc.store.publish(1);
+      expect(r1.verdict).toBe('clear');
+      expect(r1.unchanged).toBeUndefined();
+      expect(provisions).toBe(1);
+      const gens = generations(sc.root);
+      const link = readlinkSync(join(sc.root, 'current'));
+      const r2 = await sc.store.publish(r1.revision);
+      expect(r2).toEqual({ ...r1, unchanged: true });
+      expect(provisions).toBe(1); // nothing awaited: ensureVenv never reached the provisioner
+      expect(generations(sc.root)).toEqual(gens);
+      expect(readlinkSync(join(sc.root, 'current'))).toBe(link);
+      expect(sc.store.manifest().revision).toBe(r1.revision);
+      const lines = publishLines(sc.warnings);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^\[skills\] publish: validate \d+ms · venv \d+ms \(skipped\) · hash \d+ms · stage \d+ms · gen 1$/);
+      expect(lines[1]).toMatch(/^\[skills\] publish: validate \d+ms · venv 0ms \(skipped\) · hash \d+ms · stage 0ms · unchanged \(gen 1\)$/);
+      // …and a third store instance over the same root (no memo) reads the same current generation.
+      expect(storeOver(sc).currentSnapshot()).toMatchObject({ gen: 1, path: r1.snapshot?.path });
+    } finally {
+      removeScratch(sc.base);
+    }
+  });
+
+  it('a changed tree is NOT unchanged — an edit on disk, a toggled skill: each mints the next generation exactly as before', async () => {
+    s.store.seed();
+    const r1 = await s.store.publish(1);
+    editedOnDisk(s, 'gamma', 'a changed body');
+    const r2 = await s.store.publish(r1.revision);
+    expect(r2.unchanged).toBeUndefined();
+    expect(r2.snapshot?.gen).toBe(2);
+    const off = s.store.disable('wicked-garden-delta', r2.revision);
+    const r3 = await s.store.publish(off.revision);
+    expect(r3.unchanged).toBeUndefined();
+    expect(r3.snapshot?.gen).toBe(3);
+    // …and once the tree settles, the next publish is unchanged again at gen 3.
+    const r4 = await s.store.publish(r3.revision);
+    expect(r4).toMatchObject({ unchanged: true, snapshot: { gen: 3, contentHash: r3.snapshot?.contentHash } });
+  });
+
+  it('a generation published under OTHER portability rules (F-083) is NOT unchanged: the publish re-mints under the running identity and clears the stale-rules state', async () => {
+    s.store.seed();
+    const r1 = await s.store.publish(1);
+    const snapPath = r1.snapshot?.path ?? '';
+    const file = join(snapPath, 'snapshot.json');
+    unlock(file);
+    const pristine = snapshotManifest(snapPath);
+    writeFileSync(file, `${JSON.stringify({ ...pristine, rulesVersion: 1, rulesSha256: 'ab'.repeat(32) }, null, 2)}\n`);
+    stampPublished(s.root, file);
+    // Accepted from disk with drift semantics (F-083) — the bytes are authenticated, only the rules moved.
+    expect(s.store.currentSnapshot()).toMatchObject({ gen: 1, rules: { stale: true } });
+    const r2 = await s.store.publish(r1.revision);
+    expect(r2.unchanged).toBeUndefined();
+    expect(r2.snapshot?.gen).toBe(2);
+    expect(s.store.currentSnapshot()).toMatchObject({ gen: 2, rules: { recorded: { ...PORTABILITY_RULES_IDENTITY }, stale: false } });
+  });
+
+  it('an unverifiable current generation is NOT unchanged — a tampered generation is re-minted, never declared current', async () => {
+    s.store.seed();
+    const r1 = await s.store.publish(1);
+    const gamma = join(r1.snapshot?.path ?? '', 'skills', 'gamma', 'SKILL.md');
+    unlock(gamma);
+    writeFileSync(gamma, '#', { flag: 'a' });
+    expect(() => s.store.currentSnapshot()).toThrow(SkillsCurrentInvalidError);
+    const r2 = await s.store.publish(r1.revision);
+    expect(r2.unchanged).toBeUndefined();
+    expect(r2.snapshot?.gen).toBe(2);
+    expect(s.store.currentSnapshot()?.gen).toBe(2);
+  });
+
+  it('verifyCurrent memo: the second read skips the row re-derivation; an edited manifest.json is refused ON A HIT (the cross-check still runs); chmod + a one-byte edit of a generation file is a MISS the byte hash refuses', async () => {
+    s.store.seed();
+    const r1 = await s.store.publish(1);
+    const rows = vi.spyOn(s.store as unknown as { snapshotRowsProblem: (...args: unknown[]) => unknown }, 'snapshotRowsProblem');
+    const first = s.store.currentSnapshot();
+    expect(rows).toHaveBeenCalledTimes(1);
+    const second = s.store.currentSnapshot();
+    expect(rows).toHaveBeenCalledTimes(1); // the hit
+    expect(second).toBe(first); // the memoised object itself
+    // The manifest cross-check runs on every read — a hand-edited manifest never rides a cached "valid".
+    const manifestPath = join(s.root, 'manifest.json');
+    const raw = readFileSync(manifestPath, 'utf8');
+    const m = JSON.parse(raw) as { published: { contentHash: string } };
+    m.published.contentHash = 'ff'.repeat(32);
+    writeFileSync(manifestPath, `${JSON.stringify(m, null, 2)}\n`);
+    expect(() => s.store.currentSnapshot()).toThrow(/not the metadata this root published/);
+    writeFileSync(manifestPath, raw);
+    expect(s.store.currentSnapshot()?.gen).toBe(1);
+    expect(rows).toHaveBeenCalledTimes(1); // still a hit: the generation itself did not move
+    // A deliberate edit needs the unlock (ctime + mode move) — a miss, and the byte hash refuses it.
+    const gamma = join(r1.snapshot?.path ?? '', 'skills', 'gamma', 'SKILL.md');
+    unlock(gamma);
+    writeFileSync(gamma, '#', { flag: 'a' });
+    expect(() => s.store.currentSnapshot()).toThrow(/content hash mismatch/);
+    expect(rows).toHaveBeenCalledTimes(1); // the hash refused before the rows were re-derived
+  });
+
+  it('manifest() is memoised on the file identity and answers a CLONE; a mutation commit is read back', () => {
+    s.store.seed();
+    const a = s.store.manifest();
+    const b = s.store.manifest();
+    expect(b).toEqual(a);
+    expect(b).not.toBe(a);
+    a.revision = 999; // a caller's mutation before commit never reaches the memo
+    expect(s.store.manifest().revision).toBe(b.revision);
+    const off = s.store.disable('wicked-garden-delta', b.revision);
+    expect(s.store.manifest()).toMatchObject({ revision: off.revision, skills: { 'wicked-garden-delta': { enabled: false } } });
+  });
+
+  it('holdsSkill answers from the PUBLISHED generation (F-E2E-042): a skill enabled AFTER the publish is not held until the next publish', async () => {
+    const saved = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+    try {
+      s.store.seed();
+      const off = s.store.disable('wicked-garden-delta', 1);
+      const r1 = await s.store.publish(off.revision);
+      const rt = new SkillsRuntime({ store: s.store, log: () => undefined });
+      rt.afterPublish();
+      expect(rt.health().state).toBe('published');
+      expect(rt.holdsSkill('wicked-garden-beta')).toBe(true);
+      expect(rt.holdsSkill('wicked-garden-delta')).toBe(false);
+      const on = s.store.enable('wicked-garden-delta', r1.revision);
+      expect(s.store.manifest().skills['wicked-garden-delta']?.enabled).toBe(true);
+      expect(rt.holdsSkill('wicked-garden-delta')).toBe(false); // in the catalog, NOT in what the engine is handed
+      const r2 = await s.store.publish(on.revision);
+      expect(r2.unchanged).toBeUndefined();
+      rt.afterPublish();
+      expect(rt.holdsSkill('wicked-garden-delta')).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+      else process.env[SKILLS_SNAPSHOT_ENGINE_ENV] = saved;
+    }
+  });
 });
