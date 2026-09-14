@@ -16,7 +16,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuditLog } from '../src/api/audit.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
@@ -293,6 +293,37 @@ describe('adapter getSettings read-validation', () => {
     writeSettings({ graphNodeLimit: 150, skills_root: '' });
     expect(Object.hasOwn(await read(), 'skills_root')).toBe(false);
   });
+
+  it("REFUSES a persisted baseSkillPolicy 'warn' — a settings.json written by crew ≤ 0.7.34 — loudly by name: the daemon reads 'require' and never boots reporting a deleted value (DES-L4 PR-⑧, D-8b)", async () => {
+    writeSettings({ graphNodeLimit: 150, baseSkillPolicy: 'warn', worker_config_root: '/srv/worker' });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    });
+    try {
+      const loaded = await read();
+      expect(loaded.baseSkillPolicy).toBe('require'); // the shipped default — never the deleted value
+      expect(loaded).toMatchObject({ graphNodeLimit: 150, worker_config_root: '/srv/worker' }); // nothing else is touched
+      const line = lines.find((l) => l.startsWith('[settings] refused baseSkillPolicy'));
+      expect(line).toBeDefined();
+      expect(line).toContain('"warn"'); // the refused value, by name
+      expect(line).toContain(settingsFilePath()); // the file
+      expect(line).toContain("'require' is the only accepted value"); // the one accepted value
+      expect(line).toContain('baseSkillRef ""'); // the one OFF switch
+      // An unknown token takes the same door — there is no silent fallback for this key.
+      lines.length = 0;
+      writeSettings({ baseSkillPolicy: 'bogus' });
+      expect((await read()).baseSkillPolicy).toBe('require');
+      expect(lines.some((l) => l.startsWith('[settings] refused baseSkillPolicy "bogus"'))).toBe(true);
+      // …and 'require' itself loads silently.
+      lines.length = 0;
+      writeSettings({ baseSkillPolicy: 'require' });
+      expect((await read()).baseSkillPolicy).toBe('require');
+      expect(lines).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('resolveSkillsRoot + the boot fence (root-fence.ts)', () => {
@@ -452,23 +483,24 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(res.statusCode).toBe(200);
       expect((res.json() as SkillsManifestResponse).current).toMatchObject({ gen: 1, path: real }); // `rules` / `drift` ride beside (F-083)
       expect((res.json() as SkillsManifestResponse).root).toBe(root);
-      // Exactly ONE engine input (v3.4 §2): nothing is exported beside the snapshot — the retired
-      // WICKED_CREW_STATE_HOME is untouched — and the snapshot IS <state home>/skills/snapshots/<gen>
-      // by construction, the layout core derives the state home from.
+      // The snapshot is the ONE skills engine input (v3.4 §2) — beside it only the base skill ref
+      // (D-8), the retired WICKED_CREW_STATE_HOME is untouched — and the snapshot IS
+      // <state home>/skills/snapshots/<gen> by construction, the layout core derives the state home from.
       expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
       expect(real.startsWith(join(canonicalCrewStateHome(), SKILLS_DIRNAME, 'snapshots') + '/')).toBe(true);
       const skills = await diagnostics(app);
       // The shipped BASE skill default (crew#554) rides the boot: the fixture catalog does not ship
-      // `wicked-garden-governed-worker`, so under the default `warn` policy the posture is
-      // "not handed" (engine variable unset) and the ONE finding is its warning.
+      // `wicked-garden-governed-worker`, so under `require` (the only policy — DES-L4 PR-⑧, D-8) the
+      // engine variable IS exported, the posture says `present: false` and the ONE finding is its
+      // ERROR: the engine refuses a launch at intake until a generation holds the skill.
       expect(skills).toEqual({
         state: 'published',
         root,
         current: { gen: 1, path: real },
         engineInput: real,
         stateHome: canonicalCrewStateHome(),
-        findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' })],
-        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, policy: 'warn', present: false, gen: 1, engineInput: null }),
+        findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'error' })],
+        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, policy: 'require', present: false, gen: 1, engineInput: DEFAULT_SETTINGS.baseSkillRef }),
       });
       // The root lives under THIS state home — never under the operator's real one.
       expect(readdirSync(dir)).toContain('skills');
@@ -535,10 +567,11 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
             severity: 'warning',
             message: `seeded from the installer copy at ${FIXTURE_PLUGIN}; register the plugin with Claude Code (marketplace) to receive marketplace updates`,
           },
-          // …and the shipped BASE skill default's warning (crew#554): the fixture does not ship it.
-          expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' }),
+          // …and the shipped BASE skill default's ERROR (crew#554 / D-8): the fixture does not ship it,
+          // so the engine refuses a launch at intake — the variable is exported regardless.
+          expect.objectContaining({ kind: 'skills.base-skill', severity: 'error' }),
         ],
-        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: 1, engineInput: null }),
+        baseSkill: expect.objectContaining({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: 1, engineInput: DEFAULT_SETTINGS.baseSkillRef }),
       });
       const res = await app.inject({ method: 'GET', url: '/api/v1/skills' });
       expect(res.statusCode).toBe(200);
@@ -562,10 +595,12 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(skills.stateHome).toBe(canonicalCrewStateHome()); // REPORTED for humans whatever the skills outcome — never an engine input (v3.4 §2)
       expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
       // The ladder's finding, then the shipped BASE skill default's (crew#554): with no plugin there is
-      // no generation that could hold it, so under `warn` it is "not handed" — a second warning.
+      // no generation that could hold it, so under `require` (D-8) the variable is exported all the
+      // same and the second finding is an ERROR — the engine refuses a launch at intake.
       expect(skills.findings.map((f) => f.kind)).toEqual(['skills.fallback', 'skills.base-skill']);
       expect(skills.findings[0]?.message).toContain('install wicked-garden first');
-      expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: null });
+      expect(skills.findings[1]?.severity).toBe('error');
+      expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: DEFAULT_SETTINGS.baseSkillRef });
       expect(existsSync(join(dir, 'skills'))).toBe(false); // a seed with no source creates nothing
     } finally {
       await app.close();

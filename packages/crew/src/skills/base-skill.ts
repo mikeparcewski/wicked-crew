@@ -9,14 +9,16 @@
  * default (`SystemSettings.baseSkillRef`, shipped as `wicked-garden-governed-worker`) and must
  * decide what a snapshot WITHOUT the skill means:
  *
- *   `baseSkillPolicy: 'warn'`    (default) — export the env ONLY when the published generation
- *                                holds the skill; otherwise leave it unset (runs proceed without
- *                                the directive) and raise a `skills.base-skill` WARNING. A fresh
- *                                install lacks the skill until the garden that ships it is
- *                                installed and published — a visible warning, never a dead Send.
- *   `baseSkillPolicy: 'require'` — export the env whatever the generation holds; the engine
- *                                refuses every launch at intake until a generation with the skill
- *                                is published. The finding is an ERROR that says so.
+ *   `baseSkillPolicy: 'require'` — the ONLY policy (DES-L4 PR-⑧, D-8 / D-8b): export the env
+ *                                whatever the generation holds; the engine refuses every launch at
+ *                                intake until a generation with the skill is published, and the
+ *                                finding is an ERROR that says so. The former `'warn'` rung is
+ *                                DELETED: it left the env unset when the skill was missing, so every
+ *                                seat ran UNGROUNDED — no launcher, no estate shim reachable — with
+ *                                a /health warning as the only signal (a silent-ungrounded state
+ *                                under D1). A fresh install lacks the skill until the garden that
+ *                                ships it is installed and published; the refusal names that remedy.
+ *                                `baseSkillRef: ""` remains the one explicit OFF switch.
  *
  * Pure: the posture is a function of the configured default, the published generation's skill
  * rows and the editor catalog — the runtime applies it to `process.env` (engine-env.ts) and
@@ -27,6 +29,7 @@
  */
 
 import type { SkillsHealthFinding } from './runtime.js';
+import type { BaseSkillPosture as WireBaseSkillPosture } from 'wicked-crew-api-types';
 
 /** The engine-config variable wicked-core reads at intake (`workflow::BASE_SKILL_REF_ENV`). */
 export const BASE_SKILL_REF_ENGINE_ENV = 'WICKED_BASE_SKILL_REF';
@@ -34,9 +37,18 @@ export const BASE_SKILL_REF_ENGINE_ENV = 'WICKED_BASE_SKILL_REF';
 /** The shipped default: the cross-CLI discipline skill wicked-garden publishes (garden#1131). */
 export const DEFAULT_BASE_SKILL_REF = 'wicked-garden-governed-worker';
 
-export type BaseSkillPolicy = 'warn' | 'require';
+export type BaseSkillPolicy = 'require';
 
-export const BASE_SKILL_POLICIES: ReadonlySet<string> = new Set<BaseSkillPolicy>(['warn', 'require']);
+/**
+ * What the PUBLISHED wire (`wicked-crew-api-types` 0.38.0 `BaseSkillPosture.policy`) still spells —
+ * it predates D-8b and keeps the deleted `'warn'` token until the next api-types field list narrows
+ * it. The disclosed posture is typed by the wire so the both-way wire-contract pin holds; the daemon
+ * only ever emits `'require'` (`BaseSkillConfig.policy` is the narrow type).
+ */
+export type WireBaseSkillPolicy = WireBaseSkillPosture['policy'];
+
+/** The accepted `baseSkillPolicy` values — `'require'` only; `'warn'` is refused (400) since D-8b. */
+export const BASE_SKILL_POLICIES: ReadonlySet<string> = new Set<BaseSkillPolicy>(['require']);
 
 /**
  * What a base skill NAME may look like once trimmed: empty (off) or a frontmatter skill name —
@@ -67,7 +79,8 @@ export interface PublishedSkills {
 export interface BaseSkillPosture {
   /** The frontmatter name the engine is (or would be) handed. */
   name: string;
-  policy: BaseSkillPolicy;
+  /** Always `'require'` from this daemon (D-8b); typed by the wire, see `WireBaseSkillPolicy`. */
+  policy: WireBaseSkillPolicy;
   /** The published generation the engine is handed holds the skill — the intake admission will pass. */
   present: boolean;
   /** The editor catalog holds the skill enabled — a publish would hand it (`present` after the next publish). */
@@ -101,27 +114,22 @@ export function baseSkillPosture(
   const present = published !== null && published.skills.includes(name);
   const catalog = inCatalog(name);
   const gen = published?.gen ?? null;
-  const engineInput = config.policy === 'require' || present ? name : null;
-  const finding = present ? null : missingFinding(name, config.policy, gen, catalog);
+  // `'require'` is the only policy: the engine variable is ALWAYS exported and the engine refuses
+  // at intake when the handed generation lacks the skill — never an unset env and an ungrounded run.
+  const engineInput = name;
+  const finding = present ? null : missingFinding(name, gen, catalog);
   return { name, policy: config.policy, present, inCatalog: catalog, gen, engineInput, finding };
 }
 
-function missingFinding(name: string, policy: BaseSkillPolicy, gen: number | null, inCatalog: boolean): SkillsHealthFinding {
+function missingFinding(name: string, gen: number | null, inCatalog: boolean): SkillsHealthFinding {
   const where = gen === null ? 'no published snapshot is handed to the engine' : `the published snapshot (gen ${gen}) does not hold it`;
   const remedy = inCatalog
     ? 'it is in the catalog — POST /skills/publish hands it to the next launch'
     : 'install a wicked-garden that ships it, POST /skills/refresh-baseline, then POST /skills/publish';
-  if (policy === 'require') {
-    return {
-      kind: 'skills.base-skill',
-      severity: 'error',
-      message: `the base skill "${name}" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but ${where}: the engine refuses every launch at intake until a generation holding it is published — ${remedy}; or set baseSkillPolicy "warn" to run without the discipline directive meanwhile`,
-    };
-  }
   return {
     kind: 'skills.base-skill',
-    severity: 'warning',
-    message: `the base skill "${name}" (baseSkillRef — the role-keyed discipline every governed unit follows) is not handed: ${where}, so runs proceed WITHOUT the discipline directive — ${remedy}; set baseSkillPolicy "require" to refuse such runs at intake instead`,
+    severity: 'error',
+    message: `the base skill "${name}" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but ${where}: the engine refuses every launch at intake until a generation holding it is published — ${remedy}; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`,
   };
 }
 
@@ -144,7 +152,6 @@ export function applyBaseSkillEnv(posture: BaseSkillPosture | null): void {
 export function describeBaseSkill(posture: BaseSkillPosture | null): string {
   if (posture === null) return 'discipline skill: off';
   if (posture.present) return `discipline skill: ${posture.name} gen ${posture.gen ?? '?'}`;
-  return posture.policy === 'require'
-    ? `discipline skill: ${posture.name} MISSING — runs will be refused at intake`
-    : `discipline skill: ${posture.name} MISSING — runs proceed without it`;
+  // `'require'` is the only policy (D-8b): a missing skill always refuses launches at intake.
+  return `discipline skill: ${posture.name} MISSING — runs will be refused at intake`;
 }

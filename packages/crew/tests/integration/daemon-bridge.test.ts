@@ -20,6 +20,7 @@ import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
   type: string;
@@ -66,6 +67,7 @@ const has = (type: string): boolean => frames.some((f) => f.type === type);
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'crew-bridge-'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

@@ -1591,8 +1591,8 @@ export function registerRoutes(
         const posture = runtime.skills?.baseSkill() ?? null;
         const remedy =
           posture !== null && posture.inCatalog
-            ? `the skill is in the catalog — POST /skills/publish hands it to the next launch; or set baseSkillPolicy "warn" (PUT /settings) to run without the discipline directive`
-            : `install a wicked-garden that ships the skill, POST /skills/refresh-baseline, then POST /skills/publish; or set baseSkillPolicy "warn" (PUT /settings) to run without the discipline directive`;
+            ? `the skill is in the catalog — POST /skills/publish hands it to the next launch (or set baseSkillRef "" via PUT /settings to turn the base skill off explicitly)`
+            : `install a wicked-garden that ships the skill, POST /skills/refresh-baseline, then POST /skills/publish (or set baseSkillRef "" via PUT /settings to turn the base skill off explicitly)`;
         return reply.code(422).send({ code: 'base_skill_refused', error: msg, baseSkill: posture, remedy });
       }
       const busy = /busy|in flight|already/i.test(msg);
@@ -3877,7 +3877,7 @@ export function registerRoutes(
       const p = patch.baseSkillPolicy;
       if (typeof p !== 'string' || !BASE_SKILL_POLICIES.has(p)) {
         return reply.code(400).send({
-          error: "baseSkillPolicy must be 'warn' (runs proceed without a missing base skill, with a diagnostics warning) or 'require' (the engine refuses launches at intake until the published snapshot holds it)",
+          error: "baseSkillPolicy must be 'require' — the only policy (the engine refuses launches at intake until the published snapshot holds the base skill); 'warn' was deleted in crew 0.7.35: it ran seats UNGROUNDED. Set baseSkillRef \"\" to turn the base skill off explicitly",
         });
       }
     }

@@ -320,9 +320,9 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
     expect(process.env['WICKED_SKILLS_SNAPSHOT']?.startsWith(join(stateHome, SKILLS_DIRNAME, 'snapshots')) || process.env['WICKED_SKILLS_SNAPSHOT']?.includes(`/${SKILLS_DIRNAME}/snapshots/`)).toBe(true);
   });
 
-  it('hands the engine EXACTLY ONE variable — WICKED_SKILLS_SNAPSHOT, laid out as <state home>/skills/snapshots/<gen> with every component a real directory (v3.4 §2); WICKED_CREW_STATE_HOME is NOT exported, the state home is only REPORTED', async () => {
+  it('hands the engine WICKED_SKILLS_SNAPSHOT laid out as <state home>/skills/snapshots/<gen> with every component a real directory (v3.4 §2) — beside it only WICKED_BASE_SKILL_REF (D-8); WICKED_CREW_STATE_HOME is NOT exported, the state home is only REPORTED', async () => {
     const canonical = realpathSync(stateHome);
-    // Retired as an engine input (v3.4 §2; core#399 pass 6 retires it on the engine side): crew exports nothing beside the snapshot.
+    // Retired as an engine input (v3.4 §2; core#399 pass 6 retires it on the engine side): crew exports nothing beside the snapshot and (D-8) the base skill ref.
     expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
     const handed = process.env[SKILLS_SNAPSHOT_ENGINE_ENV] as string;
     expect(handed.startsWith(join(canonical, SKILLS_DIRNAME, SNAPSHOTS_DIRNAME) + '/')).toBe(true);
@@ -336,15 +336,16 @@ describe('DYNAMIC — a booted daemon creates nothing under the state home the r
     expect(realpathSync(handed)).toBe(handed);
     expect(lstatSync(handed).isDirectory()).toBe(true);
     const skills = ((await app.inject({ method: 'GET', url: '/api/v1/diagnostics' })).json() as DiagnosticsResponse).skills;
-    // The ONE ladder outcome, plus the shipped BASE skill default's warning (crew#554): the fixture does not
-    // ship `wicked-garden-governed-worker`, so under `warn` it is "not handed" — and WICKED_BASE_SKILL_REF is
-    // therefore NOT exported either: the snapshot path stays the one variable the engine is handed.
+    // The ONE ladder outcome, plus the shipped BASE skill default's ERROR (crew#554 / DES-L4 PR-⑧, D-8): the
+    // fixture does not ship `wicked-garden-governed-worker`, and `require` is the only policy — so the
+    // finding is an error, WICKED_BASE_SKILL_REF is exported regardless (the engine refuses a launch at
+    // intake), and those two are the ONLY variables crew hands the engine.
     expect(skills).toMatchObject({
       state: 'published',
       stateHome: canonical,
       engineInput: handed,
-      findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'warning' })],
+      findings: [expect.objectContaining({ kind: 'skills.base-skill', severity: 'error' })],
     });
-    expect(process.env['WICKED_BASE_SKILL_REF']).toBeUndefined();
+    expect(process.env['WICKED_BASE_SKILL_REF']).toBe(DEFAULT_SETTINGS.baseSkillRef);
   });
 });

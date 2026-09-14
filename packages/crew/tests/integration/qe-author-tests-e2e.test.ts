@@ -40,6 +40,7 @@ import {
 } from '../../src/qe/author-workflow.js';
 import type { TestSet } from '../../src/qe/test-sets.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 import { createRequire } from 'node:module';
 
 /**
@@ -248,6 +249,7 @@ beforeAll(async () => {
 
   // ── The daemon in-process over the STUB engine, real HTTP surface ──
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

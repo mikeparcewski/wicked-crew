@@ -23,7 +23,7 @@ export type * from 'wicked-crew-api-types';
 
 import type { SystemSettings } from 'wicked-crew-api-types';
 
-import { DEFAULT_BASE_SKILL_REF } from '../skills/base-skill.js';
+import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
 
 /** The run id of the onboarding run started when a repo was registered. */
 export interface RepoOnboardRef {
@@ -179,6 +179,15 @@ export interface CrewSystemSettings extends SystemSettings {
    * per-key byte cap" at the PUT boundary (`api/routes.ts` `STUDIO_SETTINGS_MAX_BYTES`).
    */
   [key: `studio.${string}`]: unknown;
+  /**
+   * RESTATED narrow (DES-L4 PR-⑧, D-8b): `'require'` is the only policy this daemon reads or writes.
+   * The published wire (`wicked-crew-api-types` 0.38.0 `SystemSettings.baseSkillPolicy`) still spells
+   * `'warn' | 'require'` — it predates the deletion; the union loses `'warn'` in the next api-types
+   * field list. `PUT /settings` refuses `'warn'` (400) and the settings.json loader refuses it by
+   * name, so nothing typed by the wire reaches a reader as `'warn'`. (The one-way wire pins —
+   * produced ⊆ published — hold: `'require'` ⊆ `'warn' | 'require'`.)
+   */
+  baseSkillPolicy?: BaseSkillPolicy;
 }
 
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
@@ -191,9 +200,11 @@ export const DEFAULT_SETTINGS: CrewSystemSettings = {
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
-  // crew#554 (wicked-core#468) — every governed agent unit follows the cross-CLI discipline skill
-  // by default; a snapshot that lacks it WARNS (runs proceed without the directive) until the
-  // operator flips the policy to `'require'` (the engine then refuses such launches at intake).
+  // crew#554 (wicked-core#468) / DES-L4 PR-⑧ (D-8, D-8b) — every governed agent unit follows the
+  // cross-CLI discipline skill, and `'require'` is the ONLY policy: a published generation that
+  // lacks the skill REFUSES every launch at intake (the engine's `BaseSkillRefused`) — never a
+  // silently UNGROUNDED run (the deleted `'warn'` rung left every seat with no launcher and no
+  // shim, signalled only by a /health warning). `baseSkillRef: ''` is the one OFF switch.
   baseSkillRef: DEFAULT_BASE_SKILL_REF,
-  baseSkillPolicy: 'warn',
+  baseSkillPolicy: 'require',
 };
