@@ -135,13 +135,48 @@ function plainLine(raw: string): string {
     .trim();
 }
 
-/** The intent's first non-blank line as plain words, or `''`. */
+/** A line that is nothing but a URL (the benchmark runs' intents opened with the bare issue link). */
+const BARE_URL = /^<?https?:\/\/\S+>?$/i;
+/** `owner/repo#N` from a GitHub issue / pull URL. */
+const GITHUB_ISSUE_URL = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)/i;
+
+/**
+ * The intent's first non-blank PROSE line as plain words, or `''`. A line that is only a URL is
+ * never a title (review-benchmark-prs D1: three PRs titled by the bare issue URL): it is skipped,
+ * and when the intent has no prose at all the issue it names becomes the headline
+ * (`resolve owner/repo#N`).
+ */
 function firstLine(intent: string): string {
+  let url: string | null = null;
   for (const raw of intent.split(/\r?\n/)) {
     const line = plainLine(raw);
-    if (line !== '') return line;
+    if (line === '') continue;
+    if (BARE_URL.test(line)) {
+      url ??= line;
+      continue;
+    }
+    return line;
   }
-  return '';
+  const m = url === null ? null : GITHUB_ISSUE_URL.exec(url);
+  return m === null ? '' : `resolve ${m[1]}/${m[2]}#${m[3]}`;
+}
+
+/** `fix:` / `feat:` / `chore:` — the conventional-commit type a workflow's delivery reads as. */
+const CONVENTIONAL_TYPE_BY_WORKFLOW: Record<string, string> = {
+  bug: 'fix',
+  feature: 'feat',
+  migration: 'refactor',
+};
+/** A headline that already carries a conventional prefix (`fix(scope)!: …`). */
+const HAS_CONVENTIONAL_PREFIX = /^[a-z]+(?:\([^)]*\))?!?: /;
+
+/**
+ * The conventional-commit prefix for a headline: derived from the workflow (`bug` → `fix`,
+ * `feature` → `feat`, `migration` → `refactor`, anything else → `chore`), applied only when the
+ * headline does not already start with one (DES-L9; review-benchmark-prs D1).
+ */
+export function conventionalPrefix(workflowId: string | null | undefined): string {
+  return CONVENTIONAL_TYPE_BY_WORKFLOW[workflowId ?? ''] ?? 'chore';
 }
 
 /**
@@ -152,11 +187,18 @@ function firstLine(intent: string): string {
  * long caller-supplied session id (the CLI passes `--session` through) is never cut mid-id either
  * (Copilot on #525): the body names the run id in full.
  */
-export function deliverTitle(intent: string, runId: string): string {
+export function deliverTitle(intent: string, runId: string, workflowId?: string | null): string {
   const line = firstLine(intent);
   // The run id is caller-supplied too (`LaunchSchema` only requires it non-empty): a newline in it
   // must not turn the title into two lines and break the framing (Copilot on #525).
-  return boundedTitle(line === '' ? oneLine(`wicked-crew run ${oneLine(runId)}`) : line);
+  if (line === '') return boundedTitle(oneLine(`wicked-crew run ${oneLine(runId)}`));
+  // DES-L9: a conventional prefix derived from the WORKFLOW the run drove (a free-text run has no
+  // workflow and keeps the bare headline), unless the intent already wrote one.
+  const prefixed =
+    workflowId === undefined || workflowId === null || workflowId === '' || HAS_CONVENTIONAL_PREFIX.test(line)
+      ? line
+      : `${conventionalPrefix(workflowId)}: ${line}`;
+  return boundedTitle(prefixed);
 }
 
 /** Characters that OPEN a quoted or bracketed phrase, and what closes each. */
@@ -233,6 +275,13 @@ export function issueRefs(intent: string, repoRef?: string | null): IssueRefs {
     const ref = normalize(m[1], m[2]!);
     if (!fixes.includes(ref) && !refs.includes(ref)) refs.push(ref);
   }
+  // A bare GitHub issue / pull URL names an issue too (DES-L9; the benchmark intents were URLs):
+  // it rides as `owner/repo#N` — a link GitHub renders — never as a closing reference (a URL
+  // carries no verb).
+  for (const m of intent.matchAll(new RegExp(GITHUB_ISSUE_URL.source, 'gi'))) {
+    const ref = `${m[1]}/${m[2]}#${m[3]}`;
+    if (!fixes.includes(ref) && !refs.includes(ref)) refs.push(ref);
+  }
   return { fixes, refs };
 }
 
@@ -306,7 +355,7 @@ const FOOTER_LINK = '[wicked-crew](https://wc.wickedagile.com)';
  * references of the FULL intent while `f.intent` is the bounded copy ({@link composeEmbeddedDeliverText}).
  */
 export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issueRefs(f.intent, f.repoRef)): DeliverText {
-  const title = deliverTitle(f.intent, f.runId);
+  const title = deliverTitle(f.intent, f.runId, f.workflowId);
   const { fixes, refs } = links;
   const intent = f.intent.replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, ' ').trim();
   const out: string[] = [];
@@ -402,6 +451,10 @@ export function composeDeliverText(f: DeliverTextFacts, links: IssueRefs = issue
     '---',
     '',
     `Delivered by ${FOOTER_LINK} run ${code(f.runId)}. Merge stays human: the phase opens the PR, never merges it.`,
+    '',
+    // A git TRAILER (`Token: value`, the message's last paragraph) — the commit this text becomes
+    // names the pipeline that authored it (review-benchmark-prs D4), machine-readable.
+    `Delivered-By: wicked-crew run ${oneLine(f.runId)}`,
   );
   return { title, body: out.join('\n') };
 }

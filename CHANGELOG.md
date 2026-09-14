@@ -29,6 +29,17 @@ mentioned only where a daemon release depends on them.
   (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
   `LaunchCampaignBody.denialGate?`.
 <!-- fixall L9 -->
+- **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a
+  `Delivered-By` trailer (fixall L9-D1 / L9-D4 = BC-72 / BC-73; crew #550 P-1/P-4, review-benchmark-prs
+  D1 / D4).** The PR title / commit subject gets a conventional-commit prefix derived from the WORKFLOW
+  the run drove (`bug` → `fix:`, `feature` → `feat:`, `migration` → `refactor:`, anything else →
+  `chore:`; a free-text run and the run-id fallback headline keep the bare text; an intent that already
+  starts `type(scope)!: ` is left alone). A first line that is only a URL never becomes the title: the
+  next prose line does, or — when the intent has no prose — `resolve owner/repo#N` for a GitHub
+  issue/pull URL (and the URL rides the body as an `owner/repo#N` `Refs:` link, never a closing
+  reference). The framed text — and so the commit the deliver phase makes — ends with the git trailer
+  `Delivered-By: wicked-crew run <run id>` (the run id only; never an account or a path); the PR
+  footer is unchanged.
 - **Revise a pull request from a run (`revisesPr`), a deliver identity that refuses instead of
   switching, deliver text that reads right, and a deliver sweep that no longer walks the engine's
   scratch (DES-L9 r2 §5 PR-L9-crew; crew #549 = F-RC1-010 / F-RC2-026/036, crew #550 = F-RC1-043 /

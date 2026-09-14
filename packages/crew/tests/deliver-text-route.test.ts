@@ -121,7 +121,8 @@ describe('GET /runs/:id/deliver-text (crew#524)', () => {
     expect(res.headers['content-type']).toMatch(/^text\/plain/);
     const text = parseFramedDeliverText(res.body);
     expect(text).not.toBeNull();
-    expect(text!.title).toBe('the archive controls never render');
+    // DES-L9: the workflow's conventional prefix (`bug` → `fix:`).
+    expect(text!.title).toBe('fix: the archive controls never render');
     expect(text!.body).toContain('Fixes #214');
     // The run link points at the daemon that answered — its own bound origin.
     expect(text!.body).toContain(`- Run: [\`${RUN_ID}\`](http://127.0.0.1:${port}/runs/${RUN_ID})`);
