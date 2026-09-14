@@ -50,6 +50,14 @@ mentioned only where a daemon release depends on them.
   skips `avoid`; a stalled TOOL cursor gets `workerStallEscalated{action: notify, needsYou: true}`
   and a log naming the levers (Cancel run / `POST /runs/:id/reassign`) instead of a second copy of
   the same command in the same worktree. Failover stays ON by default in this release.
+- **A run the watchdog handed to a human keeps its "needs you" facts across a page reload
+  (wicked-studio#284; the crew companion L8 handed to L3).** `workerStalled` / `workerStallEscalated`
+  were live-only `/ws` frames — the engine's event log never saw them — so `GET /runs/:id/events`
+  after a reload showed nothing and the run page offered only Cancel. The stall watchdog now
+  REMEMBERS the frames it broadcast per executing run (capture `ts`, `daemon: true`, no engine
+  `seq`; capped at 64, forgotten when the run leaves the executing listing) and the events route
+  merges them in capture order beside the engine's events; `?type=` reaches them too. Daemon-local:
+  a daemon restart forgets them with the clocks that produced them (disclosed).
 
 <!-- fixall L9 -->
 - **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a

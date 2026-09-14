@@ -68,6 +68,18 @@ import {
 // existing importers of this module keep compiling.
 export type { WorkerStalledFrame, WorkerStallEscalatedFrame };
 
+/** A watchdog frame as the daemon REMEMBERS it for `GET /runs/:id/events` (wicked-studio#284): the
+ *  `/ws` frame plus a capture-time `ts` and a `daemon: true` marker (it is daemon-authored — the
+ *  engine's event log never saw it, so it carries no engine `seq`). */
+export type RecordedStallFrame = (WorkerStalledFrame | WorkerStallEscalatedFrame) & {
+  ts: number;
+  daemon: true;
+};
+
+/** Per-run cap on remembered watchdog frames — a wedged run emits one detection per quiet period
+ *  and at most `maxPerRun` escalations, so the cap is a backstop, not a budget. */
+export const STALL_FRAME_CAP = 64;
+
 /** Default sweep cadence — frequent enough that `quietForMs` is at most ~30s stale. */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
 
@@ -191,6 +203,14 @@ export class WorkerStallWatchdog {
   private readonly lastEventAt = new Map<string, number>();
   /** run id → last unit ord any of its events named. */
   private readonly lastOrd = new Map<string, number>();
+  /**
+   * wicked-studio#284: the frames this watchdog put on `/ws` for each executing run, kept so a
+   * reloaded page (`GET /runs/:id/events`) sees the SAME stall/escalation facts the live socket
+   * carried — the "needs you" card was live-only before. Daemon-local: a daemon restart forgets
+   * them along with the clocks that produced them (disclosed). Pruned with the run's other state
+   * when it leaves the executing listing.
+   */
+  private readonly frames = new Map<string, RecordedStallFrame[]>();
   /** Per-run notification/action latches for the CURRENT quiet period (cleared by any event). */
   private readonly quietPeriods = new Map<string, QuietPeriodState>();
   /** run id → automatic reassigns consumed (the crew#341 budget). Pruned with the run. */
@@ -280,6 +300,7 @@ export class WorkerStallWatchdog {
         if (!ids.has(key)) {
           this.lastEventAt.delete(key);
           this.lastOrd.delete(key);
+          this.frames.delete(key);
           this.quietPeriods.delete(key);
           this.escalationCount.delete(key);
           this.stalledSeats.delete(key);
@@ -304,12 +325,14 @@ export class WorkerStallWatchdog {
         if (quietForMs >= thresholdMs && !period?.detectionEmitted) {
           this.quietPeriod(run.id).detectionEmitted = true;
           const ord = this.lastOrd.get(run.id) ?? run.ord;
-          this.deps.broadcast({
+          const detected: WorkerStalledFrame = {
             type: 'workerStalled',
             session: run.id,
             ...(ord !== undefined ? { ord } : {}),
             quietForMs,
-          });
+          };
+          this.deps.broadcast(detected);
+          this.remember(detected);
           this.log(
             `[stall-watchdog] run ${run.id}${ord !== undefined ? ` (unit ${ord})` : ''} silent for ` +
               `${(quietForMs / 60_000).toFixed(1)} min — workerStalled frame broadcast` +
@@ -510,6 +533,7 @@ export class WorkerStallWatchdog {
       }
     }
     this.deps.broadcast(frame);
+    this.remember(frame);
     try {
       this.deps.escalation?.audit?.(frame);
     } catch (err) {
@@ -555,6 +579,22 @@ export class WorkerStallWatchdog {
    * (still safe) behaviour. Pool order is `session.clis` order: deterministic, no health
    * heuristics — the per-run budget bounds how far the rotation can walk.
    */
+  /**
+   * The watchdog frames remembered for `runId` (wicked-studio#284), oldest first, stamped with
+   * the capture time and `daemon: true`. Empty for a run this daemon never saw stall — or saw
+   * before its last restart.
+   */
+  framesFor(runId: string): readonly RecordedStallFrame[] {
+    return this.frames.get(runId) ?? [];
+  }
+
+  private remember(frame: WorkerStalledFrame | WorkerStallEscalatedFrame): void {
+    const list = this.frames.get(frame.session) ?? [];
+    list.push({ ...frame, ts: this.now(), daemon: true });
+    if (list.length > STALL_FRAME_CAP) list.splice(0, list.length - STALL_FRAME_CAP);
+    this.frames.set(frame.session, list);
+  }
+
   private pickFailoverSeat(run: ExecutingRun): string | undefined {
     if (run.cli === undefined) return undefined; // unknown current seat → council re-pick
     const stalled = this.stalledSeats.get(run.id);

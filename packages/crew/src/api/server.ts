@@ -1341,6 +1341,8 @@ export async function createServer(
     { audit, authMode: auth.mode },
     {
       seatHealth,
+      // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
+      stallFrames: (runId) => stallWatchdog.framesFor(runId),
       // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
       rosterWithStanding,
       retryIndex,

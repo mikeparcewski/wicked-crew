@@ -1093,3 +1093,30 @@ describe('stall escalation — a TOOL cursor (PR-L3-W, crew #580 / #581)', () =>
     expect(reassigns).toEqual([{ runId: 'r-agent', ord: 3, cli: 'codex' }]);
   });
 });
+
+// ── wicked-studio#284: the watchdog remembers its frames for GET /runs/:id/events ────────────────
+
+describe('stall watchdog — remembered frames (wicked-studio#284)', () => {
+  it('remembers the workerStalled and workerStallEscalated frames it broadcast, stamped ts + daemon:true, oldest first; forgets them when the run leaves the executing listing', async () => {
+    let executing: ExecutingRun[] = [{ id: 'r-mem', ord: 2, cli: 'claude', seats: ['claude', 'codex'] }];
+    const { wd, tick } = build({ listExecuting: async () => executing });
+    expect(wd.framesFor('r-mem')).toEqual([]);
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-mem', ord: 2, text: 'x' }));
+    tick(16 * MIN);
+    await wd.sweep();
+    const afterDetect = wd.framesFor('r-mem');
+    expect(afterDetect).toHaveLength(1);
+    expect(afterDetect[0]).toMatchObject({ type: 'workerStalled', session: 'r-mem', ord: 2, daemon: true });
+    expect(typeof afterDetect[0]!.ts).toBe('number');
+    tick(15 * MIN);
+    await wd.sweep();
+    const afterEscalate = wd.framesFor('r-mem');
+    expect(afterEscalate.map((f) => f.type)).toEqual(['workerStalled', 'workerStallEscalated']);
+    expect(afterEscalate[1]!.ts).toBeGreaterThan(afterEscalate[0]!.ts);
+    expect(afterEscalate[1]).toMatchObject({ action: 'reassign', outcome: 'ok', daemon: true });
+    // The run leaves the listing (completed / cancelled / parked): its frames go with its clocks.
+    executing = [];
+    await wd.sweep();
+    expect(wd.framesFor('r-mem')).toEqual([]);
+  });
+});
