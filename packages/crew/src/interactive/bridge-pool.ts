@@ -50,6 +50,15 @@
  * (`npx` → shell → node), it must differ from the pid just recycled, and a bridge whose lineage
  * cannot be read is used but never written into the sidecar. A sidecar entry is a claim of
  * ownership that licenses a later kill, so it is only ever written for a pid this daemon spawned.
+ *
+ * LIFETIME (F-W1-103, FIX-IT-ALL wave 1): a crew-spawned bridge lives exactly as long as a crew
+ * daemon OWNS it — adopt-or-kill, never leak. The sidecar's `ownerPid` + `ownerStartedAt` is that
+ * daemon — one process incarnation, so a recycled pid never reads as a live owner — the spawner, or
+ * the daemon that last adopted the bridge (adoption stamps the adopter). The daemon's shutdown
+ * reaps the bridges it spawned (the npm wrapper AND its server child), and every daemon's boot and
+ * periodic sweeps reap a bridge tree reparented to init whose sidecar owner is gone
+ * (`core/bridge-reaper.ts`). Two bridges on ports nothing would ever look up again, ~20 h after
+ * their daemon exited, were the finding.
  */
 
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -246,9 +255,15 @@ export interface CrewSidecar {
   env: BridgeEnv;
   startedBy: 'wicked-crew';
   startedAt: string;
-  /** The DAEMON that spawned it. A bridge whose owner is still alive is that daemon's to stop —
-   *  never this one's (codex on crew#506). */
+  /** The DAEMON that owns it: the spawner, or the daemon that last ADOPTED it (F-W1-103 — adoption
+   *  stamps the adopter, so the orphan sweeps see a bridge in use). A bridge whose owner is still
+   *  alive is that daemon's to stop — never this one's (codex on crew#506). */
   ownerPid?: number;
+  /** The owner's process start time as the process table reports it ({@link processStartedAt}), so
+   *  `ownerPid` names ONE incarnation of that pid: a recycled pid reads as "owner gone" instead of
+   *  keeping the bridge alive for as long as the pid stays taken (crew #606 review, MED-2). Absent
+   *  on a sidecar written before this field existed — pid liveness is all those can be checked by. */
+  ownerStartedAt?: string;
 }
 
 /** Injectable IO — the integration suite substitutes a fake bridge for the real `npx` spawn. */
@@ -327,6 +342,7 @@ export function readCrewSidecar(root: string): CrewSidecar | null {
       startedBy: 'wicked-crew',
       startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
       ...(typeof raw.ownerPid === 'number' ? { ownerPid: raw.ownerPid } : {}),
+      ...(typeof raw.ownerStartedAt === 'string' ? { ownerStartedAt: raw.ownerStartedAt } : {}),
     };
   } catch {
     return null;
@@ -374,6 +390,72 @@ export function pidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * The start time of `pid` as the process table reports it, or null when it cannot be read. Together
+ * with the pid it identifies ONE process incarnation — a recycled pid has a different start — which
+ * is what a sidecar's `ownerPid` needs to mean "that daemon" on a host that stays up for weeks.
+ * POSIX asks `ps -o lstart=` (the same spelling on macOS and procps); Windows asks CIM. Read once
+ * per bridge start / adoption and once per orphan candidate — never on a hot path.
+ */
+export function processStartedAt(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const res =
+      process.platform === 'win32'
+        ? spawnSync(
+            'powershell',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToUniversalTime().ToString('o')`,
+            ],
+            { encoding: 'utf8', timeout: 5000, windowsHide: true, env: childEnvWithBootEstateDb() },
+          )
+        : spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, env: childEnvWithBootEstateDb() });
+    if (res.error || res.status !== 0) return null;
+    const out = String(res.stdout).trim();
+    return out === '' ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+let ownStartedAt: string | null | undefined;
+
+/** This daemon's own start time, read once — what it writes into every sidecar it owns. */
+export function daemonStartedAt(): string | null {
+  if (ownStartedAt === undefined) ownStartedAt = processStartedAt(process.pid);
+  return ownStartedAt;
+}
+
+/** The owner identity this daemon stamps into a sidecar it spawns or adopts: its pid, and its start
+ *  time when the process table gave one. */
+function ownerIdentity(): Pick<CrewSidecar, 'ownerPid' | 'ownerStartedAt'> {
+  const started = daemonStartedAt();
+  return { ownerPid: process.pid, ...(started !== null ? { ownerStartedAt: started } : {}) };
+}
+
+/**
+ * Is the daemon a sidecar names as owner still THAT daemon? Alive means the pid is in the table AND,
+ * when the sidecar recorded the owner's start time, the pid's start time today is the same one — a
+ * recycled pid is "owner gone" (crew #606 review, MED-2). A sidecar without `ownerStartedAt` can only
+ * be checked by pid (disclosed gap); an UNREADABLE start time today reads as alive — a possibly-live
+ * daemon's bridge is never treated as reapable on uncertainty. No owner at all is "not alive".
+ * `io` is for tests (a fake table); production uses the real one.
+ */
+export function ownerAlive(
+  sidecar: Pick<CrewSidecar, 'ownerPid' | 'ownerStartedAt'>,
+  io: { alive?: (pid: number) => boolean; startedAt?: (pid: number) => string | null } = {},
+): boolean {
+  const owner = sidecar.ownerPid;
+  if (owner === undefined || !Number.isInteger(owner) || owner <= 0) return false;
+  if (!(io.alive ?? pidAlive)(owner)) return false;
+  if (sidecar.ownerStartedAt === undefined) return true;
+  const now = (io.startedAt ?? processStartedAt)(owner);
+  return now === null || now === sidecar.ownerStartedAt;
 }
 
 /**
@@ -496,9 +578,11 @@ export class InteractiveBridgePool {
 
   /**
    * A live bridge was found through the lockfile. Is it one THIS daemon can use (F-042/F-043)?
-   *  - crew's sidecar names this pid and its env matches ours → adopt silently;
-   *  - the sidecar names this pid with a DIFFERENT env: if the daemon that spawned it (`ownerPid`)
-   *    is STILL ALIVE, the bridge is that daemon's — two daemons sharing one docs root — and this
+   *  - crew's sidecar names this pid and its env matches ours → adopt silently, and stamp THIS
+   *    daemon as its owner (F-W1-103) so the reaper's orphan sweeps — which reap a crew bridge whose
+   *    owner daemon is gone — see it in use for as long as this daemon lives;
+   *  - the sidecar names this pid with a DIFFERENT env: if the daemon that owns it (`ownerPid`, the
+   *    SAME incarnation — pid and start time, {@link ownerAlive}) is STILL ALIVE, the bridge is that daemon's — two daemons sharing one docs root — and this
    *    one must not kill it mid-create (codex on crew#506): refuse with a `BridgeUnavailableError`
    *    naming the owner and the fix (give this daemon its own interactive root). Only a bridge
    *    whose owner is gone (a previous daemon that exited, or this very process after a
@@ -511,7 +595,10 @@ export class InteractiveBridgePool {
     const expected = bridgeEnvFor(this.io);
     const sidecar = readCrewSidecar(root);
     if (sidecar !== null && sidecar.pid === live.pid) {
-      if (bridgeEnvMatches(sidecar.env, expected)) return live;
+      if (bridgeEnvMatches(sidecar.env, expected)) {
+        this.claimSidecar(root, sidecar);
+        return live;
+      }
       const owner = sidecar.ownerPid;
       const ownerOrigin = sidecar.env.WICKED_CREW_API ?? '(unknown origin)';
       if (owner === undefined || !Number.isInteger(owner) || owner <= 0) {
@@ -528,7 +615,7 @@ export class InteractiveBridgePool {
             `interactive root (WICKED_INTERACTIVE_ROOT, or the project's interactiveRoot setting); the next request starts a bridge for this one`,
         );
       }
-      if (owner !== process.pid && pidAlive(owner)) {
+      if (owner !== process.pid && ownerAlive(sidecar)) {
         this.io.log?.(
           `interactive bridge pid ${live.pid} for ${root} belongs to another live crew daemon (pid ${owner}, ` +
             `${ownerOrigin}) with ${describeEnv(sidecar.env)}; this daemon needs ${describeEnv(expected)} — NOT ` +
@@ -686,8 +773,10 @@ export class InteractiveBridgePool {
     const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
-    // Detached + unref: the bridge is a SHARED instance keyed by root, so it must outlive the
-    // daemon that happened to start it (and be adoptable by the next one via the lockfile).
+    // Detached + unref: the bridge is keyed by root and adoptable through its lockfile, so the
+    // daemon never holds it as an awaited handle. It does NOT outlive crew (F-W1-103): the daemon's
+    // shutdown reaps the wrapper and its server child, and a daemon that dies too hard for that
+    // leaves a sidecar whose owner is gone — the next boot sweep reaps it (`core/bridge-reaper.ts`).
     child.on('error', (err) => {
       spawnFailure = err.message;
     });
@@ -753,12 +842,27 @@ export class InteractiveBridgePool {
     );
   }
 
+  /** Adopting a crew-started bridge makes THIS daemon its owner (F-W1-103): rewrite the sidecar's
+   *  `ownerPid` — pid, env and `startedAt` untouched — so the orphan sweeps, which reap a crew
+   *  bridge whose owner daemon is gone, see it in use. Best-effort, like {@link writeSidecar}. */
+  private claimSidecar(root: string, sidecar: CrewSidecar): void {
+    const mine = ownerIdentity();
+    if (sidecar.ownerPid === mine.ownerPid && sidecar.ownerStartedAt === mine.ownerStartedAt) return;
+    // What crew recorded at the spawn stays; only the owner identity changes hands.
+    const recorded: CrewSidecar = { pid: sidecar.pid, env: sidecar.env, startedBy: sidecar.startedBy, startedAt: sidecar.startedAt };
+    try {
+      writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...recorded, ...mine }, null, 2), 'utf8');
+    } catch (err) {
+      this.io.debug?.(`could not claim ${CREW_SIDECAR_NAME} in ${root}: ${(err as Error).message}`);
+    }
+  }
+
   /** Record which pid crew started and with which env, so a later adopt can tell ours from a
    *  sibling daemon's (see {@link adoptOrRecycle}). Only ever called for a pid whose lineage from
    *  this daemon's own spawn is PROVEN (see {@link start}). Best-effort: an unwritable sidecar only
    *  costs the adopt-time check, never the start. */
   private writeSidecar(root: string, pid: number, env: BridgeEnv): void {
-    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ownerPid: process.pid };
+    const sidecar: CrewSidecar = { pid, env, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ...ownerIdentity() };
     try {
       writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(sidecar, null, 2), 'utf8');
     } catch (err) {

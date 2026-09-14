@@ -66,6 +66,26 @@ mentioned only where a daemon release depends on them.
   fills a map, it never broadcasts or re-arms a clock. Served frames carry `daemon: true` and the
   `seq` of the engine record they follow (`RecordedEvent.seq` is required; `daemon` rides additively
   until api-types 0.39.0 declares it). No new state-home root and no core fence entry.
+- **Interactive bridges no longer outlive crew — adopt-or-kill, never leak (F-W1-103, FIX-IT-ALL
+  wave 1; separate from the L3 3D train, distinct seam).** The `npx wicked-interactive serve --root …`
+  bridge the pool spawns per docs root was outside every reaper sweep (not a `*-acp` binary; its
+  server is the daemon's GRANDCHILD under an `npm exec` wrapper), so it survived every daemon that
+  started it — two were found ~20 h after their daemon exited, on ports nothing would look up again.
+  Now `core/bridge-reaper.ts` (a) reaps the wrapper AND its server child on the daemon's SIGTERM /
+  exit path (npm never forwards the signal), and (b) in the boot sweep and the 30 s live sweep reaps
+  a ppid-1 interactive tree whose docs root carries crew's own `.wi-serve.crew.json` naming one of
+  its pids with an `ownerPid` that is gone — an operator's own `serve` (no sidecar), a sidecar naming
+  another pid, a pre-#506 sidecar without an owner, or a LIVE owner all leave the tree alone. The
+  owner is one process INCARNATION — `ownerPid` + `ownerStartedAt` (the owner's start time as the
+  process table reports it) — so a recycled pid reads as "owner gone" instead of keeping a bridge
+  alive for weeks. Adopting a matching crew bridge now stamps the adopter as owner, so a bridge a
+  live daemon uses is never matched. Behaviour change: a graceful daemon restart respawns its bridges on the
+  next document request instead of re-adopting them; the first boot of this version on a host
+  reaps crew-recorded bridges left by earlier daemons. Tests: the parser on the two recorded
+  orphan shapes beside a live daemon's pair and operator bridges, every sidecar-gate refusal, the
+  SIGTERM→SIGKILL escalation, a REAL wrapper→server tree reaped through the process table, and the
+  adopt-claims-owner path in the pool suite. Behaviour change register: BC-76 (PROPOSED — user
+  decision owed; not covered by L7's BC-48 / BC-49).
 
 <!-- fixall L4 -->
 - **A daemon that refuses every launch can no longer read "status ok, no warnings" (F-W1-102, the
