@@ -104,7 +104,9 @@ export interface InteractiveProxyDeps {
   settings: ProjectSettingsStore;
   pool: InteractiveBridgePool;
   env?: NodeJS.ProcessEnv;
-  /** The home the default root hangs off (tests point it at a scratch dir). */
+  /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
+  stateHome?: string;
+  /** The HOME a leading `~` in an EXPLICIT `interactiveRoot` expands against. */
   home?: string;
   /** The create-time doc → subject-repo binding store (F-046). Absent = the create is pure
    *  transport like every other route (a directly-driven route set with no grounding). */

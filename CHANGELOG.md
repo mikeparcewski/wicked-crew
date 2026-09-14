@@ -20,6 +20,35 @@ mentioned only where a daemon release depends on them.
 
 ### Changed
 - **Skills store latency: an unchanged publish mints nothing, `current` is re-verified only when its lstat fingerprint moved, `holdsSkill` answers from the PUBLISHED rows, and every publish logs where its seconds went (fixall L6-1; crew#547 items 1-3 = F-RC1-017 / F-E2E-010, F-E2E-042; DES-L6 r2 §5 PR-L6-1).** The Skills page took 15–23 s per `GET /skills` and a publish with nothing changed took minutes and still minted a generation, because `currentSnapshot()` re-hashed every byte of the generation AND re-derived every skill row's kind/portability on EVERY read, `manifest()` re-read and re-validated the file on every call, and `publishSerialized` awaited the venv step before it knew whether anything had changed. (a) **One timing line per publish** — `[skills] publish: validate Xms · venv Yms (ready|synced|skipped|failed) · hash Zms · stage Wms · gen N|unchanged (gen N)|blocked` — so a slow publish is diagnosed from the daemon log. (b) **The `unchanged` fast path**: before `ensureVenv`, the store computes byte-for-byte the SAME `contentHash` the slow path would (validated file set + copilot view files + the `.venv` link entry exactly when the slow path would write one + implied dirs) — deterministic only when the baseline env is READY (linked) or recorded `skipped` with no env on disk (no `pyproject.toml`); equal to the current generation's hash, with `current` naming AND verifying that generation, `snapshot.json` being the bytes publish wrote, and the RUNNING portability rules identity recorded, the publish answers `200 {…, snapshot: <the current generation>, unchanged: true}` (api-types 0.38.0) — nothing awaited, nothing written, no `snapshots/<gen>/`, `current` unmoved; the route skips `afterPublish()` and audits `skills.published {unchanged: true}`. NO manifest field, NO schema touch (the review killed `treeHash`): a rollback to 0.7.34 reads the same manifest. A blocked validation, a changed tree, a moved rules table (F-083 `skills.stale-rules` still clears through a real publish) or an unverifiable current generation all take the slow path exactly as before. (c) **`verifyCurrent` memo**: root identity, storage-ancestor, containment, metadata and the `manifest.json` cross-check still run on every read (a hand-edited manifest never rides a cached "valid"); only the byte hash and the row re-derivation are skipped, and only while the generation's lstat fingerprint (`tree.ts` `fingerprintTree`: sha256 over `rel · kind · size · mtimeMs · ctimeMs · mode · linkText`, pruned subtrees included) equals the one taken BEFORE the verification that produced the memo — taken again after it, memoised only when both agree; cleared on every `current` flip (publish, `ensureReady`'s torn-flip repair). `ctime` cannot be set by user tools and a generation is locked read-only, so an edit needs the `chmod +w` that moves ctime/mode; a root-forged ctime is the stated gap. `manifest()` is memoised on the file's `(ino, size, mtimeMs, ctimeMs)` and answers a structured clone. (d) **`holdsSkill`** reads `store.currentSnapshotSkills()` — the verified current generation's own rows — instead of the editor manifest's `enabled` flag: a skill enabled after the last publish is in the catalog but NOT handed to the engine, and used to be answered `true` here and refused by the engine at unit 1 (F-E2E-042); an interactive stamp on it is now refused by crew before launch. Behaviour change register: BC-42, BC-43.
+<!-- fixall L7 -->
+- **The default interactive docs root moves into the daemon state home — `<state home>/interactive/docs`**
+  (D-L7-1 / BC-49, F-RC1-122 = 083 = 015/020 = 009, crew #564; DES-L7 §5 I2). Two derivations from
+  the process HOME (`bridge-root.ts defaultInteractiveRoot`, "kept byte-identical to interactive's
+  own default") meant a fresh daemon listed and edited the operator's — or another daemon's —
+  documents, and two daemons on one host collided on one docs directory. Now the default is one per
+  daemon (`join(crewStateHome(), 'interactive', 'docs')`, a registered state-home entry); the
+  `projects/<id>` partitions hang under it; `homedir()` survives only to expand `~` in an EXPLICIT
+  `interactiveRoot`. Existing documents are NOT moved: `serve` prints the default root and, once,
+  `N interactive document(s) found under <old default> … set WICKED_INTERACTIVE_ROOT=<old default>
+  or bind a project's interactiveRoot` when the old HOME default still holds docs.
+  `WICKED_INTERACTIVE_ROOT` leaves the boot-refuse list (`STATE_HOME_ROOT_ENVS`) and may name any
+  path, inside the state home or out; the fixture's `interactive` entry is a plain join entry again
+  (its `env` field dropped, `source` names both crew placements — byte-identical to wicked-core's
+  copy). Resolver signatures gain a `stateHome` parameter ahead of `home` (`resolveInteractiveRoot`,
+  `resolveProjectInteractiveRoot`, `ensureProjectInteractiveRoot`, the partition helpers;
+  `ProjectRootOptions.stateHome`, `ListInteractiveDocsDeps.stateHome`).
+- **The bridge pool hands every bridge a third variable, `PLAYWRIGHT_BROWSERS_PATH=<state
+  home>/interactive/recorder-browsers`** (BC-50 / R-L7-d, interactive #228). The recorder's browser
+  is provisioned and looked for under the state home, never the global Playwright cache; the first
+  recording after this release re-provisions it there (~100 MB; offline → `recorder_browser_missing`
+  with a remedy that names the path — interactive 0.9.3's `install_command` carries the prefix). A
+  sidecar written before the key existed no longer matches (`bridgeEnvMatches`), so a live 0.9.2
+  bridge whose owning daemon is gone is RECYCLED — which is how interactive 0.9.3 reaches a running
+  daemon; a bridge another live daemon owns is still refused, never killed.
+- **`wicked-interactive` need floor `^0.9.3`** (`INTERACTIVE_DEFAULT_RANGE`): per-root bus identity
+  (`wi-service-*@<h8>` — two bridges on one bus db no longer share a cursor, F-RC1-120), loud
+  refusal of frames for docs outside a bridge's root (`/api/health.unknown_doc_refused`), crew-api
+  fail-closed. A `WICKED_INTERACTIVE_SPEC` pinned below it gets the existing boot warning.
 
 - **`wicked-crew-api-types` 0.38.0** (additive over 0.37.0 — the wave-1 train's ONE api-types
   release; FIX-IT-ALL L8 PR-0, the field list adjudicated across every lane's design). Publishes the

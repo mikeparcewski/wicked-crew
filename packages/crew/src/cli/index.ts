@@ -30,6 +30,7 @@ import { runMcpServer } from './mcp.js';
 import { versionLines } from '../core/versions.js';
 import type { LaunchRunInput } from '../core/types.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
+import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
 
 const [, , command, ...argv] = process.argv;
 
@@ -281,6 +282,12 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
         'the recorder preflight and the typed RecorderError frames the demo seam relays arrived in 0.9.2)',
     );
   }
+  // D-L7-1 / BC-49 (0.7.35): the shared default docs root and the recorder browsers both live under
+  // this daemon's state home now — say where, and say ONCE if documents were left under the old
+  // HOME default (they are not moved; the notice carries the remedy).
+  console.error(`[crew] interactive default docs root: ${defaultInteractiveRoot()} · recorder browsers: ${recorderBrowsersPath()}`);
+  const legacyDocs = legacyHomeDocsNotice();
+  if (legacyDocs !== null) console.warn(`[crew] interactive: ${legacyDocs}`);
   const crewVersion = crewPackageVersion();
   applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath }));
   const legacyOutbox = await probeLegacyOutbox(legacyHomeOutboxPath(), governanceStore.coreDbPath);

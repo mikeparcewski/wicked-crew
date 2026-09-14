@@ -18,6 +18,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { recorderBrowsersPath } from '../../src/interactive/bridge-root.js';
 import {
   BridgeUnavailableError,
   CREW_SIDECAR_NAME,
@@ -168,15 +169,20 @@ describe('busDataDirOf (F-043)', () => {
 });
 
 describe('bridgeEnvFor / bridgeEnvMatches', () => {
-  it('carries only the DEFINED halves, and compares both variables', () => {
-    expect(bridgeEnvFor({})).toEqual({});
+  it('carries only the DEFINED halves of the F-042/F-043 pair, ALWAYS the browsers path (BC-50), and compares all three', () => {
+    // The browsers path is crew's own placement under the state home — it rides even when nothing
+    // else is defined (crew ≥ 0.7.35; the key a pre-0.7.35 sidecar lacks, which is the recycle trigger).
+    const browsers = recorderBrowsersPath();
+    expect(bridgeEnvFor({})).toEqual({ PLAYWRIGHT_BROWSERS_PATH: browsers });
     expect(bridgeEnvFor({ studioOrigin: () => 'http://127.0.0.1:60785', busDataDir: '/fresh/bus' })).toEqual({
       WICKED_CREW_API: 'http://127.0.0.1:60785',
       WICKED_BUS_DATA_DIR: '/fresh/bus',
+      PLAYWRIGHT_BROWSERS_PATH: browsers,
     });
-    expect(bridgeEnvFor({ studioOrigin: () => null, busDataDir: null })).toEqual({});
+    expect(bridgeEnvFor({ studioOrigin: () => null, busDataDir: null })).toEqual({ PLAYWRIGHT_BROWSERS_PATH: browsers });
     expect(bridgeEnvMatches({ WICKED_CREW_API: 'a' }, { WICKED_CREW_API: 'a' })).toBe(true);
     expect(bridgeEnvMatches({ WICKED_CREW_API: 'a' }, { WICKED_CREW_API: 'a', WICKED_BUS_DATA_DIR: '/b' })).toBe(false);
+    expect(bridgeEnvMatches({ WICKED_CREW_API: 'a', WICKED_BUS_DATA_DIR: '/b' }, { WICKED_CREW_API: 'a', WICKED_BUS_DATA_DIR: '/b', PLAYWRIGHT_BROWSERS_PATH: browsers })).toBe(false);
     expect(bridgeEnvMatches({}, {})).toBe(true);
   });
 });
@@ -197,7 +203,11 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     const sidecar = readCrewSidecar(root);
     expect(sidecar?.pid).toBe(bridge.pid);
     expect(sidecar?.pid).toBe(lock(root).pid);
-    expect(sidecar?.env).toEqual({ WICKED_CREW_API: 'http://127.0.0.1:60785', WICKED_BUS_DATA_DIR: join(dir, 'state', 'bus') });
+    expect(sidecar?.env).toEqual({
+      WICKED_CREW_API: 'http://127.0.0.1:60785',
+      WICKED_BUS_DATA_DIR: join(dir, 'state', 'bus'),
+      PLAYWRIGHT_BROWSERS_PATH: recorderBrowsersPath(),
+    });
     expect(sidecar?.startedBy).toBe('wicked-crew');
     expect(existsSync(join(root, CREW_SIDECAR_NAME))).toBe(true);
   }, 30_000);
