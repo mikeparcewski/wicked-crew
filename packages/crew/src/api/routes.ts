@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds } from '../core/adapter.js';
+import { CampaignsUnsupportedError, ChatUnsupportedError, CoreAdapter, ElicitationUnsupportedError, SteeringUnsupportedError, humanGatePhaseIds, settingsFilePath } from '../core/adapter.js';
 import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/repoPaths.js';
 import type {
   CodeGraphData,
@@ -3757,7 +3757,11 @@ export function registerRoutes(
   // The store is SHARED with the skin (crew#323): beside the engine's own keys it round-trips
   // the studio's `studio.*` preference blobs verbatim — see `CrewSystemSettings`'s index
   // signature in core/types.ts, which states that rather than leaving it to a client comment.
-  app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings() }));
+  // crew#494 (F-007 — FIX-IT-ALL L10-6): the System page showed a LITERAL settings path; the daemon
+  // now says where its settings file actually is (`WICKED_CREW_SYSTEM_SETTINGS` honoured) as the
+  // additive `path` (api-types 0.38.0 `SettingsResponse.path?`; adjudicated §4.6 — `path`, not
+  // `settings_path`).
+  app.get(`${V}/settings`, async () => ({ settings: await adapter.getSettings(), path: settingsFilePath() }));
 
   app.put(`${V}/settings`, async (req, reply) => {
     const patch = req.body as Partial<import('../core/types.js').CrewSystemSettings>;
