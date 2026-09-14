@@ -1033,3 +1033,63 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
     }
   }, 15_000);
 });
+
+// ── DES-L3 PR-3E: role-aware failover · PR-L3-W: a tool cursor is notified, never reassigned ────
+
+describe('stall escalation — evaluator ≠ creator across a failover (PR-3E, F-RC1-012)', () => {
+  it('an evaluator cursor never lands on a seat that built the work it reviews (`avoid`)', async () => {
+    const { wd, reassigns, tick } = build({
+      runs: [{ id: 'r-eval', ord: 2, cli: 'claude', seats: ['claude', 'codex', 'pi'], avoid: ['codex'] }],
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-eval', ord: 2, text: 'x' }));
+    tick(16 * MIN);
+    await wd.sweep();
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-eval', ord: 2, cli: 'pi' }]);
+  });
+
+  it('no distinct candidate outside `avoid` ⇒ in-place recycle, as before', async () => {
+    const { wd, reassigns, tick } = build({
+      runs: [{ id: 'r-eval2', ord: 2, cli: 'claude', seats: ['claude', 'codex'], avoid: ['codex'] }],
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-eval2', ord: 2, text: 'x' }));
+    tick(16 * MIN);
+    await wd.sweep();
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-eval2', ord: 2, cli: 'claude' }]);
+  });
+});
+
+describe('stall escalation — a TOOL cursor (PR-L3-W, crew #580 / #581)', () => {
+  it('detects the stall, then NOTIFIES (needsYou) instead of reassigning; no budget consumed; the log names the lever', async () => {
+    const { wd, frames, logs, reassigns, audited, tick } = build({
+      runs: [{ id: 'r-tool', ord: 5, cli: 'bash', seats: ['claude', 'codex'], executor: 'tool' }],
+    });
+    wd.ingest(ev({ type: 'toolExecutorDispatched', session: 'r-tool', ord: 5, cmd: ['bash', '-lc', 'deliver'] }));
+    tick(16 * MIN);
+    await wd.sweep();
+    expect(stalled(frames).map((f) => f.session)).toEqual(['r-tool']);
+    tick(15 * MIN);
+    await wd.sweep();
+    const esc = escalatedOf(frames);
+    expect(esc).toHaveLength(1);
+    expect(esc[0]).toMatchObject({ session: 'r-tool', ord: 5, action: 'notify', outcome: 'ok', needsYou: true });
+    expect(reassigns).toHaveLength(0);
+    expect(audited).toHaveLength(1);
+    expect(logs.some((l) => /tool command/.test(l) && /Cancel run stops it/.test(l) && /reassign re-runs it/.test(l))).toBe(true);
+  });
+
+  it('an agent cursor (executor absent — older engine views) keeps today\'s reassign ladder', async () => {
+    const { wd, reassigns, tick } = build({
+      runs: [{ id: 'r-agent', ord: 3, cli: 'claude', seats: ['claude', 'codex'] }],
+    });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-agent', ord: 3, text: 'x' }));
+    tick(16 * MIN);
+    await wd.sweep();
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(reassigns).toEqual([{ runId: 'r-agent', ord: 3, cli: 'codex' }]);
+  });
+});

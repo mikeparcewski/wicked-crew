@@ -40,9 +40,12 @@ describe('toEngineSeat', () => {
     const signedOut = toEngineSeat({ ...registrySeat, auth: 'signed_out', council_eligible: false, council_ineligible_reason: 'signed out — a council would bench this seat on its first ballot; sign it in from the System page' }) as Record<string, unknown>;
     expect(signedOut['health']).toEqual({ usable: false, reason: 'signed out' });
     const inactive = toEngineSeat({ ...registrySeat, health: { status: 'inactive', since: 't' }, council_eligible: false, council_ineligible_reason: 'inactive after a seat-level error: boom' }) as Record<string, unknown>;
-    expect(inactive['health']).toEqual({ usable: false, reason: 'inactive after a seat-level error' });
+    // (R5) No `inactive` arm any more — a stale client's sentence falls back to its first clause.
+    expect(inactive['health']).toEqual({ usable: false, reason: 'inactive after a seat-level error: boom' });
     const benchedByCouncils = toEngineSeat({ ...registrySeat, council_eligible: false, council_bench: { failures: 2, last_kind: 'timed_out', last_at: 't', window_ms: 60_000 }, council_ineligible_reason: 'benched by this daemon’s recent councils: …' }) as Record<string, unknown>;
-    expect(benchedByCouncils['health']).toEqual({ usable: false, reason: 'benched by recent councils (2 timed out)' });
+    // (R5b) No `council_bench` arm any more — the sentence's first clause, the field itself stripped.
+    expect(benchedByCouncils['health']).toEqual({ usable: false, reason: 'benched by this daemon’s recent councils: …' });
+    expect('council_bench' in benchedByCouncils).toBe(false);
     const disabled = toEngineSeat({ ...registrySeat, enabled_for_council: false, council_eligible: false, council_ineligible_reason: 'not enabled for council' }) as Record<string, unknown>;
     expect(disabled['health']).toEqual({ usable: false, reason: 'not enabled for council' });
     // An unknown cause falls back to the first clause of the operator sentence.

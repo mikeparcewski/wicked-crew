@@ -130,7 +130,7 @@ describe('engineCampaignDef (pure)', () => {
     for (const seat of [...a, ...b]) expectNoCrewReadings(seat);
     expect(a[0]!['health']).toEqual({ usable: false, reason: 'signed out' });
     expect(a[1]!['health']).toEqual({ usable: true });
-    expect(b[0]!['health']).toEqual({ usable: false, reason: 'benched by recent councils (2 timed out)' });
+    expect(b[0]!['health']).toEqual({ usable: false, reason: 'benched by this daemon’s recent councils: 2 ballot failures in the last 1 min' });
     // Registry fields survive verbatim.
     expect(a[0]!['login_invocation']).toBe('codex login');
     expect(a[0]!['headless_invocation']).toBe('codex {PROMPT}');
@@ -171,7 +171,7 @@ describe('engineCampaignDef (pure)', () => {
     const out = engineCampaignDef(input);
     expect((out.nodes[0]!.run_spec as { clis: unknown }).clis).toBe('garbage');
     // The other node is still translated.
-    expect(seatsOf(out, 1)[0]!['health']).toEqual({ usable: false, reason: 'benched by recent councils (2 timed out)' });
+    expect(seatsOf(out, 1)[0]!['health']).toEqual({ usable: false, reason: 'benched by this daemon’s recent councils: 2 ballot failures in the last 1 min' });
   });
 });
 
@@ -208,7 +208,7 @@ describe('CoreAdapter.launchCampaign (the seam)', () => {
     for (const seat of [...a, ...b]) expectNoCrewReadings(seat);
     expect(a[0]!['health']).toEqual({ usable: false, reason: 'signed out' });
     expect(a[1]!['health']).toEqual({ usable: true });
-    expect(b[0]!['health']).toEqual({ usable: false, reason: 'benched by recent councils (2 timed out)' });
+    expect(b[0]!['health']).toEqual({ usable: false, reason: 'benched by this daemon’s recent councils: 2 ballot failures in the last 1 min' });
     expect(b[1]).toEqual(plainOpencode);
     // Non-roster fields reached the engine untouched.
     expect(wire.edges).toEqual([{ from: 'a', to: 'b', condition: 'on_success' }]);

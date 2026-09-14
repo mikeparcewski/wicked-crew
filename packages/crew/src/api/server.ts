@@ -995,11 +995,23 @@ export async function createServer(
           // candidates. Views with no units (older engines, stub adapters) keep the historical
           // `unit_ix` fallback.
           const cursor = resolveCursorUnit(v);
+          // DES-L3 PR-3E (F-RC1-012): an EVALUATOR cursor must never fail over onto a seat
+          // that built the work it reviews — the creators' seats ride as `avoid`. A free-text
+          // unit carries no role → no constraint (today's pick).
+          const avoid =
+            cursor?.role === 'evaluator'
+              ? v.units
+                  .filter((u) => (u as { role?: unknown }).role === 'creator' && u.assigned_cli != null)
+                  .map((u) => u.assigned_cli as string)
+              : [];
           return {
             id: v.session.id,
             ord: cursor?.ord ?? v.session.unit_ix,
             ...(cursor?.cli !== undefined ? { cli: cursor.cli } : {}),
             ...(Array.isArray(v.session.clis) ? { seats: v.session.clis } : {}),
+            ...(avoid.length > 0 ? { avoid } : {}),
+            // crew #580 / #581: a tool cursor is notified about, never reassigned.
+            ...(cursor !== undefined ? { executor: cursor.executor } : {}),
           };
         }),
     broadcast: (frame) => broadcast(frame),

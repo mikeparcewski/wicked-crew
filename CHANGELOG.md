@@ -35,6 +35,21 @@ mentioned only where a daemon release depends on them.
   NOT_FIXED_YET `it.fails` case that goes red on the first crew CI run linking a core main with the
   engine change; it is now status-conditional (asserts the gate shape when the run parked, returns on
   a pre-3A `failed` run), so crew main is green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
+- **Seat health is the engine's bench + the seat's own auth refusal — crew's second classifiers are
+  deleted (R5 / R5b; F-RC2-006 / -021 / -041 / -004; DES-L3 PR-3D).** `stepFailed{workerError}`,
+  quota / 401 / timeout phrases and repeated ACP fallbacks no longer flip a seat `inactive`
+  (`health.status` is always `active`; observed errors stamp `lastErrorAt`); the daemon-wide
+  council-count bench (`council_bench`, 30-min window) is gone from the tracker, the standing
+  predicate and `GET /roster` — the engine benches a seat per run at its ballot threshold (now
+  including an unclassified persistent failure) and says so in `unitDistributed.degradedReason`.
+  A launch refusal or a load timeout can no longer take the roster to 0 eligible seats until a
+  restart.
+- **Stall-watchdog failover is role-aware and never reassigns a tool unit (DES-L3 PR-3E / PR-L3-W;
+  F-RC1-012, crew #580 / #581).** `listExecuting` carries `avoid` (the creators' seats when the
+  cursor is an evaluator) and `executor` (`tool` when the cursor has a `tool_cmd`); `pickFailoverSeat`
+  skips `avoid`; a stalled TOOL cursor gets `workerStallEscalated{action: notify, needsYou: true}`
+  and a log naming the levers (Cancel run / `POST /runs/:id/reassign`) instead of a second copy of
+  the same command in the same worktree. Failover stays ON by default in this release.
 
 <!-- fixall L9 -->
 - **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a

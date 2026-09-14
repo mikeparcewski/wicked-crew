@@ -113,6 +113,14 @@ export interface ExecutingRun {
   /** The run's own seat pool (`session.clis`), in roster order — the failover candidates a
    *  reassign may route to (perf#4). Absent/empty = no pool known: reassign in place. */
   seats?: string[];
+  /** Seats a failover must NOT land on (DES-L3 PR-3E, F-RC1-012 / crew#436): when the cursor is
+   *  an EVALUATOR, every seat that built work it reviews — evaluator ≠ creator holds across a
+   *  stall reassign too. Absent/empty = no constraint (a free-text unit carries no role). */
+  avoid?: string[];
+  /** What runs the cursor unit (crew #580 / #581): a `tool` unit is the engine's own command —
+   *  there is no seat to fail over to, so the escalation stage NOTIFIES instead of reassigning.
+   *  Absent = unknown (older engine views): today's ladder. */
+  executor?: 'tool' | 'agent';
 }
 
 /**
@@ -413,7 +421,20 @@ export class WorkerStallWatchdog {
       quietForMs,
     };
     let frame: WorkerStallEscalatedFrame;
-    if (escalation.action === 'notify') {
+    if (run.executor === 'tool') {
+      // crew #580 / #581 (F-BM-004 / F-BM-010): the cursor is a TOOL unit — the engine's own
+      // command (a deliver script, an index) — and there is no seat to fail over to. A reassign
+      // would spawn a second copy of the same command into the same worktree (run 6: three
+      // deliver scripts raced on one branch); the engine now kills the running child on a
+      // supersede, so an automatic reassign would only be a kill-and-retry loop burning the
+      // budget. Surface it for a human instead; no budget consumed, `stalledSeats` untouched.
+      frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
+      this.deps.log?.(
+        `stall watchdog: run ${run.id} unit ${ord ?? '?'} is a tool command running for ` +
+          `${Math.round(quietForMs / 60_000)} min — no seat to fail over to; Cancel run stops it, ` +
+          `POST /runs/${run.id}/reassign re-runs it`,
+      );
+    } else if (escalation.action === 'notify') {
       // The fail-loud rung: surface for a human, touch nothing. No budget — notifying is free.
       frame = { ...base, action: 'notify', outcome: 'ok', needsYou: true };
     } else {
@@ -537,7 +558,12 @@ export class WorkerStallWatchdog {
   private pickFailoverSeat(run: ExecutingRun): string | undefined {
     if (run.cli === undefined) return undefined; // unknown current seat → council re-pick
     const stalled = this.stalledSeats.get(run.id);
-    return (run.seats ?? []).find((s) => s !== run.cli && !(stalled?.has(s) ?? false));
+    // DES-L3 PR-3E: never onto a seat the cursor evaluator reviews (`avoid` — the creators'
+    // seats); no distinct candidate left ⇒ in-place recycle, as before.
+    const avoid = run.avoid ?? [];
+    return (run.seats ?? []).find(
+      (s) => s !== run.cli && !(stalled?.has(s) ?? false) && !avoid.includes(s),
+    );
   }
 
   /** Returns the independent detection/action latches for this quiet period. */
