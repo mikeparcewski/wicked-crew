@@ -323,6 +323,31 @@ export function walkTree(root: string, skipDir?: (rel: string) => boolean): Tree
   };
 }
 
+/**
+ * The lstat FINGERPRINT of a tree (DES-L6 PR-L6-1 (c), crew#547): sha256 over every entry `walkEntries`
+ * classifies — pruned subtrees included, so a node planted under one moves it — as
+ * `rel · kind · size · mtimeMs · ctimeMs · mode · linkText`. It is a CHANGE DETECTOR, never an
+ * integrity claim: `verifyCurrent` re-hashes the bytes on the first read and again whenever this
+ * moved; an equal fingerprint lets it answer its last VERIFIED result. `ctime` cannot be set by
+ * user tools (`touch -r` sets mtime only) and a published generation is locked read-only, so an
+ * edit needs a `chmod +w` that moves ctime and mode; a root-forged ctime is the stated gap.
+ * Answers `null` when an entry vanished between the readdir and its lstat — the caller treats that
+ * as "moved" and takes the full path.
+ */
+export function fingerprintTree(root: string, skipDir?: (rel: string) => boolean): string | null {
+  const h = createHash('sha256');
+  try {
+    for (const e of walkEntries(root, skipDir)) {
+      const st = lstatSync(e.abs);
+      h.update(`${e.rel}\0${e.kind}\0${st.size}\0${st.mtimeMs}\0${st.ctimeMs}\0${st.mode}\0${e.target ?? ''}\n`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  return h.digest('hex');
+}
+
 /** Every proper ancestor directory a set of POSIX-relative file paths implies (`a/b/c.md` → `a`, `a/b`), sorted. */
 export function impliedDirs(rels: Iterable<string>): string[] {
   const out = new Set<string>();

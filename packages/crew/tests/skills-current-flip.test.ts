@@ -41,7 +41,7 @@ import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 
 import { CURRENT_TMP_PREFIX } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
-import { scaffold, type Scaffold } from './support/skills-fixture.js';
+import { bump, scaffold, type Scaffold } from './support/skills-fixture.js';
 
 interface Registry {
   entries: Array<{ name?: string; read_slot?: string; denied_children?: string[] }>;
@@ -78,7 +78,7 @@ describe('the `current` flip (core#399 round 4)', () => {
     expect(registered).toEqual(new Set(['snapshots', 'baseline', 'effective', 'manifest.json', 'manifest.json.tmp-*', 'current', '.uv-cache', '.staging-*', 'refused']));
     // Two publishes: the first creates `current`, the second flips over an existing one.
     expect((await s.store.publish(1)).verdict).toBe('clear');
-    expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');
+    expect((await s.store.publish(bump(s))).verdict).toBe('clear'); // a changed tree — an unchanged publish flips nothing (DES-L6 PR-L6-1)
     expect(flips.observed).toHaveLength(2);
     for (const flip of flips.observed) {
       expect(flip.to).toBe(join(s.root, 'current'));

@@ -10,7 +10,7 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import { GateCache } from '../src/api/gate-cache.js';
@@ -354,6 +354,28 @@ describe('publish / analyze — the engine handoff and the copilot view', () => 
       release(); // always open the gate, even on an assertion failure, so teardown never hangs
       await slowApp.close();
       removeScratch(slow.base);
+    }
+  });
+
+  it('a second publish with nothing changed is 200 {unchanged: true} naming the CURRENT generation; afterPublish is NOT re-run (the export already names it) — DES-L6 PR-L6-1', async () => {
+    const runtime = new SkillsRuntime({ store: s.store, log: (m) => logs.push(m) });
+    const after = vi.spyOn(runtime, 'afterPublish');
+    const own = buildApp(runtime);
+    await own.ready();
+    try {
+      const first = (await own.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: 1 } })).json() as SkillPublishResult;
+      expect(first.verdict).toBe('clear');
+      expect(first.unchanged).toBeUndefined();
+      expect(after).toHaveBeenCalledTimes(1);
+      const exported = process.env[SKILLS_SNAPSHOT_ENGINE_ENV];
+      const res = await own.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: first.revision } });
+      expect(res.statusCode).toBe(200);
+      const second = res.json() as SkillPublishResult;
+      expect(second).toMatchObject({ verdict: 'clear', revision: first.revision, unchanged: true, snapshot: { gen: first.snapshot?.gen, contentHash: first.snapshot?.contentHash, path: first.snapshot?.path } });
+      expect(after).toHaveBeenCalledTimes(1);
+      expect(process.env[SKILLS_SNAPSHOT_ENGINE_ENV]).toBe(exported);
+    } finally {
+      await own.close();
     }
   });
 

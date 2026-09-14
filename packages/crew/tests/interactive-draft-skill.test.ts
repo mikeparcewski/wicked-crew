@@ -104,13 +104,18 @@ describe('draftSkillArmLine', () => {
 });
 
 describe('SkillsRuntime.holdsSkill', () => {
+  // `holdsSkill` reads the PUBLISHED generation's rows (`currentSnapshotSkills`, DES-L6 PR-L6-1 (d) / F-E2E-042) —
+  // only enabled skills are ever published, so the stub publishes exactly the enabled entries.
   function runtimeWith(state: string, skills: Record<string, { enabled: boolean }>, manifestThrows = false): SkillsRuntime {
-    const store = { manifest: () => { if (manifestThrows) throw new Error('boom'); return { skills }; } } as unknown as SkillsStore;
+    const published = Object.entries(skills).filter(([, v]) => v.enabled).map(([name]) => name);
+    const store = {
+      currentSnapshotSkills: () => { if (manifestThrows) throw new Error('boom'); return { gen: 1, skills: published }; },
+    } as unknown as SkillsStore;
     const rt = new SkillsRuntime({ store, log: () => {}, bootSnapshot: undefined });
     (rt as unknown as { lastHealth: { state: string } }).lastHealth = { state, root: null, current: null, engineInput: null, stateHome: null, findings: [] } as never;
     return rt;
   }
-  it('true only for a PUBLISHED snapshot holding the skill enabled; false on every other state, a missing/disabled entry, or an unreadable manifest', () => {
+  it('true only for a PUBLISHED snapshot holding the skill; false on every other state, a skill the generation lacks (missing or disabled at publish), or an unverifiable generation', () => {
     expect(runtimeWith('published', { [DRAFT_SKILL]: { enabled: true } }).holdsSkill(DRAFT_SKILL)).toBe(true);
     expect(runtimeWith('published', { [DRAFT_SKILL]: { enabled: false } }).holdsSkill(DRAFT_SKILL)).toBe(false);
     expect(runtimeWith('published', {}).holdsSkill(DRAFT_SKILL)).toBe(false);

@@ -309,16 +309,20 @@ export class SkillsRuntime {
    * current baseline to judge; the other rungs have no manifest, or one their own finding condemns.
    */
   /**
-   * Does the PUBLISHED snapshot the engine is handed hold (and enable) skill `name`? The interactive
-   * seams gate their `skill_ref` on this (interactive/draft-skill.ts): the engine refuses a run whose
-   * `skill_ref` the snapshot lacks, so a seam must know before it stamps. `false` on every non-published
-   * state (fallback, blocked, config-error, disabled) and on an unreadable manifest — never a guess.
+   * Does the PUBLISHED snapshot the engine is handed hold skill `name`? The interactive seams gate
+   * their `skill_ref` on this (interactive/draft-skill.ts): the engine refuses a run whose `skill_ref`
+   * the snapshot lacks, so a seam must know before it stamps. Answered from the VERIFIED current
+   * generation's own rows (`store.currentSnapshotSkills()` — only ENABLED skills are ever published),
+   * not from the editor manifest (F-E2E-042 / DES-L6 PR-L6-1 (d)): a skill enabled AFTER the last
+   * publish is in the catalog but not in what the engine is handed, and used to be answered `true`
+   * here and refused by the engine at unit 1. `false` on every non-published state (fallback,
+   * blocked, config-error, disabled) and on an unverifiable or unreadable generation — never a guess.
    */
   holdsSkill(name: string): boolean {
     if (this.lastHealth.state !== 'published') return false;
     try {
-      const entry = this.store.manifest().skills[name];
-      return entry !== undefined && entry.enabled;
+      const current = this.store.currentSnapshotSkills();
+      return current !== null && current.skills.includes(name);
     } catch {
       return false;
     }
