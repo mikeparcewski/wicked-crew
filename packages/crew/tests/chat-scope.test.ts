@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ChatScopeIndex,
+  CHAT_GROUNDING_COMMAND,
   chatScopeStatement,
   chatScratchBase,
   prepareChatScratch,
@@ -376,14 +377,16 @@ describe('the scratch root and its statement', () => {
     expect(agents).toContain('/srv/repos/beta');
     expect(agents).toMatch(/READ-ONLY/);
     expect(agents).toMatch(/Do NOT modify/);
-    // DES-L5 §5-a (D-7): the grounding path is the handed garden skills over the read-only estate
-    // shim — never a CLI-registered MCP server (deleted in core-ts 0.7.26; a false promise on
-    // every non-claude seat) — plus the answer contract (P6 criterion 5).
+    // DES-L5 §5-a (D-7) re-cut after the P6 gate (recon-w1-grounding Q1/Q4 cause #1): the
+    // statement hands a COMMAND, not a noun — the one worked shim line a seat can run on any
+    // carrier — plus the store-pin sentence; never a CLI-registered MCP server; plus the answer
+    // contract (P6 criterion 5).
     expect(agents).toMatch(/## Grounding/);
-    expect(agents).toContain('`wicked-garden-mem`');
-    expect(agents).toContain('`wicked-garden-search`');
+    expect(agents).toContain(`    ${CHAT_GROUNDING_COMMAND}`);
+    expect(agents).toContain('the store is pinned by `WICKED_ESTATE_DB`');
     expect(agents).toContain('always pass `--readonly`');
     expect(agents).not.toMatch(/MCP/);
+    expect(agents).not.toMatch(/wicked-garden-(mem|search)/);
     expect(agents).toMatch(/## Answer format/);
     expect(agents).toMatch(/"Work State", "Next Move"/);
     expect(agents).toMatch(/say so in one line/);
@@ -468,8 +471,47 @@ describe('the scratch root and its statement', () => {
     });
     expect(text).toMatch(/None\./);
     expect(text).toContain('No code graph is bound: nothing to bind — read the repositories directly and say so.');
+    // Nothing pins the store on an unbound chat, so no shim command is handed (it would be refused).
+    expect(text).not.toContain('_estate_client.py');
     expect(text).not.toMatch(/MCP/);
     expect(text).not.toMatch(/## Project/);
+  });
+
+  it('R-L5-1: the bound statement\'s Grounding section is the pinned snapshot — one worked shim command, the store pin, the tool keys — and fits a 1022-byte PTY line', () => {
+    const text = chatScopeStatement('c9', {
+      kind: 'repos',
+      repos: [{ id: 'r1', name: 'alpha', rootPath: '/srv/repos/alpha' }],
+      cwd: join(base, 'c9'),
+      graph: { bound: true, reason: 'the repo\'s own code graph', repoLabel: 'alpha' },
+      dangling: [],
+    } as unknown as Parameters<typeof chatScopeStatement>[1]);
+    const start = text.indexOf('## Grounding');
+    const end = text.indexOf('## Answer format');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const section = text.slice(start, end);
+    expect(section).toBe(
+      '## Grounding\n' +
+        '\n' +
+        'Before you read files, query the code graph through the read-only estate shim. Run this in\n' +
+        'your shell (`wicked-garden` is first on PATH; the store is pinned by `WICKED_ESTATE_DB`):\n' +
+        '\n' +
+        `    ${CHAT_GROUNDING_COMMAND}\n` +
+        '\n' +
+        'The same form reaches `BlastRadius` and `Lineage` (`{"symbol":"<name>"}`) and `RankHotspots`\n' +
+        '(`{"limit":20}`); always pass `--readonly`.\n' +
+        "The graph is bound to `alpha` (the repo's own code graph).\n" +
+        '\n',
+    );
+    // The command is the exact shim grammar (`_estate_client.py [--readonly] … call '{"tool":…,"arguments":…}'`)
+    // with the estate MCP's `SearchEntity` argument key `name` — `{"query"}` returned 0 matches (F-W1-006).
+    expect(CHAT_GROUNDING_COMMAND).toBe(
+      'wicked-garden run scripts/_estate_client.py --readonly call \'{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}\'',
+    );
+    expect(section).not.toMatch(/MCP|Skill|"query"/);
+    // The statement is a FILE (AGENTS.md / CLAUDE.md), not a PTY prompt — but the section is kept
+    // under the 1022-byte canonical-line budget so it could ride one if a carrier ever inlines it.
+    expect(Buffer.byteLength(section, 'utf8')).toBeLessThanOrEqual(1022);
   });
 
   it('removeChatScratch removes a root inside the base and REFUSES one outside it', () => {

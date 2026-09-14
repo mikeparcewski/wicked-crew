@@ -91,9 +91,10 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     const agents = readFileSync(join(body.scope.cwd, 'AGENTS.md'), 'utf8');
     expect(agents).toContain('/srv/repos/alpha');
     expect(agents).toMatch(/READ-ONLY/);
-    // DES-L5 §5-a: the grounding names the handed garden skills over the read-only estate shim — never an MCP server.
+    // DES-L5 §5-a re-cut (recon-w1-grounding Q4 cause #1): the grounding hands ONE worked shim command — never an MCP server.
     expect(agents).toMatch(/## Grounding/);
-    expect(agents).toContain('`wicked-garden-mem`');
+    expect(agents).toContain("wicked-garden run scripts/_estate_client.py --readonly call '{\"tool\":\"SearchEntity\"");
+    expect(agents).toContain('the store is pinned by `WICKED_ESTATE_DB`');
     expect(agents).not.toMatch(/MCP/);
     expect(existsSync(join(body.scope.cwd, 'CLAUDE.md'))).toBe(true);
     // What the engine was handed.
