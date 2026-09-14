@@ -221,6 +221,7 @@ import {
   assertNoSymlinkComponents,
   copyFiles,
   EntrySwappedError,
+  fingerprintTree,
   hashFileSet,
   hashTree,
   impliedDirs,
@@ -232,14 +233,14 @@ import {
   sha256Hex,
   SKIP_DIR_NAMES,
   SymlinkComponentError,
-  walkEntries,
-  walkFiles,
-  walkTree,
-  writeFileAtomic,
   type FileRecord,
   type LinkRecord,
   type TreeEntry,
   type TreeListing,
+  walkEntries,
+  walkFiles,
+  walkTree,
+  writeFileAtomic,
 } from './tree.js';
 
 /** The root-level names the store creates live in ONE table (`root-names.ts`, design v3.5 §2) — re-exported for the tests that observe the flip. */
@@ -733,6 +734,19 @@ export class SkillsStore {
    *  root is seen as a real directory (boot / seed), compared on every operation for the store's
    *  whole lifetime (the root is never re-aimed: a new root is a new store). */
   private boundRootReal: string | null = null;
+  /**
+   * `verifyCurrent`'s last VERIFIED answer (DES-L6 PR-L6-1 (c), crew#547): kept only while the
+   * generation's lstat fingerprint (tree.ts `fingerprintTree`) is the one taken BEFORE that
+   * verification — equal → the byte hash and the row re-derivation are skipped; anything else →
+   * the full verification runs and refreshes it. Cleared on every `current` flip.
+   */
+  private verifiedCurrent: { gen: number; contentHash: string; snapshotHash: string; fingerprint: string; result: CurrentSnapshot } | null = null;
+  /**
+   * `manifest()` memo keyed on the manifest FILE's identity `(ino, size, mtimeMs, ctimeMs)`: the
+   * same lstat every read already performs decides whether the bytes are re-read, re-parsed and
+   * re-validated. Callers get a structured clone — they mutate before `commit`, never the memo.
+   */
+  private manifestMemo: { key: string; value: SkillManifest } | null = null;
 
   constructor(opts: SkillsStoreOptions) {
     this.rootDir = opts.root;
@@ -877,6 +891,12 @@ export class SkillsStore {
       throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is a symlink (-> ${readlinkSync(path)}) — the store never reads its state through a link`);
     }
     if (!st.isFile()) throw new SkillsManifestCorruptError(path, `${MANIFEST_FILENAME} is not a regular file`);
+    // The same lstat keys the memo (DES-L6 PR-L6-1 (c)): a commit writes a new file (new ino /
+    // size / times), a hand edit moves size or ctime — either re-reads; an identical identity
+    // answers the validated manifest again, as a fresh clone.
+    const key = `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    const memo = this.manifestMemo;
+    if (memo !== null && memo.key === key) return structuredClone(memo.value);
     const raw = readFileNoFollow(path).toString('utf8'); // O_NOFOLLOW + identity: the entry lstat judged is the one read (v3.5 §3)
     let parsed: unknown;
     try {
@@ -884,7 +904,9 @@ export class SkillsStore {
     } catch (err) {
       throw new SkillsManifestCorruptError(path, err instanceof Error ? err.message : String(err));
     }
-    return this.validateManifest(path, parsed);
+    const validated = this.validateManifest(path, parsed);
+    this.manifestMemo = { key, value: structuredClone(validated) };
+    return validated;
   }
 
   /**
@@ -1138,6 +1160,26 @@ export class SkillsStore {
     // EVERY entry is judged, links included (codex round 5): the walk enumerates symlinks instead of
     // skipping them, the hash covers them (path + link text), and the only link a generation may
     // carry is `.venv` at its root, pointing at THIS root's baseline env for the recorded baseline.
+    // The memo (DES-L6 PR-L6-1 (c)): everything ABOVE ran again — root identity, storage ancestors,
+    // containment, the metadata read and the manifest cross-check (a hand-edited `manifest.json`
+    // never rides a cached "valid"). What is skipped on a hit is only the byte hash and the row
+    // re-derivation, and only while the generation's lstat fingerprint is the one taken before the
+    // verification that produced the memo. The fingerprint is taken BEFORE the walk (a tree that
+    // moves during verification pairs the verified result with a fingerprint that no longer
+    // matches, so the next read re-verifies) and once more AFTER it; the result is memoised only
+    // when both agree.
+    const fingerprint = fingerprintTree(real);
+    const memo = this.verifiedCurrent;
+    if (
+      memo !== null &&
+      fingerprint !== null &&
+      memo.gen === parsed.gen &&
+      memo.contentHash === parsed.contentHash &&
+      memo.snapshotHash === meta.rawSha &&
+      memo.fingerprint === fingerprint
+    ) {
+      return memo.result;
+    }
     const tree = walkTree(real);
     const special = tree.others[0];
     if (special !== undefined) return invalid(`${special.rel} is neither a file, a directory nor a symlink — a published generation carries no special nodes`);
@@ -1167,7 +1209,13 @@ export class SkillsStore {
     if ('problem' in rows) return invalid(rows.problem);
     const linkProblem = this.snapshotLinkProblem(real, tree.links, parsed);
     if (linkProblem !== null) return invalid(linkProblem);
-    return { gen: parsed.gen, path: real, rules: { recorded, running, stale }, drift: rows.drift };
+    const result: CurrentSnapshot = { gen: parsed.gen, path: real, rules: { recorded, running, stale }, drift: rows.drift };
+    const after = fingerprintTree(real);
+    this.verifiedCurrent =
+      fingerprint !== null && after === fingerprint
+        ? { gen: parsed.gen, contentHash: parsed.contentHash, snapshotHash: meta.rawSha, fingerprint, result }
+        : null;
+    return result;
   }
 
   /**
@@ -3430,13 +3478,39 @@ export class SkillsStore {
     if (preProblem !== null) {
       return { verdict: 'blocked', findings: [this.baselineCorruptFinding(null, `${BASELINE_DIRNAME}/${pre.baseline}`, preProblem)], revision: pre.revision, snapshot: null };
     }
+    // ONE timing line per publish (DES-L6 PR-L6-1 (a) — classify first): where the seconds go, so a
+    // slow publish is diagnosed from the daemon log, not guessed at. `venv` is `ready` when the
+    // baseline env verified without provisioning, else the provisioner's own state.
+    const t = { validate: 0, venv: 0, hash: 0, stage: 0 };
+    const ms = (x: number): string => `${Math.round(x)}ms`;
+    const timing = (venvState: string, tail: string): void => {
+      this.warn(`[skills] publish: validate ${ms(t.validate)} · venv ${ms(t.venv)} (${venvState}) · hash ${ms(t.hash)} · stage ${ms(t.stage)}${tail}`);
+    };
+    // The `unchanged` fast path (crew#547 items 1-2 / DES-L6 PR-L6-1 (b)): BEFORE the slow step, the
+    // SAME content hash the slow path would compute is derived from the effective tree; equal to the
+    // current generation's — and that generation still verifies under the running rules — means
+    // there is nothing to publish: nothing awaited, nothing written, no generation minted.
+    const venvDir0 = baselineVenvDir(this.baselineDir(pre.baseline));
+    const ready0 = this.venvReady(venvDir0);
+    const fast = this.unchangedPublish(pre, ready0);
+    t.validate += fast.validateMs;
+    t.hash += fast.hashMs;
+    if (fast.result !== null) {
+      timing(ready0 ? 'ready' : 'skipped', ` · unchanged (gen ${fast.result.snapshot?.gen ?? '?'})`);
+      return fast.result;
+    }
     // Provisioning FIRST (it may take minutes): a snapshot never links an env still being written.
+    const tVenv = performance.now();
     const venv = await this.ensureVenv(pre.baseline);
+    t.venv = performance.now() - tVenv;
+    const venvLabel = ready0 ? 'ready' : venv;
     // The world may have moved while uv ran: the root must be the same directory, the CAS re-checked.
     this.assertRootUnchanged(bound, this.isSeeded() ? this.revision() : expectedRevision);
     const m = this.manifest();
     this.assertRevision(m, expectedRevision);
+    const tValidate = performance.now();
     const v = this.validate(m);
+    t.validate += performance.now() - tValidate; // validated twice on a CHANGED publish (accepted; the line shows the cost)
     if (venv === 'failed') {
       v.findings.push(
         finding(
@@ -3449,6 +3523,7 @@ export class SkillsStore {
       );
     }
     if (verdictOf(v.findings) === 'blocked') {
+      timing(venvLabel, ' · blocked');
       return { verdict: 'blocked', findings: v.findings, revision: m.revision, snapshot: null };
     }
     const gen = this.nextGeneration(m);
@@ -3464,7 +3539,10 @@ export class SkillsStore {
     // The hash covers the directories the file set IMPLIES (codex round 9): the staged tree and every
     // later verification hash the directories they WALK, so an extra directory — empty or not — is a
     // mismatch, never an invisible passenger.
+    const tHash = performance.now();
     const contentHash = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
+    t.hash += performance.now() - tHash;
+    const tStage = performance.now();
     const snapshots = this.snapshotsDir();
     mkdirSync(snapshots, { recursive: true });
     this.sweepStaging(snapshots);
@@ -3555,12 +3633,74 @@ export class SkillsStore {
     this.live.published(gen);
     for (const g of retiredGens) removeTreeForce(this.snapshotDir(g)); // locked read-only at publish
     for (const dir of prune.dirs) removeTreeForce(dir);
+    t.stage = performance.now() - tStage;
+    timing(venvLabel, ` · gen ${gen}`);
     return {
       verdict: verdictOf(v.findings),
       findings: v.findings,
       revision: m.revision,
       // The REAL path — the same spelling `currentSnapshot()` answers and the engine is handed.
       snapshot: { gen, path: realpathSync(dest), contentHash, skills: snapshot.skills.length },
+    };
+  }
+
+  /**
+   * The `unchanged` answer, or `null` when the slow path must run (DES-L6 PR-L6-1 (b); crew#547).
+   * Byte-for-byte the slow path's `contentHash` — the validated file set + the copilot view files,
+   * the `.venv` link entry exactly when the slow path would write one, the implied directories —
+   * computed BEFORE `ensureVenv`. The link is deterministic in exactly two states: the baseline env
+   * is READY (the slow path's `ensureVenv` answers `synced` without provisioning and links it), or
+   * the baseline is recorded `skipped` with no env on disk (no `pyproject.toml`: nothing to
+   * provision, no link). Any other state provisions, so the slow path decides. `unchanged` then
+   * needs ALL of: a recorded publish; the candidate equal to its `contentHash`; `current` naming that
+   * generation AND verifying (a tampered or unverifiable current generation is re-minted, never
+   * declared current); `snapshot.json` being the metadata that publish wrote (its hash) and recording
+   * the RUNNING portability rules identity — under other rules the rows may derive differently and
+   * `skills.stale-rules` (F-083) must clear through a real publish. No manifest field, no schema
+   * touch: a rollback reads the same manifest. A blocked validation is left to the slow path so the
+   * findings (a `venv-failed` included) are reported exactly as before.
+   */
+  private unchangedPublish(pre: SkillManifest, venvReady: boolean): { result: SkillPublishResult | null; validateMs: number; hashMs: number } {
+    const none = (validateMs = 0, hashMs = 0): { result: null; validateMs: number; hashMs: number } => ({ result: null, validateMs, hashMs });
+    const published = pre.published;
+    if (published === null) return none();
+    const record = pre.baselines[pre.baseline];
+    if (record === undefined) return none();
+    const venvDir = baselineVenvDir(this.baselineDir(pre.baseline));
+    let venvLink: { text: string; absTarget: string } | null;
+    if (venvReady) venvLink = this.venvLinkText(pre.baseline);
+    else if (record.venv === 'skipped' && !this.entryExists(venvDir)) venvLink = null;
+    else return none();
+    const tValidate = performance.now();
+    const v = this.validate(pre);
+    const validateMs = performance.now() - tValidate;
+    if (verdictOf(v.findings) === 'blocked') return none(validateMs);
+    const tHash = performance.now();
+    const allFiles = sortedRels([...v.snapshotFiles, ...this.viewFiles(v).files]);
+    const candidate = hashTree(allFiles, venvLink === null ? [] : [{ rel: VENV_LINKNAME, target: venvLink.text }], impliedDirs(allFiles.map((f) => f.rel)));
+    const hashMs = performance.now() - tHash;
+    if (candidate !== published.contentHash) return none(validateMs, hashMs);
+    if (this.currentLinkGen() !== published.gen) return none(validateMs, hashMs);
+    let current: CurrentSnapshot | null;
+    try {
+      current = this.currentSnapshot();
+    } catch {
+      return none(validateMs, hashMs); // an unverifiable current generation is re-minted by the slow path
+    }
+    if (current === null || current.gen !== published.gen) return none(validateMs, hashMs);
+    const meta = this.readSnapshotMetadata(current.path);
+    if (typeof meta === 'string' || meta.rawSha !== published.snapshotHash) return none(validateMs, hashMs);
+    if (meta.parsed.rulesVersion !== PORTABILITY_RULES_IDENTITY.version || meta.parsed.rulesSha256 !== PORTABILITY_RULES_IDENTITY.sha256) return none(validateMs, hashMs);
+    return {
+      result: {
+        verdict: verdictOf(v.findings),
+        findings: v.findings,
+        revision: pre.revision,
+        snapshot: { gen: published.gen, path: current.path, contentHash: candidate, skills: v.enabledSkills.length },
+        unchanged: true,
+      },
+      validateMs,
+      hashMs,
     };
   }
 
@@ -3619,6 +3759,7 @@ export class SkillsStore {
    * there — a torn flip leaves a `.tmp-current-*` the next publish's staging sweep removes.
    */
   private flipCurrent(gen: number): void {
+    this.verifiedCurrent = null; // a new `current` is verified from scratch (publish, and ensureReady's torn-flip repair)
     const link = this.currentLink();
     const tmp = join(this.snapshotsDir(), `${CURRENT_TMP_PREFIX}${randomBytes(6).toString('hex')}`);
     this.symlink(posix.join(SNAPSHOTS_DIRNAME, generationDirName(gen)), tmp, this.snapshotDir(gen));

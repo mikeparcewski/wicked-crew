@@ -319,8 +319,10 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
       return guarded(reply, async () => {
         const runtime = runtimeOf();
         const published = await runtime.store.publish(parsed.data.expectedRevision);
-        // The published snapshot is what the engine consumes — export its real path now.
-        if (published.snapshot !== null) runtime.afterPublish();
+        // The published snapshot is what the engine consumes — export its real path now. An
+        // `unchanged` publish (DES-L6 PR-L6-1) minted nothing and moved nothing: the export the
+        // engine reads is already this generation, so the ladder is not re-run.
+        if (published.snapshot !== null && published.unchanged !== true) runtime.afterPublish();
         // …and say whether the generation the engine is now handed holds the BASE skill (crew#554):
         // a publish that lacks it is the moment the operator learns runs go without the discipline
         // directive (`warn`) or will be refused at intake (`require`).
@@ -331,6 +333,7 @@ export function registerSkillsRoutes(app: FastifyInstance, deps: SkillsRouteDeps
           contentHash: result.snapshot?.contentHash ?? null,
           blocking: result.findings.filter((f) => f.severity === 'blocking').map((f) => `${f.kind}: ${f.evidence}`),
           revision: result.revision,
+          ...(result.unchanged === true ? { unchanged: true } : {}),
           ...(result.baseSkill !== null && !result.baseSkill.present ? { baseSkillMissing: result.baseSkill.name } : {}),
         });
         return result;
