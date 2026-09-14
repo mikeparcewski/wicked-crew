@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { rosterWithStandingFactory } from '../src/api/roster-standing.js';
+import { chatSeatAdmission } from '../src/api/seat-standing.js';
 import { SeatHealthTracker } from '../src/api/seat-health.js';
 import { engineRosterJson } from '../src/core/engine-roster.js';
 
@@ -42,6 +43,38 @@ describe('rosterWithStandingFactory', () => {
     expect(roster().find((s) => s.key === 'codex')!.council_eligible).toBe(true);
   });
 
+  it('F-W1-005: every seat carries the daemon\'s chat admission verdict for BOTH scope modes — the same chatSeatAdmission the POST /chats pre-filter runs', () => {
+    const roster = rosterWithStandingFactory({
+      seatHealth: new SeatHealthTracker(),
+      registry: () => [
+        ...REGISTRY.map((s) => ({ ...s })),
+        { key: 'pi', display_name: 'Pi', binary: 'pi', enabled_for_council: true, headless_invocation: 'pi {PROMPT}', acp: { binary: 'pi-acp', acp_input_governance: false, os_sandbox: false } },
+        { key: 'governed', display_name: 'Governed', binary: 'claude', enabled_for_council: true, headless_invocation: 'claude -p {PROMPT}', acp: { binary: 'claude-acp', acp_input_governance: true } },
+      ],
+      signedIn: (key) => (key === 'codex' ? false : true),
+      env: { WICKED_WORKER_HOME: '' },
+    })();
+    const of = (key: string) => roster.find((s) => s.key === key)!['chat_admission'] as { unscoped: { ok: boolean; reason?: string; source?: string }; scoped: { ok: boolean; reason?: string; source?: string } };
+    // No ACP adapter: sits in an unscoped chat, refused for a scoped one — with the daemon's own reason.
+    expect(of('claude').unscoped).toEqual({ ok: true });
+    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter registered/), source: 'scope' });
+    // Signed out: refused in BOTH modes, source auth (the reason names the remedy).
+    expect(of('codex').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/signed out/), source: 'auth' });
+    expect(of('codex').scoped.ok).toBe(false);
+    expect(of('codex').scoped.source).toBe('auth');
+    // pi: an adapter that asks no permissions and arms no sandbox — unscoped yes, scoped no.
+    expect(of('pi').unscoped).toEqual({ ok: true });
+    expect(of('pi').scoped).toEqual({ ok: false, reason: expect.stringMatching(/asks no permissions/), source: 'scope' });
+    // A governed adapter sits in both.
+    expect(of('governed')).toEqual({ unscoped: { ok: true }, scoped: { ok: true } });
+    // The verdict IS the pre-filter's: the same function, the same inputs.
+    for (const key of ['claude', 'codex', 'pi', 'governed']) {
+      const seat = roster.find((s) => s.key === key)!;
+      expect(of(key).scoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, true));
+      expect(of(key).unscoped).toEqual(chatSeatAdmission(seat as unknown as Parameters<typeof chatSeatAdmission>[0], seat.auth!, false));
+    }
+  });
+
   it('a signed-out seat reaches the ENGINE benched: health {usable:false, reason:"signed out"} (engineRosterJson, what launchRun applies)', () => {
     const roster = rosterWithStandingFactory({
       seatHealth: new SeatHealthTracker(),
@@ -55,7 +88,7 @@ describe('rosterWithStandingFactory', () => {
     expect(engine.find((s) => s['key'] === 'claude')!['health']).toEqual({ usable: true });
     // Crew's own readings never reach the engine.
     for (const seat of engine) {
-      for (const k of ['signed_in', 'auth', 'council_eligible', 'council_ineligible_reason', 'council_bench']) {
+      for (const k of ['signed_in', 'auth', 'council_eligible', 'council_ineligible_reason', 'council_bench', 'chat_admission']) {
         expect(k in seat, `${String(seat['key'])}.${k} must not reach the engine`).toBe(false);
       }
     }

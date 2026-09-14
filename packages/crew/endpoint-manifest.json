@@ -117,6 +117,18 @@
       "statusCodes": []
     },
     {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/seats",
+      "requestType": "ChatSeatsBody",
+      "responseType": "ChatSeatsResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
+      ]
+    },
+    {
       "method": "GET",
       "path": "/api/v1/config",
       "requestType": null,

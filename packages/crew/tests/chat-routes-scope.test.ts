@@ -284,3 +284,55 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
     expect(chatScopes.has('racy')).toBe(false);
   });
 });
+
+describe('POST /chats/:id/seats — re-seat named seats on a LIVE chat (F-W1-005, the retry lever)', () => {
+  it('re-runs chatOpen with the IDENTICAL engine scope; a warmed seat leaves `refused`; the engine\'s refusal folds in and reaches the thread', async () => {
+    // Open with an explicit list where the engine refuses pi (the 201 records it as refused: engine).
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
+    );
+    const opened = await open({ chatId: 'reseat', repoRefs: ['r1'], clis: ['claude', 'pi'] });
+    expect(opened.statusCode).toBe(201);
+    const openCall = chatOpen.mock.calls[0]!;
+    expect((opened.json() as { refused: { cliKey: string }[] }).refused.map((r) => r.cliKey)).toEqual(['pi']);
+    broadcast.length = 0;
+
+    // Retry pi: the engine now seats it (say the operator set os_sandbox and re-registered).
+    const retry = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['pi'] } });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toEqual({ chatId: 'reseat', seats: [{ cliKey: 'pi', ok: true }], refused: [] });
+    // The SAME cwd + graph + read roots the open handed the engine — never a re-resolved scope
+    // (a different scope would evict every warm seat).
+    const retryCall = chatOpen.mock.calls[1]!;
+    expect(retryCall[0]).toBe('reseat');
+    expect(retryCall[1]).toEqual(['pi']);
+    expect(retryCall[2]).toBe(openCall[2]);
+    expect(retryCall[3]).toEqual(openCall[3]);
+    expect(broadcast, 'a seated retry broadcasts no refusal').toEqual([]);
+    // The detail no longer names pi as refused.
+    expect((await app.inject({ method: 'GET', url: '/api/v1/chats/reseat' })).json()).toMatchObject({ refused: [] });
+
+    // Retry a seat the engine STILL refuses: the refusal replaces its entry and reaches /ws.
+    chatOpen.mockImplementationOnce(async () => [{ cliKey: 'codex', ok: false, error: "no ACP config for 'codex'" }]);
+    const again = await app.inject({ method: 'POST', url: '/api/v1/chats/reseat/seats', payload: { clis: ['codex'] } });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual({
+      chatId: 'reseat',
+      seats: [{ cliKey: 'codex', ok: false, error: "no ACP config for 'codex'" }],
+      refused: [{ cliKey: 'codex', reason: "no ACP config for 'codex'", source: 'engine' }],
+    });
+    expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'reseat', cliKey: 'codex', reason: "no ACP config for 'codex'", source: 'engine' }]);
+  });
+
+  it('an unknown or closed chat is 404 (never a fresh chat); a bad body is 400; no engine call either way', async () => {
+    const before = chatOpen.mock.calls.length;
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
+    await open({ chatId: 'gone', repoRefs: ['r1'] });
+    await app.inject({ method: 'DELETE', url: '/api/v1/chats/gone' });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/gone/seats', payload: { clis: ['claude'] } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: { clis: [] } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: {} })).statusCode).toBe(400);
+    // Only the DELETE-d chat's own open reached the engine.
+    expect(chatOpen.mock.calls.length - before).toBe(1);
+  });
+});
