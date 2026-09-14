@@ -88,7 +88,7 @@ import {
   stateHomeBlockerBody,
   type StateHomeWatch,
 } from '../projects/state-home-preflight.js';
-import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
+import { BASE_SKILL_POLICIES, BASE_SKILL_REF_SHAPE, baseSkillRemedy } from '../skills/base-skill.js';
 import type { EvalRunStore } from './eval-store.js';
 import { noEligibleSeatBody, parseNoEligibleSeat } from '../core/engine-roster.js';
 import { ProjectSettingsStore } from '../projects/settings.js';
@@ -995,13 +995,19 @@ export function registerRoutes(
     // per probe (two readdirs) so an entry that appears after boot is reported without a restart;
     // the field is ABSENT when there is nothing to say, and on a route set booted without the watch.
     const stateHome = runtime.stateHome !== undefined ? await runtime.stateHome.refresh() : null;
-    const warnings =
-      stateHome === null
-        ? []
-        : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }));
     // crew#554: the BASE skill posture for the next launch — the composer's confirm line
     // ("discipline skill: <name> gen N" / "MISSING — …"). Cached by the skills runtime: no I/O.
     const baseSkill = runtime.skills?.baseSkill() ?? null;
+    // F-W1-102: the base skill's ERROR rides `warnings` too. A daemon under `require` with no published
+    // generation holding the skill (the crew-only install: no wicked-garden) REFUSES every launch at
+    // intake — it must never read "status ok, no warnings". The SAME finding object as
+    // `baseSkill.finding` and `/diagnostics.skills.findings[]` (one surface, no new field;
+    // `HealthWarning.kind` is open); status stays ok because the daemon serves and studio must load
+    // and show it — exactly the state-home blocker's precedent above.
+    const warnings = [
+      ...(stateHome === null ? [] : stateHome.findings.map((f) => ({ kind: f.kind, severity: f.severity, message: f.message }))),
+      ...(baseSkill?.finding ? [{ kind: baseSkill.finding.kind, severity: baseSkill.finding.severity, message: baseSkill.finding.message }] : []),
+    ];
     return {
       status: 'ok',
       version: PKG_VERSION,
@@ -1688,10 +1694,8 @@ export function registerRoutes(
       // composer renders a clear card (skill, policy, remedy) instead of a generic launch 400.
       if (/\bbase skill\b.*\brefused at intake\b/is.test(msg)) {
         const posture = runtime.skills?.baseSkill() ?? null;
-        const remedy =
-          posture !== null && posture.inCatalog
-            ? `the skill is in the catalog — POST /skills/publish hands it to the next launch (or set baseSkillRef "" via PUT /settings to turn the base skill off explicitly)`
-            : `install a wicked-garden that ships the skill, POST /skills/refresh-baseline, then POST /skills/publish (or set baseSkillRef "" via PUT /settings to turn the base skill off explicitly)`;
+        // F-W1-102: the SAME remedy sentence the /health finding and `wicked-crew status` carry.
+        const remedy = baseSkillRemedy(posture?.inCatalog ?? false);
         return reply.code(422).send({ code: 'base_skill_refused', error: msg, baseSkill: posture, remedy });
       }
       const busy = /busy|in flight|already/i.test(msg);

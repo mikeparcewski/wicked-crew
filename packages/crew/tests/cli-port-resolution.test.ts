@@ -92,7 +92,11 @@ describe('wicked-crew status against a daemon on CREW_PORT while a STRANGER sits
     expect(out.code).toBe(0);
     expect(out.stderr).toBe('');
     expect(JSON.parse(out.stdout)).toEqual([{ id: 'run-of-mine' }]);
-    expect(mine.hits()).toBe(1);
+    // Since F-W1-102 (fixall L4-⑧b) `status` makes TWO calls to the daemon it resolved: the runs
+    // listing it prints, then `GET /health` — a daemon whose REQUIRED base skill is not handed
+    // refuses every launch, and `status` says so on stderr. This test's subject is unchanged: both
+    // calls go to THIS daemon and the stranger on the other port is never contacted.
+    expect(mine.hits()).toBe(2);
     expect(stranger.hits()).toBe(0);
   });
 

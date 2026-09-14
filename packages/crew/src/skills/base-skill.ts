@@ -121,15 +121,29 @@ export function baseSkillPosture(
   return { name, policy: config.policy, present, inCatalog: catalog, gen, engineInput, finding };
 }
 
+/** The installer command that brings the plugin shipping the default base skill (F-W1-102: a crew-only install boots a daemon that refuses every launch until it is present). */
+export const BASE_SKILL_INSTALL_HINT = 'npx wicked-installer install wicked-garden';
+
+/**
+ * The ONE remedy every surface quotes — the `skills.base-skill` finding (`/health.baseSkill.finding`,
+ * `/health.warnings[]`, `/diagnostics.skills.findings[]`), `wicked-crew status`, and the 422
+ * `base_skill_refused` launch body — so an operator reads the same sentence wherever the refusal
+ * shows. F-W1-102: the direct `install wicked-crew` path (and the installer's `quick-start` bundle)
+ * lands on a daemon that REFUSES every launch at intake; the remedy therefore names the install.
+ */
+export function baseSkillRemedy(inCatalog: boolean): string {
+  const step = inCatalog
+    ? 'it is in the catalog — POST /skills/publish hands it to the next launch'
+    : `install wicked-garden (${BASE_SKILL_INSTALL_HINT}), POST /skills/refresh-baseline, then POST /skills/publish`;
+  return `${step}; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`;
+}
+
 function missingFinding(name: string, gen: number | null, inCatalog: boolean): SkillsHealthFinding {
   const where = gen === null ? 'no published snapshot is handed to the engine' : `the published snapshot (gen ${gen}) does not hold it`;
-  const remedy = inCatalog
-    ? 'it is in the catalog — POST /skills/publish hands it to the next launch'
-    : 'install a wicked-garden that ships it, POST /skills/refresh-baseline, then POST /skills/publish';
   return {
     kind: 'skills.base-skill',
     severity: 'error',
-    message: `the base skill "${name}" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but ${where}: the engine refuses every launch at intake until a generation holding it is published — ${remedy}; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`,
+    message: `the base skill "${name}" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but ${where}: the engine refuses every launch at intake until a generation holding it is published — ${baseSkillRemedy(inCatalog)}`,
   };
 }
 
