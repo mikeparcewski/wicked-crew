@@ -258,6 +258,64 @@ describe('deliver refusals are escalations, not seat faults (wicked-core#431 fol
   });
 });
 
+// ── DES-L9 (FIX-IT-ALL row 0.11, PR-L9-crew-0 — tests first for the engine arm) ─────────────────
+//
+// The F1 arm (PR-L9-core, core-ts 0.7.27): a failed deliver unit whose output is not a LIFT-CONFLICT
+// strand emits `stepFailed{failureKind: "workerError"}` and then PARKS the run at
+// `awaitingHuman{gateKind: "escalation", ord: <deliver>}` — no LLM triage, regardless of
+// `humanConfirm`. The revision + identity refusals PR-L9-crew adds to the script ride that arm.
+// Seat health must read the whole sequence as an operator escalation: the assigned seat (a deliver
+// unit is a Tool unit, but the roster may still name one) flips nowhere, stamps nothing.
+describe('DES-L9 deliver refusals park at an escalation gate — seat health flips no seat (PR-L9-crew-0)', () => {
+  const PR_BRANCH = 'wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595';
+  const IDENTITY_MISMATCH =
+    "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is someone-else; nothing was staged, committed or pushed. Fix the daemon's gh login (gh auth switch, or GH_TOKEN in the daemon environment) and approve to retry the deliver phase";
+  const L9_REFUSALS: [string, string][] = [
+    ['identity mismatch (D-18)', IDENTITY_MISMATCH],
+    [
+      'identity unreadable (D-18)',
+      "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is unreadable; nothing was staged, committed or pushed. Fix the daemon's gh login (gh auth switch, or GH_TOKEN in the daemon environment) and approve to retry the deliver phase",
+    ],
+    ['revision: PR branch gone', `deliver: pull request #273's branch origin/${PR_BRANCH} no longer exists on the remote; nothing was staged, committed or pushed`],
+    [
+      'revision: PR branch moved',
+      `deliver: pull request #273's branch moved since this run based on it (origin/${PR_BRANCH} is no longer an ancestor of wicked/r-l9); nothing was staged, committed or pushed — launch a new revision on the current head, or rebase wicked/r-l9 onto origin/${PR_BRANCH} by hand and approve to retry`,
+    ],
+    ['revision: nothing on top', 'deliver: nothing to deliver — the run added no commit on top of PR #273'],
+  ];
+  const escalation = (session: string, ord: number, detail: string): CoreEvent =>
+    ev({
+      type: 'awaitingHuman',
+      session,
+      ord,
+      reviewingOrd: ord,
+      gateKind: 'escalation',
+      prompt:
+        `The deliver phase refused: ${detail}. Approve to re-run the deliver phase now (the engine re-lifts and ` +
+        're-verifies first; no second deliver gate), reject to cancel the run and keep the worktree.',
+    });
+
+  it('a deliver stepFailed carrying a DES-L9 refusal, followed by awaitingHuman{gateKind: escalation}, flips NO seat', () => {
+    for (const [label, detail] of L9_REFUSALS) {
+      const t = new SeatHealthTracker();
+      t.ingest(distributed('r-l9', 5, 'claude'));
+      t.ingest(stepFailed('r-l9', 5, detail, 'workerError'));
+      t.ingest(escalation('r-l9', 5, detail));
+      expect(t.healthFor('claude').status, label).toBe('active');
+      expect(t.healthFor('claude').message, label).toBeUndefined();
+      expect(t.healthFor('claude').lastErrorAt, label).toBeUndefined();
+    }
+  });
+
+  it('the escalation frame alone never flips a seat (a gate is a question to a person, not seat evidence)', () => {
+    const t = new SeatHealthTracker();
+    t.ingest(distributed('r-l9g', 5, 'claude'));
+    t.ingest(escalation('r-l9g', 5, IDENTITY_MISMATCH));
+    expect(t.healthFor('claude').status).toBe('active');
+    expect(t.healthFor('claude').lastErrorAt).toBeUndefined();
+  });
+});
+
 // ── The council bench fold (independent review of #533, F-1) ─────────────────────────────────────
 //
 // `councilSeatFailed { cli, kind }` is the engine's own evidence that a seat cannot hold a ballot.
