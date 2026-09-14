@@ -10,6 +10,9 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Changed
+- **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
+
 ## [0.7.34] — 2026-09-14
 
 Release train 1 (pipeline hardening, step 3) — **core-ts 0.7.25 / studio 0.5.9 / api-types 0.37.0 /

@@ -25,6 +25,15 @@
  *   INCONCLUSIVE / N-A / SKIP  → denied (evidence missing or not evaluated —
  *                                map to `inconclusive`, the `?? 'inconclusive'`
  *                                fallback of garden's convention)
+ *
+ *   Verdict vocabulary (garden ≥ 12.37.0, fixall L6): a garden evaluator's
+ *   OUTPUT line is `VERDICT: PASS` or `VERDICT: FAIL` only — the engine's
+ *   evaluator gate reads the LAST such line and passes on the token PASS
+ *   alone, so CONDITIONAL, PARTIAL, INCONCLUSIVE, N-A and SKIP are legacy
+ *   RECORD values that older ledgers (and the specialists' DomainStore
+ *   records) still carry. This mapping keeps resolving them 1:1 — the enum
+ *   and the table are unchanged — so a ledger written by any generation
+ *   reads the same here.
  *   missing ledger / verdict   → denied (no evidence is never a pass)
  *   unreadable ledger          → denied, naming the read failure
  *
