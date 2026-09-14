@@ -1394,9 +1394,10 @@ export interface ValidationPinAttachedEvent {
  * 0.7.27 — the evaluator's own `VERDICT` line), or a def-declared `human_confirm_if` condition
  * (`defGate: true`). `verdictSummary` is the denial reason.
  *
- * The six additive keys (api-types 0.38.0 — the engine has emitted all eleven since wicked-core#464;
- * `event.rs::GateEscalated`) carry what a decision arm needs without re-reading the unit. ABSENT
- * on a daemon whose engine predates them; when present they are ALWAYS all present.
+ * The seven additive keys (api-types 0.38.0 — the engine has emitted all eleven fields, twelve JSON
+ * keys with `type`, since wicked-core#464; `event.rs::GateEscalated`) carry what a decision arm
+ * needs without re-reading the unit. ABSENT on a daemon whose engine predates them; when present
+ * they are ALWAYS all present.
  */
 export interface GateEscalatedEvent {
   type: 'gateEscalated';
@@ -1573,42 +1574,46 @@ export interface RepoCheckRun {
   stderrTail: string;
   /**
    * The baseline-diff floor's evidence (api-types 0.38.0 — the seven keys the engine has emitted
-   * since wicked-core#469 / #476, `repo_checks.rs::CheckRun` with `serde(default,
-   * skip_serializing_if)`): each ABSENT when the engine has nothing to say (an older engine, a
-   * passing check, no base comparison). `boundS` — the EFFECTIVE wall-clock bound the check ran
-   * under, seconds (base × host-load factor); `boundNote` — how it was derived, for the operator.
+   * since wicked-core#469 / #476). PRESENT ON EVERY CHECK from that engine on: the one producer of
+   * this camelCase form, `event.rs::check_run_json`, writes all seven every time — `0` / `null` / `[]`
+   * when there is nothing to say (the Rust `Option` → `null` rule; the struct's own
+   * `skip_serializing_if` governs the persisted record, not this frame). ABSENT only on an older
+   * engine — the `?:` is that one case, so read with `== null`, never `=== undefined`. `boundS` — the
+   * EFFECTIVE wall-clock bound the check ran under, seconds (base × host-load factor; a bare number,
+   * `0` when unknown); `boundNote` — how it was derived, for the operator (`null` when none).
    */
   boundS?: number;
   boundNote?: string | null;
   /**
    * Failure identifiers streamed off the runner's output (`test a::b ... FAILED`, ` FAIL file >
-   * name`, `path: error TS1234: …`) — what the baseline diff compares. Absent/empty when the
-   * runner's format is not one the scanner knows (the diff then compares exit codes).
+   * name`, `path: error TS1234: …`) — what the baseline diff compares. `[]` when the runner's format
+   * is not one the scanner knows (the diff then compares exit codes).
    */
   failureIds?: string[];
   /**
    * Set when the check FAILED and the same check was run on the base (`base`): `regression` (head
    * failures absent on the base — denies) or `pre_existing_in_sandbox` (equal failure sets — never
    * this change's doing); `floor_env_mismatch` was emitted by engines before wicked-core-ts 0.7.27
-   * and is retired. An OPEN string — new tokens may follow; `null`/absent when the check passed,
+   * and is retired. An OPEN string — new tokens may follow; `null` when the check passed,
    * timed out, could not run, or no base comparison was possible (the check then denies as before).
    */
   classification?: string | null;
-  /** Head failures that ALSO fail on the base (never this change's doing). */
+  /** Head failures that ALSO fail on the base (never this change's doing); `[]` when none. */
   preExisting?: string[];
-  /** Head failures ABSENT on the base — the regressions that deny. */
+  /** Head failures ABSENT on the base — the regressions that deny; `[]` when none. */
   regressions?: string[];
-  /** The same check run on the run BASE, when the floor ran it; `null`/absent otherwise. */
+  /** The same check run on the run BASE, when the floor ran it; `null` otherwise. */
   base?: RepoCheckBaseRun | null;
 }
 
 /**
  * `RepoCheckRun.base` — the same check on the run base (api-types 0.38.0; wicked-core
- * `repo_checks.rs::BaseRun`). Typed as an OPEN object this release; the engine emits `head` (the
- * base commit), `cached` (read back from this run's cache), `run` (a nested check run, absent when
- * the base could not be run) and `error` (why not: export failed, the base declares no such check,
- * its install failed, the repo opted out — the head check then denies fail-closed). The fields are
- * named in the next minor (DES-L2 2C); read them through `unknown` narrowing until then.
+ * `repo_checks.rs::BaseRun`, serialised by `event.rs::base_run_json`). Typed as an OPEN object this
+ * release; the engine writes all four keys every time: `head` (the base commit), `cached` (read back
+ * from this run's cache), `run` (a nested check run — `null` when the base could not be run) and
+ * `error` (why not: export failed, the base declares no such check, its install failed, the repo
+ * opted out — the head check then denies fail-closed; `null` when it ran). The fields are named in
+ * the next minor (DES-L2 2C); read them through `unknown` narrowing until then.
  */
 export interface RepoCheckBaseRun {
   [k: string]: unknown;
