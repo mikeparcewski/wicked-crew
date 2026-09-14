@@ -53,7 +53,8 @@ mentioned only where a daemon release depends on them.
   GH_ACCOUNT is <a> but gh's active login is <b|unreadable>; nothing was staged, committed or
   pushed. …`); the engine's arm parks the run at an escalation gate (approve re-runs the phase).
   Unset = today, now disclosed in the phase output (`deliver: pushing as <login> (GH_ACCOUNT not
-  set — not pinned)`). The deliver GATE card names the push target and the identity with its pin
+  set — not pinned)`; with `GH_ACCOUNT` set: `… (GH_ACCOUNT pinned by GH_TOKEN)` or `… (GH_ACCOUNT
+  from the gh keyring — export GH_TOKEN to pin it)`). The deliver GATE card names the push target and the identity with its pin
   source (`pinned by GH_TOKEN` / `from the gh keyring — export GH_TOKEN to pin it` / `not set`).
   (c) TEXT: the 72-char title / commit-subject cut lands at the last word boundary OUTSIDE any
   quoted or bracketed phrase (crew #550 P-1 — `… truncated at '(Failed):' and 'sign a seat…`);
@@ -67,7 +68,8 @@ mentioned only where a daemon release depends on them.
   pathspecs and reports each once with a count — never a fork per file for a path it excludes;
   the engine's `tmp/wicked-checks` and a worker's pytest temp no longer take hours. (e) `bug.fix`
   carries the retired-behaviour sweep `instructions` — the same literal wicked-core's `bug_def()`
-  carries, pinned by a test. `deliver-triage.ts` accepts the engine arm's `deliver refused on unit
+  carries (wicked-core #522), pinned by a test; `builtin-overlay-shadow.test.ts` tolerates exactly
+  that one field while core main has not merged #522 (the row-6.9 pin PR removes the tolerance). `deliver-triage.ts` accepts the engine arm's `deliver refused on unit
   N: ` framing. Tests: the three #578 NOT_FIXED_YET pins flip to `it`; script tests drive identity
   (mismatch / unreadable / match / pinned / unset), revision (push onto the PR branch, moved head,
   vanished head, nothing on top, comment), the scratch-dir exclusion; resolver, schema refines and

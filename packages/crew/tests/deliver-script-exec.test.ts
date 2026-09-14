@@ -311,6 +311,10 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx.workdir, 'SECRETS.PEM'), 'KEY MATERIAL\n'); // denylisted-name (case-insensitive; distinct basename — APFS folds case)
     mkdirSync(join(fx.workdir, 'coverage'));
     writeFileSync(join(fx.workdir, 'coverage', 'lcov.info'), 'TN:\n'); // scratch-dir
+    // F-BM-002 (crew#579): the engine's own scratch under the worktree — excluded at enumeration, counted once.
+    mkdirSync(join(fx.workdir, 'tmp', 'wicked-checks'), { recursive: true });
+    writeFileSync(join(fx.workdir, 'tmp', 'wicked-checks', 'a.log'), 'a\n');
+    writeFileSync(join(fx.workdir, 'tmp', 'pytest-of-x'), 'b\n');
     // An oversized (>1 MiB) untracked blob with an unremarkable name — caught by the size cap.
     writeFileSync(join(fx.workdir, 'rec.bin'), Buffer.alloc(1_600_000, 7)); // oversize-1mib
 
@@ -332,11 +336,13 @@ describe('deliver script, driven for real (crew#317)', () => {
     expect(r.output).toContain('deliver: EXCLUDED (socket-name): socket.path');
     // F-BM-002: a scratch DIRECTORY is excluded at enumeration and reported once, with a count.
     expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): coverage/ (1 files)');
+    expect(r.output).toContain('deliver: EXCLUDED (scratch-dir): tmp/ (2 files)');
+    expect(r.output).not.toContain('wicked-checks/a.log'); // one line per directory, never per file
     expect(r.output).not.toContain('coverage/lcov.info');
     expect(r.output).toContain('deliver: EXCLUDED (oversize-1mib): rec.bin');
     // Skipped, never deleted — the excluded files remain untracked in the worktree for the operator.
     const status = git(fx.workdir, 'status', '--porcelain');
-    for (const p of ['bus.db', 'socket.path', 'deploy.key', 'coverage/', 'rec.bin']) {
+    for (const p of ['bus.db', 'socket.path', 'deploy.key', 'coverage/', 'tmp/', 'rec.bin']) {
       expect(status).toContain(p);
     }
   }, 60_000);
@@ -386,7 +392,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     writeFileSync(join(fx2.workdir, 'work.ts'), 'export const z = 3;\n');
     const keyring = await runDeliver(fx2, { gh: { login: 'release-bot' }, env: { GH_ACCOUNT: 'release-bot' } });
     expect(keyring.status).toBe(0);
-    expect(keyring.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT pinned)');
+    expect(keyring.output).toContain('deliver: pushing as release-bot (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)');
     expect(keyring.output).not.toContain('by GH_TOKEN');
   }, 60_000);
 
@@ -692,7 +698,7 @@ describe('deliver script, driven for real (crew#317)', () => {
     // Same account ⇒ pushes, disclosing the identity; never a switch.
     const same = await runDeliver(fx, { gh: { login: 'someone' }, env: { GH_ACCOUNT: 'someone' } });
     expect(same.status).toBe(0);
-    expect(same.output).toContain('deliver: pushing as someone (GH_ACCOUNT pinned)');
+    expect(same.output).toContain('deliver: pushing as someone (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)');
     expect(same.output).not.toContain('switched account');
 
     // Different account ⇒ REFUSED up front (the `gh auth switch` this replaced is gone).

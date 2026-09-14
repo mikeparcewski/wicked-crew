@@ -329,7 +329,8 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script.indexOf('L=$(gh api user -q .login')).toBeLessThan(script.indexOf('git fetch origin'));
     // Unset ⇒ disclosed, never silent.
     expect(script).toContain('GH_ACCOUNT not set — not pinned');
-    expect(script).toContain('GH_ACCOUNT pinned${GH_TOKEN:+ by GH_TOKEN}');
+    expect(script).toContain('GH_ACCOUNT pinned by GH_TOKEN');
+    expect(script).toContain('GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it');
   });
 
   // DES-L9 / crew#550 — REVISION mode: the script pushes onto the PR's head branch and never

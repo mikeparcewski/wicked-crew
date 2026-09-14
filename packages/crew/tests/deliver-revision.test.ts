@@ -265,11 +265,9 @@ describe('the deliver gate card (DES-L9 §4) — push target + identity with its
 });
 
 describe('bug.fix sweep instructions — one literal on both carriers (DES-L9 F10, BC-60)', () => {
-  // The crew MIRROR gains the line in the row-6.9 pin PR, lockstep with wicked-core-ts 0.7.27:
-  // `builtin-overlay-shadow.test.ts` compares the mirror byte-for-byte with core MAIN's
-  // workflows/bug.json, which gains the field in wicked-core #522 — carrying it here first would
-  // red-line crew CI until #522 merges. NOT_FIXED_YET until 6.9 — flip to `it` there.
-  it.fails('NOT_FIXED_YET (row 6.9, lockstep with core-ts 0.7.27): crew’s mirror carries exactly the literal wicked-core’s bug_def() carries', () => {
+  // Both carriers carry the line (BC-60). `builtin-overlay-shadow.test.ts` tolerates exactly this one
+  // field until core MAIN merges wicked-core #522; row 6.9 removes that tolerance.
+  it('crew’s mirror carries exactly the literal wicked-core’s bug_def() carries', () => {
     const fix = BUILTIN_WORKFLOWS.find((w) => w.id === 'bug')!.phases.find((p) => p.id === 'fix')!;
     expect(fix.instructions).toBe(BUG_FIX_SWEEP_INSTRUCTIONS);
   });

@@ -399,7 +399,7 @@ export function deliverPrScript(intent?: string, opts: DeliverScriptOptions = {}
     'L=$(gh api user -q .login 2>/dev/null || true)',
     'if [ -n "${GH_ACCOUNT:-}" ]; then',
     '  [ "$L" = "$GH_ACCOUNT" ] || { echo "deliver: identity mismatch — GH_ACCOUNT is $GH_ACCOUNT but gh\'s active login is ${L:-unreadable}; nothing was staged, committed or pushed. Fix the daemon\'s gh login (switch gh\'s active account, or export GH_TOKEN in the daemon environment) and approve to retry the deliver phase"; exit 1; }',
-    '  echo "deliver: pushing as $L (GH_ACCOUNT pinned${GH_TOKEN:+ by GH_TOKEN})"',
+    '  if [ -n "${GH_TOKEN:-}" ]; then echo "deliver: pushing as $L (GH_ACCOUNT pinned by GH_TOKEN)"; else echo "deliver: pushing as $L (GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it)"; fi',
     'elif [ -n "$L" ]; then echo "deliver: pushing as $L (GH_ACCOUNT not set — not pinned)"',
     'else echo "deliver: pushing as an unknown login (gh not authenticated; GH_ACCOUNT not set — not pinned)"; fi',
     // REVISION MODE inputs (DES-L9 / crew#550) — baked at compose time from the resolved PR, each
