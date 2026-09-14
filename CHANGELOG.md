@@ -10,14 +10,6 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-### Added
-- **`GET /settings` names the settings file the daemon actually reads and writes — additive `path`
-  (crew#494 crew half, F-007 — FIX-IT-ALL L10-6).** The System page showed a LITERAL settings path;
-  `settingsFilePath()` (`WICKED_CREW_SYSTEM_SETTINGS` honoured, else the config-dir default) never
-  reached the wire. `{ settings, path }` — `path` as `wicked-crew-api-types` 0.38.0 types
-  `SettingsResponse.path?` (adjudicated §4.6: `path`, not `settings_path`); studio renders it (L8).
-  No behaviour change beyond the new field.
-
 ### Changed
 - **Skills store latency: an unchanged publish mints nothing, `current` is re-verified only when its lstat fingerprint moved, `holdsSkill` answers from the PUBLISHED rows, and every publish logs where its seconds went (fixall L6-1; crew#547 items 1-3 = F-RC1-017 / F-E2E-010, F-E2E-042; DES-L6 r2 §5 PR-L6-1).** The Skills page took 15–23 s per `GET /skills` and a publish with nothing changed took minutes and still minted a generation, because `currentSnapshot()` re-hashed every byte of the generation AND re-derived every skill row's kind/portability on EVERY read, `manifest()` re-read and re-validated the file on every call, and `publishSerialized` awaited the venv step before it knew whether anything had changed. (a) **One timing line per publish** — `[skills] publish: validate Xms · venv Yms (ready|synced|skipped|failed) · hash Zms · stage Wms · gen N|unchanged (gen N)|blocked` — so a slow publish is diagnosed from the daemon log. (b) **The `unchanged` fast path**: before `ensureVenv`, the store computes byte-for-byte the SAME `contentHash` the slow path would (validated file set + copilot view files + the `.venv` link entry exactly when the slow path would write one + implied dirs) — deterministic only when the baseline env is READY (linked) or recorded `skipped` with no env on disk (no `pyproject.toml`); equal to the current generation's hash, with `current` naming AND verifying that generation, `snapshot.json` being the bytes publish wrote, and the RUNNING portability rules identity recorded, the publish answers `200 {…, snapshot: <the current generation>, unchanged: true}` (api-types 0.38.0) — nothing awaited, nothing written, no `snapshots/<gen>/`, `current` unmoved; the route skips `afterPublish()` and audits `skills.published {unchanged: true}`. NO manifest field, NO schema touch (the review killed `treeHash`): a rollback to 0.7.34 reads the same manifest. A blocked validation, a changed tree, a moved rules table (F-083 `skills.stale-rules` still clears through a real publish) or an unverifiable current generation all take the slow path exactly as before. (c) **`verifyCurrent` memo**: root identity, storage-ancestor, containment, metadata and the `manifest.json` cross-check still run on every read (a hand-edited manifest never rides a cached "valid"); only the byte hash and the row re-derivation are skipped, and only while the generation's lstat fingerprint (`tree.ts` `fingerprintTree`: sha256 over `rel · kind · size · mtimeMs · ctimeMs · mode · linkText`, pruned subtrees included) equals the one taken BEFORE the verification that produced the memo — taken again after it, memoised only when both agree; cleared on every `current` flip (publish, `ensureReady`'s torn-flip repair). `ctime` cannot be set by user tools and a generation is locked read-only, so an edit needs the `chmod +w` that moves ctime/mode; a root-forged ctime is the stated gap. `manifest()` is memoised on the file's `(ino, size, mtimeMs, ctimeMs)` and answers a structured clone. (d) **`holdsSkill`** reads `store.currentSnapshotSkills()` — the verified current generation's own rows — instead of the editor manifest's `enabled` flag: a skill enabled after the last publish is in the catalog but NOT handed to the engine, and used to be answered `true` here and refused by the engine at unit 1 (F-E2E-042); an interactive stamp on it is now refused by crew before launch. Behaviour change register: BC-42, BC-43.
 
@@ -49,19 +41,7 @@ mentioned only where a daemon release depends on them.
   (`release-api-types.yml`); studio 0.5.10 pins it and re-vendors its byte-pinned mirrors.
 - **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
 
-### Fixed
-- **State-home boot preflight compares REAL paths and refuses `WICKED_CREW_SYSTEM_SETTINGS` under the
-  state home (crew#555 W1 residual, crew#569 — FIX-IT-ALL L10-4).** `assertWickedRootsOutsideStateHome`
-  compared spelled paths (`resolve`) while core's fence canonicalises, so a symlinked state home with
-  `WICKED_WORKFLOWS_DIR` under its real path booted green and refused every launch at intake; and the
-  settings file `PUT /settings` writes was not a refused root, so a `WICKED_CREW_SYSTEM_SETTINGS`
-  pointed under the state home booted green and refused every launch after the first PUT while
-  `/health` stayed ok. `canonicalize()` realpaths the deepest EXISTING ancestor and re-joins the
-  rest (the workflows dir is created AFTER the preflight); `STATE_HOME_ROOT_ENVS` gains `fenced` and
-  the refuse-only `WICKED_CREW_SYSTEM_SETTINGS` row — **behaviour change:** a daemon whose settings
-  variable points under the state home now refuses to BOOT with the remedy naming the file (was:
-  green boot, then refuse-everything); no registry row (rule 6 — one fence change per RC).
-  `WICKED_INTERACTIVE_ROOT` stays refused here until L7's docs-root move deletes the row.
+<!-- fixall L10 -->
 - **`wicked-crew status` / `gate` with no daemon answering print one remedy line and exit 1; a
   non-2xx answer exits 1; `wicked-crew --version` exists (crew#551, crew#493, F-RC1-044, F-003 —
   FIX-IT-ALL L10-1).** After a reboot the daemon is gone and `wicked-crew status` printed the whole
@@ -77,6 +57,24 @@ mentioned only where a daemon release depends on them.
   (new `core/versions.ts`), never consulting a socket — the daemon on a port is
   `GET /api/v1/diagnostics` (crew#499); the usage line says so. No daemon service install (D-17).
 
+- **State-home boot preflight compares REAL paths and refuses `WICKED_CREW_SYSTEM_SETTINGS` under the
+  state home (crew#555 W1 residual, crew#569 — FIX-IT-ALL L10-4).** `assertWickedRootsOutsideStateHome`
+  compared spelled paths (`resolve`) while core's fence canonicalises, so a symlinked state home with
+  `WICKED_WORKFLOWS_DIR` under its real path booted green and refused every launch at intake; and the
+  settings file `PUT /settings` writes was not a refused root, so a `WICKED_CREW_SYSTEM_SETTINGS`
+  pointed under the state home booted green and refused every launch after the first PUT while
+  `/health` stayed ok. `canonicalize()` realpaths the deepest EXISTING ancestor and re-joins the
+  rest (the workflows dir is created AFTER the preflight); `STATE_HOME_ROOT_ENVS` gains `fenced` and
+  the refuse-only `WICKED_CREW_SYSTEM_SETTINGS` row — **behaviour change:** a daemon whose settings
+  variable points under the state home now refuses to BOOT with the remedy naming the file (was:
+  green boot, then refuse-everything); no registry row (rule 6 — one fence change per RC).
+  `WICKED_INTERACTIVE_ROOT` stays refused here until L7's docs-root move deletes the row.
+- **`GET /settings` names the settings file the daemon actually reads and writes — additive `path`
+  (crew#494 crew half, F-007 — FIX-IT-ALL L10-6).** The System page showed a LITERAL settings path;
+  `settingsFilePath()` (`WICKED_CREW_SYSTEM_SETTINGS` honoured, else the config-dir default) never
+  reached the wire. `{ settings, path }` — `path` as `wicked-crew-api-types` 0.38.0 types
+  `SettingsResponse.path?` (adjudicated §4.6: `path`, not `settings_path`); studio renders it (L8).
+  No behaviour change beyond the new field.
 - **`GET /repos/:id/requirements` serves the evidence-gated artifact only — the second SQLite library
   is gone (crew#548, F-RC1-041 — FIX-IT-ALL L10-3).** `api/requirements.ts` opened the repo's code-graph
   store through `node:sqlite` (read-only, per request) while the engine holds the same file open
@@ -87,6 +85,7 @@ mentioned only where a daemon release depends on them.
   type for older daemons). **Behaviour change (BC-64):** a repo whose domain-graph never passed its
   coverage bar answers the existing 404 (`requirements_graph.json not generated`) where the live store
   used to answer — not on any RC2 journey. A guard test keeps `node:sqlite` out of `src/`.
+
 ## [0.7.34] — 2026-09-14
 
 Release train 1 (pipeline hardening, step 3) — **core-ts 0.7.25 / studio 0.5.9 / api-types 0.37.0 /
