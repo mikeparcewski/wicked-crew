@@ -21,7 +21,7 @@ import { CoreAdapter } from '../core/adapter.js';
 import type { RosterSeat } from '../core/types.js';
 import type { SeatHealthTracker } from './seat-health.js';
 import { signedInHeuristic } from './seat-signin.js';
-import { seatStanding } from './seat-standing.js';
+import { seatStanding, chatSeatAdmission, type StandingSeat } from './seat-standing.js';
 
 /** The accessor: the registry roster WITH crew's standing, freshly read on every call. */
 export type RosterWithStanding = () => RosterSeat[];
@@ -56,22 +56,33 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
       const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
+      // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
+      // prediction learns from what the engine actually did with the seat (#533 review, F-1).
+      const standing = seatStanding(
+        seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
+        signed,
+        health,
+        seatHealth.councilBenchFor(key),
+        // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
+        // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
+        // `council_eligible`, and the evidence rides on the wire.
+        seatHealth.authFailureFor(key),
+      );
+      // F-W1-005 (wave-1 P6): the chat admission verdict the daemon itself applies when `POST /chats`
+      // picks its default seats — the SAME `chatSeatAdmission` call, for both scope modes — so the
+      // studio's picker offers exactly the seats an open would seat, from one source of truth (no
+      // client-side copy of the rule). Additive on the wire (`RosterSeat` index signature until
+      // api-types 0.39.0 types it).
+      const standingSeat = seat as unknown as StandingSeat;
       return {
         ...seat,
         health,
         signed_in: signed,
-        // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
-        // prediction learns from what the engine actually did with the seat (#533 review, F-1).
-        ...seatStanding(
-          seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
-          signed,
-          health,
-          seatHealth.councilBenchFor(key),
-          // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
-          // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
-          // `council_eligible`, and the evidence rides on the wire.
-          seatHealth.authFailureFor(key),
-        ),
+        ...standing,
+        chat_admission: {
+          unscoped: chatSeatAdmission(standingSeat, standing.auth, false),
+          scoped: chatSeatAdmission(standingSeat, standing.auth, true),
+        },
       };
     });
   };

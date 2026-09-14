@@ -48,6 +48,13 @@ import type { ChatScope, ChatScopeRepo, RepoEntry } from '../core/types.js';
 import { resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
+/** The engine's per-seat answer to `chatOpen` (`ChatSeatOutcome` on the wire). */
+export interface ChatSeatOutcomeLike {
+  cliKey: string;
+  ok: boolean;
+  error?: string;
+}
+
 /** One seat a `POST /chats` did NOT seat, and why (F-2R2-007 / F-A45-011) — published as
  *  `ChatSeatRefusal` in wicked-crew-api-types (`source` since 0.36.0). */
 export interface ChatSeatRefusal {
@@ -741,7 +748,14 @@ type ChatSlot =
   /** The chat is open; its scratch root exists and its seats are reading the statement there.
    *  `refused` (F-A45-011): every requested/default seat NOT seated at open, with its reason and
    *  source — served on `GET /chats/:id` so the studio's admission copy survives a reload. */
-  | { state: 'live'; scope: ChatScope; refused: ChatSeatRefusal[] }
+  | {
+      state: 'live';
+      scope: ChatScope;
+      refused: ChatSeatRefusal[];
+      /** What the ENGINE was handed at open (F-W1-005): a per-seat retry must re-run `chatOpen` with
+       *  the IDENTICAL scope — a different one makes the engine evict every warm seat (Copilot, #426). */
+      engine?: EngineChatScope;
+    }
   /** `DELETE` ran: the root is already gone, and the id stays taken until the engine's own
    *  `chatClosed` for it is observed (or the grace timer gives up) — so a delayed close can never
    *  land on a chat that reused the id, and a reuse cannot race the close. */
@@ -816,10 +830,21 @@ export class ChatScopeIndex {
 
   /** Publish the scope of a finished open. `false` when the reservation is gone (cancelled by a
    *  close in the meantime): the caller must tear the chat down, nothing was recorded. */
-  set(chatId: string, scope: ChatScope, token: number, refused: ChatSeatRefusal[] = []): boolean {
+  set(
+    chatId: string,
+    scope: ChatScope,
+    token: number,
+    refused: ChatSeatRefusal[] = [],
+    engine?: EngineChatScope,
+  ): boolean {
     const slot = this.slots.get(chatId);
     if (slot?.state !== 'reserved' || slot.token !== token) return false;
-    this.slots.set(chatId, { state: 'live', scope, refused: [...refused] });
+    this.slots.set(chatId, {
+      state: 'live',
+      scope,
+      refused: [...refused],
+      ...(engine !== undefined ? { engine: { ...engine, readRoots: [...engine.readRoots] } } : {}),
+    });
     return true;
   }
 
@@ -827,6 +852,31 @@ export class ChatScopeIndex {
   get(chatId: string): ChatScope | undefined {
     const slot = this.slots.get(chatId);
     return slot?.state === 'live' ? slot.scope : undefined;
+  }
+
+  /** The engine scope recorded at open (F-W1-005) — `undefined` for a chat that is not live here. */
+  engineOf(chatId: string): EngineChatScope | undefined {
+    const slot = this.slots.get(chatId);
+    return slot?.state === 'live' && slot.engine !== undefined
+      ? { ...slot.engine, readRoots: [...slot.engine.readRoots] }
+      : undefined;
+  }
+
+  /**
+   * Fold a per-seat re-open (F-W1-005, `POST /chats/:id/seats`): a seat that WARMED leaves the
+   * refused list; one the engine refused replaces its entry (the engine's reason, source `engine`).
+   * Returns the refused list as it now stands, or `undefined` when the chat is not live.
+   */
+  foldSeats(chatId: string, outcomes: readonly ChatSeatOutcomeLike[]): ChatSeatRefusal[] | undefined {
+    const slot = this.slots.get(chatId);
+    if (slot?.state !== 'live') return undefined;
+    const touched = new Set(outcomes.map((o) => o.cliKey));
+    const kept = slot.refused.filter((r) => !touched.has(r.cliKey));
+    const fresh: ChatSeatRefusal[] = outcomes
+      .filter((o) => !o.ok)
+      .map((o) => ({ cliKey: o.cliKey, reason: o.error ?? 'the engine refused the seat', source: 'engine' as const }));
+    slot.refused = [...kept, ...fresh];
+    return [...slot.refused];
   }
 
   /** The seats refused at open (F-A45-011) — `undefined` for a chat this daemon did not open. */

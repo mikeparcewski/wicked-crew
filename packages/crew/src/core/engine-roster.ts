@@ -28,6 +28,9 @@ import type { CampaignDef } from './types.js';
 
 /** The crew-only readings `GET /roster` adds to a registry seat — never handed to the engine. */
 export const CREW_ONLY_SEAT_FIELDS: ReadonlySet<string> = new Set([
+  // F-W1-005: the daemon's chat admission verdict — the studio picker's source of truth, not an
+  // engine field.
+  'chat_admission',
   'health',
   'signed_in',
   'auth',
