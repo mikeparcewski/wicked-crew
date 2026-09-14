@@ -99,6 +99,18 @@ describe('qe-author-tests — the def as data', () => {
     expect(phase('author').instructions).toMatch(/RUN every test/);
   });
 
+  it('review asks for the ONE verdict grammar the engine gate parses (fixall L6-0c ↔ garden 12.37.0): a plain-text VERDICT: PASS|FAIL last line, never a quoted VERDICT line', () => {
+    const instr = phase('review').instructions ?? '';
+    // the same words as garden's governed-worker / qe review text — the carrier the wave-3 parser
+    // (last `^VERDICT[:=]` line wins, token PASS alone passes) is asked for on every surface
+    expect(instr).toContain('one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line');
+    expect(instr).toContain('findings above it; never quote another VERDICT line');
+    // CONDITIONAL / APPROVE / REJECT / SKIP are not verdicts (D-9) — the review prompt names none
+    expect(instr).not.toMatch(/CONDITIONAL|APPROVE|REJECT|SKIP|PARTIAL|INCONCLUSIVE/);
+    expect(instr).not.toContain('Verdict PASS or FAIL with reasons');
+    expect(Buffer.byteLength(instr, 'utf8')).toBeLessThanOrEqual(QE_MAX_INLINE_INSTRUCTION_BYTES);
+  });
+
   it('honours the wicked-core#414 rule as authored: a code-writing agent phase carries a pin or a human gate; a verified_evidence phase carries a pin', () => {
     for (const p of def.phases) {
       const humanGate = typeof p.gate === 'object' && p.gate !== null;

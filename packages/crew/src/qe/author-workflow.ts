@@ -80,7 +80,8 @@ const REVIEW_INSTRUCTIONS =
   'Phase 4/4 REVIEW (qe skill, review action): judge the produced tests independently — behaviour ' +
   'vs implementation coupling, every claim of existing coverage verified at file:line, no sleeps ' +
   "or flaky waits, the PLAN matches what shipped, and the verify phase's QE-VERIFY report shows " +
-  'every produced test executed. Verdict PASS or FAIL with reasons. Read-only: change nothing.';
+  'every produced test executed. End with one plain-text line VERDICT: PASS or VERDICT: FAIL as ' +
+  'the last line, findings above it; never quote another VERDICT line. Read-only: change nothing.';
 
 /**
  * The verify phase's script — the R4-r2 floor: a produced test that fails, or was never run, FAILS
