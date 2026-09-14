@@ -393,11 +393,12 @@ function installShutdownHandlers(): void {
     if (shuttingDown) return;
     shuttingDown = true;
     void (async () => {
-      // Reap ACP bridge children BEFORE this process goes away (crew#285): the engine's
-      // in-memory kill handles die with the daemon, so this is the last actor that can
-      // still find the bridges (they are our direct OS children). SIGTERM, a ~2 s grace,
-      // then SIGKILL for anything that ignored it. Best-effort — a reap failure must
-      // never block shutdown.
+      // Reap bridge children BEFORE this process goes away — the ACP bridges (crew#285: the
+      // engine's in-memory kill handles die with the daemon) and the interactive bridge trees
+      // the pool spawned (F-W1-103: the npm wrapper AND its server child). This is the last
+      // actor that can still find them (they are our direct OS children / grandchildren).
+      // SIGTERM, a ~2 s grace, then SIGKILL for anything that ignored it. Best-effort — a reap
+      // failure must never block shutdown.
       try {
         await bridgeReaper.shutdown();
       } catch {
@@ -485,9 +486,10 @@ async function main(): Promise<void> {
     // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
     // reparented to init and would otherwise live forever — shutdown-path reaping
     // can never see them. Conservative: only ppid==1 matches, so another live
-    // daemon's bridges are untouched.
+    // daemon's bridges are untouched. Interactive bridge trees join under the sidecar
+    // gate (F-W1-103): crew's own sidecar names the pid and its owner daemon is gone.
     const orphans = reapOrphansAtBoot();
-    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker process(es) from a previous daemon: ${orphans.join(', ')}`);
+    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker/interactive process(es) from a previous daemon (crew#285 / F-W1-103): ${orphans.join(', ')}`);
     // Live sweep (crew#340): kill -9 on a bridge mid-run orphans its worker CLI NOW, and
     // that orphan holds the shared worker config home hostage until reaped — the boot
     // sweep only helps the NEXT daemon. Unref'd timer; SIGTERM, then SIGKILL a tick later.

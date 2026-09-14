@@ -8,6 +8,9 @@
 //   - a crew-started bridge whose recorded pair matches is ADOPTED; one recorded with a DIFFERENT
 //     pair (a sibling daemon's) is RECYCLED — killed and restarted with the right env;
 //   - a bridge nobody recorded (operator-run, pre-upgrade) is adopted with a warning, never killed;
+//   - adopting a matching crew bridge whose owner daemon is GONE stamps THIS daemon as its owner
+//     (F-W1-103): the reaper's orphan sweeps reap a crew bridge with a dead owner, so a bridge in
+//     use must name a live one;
 //   - recycling FAILS CLOSED (codex r4 on #506): a refused signal or a pid that survives the wait
 //     refuses the start with the sidecar untouched; the replacement must be a different pid AND
 //     descend from the child this daemon spawned before it is recorded as crew's;
@@ -251,6 +254,32 @@ describe('the spawn env + the sidecar (F-042 / F-043)', () => {
     expect(readCrewSidecar(root)?.pid).toBe(b3.pid);
     expect(readCrewSidecar(root)?.env.WICKED_CREW_API).toBe('http://127.0.0.1:7701');
   }, 60_000);
+
+  it('ADOPTING a matching crew bridge whose owner daemon is GONE claims it: ownerPid becomes this daemon, pid/env untouched, no spawn (F-W1-103)', async () => {
+    const root = join(dir, 'root-claim');
+    const pair = { origin: 'http://127.0.0.1:60785', bus: join(dir, 'state', 'bus') };
+    const b1 = await poolWith(pair).ensure(root);
+    const spawnsBefore = spawns.length;
+    const recorded = readCrewSidecar(root)!;
+    // The spawning daemon exited; its bridge (same pair — a restart of the same daemon identity)
+    // is left with a dead owner, exactly what the boot/periodic sweeps reap.
+    const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
+    expect(pidAlive(deadOwner)).toBe(false);
+    writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...recorded, ownerPid: deadOwner }), 'utf8');
+    expect(readCrewSidecar(root)?.ownerPid).toBe(deadOwner);
+
+    const logged: string[] = [];
+    const b2 = await poolWith(pair, (m) => logged.push(m)).ensure(root);
+
+    expect(b2.pid).toBe(b1.pid);
+    expect(spawns.length).toBe(spawnsBefore);
+    expect(logged).toEqual([]);
+    const claimed = readCrewSidecar(root)!;
+    expect(claimed.ownerPid).toBe(process.pid);
+    expect(claimed.pid).toBe(recorded.pid);
+    expect(claimed.env).toEqual(recorded.env);
+    expect(claimed.startedAt).toBe(recorded.startedAt);
+  }, 30_000);
 
   it('NEVER recycles a mismatched bridge of UNPROVEN ownership — a pre-upgrade sidecar without ownerPid is refused, the bridge left running (codex r3 on #506)', async () => {
     const root = join(dir, 'root-e');

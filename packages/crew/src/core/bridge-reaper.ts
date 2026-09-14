@@ -39,6 +39,19 @@
  * boot, one periodic while the daemon lives) reap those under a conservative triple
  * gate: ppid == 1, a token-boundary command match, and a cwd inside a run worktree.
  *
+ * A fourth joined with F-W1-103 (FIX-IT-ALL wave 1): the INTERACTIVE document bridge the pool
+ * spawns per docs root (`npx wicked-interactive serve --root …`, `interactive/bridge-pool.ts`,
+ * detached and unref'd) was outside every sweep — it is not a `*-acp` binary, and its server is
+ * this daemon's GRANDCHILD (an `npm exec` wrapper is the child) — so it outlived every daemon that
+ * started it: two such pairs were found ~20 h after their daemon had exited, on ports nothing
+ * would ever look up again. Now (1) the shutdown sweep reaps the wrapper AND its server child
+ * (npm does not forward a signal to it), and (2) both orphan sweeps reap a ppid-1 interactive tree
+ * whose docs root carries crew's own sidecar (`.wi-serve.crew.json`) naming one of its pids with
+ * an owning daemon that is gone. Adopting a bridge stamps the adopter as its owner, so a bridge in
+ * use by a LIVE daemon — spawner or adopter — is never matched; a bridge nobody recorded (an
+ * operator's own `serve`) is never matched either. Crew-spawned bridges therefore live exactly as
+ * long as a crew daemon owns them: adopt-or-kill, never leak.
+ *
  * # Why a process-table sweep rather than tracked pids alone
  *
  * The spawn happens inside the engine (the native actor thread), which reports no pid
@@ -51,6 +64,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { isAbsolute } from 'node:path';
+import { pidAlive, readCrewSidecar, type CrewSidecar } from '../interactive/bridge-pool.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /**
@@ -82,17 +97,21 @@ export const WORKER_CLI_BINS: readonly string[] = ['agy', 'claude', 'codex', 'pi
 // sits BETWEEN the bridge and pi. Through the npm shim it runs as `node …/wicked-pi.mjs …`, so
 // the token matcher below also accepts a `.mjs` launcher extension.
 
+/**
+ * The interactive document bridge the pool spawns per docs root (F-W1-103): `npx --yes
+ * wicked-interactive@<spec> serve --root <root>`, detached. It runs as an `npm exec` WRAPPER whose
+ * child is the `node …/wicked-interactive serve --root <root>` that holds the port — the wrapper is
+ * this daemon's child, the server its grandchild, and SIGTERM to the wrapper alone leaves the
+ * server running (npm does not forward it). Every matcher below treats the pair as one tree.
+ */
+export const INTERACTIVE_BIN = 'wicked-interactive';
+
 /** How long a SIGTERM'd bridge gets to exit before the SIGKILL escalation. */
 export const BRIDGE_KILL_GRACE_MS = 2000;
 
 /** How often the grace window re-checks survivor liveness. */
 const POLL_INTERVAL_MS = 100;
 
-/**
- * One line of a `pid ppid command` process listing → the pids of DIRECT children of
- * `parentPid` whose command line names a bridge binary. Pure, so the parsing is
- * testable without a real process table.
- */
 /**
  * Matches `bin` as a whole command token, never a substring: start/whitespace/path-sep/
  * quote before; an optional launcher extension (.cmd/.exe/.bat on Windows; .mjs for the
@@ -115,19 +134,77 @@ const ORPHAN_TOKEN_RES: readonly RegExp[] = [...BRIDGE_BINS, ...WORKER_CLI_BINS]
   bridgeTokenRe(bin),
 );
 
-export function parseBridgeChildren(listing: string, parentPid: number): number[] {
-  const pids: number[] = [];
+/**
+ * `wicked-interactive` as a whole token — the npx spec spelling (`wicked-interactive@^0.9.3`), the
+ * npm shim (`…/.bin/wicked-interactive`) and the package path (`…/wicked-interactive/dist/…`) all
+ * count, `wicked-interactive-export` never does — followed by the `serve` subcommand as its own
+ * token. A `render`/`export` invocation of the same package is not a bridge.
+ */
+const INTERACTIVE_SERVE_RE = new RegExp(
+  `(?:^|[\\s/\\\\"'])${INTERACTIVE_BIN}(?:@[^\\s"']*)?(?:\\.(?:cmd|exe|bat|mjs|js))?(?=[\\s/\\\\"']|$).*?\\sserve(?:\\s|$)`,
+  'i',
+);
+
+/** Is `command` an interactive bridge `serve` — the npm wrapper or the server itself? */
+export function isInteractiveServe(command: string): boolean {
+  return INTERACTIVE_SERVE_RE.test(command);
+}
+
+/**
+ * The `--root <path>` of an interactive `serve` command line, or null when absent or not absolute.
+ * A quoted value is unquoted; an unquoted one runs to the next `--flag` or the end of the line, so a
+ * root with a space in it survives and the blanks `ps` pads a line with are dropped.
+ */
+export function rootArgOf(command: string): string | null {
+  const m = /(?:^|\s)--root(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(.+?))(?=\s+--[a-z]|\s*$)/i.exec(command);
+  if (m === null) return null;
+  const raw = (m[1] ?? m[2] ?? m[3] ?? '').trim();
+  return raw !== '' && isAbsolute(raw) ? raw : null;
+}
+
+/** One `pid ppid command` row of a process listing. */
+interface ProcessRow {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+/** The parseable rows of a `pid ppid command` listing; garbage lines a real `ps` never quite spares us are skipped. */
+function parseListing(listing: string): ProcessRow[] {
+  const rows: ProcessRow[] = [];
   for (const line of listing.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     if (m === null) continue;
-    const pid = Number(m[1]);
-    const ppid = Number(m[2]);
-    const command = m[3] as string;
+    rows.push({ pid: Number(m[1]), ppid: Number(m[2]), command: m[3] as string });
+  }
+  return rows;
+}
+
+/**
+ * A `pid ppid command` process listing → the pids of the DIRECT children of `parentPid` whose
+ * command line names a bridge binary or an interactive `serve`, plus the `serve` children of those
+ * interactive wrappers (this daemon's grandchildren, F-W1-103). Pure, so the parsing is testable
+ * without a real process table.
+ */
+export function parseBridgeChildren(listing: string, parentPid: number): number[] {
+  const rows = parseListing(listing);
+  const pids: number[] = [];
+  const wrappers: number[] = [];
+  for (const { pid, ppid, command } of rows) {
     if (ppid !== parentPid || pid === parentPid) continue;
     // Token-boundary match: `pi-acp` must not match inside `api-acp` (Copilot review
     // on #300 post-merge). A bridge binary appears as its own token — start-of-line,
     // whitespace, or a path separator before it; end-of-token after.
     if (BRIDGE_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
+    else if (isInteractiveServe(command)) {
+      pids.push(pid);
+      wrappers.push(pid);
+    }
+  }
+  // The interactive server is the npm wrapper's child — this daemon's GRANDCHILD — and a SIGTERM
+  // to the wrapper alone orphans it (F-W1-103). The pair is one tree; reap both.
+  for (const { pid, ppid, command } of rows) {
+    if (wrappers.includes(ppid) && pid !== parentPid && !pids.includes(pid) && isInteractiveServe(command)) pids.push(pid);
   }
   return pids;
 }
@@ -182,16 +259,63 @@ export function discoverBridgeChildren(parentPid: number = process.pid): number[
  */
 export function parseOrphanedRunProcesses(listing: string): number[] {
   const pids: number[] = [];
-  for (const line of listing.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    if (m === null) continue;
-    const pid = Number(m[1]);
-    const ppid = Number(m[2]);
-    const command = m[3] as string;
+  for (const { pid, ppid, command } of parseListing(listing)) {
     if (ppid !== 1 || pid === process.pid) continue;
     if (ORPHAN_TOKEN_RES.some((re) => re.test(command))) pids.push(pid);
   }
   return pids;
+}
+
+/** An interactive bridge tree reparented to init: the docs root its command line names and the
+ *  pids to reap — the ppid-1 process first (the npm wrapper, or the server itself once its wrapper
+ *  is gone), then any `serve` child of it. */
+export interface OrphanedInteractiveBridge {
+  root: string;
+  pids: number[];
+}
+
+/**
+ * Every interactive bridge tree whose parent is init (F-W1-103): a ppid-1 `wicked-interactive …
+ * serve --root <root>` plus its own `serve` children. Pure — the OWNERSHIP gate (crew's sidecar in
+ * `root` naming one of these pids, with an owner daemon that is gone) is applied by the sweeps,
+ * so a shell-parented or nohup'd operator bridge is parsed here but never reaped there.
+ */
+export function parseOrphanedInteractiveBridges(listing: string): OrphanedInteractiveBridge[] {
+  const rows = parseListing(listing);
+  const trees: OrphanedInteractiveBridge[] = [];
+  for (const { pid, ppid, command } of rows) {
+    if (ppid !== 1 || pid === process.pid || !isInteractiveServe(command)) continue;
+    const root = rootArgOf(command);
+    if (root === null) continue;
+    const pids = [pid];
+    for (const child of rows) {
+      if (child.ppid === pid && child.pid !== process.pid && isInteractiveServe(child.command)) pids.push(child.pid);
+    }
+    trees.push({ root, pids });
+  }
+  return trees;
+}
+
+/**
+ * The ownership gate for an orphaned interactive tree, mirroring the pool's own adopt-or-recycle
+ * rules (`interactive/bridge-pool.ts`, codex on crew#506): crew's `.wi-serve.crew.json` in the root
+ * the command line names must record one of the tree's pids — the proof crew spawned it; an
+ * operator's `wicked-interactive serve` has no sidecar and is never matched — and the daemon it
+ * records as owner must be GONE. A live owner (the spawner, or a daemon that adopted the bridge and
+ * stamped itself) is using it; a sidecar without an owner is of unproven ownership and left alone.
+ */
+function orphanedInteractiveTargets(listing: string, io: BridgeReaperIo): number[] {
+  const sidecarOf = io.sidecar ?? readCrewSidecar;
+  const alive = io.alive ?? pidAlive;
+  const targets: number[] = [];
+  for (const { root, pids } of parseOrphanedInteractiveBridges(listing)) {
+    const sidecar = sidecarOf(root);
+    if (sidecar === null || !pids.includes(sidecar.pid)) continue;
+    const owner = sidecar.ownerPid;
+    if (owner === undefined || !Number.isInteger(owner) || owner <= 0 || alive(owner)) continue;
+    targets.push(...pids);
+  }
+  return targets;
 }
 
 /**
@@ -220,14 +344,16 @@ function pidRunsInRunWorktree(pid: number): boolean {
 /**
  * Boot-time sweep: SIGTERM orphaned bridges from a prior daemon generation AND orphaned
  * worker CLIs from any bridge that died too hard to reap them — ppid 1 AND cwd inside a
- * run worktree, so user-started processes are never matched.
+ * run worktree, so user-started processes are never matched — AND crew-spawned interactive
+ * bridge trees whose owning daemon is gone (ppid 1 AND crew's sidecar names them, F-W1-103).
  */
 export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
   const listing = (io.list ?? listProcesses)();
   if (listing === null) return [];
-  const orphans = parseOrphanedRunProcesses(listing).filter(
-    (pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid),
-  );
+  const orphans = [
+    ...parseOrphanedRunProcesses(listing).filter((pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid)),
+    ...orphanedInteractiveTargets(listing, io),
+  ];
   const reaped: number[] = [];
   for (const pid of orphans) {
     try {
@@ -247,7 +373,10 @@ export function reapOrphansAtBoot(io: BridgeReaperIo = {}): number[] {
 // that orphan keeps the engine-minted shared worker config home busy — the next
 // `session/new` contends on it until something reaps the orphan or the daemon restarts.
 // So the daemon keeps sweeping, on an unref'd timer, with the SAME conservative triple
-// gate as the boot sweep (ppid 1 + token match + cwd inside a run worktree).
+// gate as the boot sweep (ppid 1 + token match + cwd inside a run worktree) — and, for
+// interactive bridge trees, the same sidecar gate (ppid 1 + crew's sidecar names the pid +
+// its owning daemon is gone), so a sibling daemon that dies hard cannot leak its bridges past
+// the next tick either (F-W1-103).
 
 /** How often the live daemon re-scans for orphaned run processes. */
 export const ORPHAN_SWEEP_DEFAULT_MS = 30_000;
@@ -271,11 +400,10 @@ export function sweepOrphanedRunProcesses(
 ): { terminated: number[]; killed: number[] } {
   const listing = (io.list ?? listProcesses)();
   if (listing === null) return { terminated: [], killed: [] };
-  const alive = new Set(
-    parseOrphanedRunProcesses(listing).filter(
-      (pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid),
-    ),
-  );
+  const alive = new Set([
+    ...parseOrphanedRunProcesses(listing).filter((pid) => (io.cwdInWorktree ?? pidRunsInRunWorktree)(pid)),
+    ...orphanedInteractiveTargets(listing, io),
+  ]);
   const kill = io.kill ?? process.kill;
   const terminated: number[] = [];
   const killed: number[] = [];
@@ -335,6 +463,10 @@ export interface BridgeReaperIo {
   cwdInWorktree?: (pid: number) => boolean;
   /** Orphan-sweep process listing (`pid ppid command` lines); defaults to the real table. */
   list?: () => string | null;
+  /** Interactive-orphan gate: crew's sidecar for a docs root (F-W1-103); injectable so tests avoid real files. */
+  sidecar?: (root: string) => CrewSidecar | null;
+  /** Interactive-orphan gate: is the sidecar's owning daemon alive? Default {@link pidAlive}. */
+  alive?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
 }

@@ -50,6 +50,14 @@
  * (`npx` → shell → node), it must differ from the pid just recycled, and a bridge whose lineage
  * cannot be read is used but never written into the sidecar. A sidecar entry is a claim of
  * ownership that licenses a later kill, so it is only ever written for a pid this daemon spawned.
+ *
+ * LIFETIME (F-W1-103, FIX-IT-ALL wave 1): a crew-spawned bridge lives exactly as long as a crew
+ * daemon OWNS it — adopt-or-kill, never leak. The sidecar's `ownerPid` is that daemon: the spawner,
+ * or the daemon that last adopted the bridge (adoption stamps the adopter). The daemon's shutdown
+ * reaps the bridges it spawned (the npm wrapper AND its server child), and every daemon's boot and
+ * periodic sweeps reap a bridge tree reparented to init whose sidecar owner is gone
+ * (`core/bridge-reaper.ts`). Two bridges on ports nothing would ever look up again, ~20 h after
+ * their daemon exited, were the finding.
  */
 
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -246,8 +254,9 @@ export interface CrewSidecar {
   env: BridgeEnv;
   startedBy: 'wicked-crew';
   startedAt: string;
-  /** The DAEMON that spawned it. A bridge whose owner is still alive is that daemon's to stop —
-   *  never this one's (codex on crew#506). */
+  /** The DAEMON that owns it: the spawner, or the daemon that last ADOPTED it (F-W1-103 — adoption
+   *  stamps the adopter, so the orphan sweeps see a bridge in use). A bridge whose owner is still
+   *  alive is that daemon's to stop — never this one's (codex on crew#506). */
   ownerPid?: number;
 }
 
@@ -496,7 +505,9 @@ export class InteractiveBridgePool {
 
   /**
    * A live bridge was found through the lockfile. Is it one THIS daemon can use (F-042/F-043)?
-   *  - crew's sidecar names this pid and its env matches ours → adopt silently;
+   *  - crew's sidecar names this pid and its env matches ours → adopt silently, and stamp THIS
+   *    daemon as its owner (F-W1-103) so the reaper's orphan sweeps — which reap a crew bridge whose
+   *    owner daemon is gone — see it in use for as long as this daemon lives;
    *  - the sidecar names this pid with a DIFFERENT env: if the daemon that spawned it (`ownerPid`)
    *    is STILL ALIVE, the bridge is that daemon's — two daemons sharing one docs root — and this
    *    one must not kill it mid-create (codex on crew#506): refuse with a `BridgeUnavailableError`
@@ -511,7 +522,10 @@ export class InteractiveBridgePool {
     const expected = bridgeEnvFor(this.io);
     const sidecar = readCrewSidecar(root);
     if (sidecar !== null && sidecar.pid === live.pid) {
-      if (bridgeEnvMatches(sidecar.env, expected)) return live;
+      if (bridgeEnvMatches(sidecar.env, expected)) {
+        this.claimSidecar(root, sidecar);
+        return live;
+      }
       const owner = sidecar.ownerPid;
       const ownerOrigin = sidecar.env.WICKED_CREW_API ?? '(unknown origin)';
       if (owner === undefined || !Number.isInteger(owner) || owner <= 0) {
@@ -686,8 +700,10 @@ export class InteractiveBridgePool {
     const env: NodeJS.ProcessEnv = { ...childEnvWithBootEstateDb(), ...bridgeEnv };
     const child = (this.io.spawn ?? defaultSpawn)(root, env);
     const childPid = child.pid; // undefined when the spawn failed synchronously — its 'error' follows
-    // Detached + unref: the bridge is a SHARED instance keyed by root, so it must outlive the
-    // daemon that happened to start it (and be adoptable by the next one via the lockfile).
+    // Detached + unref: the bridge is keyed by root and adoptable through its lockfile, so the
+    // daemon never holds it as an awaited handle. It does NOT outlive crew (F-W1-103): the daemon's
+    // shutdown reaps the wrapper and its server child, and a daemon that dies too hard for that
+    // leaves a sidecar whose owner is gone — the next boot sweep reaps it (`core/bridge-reaper.ts`).
     child.on('error', (err) => {
       spawnFailure = err.message;
     });
@@ -751,6 +767,18 @@ export class InteractiveBridgePool {
       `the interactive bridge for ${root} did not become healthy in time`,
       `run \`${serveCommand(root)}\` in a terminal to see the failure (or check ${join(root, '.wi-serve.log')})`,
     );
+  }
+
+  /** Adopting a crew-started bridge makes THIS daemon its owner (F-W1-103): rewrite the sidecar's
+   *  `ownerPid` — pid, env and `startedAt` untouched — so the orphan sweeps, which reap a crew
+   *  bridge whose owner daemon is gone, see it in use. Best-effort, like {@link writeSidecar}. */
+  private claimSidecar(root: string, sidecar: CrewSidecar): void {
+    if (sidecar.ownerPid === process.pid) return;
+    try {
+      writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify({ ...sidecar, ownerPid: process.pid }, null, 2), 'utf8');
+    } catch (err) {
+      this.io.debug?.(`could not claim ${CREW_SIDECAR_NAME} in ${root}: ${(err as Error).message}`);
+    }
   }
 
   /** Record which pid crew started and with which env, so a later adopt can tell ours from a
