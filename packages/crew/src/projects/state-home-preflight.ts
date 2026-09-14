@@ -62,15 +62,18 @@ export const STATE_HOME_FINDING_KIND = 'state-home.unregistered';
 export const STATE_HOME_BLOCKER_CODE = 'state_home_unregistered';
 
 /**
- * The `WICKED_*` root variables whose target crew WRITES INTO (or spawns a bridge that does), with
- * what lands there — the ones an operator can point inside the state home by accident (the rig
- * did). Each default lives outside the state home; the fixture registers the top-level name each
- * would create so a pre-existing placement is fenced, and this module refuses to boot into one.
+ * The `WICKED_*` root variables whose target crew WRITES INTO, with what lands there — the ones an
+ * operator can point inside the state home by accident (the rig did). Each default lives outside
+ * the state home; the fixture registers the top-level name each would create so a pre-existing
+ * placement is fenced, and this module refuses to boot into one.
+ *
+ * `WICKED_INTERACTIVE_ROOT` is deliberately NOT listed since crew 0.7.35 (D-L7-1 / BC-49): the
+ * interactive default now lives INSIDE the state home (`interactive/`, a registered join entry the
+ * fence classifies), so the variable may name any path — inside the state home or out.
  */
 export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: string; fenced: boolean }> = [
   { variable: 'WICKED_WORKFLOWS_DIR', creates: 'the workflow overlay directory (crew seeds the interactive-* drop-in defs into it at boot)', fenced: true },
   { variable: 'WICKED_STEERING_INBOX_DIR', creates: 'the steering-inbox documents a governed run must READ — unreadable by construction under the fence', fenced: true },
-  { variable: 'WICKED_INTERACTIVE_ROOT', creates: "the wicked-interactive docs store and its `.wi-serve.json` (written by the bridge crew spawns)", fenced: true },
   // crew#569: `PUT /settings` writes this FILE wherever the variable points; under the state home
   // the write lands as an unregistered entry the fence refuses every launch on — while /health
   // stays ok. Refuse-only: crew never seeds the file, so an existing placement is the config

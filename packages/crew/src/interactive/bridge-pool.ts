@@ -26,9 +26,11 @@
  * bridge: recording can never fail — or slow down — a proxied request.
  *
  * THE SPAWN ENV (acceptance findings F-042 + F-043). The bridge validates and registers a doc's
- * project against `WICKED_CREW_API` — defaulting to `http://127.0.0.1:7701` when unset — and emits
- * onto the wicked-bus at `WICKED_BUS_DATA_DIR` — defaulting to `~/.something-wicked/wicked-bus`.
- * A bridge spawned with the daemon's bare env therefore talked to whatever daemon owned :7701 (a
+ * project against `WICKED_CREW_API` — until interactive 0.9.3 defaulting to `http://127.0.0.1:7701`
+ * when unset; since 0.9.3 it FAILS CLOSED instead (R-L7-a: binding, picker and the runs probe are
+ * off and name the variable) — and emits onto the wicked-bus at `WICKED_BUS_DATA_DIR`, defaulting
+ * to `~/.something-wicked/wicked-bus`. A bridge spawned with the daemon's bare env therefore talked
+ * to whatever daemon owned :7701 (a
  * daemon on any other port could not create a single project-bound document) and shared ONE bus
  * with every other daemon on the host (two daemons' durable cursors racing for one `doc.created`).
  * So the spawn now exports BOTH: `WICKED_CREW_API` = this daemon's own bound origin, and
@@ -55,6 +57,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { childEnvWithBootEstateDb } from '../core/governance-store.js';
+import { recorderBrowsersPath } from './bridge-root.js';
 
 export const LOCK_NAME = '.wi-serve.json';
 /** Crew's sidecar beside the bridge's lockfile: which pid crew started, and with which env (F-042/F-043). */
@@ -113,11 +116,21 @@ export const LINEAGE_MAX_HOPS = 16;
  * the recorder snapshot, and `wicked-interactive doctor [--install]` is the operator remedy. A 0.9.1
  * bridge answers the same routes WITHOUT the typed frames, so a daemon pinned back through
  * `WICKED_INTERACTIVE_SPEC` gets the boot warning and an untyped thread on recorder failure.
+ *
+ * 0.9.3 (wicked-interactive #229 — FIX-IT-ALL L7-I1, F-RC1-120/121/122): the floor follows 0.9.3
+ * because the bridge's BUS IDENTITY is now per served root (`wi-service-*@<h8>`) — two bridges on
+ * one bus db no longer share a cursor, so a project partition's `demo.requested` is never drained
+ * (and silently acked) by the default root's bridge; a frame for a doc outside a bridge's root is
+ * refused loudly (`/api/health.unknown_doc_refused`, `plugin`). It also fails CLOSED on an unset
+ * `WICKED_CREW_API` (crew always sets it) and its remedies carry `PLAYWRIGHT_BROWSERS_PATH` — the
+ * third {@link BridgeEnv} key this pool now hands every bridge, which is ALSO the rollout vehicle:
+ * a running 0.9.2 bridge's sidecar lacks the key, {@link bridgeEnvMatches} says no, and the pool
+ * recycles it into `npx wicked-interactive@^0.9.3`.
  */
 /** The package crew starts as the interactive bridge — named in CODE exactly once. */
 const INTERACTIVE_PACKAGE = 'wicked-interactive';
 /** The range crew needs when nothing overrides it (see F-081 above). */
-export const INTERACTIVE_DEFAULT_RANGE = '^0.9.2';
+export const INTERACTIVE_DEFAULT_RANGE = '^0.9.3';
 /** The env override of the RANGE (not the package). */
 export const INTERACTIVE_SPEC_ENV = 'WICKED_INTERACTIVE_SPEC';
 /** The default spec — what the daemon spawns with no override. */
@@ -213,13 +226,17 @@ function serveCommand(root: string): string {
   return `npx ${interactiveSpec()} serve --root ${root}`;
 }
 
-/** The two variables crew hands the bridge it spawns (F-042/F-043). Absent = not set — the bridge
- *  falls back to its own defaults, which is exactly the pre-fix behavior this exists to end. */
+/** The three variables crew hands the bridge it spawns (F-042/F-043, BC-50). Absent = not set —
+ *  the bridge falls back to its own defaults, which is exactly the pre-fix behavior this exists to
+ *  end (since interactive 0.9.3 an unset `WICKED_CREW_API` fails CLOSED there — R-L7-a). */
 export interface BridgeEnv {
   /** The daemon's own origin — where the bridge validates/registers project bindings. */
   WICKED_CREW_API?: string;
   /** The directory holding the `bus.db` this daemon's interactive seams read. */
   WICKED_BUS_DATA_DIR?: string;
+  /** Where the recorder's Playwright browser is provisioned AND looked for:
+   *  `<state home>/interactive/recorder-browsers` (BC-50 / R-L7-d), never the global cache. */
+  PLAYWRIGHT_BROWSERS_PATH?: string;
 }
 
 /** What crew writes beside the lockfile after IT starts a bridge. */
@@ -269,21 +286,29 @@ export interface BridgePoolIo {
   busDataDir?: string | null;
 }
 
-/** The {@link BridgeEnv} this pool hands a bridge it starts, from its io. Only DEFINED values ride. */
+/** The {@link BridgeEnv} this pool hands a bridge it starts, from its io. Only DEFINED values ride;
+ *  the browsers path always does — it is crew's placement, under the daemon's own state home. */
 export function bridgeEnvFor(io: Pick<BridgePoolIo, 'studioOrigin' | 'busDataDir'>): BridgeEnv {
   const origin = io.studioOrigin?.() ?? null;
   const busDir = io.busDataDir ?? null;
   return {
     ...(origin !== null ? { WICKED_CREW_API: origin } : {}),
     ...(busDir !== null ? { WICKED_BUS_DATA_DIR: busDir } : {}),
+    PLAYWRIGHT_BROWSERS_PATH: recorderBrowsersPath(),
   };
 }
 
 export { busDataDirOf } from './bus-location.js';
 
-/** `true` when two bridge envs agree on every variable either one sets. */
+/** `true` when two bridge envs agree on every variable either one sets. A sidecar written before
+ *  the browsers-path key existed (crew ≤ 0.7.34) does NOT match — that mismatch is the recycle
+ *  that carries a live bridge onto interactive 0.9.3 (see the 0.9.3 note above). */
 export function bridgeEnvMatches(a: BridgeEnv, b: BridgeEnv): boolean {
-  return a.WICKED_CREW_API === b.WICKED_CREW_API && a.WICKED_BUS_DATA_DIR === b.WICKED_BUS_DATA_DIR;
+  return (
+    a.WICKED_CREW_API === b.WICKED_CREW_API &&
+    a.WICKED_BUS_DATA_DIR === b.WICKED_BUS_DATA_DIR &&
+    a.PLAYWRIGHT_BROWSERS_PATH === b.PLAYWRIGHT_BROWSERS_PATH
+  );
 }
 
 /** `<root>/.wi-serve.crew.json`, or null when absent/unparseable/incomplete. */
@@ -294,6 +319,7 @@ export function readCrewSidecar(root: string): CrewSidecar | null {
     const env: BridgeEnv = {
       ...(typeof raw.env.WICKED_CREW_API === 'string' ? { WICKED_CREW_API: raw.env.WICKED_CREW_API } : {}),
       ...(typeof raw.env.WICKED_BUS_DATA_DIR === 'string' ? { WICKED_BUS_DATA_DIR: raw.env.WICKED_BUS_DATA_DIR } : {}),
+      ...(typeof raw.env.PLAYWRIGHT_BROWSERS_PATH === 'string' ? { PLAYWRIGHT_BROWSERS_PATH: raw.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
     };
     return {
       pid: raw.pid,
@@ -741,8 +767,9 @@ export class InteractiveBridgePool {
   }
 }
 
-/** `npx wicked-interactive serve` in `<root>`, detached, output to the bridge's own log, with the
- *  env the pool computed (the daemon's own plus {@link BridgeEnv}). */
+/** `npx wicked-interactive serve` in `<root>`, detached, stdio IGNORED (the bridge's own stdout/
+ *  stderr — its `bus identity` and refusal lines — are discarded here; `GET /api/health` is the
+ *  observable), with the env the pool computed (the daemon's own plus {@link BridgeEnv}). */
 function defaultSpawn(root: string, env: NodeJS.ProcessEnv): ChildProcess {
   // `--yes` is load-bearing: without it npx PROMPTS when the package is not installed, and a
   // daemon has no tty to answer with — the request would hang instead of failing to a 503.

@@ -119,10 +119,18 @@ describe('assertWickedRootsOutsideStateHome — the boot refusal (F-RC1-011)', (
     );
   });
 
+  it('WICKED_INTERACTIVE_ROOT is NOT refused inside the state home since 0.7.35 — the interactive default lives there (D-L7-1 / BC-49)', () => {
+    expect(STATE_HOME_ROOT_ENVS.map((r) => r.variable)).not.toContain('WICKED_INTERACTIVE_ROOT');
+    // The very path the unset default resolves to (an operator spelling it out is not an error) —
+    // and any other path inside the state home.
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_INTERACTIVE_ROOT: join(home, 'interactive', 'docs') }, home)).not.toThrow();
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_INTERACTIVE_ROOT: join(home, 'anywhere') }, home)).not.toThrow();
+  });
+
   it('the state home ITSELF as a root is refused too, and says so', () => {
     let thrown: unknown;
     try {
-      assertWickedRootsOutsideStateHome({ WICKED_INTERACTIVE_ROOT: home }, home);
+      assertWickedRootsOutsideStateHome({ WICKED_WORKFLOWS_DIR: home }, home);
     } catch (err) {
       thrown = err;
     }
@@ -184,10 +192,11 @@ describe('assertWickedRootsOutsideStateHome — the boot refusal (F-RC1-011)', (
     // The default (outside) and a sibling are fine; the row is refuse-only.
     expect(() => assertWickedRootsOutsideStateHome({ WICKED_CREW_SYSTEM_SETTINGS: join(base, 'settings.json') }, stateHome)).not.toThrow();
     expect(STATE_HOME_ROOT_ENVS.find((r) => r.variable === 'WICKED_CREW_SYSTEM_SETTINGS')?.fenced).toBe(false);
+    // Two fenced variables since crew 0.7.35 (D-L7-1 / BC-49): WICKED_INTERACTIVE_ROOT left the list —
+    // the interactive default is a registered JOIN entry inside the state home, not an env placement.
     expect(STATE_HOME_ROOT_ENVS.filter((r) => r.fenced).map((r) => r.variable)).toEqual([
       'WICKED_WORKFLOWS_DIR',
       'WICKED_STEERING_INBOX_DIR',
-      'WICKED_INTERACTIVE_ROOT',
     ]);
   });
 

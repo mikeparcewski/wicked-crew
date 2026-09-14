@@ -35,15 +35,16 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(INTERACTIVE_SPEC).not.toBe('wicked-interactive');
   });
 
-  it('floors at 0.9.2 — the recorder preflights/provisions its browser and fails with a typed RecorderError the demo seam relays (F-RECON-012/013/014), on top of F-050 page geometry and DELETE /api/docs/:doc retire (F-081)', () => {
+  it('floors at 0.9.3 — per-root bus identity + loud refusal (F-RC1-120), crew-api fail-closed (F-RC1-122), browsers-path remedies (F-RC1-121), on top of 0.9.2\'s typed recorder contract (F-RECON-012/013/014)', () => {
     const range = INTERACTIVE_SPEC.split('@')[1] ?? '';
     expect(range).toBe(INTERACTIVE_DEFAULT_RANGE);
     const m = /^\^?(\d+)\.(\d+)\.(\d+)/.exec(range);
     expect(m, `unparseable range: ${range}`).not.toBeNull();
     const [maj, min, pat] = [Number(m![1]), Number(m![2]), Number(m![3])];
     // 0.8.x never picked up 0.9.0 (F-081: the caret was a compiled constant — a silent freeze); 0.9.1
-    // answers the recorder routes without the typed frames (F-RECON-012/014 shipped in 0.9.2).
-    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 2);
+    // answers the recorder routes without the typed frames (F-RECON-012/014 shipped in 0.9.2); a
+    // 0.9.2 bridge shares ONE bus cursor with every other bridge on the db (F-RC1-120, fixed 0.9.3).
+    expect(maj * 1_000_000 + min * 1_000 + pat).toBeGreaterThanOrEqual(0 * 1_000_000 + 9 * 1_000 + 3);
   });
 
   it('WICKED_INTERACTIVE_SPEC overrides the RANGE when it is a semver range; anything else is ignored and NAMED (F-081)', () => {
@@ -59,9 +60,11 @@ describe('the wicked-interactive spec crew resolves', () => {
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.8.1' })).toEqual({ spec: 'wicked-interactive@0.8.1', range: '0.8.1', source: 'env', belowFloor: true });
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.8.1' }).belowFloor).toBe(true);
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '>=0.9.0 <1.0.0' }).belowFloor).toBe(true);
-    // 0.9.1 is now BELOW the floor (no typed RecorderError frames) — honoured, flagged.
+    // 0.9.1 is BELOW the floor (no typed RecorderError frames) — honoured, flagged. So is 0.9.2 now
+    // (F-RC1-120: one bus cursor shared by every bridge on the db; fixed by 0.9.3's per-root identity).
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.1' }).belowFloor).toBe(true);
-    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.2' }).belowFloor).toBeUndefined();
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.2' }).belowFloor).toBe(true);
+    expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '^0.9.3' }).belowFloor).toBeUndefined();
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '0.10.0-rc.1' }).belowFloor).toBeUndefined();
     // An upper-bound-only range has no floor to compare — accepted, not flagged.
     expect(resolveInteractiveSpec({ [INTERACTIVE_SPEC_ENV]: '<1.0.0' })).toEqual({ spec: 'wicked-interactive@<1.0.0', range: '<1.0.0', source: 'env' });

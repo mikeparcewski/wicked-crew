@@ -75,7 +75,9 @@ export interface ListInteractiveDocsDeps {
   settings: ProjectSettingsStore;
   docRuns: Pick<DocRunIndex, 'kindsOf' | 'runsOf'>;
   env?: Record<string, string | undefined>;
-  /** The home the default root hangs off (tests point it at a scratch dir). */
+  /** The daemon state home the DEFAULT root hangs off (crew ≥ 0.7.35; tests point it at a scratch dir). */
+  stateHome?: string;
+  /** The HOME a leading `~` in an EXPLICIT `interactiveRoot` expands against. */
   home?: string;
   includeRetired?: boolean;
 }
@@ -149,6 +151,7 @@ export async function listInteractiveDocs(deps: ListInteractiveDocsDeps): Promis
         projectId === DEFAULT_PROJECT_ID ? undefined : projectId,
         deps.settings.get(projectId),
         env,
+        deps.stateHome,
         deps.home,
       );
     } catch (err) {

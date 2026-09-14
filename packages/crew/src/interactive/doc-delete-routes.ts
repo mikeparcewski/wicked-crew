@@ -71,7 +71,9 @@ export interface DocDeleteDeps {
    *  a directly-driven route set gets an inert default so unit tests never touch ~/.wicked-crew). */
   dropDocLedgerRows: (documentId: string) => DocLedgerSweep;
   env?: NodeJS.ProcessEnv;
-  /** The home the default root hangs off (tests point it at a scratch dir). */
+  /** The daemon state home the DEFAULT docs root hangs off (crew ≥ 0.7.35, D-L7-1; tests point it at a scratch dir). */
+  stateHome?: string;
+  /** The HOME a leading `~` in an EXPLICIT `interactiveRoot` expands against. */
   home?: string;
   log?: (msg: string) => void;
   /** Budget for the bridge's retire call (tests shorten it). The tombstone write is local and
