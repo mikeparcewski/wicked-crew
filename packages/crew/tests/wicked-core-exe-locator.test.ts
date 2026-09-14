@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { bundledWickedCoreExe, wickedCoreTsPlatformPackage } from '../src/core/adapter.js';
+import { WICKED_CORE_EXE_NAME, bundledWickedCoreExe, wickedCoreTsPlatformPackage } from '../src/core/adapter.js';
 import { removeScratch } from './setup/scratch.js';
 
 const scratches: string[] = [];
@@ -37,34 +37,34 @@ describe('bundledWickedCoreExe — the binary inside the platform package, or no
     const pkgDir = join(nm, 'wicked-core-ts-linux-x64-gnu');
     mkdirSync(pkgDir, { recursive: true });
     writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'wicked-core-ts-linux-x64-gnu', version: '0.7.26', wickedCoreVersion: '0.4.0' }), 'utf8');
-    if (withBinary) writeFileSync(join(pkgDir, 'wicked-core'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    if (withBinary) writeFileSync(join(pkgDir, WICKED_CORE_EXE_NAME), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     return { nm, pkgDir };
   }
 
   it('resolves through the package.json when the exports map allows it', () => {
     const { nm, pkgDir } = fakeInstall(true);
-    const found = bundledWickedCoreExe('wicked-core', 'wicked-core-ts-linux-x64-gnu', {
+    const found = bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', {
       resolve: (id) => join(nm, id),
       paths: () => [],
     });
-    expect(found).toBe(join(pkgDir, 'wicked-core'));
+    expect(found).toBe(join(pkgDir, WICKED_CORE_EXE_NAME));
   });
 
   it('falls back to the resolver candidate dirs when package.json is not exported', () => {
     const { nm, pkgDir } = fakeInstall(true);
-    const found = bundledWickedCoreExe('wicked-core', 'wicked-core-ts-linux-x64-gnu', {
+    const found = bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', {
       resolve: () => {
         throw new Error('ERR_PACKAGE_PATH_NOT_EXPORTED');
       },
       paths: () => ['/nowhere/node_modules', nm],
     });
-    expect(found).toBe(join(pkgDir, 'wicked-core'));
+    expect(found).toBe(join(pkgDir, WICKED_CORE_EXE_NAME));
   });
 
   it('a pre-0.7.26 platform package (no binary) and a missing package both yield undefined — the home-dir ladder takes over', () => {
     const { nm } = fakeInstall(false);
-    expect(bundledWickedCoreExe('wicked-core', 'wicked-core-ts-linux-x64-gnu', { resolve: (id) => join(nm, id), paths: () => [nm] })).toBeUndefined();
-    expect(bundledWickedCoreExe('wicked-core', 'wicked-core-ts-linux-x64-gnu', { resolve: () => { throw new Error('MODULE_NOT_FOUND'); }, paths: () => null })).toBeUndefined();
-    expect(bundledWickedCoreExe('wicked-core', undefined, { resolve: () => 'x', paths: () => [] })).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', { resolve: (id) => join(nm, id), paths: () => [nm] })).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, 'wicked-core-ts-linux-x64-gnu', { resolve: () => { throw new Error('MODULE_NOT_FOUND'); }, paths: () => null })).toBeUndefined();
+    expect(bundledWickedCoreExe(WICKED_CORE_EXE_NAME, undefined, { resolve: () => 'x', paths: () => [] })).toBeUndefined();
   });
 });

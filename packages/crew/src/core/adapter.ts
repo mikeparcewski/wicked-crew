@@ -147,6 +147,9 @@ export function readOverlayWorkflows(
   return out;
 }
 
+/** The gate-hook binary's file name on this host. */
+export const WICKED_CORE_EXE_NAME = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+
 /**
  * The `wicked-core-ts` platform package for this host — the five names `napi-release.yml` publishes
  * (`wicked-core-ts-darwin-arm64`, `-darwin-x64`, `-linux-x64-gnu`, `-linux-arm64-gnu`,
@@ -173,7 +176,7 @@ export function wickedCoreTsPlatformPackage(platform: string = process.platform,
  * `undefined` when no platform package resolves or it carries no binary (a pre-0.7.26 package).
  */
 export function bundledWickedCoreExe(
-  exeName: string = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core',
+  exeName: string = WICKED_CORE_EXE_NAME,
   pkg: string | undefined = wickedCoreTsPlatformPackage(),
   resolver: { resolve: (id: string) => string; paths: (id: string) => string[] | null } = {
     resolve: (id) => require.resolve(id),
@@ -204,7 +207,7 @@ export function bundledWickedCoreExe(
  * set by the operator still wins (the caller only fills it when unset).
  */
 function locateWickedCoreExe(): string | undefined {
-  const exeName = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+  const exeName = WICKED_CORE_EXE_NAME;
   const bundled = bundledWickedCoreExe(exeName);
   if (bundled !== undefined) return bundled;
   const candidates: string[] = [];
