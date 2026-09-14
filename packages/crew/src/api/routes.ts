@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +12,7 @@ import { codeGraphDb, codeGraphErrorStatus, requirementsGraph } from '../core/re
 import type {
   CodeGraphData,
   CoreEvent,
+  RecordedEvent,
   RepoEntry,
   RepoFinding,
   WorkflowDef,
@@ -645,11 +647,40 @@ export interface SecurityDeps {
  * fed by the daemon's single CoreEvent subscription) and the OS opener for `/open` (crew#273,
  * injectable so tests never actually open anything).
  */
+/** A remembered watchdog frame as `GET /runs/:id/events` SERVES it — with the `seq` the published
+ *  `RecordedEvent` contract requires (api-types 0.38.0). `daemon: true` rides additively until
+ *  api-types 0.39.0 declares it; every consumer today reads unknown keys through. */
+type ServedStallFrame = RecordedStallFrame & { seq: number };
+
+/**
+ * Stamp the required `seq` onto the daemon-authored frames of a ts-sorted merge. A watchdog frame
+ * has no engine `seq` — the engine's log never saw it — so each one rides the seq of the engine
+ * record it FOLLOWS (0 before the first). The served array is therefore monotonic non-decreasing in
+ * `seq`, and a consumer that re-sorts by seq (studio's narrator) keeps every frame beside the event
+ * it was captured after, instead of dropping it to the front on a missing key.
+ */
+function withServedSeq(
+  merged: Array<RecordedEvent | RecordedStallFrame>,
+): Array<RecordedEvent | ServedStallFrame> {
+  let seq = 0;
+  return merged.map((e) => {
+    if (!('daemon' in e)) {
+      if (typeof e.seq === 'number') seq = e.seq;
+      return e;
+    }
+    return { ...e, seq };
+  });
+}
+
 export interface RuntimeDeps {
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
   resolvePullRequest?: (repoRoot: string, number: number) => Promise<PullRequestResolution>;
   seatHealth?: SeatHealthTracker;
+  /** wicked-studio#284: the stall watchdog's remembered frames for a run — merged into
+   *  `GET /runs/:id/events` at serve time so a reloaded page sees the `workerStalled` /
+   *  `workerStallEscalated` facts the live socket carried. Absent ⇒ engine events only. */
+  stallFrames?: (runId: string) => readonly RecordedStallFrame[];
   /** Run→retry-lineage index (CREW-UX-3) — `createServer` hydrates one from the audit trail so
    *  a restarted daemon still echoes `retry_of`; a directly-driven route set gets a fresh one. */
   retryIndex?: RetryIndex;
@@ -2244,7 +2275,8 @@ export function registerRoutes(
         // taken out by the council-bench / dispatch-timeout path, not by admission, so admission's
         // list never named it. Every requested-or-defaulted seat that is not in `seats` is named
         // here with the most specific cause the daemon knows: its own "no credential" report
-        // (`auth`), this daemon's council bench (`bench`), else the dispatch budget (`budget`).
+        // (`auth`), else the dispatch budget (`budget`). (R5b: crew keeps no council bench of its
+        // own any more — the engine benches per run and says so in `unitDistributed.degradedReason`.)
         for (const key of clis) {
           if (seats.some((s) => s.cliKey === key) || refused.some((r) => r.cliKey === key)) continue;
           const st = standingOf(key);
@@ -2257,12 +2289,6 @@ export function registerRoutes(
                   ? `not seated — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
                   : 'not seated — signed out; sign it in from the System page',
               source: 'auth',
-            });
-          } else if (st?.council_bench !== undefined) {
-            refused.push({
-              cliKey: key,
-              reason: `not seated — ${st.council_ineligible_reason ?? 'benched by this daemon’s recent councils'}`,
-              source: 'bench',
             });
           } else {
             refused.push({
@@ -3192,14 +3218,23 @@ export function registerRoutes(
       return reply.code(404).send({ error: 'Run not found' });
     }
 
-    const events = await adapter.runEvents(id);
-    if (events === null) {
+    const engineEvents = await adapter.runEvents(id);
+    if (engineEvents === null) {
       // Same shape as the gate route's 503, and for the same reason: "no events" would report a
       // missing binding as a fact about the run. The run may well have a rich history.
       return reply.code(503).send({
         error: 'Run history is unavailable: this wicked-core build has no event-log read binding',
       });
     }
+    // wicked-studio#284: the stall watchdog's frames are daemon-authored — the engine's log never
+    // saw them — so a reloaded page used to lose the "needs you" facts the live socket carried.
+    // Merge the remembered frames in capture order beside the engine's; they carry `daemon: true`
+    // and no engine `seq`.
+    const daemonFrames = runtime.stallFrames?.(id) ?? [];
+    const events: Array<RecordedEvent | ServedStallFrame> =
+      daemonFrames.length === 0
+        ? engineEvents
+        : withServedSeq([...engineEvents, ...daemonFrames].sort((a, b) => a.ts - b.ts));
 
     // An empty array here is a real answer, not a failure: runs that predate the log have no
     // history, and saying so is the honest response.

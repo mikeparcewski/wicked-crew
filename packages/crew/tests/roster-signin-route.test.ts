@@ -145,14 +145,13 @@ describe('GET /roster with seat sign-in (seat sign-in)', () => {
     expect(by.get('agy')).toMatchObject({ signed_in: null, auth: 'unknown', council_eligible: false, council_ineligible_reason: 'not enabled for council' });
   });
 
-  it('a seat this daemon\'s recent councils BENCHED reads council_eligible:false with the last failure named — whatever its auth (#533 review, F-1)', async () => {
+  it('a seat whose ballots FAILED reads council_eligible:true with lastErrorAt stamped — crew keeps no council bench (R5b)', async () => {
     vi.spyOn(CoreAdapter, 'roster').mockReturnValue([
       { key: 'opencode', display_name: 'opencode', binary: 'opencode', enabled_for_council: true },
       { key: 'claude', display_name: 'Claude Code', binary: 'claude', enabled_for_council: true },
     ]);
     const tracker = new SeatHealthTracker();
     const now = Date.now();
-    // The phase-4 rig, as the engine reported it: opencode past the 40 s dispatch budget on two ballots.
     for (const [ord, ts] of [[1, now - 60_000], [2, now - 30_000]] as const) {
       tracker.ingest({
         type: 'councilSeatFailed', session: 'bb28ad5a-febb-411f-b8db-aed1dee8e515', ord, round: 2,
@@ -168,12 +167,10 @@ describe('GET /roster with seat sign-in (seat sign-in)', () => {
     try {
       const { roster } = (await local.inject({ method: 'GET', url: '/api/v1/roster' })).json() as { roster: RosterSeat[] };
       const opencode = roster.find((s) => s.key === 'opencode');
-      // Free tier still answers a chat — but a council benched it, and the roster says so.
-      expect(opencode).toMatchObject({ auth: 'not_required', council_eligible: false, health: { status: 'active' } });
-      expect(opencode?.council_ineligible_reason).toMatch(/^benched by this daemon's recent councils: 2 ballot failures/);
-      expect(opencode?.council_ineligible_reason).toMatch(/last timed_out on run bb28ad5a \(exceeded 40s dispatch budget\)/);
-      expect(opencode?.council_bench).toMatchObject({ failures: 2, last_kind: 'timed_out', last_run: 'bb28ad5a-febb-411f-b8db-aed1dee8e515' });
-      // The other seat is untouched.
+      // The engine benched it for THAT run and said so on the run; the roster does not predict.
+      expect(opencode).toMatchObject({ auth: 'not_required', council_eligible: true, health: { status: 'active' } });
+      expect(opencode?.health?.lastErrorAt).toBeDefined();
+      expect(opencode?.council_bench).toBeUndefined();
       expect(roster.find((s) => s.key === 'claude')).toMatchObject({ council_eligible: true });
     } finally {
       await local.close();

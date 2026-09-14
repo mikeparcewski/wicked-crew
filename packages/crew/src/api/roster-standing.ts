@@ -1,8 +1,8 @@
 /**
  * The ONE roster accessor every launch path shares: the registry roster decorated with crew's
- * STANDING (F-2R2-009) — runtime `health`, `signed_in`, `auth`, `council_eligible` + its reason,
- * the council bench — so `engineRosterJson` (core/engine-roster.ts) can bench a seat the daemon
- * already knows is unusable before the engine convenes it.
+ * STANDING (F-2R2-009) — runtime `health`, `signed_in`, `auth`, `council_eligible` + its reason —
+ * so `engineRosterJson` (core/engine-roster.ts) can bench a seat the daemon already knows is
+ * unusable before the engine convenes it. (R5b: crew keeps no council bench of its own.)
  *
  * F-RECON-002 / F-RECON-003: this used to be a closure inside `registerRoutes`, so ONLY the routes
  * (`POST /runs`, `/testing/*`, campaigns, steering) launched with standing. The interactive seams
@@ -43,7 +43,7 @@ export interface RosterStandingDeps {
  * Build the accessor. Each seat's registry fields ride through verbatim — the spread is
  * deliberately NOT a field whitelist, which is what lets the engine's `login_invocation` pass
  * untouched — and gains `health`, `signed_in`, and the standing readings (`auth`, `free_tier*`,
- * `council_eligible`, `council_ineligible_reason`, `council_bench`, `auth_source/evidence`).
+ * `council_eligible`, `council_ineligible_reason`, `auth_source/evidence`).
  */
 export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithStanding {
   const { seatHealth } = deps;
@@ -56,13 +56,12 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const key = String(seat.key);
       const health = seatHealth.healthFor(key);
       const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
-      // The bench is THIS daemon's council evidence (councilSeatFailed, bounded window) — the
-      // prediction learns from what the engine actually did with the seat (#533 review, F-1).
+      // (R5b, DES-L3 PR-3D) No crew-side council bench any more: the engine's per-run ballot ledger
+      // (`session.benched_seats`) is the one bench, so there is no bench reading to pass and no
+      // health reading to weigh — the roster's standing is the auth picture alone.
       const standing = seatStanding(
         seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
         signed,
-        health,
-        seatHealth.councilBenchFor(key),
         // F-A45-006: the seat's OWN "no credential" report (a ballot's "No API key found", a
         // worker's 401, an auth ACP fallback) overrides the file probe — `auth` flips, not only
         // `council_eligible`, and the evidence rides on the wire.

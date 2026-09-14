@@ -26,7 +26,6 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 
 const ev = (frame: Record<string, unknown>): CoreEvent => frame as unknown as CoreEvent;
-const ACTIVE = { status: 'active' as const, since: '2026-09-11T00:00:00.000Z' };
 
 describe('the seat-health fold records the seat’s OWN "no credential" report (F-A45-006)', () => {
   it('a council ballot lost to not_logged_in / "No API key found" sets the auth failure, with the seat’s words', () => {
@@ -97,7 +96,7 @@ describe('seatStanding — the seat’s own report overrides the probe (F-A45-00
   const failure = { at: '2026-09-11T00:00:00.000Z', detail: 'No API key found for anthropic', source: 'ballot' as const, run: 'r-1' };
 
   it('signed_in by the file probe, but the seat said it has no credential → signed_out, sourced, evidenced, council-ineligible', () => {
-    const s = seatStanding({ key: 'pi' }, true, ACTIVE, null, failure);
+    const s = seatStanding({ key: 'pi' }, true, failure);
     expect(s).toMatchObject({
       auth: 'signed_out',
       auth_source: 'seat-stderr',
@@ -106,15 +105,15 @@ describe('seatStanding — the seat’s own report overrides the probe (F-A45-00
     });
     expect(s.council_ineligible_reason).toMatch(/the seat itself reported no credential \(ballot: No API key found/);
     // Without the report the probe decides exactly as before.
-    expect(seatStanding({ key: 'pi' }, true, ACTIVE)).toMatchObject({ auth: 'signed_in', council_eligible: true });
-    expect(seatStanding({ key: 'pi' }, true, ACTIVE).auth_source).toBeUndefined();
+    expect(seatStanding({ key: 'pi' }, true)).toMatchObject({ auth: 'signed_in', council_eligible: true });
+    expect(seatStanding({ key: 'pi' }, true).auth_source).toBeUndefined();
   });
 
   it('a free-tier seat that itself says "No API key" is NOT on its free tier', () => {
-    const s = seatStanding({ key: 'opencode' }, false, ACTIVE, null, failure);
+    const s = seatStanding({ key: 'opencode' }, false, failure);
     expect(s.auth).toBe('signed_out');
     expect(s.free_tier).toBeUndefined();
-    expect(seatStanding({ key: 'opencode' }, false, ACTIVE).auth).toBe('not_required');
+    expect(seatStanding({ key: 'opencode' }, false).auth).toBe('not_required');
   });
 
   it('chatSeatAdmission names the cause class: auth before scope', () => {
@@ -212,15 +211,18 @@ describe('GET /roster + POST /chats with the seat’s own evidence (F-A45-006 / 
     expect(broadcast).toEqual([{ type: 'chatSeatRefused', chat: 'proj-chat', cliKey: 'pi', reason: body.refused[0]!.reason, source: 'budget' }]);
   });
 
-  it('the dropped seat’s cause is the most specific the daemon knows: its own "no credential" report (auth) beats the bench, the bench beats the budget', async () => {
+  it('the dropped seat’s cause is the most specific the daemon knows: its own "no credential" report (auth) beats the engine’s drop (budget); repeated ballot timeouts no longer bench a seat daemon-wide (PR-3D)', async () => {
     seatsOf = (clis) => clis.filter((c) => c !== 'pi').map((c) => ({ cliKey: c, ok: true }));
     // An EXPLICIT clis list (the studio's default chips are sent explicitly) bypasses admission —
     // the drop is only visible after the engine answered.
     seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-2', cli: 'pi', kind: 'timed_out', detail: 'ballot timed out' }));
     seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-3', cli: 'pi', kind: 'timed_out', detail: 'ballot timed out' }));
-    const benched = (await open({ chatId: 'bench-chat', clis: ['claude', 'pi', 'opencode'] })).json() as { refused: Refusal[] };
-    expect(benched.refused[0]).toMatchObject({ cliKey: 'pi', source: 'bench' });
-    expect(benched.refused[0]!.reason).toMatch(/benched by this daemon/);
+    // Two timeouts used to bench pi for 30 min daemon-wide (`source: 'bench'`, "benched by this
+    // daemon"). The bench is the ENGINE's per-run business now (R5b / BC-15): crew records the
+    // failures but names no cause of its own, so the drop keeps the engine's — `budget`.
+    const dropped = (await open({ chatId: 'bench-chat', clis: ['claude', 'pi', 'opencode'] })).json() as { refused: Refusal[] };
+    expect(dropped.refused[0]).toMatchObject({ cliKey: 'pi', source: 'budget' });
+    expect(dropped.refused[0]!.reason).not.toMatch(/benched by this daemon/);
     seatHealth.ingest(ev({ type: 'councilSeatFailed', session: 'run-4', cli: 'pi', kind: 'not_logged_in', detail: 'No API key found for anthropic' }));
     const auth = (await open({ chatId: 'auth-chat', clis: ['claude', 'pi', 'opencode'] })).json() as { refused: Refusal[] };
     expect(auth.refused[0]).toMatchObject({ cliKey: 'pi', source: 'auth' });

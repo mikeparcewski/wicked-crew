@@ -29,10 +29,12 @@
  *    ACP adapter asks permissions or whose record arms the kernel write floor). Every refusal
  *    carries every reason that applies, so the thread can say WHY a seat is missing.
  *
- * Pure, synchronous, no IO: the probe result and the health record are inputs.
+ * Pure, synchronous, no IO: the probe result and the seat's own auth refusal are the inputs. The
+ * runtime HEALTH record is not one any more (R5 / R5b, DES-L3 PR-3D) — `inactive` is never produced
+ * and the one bench is the engine's per-run ballot ledger.
  */
 
-import type { CouncilBench, SeatAuthFailure, SeatHealth } from './seat-health.js';
+import type {SeatAuthFailure} from './seat-health.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
@@ -100,8 +102,6 @@ export interface SeatStanding {
   council_eligible: boolean;
   /** Present when `council_eligible` is false: the one reason, in the operator's words. */
   council_ineligible_reason?: string;
-  /** Present when THIS daemon's recent councils benched the seat (`SeatHealthTracker.councilBenchFor`). */
-  council_bench?: CouncilBench;
 }
 
 /** A seat whose `auth` lets it take a turn — the ONE predicate the roster and the chat share. */
@@ -112,8 +112,6 @@ export function authUsable(auth: SeatAuth): boolean {
 export function seatStanding(
   seat: StandingSeat,
   signedIn: boolean | null,
-  health: SeatHealth,
-  bench: CouncilBench | null = null,
   authFailure: SeatAuthFailure | null = null,
 ): SeatStanding {
   // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
@@ -142,36 +140,21 @@ export function seatStanding(
           : 'signed out — a council would bench this seat on its first ballot; sign it in from the System page',
     };
   }
-  if (health.status === 'inactive') {
-    return {
-      ...base,
-      council_eligible: false,
-      council_ineligible_reason: `inactive after a seat-level error${health.message !== undefined ? `: ${health.message}` : ''}`,
-    };
-  }
-  if (bench !== null) {
-    // The engine's own evidence, from THIS daemon's recent runs (independent review of #533, F-1):
-    // a seat that failed its ballots is benched whatever its auth reading says — the free tier
-    // that answers a chat can still time out a 40 s dispatch budget.
-    const minutes = Math.max(1, Math.round(bench.window_ms / 60_000));
-    return {
-      ...base,
-      council_eligible: false,
-      council_ineligible_reason:
-        `benched by this daemon's recent councils: ${bench.failures} ballot failures in the last ${minutes} min — ` +
-        `last ${bench.last_kind}${bench.last_run !== undefined ? ` on run ${bench.last_run.slice(0, 8)}` : ''}` +
-        `${bench.last_detail !== undefined ? ` (${bench.last_detail})` : ''}; an ok unit output clears it`,
-      council_bench: bench,
-    };
-  }
+  // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew council bench any more: `health.status`
+  // is always `active` (observed errors stamp `lastErrorAt` only), and the one bench is the
+  // engine's per-run ballot ledger, read from the run (`session.benched_seats`,
+  // `unitDistributed.degradedReason`) — never predicted here from a cross-run count. The runtime
+  // health reading is therefore no longer an INPUT to standing: the parameter is gone rather than
+  // silenced, so a caller cannot think it still decides something.
   return base;
 }
 
 /** Why a seat was not seated (F-A45-011; `ChatSeatRefusal.source` on the wire): `auth` — signed
- *  out; `scope` — the scoped-chat admission rule; `bench` — benched by this daemon's recent councils;
- *  `budget` — the engine did not seat it (its warm-up timed out or it was dropped at dispatch);
+ *  out; `scope` — the scoped-chat admission rule;
+ *  `budget` — the engine did not seat it (its warm-up timed out or it was dropped at dispatch; R5b —
+ *  crew keeps no council bench of its own, so the engine's per-run bench surfaces here);
  *  `engine` — the engine refused it with its own reason. */
-export type ChatRefusalSource = 'auth' | 'scope' | 'bench' | 'budget' | 'engine';
+export type ChatRefusalSource = 'auth' | 'scope' | 'budget' | 'engine';
 
 export type ChatAdmission = { ok: true } | { ok: false; reason: string; source: ChatRefusalSource };
 

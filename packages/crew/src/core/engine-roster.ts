@@ -4,9 +4,10 @@
  * half of F-7R2-006).
  *
  * `GET /roster` decorates every registry seat with crew's own readings: runtime `health`
- * (`{status: 'active'|'inactive', since, …}` — seat-health.ts), `signed_in`, `auth`,
- * `free_tier(_source)`, `council_eligible` + `council_ineligible_reason` + `council_bench`
- * (seat-standing.ts). The studio's launch form round-trips those seats into `clisJson` verbatim,
+ * (`{status: 'active', since, lastErrorAt?}` — seat-health.ts; `inactive` is no longer produced), `signed_in`, `auth`,
+ * `free_tier(_source)`, `council_eligible` + `council_ineligible_reason` (seat-standing.ts;
+ * `council_bench` is gone — R5b — though the stripper below still names it, so a seat from an older
+ * daemon's roster cannot round-trip it into the engine). The studio's launch form round-trips those seats into `clisJson` verbatim,
  * which was fine while the engine ignored every unknown field — but the wave-6 engine grew its own
  * `AgenticCli.health: Option<SeatHealth {usable: bool, reason?}>` (the launcher's usability verdict
  * that benches a seat for the run). Same key, different shape: a round-tripped crew `health`
@@ -60,17 +61,9 @@ function isEngineHealth(v: unknown): v is EngineSeatHealth {
 export function shortBenchReason(seat: Record<string, unknown>): string | undefined {
   if (seat['enabled_for_council'] === false) return 'not enabled for council';
   if (seat['auth'] === 'signed_out') return 'signed out';
-  const health = seat['health'];
-  if (typeof health === 'object' && health !== null && (health as { status?: unknown }).status === 'inactive') {
-    return 'inactive after a seat-level error';
-  }
-  const bench = seat['council_bench'];
-  if (typeof bench === 'object' && bench !== null) {
-    const b = bench as { failures?: unknown; last_kind?: unknown };
-    const kind = typeof b.last_kind === 'string' ? b.last_kind.replace(/_/g, ' ') : 'ballot failures';
-    const n = typeof b.failures === 'number' ? `${b.failures} ` : '';
-    return `benched by recent councils (${n}${kind})`;
-  }
+  // (R5 / R5b, DES-L3 PR-3D) The `inactive` health flip and the crew council-count bench are
+  // gone — the engine's per-run ballot ledger is the one bench; a stale client's `council_bench`
+  // is still stripped by CREW_ONLY_SEAT_FIELDS, never read.
   const verbose = seat['council_ineligible_reason'];
   if (typeof verbose === 'string' && verbose.trim() !== '') {
     return verbose.split(/\s+—\s+|;\s+/, 1)[0]!.trim().slice(0, 80);

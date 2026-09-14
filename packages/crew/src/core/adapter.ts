@@ -485,6 +485,17 @@ export function armsUnsupportedReason(
 /** The recogniser the routes map to 409: the engine-too-old refusal above, by its fixed phrase. */
 export const ENGINE_TOO_OLD_RE = /needs wicked-core-ts >= /;
 
+/**
+ * Does the installed engine bench a seat whose ballots fail PERSISTENTLY without a recognised
+ * reason (wicked-core #523's unclassified arm, 3D')? From 0.7.27 only. crew deleted its own
+ * cross-run bench in the same release (BC-15) on the strength of that arm, and the runtime pin
+ * still allows 0.7.26 — so the one place that matters (the daemon's boot log) says which engine it
+ * has. `supported` is injectable so the old-engine path is unit-testable without an addon.
+ */
+export function engineBenchesUnclassifiedSeats(supported: boolean = addonAtLeast(0, 7, 27)): boolean {
+  return supported;
+}
+
 function addonAtLeast(maj: number, min: number, pat: number): boolean {
   try {
     const pkg = require('wicked-core-ts/package.json') as { version?: string };

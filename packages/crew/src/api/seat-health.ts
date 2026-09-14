@@ -44,50 +44,17 @@ import { triageDeliverFailure } from '../core/deliver-triage.js';
 
 export type { SeatHealth };
 
-/** Rolling window for the repeated-acpFallback rule. */
-export const FALLBACK_WINDOW_MS = 10 * 60 * 1000;
-/** Fallbacks within the window that flip a seat inactive. */
-export const FALLBACK_THRESHOLD = 3;
-
 /**
- * The council BENCH fold (independent review of #533, F-1): `councilSeatFailed { cli, kind }` is the
- * engine's own evidence that a seat cannot hold a ballot — `non_zero_exit` ("Not logged in", "No
- * API key found", "exceeded your monthly quota") or `timed_out` (opencode past the 40 s dispatch
- * budget on the phase-4 rig). Until this fold existed the tracker never read it, so a seat benched
- * in every council kept `health: active` and the roster's `council_eligible` prediction could not
- * learn. The fold is bounded on purpose: only PRIMARY failures count (`benched` is the engine's
- * derivative of an earlier failure, not a new observation), only within {@link COUNCIL_BENCH_WINDOW_MS},
- * and only from {@link COUNCIL_BENCH_THRESHOLD} failures up (one timed-out ballot is weather). It
- * does NOT flip `health` — a chat is not a council and the free tier may still answer — it feeds
- * `council_eligible` through {@link SeatHealthTracker.councilBenchFor}, and an ok unit output clears
- * it like every other recovery.
+ * (R5 / R5b — DES-L3 PR-3D, F-RC2-006 / F-RC2-021 / F-RC2-041 / F-RC2-004) What this tracker NO
+ * LONGER does: flip a seat `inactive` on a `stepFailed{workerError}`, on quota / 401 / timeout
+ * phrases, or on repeated ACP fallbacks; and keep a daemon-wide council-count bench
+ * (`council_bench`, 30-min window). Both were second classifiers beside the engine's own per-run
+ * ballot ledger (`session.benched_seats`, `unitDistributed.degradedReason`) and they blamed the
+ * seat for launch refusals and load timeouts — a roster at 0 eligible seats that only a restart
+ * cleared. Seat health is now: the engine's bench (per run) + the seat's OWN auth refusal
+ * (`auth: signed_out`, cleared by an ok output). `health.status` is always `active`; observed
+ * errors stamp `lastErrorAt` and nothing else.
  */
-export const COUNCIL_BENCH_WINDOW_MS = 30 * 60 * 1000;
-export const COUNCIL_BENCH_THRESHOLD = 2;
-/** The `councilSeatFailed.kind` values that are the seat's OWN failure (the engine's `benched` is derivative). */
-export const COUNCIL_PRIMARY_FAILURE_KINDS: ReadonlySet<string> = new Set(['non_zero_exit', 'timed_out']);
-
-/** One primary council failure the tracker holds for a seat, inside the window. */
-interface CouncilFailure {
-  at: number;
-  kind: string;
-  detail: string;
-  session: string | undefined;
-}
-
-/** What the roster carries as `council_bench` when a seat is benched by this daemon's recent evidence. */
-export interface CouncilBench {
-  /** Primary ballot failures inside the window. */
-  failures: number;
-  last_kind: string;
-  /** ISO-8601 of the last failure. */
-  last_at: string;
-  /** The run the last failure happened in, when the frame named one. */
-  last_run?: string;
-  /** A bounded excerpt of the last failure's detail / stderr, when there was one. */
-  last_detail?: string;
-  window_ms: number;
-}
 
 /** Health messages are operator-facing chips, not transcripts — bound them hard. */
 const EXCERPT_MAX = 240;
@@ -99,19 +66,6 @@ function excerpt(s: string): string {
 
 /** The wrapped runner's seat-naming failure message: "(cli `x` exited N) …" (execute_wrapped.rs). */
 const CLI_IN_DETAIL = /\(cli `([^`]+)` exited /;
-
-/**
- * Seat-level failure signatures in a `stepFailed` detail. Deliberately narrow: a unit that failed
- * its WORK (missing deliverable, gate veto) says nothing about the seat's health, so only strings
- * that name the CLI process, its transport, or its account state qualify.
- */
-const SEAT_FAILURE_PATTERNS: RegExp[] = [
-  CLI_IN_DETAIL, // non-zero exit, seat named by the runner itself
-  /timeout waiting/i, // ACP "timeout waiting for response id=…" (acp_runner.rs)
-  /\bHTTP\/?[0-9.]*\s+401\b|\b401\s+unauthori[sz]ed\b|\bunauthori[sz]ed\b/i, // auth: needs a re-login (a 401 only as an HTTP status — never a bare number, review M-3 of #536)
-  /\bquota\b|rate.?limit|too many requests|\b429\b/i, // quota/rate ceiling
-  /\bout of credits\b|\binsufficient credits\b/i, // account balance
-];
 
 /** `acpFallback` kinds that are deliberate routing rather than a failure — never counted:
  *  `governance_requires_wrapped` (crew#276) and `read_only_requires_wrapped` (wicked-core#431 —
@@ -156,7 +110,7 @@ const AUTH_FALLBACK_KINDS = new Set(['auth_required', 'auth_failed', 'unauthenti
 
 /** How long a seat's own "no credential" report keeps its `auth` at `signed_out` with no ok output
  *  since — the same window as the council bench; an ok unit output clears it at once. */
-export const AUTH_FAILURE_WINDOW_MS = COUNCIL_BENCH_WINDOW_MS;
+export const AUTH_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 
 /** A seat's own report that it has no credential (`RosterSeat.auth_evidence`). */
 export interface SeatAuthFailure {
@@ -180,10 +134,6 @@ export class SeatHealthTracker {
   private readonly entries = new Map<string, SeatHealth>();
   /** `${session}:${ord}` → cli key. `unitOutputCaptured` carries no seat; this is the correlation. */
   private readonly assignments = new Map<string, string>();
-  /** cli key → recent failure-fallback timestamps (epoch ms), pruned to the rolling window. */
-  private readonly fallbacks = new Map<string, number[]>();
-  /** cli key → primary council ballot failures inside {@link COUNCIL_BENCH_WINDOW_MS}. */
-  private readonly councilFailures = new Map<string, CouncilFailure[]>();
   /** cli key → the seat's latest own "no credential" report (F-A45-006), cleared by an ok output. */
   private readonly authFailures = new Map<string, { at: number; detail: string; source: SeatAuthFailure['source']; session?: string }>();
   /** Default `since` for seats that have never changed state. */
@@ -244,7 +194,6 @@ export class SeatHealthTracker {
         // that literally blamed the unit's assigned seat for a git state. Recognised by phrase
         // (`core/deliver-triage.ts`), it flips nobody.
         if (triageDeliverFailure(detail) !== null) return;
-        const failureKind = str((event as { failureKind?: unknown }).failureKind);
         // The detail names the seat when the wrapped runner produced it; otherwise fall back to
         // the unit's assignment (a workerError detail is the CLI's own output and rarely does).
         const named = CLI_IN_DETAIL.exec(detail)?.[1];
@@ -256,12 +205,10 @@ export class SeatHealthTracker {
         if (seat === undefined) return;
         // F-A45-006: the seat's own words beat the file probe — "No API key found" flips `auth`.
         if (isAuthRefusal(detail)) this.recordAuthFailure(seat, detail, 'worker', at, session);
-        const seatLevel =
-          failureKind === 'workerError' || SEAT_FAILURE_PATTERNS.some((re) => re.test(detail));
-        if (seatLevel) {
-          const msg = excerpt(detail) || `seat failure (${failureKind ?? 'unreported'})`;
-          this.markInactive(seat, msg, at);
-        }
+        // (R5) Every other worker failure is an OBSERVED error, never a status flip: a launch
+        // refusal, a load timeout or a worker crash says nothing about whether the seat can take
+        // the next turn — the engine's per-run ballot ledger judges that (F-RC2-006).
+        else this.stampError(seat, at);
         return;
       }
       case 'councilSeatFailed': {
@@ -273,18 +220,10 @@ export class SeatHealthTracker {
         if (cli !== undefined && (kind === 'not_logged_in' || isAuthRefusal(detail))) {
           this.recordAuthFailure(cli, detail !== '' ? detail : (kind ?? 'not logged in'), 'ballot', at, session);
         }
-        if (cli === undefined || kind === undefined || !COUNCIL_PRIMARY_FAILURE_KINDS.has(kind)) return;
-        const fresh = (this.councilFailures.get(cli) ?? []).filter((f) => at - f.at < COUNCIL_BENCH_WINDOW_MS);
-        fresh.push({ at, kind, detail: excerpt(detail), session });
-        this.councilFailures.set(cli, fresh);
-        // An observed error — stamped, never a status flip (see COUNCIL_BENCH_WINDOW_MS).
-        const prev = this.entries.get(cli);
-        this.entries.set(cli, {
-          status: prev?.status ?? 'active',
-          ...(prev?.message !== undefined ? { message: prev.message } : {}),
-          since: prev?.since ?? this.startedAt,
-          lastErrorAt: new Date(at).toISOString(),
-        });
+        // (R5b) An observed error — stamped, never counted: the engine benches the seat for the
+        // run at its own ballot threshold and says so in `unitDistributed.degradedReason`; crew
+        // keeps no cross-run council ledger any more (one bench ledger, DES-L3 PR-3D).
+        if (cli !== undefined && kind !== undefined && kind !== 'benched') this.stampError(cli, at);
         return;
       }
       case 'acpFallback': {
@@ -298,29 +237,9 @@ export class SeatHealthTracker {
           const why = str((event as { reason?: unknown }).reason) ?? fallbackKind;
           this.recordAuthFailure(cliKey, why, 'acp', at, session);
         }
-        const fresh = (this.fallbacks.get(cliKey) ?? []).filter(
-          (t) => at - t < FALLBACK_WINDOW_MS,
-        );
-        fresh.push(at);
-        this.fallbacks.set(cliKey, fresh);
-        if (fresh.length >= FALLBACK_THRESHOLD) {
-          const reason = str((event as { reason?: unknown }).reason) ?? fallbackKind ?? 'unknown';
-          this.markInactive(
-            cliKey,
-            `repeated ACP fallback (${fresh.length} in 10 min): ${reason}`,
-            at,
-          );
-        } else {
-          // One fallback is not inactive (session death falls back and the unit can still work),
-          // but it IS an observed error — stamp lastErrorAt without flipping the status.
-          const prev = this.entries.get(cliKey);
-          this.entries.set(cliKey, {
-            status: prev?.status ?? 'active',
-            ...(prev?.message !== undefined ? { message: prev.message } : {}),
-            since: prev?.since ?? this.startedAt,
-            lastErrorAt: new Date(at).toISOString(),
-          });
-        }
+        // (R5) A fallback — one or many — is an observed error, never a status flip: the unit
+        // still runs on the wrapped carrier, and the seat's next turn is the engine's call.
+        this.stampError(cliKey, at);
         // ── crew#411: signal correlation ───────────────────────────────────────
         // A session_died fallback is a silent bridge exit-0; whether the daemon was
         // also signalled at the same time determines the likely cause. Both branches
@@ -367,8 +286,6 @@ export class SeatHealthTracker {
       since: prev?.status === 'active' ? prev.since : new Date(atMs).toISOString(),
       ...(prev?.lastErrorAt !== undefined ? { lastErrorAt: prev.lastErrorAt } : {}),
     });
-    this.fallbacks.delete(key); // an ok output resets the repeated-fallback window too
-    this.councilFailures.delete(key); // …and the council bench: real work is the recovery
     this.authFailures.delete(key); // …and the seat's own "no credential" report (F-A45-006)
   }
 
@@ -386,9 +303,14 @@ export class SeatHealthTracker {
       source,
       ...(session !== undefined ? { session } : {}),
     });
+    this.stampError(key, atMs);
+  }
+
+  /** Stamp an OBSERVED error on the seat — `lastErrorAt` only; the status stays `active` (R5). */
+  private stampError(key: string, atMs: number): void {
     const prev = this.entries.get(key);
     this.entries.set(key, {
-      status: prev?.status ?? 'active',
+      status: 'active',
       ...(prev?.message !== undefined ? { message: prev.message } : {}),
       since: prev?.since ?? this.startedAt,
       lastErrorAt: new Date(atMs).toISOString(),
@@ -413,42 +335,6 @@ export class SeatHealthTracker {
       source: rec.source,
       ...(rec.session !== undefined ? { run: rec.session } : {}),
     };
-  }
-
-  /**
-   * The seat's council bench from THIS daemon's recent evidence, or `null`: fewer than
-   * {@link COUNCIL_BENCH_THRESHOLD} primary ballot failures inside {@link COUNCIL_BENCH_WINDOW_MS}
-   * (older ones have aged out), or an ok output since.
-   */
-  councilBenchFor(key: string, nowMs = Date.now()): CouncilBench | null {
-    const fresh = (this.councilFailures.get(key) ?? []).filter((f) => nowMs - f.at < COUNCIL_BENCH_WINDOW_MS);
-    if (fresh.length === 0) {
-      this.councilFailures.delete(key);
-      return null;
-    }
-    this.councilFailures.set(key, fresh);
-    if (fresh.length < COUNCIL_BENCH_THRESHOLD) return null;
-    const last = fresh[fresh.length - 1]!;
-    return {
-      failures: fresh.length,
-      last_kind: last.kind,
-      last_at: new Date(last.at).toISOString(),
-      ...(last.session !== undefined ? { last_run: last.session } : {}),
-      ...(last.detail !== '' ? { last_detail: last.detail } : {}),
-      window_ms: COUNCIL_BENCH_WINDOW_MS,
-    };
-  }
-
-  /** Flip a seat INACTIVE with the error excerpt; `since` survives while already inactive. */
-  markInactive(key: string, message: string, atMs = Date.now()): void {
-    const prev = this.entries.get(key);
-    const iso = new Date(atMs).toISOString();
-    this.entries.set(key, {
-      status: 'inactive',
-      message: excerpt(message),
-      since: prev?.status === 'inactive' ? prev.since : iso,
-      lastErrorAt: iso,
-    });
   }
 
   /** The seat's health — a seat never seen in an event is ACTIVE with no message (the default). */
