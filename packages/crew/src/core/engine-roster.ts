@@ -5,8 +5,9 @@
  *
  * `GET /roster` decorates every registry seat with crew's own readings: runtime `health`
  * (`{status: 'active', since, lastErrorAt?}` — seat-health.ts; `inactive` is no longer produced), `signed_in`, `auth`,
- * `free_tier(_source)`, `council_eligible` + `council_ineligible_reason` + `council_bench`
- * (seat-standing.ts). The studio's launch form round-trips those seats into `clisJson` verbatim,
+ * `free_tier(_source)`, `council_eligible` + `council_ineligible_reason` (seat-standing.ts;
+ * `council_bench` is gone — R5b — though the stripper below still names it, so a seat from an older
+ * daemon's roster cannot round-trip it into the engine). The studio's launch form round-trips those seats into `clisJson` verbatim,
  * which was fine while the engine ignored every unknown field — but the wave-6 engine grew its own
  * `AgenticCli.health: Option<SeatHealth {usable: bool, reason?}>` (the launcher's usability verdict
  * that benches a seat for the run). Same key, different shape: a round-tripped crew `health`

@@ -29,10 +29,12 @@
  *    ACP adapter asks permissions or whose record arms the kernel write floor). Every refusal
  *    carries every reason that applies, so the thread can say WHY a seat is missing.
  *
- * Pure, synchronous, no IO: the probe result and the health record are inputs.
+ * Pure, synchronous, no IO: the probe result and the seat's own auth refusal are the inputs. The
+ * runtime HEALTH record is not one any more (R5 / R5b, DES-L3 PR-3D) — `inactive` is never produced
+ * and the one bench is the engine's per-run ballot ledger.
  */
 
-import type {SeatAuthFailure, SeatHealth} from './seat-health.js';
+import type {SeatAuthFailure} from './seat-health.js';
 
 /** The seat's auth state, read for what it MEANS for the seat's usability. */
 export type SeatAuth = 'signed_in' | 'signed_out' | 'not_required' | 'unknown';
@@ -110,7 +112,6 @@ export function authUsable(auth: SeatAuth): boolean {
 export function seatStanding(
   seat: StandingSeat,
   signedIn: boolean | null,
-  health: SeatHealth,
   authFailure: SeatAuthFailure | null = null,
 ): SeatStanding {
   // F-A45-006: the seat's OWN report beats the file probe. The fresh rig's pi read `signed_in`
@@ -142,8 +143,9 @@ export function seatStanding(
   // (R5 / R5b, DES-L3 PR-3D) No `inactive` arm and no crew council bench any more: `health.status`
   // is always `active` (observed errors stamp `lastErrorAt` only), and the one bench is the
   // engine's per-run ballot ledger, read from the run (`session.benched_seats`,
-  // `unitDistributed.degradedReason`) — never predicted here from a cross-run count.
-  void health;
+  // `unitDistributed.degradedReason`) — never predicted here from a cross-run count. The runtime
+  // health reading is therefore no longer an INPUT to standing: the parameter is gone rather than
+  // silenced, so a caller cannot think it still decides something.
   return base;
 }
 

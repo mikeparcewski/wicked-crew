@@ -194,7 +194,6 @@ export class SeatHealthTracker {
         // that literally blamed the unit's assigned seat for a git state. Recognised by phrase
         // (`core/deliver-triage.ts`), it flips nobody.
         if (triageDeliverFailure(detail) !== null) return;
-        const failureKind = str((event as { failureKind?: unknown }).failureKind);
         // The detail names the seat when the wrapped runner produced it; otherwise fall back to
         // the unit's assignment (a workerError detail is the CLI's own output and rarely does).
         const named = CLI_IN_DETAIL.exec(detail)?.[1];
@@ -210,7 +209,6 @@ export class SeatHealthTracker {
         // refusal, a load timeout or a worker crash says nothing about whether the seat can take
         // the next turn — the engine's per-run ballot ledger judges that (F-RC2-006).
         else this.stampError(seat, at);
-        void failureKind;
         return;
       }
       case 'councilSeatFailed': {

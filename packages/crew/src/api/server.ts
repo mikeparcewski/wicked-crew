@@ -46,9 +46,16 @@ import { startProjectBus, MEMBERSHIP_ATTACHED, membershipAttachedKey } from '../
 import { startInteractiveWsRelay, registerInteractiveEventRoutes } from '../interactive/ws-relay.js';
 import { MembershipIndex } from '../projects/membership-index.js';
 import { writeRunEvidencePointer } from '../projects/charter.js';
-import { CoreAdapter } from '../core/adapter.js';
+import {
+  engineBenchesUnclassifiedSeats, CoreAdapter } from '../core/adapter.js';
 import type { Actor, CoreEvent } from '../core/types.js';
 import { resolveCursorUnit } from '../core/cursor.js';
+import {
+  STALL_DETECTED_ACTION,
+  STALL_ESCALATED_ACTION,
+  StallFrameIndex,
+  stallFrameAction,
+} from './stall-frame-index.js';
 import { SeatHealthTracker } from './seat-health.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
@@ -73,6 +80,8 @@ import { refreshProjectGraphsAfterOnboarding } from '../projects/auto-refresh.js
 
 /** The daemon's own actor on the audit trail (`run.delivered`, `run.ended`, the onboarding `run.launched`). */
 const DAEMON_ACTOR: Actor = { id: 'daemon', kind: 'system', trust: 'admin' };
+/** The stall watchdog acts on runs by itself, so its audit lines name IT, not the daemon. */
+const STALL_WATCHDOG_ACTOR: Actor = { id: 'stall-watchdog', kind: 'system', trust: 'admin' };
 
 // Allow the studio (a separate localhost origin, e.g. :4200) to call the
 // daemon's REST API. Restricted to loopback origins — the daemon only binds
@@ -516,6 +525,36 @@ export async function createServer(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
         err instanceof Error ? err.message : String(err)
       }`,
+    );
+  }
+  // wicked-studio#284: the watchdog's own frames, rebuilt from the trail this daemon (or a previous
+  // one) wrote — so a run page reloaded after the run ended, or after a restart, still shows the
+  // stall/escalation facts the live socket carried. Same posture as the indexes above: two more
+  // filtered scans, best-effort, and NOTHING is re-emitted — hydrating fills a map, it never
+  // broadcasts or re-arms a clock.
+  const stallFrameIndex = new StallFrameIndex();
+  try {
+    stallFrameIndex.hydrateFromEntries([
+      ...(await audit.readAll({ action: STALL_DETECTED_ACTION })),
+      ...(await audit.readAll({ action: STALL_ESCALATED_ACTION })),
+    ]);
+  } catch (err) {
+    app.log.warn(
+      `[runs] stall-frame hydrate failed (stalls recorded before this boot stay off GET /runs/:id/events): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  // BC-15's compensating clause — "the engine benches it per run at the ballot threshold" — covers
+  // an UNCLASSIFIED persistently-failing seat only from wicked-core-ts 0.7.27 (the 3D' arm, core
+  // #523). The runtime pin still allows 0.7.26, where crew's deleted ledger has no engine
+  // counterpart, so say it once at boot instead of letting such a seat look healthy forever.
+  if (!engineBenchesUnclassifiedSeats()) {
+    app.log.warn(
+      '[roster] this engine (wicked-core-ts < 0.7.27) does not bench a seat whose ballots fail ' +
+        'persistently WITHOUT a recognised reason, and crew keeps no bench of its own (BC-15): such ' +
+        'a seat stays council-eligible until it authenticates or an operator disables it. ' +
+        'Upgrade the engine to 0.7.27+ to get the per-run bench back.',
     );
   }
   // Onboarding runs launch inside the adapter (`_doOnboardingLaunch`), never through POST /runs — so
@@ -1044,15 +1083,20 @@ export async function createServer(
       },
       // An automated actor touching a run is a privileged action exactly like an operator
       // doing it — one audit line per escalation, needs-you or not (task #88 posture).
-      audit: (frame) => {
-        const { type, session, ...detail } = frame;
-        void type; // the audit `action` names the event; the tag would only duplicate it
-        audit.record(
-          'run.stall.escalated',
-          { id: 'stall-watchdog', kind: 'system', trust: 'admin' },
-          { runId: session, detail },
-        );
-      },
+    },
+    // wicked-studio#284: every frame the watchdog broadcasts is RECORDED here — the escalation line
+    // crew#341 already wrote (`run.stall.escalated`, spelling unchanged) and now the detection line
+    // too — and remembered in the index the events route serves. The trail is what survives the run
+    // leaving the executing listing and this process exiting; the index is the read-side latency
+    // layer, stamped with the entry's OWN ts so live and post-restart answers are the same instant.
+    onFrame: (frame) => {
+      const { type, session, ...detail } = frame;
+      void type; // `stallFrameAction` names the action from it; the tag would only duplicate it
+      const ts = audit.record(stallFrameAction(frame), STALL_WATCHDOG_ACTOR, {
+        runId: session,
+        detail,
+      });
+      stallFrameIndex.record(frame, ts);
     },
     // The engine's own turn ceiling fired (`stepStatus: "timed_out"`, perf#4) — audit it as
     // what it is, distinct from an operator cancel. Never sent by older engines; the ambiguous
@@ -1342,7 +1386,7 @@ export async function createServer(
     {
       seatHealth,
       // wicked-studio#284: the watchdog's remembered frames ride `GET /runs/:id/events`.
-      stallFrames: (runId) => stallWatchdog.framesFor(runId),
+      stallFrames: (runId) => stallFrameIndex.framesFor(runId),
       // The SAME standing accessor the seams and the adapter launch with (F-RECON-002/003).
       rosterWithStanding,
       retryIndex,

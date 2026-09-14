@@ -26,7 +26,6 @@ import { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent } from '../src/core/types.js';
 
 const ev = (frame: Record<string, unknown>): CoreEvent => frame as unknown as CoreEvent;
-const ACTIVE = { status: 'active' as const, since: '2026-09-11T00:00:00.000Z' };
 
 describe('the seat-health fold records the seat’s OWN "no credential" report (F-A45-006)', () => {
   it('a council ballot lost to not_logged_in / "No API key found" sets the auth failure, with the seat’s words', () => {
@@ -97,7 +96,7 @@ describe('seatStanding — the seat’s own report overrides the probe (F-A45-00
   const failure = { at: '2026-09-11T00:00:00.000Z', detail: 'No API key found for anthropic', source: 'ballot' as const, run: 'r-1' };
 
   it('signed_in by the file probe, but the seat said it has no credential → signed_out, sourced, evidenced, council-ineligible', () => {
-    const s = seatStanding({ key: 'pi' }, true, ACTIVE, failure);
+    const s = seatStanding({ key: 'pi' }, true, failure);
     expect(s).toMatchObject({
       auth: 'signed_out',
       auth_source: 'seat-stderr',
@@ -106,15 +105,15 @@ describe('seatStanding — the seat’s own report overrides the probe (F-A45-00
     });
     expect(s.council_ineligible_reason).toMatch(/the seat itself reported no credential \(ballot: No API key found/);
     // Without the report the probe decides exactly as before.
-    expect(seatStanding({ key: 'pi' }, true, ACTIVE)).toMatchObject({ auth: 'signed_in', council_eligible: true });
-    expect(seatStanding({ key: 'pi' }, true, ACTIVE).auth_source).toBeUndefined();
+    expect(seatStanding({ key: 'pi' }, true)).toMatchObject({ auth: 'signed_in', council_eligible: true });
+    expect(seatStanding({ key: 'pi' }, true).auth_source).toBeUndefined();
   });
 
   it('a free-tier seat that itself says "No API key" is NOT on its free tier', () => {
-    const s = seatStanding({ key: 'opencode' }, false, ACTIVE, failure);
+    const s = seatStanding({ key: 'opencode' }, false, failure);
     expect(s.auth).toBe('signed_out');
     expect(s.free_tier).toBeUndefined();
-    expect(seatStanding({ key: 'opencode' }, false, ACTIVE).auth).toBe('not_required');
+    expect(seatStanding({ key: 'opencode' }, false).auth).toBe('not_required');
   });
 
   it('chatSeatAdmission names the cause class: auth before scope', () => {

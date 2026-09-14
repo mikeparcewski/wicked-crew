@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { RecordedStallFrame } from './stall-watchdog.js';
+import type { RecordedStallFrame } from './stall-frame-index.js';
 import { z } from 'zod';
 import { listRequirements, getRequirement, patchRequirement } from './requirements.js';
 import { randomUUID } from 'node:crypto';
@@ -647,6 +647,31 @@ export interface SecurityDeps {
  * fed by the daemon's single CoreEvent subscription) and the OS opener for `/open` (crew#273,
  * injectable so tests never actually open anything).
  */
+/** A remembered watchdog frame as `GET /runs/:id/events` SERVES it — with the `seq` the published
+ *  `RecordedEvent` contract requires (api-types 0.38.0). `daemon: true` rides additively until
+ *  api-types 0.39.0 declares it; every consumer today reads unknown keys through. */
+type ServedStallFrame = RecordedStallFrame & { seq: number };
+
+/**
+ * Stamp the required `seq` onto the daemon-authored frames of a ts-sorted merge. A watchdog frame
+ * has no engine `seq` — the engine's log never saw it — so each one rides the seq of the engine
+ * record it FOLLOWS (0 before the first). The served array is therefore monotonic non-decreasing in
+ * `seq`, and a consumer that re-sorts by seq (studio's narrator) keeps every frame beside the event
+ * it was captured after, instead of dropping it to the front on a missing key.
+ */
+function withServedSeq(
+  merged: Array<RecordedEvent | RecordedStallFrame>,
+): Array<RecordedEvent | ServedStallFrame> {
+  let seq = 0;
+  return merged.map((e) => {
+    if (!('daemon' in e)) {
+      if (typeof e.seq === 'number') seq = e.seq;
+      return e;
+    }
+    return { ...e, seq };
+  });
+}
+
 export interface RuntimeDeps {
   /** DES-L9: how `revisesPr` is resolved to a PR head branch (`gh pr view`, 5 s). Injectable so
    *  route tests answer without gh; production uses `core/deliver.ts::resolvePullRequest`. */
@@ -3206,10 +3231,10 @@ export function registerRoutes(
     // Merge the remembered frames in capture order beside the engine's; they carry `daemon: true`
     // and no engine `seq`.
     const daemonFrames = runtime.stallFrames?.(id) ?? [];
-    const events: Array<RecordedEvent | RecordedStallFrame> =
+    const events: Array<RecordedEvent | ServedStallFrame> =
       daemonFrames.length === 0
         ? engineEvents
-        : [...engineEvents, ...daemonFrames].sort((a, b) => a.ts - b.ts);
+        : withServedSeq([...engineEvents, ...daemonFrames].sort((a, b) => a.ts - b.ts));
 
     // An empty array here is a real answer, not a failure: runs that predate the log have no
     // history, and saying so is the honest response.

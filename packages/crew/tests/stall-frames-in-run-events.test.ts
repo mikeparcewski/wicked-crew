@@ -12,7 +12,8 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { RecordedEvent } from '../src/core/types.js';
-import type { RecordedStallFrame } from '../src/api/stall-watchdog.js';
+import { StallFrameIndex, stallFrameAction, type RecordedStallFrame } from '../src/api/stall-frame-index.js';
+import type { AuditEntry } from '../src/core/types.js';
 
 const RUN = 'r-needs-you';
 const ENGINE: RecordedEvent[] = [
@@ -63,7 +64,20 @@ describe('GET /runs/:id/events merges the remembered watchdog frames (wicked-stu
     expect(body.returned).toBe(4);
     expect(body.events[1]).toMatchObject({ daemon: true, quietForMs: 900_000 });
     expect(body.events[3]).toMatchObject({ daemon: true, needsYou: true, action: 'notify' });
-    expect('seq' in body.events[1]!).toBe(false);
+    // `RecordedEvent.seq` is REQUIRED by the wire contract and a daemon frame has none of its own,
+    // so each rides the seq of the engine record it follows — the served array stays monotonic
+    // non-decreasing and a consumer that re-sorts by seq keeps each frame where it was captured.
+    expect(body.events.map((e) => e['seq'])).toEqual([1, 1, 2, 2]);
+  });
+
+  it('a daemon frame captured BEFORE any engine record still carries a seq (0), never an absent one', async () => {
+    const early: RecordedStallFrame = { ...STALLED, ts: 10 };
+    const app = buildApp([early]);
+    apps.push(app);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/events` });
+    const body = res.json() as { events: Array<Record<string, unknown>> };
+    expect(body.events.map((e) => e['type'])).toEqual(['workerStalled', 'sessionStarted', 'unitDispatched']);
+    expect(body.events[0]).toMatchObject({ seq: 0, daemon: true });
   });
 
   it('the ?type filter reaches the daemon frames too', async () => {
@@ -86,5 +100,60 @@ describe('GET /runs/:id/events merges the remembered watchdog frames (wicked-stu
       expect(body.events.map((e) => e['type'])).toEqual(['sessionStarted', 'unitDispatched']);
       expect(body.total).toBe(2);
     }
+  });
+});
+
+// The half wicked-studio#284 is actually about: the run has ENDED (so the watchdog pruned its
+// state) and the daemon has RESTARTED (so its memory is gone) — which is exactly when a human opens
+// the run page to find out what happened. The frames come back from the audit trail, through the
+// index the events route reads; nothing is re-emitted to get them there.
+describe('the remembered frames survive the run ending and the daemon restarting', () => {
+  /** An audit line as the daemon's recorder writes it: the frame minus `type` and `session`. */
+  function line(frame: RecordedStallFrame): AuditEntry {
+    const { type, session, ts, daemon, ...detail } = frame;
+    void type;
+    void daemon;
+    return {
+      ts,
+      action: stallFrameAction(frame),
+      actor: { id: 'stall-watchdog', kind: 'system', trust: 'admin' },
+      runId: session,
+      detail,
+    } as AuditEntry;
+  }
+
+  it('a NEW index hydrated from the trail serves the same frames the live daemon did', async () => {
+    // What the previous daemon wrote, answered newest-first the way `readAll` answers.
+    const trail = [line(ESCALATED), line(STALLED)];
+    const rebuilt = new StallFrameIndex();
+    rebuilt.hydrateFromEntries(trail);
+
+    const app = buildApp(rebuilt.framesFor(RUN));
+    apps.push(app);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/events` });
+    const body = res.json() as { total: number; events: Array<Record<string, unknown>> };
+
+    expect(body.events.map((e) => e['type'])).toEqual([
+      'sessionStarted',
+      'workerStalled',
+      'unitDispatched',
+      'workerStallEscalated',
+    ]);
+    expect(body.events[1]).toMatchObject({ daemon: true, quietForMs: 900_000, ord: 1, seq: 1 });
+    expect(body.events[3]).toMatchObject({ daemon: true, needsYou: true, action: 'notify', seq: 2 });
+    expect(body.total).toBe(4);
+  });
+
+  it('a trail with no stall lines leaves the route serving the engine log unchanged', async () => {
+    const rebuilt = new StallFrameIndex();
+    rebuilt.hydrateFromEntries([
+      { ts: 1, action: 'run.launched', actor: { id: 'daemon', kind: 'system', trust: 'admin' }, runId: RUN, detail: {} } as AuditEntry,
+    ]);
+    const app = buildApp(rebuilt.framesFor(RUN));
+    apps.push(app);
+    const res = await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN}/events` });
+    const body = res.json() as { total: number; events: Array<Record<string, unknown>> };
+    expect(body.events.map((e) => e['type'])).toEqual(['sessionStarted', 'unitDispatched']);
+    expect(body.total).toBe(2);
   });
 });

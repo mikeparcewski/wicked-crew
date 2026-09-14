@@ -41,7 +41,9 @@ mentioned only where a daemon release depends on them.
   (`health.status` is always `active`; observed errors stamp `lastErrorAt`); the daemon-wide
   council-count bench (`council_bench`, 30-min window) is gone from the tracker, the standing
   predicate and `GET /roster` — the engine benches a seat per run at its ballot threshold (now
-  including an unclassified persistent failure) and says so in `unitDistributed.degradedReason`.
+  including an unclassified persistent failure — wicked-core-ts **0.7.27+**; on a 0.7.26 engine the
+  daemon says at boot that an unclassified persistently-failing seat is benched by neither side) and
+  says so in `unitDistributed.degradedReason`.
   A launch refusal or a load timeout can no longer take the roster to 0 eligible seats until a
   restart.
 - **Stall-watchdog failover is role-aware and never reassigns a tool unit (DES-L3 PR-3E / PR-L3-W;
@@ -53,11 +55,17 @@ mentioned only where a daemon release depends on them.
 - **A run the watchdog handed to a human keeps its "needs you" facts across a page reload
   (wicked-studio#284; the crew companion L8 handed to L3).** `workerStalled` / `workerStallEscalated`
   were live-only `/ws` frames — the engine's event log never saw them — so `GET /runs/:id/events`
-  after a reload showed nothing and the run page offered only Cancel. The stall watchdog now
-  REMEMBERS the frames it broadcast per executing run (capture `ts`, `daemon: true`, no engine
-  `seq`; capped at 64, forgotten when the run leaves the executing listing) and the events route
-  merges them in capture order beside the engine's events; `?type=` reaches them too. Daemon-local:
-  a daemon restart forgets them with the clocks that produced them (disclosed).
+  after a reload showed nothing and the run page offered only Cancel. Every frame the watchdog
+  broadcasts is now RECORDED on the crew audit trail — the `run.stall.escalated` line crew#341
+  already wrote, plus a new `run.stall.detected` line — and kept in a run→frames index
+  (`api/stall-frame-index.ts`, capped at 64 per run) that `GET /runs/:id/events` merges in capture
+  order beside the engine's events; `?type=` reaches them too. The index is hydrated from that trail
+  at boot, the same way `retry_of` / `created_at` / `ended_at` already survive a restart (crew#600),
+  so the "needs you" facts outlive both the run leaving the executing listing and the daemon
+  exiting — the two cases the finding is actually about. Nothing is re-emitted at boot: hydrating
+  fills a map, it never broadcasts or re-arms a clock. Served frames carry `daemon: true` and the
+  `seq` of the engine record they follow (`RecordedEvent.seq` is required; `daemon` rides additively
+  until api-types 0.39.0 declares it). No new state-home root and no core fence entry.
 
 <!-- fixall L9 -->
 - **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a

@@ -4,9 +4,6 @@
 import { describe, expect, it } from 'vitest';
 
 import { authUsable, chatSeatAdmission, FREE_TIER_SEATS, seatAuth, seatStanding } from '../src/api/seat-standing.js';
-import type { SeatHealth } from '../src/api/seat-health.js';
-
-const ACTIVE: SeatHealth = { status: 'active', since: '2026-09-11T00:00:00.000Z' };
 
 describe('seatAuth — what signed_in MEANS for the seat', () => {
   it('true is signed_in for every seat; null is unknown (keychain-backed, unknown key) for every seat', () => {
@@ -49,14 +46,14 @@ describe('seatAuth — what signed_in MEANS for the seat', () => {
 
 describe('seatStanding — what a council would do with the seat, as far as the daemon can tell', () => {
   it('a signed-in, active, council-enabled seat is eligible with no reason', () => {
-    expect(seatStanding({ key: 'claude', enabled_for_council: true }, true, ACTIVE)).toEqual({
+    expect(seatStanding({ key: 'claude', enabled_for_council: true }, true)).toEqual({
       auth: 'signed_in',
       council_eligible: true,
     });
   });
 
   it('a signed-out seat is NOT eligible — the reason says a council benches it and where to sign in', () => {
-    const s = seatStanding({ key: 'codex', enabled_for_council: true }, false, ACTIVE);
+    const s = seatStanding({ key: 'codex', enabled_for_council: true }, false);
     expect(s.auth).toBe('signed_out');
     expect(s.council_eligible).toBe(false);
     expect(s.council_ineligible_reason).toMatch(/signed out/);
@@ -65,7 +62,7 @@ describe('seatStanding — what a council would do with the seat, as far as the 
   });
 
   it('a free-tier seat with no credential IS eligible, and names its tier and its source', () => {
-    expect(seatStanding({ key: 'opencode', enabled_for_council: true }, false, ACTIVE)).toEqual({
+    expect(seatStanding({ key: 'opencode', enabled_for_council: true }, false)).toEqual({
       auth: 'not_required',
       free_tier: FREE_TIER_SEATS['opencode'],
       free_tier_source: 'crew-heuristic',
@@ -76,19 +73,20 @@ describe('seatStanding — what a council would do with the seat, as far as the 
   it('crew keeps NO council bench of its own (R5b): standing is auth + enablement only — the engine benches per run', () => {
     // Before: a 30-min daemon-wide ballot count made this seat ineligible for every run. Now the
     // run's own `benched_seats` / `degradedReason` say what the engine did with it.
-    const s = seatStanding({ key: 'opencode', enabled_for_council: true }, false, ACTIVE);
+    const s = seatStanding({ key: 'opencode', enabled_for_council: true }, false);
     expect(s.council_eligible).toBe(true);
     expect('council_bench' in s).toBe(false);
   });
 
   it('unknown auth is eligible: refusing a seat the daemon cannot read would bench working keychain seats', () => {
-    expect(seatStanding({ key: 'agy' }, null, ACTIVE)).toEqual({ auth: 'unknown', council_eligible: true });
+    expect(seatStanding({ key: 'agy' }, null)).toEqual({ auth: 'unknown', council_eligible: true });
   });
 
-  it('a seat with an observed error (lastErrorAt) is still eligible — `inactive` is never produced (R5); a disabled seat is not eligible', () => {
-    const errored: SeatHealth = { status: 'active', since: '2026-09-11T00:00:00.000Z', lastErrorAt: '2026-09-11T00:01:00.000Z' };
-    expect(seatStanding({ key: 'claude', enabled_for_council: true }, true, errored).council_eligible).toBe(true);
-    const disabled = seatStanding({ key: 'claude', enabled_for_council: false }, true, ACTIVE);
+  it('the seat’s runtime health is not an INPUT any more — an observed error never makes a seat ineligible (R5); a disabled seat is not eligible', () => {
+    // `seatStanding` no longer takes the health reading at all: `inactive` is never produced and the
+    // one bench is the engine's per-run ballot ledger, so there is nothing left for health to decide.
+    expect(seatStanding({ key: 'claude', enabled_for_council: true }, true).council_eligible).toBe(true);
+    const disabled = seatStanding({ key: 'claude', enabled_for_council: false }, true);
     expect(disabled).toEqual({ auth: 'signed_in', council_eligible: false, council_ineligible_reason: 'not enabled for council' });
   });
 });

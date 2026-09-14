@@ -67,6 +67,8 @@ function build(opts?: {
   logs: string[];
   reassigns: { runId: string; ord: number; cli?: string }[];
   audited: WorkerStallEscalatedFrame[];
+  /** EVERY frame handed to the recorder (`onFrame`) — detections included (wicked-studio#284). */
+  recorded: AnyFrame[];
   tick: (ms: number) => void;
 } {
   let nowMs = Date.parse('2026-08-31T10:00:00Z');
@@ -74,6 +76,7 @@ function build(opts?: {
   const logs: string[] = [];
   const reassigns: { runId: string; ord: number; cli?: string }[] = [];
   const audited: WorkerStallEscalatedFrame[] = [];
+  const recorded: AnyFrame[] = [];
   const runs = opts?.runs ?? [{ id: 'r-wedge', ord: 3, cli: 'claude' }];
   const wd = new WorkerStallWatchdog({
     listExecuting: opts?.listExecuting ?? (async () => runs),
@@ -86,12 +89,18 @@ function build(opts?: {
         (async (runId, ord, cli) => {
           reassigns.push({ runId, ord, ...(cli !== undefined ? { cli } : {}) });
         }),
-      audit: opts?.audit ?? ((f) => audited.push(f)),
+    },
+    // wicked-studio#284: one sink for every frame the watchdog broadcasts. The daemon writes an
+    // audit line per frame and fills the index `GET /runs/:id/events` serves; here we keep both the
+    // full stream and (for the crew#341 assertions) just the escalations.
+    onFrame: (f) => {
+      recorded.push(f);
+      if (f.type === 'workerStallEscalated') (opts?.audit ?? ((x: WorkerStallEscalatedFrame) => audited.push(x)))(f);
     },
     now: () => nowMs,
     log: (m) => logs.push(m),
   });
-  return { wd, frames, logs, reassigns, audited, tick: (ms) => (nowMs += ms) };
+  return { wd, frames, logs, reassigns, audited, recorded, tick: (ms) => (nowMs += ms) };
 }
 
 // At the WATCHDOG level a config resolving to no/zero/invalid minutes keeps escalation off —
@@ -679,7 +688,7 @@ describe('the reassign rung — recycle the wedged cursor unit in place', () => 
     tick(31 * MIN);
     await expect(wd.sweep()).resolves.toBeUndefined();
     expect(escalatedOf(frames)).toHaveLength(1); // broadcast happened before the sink threw
-    expect(logs.some((m) => m.includes('audit sink failed'))).toBe(true);
+    expect(logs.some((m) => m.includes('frame recorder failed'))).toBe(true);
   });
 });
 
@@ -810,12 +819,18 @@ afterEach(() => {
 function executingView(
   id: string,
   unitIx: number,
-  ords: { ord: number; cli: string | null }[],
+  ords: { ord: number; cli: string | null; tool_cmd?: string[] | null; role?: string }[],
   clis?: string[],
 ): SessionView {
   return {
     session: { id, status: 'executing', unit_ix: unitIx, ...(clis !== undefined ? { clis } : {}) },
-    units: ords.map((u, i) => ({ id: `${id}:u${i}`, ord: u.ord, assigned_cli: u.cli })),
+    units: ords.map((u, i) => ({
+      id: `${id}:u${i}`,
+      ord: u.ord,
+      assigned_cli: u.cli,
+      ...(u.tool_cmd !== undefined ? { tool_cmd: u.tool_cmd } : {}),
+      ...(u.role !== undefined ? { role: u.role } : {}),
+    })),
   } as unknown as SessionView;
 }
 
@@ -1034,6 +1049,19 @@ describe('stall escalation through the real server (/ws + audit + adapter.reassi
   }, 15_000);
 });
 
+describe('every broadcast frame reaches the recorder (wicked-studio#284)', () => {
+  it('detections AND escalations are handed over, in order — the watchdog keeps none of them itself', async () => {
+    const { wd, frames, recorded, tick } = build({ config: () => ({ minutes: 30 }) });
+    wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-wedge', ord: 3, text: 'x' }));
+    tick(16 * MIN);
+    await wd.sweep();
+    tick(15 * MIN);
+    await wd.sweep();
+    expect(recorded.map((f) => f.type)).toEqual(['workerStalled', 'workerStallEscalated']);
+    expect(recorded).toEqual(frames); // everything on /ws, nothing more, nothing less
+  });
+});
+
 // ── DES-L3 PR-3E: role-aware failover · PR-L3-W: a tool cursor is notified, never reassigned ────
 
 describe('stall escalation — evaluator ≠ creator across a failover (PR-3E, F-RC1-012)', () => {
@@ -1096,27 +1124,167 @@ describe('stall escalation — a TOOL cursor (PR-L3-W, crew #580 / #581)', () =>
 
 // ── wicked-studio#284: the watchdog remembers its frames for GET /runs/:id/events ────────────────
 
-describe('stall watchdog — remembered frames (wicked-studio#284)', () => {
-  it('remembers the workerStalled and workerStallEscalated frames it broadcast, stamped ts + daemon:true, oldest first; forgets them when the run leaves the executing listing', async () => {
+describe('stall watchdog — frames go to the recorder, not into the watchdog (wicked-studio#284)', () => {
+  it('hands over each frame as it broadcasts it and keeps NONE itself, so a run leaving the executing listing can no longer take its history with it', async () => {
     let executing: ExecutingRun[] = [{ id: 'r-mem', ord: 2, cli: 'claude', seats: ['claude', 'codex'] }];
-    const { wd, tick } = build({ listExecuting: async () => executing });
-    expect(wd.framesFor('r-mem')).toEqual([]);
+    const { wd, recorded, tick } = build({ listExecuting: async () => executing });
+    expect(recorded).toEqual([]);
     wd.ingest(ev({ type: 'unitOutputDelta', session: 'r-mem', ord: 2, text: 'x' }));
     tick(16 * MIN);
     await wd.sweep();
-    const afterDetect = wd.framesFor('r-mem');
-    expect(afterDetect).toHaveLength(1);
-    expect(afterDetect[0]).toMatchObject({ type: 'workerStalled', session: 'r-mem', ord: 2, daemon: true });
-    expect(typeof afterDetect[0]!.ts).toBe('number');
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ type: 'workerStalled', session: 'r-mem', ord: 2 });
     tick(15 * MIN);
     await wd.sweep();
-    const afterEscalate = wd.framesFor('r-mem');
-    expect(afterEscalate.map((f) => f.type)).toEqual(['workerStalled', 'workerStallEscalated']);
-    expect(afterEscalate[1]!.ts).toBeGreaterThan(afterEscalate[0]!.ts);
-    expect(afterEscalate[1]).toMatchObject({ action: 'reassign', outcome: 'ok', daemon: true });
-    // The run leaves the listing (completed / cancelled / parked): its frames go with its clocks.
+    expect(recorded.map((f) => f.type)).toEqual(['workerStalled', 'workerStallEscalated']);
+    expect(recorded[1]).toMatchObject({ action: 'reassign', outcome: 'ok' });
+
+    // The run leaves the listing (completed / cancelled / parked). The watchdog prunes its CLOCKS —
+    // and that used to delete the frames with them, which is the bug: a human opens the run page
+    // exactly then. The frames belong to the recorder now (audit trail + `StallFrameIndex`), so
+    // nothing is lost here; `tests/stall-frame-index.test.ts` owns what the reader gets back.
     executing = [];
     await wd.sweep();
-    expect(wd.framesFor('r-mem')).toEqual([]);
+    expect(recorded.map((f) => f.type)).toEqual(['workerStalled', 'workerStallEscalated']);
+    // …and the watchdog holds no frame store of its own to go stale.
+    expect((wd as unknown as Record<string, unknown>)['frames']).toBeUndefined();
   });
+});
+
+// ── The MAPPER seam (review HIGH-2): `avoid` and `executor` are only real if server.ts's
+// `listExecuting` derives them from the engine's unit DTO. Driving them from hand-built
+// `ExecutingRun` literals (every test above) would ship a wrong field name or a wrong `role`
+// spelling green, so these go through createServer with units exactly as the engine reports them —
+// `tool_cmd` / `role` in, notify-vs-failover out — and read the daemon's own audit trail for the
+// proof, which exercises the wicked-studio#284 recorder at the same time.
+describe('the listExecuting mapper derives the arms from the unit DTO (server.ts → resolveCursorUnit)', () => {
+  let dir: string;
+  let app: FastifyInstance | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'stall-map-'));
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+    removeScratch(dir);
+  });
+
+  type Reassign = { runId: string; ord: number; cli: string | null };
+
+  /** A real server over one executing view, with the compressed stall clock. */
+  async function serve(view: SessionView): Promise<{ reassigns: Reassign[]; auditPath: string; emit: (ord: number) => void }> {
+    const listeners = new Set<Listener>();
+    const reassigns: Reassign[] = [];
+    const mockAdapter = {
+      getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
+      projectsSupported: (): boolean => false,
+      sessionsDetail: async (): Promise<SessionView[]> => [view],
+      reassignUnit: async (runId: string, ord: number, cli?: string | null): Promise<void> => {
+        reassigns.push({ runId, ord, cli: cli ?? null });
+      },
+      onLaunch: (): (() => void) => () => undefined,
+      onEvent: (l: Listener): (() => void) => {
+        listeners.add(l);
+        return () => listeners.delete(l);
+      },
+    } as unknown as CoreAdapter;
+
+    const auditPath = join(dir, 'audit.log');
+    app = await createServer(mockAdapter, {
+      auditPath,
+      projectEvents: { disabled: true },
+      interactiveWsRelay: { disabled: true },
+      stallWatchdog: { enabled: true, sweepIntervalMs: 40, stallMinutes: 0.004, escalateMinutes: 0.008, maxEscalations: 1 },
+    });
+    const runId = (view.session as { id: string }).id;
+    return {
+      reassigns,
+      auditPath,
+      // Proof of life on the relay: stamps the liveness clock (and the run's last-seen unit ord),
+      // so the silence that follows is real and the frames name the unit the cursor is on.
+      emit: (ord: number) => {
+        for (const l of listeners) l({ type: 'unitOutputDelta', session: runId, ord, text: 'x' } as unknown as CoreEvent);
+      },
+    };
+  }
+
+  type AuditLine = { action: string; runId?: string; detail?: Record<string, unknown> };
+  const trail = (auditPath: string, action: string): AuditLine[] => {
+    let raw = '';
+    try {
+      raw = readFileSync(auditPath, 'utf8');
+    } catch {
+      return [];
+    }
+    return raw
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as AuditLine)
+      .filter((e) => e.action === action);
+  };
+
+  const waitFor = async (pred: () => boolean, label: string, ms = 5_000): Promise<void> => {
+    const t0 = Date.now();
+    while (!pred()) {
+      if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+
+  it("a cursor unit carrying tool_cmd maps to executor:'tool' — the run is NOTIFIED, never reassigned (PR-L3-W)", async () => {
+    // One tool unit at the cursor: the engine's own command, no seat to fail over to.
+    const { reassigns, auditPath, emit } = await serve(
+      executingView('r-tool-map', 0, [{ ord: 5, cli: 'bash', tool_cmd: ['bash', '-lc', 'deliver'] }], ['claude', 'codex']),
+    );
+    emit(5);
+
+    await waitFor(() => trail(auditPath, 'run.stall.escalated').length >= 1, 'an escalation on the trail');
+    const escalation = trail(auditPath, 'run.stall.escalated')[0];
+    expect(escalation?.runId).toBe('r-tool-map');
+    // `notify` is reachable ONLY through `executor: 'tool'` here — the settings leave the default
+    // `reassign` action armed, and the pool has two other seats to fail over to.
+    expect(escalation?.detail).toMatchObject({ action: 'notify', needsYou: true, ord: 5 });
+    expect(reassigns).toEqual([]);
+    // The detection frame is on the trail too (wicked-studio#284), so the reload story survives.
+    expect(trail(auditPath, 'run.stall.detected').length).toBeGreaterThanOrEqual(1);
+    expect(trail(auditPath, 'run.stall.detected')[0]?.detail).toMatchObject({ ord: 5 });
+  }, 20_000);
+
+  it('an EVALUATOR cursor maps its creators into `avoid` — the failover skips the seat that built the work (PR-3E)', async () => {
+    // unit_ix 1 of ords [1,2] is the evaluator on claude; codex built what it reviews.
+    const { reassigns, auditPath, emit } = await serve(
+      executingView(
+        'r-eval-map',
+        1,
+        [
+          { ord: 1, cli: 'codex', role: 'creator' },
+          { ord: 2, cli: 'claude', role: 'evaluator' },
+        ],
+        ['claude', 'codex', 'pi'],
+      ),
+    );
+    emit(2);
+
+    await waitFor(() => reassigns.length >= 1, 'a failover reassign');
+    // claude is the stalled cursor seat and codex is `avoid` (it created the work) → pi.
+    expect(reassigns[0]).toEqual({ runId: 'r-eval-map', ord: 2, cli: 'pi' });
+    await waitFor(() => trail(auditPath, 'run.stall.escalated').length >= 1, 'an escalation on the trail');
+    expect(trail(auditPath, 'run.stall.escalated')[0]?.detail).toMatchObject({
+      action: 'reassign',
+      outcome: 'ok',
+      cli: 'pi',
+      previousCli: 'claude',
+    });
+  }, 20_000);
+
+  it('units with neither tool_cmd nor role (an older engine view) keep the historical ladder byte-for-byte', async () => {
+    const { reassigns, emit } = await serve(
+      executingView('r-plain-map', 0, [{ ord: 3, cli: 'claude' }], ['claude', 'codex']),
+    );
+    emit(3);
+    await waitFor(() => reassigns.length >= 1, 'a plain reassign');
+    expect(reassigns[0]).toEqual({ runId: 'r-plain-map', ord: 3, cli: 'codex' });
+  }, 20_000);
 });

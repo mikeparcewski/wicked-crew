@@ -57,7 +57,7 @@ export function rosterWithStandingFactory(deps: RosterStandingDeps): RosterWithS
       const health = seatHealth.healthFor(key);
       const signed = signedIn(key, workerRoot === '' ? undefined : workerRoot);
       // (R5b, DES-L3 PR-3D) No crew-side council bench any more: the engine's per-run ballot ledger
-      // (`session.benched_seats`) is the one bench, so there is no `councilBenchFor` to read and no
+      // (`session.benched_seats`) is the one bench, so there is no bench reading to pass and no
       // health reading to weigh — the roster's standing is the auth picture alone.
       const standing = seatStanding(
         seat as { key: string; enabled_for_council?: boolean; credential?: string; free_tier?: string },
