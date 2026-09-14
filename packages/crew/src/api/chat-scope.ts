@@ -479,6 +479,15 @@ function ownGraph(only: RepoEntry): { wire: ChatScope['graph']; dbPath: string |
  * copilot) and `CLAUDE.md` (claude) into the scratch root. Plain prose, repo paths verbatim: the
  * seat is in an empty directory and this is how it learns what it was pointed at.
  */
+/**
+ * The ONE worked grounding command the scope statement hands every seat of a graph-bound chat
+ * (recon-w1-grounding Q4 cause #1; R-L5-1, text-only): the shim's `call` action against the estate
+ * MCP's `SearchEntity`, whose argument is `name` (a `{"query"}` returned 0 matches in P6). Exported
+ * so the statement snapshot test and the byte-budget test pin the exact spelling.
+ */
+export const CHAT_GROUNDING_COMMAND =
+  'wicked-garden run scripts/_estate_client.py --readonly call \'{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}\'';
+
 export function chatScopeStatement(chatId: string, scope: ChatScope): string {
   const lines: string[] = [
     '# Chat scope',
@@ -529,22 +538,38 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
       '',
     );
   }
-  // DES-L5 §5-a (D-7 / D1): the grounding path is the wicked-garden skills handed to this session
-  // and the read-only estate shim they run on EVERY seat — never a CLI-registered MCP server (the
-  // second transport only claude had, deleted in core-ts 0.7.26; naming it here was a false
-  // promise on every other seat and an org-allowlist gamble on claude). No ladder, no detection,
-  // no allowlist: the statement names the one path and the read-only rule.
+  // DES-L5 §5-a (D-7 / D1) as re-cut after the wave-1 P6 gate (recon-w1-grounding Q1/Q4, cause
+  // #1): the seat grounds through the read-only estate shim on EVERY seat — never a CLI-registered
+  // MCP server (deleted in core-ts 0.7.26) — and the statement must hand it a COMMAND, not a noun.
+  // The previous wording ("the read-only estate shim … always pass `--readonly`") named no binary,
+  // no args and no tool: claude obeyed it literally and attached `--readonly` to a `Skill` call,
+  // then grepped; opencode ran nothing. So: ONE worked, copy-pasteable line a seat can run in its
+  // shell on any carrier (the launcher form `wicked-garden run <scripts-relative path>` resolves the
+  // plugin root on every CLI; the handed snapshot's `scripts/` dir is first on PATH), the store-pin
+  // sentence, and the other tools that take the same form. Argument keys are the estate MCP's own
+  // (`SearchEntity` → `name`, the spelling the shim's `search()` wrapper uses; `BlastRadius` /
+  // `Lineage` → `symbol`; `RankHotspots` → `limit`): `{"query"}` returned 0 matches in P6
+  // (F-W1-006). Only when a graph is BOUND — an unbound chat has no `WICKED_ESTATE_DB`, so a shim
+  // call would be refused as unpinned; it is told to read the repositories directly instead.
   lines.push('## Grounding', '');
-  lines.push(
-    'Use the wicked-garden skills handed to this session — `wicked-garden-mem` (recall / answer over',
-    'memory and knowledge) and `wicked-garden-search` (blast-radius / lineage / hotspots) — to find',
-    'symbols and relationships before grepping: they reach the code graph through the read-only',
-    'estate shim on every seat; always pass `--readonly`.',
-    scope.graph.bound
-      ? `The graph is bound to \`${scope.graph.repoLabel ?? 'this scope'}\` (${scope.graph.reason}).`
-      : `No code graph is bound: ${scope.graph.reason} — read the repositories directly and say so.`,
-    '',
-  );
+  if (scope.graph.bound) {
+    lines.push(
+      'Before you read files, query the code graph through the read-only estate shim. Run this in',
+      'your shell (`wicked-garden` is first on PATH; the store is pinned by `WICKED_ESTATE_DB`):',
+      '',
+      `    ${CHAT_GROUNDING_COMMAND}`,
+      '',
+      'The same form reaches `BlastRadius` and `Lineage` (`{"symbol":"<name>"}`) and `RankHotspots`',
+      '(`{"limit":20}`); always pass `--readonly`.',
+      `The graph is bound to \`${scope.graph.repoLabel ?? 'this scope'}\` (${scope.graph.reason}).`,
+      '',
+    );
+  } else {
+    lines.push(
+      `No code graph is bound: ${scope.graph.reason} — read the repositories directly and say so.`,
+      '',
+    );
+  }
   // DES-L5 §5-a (P6 criterion 5): the reply is the answer — an agent's own handoff artefact
   // ("## Work State / ## Next Move / ## Relevant Files") leaked into a chat reply verbatim.
   lines.push('## Answer format', '');
