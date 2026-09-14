@@ -80,6 +80,20 @@ async function stubDaemon(status: number, body: string): Promise<number> {
   return (server.address() as AddressInfo).port;
 }
 
+/** A stand-in daemon answering per path (the `status` verb reads `/runs`, then `/health`). */
+async function stubDaemonRoutes(routes: Record<string, string>): Promise<number> {
+  const server = createServer((req, res) => {
+    const path = (req.url ?? '').split('?')[0] ?? '';
+    const body = routes[path];
+    res.writeHead(body === undefined ? 404 : 200, { 'Content-Type': 'application/json' });
+    res.end(body ?? '{"error":"not found"}');
+  });
+  servers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return (server.address() as AddressInfo).port;
+}
+
 const STACK_FRAME = /^\s+at /m;
 
 describe('wicked-crew status / gate with no daemon answering (crew#551)', () => {
@@ -122,6 +136,37 @@ describe('wicked-crew status / gate against an answering daemon', () => {
     expect(out.code).toBe(1);
     expect(out.stderr).toContain('wicked-crew: gate failed: 404');
     expect(out.stderr).toContain('no such run');
+  });
+
+  it('status: a daemon whose base skill is REQUIRED and not handed says so on stderr — the remedy names the installer; stdout stays the runs JSON; exit 0 (F-W1-102)', async () => {
+    const message =
+      'the base skill "wicked-garden-governed-worker" (baseSkillRef — the role-keyed discipline every governed unit follows) is REQUIRED but no published snapshot is handed to the engine: the engine refuses every launch at intake until a generation holding it is published — install wicked-garden (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish; set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly';
+    const port = await stubDaemonRoutes({
+      '/api/v1/runs': '[]',
+      '/api/v1/health': JSON.stringify({
+        status: 'ok',
+        baseSkill: { name: 'wicked-garden-governed-worker', policy: 'require', present: false, inCatalog: false, gen: null, engineInput: 'wicked-garden-governed-worker', finding: { kind: 'skills.base-skill', severity: 'error', message } },
+        warnings: [{ kind: 'skills.base-skill', severity: 'error', message }],
+      }),
+    });
+    const out = await cli(['status', '--port', String(port)]);
+    expect(out.code).toBe(0);
+    expect(JSON.parse(out.stdout)).toEqual([]);
+    expect(out.stderr.trim()).toBe(`wicked-crew: ${message}`);
+    expect(out.stderr).toContain('npx wicked-installer install wicked-garden');
+    expect(out.stderr).not.toMatch(STACK_FRAME);
+  });
+
+  it('status: a daemon whose base skill is handed (finding null) — or one too old to report a posture — prints nothing on stderr', async () => {
+    const handed = await stubDaemonRoutes({ '/api/v1/runs': '[]', '/api/v1/health': JSON.stringify({ status: 'ok', baseSkill: { name: 'wicked-garden-governed-worker', present: true, finding: null } }) });
+    const out = await cli(['status', '--port', String(handed)]);
+    expect(out.code).toBe(0);
+    expect(JSON.parse(out.stdout)).toEqual([]);
+    expect(out.stderr).toBe('');
+    const old = await stubDaemonRoutes({ '/api/v1/runs': '[]', '/api/v1/health': JSON.stringify({ status: 'ok' }) });
+    const out2 = await cli(['status', '--port', String(old)]);
+    expect(out2.code).toBe(0);
+    expect(out2.stderr).toBe('');
   });
 
   it('status: a 2xx answer is printed as before and exits 0', async () => {

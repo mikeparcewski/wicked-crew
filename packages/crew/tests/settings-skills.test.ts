@@ -24,7 +24,7 @@ import { GateCache } from '../src/api/gate-cache.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { createServer } from '../src/api/server.js';
 import { CoreAdapter, settingsFilePath } from '../src/core/adapter.js';
-import { DEFAULT_SETTINGS, type DiagnosticsResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
+import { DEFAULT_SETTINGS, type DiagnosticsResponse, type HealthResponse, type SkillsManifestResponse, type SystemSettings } from '../src/core/types.js';
 import { crewStateHome, setCrewStateHome } from '../src/projects/state-home.js';
 import { BOOT_SKILLS_SNAPSHOT, canonicalCrewStateHome, SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { pluginSourceAt, type PluginSource } from '../src/skills/plugin-source.js';
@@ -601,6 +601,33 @@ describe('daemon boot (createServer) — the root is <state home>/skills; the fe
       expect(skills.findings[0]?.message).toContain('install wicked-garden first');
       expect(skills.findings[1]?.severity).toBe('error');
       expect(skills.baseSkill).toMatchObject({ name: DEFAULT_SETTINGS.baseSkillRef, present: false, gen: null, engineInput: DEFAULT_SETTINGS.baseSkillRef });
+      // F-W1-102 — the crew-only install (no wicked-garden at all): /health must never read "status ok,
+      // no warnings" while every launch is refused. The SAME finding rides `warnings`, it names the
+      // installer, and a real launch's 422 quotes the same remedy sentence.
+      const message = skills.baseSkill?.finding?.message ?? '';
+      expect(message).toContain('npx wicked-installer install wicked-garden');
+      const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json() as HealthResponse;
+      expect(health.status).toBe('ok');
+      expect(health.warnings).toContainEqual({ kind: 'skills.base-skill', severity: 'error', message });
+      const launch = await app.inject({
+        method: 'POST',
+        url: '/api/v1/runs',
+        payload: {
+          problem: 'Do step one. Do step two', // the daemon-bridge suite's shape: two stub seats, a gate before unit 1
+          sessionId: 'crew-only-install-1',
+          clisJson: JSON.stringify([
+            { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
+            { key: 'beta', display_name: 'Beta', binary: 'beta', headless_invocation: 'beta {PROMPT}' },
+          ]),
+          entityMode: 'shared',
+          humanConfirm: 'before:1',
+        },
+      });
+      expect(launch.statusCode).toBe(422);
+      const refused = launch.json() as { code: string; error: string; remedy: string };
+      expect(refused.code).toBe('base_skill_refused');
+      expect(refused.error).toMatch(/refused at intake/);
+      expect(message.endsWith(refused.remedy)).toBe(true);
       expect(existsSync(join(dir, 'skills'))).toBe(false); // a seed with no source creates nothing
     } finally {
       await app.close();

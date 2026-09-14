@@ -67,6 +67,23 @@ mentioned only where a daemon release depends on them.
   `seq` of the engine record they follow (`RecordedEvent.seq` is required; `daemon` rides additively
   until api-types 0.39.0 declares it). No new state-home root and no core fence entry.
 
+<!-- fixall L4 -->
+- **A daemon that refuses every launch can no longer read "status ok, no warnings" (F-W1-102, the
+  crew-only install; FIX-IT-ALL L4-⑧b).** The direct `npx wicked-installer install wicked-crew` path
+  (and the installer's `quick-start` bundle — bus + crew, no wicked-garden) boots a daemon under the
+  `require` base-skill policy with nothing published that holds `wicked-garden-governed-worker`: the
+  engine refuses EVERY launch at intake, yet `GET /health` answered `status: ok` with no `warnings`
+  and `wicked-crew status` printed `[]`. Now the `skills.base-skill` ERROR — the same object
+  `/health.baseSkill.finding` and `/diagnostics.skills.findings[]` already carry — also rides
+  `/health.warnings[]` (`HealthWarning.kind` is open; no new field; status stays `ok` because the
+  daemon serves and studio must load and show it — the state-home blocker's precedent), and
+  `wicked-crew status` prints that finding on stderr after the runs JSON (stdout unchanged, exit 0).
+  ONE remedy sentence on every surface — the finding, the warning, `status`, and the 422
+  `base_skill_refused` body — and it now names the install: `install wicked-garden
+  (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish;
+  set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`. Behaviour change
+  register: R11c.
+
 <!-- fixall L9 -->
 - **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a
   `Delivered-By` trailer (fixall L9-D1 / L9-D4 = BC-72 / BC-73; crew #550 P-1/P-4, review-benchmark-prs

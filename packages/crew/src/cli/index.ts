@@ -680,6 +680,22 @@ async function runStatus(args: string[]): Promise<void> {
   const res = await daemonFetch(port, url);
   if (!res.ok) await failNon2xx('status', res);
   console.log(JSON.stringify(await res.json(), null, 2));
+  // F-W1-102: a daemon whose base skill is REQUIRED and not handed (the crew-only install — no
+  // wicked-garden) refuses EVERY launch at intake while `/runs` is an honest `[]`. `status` says why,
+  // on stderr so stdout stays the JSON a script parses — quoting the SAME `skills.base-skill` finding
+  // `/health` carries (`baseSkill.finding`, `warnings[]`) and the 422 launch body names; exit 0 (the
+  // daemon is up; this is its configuration state). An older daemon without the field says nothing.
+  const health = await daemonFetch(port, `${base}/health`);
+  if (health.ok) {
+    let message: unknown;
+    try {
+      const body = (await health.json()) as { baseSkill?: { finding?: { message?: unknown } | null } | null };
+      message = body.baseSkill?.finding?.message;
+    } catch {
+      message = undefined;
+    }
+    if (typeof message === 'string' && message.length > 0) console.error(`wicked-crew: ${message}`);
+  }
 }
 
 main().catch((err) => {

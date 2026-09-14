@@ -31,8 +31,10 @@ import {
 } from '../src/core/types.js';
 import {
   applyBaseSkillEnv,
+  BASE_SKILL_INSTALL_HINT,
   BASE_SKILL_REF_ENGINE_ENV,
   baseSkillPosture,
+  baseSkillRemedy,
   DEFAULT_BASE_SKILL_REF,
   describeBaseSkill,
 } from '../src/skills/base-skill.js';
@@ -339,5 +341,20 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
     expect(body.remedy).toContain('POST /skills/refresh-baseline, then POST /skills/publish');
     expect(body.remedy).toContain('baseSkillRef ""');
     expect(body.remedy).not.toContain('baseSkillPolicy "warn"');
+  });
+
+  it('GET /health carries the base-skill ERROR in `warnings` too — "status ok, no warnings" never coexists with "refuses every launch" (F-W1-102); the finding, the warning and the 422 remedy quote ONE remedy that names the installer', async () => {
+    const h = await health();
+    expect(h.status).toBe('ok'); // the daemon serves — studio must load and show it (the state-home precedent)
+    const finding = h.baseSkill?.finding ?? null;
+    expect(finding).not.toBeNull();
+    expect(h.warnings).toEqual([{ kind: 'skills.base-skill', severity: 'error', message: finding!.message }]);
+    expect(finding!.message).toContain(BASE_SKILL_INSTALL_HINT);
+    expect(finding!.message.endsWith(baseSkillRemedy(false))).toBe(true);
+    const res = await app!.inject({ method: 'POST', url: '/api/v1/runs', payload: { problem: 'triage the flake', clisJson: '[]' } });
+    expect(res.statusCode).toBe(422);
+    expect((res.json() as BaseSkillRefusedResponse).remedy).toBe(baseSkillRemedy(false));
+    // A publish that hands the skill clears the warning with the finding — one surface, one object.
+    // (Covered end to end by the publish tests above; here the shape: no finding ⇒ no warnings key.)
   });
 });
