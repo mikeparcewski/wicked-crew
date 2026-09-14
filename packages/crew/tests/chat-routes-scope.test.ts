@@ -200,18 +200,24 @@ describe('POST /chats — scope lifecycle over a fake engine', () => {
       const scopedBody = scopedRes.json() as { refused: { cliKey: string; reason: string }[] };
       expect(scopedBody.refused.map((r) => r.cliKey)).toEqual(['pi', 'agy']);
       expect(scopedBody.refused[0]!.reason).toMatch(/asks no permissions/);
-      expect(scopedBody.refused[1]!.reason).toMatch(/no ACP adapter registered/);
+      expect(scopedBody.refused[1]!.reason).toMatch(/no ACP adapter/);
       // …and in the thread, one frame per refused seat, AFTER the scope is published.
       expect(broadcast).toEqual([
         { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'pi', reason: scopedBody.refused[0]!.reason, source: 'scope' },
         { type: 'chatSeatRefused', chat: 'dflt-scoped', cliKey: 'agy', reason: scopedBody.refused[1]!.reason, source: 'scope' },
       ]);
       broadcast = [];
+      // F-W1-003 = A: an UNSCOPED open no longer keeps the whole roster — the wrapped seat `agy`
+      // (no ACP adapter) is refused in this mode too, named with the ACP-seat reason.
       const plain = await open({ chatId: 'dflt-plain' });
       expect(plain.statusCode).toBe(201);
-      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'pi', 'codex', 'agy']);
-      expect((plain.json() as { refused: unknown[] }).refused).toEqual([]);
-      expect(broadcast).toEqual([]);
+      expect(chatOpen.mock.calls.at(-1)![1]).toEqual(['claude', 'pi', 'codex']);
+      const plainBody = plain.json() as { refused: { cliKey: string; reason: string }[] };
+      expect(plainBody.refused.map((r) => r.cliKey)).toEqual(['agy']);
+      expect(plainBody.refused[0]!.reason).toMatch(/no ACP adapter/);
+      expect(broadcast).toEqual([
+        { type: 'chatSeatRefused', chat: 'dflt-plain', cliKey: 'agy', reason: plainBody.refused[0]!.reason, source: 'scope' },
+      ]);
       // A roster with no admissible seat cannot open a scoped chat by default — said plainly, with the list.
       spy.mockReturnValue([{ key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } }]);
       const none = await open({ chatId: 'dflt-none', repoRefs: ['alpha'] });

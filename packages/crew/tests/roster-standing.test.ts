@@ -55,9 +55,10 @@ describe('rosterWithStandingFactory', () => {
       env: { WICKED_WORKER_HOME: '' },
     })();
     const of = (key: string) => roster.find((s) => s.key === key)!['chat_admission'] as { unscoped: { ok: boolean; reason?: string; source?: string }; scoped: { ok: boolean; reason?: string; source?: string } };
-    // No ACP adapter: sits in an unscoped chat, refused for a scoped one — with the daemon's own reason.
-    expect(of('claude').unscoped).toEqual({ ok: true });
-    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter registered/), source: 'scope' });
+    // No ACP adapter (this fixture's `claude` carries none): F-W1-003 = A — refused in BOTH modes,
+    // because chat runs on ACP-adapter seats only (was: admitted unscoped).
+    expect(of('claude').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter/), source: 'scope' });
+    expect(of('claude').scoped).toEqual({ ok: false, reason: expect.stringMatching(/no ACP adapter/), source: 'scope' });
     // Signed out: refused in BOTH modes, source auth (the reason names the remedy).
     expect(of('codex').unscoped).toEqual({ ok: false, reason: expect.stringMatching(/signed out/), source: 'auth' });
     expect(of('codex').scoped.ok).toBe(false);

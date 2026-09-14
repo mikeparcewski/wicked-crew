@@ -174,16 +174,21 @@ export function chatSeatAdmission(seat: StandingSeat, auth: SeatAuth, scoped: bo
     reasons.push('signed out — it cannot take a turn until it is signed in from the System page');
     source = 'auth';
   }
-  if (scoped) {
-    const acp = seat.acp ?? undefined;
-    if (acp === undefined) {
-      reasons.push('it has no ACP adapter registered, and a scoped chat holds only ACP-governed seats');
-    } else if (acp.acp_input_governance !== true && acp.os_sandbox !== true) {
-      reasons.push(
-        'its ACP adapter asks no permissions and its record arms no OS sandbox, so a scoped chat ' +
-          'could not hold the repositories read-only for it (open the chat unscoped to include it)',
-      );
-    }
+  const acp = seat.acp ?? undefined;
+  if (acp === undefined) {
+    // F-W1-003 = A (approved 2026-09-15): chat runs on ACP-adapter seats only, scoped AND
+    // unscoped. A seat with no ACP adapter is a WRAPPED seat — it does governed work in runs, but
+    // it has no in-process turn/permission channel to hold a chat session, so it is never a chat
+    // seat and is not offered in either mode (was: admitted to an unscoped chat).
+    reasons.push(
+      'it has no ACP adapter, so it is not a chat seat — chat runs on ACP-adapter seats only, and ' +
+        'this seat does governed work in runs instead',
+    );
+  } else if (scoped && acp.acp_input_governance !== true && acp.os_sandbox !== true) {
+    reasons.push(
+      'its ACP adapter asks no permissions and its record arms no OS sandbox, so a scoped chat ' +
+        'could not hold the repositories read-only for it (open the chat unscoped to include it)',
+    );
   }
   return reasons.length === 0 ? { ok: true } : { ok: false, reason: reasons.join('; '), source };
 }

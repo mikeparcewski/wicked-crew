@@ -96,11 +96,23 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
   const ungoverned = { key: 'pi', acp: { acp_input_governance: false, os_sandbox: false } };
   const sandboxed = { key: 'codex', acp: { acp_input_governance: false, os_sandbox: true } };
   const noAcp = { key: 'copilot' };
-  it('an UNSCOPED chat admits every seat that can take a turn, ACP or not — auth is the ONLY input (a chat is not a council; #533 review, F-4)', () => {
-    for (const seat of [governed, ungoverned, sandboxed, noAcp]) {
+  it('an UNSCOPED chat admits every ACP seat that can take a turn — governed or not (chat is not a council; #533 review, F-4)', () => {
+    for (const seat of [governed, ungoverned, sandboxed]) {
       expect(chatSeatAdmission(seat, 'signed_in', false)).toEqual({ ok: true });
       expect(chatSeatAdmission(seat, 'unknown', false)).toEqual({ ok: true });
       expect(chatSeatAdmission(seat, 'not_required', false)).toEqual({ ok: true });
+    }
+  });
+
+  it('F-W1-003 = A (2026-09-15): a NON-ACP (wrapped) seat is not a chat seat — refused in BOTH modes, source scope, with an actionable reason', () => {
+    for (const scoped of [false, true]) {
+      const v = chatSeatAdmission(noAcp, 'signed_in', scoped);
+      expect(v.ok).toBe(false);
+      if (v.ok) return;
+      expect(v.source).toBe('scope');
+      expect(v.reason).toMatch(/no ACP adapter/);
+      expect(v.reason).toMatch(/governed work in runs/);
+      expect(v.reason).not.toMatch(/open the chat unscoped/);
     }
   });
 
@@ -123,7 +135,7 @@ describe('chatSeatAdmission — the default seats of a chat, and WHY a seat is n
     }
     const copilot = chatSeatAdmission(noAcp, 'signed_in', true);
     expect(copilot.ok).toBe(false);
-    if (!copilot.ok) expect(copilot.reason).toMatch(/no ACP adapter registered/);
+    if (!copilot.ok) expect(copilot.reason).toMatch(/no ACP adapter/);
   });
 
   it('every applicable reason is carried — a signed-out, ungoverned seat in a scoped chat says both', () => {
