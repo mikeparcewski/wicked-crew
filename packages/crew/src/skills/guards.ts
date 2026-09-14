@@ -230,6 +230,9 @@ export const PORTABILITY_EXPLANATION: Record<PortabilityIssue, string> = {
   'relative-link': 'the content links a file via `../`, which the flat `<name>/SKILL.md` layout of every non-Claude install cannot follow',
   'cross-skill-path': 'the content reaches ANOTHER skill by filesystem path; skills are laid out flat by name outside Claude Code, so name the skill (`wicked-garden-<x>`, "its `refs/x.md`") instead',
   'requires-harness:claude': 'the frontmatter declares `metadata.requires-harness: claude` — the author says this skill genuinely needs the Claude harness',
+  // api-types 0.38.0 types the token ahead of its detector (FIX-IT-ALL L6 PR-L6-3, crew 0.7.36):
+  // the exhaustive map needs the sentence now; the reason is not yet reported by any publisher.
+  'claude-dispatch': 'the body calls a Claude Code dispatch primitive (`Task(`, `Skill(`, `context: fork`, `AskUserQuestion`, `TaskCreate`) that no other seat has — a pi/opencode/codex worker cannot follow it; write the hand-off as plain prose',
 };
 
 /** The tail every `non-portable` explanation shares. */
