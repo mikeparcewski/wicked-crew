@@ -65,7 +65,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { isAbsolute } from 'node:path';
-import { pidAlive, readCrewSidecar, type CrewSidecar } from '../interactive/bridge-pool.js';
+import { ownerAlive, readCrewSidecar, type CrewSidecar } from '../interactive/bridge-pool.js';
 import { childEnvWithBootEstateDb } from './governance-store.js';
 
 /**
@@ -136,12 +136,15 @@ const ORPHAN_TOKEN_RES: readonly RegExp[] = [...BRIDGE_BINS, ...WORKER_CLI_BINS]
 
 /**
  * `wicked-interactive` as a whole token — the npx spec spelling (`wicked-interactive@^0.9.3`), the
- * npm shim (`…/.bin/wicked-interactive`) and the package path (`…/wicked-interactive/dist/…`) all
- * count, `wicked-interactive-export` never does — followed by the `serve` subcommand as its own
- * token. A `render`/`export` invocation of the same package is not a bridge.
+ * npm shim (`…/.bin/wicked-interactive`), a Windows launcher (`wicked-interactive.cmd`) and the
+ * package path (`…/wicked-interactive/dist/cli.js`) all count, `wicked-interactive-export` never
+ * does — followed IMMEDIATELY by the `serve` subcommand (interactive's options come after the
+ * subcommand: `serve --root <dir> [--port N]`). `render --mode serve` is not a bridge, and neither
+ * is anything with another token between the bin and `serve` — review NIT on crew #606: the
+ * shutdown path has no sidecar gate, so the subcommand must be the anchor.
  */
 const INTERACTIVE_SERVE_RE = new RegExp(
-  `(?:^|[\\s/\\\\"'])${INTERACTIVE_BIN}(?:@[^\\s"']*)?(?:\\.(?:cmd|exe|bat|mjs|js))?(?=[\\s/\\\\"']|$).*?\\sserve(?:\\s|$)`,
+  `(?:^|[\\s/\\\\"'])${INTERACTIVE_BIN}(?:@[^\\s"'/\\\\]*)?(?:\\.(?:cmd|exe|bat|mjs|js))?(?:[/\\\\][^\\s"']*)?["']?\\s+serve(?:\\s|$)`,
   'i',
 );
 
@@ -301,18 +304,21 @@ export function parseOrphanedInteractiveBridges(listing: string): OrphanedIntera
  * rules (`interactive/bridge-pool.ts`, codex on crew#506): crew's `.wi-serve.crew.json` in the root
  * the command line names must record one of the tree's pids — the proof crew spawned it; an
  * operator's `wicked-interactive serve` has no sidecar and is never matched — and the daemon it
- * records as owner must be GONE. A live owner (the spawner, or a daemon that adopted the bridge and
- * stamped itself) is using it; a sidecar without an owner is of unproven ownership and left alone.
+ * records as owner must be GONE: not in the process table, or a DIFFERENT incarnation of that pid
+ * (`ownerStartedAt` no longer matches — a recycled pid must not keep a bridge alive for weeks). A
+ * live owner (the spawner, or a daemon that adopted the bridge and stamped itself) is using it; a
+ * sidecar without an owner is of unproven ownership and left alone.
  */
 function orphanedInteractiveTargets(listing: string, io: BridgeReaperIo): number[] {
   const sidecarOf = io.sidecar ?? readCrewSidecar;
-  const alive = io.alive ?? pidAlive;
+  const isOwnerAlive = io.ownerAlive ?? ownerAlive;
   const targets: number[] = [];
   for (const { root, pids } of parseOrphanedInteractiveBridges(listing)) {
     const sidecar = sidecarOf(root);
     if (sidecar === null || !pids.includes(sidecar.pid)) continue;
     const owner = sidecar.ownerPid;
-    if (owner === undefined || !Number.isInteger(owner) || owner <= 0 || alive(owner)) continue;
+    if (owner === undefined || !Number.isInteger(owner) || owner <= 0) continue; // unproven ownership: not ours to kill
+    if (isOwnerAlive(sidecar)) continue; // the same daemon incarnation still owns it
     targets.push(...pids);
   }
   return targets;
@@ -465,8 +471,9 @@ export interface BridgeReaperIo {
   list?: () => string | null;
   /** Interactive-orphan gate: crew's sidecar for a docs root (F-W1-103); injectable so tests avoid real files. */
   sidecar?: (root: string) => CrewSidecar | null;
-  /** Interactive-orphan gate: is the sidecar's owning daemon alive? Default {@link pidAlive}. */
-  alive?: (pid: number) => boolean;
+  /** Interactive-orphan gate: is the daemon the sidecar names as owner still THAT daemon — pid AND
+   *  start time ({@link ownerAlive}), so a recycled pid reads as "owner gone"? Injectable for tests. */
+  ownerAlive?: (sidecar: CrewSidecar) => boolean;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
 }

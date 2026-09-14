@@ -18,9 +18,10 @@
  * bridge added or removed there cannot silently escape the reaper here.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -42,7 +43,7 @@ import {
   startOrphanSweep,
   sweepOrphanedRunProcesses,
 } from '../src/core/bridge-reaper.js';
-import { pidAlive, type CrewSidecar } from '../src/interactive/bridge-pool.js';
+import { CREW_SIDECAR_NAME, parentPidOf, pidAlive, readCrewSidecar, type CrewSidecar } from '../src/interactive/bridge-pool.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, '..');
@@ -525,8 +526,14 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} serve --root /x`)).toBe(true);
     expect(isInteractiveServe(`node /repo/node_modules/${INTERACTIVE_BIN}/dist/cli.js serve --root /x`)).toBe(true);
     expect(isInteractiveServe(`"C:\\Users\\op\\AppData\\npm\\${INTERACTIVE_BIN}.cmd" serve --root C:\\docs`)).toBe(true);
+    // Interactive's options come AFTER the subcommand (`serve --root <dir> [--port N]`); a token
+    // between the bin and `serve` is not how any bridge is spawned, so it is not a bridge.
+    expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} --port 4400 serve --root /x`)).toBe(false);
     expect(isInteractiveServe(`node /opt/bin/${INTERACTIVE_BIN}-export serve --root /x`)).toBe(false);
     expect(isInteractiveServe(`npm exec ${INTERACTIVE_BIN}@^0.9.3 render --root /x`)).toBe(false);
+    // `serve` must be the token right after the bin (review NIT): a render whose option VALUE is
+    // `serve` is not a bridge — the shutdown path has no sidecar gate to catch it.
+    expect(isInteractiveServe(`npm exec ${INTERACTIVE_BIN}@^0.9.3 render --mode serve --root /x`)).toBe(false);
     expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} --root /x`)).toBe(false);
     expect(isInteractiveServe('node /opt/homebrew/bin/wicked-crew serve')).toBe(false);
   });
@@ -569,7 +576,8 @@ describe('interactive bridge trees (F-W1-103)', () => {
       return s === undefined ? null : { env: {}, startedBy: 'wicked-crew', startedAt: '', ...s };
     };
   const DEAD_OWNER = 30379; // the daemon both recorded orphans named — long gone
-  const aliveExcept = (...dead: number[]) => (pid: number): boolean => !dead.includes(pid);
+  /** A fake owner check: every recorded owner is alive except the listed pids. */
+  const ownerGone = (...dead: number[]) => (s: CrewSidecar): boolean => !dead.includes(s.ownerPid ?? -1);
 
   it('reapOrphansAtBoot reaps a crew-recorded tree whose owner daemon is gone — the wrapper AND the server; run-process orphans still need their worktree cwd', () => {
     const signals: Array<[number, NodeJS.Signals | 0]> = [];
@@ -580,7 +588,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
         [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER },
         [DOCS]: { pid: 9488, ownerPid: DEAD_OWNER },
       }),
-      alive: aliveExcept(DEAD_OWNER),
+      ownerAlive: ownerGone(DEAD_OWNER),
       kill: (pid, sig) => signals.push([pid, sig]),
     });
     expect(reaped.sort(byNumber)).toEqual([8687, 9488, 96633, 98034]);
@@ -600,7 +608,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
         ['/home/op/.wicked-crew/interactive/docs']: { pid: 91000 }, // a pre-#506 sidecar: no proven owner
         ['/home/op/notes']: { pid: 77002, ownerPid: 6556 }, // owner alive — that daemon adopted it and stamped itself
       }),
-      alive: aliveExcept(DEAD_OWNER),
+      ownerAlive: ownerGone(DEAD_OWNER),
       kill: (pid) => signals.push(pid),
     });
     expect(reaped).toEqual([]);
@@ -613,7 +621,7 @@ describe('interactive bridge trees (F-W1-103)', () => {
       list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
       cwdInWorktree: () => false,
       sidecar: sidecars({ [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER } }),
-      alive: aliveExcept(DEAD_OWNER),
+      ownerAlive: ownerGone(DEAD_OWNER),
       kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
     };
     const pending = new Set<number>();
@@ -622,6 +630,66 @@ describe('interactive bridge trees (F-W1-103)', () => {
     expect(signals).toEqual([[96633, 'SIGTERM'], [98034, 'SIGTERM'], [96633, 'SIGKILL'], [98034, 'SIGKILL']]);
     expect(pending.size).toBe(0);
   });
+
+  // Review finding 4 (crew #606): the DEFAULT seams wired end to end — real `ps`, the real sidecar
+  // reader, the real owner check (pid + start time) and a real SIGTERM. A wrapper spawns its "server"
+  // and EXITS, so the server is reparented to init exactly like the recorded orphans; a real
+  // `.wi-serve.crew.json` in the fixture root names it with an owner pid that is gone.
+  it.skipIf(process.platform === 'win32')(
+    'end to end with the default seams: a serve orphaned by its dead wrapper, recorded by a dead owner, is reaped at boot — fenced to the fixture root',
+    async (ctx) => {
+      const root = mkdtempSync(join(tmpdir(), 'wi-reap-e2e-'));
+      const WRAPPER = `
+        const { spawn } = require('node:child_process');
+        const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ...process.argv.slice(1)], { detached: true, stdio: 'ignore' });
+        c.unref();
+        process.stdout.write(String(c.pid) + '\\n');
+      `;
+      const wrapper = spawn(process.execPath, ['-e', WRAPPER, INTERACTIVE_BIN, 'serve', '--root', root], {
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      const serverPid = Number(
+        await new Promise<string>((resolve, reject) => {
+          wrapper.once('error', reject);
+          wrapper.stdout?.once('data', (d: Buffer) => resolve(String(d).trim()));
+        }),
+      );
+      await once(wrapper, 'exit');
+      try {
+        expect(Number.isInteger(serverPid) && serverPid > 0).toBe(true);
+        // Reparenting to init is the precondition the production sweep keys on. A subreaper
+        // environment (some containers) keeps a different parent — there the case is skipped, never faked.
+        await waitUntil(() => parentPidOf(serverPid) === 1, 5_000).catch(() => undefined);
+        if (parentPidOf(serverPid) !== 1) ctx.skip();
+        const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
+        expect(pidAlive(deadOwner)).toBe(false);
+        writeFileSync(
+          join(root, CREW_SIDECAR_NAME),
+          JSON.stringify({ pid: serverPid, env: {}, startedBy: 'wicked-crew', startedAt: new Date().toISOString(), ownerPid: deadOwner, ownerStartedAt: 'Thu Jan  1 00:00:00 1970' }),
+          'utf8',
+        );
+        expect(readCrewSidecar(root)?.pid).toBe(serverPid);
+        // Default `list`, `ownerAlive` and `kill`. The sidecar READER is fenced to the fixture root
+        // and the run-process arm is switched off: a test must never reap a process outside its own
+        // fixture — the host it runs on may carry real orphans the production sweep exists for.
+        const reaped = reapOrphansAtBoot({
+          cwdInWorktree: () => false,
+          sidecar: (r) => (r === root ? readCrewSidecar(r) : null),
+        });
+        expect(reaped).toEqual([serverPid]);
+        await waitUntil(() => !pidAlive(serverPid), 5_000);
+        expect(pidAlive(serverPid)).toBe(false);
+      } finally {
+        try {
+          process.kill(serverPid, 'SIGKILL');
+        } catch {
+          /* gone */
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
 
   // The proof the hand-off asked for: start a bridge-shaped tree (wrapper → server), hold no handle
   // to the server, and show the daemon's shutdown path finds and reaps BOTH through the real
