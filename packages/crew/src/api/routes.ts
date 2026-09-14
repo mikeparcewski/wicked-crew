@@ -2462,52 +2462,58 @@ export function registerRoutes(
   const ChatSeatsSchema = z.object({
     clis: z.array(z.string().min(1)).min(1).max(8),
   }).strict();
-  app.post(`${V}/chats/:id/seats`, async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const parsed = ChatSeatsSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
-    }
-    const engine = chatScopes.engineOf(id);
-    if (engine === undefined) {
-      return reply.code(404).send({
-        error: `chat ${id} is not open on this daemon — open a chat first, then re-seat into it`,
-      });
-    }
-    const clis = [...new Set(parsed.data.clis)];
-    // A seat mid-turn is not re-warmed under its own reply (the same rule as a send).
-    const inFlight = chatTurns.inFlight(id, clis);
-    if (inFlight !== null) {
-      return reply.code(409).send({
-        code: 'turn_in_flight',
-        error: `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering in this chat (turn ${inFlight.turnId}) — wait for the reply before re-seating.`,
-        chatId: id,
-        turn: inFlight,
-      });
-    }
-    try {
-      const seats = await adapter.chatOpen(id, clis, engine.cwd, {
-        codeGraphDb: engine.codeGraphDb,
-        readRoots: engine.readRoots,
-      });
-      const refused = chatScopes.foldSeats(id, seats) ?? [];
-      const projectId = projects.index.projectOf(id) ?? undefined;
-      for (const s of seats) {
-        if (s.ok) continue;
-        runtime.broadcast?.({
-          type: 'chatSeatRefused',
-          chat: id,
-          cliKey: s.cliKey,
-          reason: s.error ?? 'the engine refused the seat',
-          source: 'engine',
-          ...(projectId !== undefined ? { project_id: projectId } : {}),
-        } as CoreEvent);
+  app.post(
+    `${V}/chats/:id/seats`,
+    // The manifest declares the codes now; `ChatSeatsBody` / `ChatSeatsResponse` are named here
+    // once api-types 0.39.0 publishes them (the 201's shapes are what the body already carries).
+    { config: { manifest: { statusCodes: [200, 400, 404, 409] } } },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const parsed = ChatSeatsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send(invalidBody(parsed.error, 'Invalid request body'));
       }
-      return { chatId: id, seats, refused };
-    } catch (err) {
-      return reply.code(400).send({ error: message(err) });
-    }
-  });
+      const engine = chatScopes.engineOf(id);
+      if (engine === undefined) {
+        return reply.code(404).send({
+          error: `chat ${id} is not open on this daemon — open a chat first, then re-seat into it`,
+        });
+      }
+      const clis = [...new Set(parsed.data.clis)];
+      // A seat mid-turn is not re-warmed under its own reply (the same rule as a send).
+      const inFlight = chatTurns.inFlight(id, clis);
+      if (inFlight !== null) {
+        return reply.code(409).send({
+          code: 'turn_in_flight',
+          error: `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering in this chat (turn ${inFlight.turnId}) — wait for the reply before re-seating.`,
+          chatId: id,
+          turn: inFlight,
+        });
+      }
+      try {
+        const seats = await adapter.chatOpen(id, clis, engine.cwd, {
+          codeGraphDb: engine.codeGraphDb,
+          readRoots: engine.readRoots,
+        });
+        const refused = chatScopes.foldSeats(id, seats) ?? [];
+        const projectId = projects.index.projectOf(id) ?? undefined;
+        for (const s of seats) {
+          if (s.ok) continue;
+          runtime.broadcast?.({
+            type: 'chatSeatRefused',
+            chat: id,
+            cliKey: s.cliKey,
+            reason: s.error ?? 'the engine refused the seat',
+            source: 'engine',
+            ...(projectId !== undefined ? { project_id: projectId } : {}),
+          } as CoreEvent);
+        }
+        return { chatId: id, seats, refused };
+      } catch (err) {
+        return reply.code(400).send({ error: message(err) });
+      }
+    },
+  );
 
   // Enumerate live chats (FINDING-027 gap 4). Chat sessions deliberately outlive the page, and
   // their ids are minted client-side — so before this route the only record of an orphaned seat
