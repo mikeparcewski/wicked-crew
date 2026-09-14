@@ -306,10 +306,21 @@ describe('deliverPrScript (the hardened field script)', () => {
     // The field overlay guarded a personal account by name; that must never ship in crew.
     expect(script).not.toContain('mikeparcewski');
     expect(script).toContain('GH_ACCOUNT');
-    // The switch only runs when GH_ACCOUNT is set AND differs from the current login.
+    // The identity check reads gh's ACTIVE login and only acts when GH_ACCOUNT is set.
     expect(script).toContain('gh api user -q .login');
-    expect(script).toContain('gh auth switch --hostname github.com --user "$GH_ACCOUNT"');
     expect(script).toMatch(/if \[ -n "\$\{GH_ACCOUNT:-\}" \]/);
+  });
+
+  // DES-L9 D-18 (FIX-IT-ALL row 0.11, PR-L9-crew-0 — tests first): with GH_ACCOUNT set and a
+  // differing (or unreadable) active login the phase REFUSES — `deliver: identity mismatch — …;
+  // nothing was staged, committed or pushed …` — and the `gh auth switch` is DELETED: the daemon's
+  // push identity is what its gh (or GH_TOKEN) holds, disclosed at the deliver gate, never flipped
+  // at push time (crew #549, F-RC1-010). Today the script still switches, so this is `it.fails`;
+  // PR-L9-crew turns it red on landing — flip to `it` there (the plain assertion above stays).
+  it.fails('NOT_FIXED_YET (DES-L9 D-18, PR-L9-crew): the identity guard REFUSES on a mismatch — no `gh auth switch` in the script', () => {
+    expect(script).not.toContain('gh auth switch');
+    expect(script).toContain('deliver: identity mismatch');
+    expect(script).toContain('nothing was staged, committed or pushed');
   });
 
   // crew#317: the overlay def that shipped run d1bc72c2 began `set -e` with NO pipefail, which

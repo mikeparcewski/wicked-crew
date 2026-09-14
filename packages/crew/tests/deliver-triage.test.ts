@@ -261,3 +261,100 @@ describe('triageDeliverFailure (wicked-core#431 follow-through)', () => {
     expect(triageDeliverFailure(undefined)).toBeNull();
   });
 });
+
+// ── DES-L9 (FIX-IT-ALL row 0.11, PR-L9-crew-0 — tests FIRST, mirror-first for the engine arm) ────
+//
+// PR-L9-crew adds two refusal families to the deliver script: REVISION mode (`revisesPr` — the run
+// pushes onto an open PR's branch: the branch may have moved or vanished since the run based on it,
+// or the run may have added no commit) and IDENTITY (D-18: with `GH_ACCOUNT` set, a gh login that
+// differs or cannot be read REFUSES — the `gh auth switch` is deleted). Every one of them is an
+// operator decision the engine parks at an `escalation` gate (DES-L9 §4) — never a seat fault, never
+// a post-hoc lift: `script_refusal`, `author: 'script'`, `recoverable: false`, exactly like the
+// script's existing refusals. Pinned here BEFORE the script grows them, against the DES §4 texts
+// verbatim, so PR-L9-crew's wording must keep the classifier's `deliver: ` line contract.
+describe('DES-L9 deliver refusals — revision + identity classify as script refusals (PR-L9-crew-0)', () => {
+  const PR_BRANCH = 'wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595';
+  const RUN_BRANCH = `wicked/${RUN}`;
+  /** DES-L9 §4, the script's own texts with the placeholders filled. */
+  const L9 = {
+    identityMismatch:
+      "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is someone-else; nothing was " +
+      "staged, committed or pushed. Fix the daemon's gh login (gh auth switch, or GH_TOKEN in the daemon environment) " +
+      'and approve to retry the deliver phase',
+    identityUnreadable:
+      "deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is unreadable; nothing was " +
+      "staged, committed or pushed. Fix the daemon's gh login (gh auth switch, or GH_TOKEN in the daemon environment) " +
+      'and approve to retry the deliver phase',
+    branchGone:
+      `deliver: pull request #273's branch origin/${PR_BRANCH} no longer exists on the remote; nothing was staged, ` +
+      'committed or pushed',
+    branchMoved:
+      `deliver: pull request #273's branch moved since this run based on it (origin/${PR_BRANCH} is no longer an ` +
+      `ancestor of ${RUN_BRANCH}); nothing was staged, committed or pushed — launch a new revision on the current head, ` +
+      `or rebase ${RUN_BRANCH} onto origin/${PR_BRANCH} by hand and approve to retry`,
+    nothingOnTop: 'deliver: nothing to deliver — the run added no commit on top of PR #273',
+  };
+  const SCRIPT_REFUSAL = { kind: 'script_refusal', author: 'script', disposition: 'escalate', recoverable: false } as const;
+
+  it('every DES-L9 refusal text classifies script_refusal — an escalation, never recoverable by a post-hoc lift', () => {
+    for (const [name, text] of Object.entries(L9)) {
+      expect(triageDeliverFailure(text), name).toEqual(SCRIPT_REFUSAL);
+      // The engine's `denial_reason` framing (`deliver refused on unit N: <excerpt>` under the F1 arm, or
+      // today's `Worker FAILED on unit N (…): <excerpt>`) keeps the `deliver: ` line intact.
+      expect(triageDeliverFailure(framed(text)), `${name} (framed)`).toEqual(SCRIPT_REFUSAL);
+    }
+  });
+
+  // FOUND BY THIS PIN (mirror-first): DES-L9 §5 frames the F1 arm's `unit.denial_reason` as
+  // `deliver refused on unit {ord}: {snippet}` — but the classifier's line rule accepts `deliver: `
+  // only at the start, after a newline, or after the engine's `): ` framing. Today the classifier's
+  // one crew consumer is `seat-health.ts:246` over `stepFailed.detail` — which the arm serves as the
+  // BARE snippet, so seat health is unaffected (pinned in seat-health.test.ts). But PR-L9-crew's
+  // post-hoc reading and `deliver-text.ts` classify the UNIT's `denial_reason` (DES-L9 §5), and the
+  // studio's delivery card mirrors it — there this framing answers null. ONE character settles it on
+  // either side: the engine frames with `(deliver): ` or a newline before the snippet (PR-L9-core), or
+  // PR-L9-crew widens SCRIPT_REFUSAL to accept `: deliver: `. NOT_FIXED_YET until one lands — flip
+  // to `it` there.
+  it.fails('NOT_FIXED_YET (DES-L9 §5 framing ↔ the deliver-triage line rule): the F1 arm’s `deliver refused on unit N: …` denial_reason classifies script_refusal', () => {
+    for (const [name, text] of Object.entries(L9)) {
+      expect(triageDeliverFailure(`deliver refused on unit 5: ${boundedExcerpt(text)}`), `${name} (F1 arm framing)`).toEqual(SCRIPT_REFUSAL);
+    }
+  });
+
+  it('the identity refusal is the WHOLE output (it runs before `git fetch`), so it is carried by the head', () => {
+    // DES-L9 §5: the identity block replaces the `gh auth switch` guard at the very top of the script —
+    // nothing precedes it, so the head-150 of the excerpt is the refusal's own first line.
+    for (const text of [L9.identityMismatch, L9.identityUnreadable]) {
+      expect([...text].slice(0, 150).join('')).toMatch(/^deliver: identity mismatch — GH_ACCOUNT is release-bot but gh's active login is /);
+      expect(triageDeliverFailure(framed(`${text}\n${'-'.repeat(400)}`))).toEqual(SCRIPT_REFUSAL);
+    }
+  });
+
+  it('the revision-mode refusals are NOT marker-bearing: none of them may read as a lift conflict, a moved base or a preflight change', () => {
+    for (const [name, text] of Object.entries(L9)) {
+      expect(text, name).not.toContain(DELIVER_LIFT_CONFLICT_MARKER);
+      expect(text, name).not.toContain(DELIVER_BASE_MOVED_MARKER);
+      expect(text, name).not.toContain(DELIVER_PREFLIGHT_CHANGED_MARKER);
+      expect(triageDeliverFailure(text)?.recoverable, name).toBe(false);
+    }
+  });
+
+  // The revision refusals run AFTER `git fetch origin` (the moved-head check needs the fresh
+  // `origin/<pr-branch>`), so real fetch chatter precedes them in the Tool output and the engine's
+  // head-150 keeps the chatter, not the refusal — only the tail-250 is the script's (review
+  // F-527-001, the same trap the BASE MOVED / PREFLIGHT CHANGED markers were moved to the tail for).
+  // The DES §4 moved-head text is LONGER than 250 chars once the two branch names are filled in, so
+  // its `deliver: ` line start falls into the elided middle and the classifier answers null.
+  // NOT_FIXED_YET: PR-L9-crew must make the refusal survive the excerpt — a short trailing
+  // `deliver: …` line (the marker idiom, without a marker) or an equivalent — and flip this to `it`.
+  it.fails('NOT_FIXED_YET (DES-L9 PR-L9-crew): the moved-head refusal survives the head+tail excerpt after fetch chatter', () => {
+    const chatter =
+      'From /srv/git/wicked-studio\n * branch            main       -> FETCH_HEAD\n' +
+      `   1432c96..f57069d  ${PR_BRANCH} -> origin/${PR_BRANCH}\n` +
+      'deliver: PR text composed from the run record (http://127.0.0.1:7701)\n';
+    expect([...L9.branchMoved].length).toBeGreaterThan(250);
+    const excerpt = framed(chatter + L9.branchMoved);
+    expect(excerpt).toContain('chars elided');
+    expect(triageDeliverFailure(excerpt)).toEqual(SCRIPT_REFUSAL);
+  });
+});
