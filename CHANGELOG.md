@@ -13,6 +13,22 @@ mentioned only where a daemon release depends on them.
 ### Changed
 - **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
 
+### Fixed
+- **`wicked-crew status` / `gate` with no daemon answering print one remedy line and exit 1; a
+  non-2xx answer exits 1; `wicked-crew --version` exists (crew#551, crew#493, F-RC1-044, F-003 —
+  FIX-IT-ALL L10-1).** After a reboot the daemon is gone and `wicked-crew status` printed the whole
+  `TypeError: fetch failed … ECONNREFUSED` stack; `wicked-crew --version` answered "Unknown
+  command". ONE `daemonFetch()` wraps the two bare `fetch` calls in `cli/index.ts`: a connection
+  failure is `wicked-crew: no daemon answering on 127.0.0.1:<port> — start it with \`wicked-crew
+  serve\` (crew#551)` on stderr, exit 1, no stack. **Behaviour changes:** `status`/`gate` exit 1
+  with a one-line remedy when no daemon answers (was: stack trace); `status`/`gate` exit 1 on a
+  non-2xx answer as `wicked-crew: <verb> failed: <status> <body>` (was: `status` printed the error
+  body as JSON and exited 0 — 0 consumers of the exit code in crew or wicked-ci). The 2xx output is
+  unchanged. `version` | `--version` | `-V` prints `wicked-crew <v>` / `wicked-core-ts <v|unknown>`
+  / `wicked-studio <v|none>` for THIS install from the three readers that already existed unjoined
+  (new `core/versions.ts`), never consulting a socket — the daemon on a port is
+  `GET /api/v1/diagnostics` (crew#499); the usage line says so. No daemon service install (D-17).
+
 ## [0.7.34] — 2026-09-14
 
 Release train 1 (pipeline hardening, step 3) — **core-ts 0.7.25 / studio 0.5.9 / api-types 0.37.0 /
