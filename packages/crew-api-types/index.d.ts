@@ -1438,7 +1438,7 @@ export interface GateEscalatedEvent {
  * containment is the worktree guard plus the command-text fences, which a shell can evade.
  * `reason` is the engine's sentence naming the deciding record/flag.
  */
-export interface SandboxPostureEvent {
+export type SandboxPostureEvent = {
   type: 'sandboxPosture';
   session: string;
   ord: number;
@@ -1446,22 +1446,24 @@ export interface SandboxPostureEvent {
   cli: string;
   posture: 'os' | 'advisory';
   reason: string;
-}
+};
 
 /**
  * F-RC1-064 / F-E2E-028 (api-types 0.38.0; emitted since wicked-core#456): a TERMINAL run's
  * worktree was KEPT because it holds uncommitted work the run branch does not carry — named on the
  * wire so a skin can point the operator at the path. Cancel and the terminal reap apply the same
  * rule; the retention window (`WICKED_COMPLETED_WORKTREE_KEEP_DAYS`) then reaps it clean-only. A
- * clean tree is reaped and emits nothing. Session-level (no `ord`).
+ * clean tree is reaped and emits nothing. Session-level (no `ord`). Both new frames are `type`
+ * aliases on purpose — see {@link EvaluatorMutatedWorktreeEvent}: an alias satisfies `CoreEvent`'s
+ * index signature and relays through the CoreEvent-typed broadcast seams unchanged.
  */
-export interface WorktreeRetainedEvent {
+export type WorktreeRetainedEvent = {
   type: 'worktreeRetained';
   session: string;
   /** The kept worktree's absolute path (the engine's; a skin never resolves it). */
   path: string;
   reason: string;
-}
+};
 
 /** P2 — a tool-executor command was dispatched (non-agent unit). */
 export interface ToolExecutorDispatchedEvent {
