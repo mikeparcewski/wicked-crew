@@ -21,10 +21,13 @@
 // (`SeatFailureReason::NotLoggedIn`) and exits 1. Two seats on purpose: a single seat takes the
 // FINDING-010 short-circuit (no council convened) and would fail at the UNIT instead.
 //
-// The `it.fails` case is NOT_FIXED_YET: it passes while the engine still books `sessionFailed` and
-// starts FAILING the day crew CI links a wicked-core main carrying 3A — the flip signal (`it.fails` →
-// `it`, in L3's crew PR). The unmarked case proves the harness reaches the distribution refusal TODAY,
-// so the expectation can never pass for an unrelated reason (a run that never launched, a boot error).
+// Engine-version-tolerant (the #592 shape; wicked-core#523 = L3 PR-3A, core-ts 0.7.27): crew CI
+// builds core-ts from core MAIN, so this file must pass on BOTH sides of the engine change. The first
+// case proves the harness reaches the distribution refusal on either engine (a run that never
+// launched, or a boot error, can never pass it). The second case asserts the 3A gate shape whenever
+// the engine PARKED the run (`awaiting_human`) and returns early on a pre-3A engine that booked
+// `sessionFailed` — the first case already pinned that terminal. No NOT_FIXED_YET marker: the flip is
+// observed, not scheduled.
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -198,8 +201,11 @@ describe('every seat benched at DISTRIBUTION (DES-L3 PR-3A / D-10)', () => {
     }
   });
 
-  it.fails('NOT_FIXED_YET (L3 PR-3A, core-ts 0.7.27): the run parks at gateEscalated{dead_seat} → awaitingHuman{escalation}; benched_seats names both seats; every agent unit pending on clis[0]; 0 sessionFailed', () => {
-    expect(settled.session['status']).toBe('awaiting_human');
+  it('L3 PR-3A (core-ts 0.7.27): when the engine parks the run, it is at gateEscalated{dead_seat} → awaitingHuman{escalation}; benched_seats names both seats; every agent unit pending on clis[0]; 0 sessionFailed', () => {
+    if (settled.session['status'] !== 'awaiting_human') {
+      // Pre-3A engine: the run rested `failed` (pinned by the case above). Nothing more to assert.
+      return;
+    }
     const gates = settled.events.filter((e) => e['type'] === 'gateEscalated');
     expect(gates.length).toBeGreaterThanOrEqual(1);
     const gate = gates[gates.length - 1]!;
