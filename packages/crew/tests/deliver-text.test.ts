@@ -400,6 +400,11 @@ describe('deliverTitle — conventional prefix, no bare-URL titles, cuts outside
     expect(deliverTitle('add the attention-reason helper', RUN_ID, null)).toBe('add the attention-reason helper');
     expect(deliverTitle('fix(deliver): already conventional', RUN_ID, 'bug')).toBe('fix(deliver): already conventional');
     expect(deliverTitle('feat!: breaking', RUN_ID, 'bug')).toBe('feat!: breaking');
+    expect(deliverTitle('docs: explain the gate', RUN_ID, 'bug')).toBe('docs: explain the gate');
+    // review-L9-603 M1: a free-form `word: ` is NOT a conventional type — the workflow's prefix applies.
+    expect(deliverTitle('wip: half done', RUN_ID, 'bug')).toBe('fix: wip: half done');
+    expect(deliverTitle('note: see the thread', RUN_ID, 'feature')).toBe('feat: note: see the thread');
+    expect(deliverTitle('todo: later', RUN_ID, 'survey-repo')).toBe('chore: todo: later');
     expect(deliverTitle('', RUN_ID, 'bug')).toBe(`wicked-crew run ${RUN_ID}`);
     expect(conventionalPrefix('bug')).toBe('fix');
     expect(conventionalPrefix(undefined)).toBe('chore');

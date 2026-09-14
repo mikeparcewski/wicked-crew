@@ -167,8 +167,12 @@ const CONVENTIONAL_TYPE_BY_WORKFLOW: Record<string, string> = {
   feature: 'feat',
   migration: 'refactor',
 };
-/** A headline that already carries a conventional prefix (`fix(scope)!: …`). */
-const HAS_CONVENTIONAL_PREFIX = /^[a-z]+(?:\([^)]*\))?!?: /;
+/**
+ * A headline that already carries a CONVENTIONAL prefix (`fix(scope)!: …`) — the conventional-commit
+ * type set, closed (review-L9-603 M1): an intent opening `wip: …` / `note: …` is a free-form word,
+ * not a type, and gets the workflow's prefix like any other headline.
+ */
+const HAS_CONVENTIONAL_PREFIX = /^(?:feat|fix|refactor|chore|docs|test|build|ci|perf|style|revert)(?:\([^)]*\))?!?: /;
 
 /**
  * The conventional-commit prefix for a headline: derived from the workflow (`bug` → `fix`,
