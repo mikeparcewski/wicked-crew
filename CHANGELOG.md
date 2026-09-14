@@ -70,6 +70,12 @@ mentioned only where a daemon release depends on them.
   (`release-api-types.yml`); studio 0.5.10 pins it and re-vendors its byte-pinned mirrors.
 - **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
 
+<!-- fixall L3 -->
+- **Test mirror for wicked-core D-11 (free text plans ONE unit from core-ts 0.7.27).** The
+  daemon-bridge and evidence-export integration suites pinned "2 planned units" for a two-sentence
+  free-text problem — a sentence-splitter contract the engine deletes in 0.7.27 (core#393). Both
+  now assert engine-version-tolerant shapes (≥ 1 planned unit, `unitDone` = `unitPlanned`, unit
+  ords `1..n`), so crew main stays green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
 <!-- fixall L10 -->
 - **`wicked-crew status` / `gate` with no daemon answering print one remedy line and exit 1; a
   non-2xx answer exits 1; `wicked-crew --version` exists (crew#551, crew#493, F-RC1-044, F-003 —
