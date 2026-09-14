@@ -277,6 +277,23 @@ describe('wave 6 end to end — the governed test-authoring journey', () => {
     expect(unitIds).toEqual(['recon', 'author', QE_VERIFY_PHASE_ID, 'review', 'deliver']);
     expect(run.units.every((u) => u.status === 'done')).toBe(true);
 
+    // (0) L1 mirror-first (FIX-IT-ALL L8-0b; DES-L1 PR-1A, api-types 0.38.0 `GateEvaluatedEvent
+    //     .evaluatorVerdict`): the review unit is an Evaluator-role agent phase, so once the engine
+    //     parses its `VERDICT:` line (wicked-core-ts ≥ 0.7.27; the stub runner answers `VERDICT: PASS`)
+    //     every `gateEvaluated` frame of this GREEN run carries `evaluatorVerdict: 'PASS'` for the
+    //     review unit and `null` for the creator/tool units. TODAY the engine emits no such key.
+    //     TOLERANT on purpose — NOT_FIXED_YET: tighten the review unit's frame to `'PASS'` when crew
+    //     pins 0.7.27 (a `'FAIL'`, or any other token, on a GREEN run is wrong on every engine).
+    {
+      const { body: evBody } = await getJson(`/api/v1/runs/${runId}/events`);
+      const events = evBody['events'] as Array<Record<string, unknown>>;
+      const review = run.units.find((u) => u.id.endsWith(':review'))!;
+      for (const g of events.filter((e) => e['type'] === 'gateEvaluated')) {
+        expect(['PASS', null, undefined], `gateEvaluated ord ${String(g['ord'])} evaluatorVerdict`).toContain(g['evaluatorVerdict']);
+        if (g['ord'] !== review.ord) expect([null, undefined]).toContain(g['evaluatorVerdict']);
+      }
+    }
+
     // (1) The VERIFY phase RAN the produced e2e under the repository's own harness — the marker the
     //     shim prints is in the verify unit's transcript, and the summary counts it (R4-r2 / F-7R2-015).
     const verify = run.units.find((u) => u.id.endsWith(`:${QE_VERIFY_PHASE_ID}`))!;

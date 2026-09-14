@@ -19,6 +19,8 @@
 // visible in the test run and so a human deleting the typecheck wiring still sees this
 // file named somewhere.
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import type * as Wire from 'wicked-crew-api-types';
@@ -891,6 +893,115 @@ accepts<z.input<typeof ReplaceSkillSchema>, Wire.ReplaceSkillBody>();
 // would be a lie). Both must stay OFF the contract.
 respondsWith<'skills_root' extends keyof Wire.SystemSettings ? never : true, true>();
 respondsWith<'skills_mirror' extends keyof Wire.SystemSettings ? never : true, true>();
+
+// ── api-types 0.38.0 — the frames the engine already emits, RECORDED (FIX-IT-ALL L8-0b) ─────────
+// `tests/fixtures/engine-frames-0.38.0.json` is the record (key set + spellings from wicked-core
+// 425de81 `event.rs::to_json`; the guard-class and hook-veto gate frames, `sandboxPosture` and
+// `worktreeRetained` mirror the engine's own `to_json` tests — the creator-mkdir and dead_seat gate
+// frames are DES-SHAPED: same key set and conventions, prose from DES-L4 R8 / DES-L3 §4). The
+// literals below are the recorded frames as TypeScript so `satisfies` pins them against the 0.38.0
+// declarations at compile time. The runtime block asserts the record and the pins agree
+// byte-for-byte and that every gate frame is exactly 11 fields + `type` = 12 JSON keys — a key the
+// engine renames, drops or adds shows up here before any skin reads it.
+const RECORDED_GATE_ESCALATED = {
+  type: 'gateEscalated',
+  session: 'run-1',
+  ord: 2,
+  condition: 'evaluator_mutated_worktree',
+  verdictSummary: 'the reproduce phase changed the tree',
+  attempt: 0,
+  denialSource: 'worktree_guard',
+  defGate: false,
+  outputCaptured: true,
+  restored: true,
+  discarded: [{ status: 'A', path: 'evidence/repro.md' }],
+  suggestionRef: 'refs/wicked/suggestions/run-1/2/0',
+} satisfies Wire.GateEscalatedEvent;
+/** The hook-veto arm: `boundary_deny` with the source identity folded away — `denialSource: ""`. */
+const RECORDED_GATE_ESCALATED_HOOK_VETO = {
+  type: 'gateEscalated',
+  session: 'run-1',
+  ord: 2,
+  condition: 'boundary_deny',
+  verdictSummary: 'input governance denied a tool-call in unit-2',
+  attempt: 1,
+  denialSource: '',
+  defGate: false,
+  outputCaptured: true,
+  restored: false,
+  discarded: [],
+  suggestionRef: null,
+} satisfies Wire.GateEscalatedEvent;
+const RECORDED_SANDBOX_POSTURE = {
+  type: 'sandboxPosture',
+  session: 'run-1',
+  ord: 2,
+  cli: 'codex',
+  posture: 'advisory',
+  reason: 'the registry record for `codex` declares no OS sandbox (`acp.os_sandbox` unset): containment is the worktree guard plus the command-text fences',
+} satisfies Wire.SandboxPostureEvent;
+const RECORDED_WORKTREE_RETAINED = {
+  type: 'worktreeRetained',
+  session: 'run-1',
+  path: '/srv/wicked/runs/wicked-run-1',
+  reason: 'the worktree holds uncommitted work the run branch does not carry (2 modified, 1 untracked)',
+} satisfies Wire.WorktreeRetainedEvent;
+// The two NEW frames are `type` aliases (the 0.31.0 rule) and relay through the CoreEvent-typed
+// broadcast seams unchanged; GateEscalatedEvent stays the interface it has been since 0.1.
+respondsWith<Wire.CoreEvent, Wire.SandboxPostureEvent>();
+respondsWith<Wire.CoreEvent, Wire.WorktreeRetainedEvent>();
+// A pre-#464 engine's five-key frame is still a valid GateEscalatedEvent (the six are optional).
+respondsWith<Wire.GateEscalatedEvent, { type: 'gateEscalated'; session: string; ord: number; condition: string; verdictSummary: string }>();
+// 0.38.0's other named shapes the daemon produces or will: the health capabilities object the route
+// builds today satisfies the named interface; `GET /settings` today is `{ settings }` — a valid
+// SettingsResponse without `path` (PR-L10-6 adds it).
+respondsWith<Wire.HealthCapabilities, { deliverGate: boolean }>();
+respondsWith<Wire.SettingsResponse, { settings: typeof DEFAULT_SETTINGS }>();
+respondsWith<Wire.SettingsResponse, { settings: Awaited<ReturnType<CoreAdapter['getSettings']>>; path: string }>();
+// `RepoCheckRun`'s seven 0.38.0 keys, spelled as core's `check_run_json` emits them (camelCase);
+// a five-key frame from an older engine is still a RepoCheckRun.
+respondsWith<
+  Wire.RepoCheckRun,
+  {
+    name: string; argv: string[]; source: string; exitCode: number | null; timedOut: boolean; spawnError: string | null;
+    durationMs: number; stdoutTail: string; stderrTail: string;
+    boundS: number; boundNote: string | null; failureIds: string[]; classification: 'regression' | 'pre_existing_in_sandbox';
+    preExisting: string[]; regressions: string[]; base: { head: string; cached: boolean; error: string | null } | null;
+  }
+>();
+
+describe('api-types 0.38.0 — recorded + DES-shaped engine frames (FIX-IT-ALL L8-0b)', () => {
+  const fixturePath = fileURLToPath(new URL('./fixtures/engine-frames-0.38.0.json', import.meta.url));
+  const recorded = JSON.parse(readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
+
+  it('the fixture IS the compile-time pins, byte for byte', () => {
+    expect(recorded['gateEscalated']).toEqual(RECORDED_GATE_ESCALATED);
+    expect(recorded['gateEscalatedHookVeto']).toEqual(RECORDED_GATE_ESCALATED_HOOK_VETO);
+    expect(recorded['sandboxPosture']).toEqual(RECORDED_SANDBOX_POSTURE);
+    expect(recorded['worktreeRetained']).toEqual(RECORDED_WORKTREE_RETAINED);
+  });
+
+  it('gateEscalated carries exactly the 11 fields + `type` the engine emits (the two recorded and the two DES-shaped frames alike), in the camelCase the contract spells; `null` / `[]` / `""` are present, never absent', () => {
+    const KEYS = ['attempt', 'condition', 'defGate', 'denialSource', 'discarded', 'ord', 'outputCaptured', 'restored', 'session', 'suggestionRef', 'type', 'verdictSummary'];
+    for (const name of ['gateEscalated', 'gateEscalatedHookVeto', 'gateEscalatedCreatorMkdirOutside', 'gateEscalatedDeadSeat']) {
+      const frame = recorded[name] as Record<string, unknown>;
+      expect(Object.keys(frame).sort(), name).toEqual(KEYS);
+      expect(Object.values(frame).some((v) => v === undefined), name).toBe(false);
+      expect(Array.isArray(frame['discarded']), name).toBe(true);
+    }
+    expect((recorded['gateEscalatedHookVeto'] as Record<string, unknown>)['denialSource']).toBe('');
+    expect((recorded['gateEscalatedHookVeto'] as Record<string, unknown>)['suggestionRef']).toBeNull();
+    // The two DES-shaped classes the step-0 expectations name (L3 dead_seat · L4 boundary_deny × input_governance).
+    expect(recorded['gateEscalatedDeadSeat']).toMatchObject({ condition: 'dead_seat', denialSource: 'dead_seat', attempt: 0, defGate: false });
+    expect(recorded['gateEscalatedCreatorMkdirOutside']).toMatchObject({ condition: 'boundary_deny', denialSource: 'input_governance' });
+  });
+
+  it("sandboxPosture / worktreeRetained key sets are the engine's: unit-level with `cli` + `posture`, session-level with `path`", () => {
+    expect(Object.keys(recorded['sandboxPosture'] as object).sort()).toEqual(['cli', 'ord', 'posture', 'reason', 'session', 'type']);
+    expect(['os', 'advisory']).toContain((recorded['sandboxPosture'] as Record<string, unknown>)['posture']);
+    expect(Object.keys(recorded['worktreeRetained'] as object).sort()).toEqual(['path', 'reason', 'session', 'type']);
+  });
+});
 
 describe('wire contract (wicked-crew-api-types) drift guard', () => {
   it('compiles: daemon responses satisfy the contract, contract bodies parse (see typecheck)', () => {
