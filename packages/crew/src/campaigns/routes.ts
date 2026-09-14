@@ -78,6 +78,12 @@ export const LaunchCampaignSchema = z
     scenarios: z.array(ScenarioSchema).min(1),
     policy: z.enum(['fail_fast', 'continue_independent', 'human_gate_on_failure']).optional(),
     maxConcurrency: z.number().int().min(1).max(64).optional(),
+    // (DES-L1 PR-1D / core #484, wicked-core ≥ 0.7.27) What an UNATTENDED campaign does when a node
+    // parks at the engine's ESCALATION gate: `hold` (engine default — the node waits for a human) or
+    // `auto_reject` (the campaign answers that gate with Reject; the node cancels, dependents follow
+    // the edge rule). Def / run-level gates always hold. Passed through to the engine def as
+    // `denial_gate`; an older engine ignores the field (serde default = hold).
+    denialGate: z.enum(['hold', 'auto_reject']).optional(),
     clisJson: z.string().optional(),
     // The pinned multiscope wire (see api/multiscope.ts): explicit codebase attachments and/or
     // a project whose crew.repo members crew resolves server-side. Neither ⇒ today's behavior.

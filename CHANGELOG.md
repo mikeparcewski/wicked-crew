@@ -19,6 +19,13 @@ mentioned only where a daemon release depends on them.
   NOT-PASS review back to the creator phase with the findings in context (wicked-core PR-1B); on an
   engine older than core-ts 0.7.27 the arms fail CLOSED (a 409 naming the engine) instead of being
   silently dropped by the napi call. `tests/gate-arms.test.ts` tripwires flipped `it.fails` → `it`.
+- **`POST /campaigns` accepts `denialGate: hold | auto_reject` and passes it to the engine def as
+  `denial_gate` (DES-L1 PR-1D / core #484; wicked-core ≥ 0.7.27).** Absent ⇒ the engine's default
+  (`hold`, today) — the def an older engine sees is byte-identical. Crew's own fans (recon fan,
+  qe scenario batch) do not set it yet: an unattended qe fan still parks at an escalation gate
+  until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
+  (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
+  `LaunchCampaignBody.denialGate?`.
 
 ## [0.7.35] — 2026-09-14
 
