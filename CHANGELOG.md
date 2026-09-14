@@ -105,6 +105,18 @@ mentioned only where a daemon release depends on them.
   register: R11c.
 
 <!-- fixall L9 -->
+- **Pin `wicked-core-ts ^0.7.27` — the engine half of `revisesPr` and the deliver-refusal gate is now
+  under crew; delete the shadow-test bridge; the real-engine revision journey leaves `it.todo` (fixall
+  L9 row 6.9; DES-L9 §7; wicked-core #522 on core main).** core-ts 0.7.27 carries `LaunchSpec.base_ref`
+  (the run bases on an open PR's head) and the deterministic deliver-refusal arm (a failed deliver unit
+  that is not a `LIFT-CONFLICT` strand PARKS at an `escalation` gate). With the pin, `capabilities.revisesPr`
+  reads `true` and a revision launch no longer fails closed. `builtin-overlay-shadow.test.ts` drops the
+  one-field `bug.fix.instructions` tolerance it carried while core main lacked the field (crew #601): both
+  carriers now hold `BUG_FIX_SWEEP_INSTRUCTIONS`, so the mirror is compared field-for-field again and any
+  real drift fails. `tests/integration/deliver-revision-e2e.test.ts` (new) drives the DES-L9 §7 journey end
+  to end through the real engine: `POST /runs {revisesPr}` bases the run on the PR head → deliver gate →
+  identity refusal (D-18) → `awaitingHuman{escalation}` (never `sessionFailed`) → fix the login → the run's
+  one commit lands on the PR branch, no new PR.
 - **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a
   `Delivered-By` trailer (fixall L9-D1 / L9-D4 = BC-72 / BC-73; crew #550 P-1/P-4, review-benchmark-prs
   D1 / D4).** The PR title / commit subject gets a conventional-commit prefix derived from the WORKFLOW
