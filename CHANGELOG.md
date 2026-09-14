@@ -21,7 +21,9 @@ mentioned only where a daemon release depends on them.
   silently dropped by the napi call. `tests/gate-arms.test.ts` tripwires flipped `it.fails` → `it`.
 - **`POST /campaigns` accepts `denialGate: hold | auto_reject` and passes it to the engine def as
   `denial_gate` (DES-L1 PR-1D / core #484; wicked-core ≥ 0.7.27).** Absent ⇒ the engine's default
-  (`hold`, today) — the def an older engine sees is byte-identical. Crew's own fans (recon fan,
+  (`hold`, today) — the def an older engine sees is byte-identical; PRESENT on an addon < 0.7.27 the
+  launch is REFUSED by name (409, `armsUnsupportedReason` — the same fail-closed rule as the gate
+  arms) rather than let serde drop the field and hold a campaign that asked not to. Crew's own fans (recon fan,
   qe scenario batch) do not set it yet: an unattended qe fan still parks at an escalation gate
   until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
   (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /

@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CampaignsUnsupportedError, CoreAdapter } from '../src/core/adapter.js';
+import { CampaignsUnsupportedError, CoreAdapter, armsUnsupportedReason } from '../src/core/adapter.js';
 import { toEngineRoster } from '../src/core/engine-roster.js';
 import { createServer } from '../src/api/server.js';
 import type { Campaign, CampaignDef, WorkflowDef } from '../src/core/types.js';
@@ -130,6 +130,38 @@ describe('POST /campaigns', () => {
       'campaign-camp-ok-a',
       'campaign-camp-ok-b',
     ]);
+  });
+
+  it('passes `denialGate` to the engine def as `denial_gate` (DES-L1 PR-1D; wicked-core ≥ 0.7.27)', async () => {
+    unsupported = false;
+    launched = null;
+    const res = await post('/api/v1/campaigns', {
+      id: 'camp-dg',
+      scenarios: [{ id: 'a', tool: { cmd: ['node', '/specs/a.mjs'] } }],
+      denialGate: 'auto_reject',
+    });
+    expect(res.status).toBe(201);
+    const got = launched as unknown as { def: CampaignDef & { denial_gate?: string } } | null;
+    expect(got!.def.denial_gate).toBe('auto_reject');
+    expect(got!.def.max_concurrency).toBe(2);
+  });
+
+  it('409s by name when the engine lacks the `denialGate` arm — never a silent hold (review-L1-598 M1)', async () => {
+    const prev = adapter.launchCampaign;
+    adapter.launchCampaign = async () => {
+      throw new Error(armsUnsupportedReason('the campaign knob `denialGate`', 'launch without it', false)!);
+    };
+    try {
+      const res = await post('/api/v1/campaigns', {
+        id: 'camp-old',
+        scenarios: [{ id: 'a', tool: { cmd: ['node', '/specs/a.mjs'] } }],
+        denialGate: 'auto_reject',
+      });
+      expect(res.status).toBe(409);
+      expect(String(res.body['error'])).toMatch(/denialGate.*needs wicked-core-ts >= 0\.7\.27.*launch without it/);
+    } finally {
+      adapter.launchCampaign = prev;
+    }
   });
 
   it('the default roster for agent scenarios carries crew’s STANDING (F-086 parity with POST /runs)', async () => {

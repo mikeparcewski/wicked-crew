@@ -25,8 +25,7 @@ import { z } from 'zod';
 import {
   CampaignsUnsupportedError,
   ProjectsUnsupportedError,
-  type CoreAdapter,
-} from '../core/adapter.js';
+  type CoreAdapter, ENGINE_TOO_OLD_RE } from '../core/adapter.js';
 import type { Actor, LaunchCampaignBody } from '../core/types.js';
 import type { AuditLog } from '../api/audit.js';
 import { API_PREFIX } from '../api/api-prefix.js';
@@ -82,7 +81,8 @@ export const LaunchCampaignSchema = z
     // parks at the engine's ESCALATION gate: `hold` (engine default — the node waits for a human) or
     // `auto_reject` (the campaign answers that gate with Reject; the node cancels, dependents follow
     // the edge rule). Def / run-level gates always hold. Passed through to the engine def as
-    // `denial_gate`; an older engine ignores the field (serde default = hold).
+    // `denial_gate`; on an addon < 0.7.27 the adapter REFUSES the launch by name (409) rather than
+    // let serde drop the field and hold a campaign that asked not to (review-L1-598 M1).
     denialGate: z.enum(['hold', 'auto_reject']).optional(),
     clisJson: z.string().optional(),
     // The pinned multiscope wire (see api/multiscope.ts): explicit codebase attachments and/or
@@ -178,8 +178,11 @@ export function registerCampaignRoutes(
           return reply.code(501).send({ error: err.message });
         }
         const msg = message(err);
-        // A campaign id that already exists is a state conflict on a real resource.
-        if (/already exists|already launched/i.test(msg)) {
+        // A campaign id that already exists is a state conflict on a real resource; so is an
+        // engine that lacks the arm the body asked for (`denialGate` on an addon < 0.7.27) — the
+        // request is well-formed, the daemon's engine is what cannot honour it (same 409 the gate
+        // route answers for the `action` / `amendScope` arms).
+        if (/already exists|already launched/i.test(msg) || ENGINE_TOO_OLD_RE.test(msg)) {
           return reply.code(409).send({ error: msg });
         }
         return reply.code(400).send({ error: msg });

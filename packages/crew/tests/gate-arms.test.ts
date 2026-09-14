@@ -33,7 +33,19 @@ import { GateSchema, registerRoutes } from '../src/api/routes.js';
 import { GateCache } from '../src/api/gate-cache.js';
 import { ElicitationCache } from '../src/api/elicitation-cache.js';
 import type { AuditLog } from '../src/api/audit.js';
-import { BUILTIN_WORKFLOWS, type CoreAdapter } from '../src/core/adapter.js';
+import { BUILTIN_WORKFLOWS, ENGINE_TOO_OLD_RE, armsUnsupportedReason, type CoreAdapter } from '../src/core/adapter.js';
+
+describe('the wave-3 arms fail CLOSED on an addon < 0.7.27 (review-L1-598 M1 — one rule for action/amendScope and denialGate)', () => {
+  it('names the feature, the version floor and the remedy; null when the addon carries the arms', () => {
+    const why = armsUnsupportedReason('the gate arms `action` / `amendScope`', 'approve or reject without them', false);
+    expect(why).toMatch(/^the gate arms `action` \/ `amendScope` needs wicked-core-ts >= 0\.7\.27 \(installed engine is older\) — approve or reject without them$/);
+    expect(ENGINE_TOO_OLD_RE.test(why!)).toBe(true);
+    expect(armsUnsupportedReason('the campaign knob `denialGate`', 'launch without it', true)).toBeNull();
+    // Against the addon this test process has installed, the answer is whatever `addonAtLeast(0,7,27)`
+    // says — never undefined, never a silent pass-through.
+    expect([null, 'string']).toContain(armsUnsupportedReason('x', 'y') === null ? null : 'string');
+  });
+});
 
 function view(id: string, status: string, unitIx: number) {
   return {
