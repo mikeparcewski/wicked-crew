@@ -27,6 +27,7 @@ import {
 import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
+import { versionLines } from '../core/versions.js';
 import type { LaunchRunInput } from '../core/types.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 
@@ -433,6 +434,13 @@ function printReady(fields: Record<string, unknown>): void {
 async function main(): Promise<void> {
   const t0 = performance.now();
 
+  // crew#493 (F-003): `wicked-crew --version` answered "Unknown command". The three lines are the
+  // versions of THIS install (never the daemon on a port — that is `GET /api/v1/diagnostics`).
+  if (command === 'version' || command === '--version' || command === '-V') {
+    console.log(versionLines().join('\n'));
+    return;
+  }
+
   if (command === 'serve') {
     if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
       console.log(
@@ -553,9 +561,56 @@ async function main(): Promise<void> {
     await runGovernance(argv);
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance');
+    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|version');
+    console.error(
+      '  version | --version | -V   the versions of THIS install (wicked-crew, wicked-core-ts, bundled studio);\n' +
+        '                             for the daemon running on a port, GET http://127.0.0.1:<port>/api/v1/diagnostics',
+    );
     process.exit(1);
   }
+}
+
+// ── The two daemon-client verbs (`gate`, `status`) — crew#551 (F-RC1-044) ─────────────────────
+//
+// After a reboot the daemon is gone; `wicked-crew status` used to print the whole
+// `TypeError: fetch failed … ECONNREFUSED` stack through `main().catch` and exit 1, and a non-2xx
+// answer printed the error body as JSON and exited 0 (so a script could not tell "the daemon is
+// down" from "there are no runs"). ONE wrapper around the two bare `fetch` calls: a connection
+// failure is one remedy line on stderr, exit 1, no stack; a non-2xx answer is
+// `wicked-crew: <verb> failed: <status> <body>`, exit 1. The 2xx output is unchanged.
+
+/** undici's `TypeError: fetch failed` carries the socket error as `cause`; these codes mean "nothing answered". */
+const CONNECTION_FAILURE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND']);
+
+function isConnectionFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { cause?: { code?: unknown } }).cause?.code;
+  if (typeof code === 'string' && CONNECTION_FAILURE_CODES.has(code)) return true;
+  return err instanceof TypeError && err.message === 'fetch failed';
+}
+
+/** The one remedy line for "no daemon answering" — operator terms, no stack. */
+function noDaemonRemedy(port: number): string {
+  return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
+}
+
+/** `fetch` against the local daemon: a connection failure exits 1 with the remedy; anything else propagates. */
+async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    if (isConnectionFailure(err)) {
+      console.error(noDaemonRemedy(port));
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+/** A non-2xx answer from the daemon: one line naming the verb, the status and the body; exit 1. */
+async function failNon2xx(verb: string, res: Response): Promise<never> {
+  console.error(`wicked-crew: ${verb} failed: ${res.status} ${await res.text()}`);
+  process.exit(1);
 }
 
 async function runGate(args: string[]): Promise<void> {
@@ -569,15 +624,12 @@ async function runGate(args: string[]): Promise<void> {
   }
   const body: Record<string, unknown> = { approve };
   if (amend !== undefined) body['amend'] = amend;
-  const res = await fetch(`http://127.0.0.1:${port}/api/v1/runs/${runId}/gate`, {
+  const res = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs/${runId}/gate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    console.error(`Gate action failed: ${res.status} ${await res.text()}`);
-    process.exit(1);
-  }
+  if (!res.ok) await failNon2xx('gate', res);
   console.log(`Gate ${approve ? 'approve' : 'reject'} applied to run ${runId}`);
 }
 
@@ -586,7 +638,8 @@ async function runStatus(args: string[]): Promise<void> {
   const port = flag(args, '--port') !== undefined ? Number(flag(args, '--port')) : 7701;
   const base = `http://127.0.0.1:${port}/api/v1`;
   const url = runId ? `${base}/runs/${runId}` : `${base}/runs`;
-  const res = await fetch(url);
+  const res = await daemonFetch(port, url);
+  if (!res.ok) await failNon2xx('status', res);
   console.log(JSON.stringify(await res.json(), null, 2));
 }
 
