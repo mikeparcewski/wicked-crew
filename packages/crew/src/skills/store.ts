@@ -740,7 +740,7 @@ export class SkillsStore {
    * verification — equal → the byte hash and the row re-derivation are skipped; anything else →
    * the full verification runs and refreshes it. Cleared on every `current` flip.
    */
-  private verifiedCurrent: { gen: number; contentHash: string; snapshotHash: string; fingerprint: string; result: CurrentSnapshot } | null = null;
+  private verifiedCurrent: { gen: number; contentHash: string; snapshotHash: string; fingerprint: string; links: LinkRecord[]; result: CurrentSnapshot } | null = null;
   /**
    * `manifest()` memo keyed on the manifest FILE's identity `(ino, size, mtimeMs, ctimeMs)`: the
    * same lstat every read already performs decides whether the bytes are re-read, re-parsed and
@@ -1178,6 +1178,11 @@ export class SkillsStore {
       memo.snapshotHash === meta.rawSha &&
       memo.fingerprint === fingerprint
     ) {
+      // The one thing the fingerprint cannot see: the `.venv` link's TARGET lives outside the generation
+      // (`baseline/<hash>/.venv`), so its authorization is re-derived on every hit (`snapshotLinkProblem`
+      // walks it from the root — a handful of lstats), exactly as the full path does.
+      const linkProblem = this.snapshotLinkProblem(real, memo.links, parsed);
+      if (linkProblem !== null) return invalid(linkProblem);
       return memo.result;
     }
     const tree = walkTree(real);
@@ -1213,7 +1218,7 @@ export class SkillsStore {
     const after = fingerprintTree(real);
     this.verifiedCurrent =
       fingerprint !== null && after === fingerprint
-        ? { gen: parsed.gen, contentHash: parsed.contentHash, snapshotHash: meta.rawSha, fingerprint, result }
+        ? { gen: parsed.gen, contentHash: parsed.contentHash, snapshotHash: meta.rawSha, fingerprint, links: [...tree.links], result }
         : null;
     return result;
   }

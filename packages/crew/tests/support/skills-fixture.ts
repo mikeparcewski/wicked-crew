@@ -62,3 +62,15 @@ export function scaffold(overrides: Partial<SkillsStoreOptions> = {}): Scaffold 
   });
   return { base, root, upstream, home: join(base, 'home'), store, warnings };
 }
+
+/**
+ * Make the NEXT publish mint a generation. Since DES-L6 PR-L6-1 (crew#547) a publish over an
+ * UNCHANGED tree answers `unchanged: true` and mints nothing, so a suite that needs "another
+ * generation" changes the tree first: one distinct support file written through the store's own
+ * API (no drift finding, the revision advances). Answers the revision the publish must carry.
+ */
+export function bump(sc: Scaffold, tag: string | number = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`): number {
+  const r = sc.store.writeFile('wicked-garden-gamma', `refs/bump-${tag}.md`, `# bump ${tag}\n`, sc.store.revision());
+  if (r.verdict === 'blocked') throw new Error(`bump blocked: ${r.findings.map((f) => `${f.kind}: ${f.evidence}`).join('; ')}`);
+  return r.revision;
+}

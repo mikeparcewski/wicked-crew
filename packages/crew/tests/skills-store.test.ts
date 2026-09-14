@@ -51,7 +51,7 @@ import {
 import { hashFileSet, hashTree, removeTreeForce, sha256Hex, walkEntries, walkFiles, walkTree } from '../src/skills/tree.js';
 import { noVenv, VENV_READY_MARKER, type VenvProvisioner } from '../src/skills/venv.js';
 import { removeScratch } from './setup/scratch.js';
-import { CLOCK, FIXTURE_PLUGIN, REGISTERED_REFS, scaffold, type Scaffold } from './support/skills-fixture.js';
+import { bump, CLOCK, FIXTURE_PLUGIN, REGISTERED_REFS, scaffold, type Scaffold } from './support/skills-fixture.js';
 
 let s: Scaffold;
 
@@ -448,7 +448,7 @@ describe('publish (design v3 §1)', () => {
     s.store.seed();
     let rev = s.store.revision();
     for (let i = 0; i < 5; i += 1) {
-      const r = await s.store.publish(rev);
+      const r = await s.store.publish(bump(s)); // a changed tree each time — an unchanged publish mints nothing (DES-L6 PR-L6-1)
       expect(r.verdict).toBe('clear');
       rev = r.revision;
     }
@@ -475,7 +475,7 @@ describe('publish (design v3 §1)', () => {
   it('commits the manifest BEFORE flipping current; ensureReady finishes a flip a crash interrupted', async () => {
     s.store.seed();
     const r1 = await s.store.publish(1);
-    const r2 = await s.store.publish(r1.revision);
+    const r2 = await s.store.publish(bump(s)); // a changed tree — an unchanged publish would answer gen 1 `unchanged` (DES-L6 PR-L6-1)
     expect(r2.snapshot?.gen).toBe(2);
     // The crash window: the manifest names gen 2, `current` still points at gen 1.
     rmSync(join(s.root, 'current'));
@@ -1070,8 +1070,9 @@ describe('venv provisioning (design v3 §4)', () => {
       expect(lstatSync(join(venvDir, 'bin', 'python')).mode & 0o222).toBe(0);
       // The snapshot's content hash excludes the env (never walked), so `current` still verifies.
       expect(storeOver(v).currentSnapshot()?.gen).toBe(1);
-      // A second publish of the same baseline does not provision again (the marker is the authority).
-      const r2 = await v.store.publish(r.revision);
+      // A second publish of the same baseline does not provision again (the marker is the authority) — over a
+      // CHANGED tree, so the slow path runs (an unchanged tree would not reach the provisioner at all — DES-L6 PR-L6-1).
+      const r2 = await v.store.publish(bump(v));
       expect(r2.verdict).toBe('clear');
       expect(calls).toHaveLength(1);
       // A `.venv` WITHOUT the marker is a torn sync: removed and re-provisioned, never trusted.
@@ -1186,8 +1187,8 @@ describe('publish is serialized and bound to its root (codex round 2)', () => {
       expect(v.store.isPublishing()).toBe(false);
       expect(gate.calls).toHaveLength(1);
       expect(v.store.generationsOnDisk()).toEqual([1]);
-      // The lock is released: the next publish runs.
-      expect((await v.store.publish(r.revision)).snapshot?.gen).toBe(2);
+      // The lock is released: the next publish runs (over a changed tree — an unchanged one mints nothing, DES-L6 PR-L6-1).
+      expect((await v.store.publish(bump(v))).snapshot?.gen).toBe(2);
     } finally {
       removeTreeForce(v.base);
     }
@@ -1265,7 +1266,7 @@ describe('baseline retention (a baseline lives while any snapshot references it)
     expect(Object.keys(s.store.manifest().baselines).sort()).toEqual([a, b].sort());
     let rev = ref.revision;
     for (let i = 0; i < 3; i += 1) {
-      const r = await s.store.publish(rev); // gens 2, 3, 4 — gen 1 is reaped by the third
+      const r = await s.store.publish(bump(s)); // gens 2, 3, 4 (a changed tree each time) — gen 1 is reaped by the third
       expect(r.verdict).toBe('clear');
       rev = r.revision;
     }
@@ -2822,8 +2823,9 @@ describe('baseline reaping is a CAS mutation (codex round 9): a record drop ride
     s.store.live.launched('run', 'run-a');
     let rev = ref.revision;
     for (let i = 0; i < 4; i += 1) {
-      const p = await s.store.publish(rev); // gens 2..5 — every generation is pinned by the open launch, nothing is reaped, ONE bump each
-      expect(p.revision).toBe(rev + 1);
+      const at = bump(s); // a changed tree (its own commit); the publish that follows is still ONE revision bump
+      const p = await s.store.publish(at); // gens 2..5 — every generation is pinned by the open launch, nothing is reaped, ONE bump each
+      expect(p.revision).toBe(at + 1);
       rev = p.revision;
     }
     expect(s.store.generationsOnDisk()).toEqual([1, 2, 3, 4, 5]);
@@ -3013,8 +3015,9 @@ describe('portability per reason (F-079, wicked-crew#531)', () => {
     // The whole point: the generation verifies — from this store and from a fresh one.
     expect(s.store.currentSnapshot()?.gen).toBe(1);
     expect(storeOver(s).currentSnapshot()?.gen).toBe(1);
-    // And a second publish is a clean no-drama gen 2, not a repair loop.
-    const again = await s.store.publish(r.revision);
+    // And a second publish over a CHANGED tree is a clean no-drama gen 2, not a repair loop (an unchanged tree
+    // answers `unchanged: true` at gen 1 — DES-L6 PR-L6-1).
+    const again = await s.store.publish(bump(s));
     expect(again.snapshot?.gen).toBe(2);
     expect(storeOver(s).currentSnapshot()?.gen).toBe(2);
   });

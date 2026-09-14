@@ -39,7 +39,7 @@ import {
 import { SKILLS_SNAPSHOT_ENGINE_ENV } from '../src/skills/engine-env.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { removeScratch } from './setup/scratch.js';
-import { scaffold, type Scaffold } from './support/skills-fixture.js';
+import { bump, scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const GOVERNED = DEFAULT_BASE_SKILL_REF;
 /** A skill the fixture catalog SHIPS (published in the first generation). */
@@ -317,6 +317,7 @@ describe('the routes — PUT /settings, GET /health, GET /diagnostics, publish /
   });
 
   it('POST /skills/publish and POST /skills/refresh-baseline answer the posture after the operation — a publish without the skill is the warning moment', async () => {
+    bump(s); // boot published gen 1 over this tree; an UNCHANGED publish would answer gen 1 `unchanged` (DES-L6 PR-L6-1) — change it so this one mints gen 2
     const rev = await revision();
     const published = await app!.inject({ method: 'POST', url: '/api/v1/skills/publish', payload: { expectedRevision: rev } });
     expect(published.statusCode).toBe(200);

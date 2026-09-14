@@ -21,7 +21,7 @@ import { LiveGenerations } from '../src/skills/live-generations.js';
 import { SkillsRuntime } from '../src/skills/runtime.js';
 import { KEEP_GENERATIONS } from '../src/skills/store.js';
 import { removeScratch } from './setup/scratch.js';
-import { scaffold, type Scaffold } from './support/skills-fixture.js';
+import { bump, scaffold, type Scaffold } from './support/skills-fixture.js';
 
 const ev = (type: string, session?: string): CoreEvent => (session === undefined ? { type } : { type, session });
 /** The engine's per-spawn report: the exact generation it handed `session` (a published snapshot). */
@@ -147,9 +147,11 @@ describe('SkillsStore reaping honours live pins', () => {
     removeScratch(s.base);
   });
 
+  // Each publish mints a generation ONLY over a changed tree (DES-L6 PR-L6-1: an unchanged publish answers
+  // `unchanged: true` and mints nothing) — `bump` changes it first.
   const publishTimes = async (n: number): Promise<void> => {
     for (let i = 0; i < n; i += 1) {
-      const r = await s.store.publish(s.store.revision());
+      const r = await s.store.publish(bump(s));
       expect(r.verdict).toBe('clear');
     }
   };
@@ -246,7 +248,7 @@ describe('SkillsRuntime delegates to the store', () => {
     const runtime = new SkillsRuntime({ store: s.store, log: () => undefined });
     expect((await s.store.publish(1)).verdict).toBe('clear');
     runtime.observe(handed('run-a', 1));
-    for (let i = 0; i < KEEP_GENERATIONS + 1; i += 1) expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');
+    for (let i = 0; i < KEEP_GENERATIONS + 1; i += 1) expect((await s.store.publish(bump(s))).verdict).toBe('clear');
     expect(s.store.generationsOnDisk()).toEqual([1, 2, 3, 4, 5]);
     runtime.observe(ev('sessionCompleted', 'run-a'));
     expect(s.store.generationsOnDisk()).toEqual([3, 4, 5]);
@@ -262,7 +264,7 @@ describe('SkillsRuntime delegates to the store', () => {
     expect([...s.store.live.pinned()]).toEqual([1]);
     runtime.launched({ kind: 'run', id: 'run-a', status: 'rejected' });
     expect(s.store.live.openLaunches()).toEqual(['campaign:camp-1']);
-    for (let i = 0; i < KEEP_GENERATIONS + 2; i += 1) expect((await s.store.publish(s.store.revision())).verdict).toBe('clear');
+    for (let i = 0; i < KEEP_GENERATIONS + 2; i += 1) expect((await s.store.publish(bump(s))).verdict).toBe('clear');
     expect(s.store.generationsOnDisk()).toContain(1); // the campaign's launch pin holds it
     runtime.observe(campaignFrame('campaignCancelled', 'camp-1'));
     expect(s.store.generationsOnDisk()).not.toContain(1);
@@ -340,7 +342,7 @@ describe('CoreAdapter.onLaunch — every launch the daemon hands the engine is a
       expect(pinnedAtHandoff).toEqual([1]); // recorded synchronously on `handed`, before any spawn could read the env
       if (sc.store.live.openLaunches().includes('run:s-pin')) {
         // The stub accepted the launch: the pin stays open until the engine accounts for it, whatever gets published meanwhile.
-        for (let i = 0; i < KEEP_GENERATIONS + 2; i += 1) expect((await sc.store.publish(sc.store.revision())).verdict).toBe('clear');
+        for (let i = 0; i < KEEP_GENERATIONS + 2; i += 1) expect((await sc.store.publish(bump(sc))).verdict).toBe('clear');
         expect(sc.store.generationsOnDisk()).toContain(1);
         runtime.observe(ev('sessionCompleted', 's-pin'));
         expect(sc.store.generationsOnDisk()).not.toContain(1);
