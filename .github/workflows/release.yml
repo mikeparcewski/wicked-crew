@@ -101,3 +101,9 @@ jobs:
     uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@27561a3e634813ec33c0de6343357a1f816988bc # v1.3.1
     with:
       crew_version: ${{ needs.version.outputs.version }}
+      # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
+      # leaves `github.job_workflow_sha` empty, so the harness's "same commit as the `uses:` pin"
+      # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
+      # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
+      # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
+      wicked_ci_ref: 27561a3e634813ec33c0de6343357a1f816988bc
