@@ -28,6 +28,14 @@ mentioned only where a daemon release depends on them.
   until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
   (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
   `LaunchCampaignBody.denialGate?`.
+
+<!-- fixall L3 -->
+- **Test mirror for wicked-core#523 (every seat benched at distribution parks at the `dead_seat` gate,
+  core-ts 0.7.27).** `tests/integration/dead-seat-distribution-gate.test.ts` carried an unguarded
+  NOT_FIXED_YET `it.fails` case that goes red on the first crew CI run linking a core main with the
+  engine change; it is now status-conditional (asserts the gate shape when the run parked, returns on
+  a pre-3A `failed` run), so crew main is green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
+
 <!-- fixall L9 -->
 - **Revise a pull request from a run (`revisesPr`), a deliver identity that refuses instead of
   switching, deliver text that reads right, and a deliver sweep that no longer walks the engine's
