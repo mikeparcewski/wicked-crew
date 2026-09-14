@@ -2395,6 +2395,25 @@ export function registerRoutes(
     },
   );
 
+  /**
+   * The ONE 409 `turn_in_flight` body (review NIT): the send route and the re-seat route refuse for
+   * the same reason and promise the same shape, so they build it in one place and cannot drift.
+   * `nothingHappened` names what did NOT happen on this route — their only difference.
+   */
+  const turnInFlightBody = (
+    chatId: string,
+    inFlight: NonNullable<ReturnType<ChatTurnIndex['inFlight']>>,
+    nothingHappened: string,
+  ) => ({
+    code: 'turn_in_flight' as const,
+    error:
+      `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering the previous ` +
+      `message in this chat (turn ${inFlight.turnId}, ${Math.round(inFlight.ageMs / 1000)}s ago: ` +
+      `“${inFlight.excerpt}”) — wait for the reply, or target only idle seats. ${nothingHappened}`,
+    chatId,
+    turn: inFlight,
+  });
+
   const ChatMessageSchema = z.object({
     text: z.string().min(1).max(65536),
     targets: z.array(z.string().min(1)).min(1).max(8).optional(),
@@ -2422,16 +2441,7 @@ export function registerRoutes(
     }
     const inFlight = chatTurns.inFlight(id, audience);
     if (inFlight !== null) {
-      const ageS = Math.round(inFlight.ageMs / 1000);
-      return reply.code(409).send({
-        code: 'turn_in_flight',
-        error:
-          `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering the previous ` +
-          `message in this chat (turn ${inFlight.turnId}, ${ageS}s ago: “${inFlight.excerpt}”) — wait for the ` +
-          `reply, or target only idle seats. Nothing was sent.`,
-        chatId: id,
-        turn: inFlight,
-      });
+      return reply.code(409).send(turnInFlightBody(id, inFlight, 'Nothing was sent.'));
     }
     // Sync, same tick as `inFlight`: the window is closed before anything yields.
     const turn = chatTurns.begin(id, audience, parsed.data.text);
@@ -2464,9 +2474,18 @@ export function registerRoutes(
   }).strict();
   app.post(
     `${V}/chats/:id/seats`,
-    // The manifest declares the codes now; `ChatSeatsBody` / `ChatSeatsResponse` are named here
-    // once api-types 0.39.0 publishes them (the 201's shapes are what the body already carries).
-    { config: { manifest: { statusCodes: [200, 400, 404, 409] } } },
+    // Typed like every neighbouring chat route (review HIGH-1): the names bind the 0.39.0 api-types
+    // mirror to this row — `ChatSeatsBody { clis }` in, `ChatSeatsResponse { chatId, seats, refused }`
+    // out (the 201's own `ChatSeatOutcome` / `ChatSeatRefusal` shapes, which 0.38.0 already ships).
+    {
+      config: {
+        manifest: {
+          requestType: 'ChatSeatsBody',
+          responseType: 'ChatSeatsResponse',
+          statusCodes: [200, 400, 404, 409],
+        },
+      },
+    },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const parsed = ChatSeatsSchema.safeParse(req.body);
@@ -2483,19 +2502,14 @@ export function registerRoutes(
       // A seat mid-turn is not re-warmed under its own reply (the same rule as a send).
       const inFlight = chatTurns.inFlight(id, clis);
       if (inFlight !== null) {
-        return reply.code(409).send({
-          code: 'turn_in_flight',
-          error: `${inFlight.busy.join(', ')} ${inFlight.busy.length === 1 ? 'is' : 'are'} still answering in this chat (turn ${inFlight.turnId}) — wait for the reply before re-seating.`,
-          chatId: id,
-          turn: inFlight,
-        });
+        return reply.code(409).send(turnInFlightBody(id, inFlight, 'No seat was re-warmed.'));
       }
       try {
         const seats = await adapter.chatOpen(id, clis, engine.cwd, {
           codeGraphDb: engine.codeGraphDb,
           readRoots: engine.readRoots,
         });
-        const refused = chatScopes.foldSeats(id, seats) ?? [];
+        const refused = chatScopes.foldSeats(id, seats);
         const projectId = projects.index.projectOf(id) ?? undefined;
         for (const s of seats) {
           if (s.ok) continue;

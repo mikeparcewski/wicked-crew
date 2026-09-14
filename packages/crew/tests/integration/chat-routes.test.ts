@@ -157,4 +157,39 @@ describe('chat routes (stub engine)', () => {
       expect(body.error ?? '').toMatch(/(not yet supported|unsupported)/i);
     }
   });
+
+  // F-W1-005 (review MED-2): the re-seat route through the REAL adapter + NAPI, not a mock. The
+  // stub engine opens no chats, so what this pins is the honest half — the route reaches the
+  // engine seam and refuses a chat this daemon does not hold, rather than minting one or hanging.
+  // The no-eviction half is the ENGINE's contract and is pinned in wicked-core's own suite
+  // (`acp_runner.rs` `reopening_with_a_new_scope_evicts_the_old_seats_and_a_seatless_chat_holds_no_scope`
+  // — "a same-scope re-open evicts nothing"): `chat_open` retains every session unless the
+  // recorded scope CHANGED, then ensures only the named `clis`, so seats outside the subset are
+  // never touched. This route hands the engine the scope recorded at open, verbatim.
+  it('POST /chats/:id/seats on a chat this daemon never opened is a 404 — never a fresh chat, never a hang', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats/never-opened/seats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clis: ['claude'] }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/not open on this daemon/);
+    // The refusal did not invent a chat: the enumerate surface is still empty.
+    const list = await fetch(`${baseUrl}/api/v1/chats`);
+    if (list.status === 200) {
+      expect(((await list.json()) as { chats?: unknown[] }).chats ?? []).toEqual([]);
+    }
+  });
+
+  it('POST /chats/:id/seats validates its body before touching the engine', async () => {
+    for (const payload of [{}, { clis: [] }, { clis: ['a'], extra: 1 }]) {
+      const res = await fetch(`${baseUrl}/api/v1/chats/never-opened/seats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status, JSON.stringify(payload)).toBe(400);
+    }
+  });
 });

@@ -865,11 +865,13 @@ export class ChatScopeIndex {
   /**
    * Fold a per-seat re-open (F-W1-005, `POST /chats/:id/seats`): a seat that WARMED leaves the
    * refused list; one the engine refused replaces its entry (the engine's reason, source `engine`).
-   * Returns the refused list as it now stands, or `undefined` when the chat is not live.
+   * Returns the refused list as it now stands (empty for a chat that is not live here).
    */
-  foldSeats(chatId: string, outcomes: readonly ChatSeatOutcomeLike[]): ChatSeatRefusal[] | undefined {
+  foldSeats(chatId: string, outcomes: readonly ChatSeatOutcomeLike[]): ChatSeatRefusal[] {
     const slot = this.slots.get(chatId);
-    if (slot?.state !== 'live') return undefined;
+    // Not live here ⇒ no refusal set to fold into. The caller's 404 guard already proved liveness,
+    // so this is the unreachable arm, not a silent degrade (review NIT).
+    if (slot?.state !== 'live') return [];
     const touched = new Set(outcomes.map((o) => o.cliKey));
     const kept = slot.refused.filter((r) => !touched.has(r.cliKey));
     const fresh: ChatSeatRefusal[] = outcomes

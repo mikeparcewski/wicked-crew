@@ -119,8 +119,8 @@
     {
       "method": "POST",
       "path": "/api/v1/chats/:id/seats",
-      "requestType": null,
-      "responseType": null,
+      "requestType": "ChatSeatsBody",
+      "responseType": "ChatSeatsResponse",
       "statusCodes": [
         200,
         400,
