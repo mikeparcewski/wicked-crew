@@ -446,11 +446,9 @@ describe('publish (design v3 §1)', () => {
 
   it('keeps the newest three generations and never the one just published; no staging dirs linger', async () => {
     s.store.seed();
-    let rev = s.store.revision();
     for (let i = 0; i < 5; i += 1) {
       const r = await s.store.publish(bump(s)); // a changed tree each time — an unchanged publish mints nothing (DES-L6 PR-L6-1)
       expect(r.verdict).toBe('clear');
-      rev = r.revision;
     }
     expect(s.store.generationsOnDisk()).toEqual([3, 4, 5]);
     expect(readlinkSync(join(s.root, 'current'))).toBe(join('snapshots', '000005'));
@@ -474,7 +472,7 @@ describe('publish (design v3 §1)', () => {
 
   it('commits the manifest BEFORE flipping current; ensureReady finishes a flip a crash interrupted', async () => {
     s.store.seed();
-    const r1 = await s.store.publish(1);
+    expect((await s.store.publish(1)).snapshot?.gen).toBe(1);
     const r2 = await s.store.publish(bump(s)); // a changed tree — an unchanged publish would answer gen 1 `unchanged` (DES-L6 PR-L6-1)
     expect(r2.snapshot?.gen).toBe(2);
     // The crash window: the manifest names gen 2, `current` still points at gen 1.
@@ -1264,11 +1262,9 @@ describe('baseline retention (a baseline lives while any snapshot references it)
     expect(b).not.toBe(a);
     expect(s.store.baselinesOnDisk()).toEqual([a, b].sort());
     expect(Object.keys(s.store.manifest().baselines).sort()).toEqual([a, b].sort());
-    let rev = ref.revision;
     for (let i = 0; i < 3; i += 1) {
       const r = await s.store.publish(bump(s)); // gens 2, 3, 4 (a changed tree each time) — gen 1 is reaped by the third
       expect(r.verdict).toBe('clear');
-      rev = r.revision;
     }
     expect(s.store.generationsOnDisk()).toEqual([2, 3, 4]);
     expect(s.store.baselinesOnDisk()).toEqual([b]);
