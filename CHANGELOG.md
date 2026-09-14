@@ -136,6 +136,16 @@ mentioned only where a daemon release depends on them.
   type for older daemons). **Behaviour change (BC-64):** a repo whose domain-graph never passed its
   coverage bar answers the existing 404 (`requirements_graph.json not generated`) where the live store
   used to answer — not on any RC2 journey. A guard test keeps `node:sqlite` out of `src/`.
+- **The engine's gate-hook binary comes from THIS install's `wicked-core-ts` platform package first; crew
+  pins `wicked-core-ts ^0.7.26` and bundles `wicked-studio ^0.5.10` (core#405, F-009 / F-SMOKE-006 —
+  FIX-IT-ALL L10-9 crew half, row 2.8; register BC-68).** `locateWickedCoreExe` walked the operator's home
+  installs first (`.local/bin`, `.cargo/bin`) — the stale-copy class a symlink to an old build produced.
+  core-ts 0.7.26 ships the stripped `wicked-core` inside each `wicked-core-ts-<platform>` package, stamped
+  `wickedCoreVersion` (the engine semver the addon's gate compares against `--version`); the daemon now
+  resolves that binary from the package's own directory (`bundledWickedCoreExe`) before the home-dir
+  ladder, so the hook always matches the addon that checks it. `WICKED_CORE_EXE` set by the operator still
+  wins. The 0.7.26 engine also carries the wave-1 core changes (the L4 governance train, the state-home
+  `chats` / `interactive` registration).
 
 ## [0.7.34] — 2026-09-14
 

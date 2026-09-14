@@ -147,12 +147,69 @@ export function readOverlayWorkflows(
   return out;
 }
 
+/** The gate-hook binary's file name on this host. */
+export const WICKED_CORE_EXE_NAME = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+
+/**
+ * The `wicked-core-ts` platform package for this host — the five names `napi-release.yml` publishes
+ * (`wicked-core-ts-darwin-arm64`, `-darwin-x64`, `-linux-x64-gnu`, `-linux-arm64-gnu`,
+ * `-win32-x64-msvc`); `undefined` for a platform/arch pair no package exists for.
+ */
+export function wickedCoreTsPlatformPackage(platform: string = process.platform, arch: string = process.arch): string | undefined {
+  const abi =
+    platform === 'darwin' && arch === 'arm64' ? 'darwin-arm64'
+    : platform === 'darwin' && arch === 'x64' ? 'darwin-x64'
+    : platform === 'linux' && arch === 'x64' ? 'linux-x64-gnu'
+    : platform === 'linux' && arch === 'arm64' ? 'linux-arm64-gnu'
+    : platform === 'win32' && arch === 'x64' ? 'win32-x64-msvc'
+    : undefined;
+  return abi === undefined ? undefined : `wicked-core-ts-${abi}`;
+}
+
+/**
+ * The `wicked-core` hook binary BUNDLED inside this install's platform package (core#405, F-009 —
+ * FIX-IT-ALL L10-9 crew half; core-ts ≥ 0.7.26 ships it beside the `.node`, stamped
+ * `wickedCoreVersion` = the engine semver the addon's gate compares against `--version`). Resolved
+ * from the package's own directory — `require.resolve('<pkg>/package.json')` when its exports map
+ * allows it, else the resolver's candidate dirs (the sidestep `installedPackageVersion` uses) — so
+ * the binary is the one that shipped WITH this addon, never a stale copy in the operator's home.
+ * `undefined` when no platform package resolves or it carries no binary (a pre-0.7.26 package).
+ */
+export function bundledWickedCoreExe(
+  exeName: string = WICKED_CORE_EXE_NAME,
+  pkg: string | undefined = wickedCoreTsPlatformPackage(),
+  resolver: { resolve: (id: string) => string; paths: (id: string) => string[] | null } = {
+    resolve: (id) => require.resolve(id),
+    paths: (id) => require.resolve.paths(id),
+  },
+): string | undefined {
+  if (pkg === undefined) return undefined;
+  const { existsSync } = require('node:fs') as typeof import('node:fs');
+  try {
+    const p = join(dirname(resolver.resolve(`${pkg}/package.json`)), exeName);
+    if (existsSync(p)) return p;
+  } catch {
+    // exports map without ./package.json, or the package is not installed — try the dirs below
+  }
+  for (const dir of resolver.paths(pkg) ?? []) {
+    const p = join(dir, pkg, exeName);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 /** Find the wicked-core standalone binary for the gate-hook command.
  * Checks common install locations so the Rust actor can build a correct
  * hook command even when loaded as a napi addon (where current_exe() = node).
+ * Order (core#405): the binary bundled in THIS install's platform package first — it shipped with
+ * the addon that will check its semver — then the home-dir installs (the stale-copy class: a
+ * `.local/bin` symlink once held an old build), the monorepo dev build, PATH. `WICKED_CORE_EXE`
+ * set by the operator still wins (the caller only fills it when unset).
  */
 function locateWickedCoreExe(): string | undefined {
-  const exeName = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+  const exeName = WICKED_CORE_EXE_NAME;
+  const bundled = bundledWickedCoreExe(exeName);
+  if (bundled !== undefined) return bundled;
   const candidates: string[] = [];
   // User-local install (cargo install / manual).
   const home = process.env.HOME ?? process.env.USERPROFILE;
