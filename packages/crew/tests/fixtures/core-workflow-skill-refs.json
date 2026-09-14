@@ -1,5 +1,5 @@
 {
-  "wicked-core-ts": "0.7.24",
+  "wicked-core-ts": "0.7.25",
   "refs": [
     "wicked-garden-domain",
     "wicked-garden-domain-coverage",
