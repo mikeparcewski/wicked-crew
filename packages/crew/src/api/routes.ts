@@ -2250,7 +2250,8 @@ export function registerRoutes(
         // taken out by the council-bench / dispatch-timeout path, not by admission, so admission's
         // list never named it. Every requested-or-defaulted seat that is not in `seats` is named
         // here with the most specific cause the daemon knows: its own "no credential" report
-        // (`auth`), this daemon's council bench (`bench`), else the dispatch budget (`budget`).
+        // (`auth`), else the dispatch budget (`budget`). (R5b: crew keeps no council bench of its
+        // own any more — the engine benches per run and says so in `unitDistributed.degradedReason`.)
         for (const key of clis) {
           if (seats.some((s) => s.cliKey === key) || refused.some((r) => r.cliKey === key)) continue;
           const st = standingOf(key);
@@ -2263,12 +2264,6 @@ export function registerRoutes(
                   ? `not seated — the seat itself reported no credential (${authFailure.source}: ${authFailure.detail}); sign it in from the System page`
                   : 'not seated — signed out; sign it in from the System page',
               source: 'auth',
-            });
-          } else if (st?.council_bench !== undefined) {
-            refused.push({
-              cliKey: key,
-              reason: `not seated — ${st.council_ineligible_reason ?? 'benched by this daemon’s recent councils'}`,
-              source: 'bench',
             });
           } else {
             refused.push({

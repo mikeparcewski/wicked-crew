@@ -148,11 +148,11 @@ export function seatStanding(
 }
 
 /** Why a seat was not seated (F-A45-011; `ChatSeatRefusal.source` on the wire): `auth` — signed
- *  out; `scope` — the scoped-chat admission rule; `bench` — kept for wire compatibility (crew no longer
- *  benches by its own council count — the engine's per-run ledger does);
- *  `budget` — the engine did not seat it (its warm-up timed out or it was dropped at dispatch);
+ *  out; `scope` — the scoped-chat admission rule;
+ *  `budget` — the engine did not seat it (its warm-up timed out or it was dropped at dispatch; R5b —
+ *  crew keeps no council bench of its own, so the engine's per-run bench surfaces here);
  *  `engine` — the engine refused it with its own reason. */
-export type ChatRefusalSource = 'auth' | 'scope' | 'bench' | 'budget' | 'engine';
+export type ChatRefusalSource = 'auth' | 'scope' | 'budget' | 'engine';
 
 export type ChatAdmission = { ok: true } | { ok: false; reason: string; source: ChatRefusalSource };
 
