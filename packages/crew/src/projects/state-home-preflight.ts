@@ -19,8 +19,14 @@
  *
  *   1. {@link assertWickedRootsOutsideStateHome} — the BOOT refusal: a `WICKED_*` root variable
  *      pointed INSIDE the state home is a configuration error `serve` refuses with (the rig's
- *      shape). The defaults all live outside; the three variables here are the ones whose target
- *      crew writes into (or spawns a bridge that does).
+ *      shape). The defaults all live outside; the variables here are the ones whose target crew
+ *      writes into (or spawns a bridge that does). Two classes (crew#569): a FENCED variable's
+ *      target is also a registered fixture entry, so a pre-existing placement is denied rather
+ *      than refusing every launch; a REFUSE-ONLY variable places a file crew itself never seeds
+ *      (`WICKED_CREW_SYSTEM_SETTINGS`) — an existing placement is the configuration error the
+ *      boot names, there is nothing to fence, so it has no registry row. Paths are compared by
+ *      their REAL spelling (the deepest existing ancestor realpath'd — W1 of crew#555): core's
+ *      fence canonicalises, so a symlinked state home must not pass here and refuse at intake.
  *   2. {@link StateHomeWatch} — the SURVEY: which state home the fence classifies and every entry it
  *      cannot classify there. Asked of the engine (`Core.preflightStateHome`, the same code the
  *      fence and core's intake refusal run) when the installed addon carries it; on an older addon
@@ -35,8 +41,8 @@
  * home, the variable, what to do — and none cites a repository fixture path (F-033).
  */
 
-import { lstatSync, readdirSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { SKILLS_ROOT_NAMES } from '../skills/root-names.js';
 import { SKILLS_DIRNAME, SNAPSHOTS_DIRNAME } from '../skills/store.js';
@@ -61,10 +67,15 @@ export const STATE_HOME_BLOCKER_CODE = 'state_home_unregistered';
  * did). Each default lives outside the state home; the fixture registers the top-level name each
  * would create so a pre-existing placement is fenced, and this module refuses to boot into one.
  */
-export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: string }> = [
-  { variable: 'WICKED_WORKFLOWS_DIR', creates: 'the workflow overlay directory (crew seeds the interactive-* drop-in defs into it at boot)' },
-  { variable: 'WICKED_STEERING_INBOX_DIR', creates: 'the steering-inbox documents a governed run must READ — unreadable by construction under the fence' },
-  { variable: 'WICKED_INTERACTIVE_ROOT', creates: "the wicked-interactive docs store and its `.wi-serve.json` (written by the bridge crew spawns)" },
+export const STATE_HOME_ROOT_ENVS: ReadonlyArray<{ variable: string; creates: string; fenced: boolean }> = [
+  { variable: 'WICKED_WORKFLOWS_DIR', creates: 'the workflow overlay directory (crew seeds the interactive-* drop-in defs into it at boot)', fenced: true },
+  { variable: 'WICKED_STEERING_INBOX_DIR', creates: 'the steering-inbox documents a governed run must READ — unreadable by construction under the fence', fenced: true },
+  { variable: 'WICKED_INTERACTIVE_ROOT', creates: "the wicked-interactive docs store and its `.wi-serve.json` (written by the bridge crew spawns)", fenced: true },
+  // crew#569: `PUT /settings` writes this FILE wherever the variable points; under the state home
+  // the write lands as an unregistered entry the fence refuses every launch on — while /health
+  // stays ok. Refuse-only: crew never seeds the file, so an existing placement is the config
+  // error the boot names; nothing to fence, no registry row (rule 6 — one fence change per RC).
+  { variable: 'WICKED_CREW_SYSTEM_SETTINGS', creates: 'the system settings file `PUT /settings` writes', fenced: false },
 ];
 
 /**
@@ -93,15 +104,42 @@ export class StateHomePlacementError extends Error {
   }
 }
 
-/** Is `p` inside `root` (or `root` itself)? Pure — spelled paths, both resolved absolute. */
+/**
+ * The REAL spelling of `p` (W1 residual of crew#555): `resolve` it, realpath the deepest EXISTING
+ * ancestor and re-join the rest. `realpathSync` alone throws for a path that does not exist yet —
+ * and crew creates `WICKED_WORKFLOWS_DIR` AFTER this preflight (`registerWorkflow` seeds it at
+ * boot) — so a naive realpath-else-resolve compares spelled paths again and a symlinked state home
+ * boots green, then core's fence (which canonicalises) refuses at intake. Crew's rule ⊇ core's:
+ * the one divergence — a symlinked ancestor of a not-yet-existing target — crew refuses at boot
+ * where core would refuse at intake once the dir exists; same outcome, earlier. No existing
+ * ancestor at all (a bare relative spelling nobody created) ⇒ the resolved spelling.
+ */
+export function canonicalize(p: string): string {
+  const abs = resolve(p);
+  let prefix = abs;
+  const rest: string[] = [];
+  while (!existsSync(prefix)) {
+    const parent = dirname(prefix);
+    if (parent === prefix) return abs;
+    rest.unshift(basename(prefix));
+    prefix = parent;
+  }
+  try {
+    return join(realpathSync.native(prefix), ...rest);
+  } catch {
+    return abs;
+  }
+}
+
+/** Is `p` inside `root` (or `root` itself)? Pure over the filesystem's spelling of both. */
 function isInside(p: string, root: string): boolean {
-  const rel = relative(resolve(root), resolve(p));
+  const rel = relative(canonicalize(root), canonicalize(p));
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** The first path segment of `p` below `root` — the top-level entry it would create there. */
 function topLevelUnder(p: string, root: string): string {
-  const rel = relative(resolve(root), resolve(p));
+  const rel = relative(canonicalize(root), canonicalize(p));
   return rel === '' ? '' : (rel.split(/[\\/]/)[0] as string);
 }
 
@@ -109,7 +147,8 @@ function topLevelUnder(p: string, root: string): string {
  * Refuse a `WICKED_*` root pointed inside `stateHome` (the rig's F-RC1-011 shape). Pure over `env`
  * so the boot and the tests spell the rule once; throws {@link StateHomePlacementError} naming the
  * variable, its value, the entry it would create and the remedy. An unset or empty variable is
- * fine (the default lives outside the state home).
+ * fine (the default lives outside the state home). A FILE value's entry is its first segment
+ * below the state home (the file itself when placed at the top level — crew#569).
  */
 export function assertWickedRootsOutsideStateHome(env: NodeJS.ProcessEnv, stateHome: string): void {
   for (const { variable, creates } of STATE_HOME_ROOT_ENVS) {
@@ -341,7 +380,7 @@ export class StateHomeWatch {
         derivedFrom = 'snapshot';
       }
     } else if (dbPath !== null && dbPath !== ':memory:' && !dbPath.includes('://')) {
-      stateHome = dirname(resolve(dbPath));
+      stateHome = dirname(canonicalize(dbPath));
       derivedFrom = 'db';
     }
     let unregistered: UnregisteredStateHomeEntry[] = [];

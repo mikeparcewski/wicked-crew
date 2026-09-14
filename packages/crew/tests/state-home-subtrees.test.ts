@@ -199,8 +199,8 @@ describe('STATIC — every state-home join in src/ names a registered entry', ()
         // the state home, so this daemon never seeds the entry there itself and an existing placement
         // is fenced rather than refusing every launch.
         expect(
-          STATE_HOME_ROOT_ENVS.map((r) => r.variable),
-          `registry entry ${key} (crew, env ${e.env}) names a variable the boot does not refuse inside the state home — add it to STATE_HOME_ROOT_ENVS (projects/state-home-preflight.ts) or drop the entry`,
+          STATE_HOME_ROOT_ENVS.filter((r) => r.fenced).map((r) => r.variable),
+          `registry entry ${key} (crew, env ${e.env}) names a variable the boot does not refuse inside the state home — add it to STATE_HOME_ROOT_ENVS (projects/state-home-preflight.ts) as fenced, or drop the entry`,
         ).toContain(e.env);
         continue;
       }
@@ -209,11 +209,16 @@ describe('STATIC — every state-home join in src/ names a registered entry', ()
   });
 
   it('every variable the boot refuses inside the state home has a registered env entry, and vice versa (wicked-core#411 / crew#497)', () => {
-    // Both directions: a refused variable whose entry is unregistered would still refuse every
-    // launch when an OLD placement exists; a registered env entry whose variable is not refused
-    // would let this daemon seed an unreadable store under the fence.
+    // Both directions, for the FENCED class: a refused variable whose entry is unregistered would
+    // still refuse every launch when an OLD placement exists; a registered env entry whose variable
+    // is not refused would let this daemon seed an unreadable store under the fence. A REFUSE-ONLY
+    // variable (`fenced: false`, crew#569) places a file crew itself never seeds — an existing
+    // placement is the configuration error the boot names; nothing to fence, so no registry row.
     const registered = registry.entries.filter((e) => e.env !== undefined).map((e) => e.env as string).sort();
-    expect(registered).toEqual(STATE_HOME_ROOT_ENVS.map((r) => r.variable).slice().sort());
+    expect(registered).toEqual(STATE_HOME_ROOT_ENVS.filter((r) => r.fenced).map((r) => r.variable).slice().sort());
+    for (const r of STATE_HOME_ROOT_ENVS.filter((r) => !r.fenced)) {
+      expect(registered, `refuse-only variable ${r.variable} must NOT have a registry row (rule 6)`).not.toContain(r.variable);
+    }
     for (const e of registry.entries) {
       if (e.env === undefined) continue;
       expect(e.owner).toBe('crew');
