@@ -14,7 +14,7 @@
 // Every message is in operator terms: the entry, the state home, the variable, what to do — and none
 // cites a repository test-fixture path (F-033). The route half is tests/state-home-routes.test.ts.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,6 +26,7 @@ import {
   STATE_HOME_FINDING_KIND,
   STATE_HOME_REMEDY,
   STATE_HOME_ROOT_ENVS,
+  canonicalize,
   stateHomeBlockerBody,
   stateHomeOfSnapshot,
   StateHomePlacementError,
@@ -133,6 +134,76 @@ describe('assertWickedRootsOutsideStateHome — the boot refusal (F-RC1-011)', (
     expect(() =>
       assertWickedRootsOutsideStateHome({ WICKED_STEERING_INBOX_DIR: join(home, 'x', '..', 'inbox') }, home),
     ).toThrow(StateHomePlacementError);
+  });
+
+  it('judges the REAL path (W1 of crew#555): a symlinked state home with WICKED_WORKFLOWS_DIR under its real spelling — a child that does NOT exist yet — is refused', () => {
+    // crew creates WICKED_WORKFLOWS_DIR AFTER this preflight (registerWorkflow seeds it at boot), so
+    // the target must be judged before it exists; core's fence canonicalises once it does, and a
+    // spelled-path comparison here booted green and refused every launch at intake.
+    const base = scratch();
+    const real = join(base, 'real-state');
+    mkdirSync(real);
+    const link = join(base, 'state-link');
+    symlinkSync(real, link, 'dir');
+    const notYet = join(realpathSync.native(real), 'workflows');
+    let thrown: unknown;
+    try {
+      assertWickedRootsOutsideStateHome({ WICKED_WORKFLOWS_DIR: notYet }, link);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(StateHomePlacementError);
+    expect((thrown as StateHomePlacementError).entry).toBe('workflows');
+    // And the other way round: the variable spelled through the link, the state home by its real path.
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_WORKFLOWS_DIR: join(link, 'workflows') }, real)).toThrow(
+      StateHomePlacementError,
+    );
+    // A sibling reached through a DIFFERENT link is still outside.
+    const other = join(base, 'other');
+    mkdirSync(other);
+    symlinkSync(other, join(base, 'other-link'), 'dir');
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_WORKFLOWS_DIR: join(base, 'other-link', 'workflows') }, link)).not.toThrow();
+  });
+
+  it('crew#569: WICKED_CREW_SYSTEM_SETTINGS pointed under the state home is refused at BOOT, naming the file (refuse-only — no registry row)', () => {
+    const base = scratch();
+    const { home: stateHome } = cleanStateHome(base);
+    let thrown: unknown;
+    try {
+      assertWickedRootsOutsideStateHome({ WICKED_CREW_SYSTEM_SETTINGS: join(stateHome, 'settings.json') }, stateHome);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(StateHomePlacementError);
+    const e = thrown as StateHomePlacementError;
+    expect(e.variable).toBe('WICKED_CREW_SYSTEM_SETTINGS');
+    expect(e.entry).toBe('settings.json');
+    expect(e.message).toContain('`settings.json`');
+    expect(e.message).toContain('PUT /settings');
+    expect(e.message).not.toMatch(NO_FIXTURE_PATH);
+    // The default (outside) and a sibling are fine; the row is refuse-only.
+    expect(() => assertWickedRootsOutsideStateHome({ WICKED_CREW_SYSTEM_SETTINGS: join(base, 'settings.json') }, stateHome)).not.toThrow();
+    expect(STATE_HOME_ROOT_ENVS.find((r) => r.variable === 'WICKED_CREW_SYSTEM_SETTINGS')?.fenced).toBe(false);
+    expect(STATE_HOME_ROOT_ENVS.filter((r) => r.fenced).map((r) => r.variable)).toEqual([
+      'WICKED_WORKFLOWS_DIR',
+      'WICKED_STEERING_INBOX_DIR',
+      'WICKED_INTERACTIVE_ROOT',
+    ]);
+  });
+
+  it('canonicalize: realpaths the deepest EXISTING ancestor and re-joins the rest; no existing ancestor ⇒ the resolved spelling', () => {
+    const base = scratch();
+    const real = join(base, 'real');
+    mkdirSync(real);
+    const link = join(base, 'link');
+    symlinkSync(real, link, 'dir');
+    const realBase = realpathSync.native(real);
+    expect(canonicalize(join(link, 'a', 'b', 'c.json'))).toBe(join(realBase, 'a', 'b', 'c.json'));
+    expect(canonicalize(link)).toBe(realBase);
+    expect(canonicalize(join(link, 'x', '..', 'y'))).toBe(join(realBase, 'y'));
+    // Nothing of it exists: the resolved spelling, never a throw.
+    const nowhere = join(base, 'gone', 'deeper');
+    expect(canonicalize(nowhere)).toBe(join(realpathSync.native(base), 'gone', 'deeper'));
   });
 });
 
@@ -290,7 +361,10 @@ describe('StateHomeWatch — the live classification the routes report and gate 
     handed = null;
     const byDb = await watch.refresh();
     expect(byDb.derivedFrom).toBe('db');
-    expect(byDb.stateHome).toBe(home);
+    // The db parent is reported by its REAL spelling — core's `of_db_path` canonicalises the same
+    // way (W1 of crew#555; the temp dir is a symlink on macOS) — while a snapshot-derived state home
+    // is judged by SHAPE and keeps the handed spelling.
+    expect(byDb.stateHome).toBe(canonicalize(home));
     expect(byDb.unregistered.map((u) => u.name)).toEqual(['stray.txt']);
     expect(byDb.refusesLaunches).toBe(false);
   });

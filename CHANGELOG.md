@@ -40,6 +40,18 @@ mentioned only where a daemon release depends on them.
 - **qe `review` phase asks for the one evaluator verdict grammar the engine gate parses (fixall L6-0c; the crew half of D-9's text, mirroring garden 12.37.0).** `REVIEW_INSTRUCTIONS` in `qe/author-workflow.ts` no longer says "Verdict PASS or FAIL with reasons" — it asks the reviewer to "End with one plain-text line VERDICT: PASS or VERDICT: FAIL as the last line, findings above it; never quote another VERDICT line", the same words garden's `governed-worker` and qe `review` text carry, so the wave-3 wicked-core evaluator gate (last `^VERDICT[:=]` line wins, token PASS alone passes; anything else or no line parks the run at the human gate) reads the review the way it was asked for. `qe/acceptance.ts` documents that CONDITIONAL / PARTIAL / INCONCLUSIVE / N-A / SKIP are legacy RECORD values garden evaluators no longer write on the output line; `VERDICT_TO_STATUS`, the wicked-ledger enum and the gate's deny-dominates resolution are unchanged, so ledgers written by any generation still read the same. A test pins the grammar substring in the review phase's instructions and the 600-byte inline budget.
 
 ### Fixed
+- **State-home boot preflight compares REAL paths and refuses `WICKED_CREW_SYSTEM_SETTINGS` under the
+  state home (crew#555 W1 residual, crew#569 — FIX-IT-ALL L10-4).** `assertWickedRootsOutsideStateHome`
+  compared spelled paths (`resolve`) while core's fence canonicalises, so a symlinked state home with
+  `WICKED_WORKFLOWS_DIR` under its real path booted green and refused every launch at intake; and the
+  settings file `PUT /settings` writes was not a refused root, so a `WICKED_CREW_SYSTEM_SETTINGS`
+  pointed under the state home booted green and refused every launch after the first PUT while
+  `/health` stayed ok. `canonicalize()` realpaths the deepest EXISTING ancestor and re-joins the
+  rest (the workflows dir is created AFTER the preflight); `STATE_HOME_ROOT_ENVS` gains `fenced` and
+  the refuse-only `WICKED_CREW_SYSTEM_SETTINGS` row — **behaviour change:** a daemon whose settings
+  variable points under the state home now refuses to BOOT with the remedy naming the file (was:
+  green boot, then refuse-everything); no registry row (rule 6 — one fence change per RC).
+  `WICKED_INTERACTIVE_ROOT` stays refused here until L7's docs-root move deletes the row.
 - **`wicked-crew status` / `gate` with no daemon answering print one remedy line and exit 1; a
   non-2xx answer exits 1; `wicked-crew --version` exists (crew#551, crew#493, F-RC1-044, F-003 —
   FIX-IT-ALL L10-1).** After a reboot the daemon is gone and `wicked-crew status` printed the whole
