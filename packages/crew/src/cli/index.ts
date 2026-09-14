@@ -28,6 +28,7 @@ import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
 import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import { versionLines } from '../core/versions.js';
+import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, resolveDaemonPort } from './port.js';
 import type { LaunchRunInput } from '../core/types.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
@@ -92,8 +93,8 @@ function stateHome(): string {
 
 function parseBootstrap(args: string[]): BootstrapOpts {
   const dbPath = flag(args, '--db') ?? join(stateHome(), 'core.db');
-  const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
-  const port = portStr !== undefined ? Number(portStr) : 7701;
+  // F-W1-101: the ONE daemon-port resolver — `status`/`gate` resolve the same way (cli/port.ts).
+  const port = resolveDaemonPort(args);
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
   // OPT-IN: arm the event-driven execution-mediation seam (default OFF → in-process path).
   // `--engine-exec` flag or WICKED_BUS_EXEC env turns it on; `--bus-db` / WICKED_BUS_DB sets the bus db.
@@ -456,7 +457,7 @@ async function main(): Promise<void> {
         'Start the wicked-crew daemon.\n' +
         '\n' +
         'Options:\n' +
-        '  --port <n>                      Port to listen on (default: 7701, env: CREW_PORT)\n' +
+        `  --port <n>                      Port to listen on (default: ${DEFAULT_DAEMON_PORT}, env: ${DAEMON_PORT_ENV})\n` +
         '  --db <path>                     Core database path (default: ~/.wicked-crew/core.db)\n' +
         '  --bus-db <path>                 Bus database path (env: WICKED_BUS_DB) for the interactive/project seams,\n' +
         '                                  the /ws relay and the bridge crew spawns (default: $WICKED_BUS_DATA_DIR/bus.db,\n' +
@@ -553,14 +554,17 @@ async function main(): Promise<void> {
     const status = await adapter.resumeRun(sessionId);
     printReady({ mode: 'resume', port, db: opts.dbPath, run: sessionId, status, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'gate') {
+    if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) { console.log(GATE_USAGE); return; }
     await runGate(argv);
   } else if (command === 'status') {
+    if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) { console.log(STATUS_USAGE); return; }
     await runStatus(argv);
   } else if (command === 'mcp') {
-    const portStr = flag(argv, '--port');
-    const port = portStr !== undefined ? Number(portStr) : 7701;
+    // The MCP server CONNECTS to the daemon at this port — a daemon-client verb, so the port is
+    // resolved like every other (F-W1-101): `--port`, else CREW_PORT, else the default.
+    const port = resolveDaemonPort(argv);
     if (!Number.isFinite(port) || !Number.isInteger(port) || port < 1 || port > 65535) {
-      console.error(`--port must be an integer between 1 and 65535 (got: ${portStr ?? '(missing)'})`);
+      console.error(`--port / ${DAEMON_PORT_ENV} must be an integer between 1 and 65535 (got: ${flag(argv, '--port') ?? process.env[DAEMON_PORT_ENV] ?? '(missing)'})`);
       process.exit(1);
     }
     await runMcpServer(port);
@@ -596,6 +600,33 @@ function isConnectionFailure(err: unknown): boolean {
   return err instanceof TypeError && err.message === 'fetch failed';
 }
 
+// Subcommand usage (F-W1-101: `wicked-crew status --help` answered "Unknown command"). Printed on
+// stdout with exit 0, like `serve --help`; both name the port resolution every verb shares.
+const PORT_LINE = `  --port <n>       daemon port (default: ${DEFAULT_DAEMON_PORT}, env: ${DAEMON_PORT_ENV}) — resolved exactly as \`serve\` resolves its listening port`;
+const STATUS_USAGE = [
+  'Usage: wicked-crew status [--run <id>] [--port <n>]',
+  '',
+  'Print the runs (or one run) of the daemon on this host as JSON. Exit 1 with a one-line remedy',
+  'when no daemon answers, exit 1 on a non-2xx answer.',
+  '',
+  'Options:',
+  '  --run <id>       one run (alias: --session <id>); default: the run list',
+  PORT_LINE,
+  '  -h, --help       this text',
+].join('\n');
+const GATE_USAGE = [
+  'Usage: wicked-crew gate --run <id> [--reject] [--amend <text>] [--port <n>]',
+  '',
+  'Answer the human gate a run is parked at: approve (default) or --reject; --amend steers the retry.',
+  '',
+  'Options:',
+  '  --run <id>       the run (alias: --session <id>) — required',
+  '  --reject         reject instead of approve',
+  '  --amend <text>   steering text carried with the approval',
+  PORT_LINE,
+  '  -h, --help       this text',
+].join('\n');
+
 /** The one remedy line for "no daemon answering" — operator terms, no stack. */
 function noDaemonRemedy(port: number): string {
   return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
@@ -624,9 +655,9 @@ async function runGate(args: string[]): Promise<void> {
   const runId = flag(args, '--run') ?? flag(args, '--session');
   const approve = !hasFlag(args, '--reject');
   const amend = flag(args, '--amend');
-  const port = flag(args, '--port') !== undefined ? Number(flag(args, '--port')) : 7701;
+  const port = resolveDaemonPort(args);
   if (!runId) {
-    console.error('Usage: wicked-crew gate --run <id> [--reject] [--amend <text>] [--port <n>]');
+    console.error(GATE_USAGE);
     process.exit(1);
   }
   const body: Record<string, unknown> = { approve };
@@ -642,7 +673,7 @@ async function runGate(args: string[]): Promise<void> {
 
 async function runStatus(args: string[]): Promise<void> {
   const runId = flag(args, '--run') ?? flag(args, '--session');
-  const port = flag(args, '--port') !== undefined ? Number(flag(args, '--port')) : 7701;
+  const port = resolveDaemonPort(args);
   const base = `http://127.0.0.1:${port}/api/v1`;
   const url = runId ? `${base}/runs/${runId}` : `${base}/runs`;
   const res = await daemonFetch(port, url);
