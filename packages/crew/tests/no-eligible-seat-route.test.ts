@@ -18,6 +18,12 @@
 // Same headless recipe as state-home-routes.test.ts: a real `createServer` over a scratch state home,
 // a stub adapter whose `launchRun` throws the engine's text for one sentinel problem, every seam
 // disabled — the skills seam too, and no handed snapshot, so the state-home pre-check never fires.
+//
+// FIX-IT-ALL L8-0b / DES-L3 PR-3A: this INTAKE refusal stays a synchronous 409 with a byte-identical
+// Display (L3 F10 — the recogniser below keeps matching). The OTHER all-benched path — every seat
+// benched by the council's ballots at DISTRIBUTION, today `sessionFailed` in ~2 s — becomes the
+// `dead_seat` escalation gate in core-ts 0.7.27; its NOT_FIXED_YET expectation is
+// `tests/integration/dead-seat-distribution-gate.test.ts` (real engine, two dead wrapped seats).
 
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

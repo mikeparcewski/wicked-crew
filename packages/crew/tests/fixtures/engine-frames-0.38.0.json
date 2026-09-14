@@ -1,0 +1,73 @@
+{
+  "recordedFrom": "wicked-core 425de81 src/event.rs — CoreEvent::to_json arms GateEscalated (event.rs ~1763-1789), SandboxPosture (~1991-2004), WorktreeRetained (~2005-2013); key set, camelCase spellings and the null/empty conventions are the engine's exactly (mirrored from its own to_json tests); the values are illustrative. api-types 0.38.0 types every key; a daemon whose engine predates wicked-core#464 emits only the first five gateEscalated keys.",
+  "gateEscalated": {
+    "type": "gateEscalated",
+    "session": "run-1",
+    "ord": 2,
+    "condition": "evaluator_mutated_worktree",
+    "verdictSummary": "the reproduce phase changed the tree",
+    "attempt": 0,
+    "denialSource": "worktree_guard",
+    "defGate": false,
+    "outputCaptured": true,
+    "restored": true,
+    "discarded": [{ "status": "A", "path": "evidence/repro.md" }],
+    "suggestionRef": "refs/wicked/suggestions/run-1/2/0"
+  },
+  "gateEscalatedHookVeto": {
+    "type": "gateEscalated",
+    "session": "run-1",
+    "ord": 2,
+    "condition": "boundary_deny",
+    "verdictSummary": "input governance denied a tool-call in unit-2",
+    "attempt": 1,
+    "denialSource": "",
+    "defGate": false,
+    "outputCaptured": true,
+    "restored": false,
+    "discarded": [],
+    "suggestionRef": null
+  },
+  "gateEscalatedCreatorMkdirOutside": {
+    "type": "gateEscalated",
+    "session": "run-1",
+    "ord": 3,
+    "condition": "boundary_deny",
+    "verdictSummary": "input governance refused Bash `mkdir -p <outside the boundary>/evidence` in unit-3: write target outside the run's write roots",
+    "attempt": 0,
+    "denialSource": "input_governance",
+    "defGate": false,
+    "outputCaptured": false,
+    "restored": false,
+    "discarded": [],
+    "suggestionRef": null
+  },
+  "gateEscalatedDeadSeat": {
+    "type": "gateEscalated",
+    "session": "run-1",
+    "ord": 1,
+    "condition": "dead_seat",
+    "verdictSummary": "no eligible seat for run-1: 2 of 2 seats benched: codex (not_logged_in — ballot), copilot (quota_exhausted (3/3 ballots) — ballot) — sign a seat in, or add one, before launching; provisionally seated on 'codex'",
+    "attempt": 0,
+    "denialSource": "dead_seat",
+    "defGate": false,
+    "outputCaptured": false,
+    "restored": false,
+    "discarded": [],
+    "suggestionRef": null
+  },
+  "sandboxPosture": {
+    "type": "sandboxPosture",
+    "session": "run-1",
+    "ord": 2,
+    "cli": "codex",
+    "posture": "advisory",
+    "reason": "the registry record for `codex` declares no OS sandbox (`acp.os_sandbox` unset): containment is the worktree guard plus the command-text fences"
+  },
+  "worktreeRetained": {
+    "type": "worktreeRetained",
+    "session": "run-1",
+    "path": "/srv/wicked/runs/wicked-run-1",
+    "reason": "the worktree holds uncommitted work the run branch does not carry (2 modified, 1 untracked)"
+  }
+}
