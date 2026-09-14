@@ -67,7 +67,7 @@ import {
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { TestSetIndex } from '../qe/test-sets.js';
-import { resolveProjectGraphBinding } from '../projects/graph.js';
+import { estateExe, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
@@ -124,6 +124,7 @@ import {
   gitWorktreeIsClean,
   isDeliverConflictStranded,
   prUrlFrom,
+  canDeliverResolver,
   type DeliveryState,
   type VacuityProbes,
 } from './delivery-index.js';
@@ -188,6 +189,17 @@ export interface RepoGraphReply {
   graph: CodeGraphData | null;
   reason?: string;
   finding?: RepoFinding;
+}
+
+/**
+ * The whole-graph counts from `wicked-estate stats --db` stdout (`nodes=N edges=M files=F …`, the
+ * first line estate prints — `main.rs`'s `stats` summary). `undefined` when the line does not parse
+ * (an older/newer estate, an error message): the caller leaves `CodeGraphData.totals` ABSENT.
+ */
+export function parseEstateTotals(stdout: string): { nodes: number; edges: number; files: number } | undefined {
+  const m = /^nodes=(\d+) edges=(\d+) files=(\d+)/m.exec(stdout);
+  if (m === null) return undefined;
+  return { nodes: Number(m[1]), edges: Number(m[2]), files: Number(m[3]) };
 }
 
 function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
@@ -686,6 +698,12 @@ export interface RuntimeDeps {
    *  directly-driven route set gets a COLD, unstarted one over the same injectable probes:
    *  reads then answer the stat-only tri-state until a test sweeps or warms it explicitly. */
   deliveryCache?: DeliveryDerivationCache;
+  /** Def-awareness for the delivery derivation (crew#481 / D-14) — `createServer` injects the
+   *  `runCanDeliver(view, resolveRunWorkflow(view, adapter.listWorkflows()))` closure it also hands
+   *  its cache, so the campaigns rollup and the run DTOs classify from ONE predicate. A
+   *  directly-driven route set derives the same closure over the adapter's registry when it has
+   *  one, else every completed repo-scoped run stays a candidate (today's read). */
+  canDeliver?: (view: SessionView) => boolean;
   /** The post-hoc deliver exec (crew#393, `POST /runs/:id/deliver`) — spawns the hardened
    *  deliver script in a run's worktree. Injectable so route tests aim the spawn's HOME/PATH at
    *  a fixture (stub `gh`, local bare origin); defaults to the real `bash -lc` spawn. */
@@ -834,12 +852,22 @@ export function registerRoutes(
   // the daemon's sweep/warm feed it. The default (a directly-driven route set) is COLD and
   // unstarted — no background timer under a unit test, reads degrade to the stat-only
   // tri-state — while `createServer` injects a started one over the production probes.
+  // Def-awareness (crew#481 / D-14): the ONE predicate the run DTOs' cache, the campaigns rollup and
+  // the resume 409 classify from. A fake adapter with no registry (`listWorkflows` absent) resolves
+  // no def ⇒ `runCanDeliver(view, null)` ⇒ candidate — byte-for-byte today's read.
+  const canDeliver =
+    runtime.canDeliver ??
+    canDeliverResolver(
+      () => (typeof (adapter as Partial<CoreAdapter>).listWorkflows === 'function' ? adapter.listWorkflows() : []),
+      (m) => app.log.warn(m),
+    );
   const deliveryCache =
     runtime.deliveryCache ??
     new DeliveryDerivationCache({
       listViews: () => adapter.sessionsDetail(),
       probes: vacuityProbes,
       isDelivered: (runId) => deliveryIndex.urlFor(runId) !== undefined,
+      canDeliver,
     });
   const deliverExec = runtime.deliverExec ?? runDeliverScript;
   // crew#524: the deliver phase's script asks THIS daemon for the run-derived PR text, and the PR
@@ -904,7 +932,7 @@ export function registerRoutes(
     const url = deliveryIndex.urlFor(view.session.id);
     if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
     if (conflictStrand) return { delivery: 'stranded' };
-    return deliveryCache.read(view.session);
+    return deliveryCache.read(view);
   };
   const decorateRun = (view: SessionView): SessionView => {
     const conflictStrand = normalizeStranded(view);
@@ -929,6 +957,10 @@ export function registerRoutes(
     // exclude an undated run rather than dating it with a false now.
     const createdAt = runTimingIndex.createdAtFor(view.session.id);
     if (createdAt !== undefined) view.session.created_at = createdAt;
+    // `ended_at` (crew#496 / studio#230; api-types 0.38.0): the same posture from the `run.ended`
+    // entry the daemon records at the run's terminal frame — ABSENT when it has none.
+    const endedAt = runTimingIndex.endedAtFor(view.session.id);
+    if (endedAt !== undefined) view.session.ended_at = endedAt;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -3706,20 +3738,31 @@ export function registerRoutes(
       if (q.focus !== undefined && q.focus.trim() !== '') {
         args.push('--focus', q.focus.trim());
       }
-      const { stdout } = await execCapped('wicked-estate', args, {
-        timeout: 30_000,
-        cwd: repo.root_path,
-      });
+      // Whole-graph `totals` beside the served slice (crew#505 / F-RC1-100; api-types 0.38.0):
+      // `graph-view --limit` emits only the slice, so `stats` alone read "my repo has 150 symbols".
+      // `wicked-estate stats --db` prints `nodes=N edges=M files=F …`; both spawns run under
+      // `Promise.all` (one round trip, not two), the SAME daemon-side CLI posture as `graph-view`.
+      // A stats spawn that fails or prints something else leaves `totals` ABSENT and the slice
+      // still 200 — the tile then knows only the slice, never a substituted count.
+      const exe = estateExe();
+      const [{ stdout }, statsOut] = await Promise.all([
+        execCapped(exe, args, { timeout: 30_000, cwd: repo.root_path }),
+        execCapped(exe, ['stats', '--db', dbPath], { timeout: 30_000, cwd: repo.root_path })
+          .then((r) => r.stdout)
+          .catch(() => null),
+      ]);
       const raw = JSON.parse(stdout) as {
         nodes: Array<{ id: string; name: string; kind: string; file: string; lang: string; score: number; inDeg: number; outDeg: number }>;
         edges: Array<{ src: string; tgt: string }>;
       };
       const fileCount = new Set(raw.nodes.map((n) => n.file)).size;
+      const totals = statsOut === null ? undefined : parseEstateTotals(statsOut);
       const built: RepoGraphReply = {
         graph: {
           nodes: raw.nodes,
           edges: raw.edges,
           stats: { nodeCount: raw.nodes.length, edgeCount: raw.edges.length, fileCount },
+          ...(totals !== undefined ? { totals } : {}),
         },
       };
       return reply.send(built);
@@ -4433,6 +4476,8 @@ export function registerRoutes(
     vacuity: vacuityProbes,
     // A non-probe derivation throw in the rollup is a defect — error level, loud in diagnostics.
     logDefect: (m) => app.log.error(m),
+    // crew#481: the SAME def-awareness the run DTOs apply — one predicate, every surface.
+    canDeliver,
   });
 
   // ── Governance wiki management (wiki-mgmt) — scoreboard + honest empty-state meta ──────────

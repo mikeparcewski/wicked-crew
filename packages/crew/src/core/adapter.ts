@@ -1118,6 +1118,23 @@ export class CoreAdapter {
   }
 
   /**
+   * Called once per run THIS adapter launches OFF the `POST /runs` path — today the onboarding run
+   * (`_doOnboardingLaunch`, the one site `POST /repos`, `POST /repos/:id/onboard` and the
+   * clone-then-register path all reach; the last is adapter-internal, which is why this cannot live
+   * in the routes) — after the engine accepted the launch. `createServer` wires it to
+   * `recordRunLaunched`, so those runs gain a `run.launched` trail entry and a `created_at`
+   * (crew#496 / studio#230; DES-L8 §5 PR-8B). `null` = a CLI-driven adapter with no daemon:
+   * nothing recorded, the pre-field answer. Best-effort: a recorder that throws never fails the
+   * launch the engine already accepted.
+   */
+  private onRunLaunched: ((runId: string, detail: Record<string, unknown>) => void) | null = null;
+
+  /** Hand the adapter the daemon's launch recorder (see `onRunLaunched`). */
+  setOnRunLaunched(record: (runId: string, detail: Record<string, unknown>) => void): void {
+    this.onRunLaunched = record;
+  }
+
+  /**
    * The roster a launch THIS adapter originates should carry — the daemon's roster WITH crew's
    * standing (`api/roster-standing.ts`) once `createServer` wires it, else the raw registry.
    * F-RECON-002/003: the onboarding launch (`seatsForWorkflow`) and `wicked-crew start` handed the
@@ -2229,6 +2246,20 @@ export class CoreAdapter {
       repoRef: repoId,
     });
     this.repoOnboardRunIds.set(repoId, runId);
+    // The launch record the daemon keeps for every POST /runs launch, for THIS path too (crew#496):
+    // it dates the run (`created_at`) and files it with the others. After the engine accepted the
+    // launch, never before; a failing recorder is logged, not a launch failure.
+    if (this.onRunLaunched !== null) {
+      try {
+        this.onRunLaunched(runId, { workflow: 'onboarding', repoRef: repoId, repoName, deliver: 'none' });
+      } catch (err) {
+        console.warn(
+          `[crew] onboarding run ${runId} launched but its launch record failed (reads undated): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
   }
 
   /**

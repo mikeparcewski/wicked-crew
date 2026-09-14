@@ -75,6 +75,52 @@ mentioned only where a daemon release depends on them.
   vanished head, nothing on top, comment), the scratch-dir exclusion; resolver, schema refines and
   the 409s, the retry-index hydrate, the gate-card text, the title/body composer.
 
+<!-- fixall L8 -->
+- **Def-aware delivery classification — a completed run whose workflow could never have delivered reads
+  `delivery: "none"` on `GET /runs`, `GET /runs/:id`, `GET /campaigns` and the resume 409 (fixall L8-8A;
+  crew #481 / F-BM-006 list half, F-RC1-003/004, F-SMOKE-004; DES-L8 r2 §5 PR-8A; register BC-51 / R23,
+  D-14).** `onboarding`, `capture-learnings`, `domain-graph-slice`, `chat`, `survey-repo`, `memories`,
+  `steering-author`, `collab` runs used to read `stranded` (live worktree) or `vacuous` — "nine runs NEED
+  ME" after onboarding nine repos — because the derivation read only `status`/`repo_ref`/`workdir`. ONE
+  predicate now rides INSIDE the derivation: `runCanDeliver(view, def)` = a planned `deliver` unit ‖ def
+  unknown (`null`: free-text `wf-…` runs and unresolvable defs keep today's candidacy) ‖ `isCodeWorkDef(def)`
+  (`api/delivery-index.ts`; `deliveryStateOf`/`deliveryStateWithVacuity` take it as a fourth argument,
+  default `true`), wired as one closure into the delivery cache (`GET /runs`, `GET /runs/:id`, the resume
+  409), and the campaigns rollup (`RollupDeps.canDeliver`) — no split-brain between surfaces. Such runs are
+  never probed or cached (0 git spawns). A recorded PR URL still wins; code-work defs (`feature`, `bug`,
+  `migration`, `qe-author-tests`), any run with a `<id>:deliver` unit, and a code-work run launched
+  `deliver: "none"` classify exactly as before. **Read-time only: EXISTING records flip at their next read;
+  nothing is written, the `run.delivered` trail is untouched.** `isCodeWorkDef` is the `POST /runs` inline
+  deliver-default rule, hoisted; `tests/delivery-classification-launch-rule.test.ts` DRIVES `POST /runs` per shipped
+  def and reads the closure's own `run.launched detail.deliver` back (adjudicated §4.8 — the live rule, never a copy;
+  the inline call swap is a follow-up in that closure's lane). Real-engine launch
+  test: `tests/integration/delivery-none-launch-e2e.test.ts`.
+- **Run DTO gains `ended_at`; onboarding runs gain `created_at` (fixall L8-8B; crew #496 / studio #230;
+  api-types 0.38.0; register BC-52).** The daemon records a `run.ended` audit entry (actor `daemon`,
+  `detail.status` = the terminal frame) when it sees `sessionCompleted` | `sessionFailed` | `runCancelled`
+  and stamps `RunTimingIndex.setEnded` — durable record first, index second, the `run.delivered` order;
+  idempotent per run (a resume/retry re-terminal writes nothing; boot re-reads the trail — newest entry
+  wins — and re-emits nothing). ABSENT, never null, on a live run, a pre-field run, a run that terminalled
+  before THIS daemon booted, or the crash window between the engine's status write and the record.
+  Onboarding launches (`POST /repos`, `POST /repos/:id/onboard`, the clone-then-register path — all through
+  `CoreAdapter._doOnboardingLaunch`) now reach the ONE recorder every launch route uses via
+  `CoreAdapter.setOnRunLaunched` (after the engine accepted the launch; a throwing recorder never fails it),
+  so they carry a `run.launched` entry and `created_at`.
+- **`GET /runs/:id/acceptance` no longer claims "no acceptance evidence recorded" for a missing QE ledger
+  (fixall L8-8C; F-E2E-034; register BC-55).** `required` is true for engine-gated defs (`bug.verify`,
+  `feature.test`) too, so the sentence was false for a bug run whose repo-check and evaluator evidence is on
+  `GET /runs/:id/evidence`. The reason now reads "no QE ledger at <root> — no QE run has recorded a verdict
+  for this repository; this gate reads the QE ledger only (the run's own repo-check and evaluator evidence
+  is on GET /runs/:id/evidence) (missing ⇒ deny)". Verdict unchanged — deny-dominates.
+- **`GET /repos/:id/graph` gains `totals` — whole-graph counts beside the served slice (fixall L8-8D; crew
+  #505 / F-RC1-100 / F-E2E-022; api-types 0.38.0 `CodeGraphData.totals?`; register BC-53).** `graph-view
+  --limit` emits only the slice, so `stats` read "my repo has 150 symbols". The route now spawns
+  `wicked-estate stats --db <db>` beside `graph-view` (both under `Promise.all`, the same daemon-side CLI
+  posture — D1 untouched; `projects/graph.ts` exports `estateExe` so both ride the `WICKED_ESTATE_EXE`
+  override) and parses its `nodes=N edges=M files=F` line (`parseEstateTotals`). `stats` keeps meaning the
+  served slice; `totals` is ABSENT (never substituted) when the line does not parse or the stats spawn
+  fails — the slice still answers 200.
+
 ## [0.7.35] — 2026-09-14
 
 FIX-IT-ALL wave 1 (release train step 3) — **core-ts 0.7.26 / studio 0.5.10 / api-types 0.38.0 /
