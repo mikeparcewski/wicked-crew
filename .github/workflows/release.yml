@@ -98,6 +98,6 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@502c5fce06c38ec5e44ba4abe652cd66e9663a53 # v1.3.1 candidate (wicked-ci main 502c5fc) — re-pin to the v1.3.1 tag SHA
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@27561a3e634813ec33c0de6343357a1f816988bc # v1.3.1
     with:
       crew_version: ${{ needs.version.outputs.version }}
