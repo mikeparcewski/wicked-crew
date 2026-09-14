@@ -10,6 +10,25 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+<!-- fixall L1 -->
+- **The gate accepts `action: approve | request_changes | reject` and `amendScope: cursor | creator`
+  (DES-L1 PR-2; api-types 0.38.0 `GateDecision`; core #459 / #465).** `POST /runs/:id/gate` grows the
+  two additive keys; a disagreement between `action` and `approve` (or an `amendScope` on a reject)
+  is a 400 naming the fields; the route passes all five positionals to `CoreAdapter.confirmGate(runId,
+  approve, amend?, action?, amendScope?)` and the audit detail names the arm. `request_changes` sends a
+  NOT-PASS review back to the creator phase with the findings in context (wicked-core PR-1B); on an
+  engine older than core-ts 0.7.27 the arms fail CLOSED (a 409 naming the engine) instead of being
+  silently dropped by the napi call. `tests/gate-arms.test.ts` tripwires flipped `it.fails` → `it`.
+- **`POST /campaigns` accepts `denialGate: hold | auto_reject` and passes it to the engine def as
+  `denial_gate` (DES-L1 PR-1D / core #484; wicked-core ≥ 0.7.27).** Absent ⇒ the engine's default
+  (`hold`, today) — the def an older engine sees is byte-identical; PRESENT on an addon < 0.7.27 the
+  launch is REFUSED by name (409, `armsUnsupportedReason` — the same fail-closed rule as the gate
+  arms) rather than let serde drop the field and hold a campaign that asked not to. Crew's own fans (recon fan,
+  qe scenario batch) do not set it yet: an unattended qe fan still parks at an escalation gate
+  until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
+  (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
+  `LaunchCampaignBody.denialGate?`.
+
 ## [0.7.35] — 2026-09-14
 
 FIX-IT-ALL wave 1 (release train step 3) — **core-ts 0.7.26 / studio 0.5.10 / api-types 0.38.0 /

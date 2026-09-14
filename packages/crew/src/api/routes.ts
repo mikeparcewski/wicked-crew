@@ -516,10 +516,25 @@ export const LaunchSchema = z.object({
   path: ['groupLabel'],
 });
 
+/** `POST /runs/:id/gate` (api-types 0.38.0 `GateDecision`; DES-L1 PR-2). Additive arms: `action`
+ *  names the arm (`approve` | `request_changes` | `reject`; absent = today's two-arm mapping of
+ *  `approve`), `amendScope` says where an approve's `amend` lands (`cursor` = the gated unit, today's
+ *  behaviour | `creator` = the first creator phase at/after the cursor — an intake steer reaches the
+ *  phase that implements). `request_changes` sends a NOT-PASS review back to the creator with the
+ *  findings in context (`amend` = the operator's note). A disagreement between `action` and
+ *  `approve` is a 400 that names both. */
 export const GateSchema = z.object({
   approve: z.boolean(),
   amend: z.string().optional(),
-}).strict();
+  action: z.enum(['approve', 'request_changes', 'reject']).optional(),
+  amendScope: z.enum(['cursor', 'creator']).optional(),
+}).strict().refine(
+  (b) => b.action === undefined || (b.action === 'approve') === b.approve,
+  { message: '`action` disagrees with `approve`: request_changes and reject require approve: false; approve requires approve: true', path: ['action'] },
+).refine(
+  (b) => b.amendScope === undefined || b.approve,
+  { message: '`amendScope` applies to an approve only (approve: true)', path: ['amendScope'] },
+);
 
 /** `PUT /runs/:id/guidance` (DES-UX-002 §7.2, CREW-UX-7) — the durable pre-gate note body.
  *  The empty string is a legal body: it CLEARS the note. The byte cap is checked in the route
@@ -2539,7 +2554,16 @@ export function registerRoutes(
       isSteeringAuthorRun(run, adapter.listWorkflows());
     const gatePrompt = steeringPropose ? gateCache.get(id)?.prompt : undefined;
     try {
-      const status = await adapter.confirmGate(id, parsed.data.approve, parsed.data.amend);
+      // All five positionals, explicit `undefined` for the absent ones (DES-L1 PR-2; the
+      // gate-arms tripwire pins the arity). An engine refusal (no creator to send back to,
+      // an engine older than the arm) surfaces as the existing 409 below.
+      const status = await adapter.confirmGate(
+        id,
+        parsed.data.approve,
+        parsed.data.amend,
+        parsed.data.action,
+        parsed.data.amendScope,
+      );
       // WHO approved/rejected — the gate-decision audit (task #88). The engine
       // records THAT the gate resolved (interaction_requests / gateDecided);
       // only this HTTP layer knows the authenticated principal behind it.
@@ -2548,6 +2572,8 @@ export function registerRoutes(
         detail: {
           approve: parsed.data.approve,
           ...(parsed.data.amend !== undefined ? { amend: parsed.data.amend } : {}),
+          ...(parsed.data.action !== undefined ? { action: parsed.data.action } : {}),
+          ...(parsed.data.amendScope !== undefined ? { amendScope: parsed.data.amendScope } : {}),
           status,
         },
       });

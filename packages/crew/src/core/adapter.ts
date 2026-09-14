@@ -463,6 +463,28 @@ function addonSupportsProjectGraph(): boolean {
  * the numeric MAJOR.MINOR.PATCH prefix fixes that, and a second copy of the fix is a second chance
  * to lose it. No match ⇒ unparseable ⇒ fail closed.
  */
+/**
+ * The wave-3 arms (wicked-core PR-1B `action` / `amendScope`, PR-1D `denial_gate`) need an addon of
+ * at least 0.7.27. ONE fail-closed rule for all of them (review-L1-598 M1): a napi call silently
+ * DROPS a field the addon does not declare — a `request_changes` would run as a plain reject, an
+ * `auto_reject` campaign would `hold` forever exactly when told not to — so a caller that asked for
+ * an arm the installed engine lacks is REFUSED with a named reason (the routes answer 409), never
+ * served a silent no-op. `null` ⇒ the addon carries the arms. `supported` is injectable so the
+ * old-addon path is unit-testable without booting an engine.
+ */
+export function armsUnsupportedReason(
+  feature: string,
+  remedy: string,
+  supported: boolean = addonAtLeast(0, 7, 27),
+): string | null {
+  return supported
+    ? null
+    : `${feature} needs wicked-core-ts >= 0.7.27 (installed engine is older) — ${remedy}`;
+}
+
+/** The recogniser the routes map to 409: the engine-too-old refusal above, by its fixed phrase. */
+export const ENGINE_TOO_OLD_RE = /needs wicked-core-ts >= /;
+
 function addonAtLeast(maj: number, min: number, pat: number): boolean {
   try {
     const pkg = require('wicked-core-ts/package.json') as { version?: string };
@@ -1542,9 +1564,24 @@ export class CoreAdapter {
     return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
-  /** Resolve a human gate: approve (optional amend) or reject → the status token. */
-  confirmGate(runId: string, approve: boolean, amend?: string): Promise<string> {
-    return this.handedToEngine('run', runId, () => this.core.confirmGate(runId, approve, amend));
+  /** Resolve a human gate: approve (optional amend) / request changes / reject → the status token.
+   *  (DES-L1 PR-2) `action` and `amendScope` are the 0.7.27 arms: on an older addon a napi call
+   *  would silently DROP them — a `request_changes` would run as a plain reject — so they fail
+   *  CLOSED on version (the `extraWriteRoots` / `projectGraph` doctrine); absent, the call is the
+   *  three-arg one every engine understands. */
+  confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string> {
+    return this.handedToEngine('run', runId, () => {
+      if (action === undefined && amendScope === undefined) {
+        return this.core.confirmGate(runId, approve, amend);
+      }
+      const why = armsUnsupportedReason('the gate arms `action` / `amendScope`', 'approve or reject without them');
+      if (why !== null) throw new Error(why);
+      // The 0.7.27 binding takes the two trailing optionals; typed here until the pin moves.
+      const core = this.core as unknown as {
+        confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string>;
+      };
+      return core.confirmGate(runId, approve, amend, action, amendScope);
+    });
   }
 
   /** Cancel a run → the status token. */
@@ -1589,6 +1626,16 @@ export class CoreAdapter {
    *  `readOverlayWorkflows` skips the `campaign-` prefix). */
   async launchCampaign(def: CampaignDef, workflows: WorkflowDef[] = []): Promise<string> {
     const surface = this._campaigns('Launching a campaign');
+    // (review-L1-598 M1) `denial_gate` is a 0.7.27 def field; an older addon's serde IGNORES it and
+    // the operator who asked for `auto_reject` would get `hold` — refuse by name instead (same rule
+    // as the gate arms), before any workflow is armed.
+    if ((def as { denial_gate?: unknown }).denial_gate !== undefined) {
+      const why = armsUnsupportedReason(
+        'the campaign knob `denialGate`',
+        'launch without it (the engine then holds every escalation gate for a human)',
+      );
+      if (why !== null) throw new Error(why);
+    }
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
