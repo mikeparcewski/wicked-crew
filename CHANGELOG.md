@@ -10,6 +10,20 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.38] — 2026-09-15
+
+Re-pin the engine and UI: `wicked-core-ts` `^0.7.29` (carries **BC-79** project-scoped capture
+proposals and the codex OAuth login default) and the bundled `wicked-studio` `^0.5.12` skin (bundle
+marker 0.5.12 — seat-card login/logout UX). Pins-only; no crew source change. The
+`wicked-crew-api-types` 0.38.0 pin is unchanged.
+
+### Changed
+- **Pin `wicked-core-ts` `^0.7.29` (was `^0.7.28`) — carries BC-79 project-scoped capture proposals
+  and the codex OAuth login default.** Lockfile locks `wicked-core-ts` 0.7.29 and its five platform
+  binaries @0.7.29; no crew source change.
+- **Re-pin the bundled `wicked-studio` skin `^0.5.12` (was `^0.5.11`) — seat-card login/logout UX.**
+  Bundle marker 0.5.12.
+
 ## [0.7.37] — 2026-09-15
 
 Pin the published `wicked-core-ts` `^0.7.28` engine so the daemon (and the rig) run the **F-W1-012**
@@ -3025,7 +3039,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...HEAD
+[0.7.38]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.34...v0.7.35
