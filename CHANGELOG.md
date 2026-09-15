@@ -10,7 +10,19 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
-<!-- fixall L1 -->
+## [0.7.36] — 2026-09-15
+
+FIX-IT-ALL wave 3 (release train step 3; the last big cut before the rig upgrade + P6 chat
+re-run) — **core-ts 0.7.27 / studio 0.5.11 / api-types 0.38.0 / bus 2.3.5 / interactive ^0.9.3 /
+garden ≥ 12.37.2 / bridges 1.1.1.** Pins the published `wicked-core-ts` `^0.7.27` engine (the L1
+gate arms, the L3 dead-seat bench + role-aware failover, the L9 `revisesPr` / deliver-refusal
+halves — #611), bundles the published `wicked-studio` 0.5.11 skin (bundle marker 0.5.11 — studio's
+wave-3 cut; `wicked-crew-api-types` 0.38.0 pinned on both sides), keeps `wicked-bus` `^2.3.5` and
+the `wicked-interactive` `^0.9.3` need floor. What merged since 0.7.35, by lane: L1 #598 · L3 #602
+#606 #608 · L4 #605 · L5 #607 #609 #610 · L8 #600 · L9 #601 #603 #611 · L10 #596 #604 (with the
+release-workflow smoke-ref fix #599).
+
+### Added
 - **The gate accepts `action: approve | request_changes | reject` and `amendScope: cursor | creator`
   (DES-L1 PR-2; api-types 0.38.0 `GateDecision`; core #459 / #465).** `POST /runs/:id/gate` grows the
   two additive keys; a disagreement between `action` and `approve` (or an `amendScope` on a reject)
@@ -28,106 +40,6 @@ mentioned only where a daemon release depends on them.
   until the product chooses `auto_reject` for it (crew decision, adjudicator Q4). Typed locally
   (`EngineCampaignDef`) until wicked-crew-api-types 0.39.0 carries `CampaignDef.denial_gate?` /
   `LaunchCampaignBody.denialGate?`.
-
-<!-- fixall L3 -->
-- **Test mirror for wicked-core#523 (every seat benched at distribution parks at the `dead_seat` gate,
-  core-ts 0.7.27).** `tests/integration/dead-seat-distribution-gate.test.ts` carried an unguarded
-  NOT_FIXED_YET `it.fails` case that goes red on the first crew CI run linking a core main with the
-  engine change; it is now status-conditional (asserts the gate shape when the run parked, returns on
-  a pre-3A `failed` run), so crew main is green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
-- **Seat health is the engine's bench + the seat's own auth refusal — crew's second classifiers are
-  deleted (R5 / R5b; F-RC2-006 / -021 / -041 / -004; DES-L3 PR-3D).** `stepFailed{workerError}`,
-  quota / 401 / timeout phrases and repeated ACP fallbacks no longer flip a seat `inactive`
-  (`health.status` is always `active`; observed errors stamp `lastErrorAt`); the daemon-wide
-  council-count bench (`council_bench`, 30-min window) is gone from the tracker, the standing
-  predicate and `GET /roster` — the engine benches a seat per run at its ballot threshold (now
-  including an unclassified persistent failure — wicked-core-ts **0.7.27+**; on a 0.7.26 engine the
-  daemon says at boot that an unclassified persistently-failing seat is benched by neither side) and
-  says so in `unitDistributed.degradedReason`.
-  A launch refusal or a load timeout can no longer take the roster to 0 eligible seats until a
-  restart.
-- **Stall-watchdog failover is role-aware and never reassigns a tool unit (DES-L3 PR-3E / PR-L3-W;
-  F-RC1-012, crew #580 / #581).** `listExecuting` carries `avoid` (the creators' seats when the
-  cursor is an evaluator) and `executor` (`tool` when the cursor has a `tool_cmd`); `pickFailoverSeat`
-  skips `avoid`; a stalled TOOL cursor gets `workerStallEscalated{action: notify, needsYou: true}`
-  and a log naming the levers (Cancel run / `POST /runs/:id/reassign`) instead of a second copy of
-  the same command in the same worktree. Failover stays ON by default in this release.
-- **A run the watchdog handed to a human keeps its "needs you" facts across a page reload
-  (wicked-studio#284; the crew companion L8 handed to L3).** `workerStalled` / `workerStallEscalated`
-  were live-only `/ws` frames — the engine's event log never saw them — so `GET /runs/:id/events`
-  after a reload showed nothing and the run page offered only Cancel. Every frame the watchdog
-  broadcasts is now RECORDED on the crew audit trail — the `run.stall.escalated` line crew#341
-  already wrote, plus a new `run.stall.detected` line — and kept in a run→frames index
-  (`api/stall-frame-index.ts`, capped at 64 per run) that `GET /runs/:id/events` merges in capture
-  order beside the engine's events; `?type=` reaches them too. The index is hydrated from that trail
-  at boot, the same way `retry_of` / `created_at` / `ended_at` already survive a restart (crew#600),
-  so the "needs you" facts outlive both the run leaving the executing listing and the daemon
-  exiting — the two cases the finding is actually about. Nothing is re-emitted at boot: hydrating
-  fills a map, it never broadcasts or re-arms a clock. Served frames carry `daemon: true` and the
-  `seq` of the engine record they follow (`RecordedEvent.seq` is required; `daemon` rides additively
-  until api-types 0.39.0 declares it). No new state-home root and no core fence entry.
-- **Interactive bridges no longer outlive crew — adopt-or-kill, never leak (F-W1-103, FIX-IT-ALL
-  wave 1; separate from the L3 3D train, distinct seam).** The `npx wicked-interactive serve --root …`
-  bridge the pool spawns per docs root was outside every reaper sweep (not a `*-acp` binary; its
-  server is the daemon's GRANDCHILD under an `npm exec` wrapper), so it survived every daemon that
-  started it — two were found ~20 h after their daemon exited, on ports nothing would look up again.
-  Now `core/bridge-reaper.ts` (a) reaps the wrapper AND its server child on the daemon's SIGTERM /
-  exit path (npm never forwards the signal), and (b) in the boot sweep and the 30 s live sweep reaps
-  a ppid-1 interactive tree whose docs root carries crew's own `.wi-serve.crew.json` naming one of
-  its pids with an `ownerPid` that is gone — an operator's own `serve` (no sidecar), a sidecar naming
-  another pid, a pre-#506 sidecar without an owner, or a LIVE owner all leave the tree alone. The
-  owner is one process INCARNATION — `ownerPid` + `ownerStartedAt` (the owner's start time as the
-  process table reports it) — so a recycled pid reads as "owner gone" instead of keeping a bridge
-  alive for weeks. Adopting a matching crew bridge now stamps the adopter as owner, so a bridge a
-  live daemon uses is never matched. Behaviour change: a graceful daemon restart respawns its bridges on the
-  next document request instead of re-adopting them; the first boot of this version on a host
-  reaps crew-recorded bridges left by earlier daemons. Tests: the parser on the two recorded
-  orphan shapes beside a live daemon's pair and operator bridges, every sidecar-gate refusal, the
-  SIGTERM→SIGKILL escalation, a REAL wrapper→server tree reaped through the process table, and the
-  adopt-claims-owner path in the pool suite. Behaviour change register: BC-76 (PROPOSED — user
-  decision owed; not covered by L7's BC-48 / BC-49).
-
-<!-- fixall L4 -->
-- **A daemon that refuses every launch can no longer read "status ok, no warnings" (F-W1-102, the
-  crew-only install; FIX-IT-ALL L4-⑧b).** The direct `npx wicked-installer install wicked-crew` path
-  (and the installer's `quick-start` bundle — bus + crew, no wicked-garden) boots a daemon under the
-  `require` base-skill policy with nothing published that holds `wicked-garden-governed-worker`: the
-  engine refuses EVERY launch at intake, yet `GET /health` answered `status: ok` with no `warnings`
-  and `wicked-crew status` printed `[]`. Now the `skills.base-skill` ERROR — the same object
-  `/health.baseSkill.finding` and `/diagnostics.skills.findings[]` already carry — also rides
-  `/health.warnings[]` (`HealthWarning.kind` is open; no new field; status stays `ok` because the
-  daemon serves and studio must load and show it — the state-home blocker's precedent), and
-  `wicked-crew status` prints that finding on stderr after the runs JSON (stdout unchanged, exit 0).
-  ONE remedy sentence on every surface — the finding, the warning, `status`, and the 422
-  `base_skill_refused` body — and it now names the install: `install wicked-garden
-  (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish;
-  set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`. Behaviour change
-  register: R11c.
-
-<!-- fixall L9 -->
-- **Pin `wicked-core-ts ^0.7.27` — the engine half of `revisesPr` and the deliver-refusal gate is now
-  under crew; delete the shadow-test bridge; the real-engine revision journey leaves `it.todo` (fixall
-  L9 row 6.9; DES-L9 §7; wicked-core #522 on core main).** core-ts 0.7.27 carries `LaunchSpec.base_ref`
-  (the run bases on an open PR's head) and the deterministic deliver-refusal arm (a failed deliver unit
-  that is not a `LIFT-CONFLICT` strand PARKS at an `escalation` gate). With the pin, `capabilities.revisesPr`
-  reads `true` and a revision launch no longer fails closed. `builtin-overlay-shadow.test.ts` drops the
-  one-field `bug.fix.instructions` tolerance it carried while core main lacked the field (crew #601): both
-  carriers now hold `BUG_FIX_SWEEP_INSTRUCTIONS`, so the mirror is compared field-for-field again and any
-  real drift fails. `tests/integration/deliver-revision-e2e.test.ts` (new) drives the DES-L9 §7 journey end
-  to end through the real engine: `POST /runs {revisesPr}` bases the run on the PR head → deliver gate →
-  identity refusal (D-18) → `awaitingHuman{escalation}` (never `sessionFailed`) → fix the login → the run's
-  one commit lands on the PR branch, no new PR.
-- **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a
-  `Delivered-By` trailer (fixall L9-D1 / L9-D4 = BC-72 / BC-73; crew #550 P-1/P-4, review-benchmark-prs
-  D1 / D4).** The PR title / commit subject gets a conventional-commit prefix derived from the WORKFLOW
-  the run drove (`bug` → `fix:`, `feature` → `feat:`, `migration` → `refactor:`, anything else →
-  `chore:`; a free-text run and the run-id fallback headline keep the bare text; an intent that already
-  starts `type(scope)!: ` is left alone). A first line that is only a URL never becomes the title: the
-  next prose line does, or — when the intent has no prose — `resolve owner/repo#N` for a GitHub
-  issue/pull URL (and the URL rides the body as an `owner/repo#N` `Refs:` link, never a closing
-  reference). The framed text — and so the commit the deliver phase makes — ends with the git trailer
-  `Delivered-By: wicked-crew run <run id>` (the run id only; never an account or a path); the PR
-  footer is unchanged.
 - **Revise a pull request from a run (`revisesPr`), a deliver identity that refuses instead of
   switching, deliver text that reads right, and a deliver sweep that no longer walks the engine's
   scratch (DES-L9 r2 §5 PR-L9-crew; crew #549 = F-RC1-010 / F-RC2-026/036, crew #550 = F-RC1-043 /
@@ -173,8 +85,68 @@ mentioned only where a daemon release depends on them.
   (mismatch / unreadable / match / pinned / unset), revision (push onto the PR branch, moved head,
   vanished head, nothing on top, comment), the scratch-dir exclusion; resolver, schema refines and
   the 409s, the retry-index hydrate, the gate-card text, the title/body composer.
+- **Run DTO gains `ended_at`; onboarding runs gain `created_at` (fixall L8-8B; crew #496 / studio #230;
+  api-types 0.38.0; register BC-52).** The daemon records a `run.ended` audit entry (actor `daemon`,
+  `detail.status` = the terminal frame) when it sees `sessionCompleted` | `sessionFailed` | `runCancelled`
+  and stamps `RunTimingIndex.setEnded` — durable record first, index second, the `run.delivered` order;
+  idempotent per run (a resume/retry re-terminal writes nothing; boot re-reads the trail — newest entry
+  wins — and re-emits nothing). ABSENT, never null, on a live run, a pre-field run, a run that terminalled
+  before THIS daemon booted, or the crash window between the engine's status write and the record.
+  Onboarding launches (`POST /repos`, `POST /repos/:id/onboard`, the clone-then-register path — all through
+  `CoreAdapter._doOnboardingLaunch`) now reach the ONE recorder every launch route uses via
+  `CoreAdapter.setOnRunLaunched` (after the engine accepted the launch; a throwing recorder never fails it),
+  so they carry a `run.launched` entry and `created_at`.
+- **`GET /repos/:id/graph` gains `totals` — whole-graph counts beside the served slice (fixall L8-8D; crew
+  #505 / F-RC1-100 / F-E2E-022; api-types 0.38.0 `CodeGraphData.totals?`; register BC-53).** `graph-view
+  --limit` emits only the slice, so `stats` read "my repo has 150 symbols". The route now spawns
+  `wicked-estate stats --db <db>` beside `graph-view` (both under `Promise.all`, the same daemon-side CLI
+  posture — D1 untouched; `projects/graph.ts` exports `estateExe` so both ride the `WICKED_ESTATE_EXE`
+  override) and parses its `nodes=N edges=M files=F` line (`parseEstateTotals`). `stats` keeps meaning the
+  served slice; `totals` is ABSENT (never substituted) when the line does not parse or the stats spawn
+  fails — the slice still answers 200.
+- **Chat seats: the daemon publishes its own admission verdict, and a refused seat can be re-tried on the live chat (F-W1-005, wave-1 P6 gate; R-L5-3).** (a) `GET /roster` seats gain `chat_admission: { unscoped, scoped }` — each `{ok: true}` or `{ok: false, reason, source}` — computed by the SAME `chatSeatAdmission` the `POST /chats` default pre-filter runs, so a picker can offer exactly the seats an open would seat from ONE source of truth (no client-side copy of the rule; the field is crew-only and never reaches the engine — `CREW_ONLY_SEAT_FIELDS`). Additive; api-types 0.39.0 types it. (b) NEW `POST /chats/:id/seats {clis}` (1–8 keys): re-runs the engine's per-seat `chat_ensure` through `chatOpen` with the IDENTICAL scope recorded at open (the `ChatScopeIndex` now retains the engine scope — a different scope would evict every warm seat), 404 for a chat not live here, 409 `turn_in_flight` while a named seat is mid-turn; answers `{chatId, seats, refused}` in the 201's shapes, folds `refused` (a seat that warmed leaves it; an engine refusal replaces its entry, source `engine`) and broadcasts `chatSeatRefused` for each refusal — never a new chat, never a new pool key. F-W1-003 (A: scoped chats = ACP seats / B: a wrapped-seat chat path) is untouched: whichever lands is a daemon-side change to this same verdict.
 
-<!-- fixall L8 -->
+### Changed
+- **Seat health is the engine's bench + the seat's own auth refusal — crew's second classifiers are
+  deleted (R5 / R5b; F-RC2-006 / -021 / -041 / -004; DES-L3 PR-3D).** `stepFailed{workerError}`,
+  quota / 401 / timeout phrases and repeated ACP fallbacks no longer flip a seat `inactive`
+  (`health.status` is always `active`; observed errors stamp `lastErrorAt`); the daemon-wide
+  council-count bench (`council_bench`, 30-min window) is gone from the tracker, the standing
+  predicate and `GET /roster` — the engine benches a seat per run at its ballot threshold (now
+  including an unclassified persistent failure — wicked-core-ts **0.7.27+**; on a 0.7.26 engine the
+  daemon says at boot that an unclassified persistently-failing seat is benched by neither side) and
+  says so in `unitDistributed.degradedReason`.
+  A launch refusal or a load timeout can no longer take the roster to 0 eligible seats until a
+  restart.
+- **Stall-watchdog failover is role-aware and never reassigns a tool unit (DES-L3 PR-3E / PR-L3-W;
+  F-RC1-012, crew #580 / #581).** `listExecuting` carries `avoid` (the creators' seats when the
+  cursor is an evaluator) and `executor` (`tool` when the cursor has a `tool_cmd`); `pickFailoverSeat`
+  skips `avoid`; a stalled TOOL cursor gets `workerStallEscalated{action: notify, needsYou: true}`
+  and a log naming the levers (Cancel run / `POST /runs/:id/reassign`) instead of a second copy of
+  the same command in the same worktree. Failover stays ON by default in this release.
+- **Pin `wicked-core-ts ^0.7.27` — the engine half of `revisesPr` and the deliver-refusal gate is now
+  under crew; delete the shadow-test bridge; the real-engine revision journey leaves `it.todo` (fixall
+  L9 row 6.9; DES-L9 §7; wicked-core #522 on core main).** core-ts 0.7.27 carries `LaunchSpec.base_ref`
+  (the run bases on an open PR's head) and the deterministic deliver-refusal arm (a failed deliver unit
+  that is not a `LIFT-CONFLICT` strand PARKS at an `escalation` gate). With the pin, `capabilities.revisesPr`
+  reads `true` and a revision launch no longer fails closed. `builtin-overlay-shadow.test.ts` drops the
+  one-field `bug.fix.instructions` tolerance it carried while core main lacked the field (crew #601): both
+  carriers now hold `BUG_FIX_SWEEP_INSTRUCTIONS`, so the mirror is compared field-for-field again and any
+  real drift fails. `tests/integration/deliver-revision-e2e.test.ts` (new) drives the DES-L9 §7 journey end
+  to end through the real engine: `POST /runs {revisesPr}` bases the run on the PR head → deliver gate →
+  identity refusal (D-18) → `awaitingHuman{escalation}` (never `sessionFailed`) → fix the login → the run's
+  one commit lands on the PR branch, no new PR.
+- **Deliver PR titles read as conventional commits, never as a bare URL; pipeline commits carry a
+  `Delivered-By` trailer (fixall L9-D1 / L9-D4 = BC-72 / BC-73; crew #550 P-1/P-4, review-benchmark-prs
+  D1 / D4).** The PR title / commit subject gets a conventional-commit prefix derived from the WORKFLOW
+  the run drove (`bug` → `fix:`, `feature` → `feat:`, `migration` → `refactor:`, anything else →
+  `chore:`; a free-text run and the run-id fallback headline keep the bare text; an intent that already
+  starts `type(scope)!: ` is left alone). A first line that is only a URL never becomes the title: the
+  next prose line does, or — when the intent has no prose — `resolve owner/repo#N` for a GitHub
+  issue/pull URL (and the URL rides the body as an `owner/repo#N` `Refs:` link, never a closing
+  reference). The framed text — and so the commit the deliver phase makes — ends with the git trailer
+  `Delivered-By: wicked-crew run <run id>` (the run id only; never an account or a path); the PR
+  footer is unchanged.
 - **Def-aware delivery classification — a completed run whose workflow could never have delivered reads
   `delivery: "none"` on `GET /runs`, `GET /runs/:id`, `GET /campaigns` and the resume 409 (fixall L8-8A;
   crew #481 / F-BM-006 list half, F-RC1-003/004, F-SMOKE-004; DES-L8 r2 §5 PR-8A; register BC-51 / R23,
@@ -194,38 +166,65 @@ mentioned only where a daemon release depends on them.
   def and reads the closure's own `run.launched detail.deliver` back (adjudicated §4.8 — the live rule, never a copy;
   the inline call swap is a follow-up in that closure's lane). Real-engine launch
   test: `tests/integration/delivery-none-launch-e2e.test.ts`.
-- **Run DTO gains `ended_at`; onboarding runs gain `created_at` (fixall L8-8B; crew #496 / studio #230;
-  api-types 0.38.0; register BC-52).** The daemon records a `run.ended` audit entry (actor `daemon`,
-  `detail.status` = the terminal frame) when it sees `sessionCompleted` | `sessionFailed` | `runCancelled`
-  and stamps `RunTimingIndex.setEnded` — durable record first, index second, the `run.delivered` order;
-  idempotent per run (a resume/retry re-terminal writes nothing; boot re-reads the trail — newest entry
-  wins — and re-emits nothing). ABSENT, never null, on a live run, a pre-field run, a run that terminalled
-  before THIS daemon booted, or the crash window between the engine's status write and the record.
-  Onboarding launches (`POST /repos`, `POST /repos/:id/onboard`, the clone-then-register path — all through
-  `CoreAdapter._doOnboardingLaunch`) now reach the ONE recorder every launch route uses via
-  `CoreAdapter.setOnRunLaunched` (after the engine accepted the launch; a throwing recorder never fails it),
-  so they carry a `run.launched` entry and `created_at`.
+- **Chat scope statement hands ONE worked grounding command, not a noun (R-L5-1, text-only, D1; wave-1 P6 gate NO-GO on criterion 1 — `verdicts/recon-w1-grounding.md` Q1/Q4 cause #1; F-W1-001, F-W1-006).** The `## Grounding` section written into every chat scratch root's `AGENTS.md` / `CLAUDE.md` said "they reach the code graph through the read-only estate shim on every seat; always pass `--readonly`" — no binary, no args, no tool. The claude seat obeyed it literally (attached `--readonly` to a `Skill` call, then grepped); opencode ran nothing. For a graph-BOUND chat the section now carries one copy-pasteable line a seat can run in its shell on any carrier — `wicked-garden run scripts/_estate_client.py --readonly call '{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}'` (`name`, the estate MCP's own key and the shim's `search()` spelling; `{"query"}` returned 0 matches in P6) — plus "`wicked-garden` is first on PATH; the store is pinned by `WICKED_ESTATE_DB`", the other tools that take the same form (`BlastRadius` / `Lineage` `{"symbol"}`, `RankHotspots` `{"limit"}`) and "always pass `--readonly`". Nothing else new: no second path, no MCP mention, no skill names (a `Skill` call is what the seat substituted for the command). An UNBOUND chat keeps "No code graph is bound: <reason> — read the repositories directly and say so" and is handed no command (nothing pins the store, the call would be refused). Tests: the Grounding section is a pinned snapshot, the command's exact spelling is pinned, and the section stays under the 1022-byte PTY canonical-line budget (the statement is a file attachment, not a PTY prompt — the budget is asserted anyway). `CHAT_GROUNDING_COMMAND` is exported for the tests.
+- **Chat is offered only on ACP-adapter seats — a wrapped seat is not a chat seat (F-W1-003 = A, approved 2026-09-15; R-L5-4).** `chatSeatAdmission` (`seat-standing.ts`) now refuses a seat with no ACP adapter in BOTH scope modes (was: admitted to an unscoped chat), with an actionable reason — "it has no ACP adapter, so it is not a chat seat — chat runs on ACP-adapter seats only, and this seat does governed work in runs instead". One predicate, one reason, no new field and no second list: the `POST /chats` default pre-filter and `GET /roster.chat_admission` both read it, so the studio picker hides a wrapped seat and a default open refuses it with that reason. A seat named explicitly in `clis` bypasses the pre-filter and is refused by the engine's own `no ACP config for '<seat>'` backstop instead — still refused, just not via this predicate. An ungoverned ACP seat (pi) is unchanged — admitted unscoped, refused scoped with "open the chat unscoped to include it" — because it IS an ACP seat. Option B (a wrapped-seat chat path) is logged as the first post-RC2 item, not dropped.
+
+### Fixed
+- **A run the watchdog handed to a human keeps its "needs you" facts across a page reload
+  (wicked-studio#284; the crew companion L8 handed to L3).** `workerStalled` / `workerStallEscalated`
+  were live-only `/ws` frames — the engine's event log never saw them — so `GET /runs/:id/events`
+  after a reload showed nothing and the run page offered only Cancel. Every frame the watchdog
+  broadcasts is now RECORDED on the crew audit trail — the `run.stall.escalated` line crew#341
+  already wrote, plus a new `run.stall.detected` line — and kept in a run→frames index
+  (`api/stall-frame-index.ts`, capped at 64 per run) that `GET /runs/:id/events` merges in capture
+  order beside the engine's events; `?type=` reaches them too. The index is hydrated from that trail
+  at boot, the same way `retry_of` / `created_at` / `ended_at` already survive a restart (crew#600),
+  so the "needs you" facts outlive both the run leaving the executing listing and the daemon
+  exiting — the two cases the finding is actually about. Nothing is re-emitted at boot: hydrating
+  fills a map, it never broadcasts or re-arms a clock. Served frames carry `daemon: true` and the
+  `seq` of the engine record they follow (`RecordedEvent.seq` is required; `daemon` rides additively
+  until api-types 0.39.0 declares it). No new state-home root and no core fence entry.
+- **Interactive bridges no longer outlive crew — adopt-or-kill, never leak (F-W1-103, FIX-IT-ALL
+  wave 1; separate from the L3 3D train, distinct seam).** The `npx wicked-interactive serve --root …`
+  bridge the pool spawns per docs root was outside every reaper sweep (not a `*-acp` binary; its
+  server is the daemon's GRANDCHILD under an `npm exec` wrapper), so it survived every daemon that
+  started it — two were found ~20 h after their daemon exited, on ports nothing would look up again.
+  Now `core/bridge-reaper.ts` (a) reaps the wrapper AND its server child on the daemon's SIGTERM /
+  exit path (npm never forwards the signal), and (b) in the boot sweep and the 30 s live sweep reaps
+  a ppid-1 interactive tree whose docs root carries crew's own `.wi-serve.crew.json` naming one of
+  its pids with an `ownerPid` that is gone — an operator's own `serve` (no sidecar), a sidecar naming
+  another pid, a pre-#506 sidecar without an owner, or a LIVE owner all leave the tree alone. The
+  owner is one process INCARNATION — `ownerPid` + `ownerStartedAt` (the owner's start time as the
+  process table reports it) — so a recycled pid reads as "owner gone" instead of keeping a bridge
+  alive for weeks. Adopting a matching crew bridge now stamps the adopter as owner, so a bridge a
+  live daemon uses is never matched. Behaviour change: a graceful daemon restart respawns its bridges on the
+  next document request instead of re-adopting them; the first boot of this version on a host
+  reaps crew-recorded bridges left by earlier daemons. Tests: the parser on the two recorded
+  orphan shapes beside a live daemon's pair and operator bridges, every sidecar-gate refusal, the
+  SIGTERM→SIGKILL escalation, a REAL wrapper→server tree reaped through the process table, and the
+  adopt-claims-owner path in the pool suite. Behaviour change register: BC-76 (PROPOSED — user
+  decision owed; not covered by L7's BC-48 / BC-49).
+- **A daemon that refuses every launch can no longer read "status ok, no warnings" (F-W1-102, the
+  crew-only install; FIX-IT-ALL L4-⑧b).** The direct `npx wicked-installer install wicked-crew` path
+  (and the installer's `quick-start` bundle — bus + crew, no wicked-garden) boots a daemon under the
+  `require` base-skill policy with nothing published that holds `wicked-garden-governed-worker`: the
+  engine refuses EVERY launch at intake, yet `GET /health` answered `status: ok` with no `warnings`
+  and `wicked-crew status` printed `[]`. Now the `skills.base-skill` ERROR — the same object
+  `/health.baseSkill.finding` and `/diagnostics.skills.findings[]` already carry — also rides
+  `/health.warnings[]` (`HealthWarning.kind` is open; no new field; status stays `ok` because the
+  daemon serves and studio must load and show it — the state-home blocker's precedent), and
+  `wicked-crew status` prints that finding on stderr after the runs JSON (stdout unchanged, exit 0).
+  ONE remedy sentence on every surface — the finding, the warning, `status`, and the 422
+  `base_skill_refused` body — and it now names the install: `install wicked-garden
+  (npx wicked-installer install wicked-garden), POST /skills/refresh-baseline, then POST /skills/publish;
+  set baseSkillRef "" (PUT /settings) to turn the base skill off explicitly`. Behaviour change
+  register: R11c.
 - **`GET /runs/:id/acceptance` no longer claims "no acceptance evidence recorded" for a missing QE ledger
   (fixall L8-8C; F-E2E-034; register BC-55).** `required` is true for engine-gated defs (`bug.verify`,
   `feature.test`) too, so the sentence was false for a bug run whose repo-check and evaluator evidence is on
   `GET /runs/:id/evidence`. The reason now reads "no QE ledger at <root> — no QE run has recorded a verdict
   for this repository; this gate reads the QE ledger only (the run's own repo-check and evaluator evidence
   is on GET /runs/:id/evidence) (missing ⇒ deny)". Verdict unchanged — deny-dominates.
-- **`GET /repos/:id/graph` gains `totals` — whole-graph counts beside the served slice (fixall L8-8D; crew
-  #505 / F-RC1-100 / F-E2E-022; api-types 0.38.0 `CodeGraphData.totals?`; register BC-53).** `graph-view
-  --limit` emits only the slice, so `stats` read "my repo has 150 symbols". The route now spawns
-  `wicked-estate stats --db <db>` beside `graph-view` (both under `Promise.all`, the same daemon-side CLI
-  posture — D1 untouched; `projects/graph.ts` exports `estateExe` so both ride the `WICKED_ESTATE_EXE`
-  override) and parses its `nodes=N edges=M files=F` line (`parseEstateTotals`). `stats` keeps meaning the
-  served slice; `totals` is ABSENT (never substituted) when the line does not parse or the stats spawn
-  fails — the slice still answers 200.
-
-<!-- fixall L5 -->
-- **Chat scope statement hands ONE worked grounding command, not a noun (R-L5-1, text-only, D1; wave-1 P6 gate NO-GO on criterion 1 — `verdicts/recon-w1-grounding.md` Q1/Q4 cause #1; F-W1-001, F-W1-006).** The `## Grounding` section written into every chat scratch root's `AGENTS.md` / `CLAUDE.md` said "they reach the code graph through the read-only estate shim on every seat; always pass `--readonly`" — no binary, no args, no tool. The claude seat obeyed it literally (attached `--readonly` to a `Skill` call, then grepped); opencode ran nothing. For a graph-BOUND chat the section now carries one copy-pasteable line a seat can run in its shell on any carrier — `wicked-garden run scripts/_estate_client.py --readonly call '{"tool":"SearchEntity","arguments":{"name":"<symbol>"}}'` (`name`, the estate MCP's own key and the shim's `search()` spelling; `{"query"}` returned 0 matches in P6) — plus "`wicked-garden` is first on PATH; the store is pinned by `WICKED_ESTATE_DB`", the other tools that take the same form (`BlastRadius` / `Lineage` `{"symbol"}`, `RankHotspots` `{"limit"}`) and "always pass `--readonly`". Nothing else new: no second path, no MCP mention, no skill names (a `Skill` call is what the seat substituted for the command). An UNBOUND chat keeps "No code graph is bound: <reason> — read the repositories directly and say so" and is handed no command (nothing pins the store, the call would be refused). Tests: the Grounding section is a pinned snapshot, the command's exact spelling is pinned, and the section stays under the 1022-byte PTY canonical-line budget (the statement is a file attachment, not a PTY prompt — the budget is asserted anyway). `CHAT_GROUNDING_COMMAND` is exported for the tests.
-- **Chat seats: the daemon publishes its own admission verdict, and a refused seat can be re-tried on the live chat (F-W1-005, wave-1 P6 gate; R-L5-3).** (a) `GET /roster` seats gain `chat_admission: { unscoped, scoped }` — each `{ok: true}` or `{ok: false, reason, source}` — computed by the SAME `chatSeatAdmission` the `POST /chats` default pre-filter runs, so a picker can offer exactly the seats an open would seat from ONE source of truth (no client-side copy of the rule; the field is crew-only and never reaches the engine — `CREW_ONLY_SEAT_FIELDS`). Additive; api-types 0.39.0 types it. (b) NEW `POST /chats/:id/seats {clis}` (1–8 keys): re-runs the engine's per-seat `chat_ensure` through `chatOpen` with the IDENTICAL scope recorded at open (the `ChatScopeIndex` now retains the engine scope — a different scope would evict every warm seat), 404 for a chat not live here, 409 `turn_in_flight` while a named seat is mid-turn; answers `{chatId, seats, refused}` in the 201's shapes, folds `refused` (a seat that warmed leaves it; an engine refusal replaces its entry, source `engine`) and broadcasts `chatSeatRefused` for each refusal — never a new chat, never a new pool key. F-W1-003 (A: scoped chats = ACP seats / B: a wrapped-seat chat path) is untouched: whichever lands is a daemon-side change to this same verdict.
-- **Chat is offered only on ACP-adapter seats — a wrapped seat is not a chat seat (F-W1-003 = A, approved 2026-09-15; R-L5-4).** `chatSeatAdmission` (`seat-standing.ts`) now refuses a seat with no ACP adapter in BOTH scope modes (was: admitted to an unscoped chat), with an actionable reason — "it has no ACP adapter, so it is not a chat seat — chat runs on ACP-adapter seats only, and this seat does governed work in runs instead". One predicate, one reason, no new field and no second list: the `POST /chats` default pre-filter and `GET /roster.chat_admission` both read it, so the studio picker hides a wrapped seat and a default open refuses it with that reason. A seat named explicitly in `clis` bypasses the pre-filter and is refused by the engine's own `no ACP config for '<seat>'` backstop instead — still refused, just not via this predicate. An ungoverned ACP seat (pi) is unchanged — admitted unscoped, refused scoped with "open the chat unscoped to include it" — because it IS an ACP seat. Option B (a wrapped-seat chat path) is logged as the first post-RC2 item, not dropped.
-
-<!-- fixall L10 -->
 - **`wicked-crew status` / `gate` resolve the daemon port exactly as `serve` does — `--port`, else
   `CREW_PORT`, else 7701 — through ONE shared resolver (`cli/port.ts`); `status --help` / `gate --help`
   print usage and exit 0 (F-W1-101, wave-1 gate P1 — FIX-IT-ALL L10).** On a host whose daemon listens
@@ -235,6 +234,13 @@ mentioned only where a daemon release depends on them.
   pins that no `src/cli` module but `port.ts` reads `CREW_PORT` (directly or through `DAEMON_PORT_ENV`)
   and that no private `7701` fallback remains. The no-daemon remedy wording is unchanged (it names the
   port that was resolved).
+
+### Tests
+- **Test mirror for wicked-core#523 (every seat benched at distribution parks at the `dead_seat` gate,
+  core-ts 0.7.27).** `tests/integration/dead-seat-distribution-gate.test.ts` carried an unguarded
+  NOT_FIXED_YET `it.fails` case that goes red on the first crew CI run linking a core main with the
+  engine change; it is now status-conditional (asserts the gate shape when the run parked, returns on
+  a pre-3A `failed` run), so crew main is green on 0.7.26 AND 0.7.27. Tests only; no runtime change.
 
 ## [0.7.35] — 2026-09-14
 
@@ -3007,7 +3013,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...HEAD
+[0.7.36]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.34...v0.7.35
 [0.7.34]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.33...v0.7.34
 [0.7.33]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.32...v0.7.33
