@@ -71,7 +71,7 @@ jobs:
   # release run red: the publish is NOT reverted — the playbook deprecates the version and the set
   # stays FIXED-UNVERIFIED until a green smoke. A true pre-`latest` gate (publish under dist-tag
   # `next`, promote on PASS) is decision D-L10-1, owed; this is the post-publish default. The
-  # harness is pinned by SHA (`wicked_ci_ref` empty ⇒ the same commit) — re-pin to the v1.3.1 tag's
+  # harness is pinned by SHA (`wicked_ci_ref` empty ⇒ the same commit) — re-pin to the v1.3.2 tag's
   # SHA when wicked-ci cuts it (the new S09/S10 checks for crew#551/#493 ride that tag).
   version:
     needs: release
@@ -98,7 +98,7 @@ jobs:
     needs: [release, version]
     permissions:
       contents: read
-    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@27561a3e634813ec33c0de6343357a1f816988bc # v1.3.1
+    uses: mikeparcewski/wicked-ci/.github/workflows/smoke.yml@201d42dfebac1306a8fc81fe559aee99bbdef0e2 # v1.3.2
     with:
       crew_version: ${{ needs.version.outputs.version }}
       # wicked-ci #30 (release verdict crew 0.7.35 §Smoke gate): on a CROSS-REPO workflow_call GitHub
@@ -106,4 +106,4 @@ jobs:
       # default fell back to `github.sha` — crew's own tag commit — and the harness checkout failed
       # ("not our ref"); the smoke gate never ran inside the release run. Pin the harness ref
       # EXPLICITLY to the same SHA as the `uses:` line above (move both together on every re-pin).
-      wicked_ci_ref: 27561a3e634813ec33c0de6343357a1f816988bc
+      wicked_ci_ref: 201d42dfebac1306a8fc81fe559aee99bbdef0e2
