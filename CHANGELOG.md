@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.37] — 2026-09-15
+
+Pin the published `wicked-core-ts` `^0.7.28` engine so the daemon (and the rig) run the **F-W1-012**
+chat reply-boundary fix — internal scaffold no longer leaks into rendered chat replies. The engine
+bump is the only change from 0.7.36; the bundled `wicked-studio` 0.5.11 skin (bundle marker 0.5.11)
+and the `wicked-crew-api-types` 0.38.0 pins are unchanged.
+
+### Changed
+- **Pin `wicked-core-ts` `^0.7.28` (was `^0.7.27`) — ships the F-W1-012 chat reply-boundary fix
+  (internal scaffold no longer leaks into rendered chat replies).** Lockfile locks `wicked-core-ts`
+  0.7.28 and its five platform binaries @0.7.28; no crew source change.
+
 ## [0.7.36] — 2026-09-15
 
 FIX-IT-ALL wave 3 (release train step 3; the last big cut before the rig upgrade + P6 chat
@@ -3013,7 +3025,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...HEAD
+[0.7.37]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.34...v0.7.35
 [0.7.34]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.33...v0.7.34
