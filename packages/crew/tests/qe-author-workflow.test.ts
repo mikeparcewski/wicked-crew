@@ -187,8 +187,12 @@ function harnessRepo(root: string): void {
   git('checkout', '-q', '-b', 'wicked/run-verify');
 }
 
-function runVerify(cwd: string): { status: number; out: string } {
-  const r = spawnSync('bash', ['-lc', qeVerifyScript()], { cwd, encoding: 'utf8', env: { ...process.env, HOME: cwd } });
+function runVerify(cwd: string, extraEnv?: Record<string, string>): { status: number; out: string } {
+  const r = spawnSync('bash', ['-lc', qeVerifyScript()], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: cwd, ...extraEnv },
+  });
   return { status: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
 }
 
@@ -391,6 +395,130 @@ describe.skipIf(!bashAvailable)('the verify phase RUNS the produced tests under 
     expect(out).not.toContain('uxfix_fixture.py harness=');
     expect(status).toBe(0);
   }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('#623: node:test — a produced .test.mjs importing node:test is run with `node --test <file>`; full suite via `npm test`', () => {
+    const root = join(base, 'node-test-harness');
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      // `node --test` without a path lets Node discover test files automatically (*.test.{js,mjs,cjs})
+      JSON.stringify({ name: 'nodetest-fixture', private: true, scripts: { test: 'node --test' } }),
+    );
+    writeFileSync(join(root, 'README.md'), '# nodetest\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    // The file imports node:test — the node:test rung fires even without a matching installed binary
+    writeFileSync(
+      join(root, 'tests', 'math.test.mjs'),
+      ["import { test } from 'node:test';", "import assert from 'node:assert/strict';", "test('adds', () => { assert.equal(1 + 1, 2); });"].join('\n') + '\n',
+    );
+    writeFileSync(join(root, 'tests', 'PLAN-math.md'), '# plan\n');
+    const tmpDir = mkdtempSync(join(base, 'nodetest-tmp-'));
+    const { status, out } = runVerify(root, { TMPDIR: tmpDir });
+    expect(out).toMatch(/file=tests\/math\.test\.mjs harness=node-test/);
+    expect(out).toMatch(/cmd="node --test tests\/math\.test\.mjs"/);
+    expect(out).toMatch(/exit=0 tests=[1-9][0-9]* status=passed/);
+    // Full suite check via npm test (scripts.test = node --test tests/)
+    expect(out).toMatch(/QE-VERIFY-CHECK-RUN harness=node-test.*cmd="npm test"/);
+    expect(out).toMatch(/QE-VERIFY-CHECK: harness=node-test.*exit=0/);
+    expect(out).toContain('produced=1 executed=1 passed=1');
+    expect(out).toContain('qe-verify: PASS');
+    expect(status).toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('#623: npm-test fallback — no recognised harness but scripts.test exists; produced file named in output counts as passed', () => {
+    const root = join(base, 'npm-fallback');
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    // Custom test script that echoes the file name — no vitest/jest/node:test declared
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'npm-fallback-fixture', private: true, scripts: { test: 'echo "tests/custom.test.js ran"' } }),
+    );
+    writeFileSync(join(root, 'README.md'), '# fallback\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    // A .test.js that doesn't import any recognised harness
+    writeFileSync(join(root, 'tests', 'custom.test.js'), '// custom framework\nconsole.log("custom test ok");\n');
+    writeFileSync(join(root, 'tests', 'PLAN-custom.md'), '# plan\n');
+    const tmpDir = mkdtempSync(join(base, 'npmfb-tmp-'));
+    const { status, out } = runVerify(root, { TMPDIR: tmpDir });
+    expect(out).toMatch(/file=tests\/custom\.test\.js harness=npm-test/);
+    expect(out).toMatch(/cmd="npm test"/);
+    expect(out).toMatch(/tests=1 status=passed/);
+    // npm-test skips the repo-level full-suite check (it already ran npm test per file)
+    expect(out).toContain('produced=1 executed=1 passed=1');
+    expect(out).toContain('qe-verify: PASS');
+    expect(status).toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('#624: pre-existing broken test at base → classified pre-existing-on-base → unit still passes (only produced-test failures counted)', () => {
+    const root = join(base, 'preexisting-fail');
+    mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'preexisting-fixture', private: true, devDependencies: { vitest: '^3.0.0' } }));
+    // Vitest shim: per-file run of the NEW produced file exits 0; full suite always exits 1 (broken pre-existing test)
+    writeFileSync(
+      join(root, 'node_modules', '.bin', 'vitest'),
+      [
+        '#!/bin/sh',
+        'echo "QE-VITEST-ARGS $*"',
+        'if echo "$*" | grep -q "tests/new.test.ts"; then',
+        '  echo "      Tests  1 passed (1)"',
+        '  exit 0',
+        'fi',
+        'echo "      Tests  0 passed, 1 failed (1)"',
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(root, 'node_modules', '.bin', 'vitest'), 0o755);
+    writeFileSync(join(root, 'README.md'), '# preexisting\n');
+    // Commit a broken pre-existing test at base on the main branch
+    writeFileSync(join(root, 'tests', 'broken.test.ts'), '// always fails\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@test', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: root, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A', '-f');
+    git('commit', '-q', '-m', 'base with broken pre-existing test');
+    git('checkout', '-q', '-b', 'wicked/run-verify');
+    // The produced NEW test file is untracked — this is what the author wrote
+    writeFileSync(join(root, 'tests', 'new.test.ts'), '// new passing test\n');
+    writeFileSync(join(root, 'tests', 'PLAN-new.md'), '# plan\n');
+    const tmpDir = mkdtempSync(join(base, 'preex-tmp-'));
+    // BASE resolves to 'main' branch (the base commit); the base worktree also fails because broken.test.ts is there
+    const { status, out } = runVerify(root, { TMPDIR: tmpDir });
+    // The produced test passes individually
+    expect(out).toMatch(/file=tests\/new\.test\.ts harness=vitest.*status=passed/);
+    // The repo-level check fails at HEAD but also at BASE → pre-existing-on-base, CF is NOT incremented
+    expect(out).toMatch(/QE-VERIFY-CHECK: harness=vitest.*exit=1.*class=pre-existing-on-base/);
+    expect(out).toContain('checks_failed=0');
+    expect(out).toContain('qe-verify: PASS');
+    expect(status).toBe(0);
+    const report = parseQeVerifyOutput(out)!;
+    expect(report.checksFailed).toBe(0);
+    expect(report.checks[0]).toMatchObject({ exit: 1, class: 'pre-existing-on-base' });
+  }, VERIFY_TEST_TIMEOUT_MS);
+
+  it('acceptance criterion 5: mktemp uses ${TMPDIR:-/tmp}/qe-verify.XXXXXX — a fixture-local TMPDIR is honoured', () => {
+    const root = join(base, 'tmpdir-check');
+    mkdirSync(root);
+    harnessRepo(root);
+    const tmpDir = mkdtempSync(join(base, 'custom-tmp-'));
+    writeFileSync(join(root, 'e2e', 'ok.spec.mjs'), 'console.log("ok");\n');
+    writeFileSync(join(root, 'tests', 'PLAN-ok.md'), '# plan\n');
+    // The script must create its capture files inside tmpDir (not /var/folders); if it ignored TMPDIR
+    // it would fail in a write-denied sandbox — here we verify the run succeeds with the fixture tmpDir.
+    const { status, out } = runVerify(root, { TMPDIR: tmpDir });
+    expect(out).toContain('qe-verify: PASS');
+    expect(status).toBe(0);
+  }, VERIFY_TEST_TIMEOUT_MS);
 });
 
 describe('parseQeVerifyOutput', () => {
@@ -412,6 +540,19 @@ describe('parseQeVerifyOutput', () => {
     ]);
     expect(r.checks).toEqual([{ harness: 'vitest', cmd: 'node_modules/.bin/vitest run', exit: 0 }]);
     expect(r).toMatchObject({ produced: 2, executed: 1, passed: 1, failed: 0, notExecuted: 1, plan: 'tests/PLAN-x.md', checksFailed: 0 });
+  });
+  it('QE-VERIFY-CHECK: class field is parsed when present (produced-test-failure, pre-existing-on-base, unclassified)', () => {
+    const out = [
+      'QE-VERIFY-CHECK: harness=vitest pkg=. cmd="./node_modules/.bin/vitest run" exit=1 class=pre-existing-on-base',
+      'QE-VERIFY-CHECK: harness=jest pkg=packages/b cmd="./node_modules/.bin/jest" exit=1 class=produced-test-failure',
+      'QE-VERIFY-CHECK: harness=pytest pkg=. cmd="python3 -m pytest -q" exit=0',
+      'QE-VERIFY-SUMMARY: produced=2 executed=2 passed=2 failed=0 not_executed=0 plan=tests/PLAN-x.md checks=3 checks_failed=1',
+    ].join('\n');
+    const r = parseQeVerifyOutput(out)!;
+    expect(r.checks[0]).toMatchObject({ harness: 'vitest', exit: 1, class: 'pre-existing-on-base' });
+    expect(r.checks[1]).toMatchObject({ harness: 'jest', exit: 1, class: 'produced-test-failure' });
+    expect(r.checks[2]).toMatchObject({ harness: 'pytest', exit: 0 });
+    expect(r.checks[2]!.class).toBeUndefined();
   });
 });
 
