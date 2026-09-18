@@ -10,6 +10,26 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **#623 — `qe-author-tests` verify phase: node:test harness now recognised.** A produced test file
+  that imports `node:test`, or whose nearest `package.json` declares `scripts.test` with
+  `node --test`, is now detected as the `node-test` harness; each file runs with
+  `node --test <file>` and the full-suite repo check runs `npm test`. Previously, any such file
+  resolved to `unknown` → not-executed → the verify unit failed even though the tests were passing.
+  When no harness is recognised but the repo has a `test` script, the verify phase now falls back to
+  `npm test` and counts the file as executed when its name appears in the output; the hard
+  "no harness recognised" failure is reserved for repos with no test script at all.
+- **#624 — `qe-author-tests` verify phase: three gaps closed.** (1) Repo-level suite checks now
+  re-run at the base commit when the HEAD run exits non-zero, classifying each failure as
+  `produced-test-failure`, `pre-existing-on-base`, or `unclassified`; only `produced-test-failure`
+  increments the failure counter — a pre-existing broken test no longer causes a false FAIL.
+  (2) Every temporary file the verify script creates uses an explicit template under
+  `${TMPDIR:-/tmp}` (e.g. `mktemp "${TMPDIR:-/tmp}/qe-verify.XXXXXX"`) and fails loudly with a
+  typed reason if the directory is write-denied — previously `mktemp` on macOS ignored `$TMPDIR`
+  under the sandbox and silently produced `tests=0 → not-executed`. (3) Command output is now
+  bounded to 51 200 bytes per attempt, with the `QE-VERIFY*` marker lines emitted outside the
+  bounded capture so the parser cannot be corrupted by a truncated run.
+
 ## [0.7.38] — 2026-09-15
 
 Re-pin the engine and UI: `wicked-core-ts` `^0.7.29` (carries **BC-79** project-scoped capture
