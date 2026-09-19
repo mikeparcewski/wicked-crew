@@ -57,8 +57,9 @@ import type { CoreAdapter } from '../core/adapter.js';
 export const REPO_SNAPSHOT_MAX_BYTES = 200 * 1024 * 1024;
 
 /** Never snapshotted: git's object store (the clone brings its own shallow one; the copy
- *  fallback wants working files only) and dependency trees (huge, reproducible, ungrounding). */
-const SNAPSHOT_SKIP = new Set(['.git', 'node_modules']);
+ *  fallback wants working files only), dependency trees (huge, reproducible, ungrounding), and
+ *  run worktrees (crew#620: engine-managed checkouts, not source — must not enter grounding). */
+const SNAPSHOT_SKIP = new Set(['.git', 'node_modules', 'wicked-worktrees']);
 
 /** Why a snapshot was refused — each maps to a DIFFERENT operator-facing degrade message in
  *  the calling seam, so "too large" is never claimed about a repo that was merely unreadable

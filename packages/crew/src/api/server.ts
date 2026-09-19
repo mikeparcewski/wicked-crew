@@ -502,6 +502,11 @@ export async function createServer(
   // bootstrap-configured state home (crew#353); the warn hook is the loud half of the migration
   // posture — an override root shadowing a default-root file must be SAID at boot, never silent.
   const projectSettings = new ProjectSettingsStore(undefined, (m) => app.log.warn(m));
+  // crew#619: chats promoted to runs retain their transcripts until the run is terminal, even
+  // across daemon restarts. The maps are populated from the audit trail below (non-terminal
+  // `run.launched` entries that carry a `chatId`) and kept in sync by the event loop.
+  const chatRetained = new Map<string, Set<string>>();
+  const runToChat = new Map<string, string>();
   // Retry lineage (CREW-UX-3) + ad-hoc group attach (wicked-studio#27): both durable records
   // live in the trail's `run.launched` entries, so ONE exhaustive scan feeds both indexes —
   // boot stays at three full-file trail scans, not four (the crew#321 consolidation note).
@@ -519,7 +524,20 @@ export async function createServer(
     // frames — one more filtered scan, same try, same best-effort. Nothing is re-emitted at boot: a
     // run that terminalled with no entry (pre-field, or the crash window between the engine's
     // status write and the synchronous record below) stays undated.
-    runTimingIndex.hydrateFromEndedEntries(await audit.readAll({ action: 'run.ended' }));
+    const endedEntries = await audit.readAll({ action: 'run.ended' });
+    runTimingIndex.hydrateFromEndedEntries(endedEntries);
+    // crew#619: rebuild the chat↔run retention maps for runs that were still live when the
+    // daemon was last stopped. The `run.launched` entries that carry `chatId` and are NOT in
+    // `run.ended` represent runs whose transcripts must still be on disk.
+    const endedRunIds = new Set(
+      endedEntries.filter((e) => typeof e.runId === 'string').map((e) => e.runId as string),
+    );
+    for (const entry of launchEntries) {
+      const chatId = (entry.detail as Record<string, unknown> | undefined)?.['chatId'];
+      if (typeof entry.runId === 'string' && typeof chatId === 'string' && !endedRunIds.has(entry.runId)) {
+        linkChatRun(chatId, entry.runId);
+      }
+    }
   } catch (err) {
     app.log.warn(
       `[runs] launch-index hydrate failed (prior runs read as not-a-retry / ungrouped / undated until restart): ${
@@ -1136,6 +1154,18 @@ export async function createServer(
   // written from the stamped frames below, dropped with the chat on `chatClosed`, served on
   // `GET /chats/:id.messages`.
   const chatTranscripts = new ChatTranscriptStore();
+  // crew#619: see declaration of chatRetained/runToChat above (before the hydration block).
+  // linkChatRun populates both maps and is called from the hydration block (function-hoisted)
+  // and from the launch route (via RoutesRuntime.linkChatRun).
+  function linkChatRun(chatId: string, runId: string): void {
+    runToChat.set(runId, chatId);
+    const existing = chatRetained.get(chatId);
+    if (existing !== undefined) {
+      existing.add(runId);
+    } else {
+      chatRetained.set(chatId, new Set([runId]));
+    }
+  }
   // Boot reaper (crew#502 hardening, W6): the scratch namespaces of daemons that died without
   // closing their chats (`<tmp>/wicked-crew-chats/<pid>-*` with a dead pid) are removed once, here,
   // under the same real-directory/ownership checks a live close applies. Not under vitest: the
@@ -1145,9 +1175,10 @@ export async function createServer(
     if (reaped.length > 0) {
       app.log.info(`chat scratch: reaped ${reaped.length} namespace(s) of dead daemons: ${reaped.join(', ')}`);
     }
-    // No chat survives a restart (the engine's seat pool is in memory), so every transcript on
-    // disk at boot is an orphan — cleared here, under the same not-under-vitest guard.
-    chatTranscripts.clearAll();
+    // Clear orphaned transcripts at boot. Transcripts for promoted runs that are still
+    // non-terminal (rehydrated above into chatRetained) are PRESERVED so Continue-in-Build
+    // prefill remains reproducible across a daemon restart (crew#619).
+    chatTranscripts.clearOrphaned(new Set(chatRetained.keys()));
   }
   const offEvent = adapter.onEvent((event) => {
     gateCache.ingest(event);
@@ -1155,8 +1186,13 @@ export async function createServer(
     seatHealth.ingest(event);
     if (event.type === 'chatClosed' && typeof event.chat === 'string') {
       chatScopes.closed(event.chat);
-      // ONE mechanism for DELETE / idle / pool_cap alike: the transcript goes with the chat.
-      chatTranscripts.drop(event.chat);
+      // crew#619: retain the transcript when a promoted run is still live — the chat may be
+      // idle-TTL'd before the run finishes, and Continue-in-Build needs the transcript.
+      const retaining = chatRetained.get(event.chat);
+      if (retaining === undefined || retaining.size === 0) {
+        // ONE mechanism for DELETE / idle / pool_cap alike: the transcript goes with the chat.
+        chatTranscripts.drop(event.chat);
+      }
     }
     // Stamp BEFORE folding: the closing `chatReply` is the frame most worth correlating — and the
     // one the transcript records (only a stamped reply is persisted; a straggler after the close
@@ -1184,6 +1220,22 @@ export async function createServer(
       (event.type === 'sessionCompleted' || event.type === 'sessionFailed' || event.type === 'runCancelled') &&
       session !== undefined
     ) {
+      // crew#619: when a run that was linked to a chat terminates, release the retention hold and
+      // drop the transcript if the chat was already reclaimed (not in chatScopes).
+      const linkedChat = runToChat.get(session);
+      if (linkedChat !== undefined) {
+        runToChat.delete(session);
+        const retaining = chatRetained.get(linkedChat);
+        if (retaining !== undefined) {
+          retaining.delete(session);
+          if (retaining.size === 0) {
+            chatRetained.delete(linkedChat);
+            if (!chatScopes.has(linkedChat)) {
+              chatTranscripts.drop(linkedChat);
+            }
+          }
+        }
+      }
       // `ended_at` (crew#496 / studio#230; api-types 0.38.0): the durable record first (`run.ended`),
       // then the index — the `run.delivered` write order. Synchronous, on the frame, so the DTO dates
       // the run the instant it terminals. IDEMPOTENT per run: a resume/retry re-terminal (or any
@@ -1421,6 +1473,8 @@ export async function createServer(
       // Routes that say something to the thread (a refused chat seat, F-2R2-007) emit through the
       // SAME /ws fan-out the engine's frames take.
       broadcast: (frame) => broadcast(frame),
+      // crew#619: retain a chat's transcript for the lifetime of its promoted run.
+      linkChatRun,
     },
   );
 

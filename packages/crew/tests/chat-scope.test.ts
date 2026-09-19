@@ -390,6 +390,9 @@ describe('the scratch root and its statement', () => {
     expect(agents).toMatch(/## Answer format/);
     expect(agents).toMatch(/"Work State", "Next Move"/);
     expect(agents).toMatch(/say so in one line/);
+    // crew#618: repo-relative citation instruction and crew#620: wicked-worktrees exclusion.
+    expect(agents).toMatch(/relative to their repository root/);
+    expect(agents).toMatch(/wicked-worktrees/);
     expect(agents).toContain('`r-gone`');
     expect(agents).toContain('project `p1`');
     // Idempotent: a second prepare over the same root does not throw.

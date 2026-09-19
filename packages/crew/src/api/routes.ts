@@ -46,7 +46,7 @@ import { applyWorkerConfigRoot, signedInHeuristic } from './seat-signin.js';
 import { chatSeatAdmission } from './seat-standing.js';
 import { rosterWithStandingFactory, type RosterWithStanding } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
-import type { ChatTranscriptStore } from './chat-transcripts.js';
+import type { ChatRepoRoot, ChatTranscriptStore } from './chat-transcripts.js';
 import {
   ChatScopeIndex,
   chatScopeDeps,
@@ -523,6 +523,10 @@ export const LaunchSchema = z.object({
    *  Resolved via `gh pr view` at launch — not OPEN / a fork / gh failure ⇒ 409, nothing launched.
    *  Send it only when `GET /health.capabilities.revisesPr === true` (engine ≥ 0.7.27). */
   revisesPr: z.number().int().positive().optional(),
+  /** crew#619 — the chat this run was promoted from; the daemon retains that chat's transcript
+   *  on disk until this run reaches a terminal state so the Continue-in-Build prefill is
+   *  always reproducible. Optional; omit when the launch is not promoted from a chat. */
+  chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
@@ -809,6 +813,9 @@ export interface RuntimeDeps {
    *  registers into it at each `qe-author-tests` run's terminal frame; a directly-driven route set
    *  gets a fresh, empty one. */
   testSets?: TestSetIndex;
+  /** crew#619 — called when a run is launched with a `chatId`, to retain that chat's transcript
+   *  until the run terminates. Absent in directly-driven route sets (tests). */
+  linkChatRun?: (chatId: string, runId: string) => void;
 }
 
 /**
@@ -1019,7 +1026,7 @@ export function registerRoutes(
     const capabilities =
       typeof adapter.engineCapabilities === 'function'
         ? adapter.engineCapabilities()
-        : { deliverGate: false, revisesPr: false };
+        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
     // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
@@ -1660,6 +1667,9 @@ export function registerRoutes(
         // the group index (and a restarted daemon's hydrate) reads it back from here.
         ...(b.campaignId !== undefined ? { campaignId: b.campaignId } : {}),
         ...(b.groupLabel !== undefined ? { groupLabel: b.groupLabel } : {}),
+        // crew#619: the chat↔run link is durable so the retention maps can be rehydrated after a
+        // daemon restart (rehydration reads `run.launched` entries and keeps non-terminal entries).
+        ...(b.chatId !== undefined ? { chatId: b.chatId } : {}),
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
@@ -1678,6 +1688,9 @@ export function registerRoutes(
           membershipAttachedKey(b.projectId, 'crew.run', runId, Date.now()),
         );
       }
+      // crew#619: retain the chat transcript for the run's lifetime so Continue-in-Build prefill
+      // is always reproducible even if the chat is idle-reclaimed before the run finishes.
+      if (b.chatId !== undefined) runtime.linkChatRun?.(b.chatId, runId);
       return reply.code(201).send({ runId });
     } catch (err) {
       const msg = message(err);
@@ -2389,6 +2402,12 @@ export function registerRoutes(
           return reply.code(409).send({
             error: `chat ${chatId} was closed while it was being opened; open it again`,
           });
+        }
+        // Register roots for path rewriting (crew#618): absolute host paths in seat replies are
+        // rewritten to repo-relative form before being stored in the transcript.
+        if (chatTranscripts !== undefined && scope.repos.length > 0) {
+          const roots: ChatRepoRoot[] = scope.repos.map((r) => ({ absRoot: resolve(r.rootPath), name: r.name }));
+          chatTranscripts.registerRoots(chatId, roots);
         }
         // The thread learns of every refused seat the way it learns of everything else — a frame
         // on /ws — AFTER the scope is published, so a reader never sees a refusal for a chat it

@@ -11,6 +11,23 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **#618 — Chat scope: seat replies no longer expose absolute host paths.** The chat scope
+  statement now instructs seats to cite files relative to their repository root, prefixed with
+  the repository name (e.g. `alpha/src/foo.ts` instead of `/srv/repos/alpha/src/foo.ts`). The
+  `ChatTranscriptStore` registers the chat's resolved repo roots at open time and rewrites any
+  absolute host-path prefix in seat reply text to repo-relative form before storing or serving
+  the transcript.
+- **#619 — Idle-TTL no longer drops a chat transcript while its promoted run is live.** When
+  `POST /runs` is called with `chatId`, the daemon links that run to the chat and exempts the
+  chat's transcript from deletion on `chatClosed` (idle / pool_cap / operator DELETE). The
+  transcript is dropped as normal once the run reaches a terminal frame. The new `chatId` field
+  is additive in `LaunchRequest`; `GET /health.capabilities.chatIdOnLaunch` advertises support
+  so older-Studio clients omit it safely.
+- **#620 — Run worktrees excluded from interactive grounding snapshots.** `wicked-worktrees/`
+  is now in `SNAPSHOT_SKIP` alongside `.git` and `node_modules`, preventing engine-managed run
+  checkouts from being included in the grounding context handed to interactive workers. The chat
+  scope statement also explicitly instructs seats not to read from `wicked-worktrees/`
+  subdirectories.
 - **#623 — `qe-author-tests` verify phase: node:test harness now recognised.** A produced test file
   that imports `node:test`, or whose nearest `package.json` declares `scripts.test` with
   `node --test`, is now detected as the `node-test` harness; each file runs with
