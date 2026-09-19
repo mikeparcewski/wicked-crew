@@ -184,6 +184,26 @@ export class ChatTranscriptStore {
     return out;
   }
 
+  /**
+   * Rewrite absolute host paths in a `chatReply` frame's `text` field, returning a NEW event
+   * object when the text changed or the SAME object when not applicable (crew#618).
+   *
+   * Call BEFORE `observe` and `broadcast` so the live `/ws` frame already carries the
+   * repo-relative form that studio renders and promotes from (Acceptance 1).
+   */
+  rewriteEvent(event: CoreEvent): CoreEvent {
+    if (event.type !== 'chatReply') return event;
+    const frame = event as CoreEvent & Record<string, unknown>;
+    const chatId = typeof frame['chat'] === 'string' ? frame['chat'] : undefined;
+    if (chatId === undefined) return event;
+    const roots = this.chatRoots.get(chatId);
+    if (roots === undefined || roots.length === 0) return event;
+    const rawText = typeof frame['text'] === 'string' ? frame['text'] : '';
+    const text = rewriteHostPaths(rawText, roots);
+    if (text === rawText) return event;
+    return { ...(frame as unknown as CoreEvent), text } as CoreEvent;
+  }
+
   /** The chat is gone (`chatClosed`, any reason): its transcript goes with it. */
   drop(chatId: string): void {
     this.chatRoots.delete(chatId);

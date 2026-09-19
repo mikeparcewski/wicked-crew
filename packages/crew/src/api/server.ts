@@ -60,6 +60,7 @@ import { SeatHealthTracker } from './seat-health.js';
 import { rosterWithStandingFactory } from './roster-standing.js';
 import { ChatTurnIndex } from './chat-turns.js';
 import { ChatTranscriptStore } from './chat-transcripts.js';
+import { sweepDeliveredWorktree } from './worktree-sweep.js';
 import { installEndpointManifestHook } from './endpoint-manifest.js';
 import { WorkerStallWatchdog } from './stall-watchdog.js';
 import { applyWorkerConfigRoot } from './seat-signin.js';
@@ -1198,7 +1199,10 @@ export async function createServer(
     // one the transcript records (only a stamped reply is persisted; a straggler after the close
     // carries no `turn_id` and cannot recreate the file).
     const stamped = chatTurns.decorate(event);
-    chatTranscripts.observe(stamped);
+    // crew#618 Acceptance 1: rewrite the chatReply frame ONCE — before both observe (persist) and
+    // broadcast (/ws → studio render/promote). `observe`'s own rewrite pass is then a no-op.
+    const rewritten = chatTranscripts.rewriteEvent(stamped);
+    chatTranscripts.observe(rewritten);
     chatTurns.observe(event);
     // Only feed the watchdog when its sweep is (or will be) armed: sweeping is what
     // prunes its per-run maps, so ingesting while disabled grows without bound
@@ -1210,7 +1214,7 @@ export async function createServer(
     skillsRuntime?.observe(event);
     const session = typeof event.session === 'string' ? event.session : undefined;
     const projectId = session !== undefined ? membershipIndex.projectOf(session) : undefined;
-    broadcast(projectId !== undefined ? ({ ...stamped, project_id: projectId } as CoreEvent) : stamped);
+    broadcast(projectId !== undefined ? ({ ...rewritten, project_id: projectId } as CoreEvent) : rewritten);
     // The delivered-PR record (CREW-UX-8, crew#321): resolved once per run at its terminal
     // frame, best-effort, off the hot path — see `resolveRunDelivery` above for why BOTH
     // terminal frames trigger it and why a failed deliver is a no-op. THEN the delivery-
@@ -1250,6 +1254,27 @@ export async function createServer(
         if (endedTs > 0) runTimingIndex.setEnded(session, endedTs);
       }
       void resolveRunDelivery(session)
+        // crew#620 Acceptance 3: sweep the delivered run's worktree once the PR is open.
+        // Best-effort — a sweep error must never fail the terminal frame.
+        .then(async () => {
+          if (deliveryIndex.urlFor(session) !== undefined) {
+            try {
+              const views = await adapter.sessionsDetail();
+              const repoRef = views.find((v) => v.session.id === session)?.session.repo_ref;
+              if (repoRef !== null && repoRef !== undefined) {
+                const repos = await adapter.listRepos();
+                const repoRoot = repos.find((r) => r.id === repoRef)?.root_path;
+                if (repoRoot !== undefined) {
+                  await sweepDeliveredWorktree(session, repoRoot, (m) => app.log.info(m));
+                }
+              }
+            } catch (err: unknown) {
+              app.log.warn(
+                `[runs] worktree sweep failed for ${session}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        })
         .then(() => deliveryCache.warm(session))
         // Wave 6 (F-7R2-014): a terminal `qe-author-tests` run registers its TEST SET — the
         // produced tests as the verify phase judged them — AFTER the delivery record resolved, so

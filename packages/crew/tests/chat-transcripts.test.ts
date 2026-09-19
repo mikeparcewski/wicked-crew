@@ -149,6 +149,77 @@ describe('ChatTranscriptStore.registerRoots + observe (crew#618)', () => {
   });
 });
 
+describe('ChatTranscriptStore.rewriteEvent (crew#618 — broadcast/ws path, Acceptance 1)', () => {
+  it('returns a new event with rewritten text when roots are registered — /ws subscriber sees <name>/src/x.ts:12', () => {
+    const store = new ChatTranscriptStore({ dir });
+    store.registerRoots('c1', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
+    const event = {
+      type: 'chatReply',
+      chat: 'c1',
+      cliKey: 'claude',
+      text: 'See /srv/repos/alpha/src/x.ts:12 for details.',
+      ok: true,
+      turn_id: 't1',
+    } as unknown as CoreEvent;
+    const result = store.rewriteEvent(event);
+    expect((result as unknown as Record<string, unknown>)['text']).toBe('See alpha/src/x.ts:12 for details.');
+    expect(result).not.toBe(event); // new object — original frame is unmodified
+    expect((event as unknown as Record<string, unknown>)['text']).toBe('See /srv/repos/alpha/src/x.ts:12 for details.');
+  });
+
+  it('returns the SAME object reference when no roots are registered (chat with no registered roots passes through)', () => {
+    const store = new ChatTranscriptStore({ dir });
+    const event = {
+      type: 'chatReply',
+      chat: 'c2',
+      cliKey: 'pi',
+      text: '/srv/repos/alpha/src/bar.ts',
+      ok: true,
+      turn_id: 't1',
+    } as unknown as CoreEvent;
+    expect(store.rewriteEvent(event)).toBe(event);
+  });
+
+  it('returns the SAME object reference for non-chatReply events', () => {
+    const store = new ChatTranscriptStore({ dir });
+    store.registerRoots('c1', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
+    const event = { type: 'sessionCompleted', session: 'r1' } as CoreEvent;
+    expect(store.rewriteEvent(event)).toBe(event);
+  });
+
+  it('returns the SAME object when text contains no matching prefix (no allocation)', () => {
+    const store = new ChatTranscriptStore({ dir });
+    store.registerRoots('c1', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
+    const event = {
+      type: 'chatReply',
+      chat: 'c1',
+      cliKey: 'claude',
+      text: 'No host paths here.',
+      ok: true,
+      turn_id: 't1',
+    } as unknown as CoreEvent;
+    expect(store.rewriteEvent(event)).toBe(event);
+  });
+
+  it('rewritten event passed to observe produces the same stored text (observe second-pass is a no-op)', () => {
+    const store = new ChatTranscriptStore({ dir });
+    store.registerRoots('c1', [{ absRoot: '/srv/repos/alpha', name: 'alpha' }]);
+    const event = {
+      type: 'chatReply',
+      chat: 'c1',
+      cliKey: 'claude',
+      text: '/srv/repos/alpha/src/foo.ts',
+      ok: true,
+      turn_id: 't1',
+    } as unknown as CoreEvent;
+    const rewritten = store.rewriteEvent(event);
+    store.observe(rewritten);
+    const recs = store.read('c1');
+    expect(recs).toHaveLength(1);
+    expect(recs[0]).toMatchObject({ text: 'alpha/src/foo.ts' });
+  });
+});
+
 // Inline re-implementation of the server.ts retention maps to test the three-way invariant
 // (chatClosed-while-live, terminal-while-chat-open, terminal-after-close) without a full server.
 function makeRetention() {

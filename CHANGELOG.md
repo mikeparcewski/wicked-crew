@@ -22,12 +22,19 @@ mentioned only where a daemon release depends on them.
   chat's transcript from deletion on `chatClosed` (idle / pool_cap / operator DELETE). The
   transcript is dropped as normal once the run reaches a terminal frame. The new `chatId` field
   is additive in `LaunchRequest`; `GET /health.capabilities.chatIdOnLaunch` advertises support
-  so older-Studio clients omit it safely.
+  so older-Studio clients omit it safely. Note: the engine's own idle reclaim still happens — the
+  idle TTL and seat pool-cap eviction live in wicked-core; this fix retains the transcript and
+  records `chatId` on the run record so the crew daemon can enforce the retention invariant.
+  Tracked as wicked-crew#619.
 - **#620 — Run worktrees excluded from interactive grounding snapshots.** `wicked-worktrees/`
   is now in `SNAPSHOT_SKIP` alongside `.git` and `node_modules`, preventing engine-managed run
   checkouts from being included in the grounding context handed to interactive workers. The chat
   scope statement also explicitly instructs seats not to read from `wicked-worktrees/`
-  subdirectories.
+  subdirectories. The crew half of this fix is the snapshot skip, the chat-scope statement, and
+  the post-delivery worktree sweep (a delivered run's worktree is now detached via
+  `git worktree remove --force` after its PR is opened); the estate search-index exclusion of
+  `wicked-worktrees/` is estate-side. Tracked as wicked-crew#619 (chat-scope / retention) and
+  wicked-crew#620 (snapshot skip / sweep).
 - **#623 — `qe-author-tests` verify phase: node:test harness now recognised.** A produced test file
   that imports `node:test`, or whose nearest `package.json` declares `scripts.test` with
   `node --test`, is now detected as the `node-test` harness; each file runs with
