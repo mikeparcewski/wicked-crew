@@ -11,6 +11,11 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **#495 — `worktree-sweep.ts` git children no longer inherit the daemon's `WICKED_ESTATE_DB`.** Both
+  `execFile('git', …)` calls in `sweepDeliveredWorktree` (worktree remove and worktree prune) now
+  pass `{ windowsHide: true, env: childEnvWithBootEstateDb() }`, consistent with the pattern
+  established in `post-hoc-deliver.ts`. Previously the daemon-exported estate-DB URL was silently
+  inherited by these git child processes.
 - **#618 — Chat scope: seat replies no longer expose absolute host paths.** The chat scope
   statement now instructs seats to cite files relative to their repository root, prefixed with
   the repository name (e.g. `alpha/src/foo.ts` instead of `/srv/repos/alpha/src/foo.ts`). The

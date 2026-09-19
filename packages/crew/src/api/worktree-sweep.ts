@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { childEnvWithBootEstateDb } from '../core/governance-store.js';
 
 /**
  * Best-effort post-delivery worktree sweep (crew#620 — Acceptance 3).
@@ -18,7 +19,7 @@ export async function sweepDeliveredWorktree(
 ): Promise<void> {
   const worktreePath = join('wicked-worktrees', runId);
   await new Promise<void>((resolve) => {
-    execFile('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], (err) => {
+    execFile('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) => {
       if (err !== null) {
         if (/not.*working tree|is not a working tree|no such worktree/i.test(err.message)) {
           log(`[runs] worktree sweep: ${runId} not present — nothing to remove`);
@@ -32,7 +33,7 @@ export async function sweepDeliveredWorktree(
     });
   });
   await new Promise<void>((resolve) => {
-    execFile('git', ['-C', repoRoot, 'worktree', 'prune'], (err) => {
+    execFile('git', ['-C', repoRoot, 'worktree', 'prune'], { windowsHide: true, env: childEnvWithBootEstateDb() }, (err) => {
       if (err !== null) {
         log(`[runs] worktree sweep: prune error: ${err.message}`);
       }
