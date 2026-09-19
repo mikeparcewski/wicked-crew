@@ -191,6 +191,11 @@ export interface HealthCapabilities {
    * the field — read as `false`: do not send `revisesPr` to such a daemon.
    */
   revisesPr?: boolean;
+  /**
+   * `LaunchRunBody.chatId` is accepted (crew#619; crew ≥ 0.7.39). ABSENT on a daemon before
+   * the field — read as `false`: do not send `chatId` to such a daemon.
+   */
+  chatIdOnLaunch?: boolean;
 }
 
 /** One `GET /health.warnings[]` entry (additive; wicked-core#411 / wicked-crew#497). */
@@ -3361,6 +3366,15 @@ export interface LaunchRunBody {
    * launch schema rejects the key with a 400.
    */
   revisesPr?: number;
+  /**
+   * Promote-from-chat linkage (crew#619; api-types 0.39.0, additive): the id of the chat this
+   * run was promoted from. When present, the daemon retains that chat's conversation transcript
+   * on disk for the run's lifetime, so the Continue-in-Build prefill is always reproducible
+   * even if the chat is idle-reclaimed before the run finishes. Optional; omit when the launch
+   * is not promoted from a chat. Check `GET /health.capabilities.chatIdOnLaunch` before sending —
+   * an older daemon's strict launch schema rejects the key with a 400.
+   */
+  chatId?: string;
   /**
    * Retry lineage (DES-UX-001 §8.3, CREW-UX-3; api-types 0.8.0): the id of the run this
    * launch retries. Must name an EXISTING run id — an unknown id fails the launch (400 with

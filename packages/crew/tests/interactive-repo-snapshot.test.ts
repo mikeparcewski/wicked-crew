@@ -66,7 +66,7 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     return root;
   }
 
-  it('snapshots a plain (non-git) directory via the copy fallback, skipping .git and node_modules', async () => {
+  it('snapshots a plain (non-git) directory via the copy fallback, skipping .git, node_modules and wicked-worktrees (crew#620)', async () => {
     const root = plainRepo();
     // Junk that must never ride into the snapshot — at any depth. The `.git` entry is REAL
     // (Copilot round 2: the fixture previously never created one, so the .git skip branch was
@@ -78,6 +78,9 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     writeFileSync(join(root, 'node_modules', 'left-pad', 'index.js'), 'junk', 'utf8');
     mkdirSync(join(root, 'src', 'node_modules'), { recursive: true });
     writeFileSync(join(root, 'src', 'node_modules', 'nested.js'), 'junk', 'utf8');
+    // crew#620: run worktrees must not enter the grounding snapshot.
+    mkdirSync(join(root, 'wicked-worktrees', 'run-abc123'), { recursive: true });
+    writeFileSync(join(root, 'wicked-worktrees', 'run-abc123', 'secret.ts'), 'run worktree content', 'utf8');
 
     const dest = join(dir, 'snap');
     const logged: string[] = [];
@@ -87,6 +90,7 @@ describe('snapshotRepo (CREW-UX-8 v4)', () => {
     expect(existsSync(join(dest, '.git'))).toBe(false);
     expect(existsSync(join(dest, 'node_modules'))).toBe(false);
     expect(existsSync(join(dest, 'src', 'node_modules'))).toBe(false);
+    expect(existsSync(join(dest, 'wicked-worktrees'))).toBe(false);
     // The non-git root fell THROUGH the clone to the copy — visibly, in the log. Logged whether
     // or not a git binary exists: with git the clone fails on a non-repo, without git the spawn
     // itself throws — either way the fallback is what produced the snapshot (Copilot, crew#313:

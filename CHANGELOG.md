@@ -11,6 +11,35 @@ mentioned only where a daemon release depends on them.
 ## [Unreleased]
 
 ### Fixed
+- **#495 — `worktree-sweep.ts` git children no longer inherit the daemon's `WICKED_ESTATE_DB`.** Both
+  `execFile('git', …)` calls in `sweepDeliveredWorktree` (worktree remove and worktree prune) now
+  pass `{ windowsHide: true, env: childEnvWithBootEstateDb() }`, consistent with the pattern
+  established in `post-hoc-deliver.ts`. Previously the daemon-exported estate-DB URL was silently
+  inherited by these git child processes.
+- **#618 — Chat scope: seat replies no longer expose absolute host paths.** The chat scope
+  statement now instructs seats to cite files relative to their repository root, prefixed with
+  the repository name (e.g. `alpha/src/foo.ts` instead of `/srv/repos/alpha/src/foo.ts`). The
+  `ChatTranscriptStore` registers the chat's resolved repo roots at open time and rewrites any
+  absolute host-path prefix in seat reply text to repo-relative form before storing or serving
+  the transcript.
+- **#619 — Idle-TTL no longer drops a chat transcript while its promoted run is live.** When
+  `POST /runs` is called with `chatId`, the daemon links that run to the chat and exempts the
+  chat's transcript from deletion on `chatClosed` (idle / pool_cap / operator DELETE). The
+  transcript is dropped as normal once the run reaches a terminal frame. The new `chatId` field
+  is additive in `LaunchRequest`; `GET /health.capabilities.chatIdOnLaunch` advertises support
+  so older-Studio clients omit it safely. Note: the engine's own idle reclaim still happens — the
+  idle TTL and seat pool-cap eviction live in wicked-core; this fix retains the transcript and
+  records `chatId` on the run record so the crew daemon can enforce the retention invariant.
+  Tracked as wicked-crew#619.
+- **#620 — Run worktrees excluded from interactive grounding snapshots.** `wicked-worktrees/`
+  is now in `SNAPSHOT_SKIP` alongside `.git` and `node_modules`, preventing engine-managed run
+  checkouts from being included in the grounding context handed to interactive workers. The chat
+  scope statement also explicitly instructs seats not to read from `wicked-worktrees/`
+  subdirectories. The crew half of this fix is the snapshot skip, the chat-scope statement, and
+  the post-delivery worktree sweep (a delivered run's worktree is now detached via
+  `git worktree remove --force` after its PR is opened); the estate search-index exclusion of
+  `wicked-worktrees/` is estate-side. Tracked as wicked-crew#619 (chat-scope / retention) and
+  wicked-crew#620 (snapshot skip / sweep).
 - **#623 — `qe-author-tests` verify phase: node:test harness now recognised.** A produced test file
   that imports `node:test`, or whose nearest `package.json` declares `scripts.test` with
   `node --test`, is now detected as the `node-test` harness; each file runs with

@@ -531,9 +531,12 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
       ...scope.repos.map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.rootPath}\``),
       '',
       'Explore and answer questions about these repositories by reading them at the paths above.',
-      'Cite files by their full path. Do NOT modify, create or delete anything inside them — this',
-      'chat is read-only exploration; write scratch files only under this directory. Nothing',
-      'outside these repositories and this directory is in scope.',
+      'Cite files relative to their repository root, prefixed with the repository name',
+      '(for example `alpha/src/foo.ts` for a file at `/srv/repos/alpha/src/foo.ts`).',
+      'Do NOT read from any `wicked-worktrees/` subdirectory — those are engine-managed run',
+      'checkouts, not source code. Do NOT modify, create or delete anything inside these',
+      'repositories — this chat is read-only exploration; write scratch files only under this',
+      'directory. Nothing outside these repositories and this directory is in scope.',
       '',
     );
   }
@@ -582,8 +585,9 @@ export function chatScopeStatement(chatId: string, scope: ChatScope): string {
   lines.push('## Answer format', '');
   lines.push(
     'Reply with the answer itself: no working notes or status blocks (no "Work State", "Next Move"',
-    'or "Relevant Files" sections), no tool monologue, no compaction notices. Cite files by their',
-    'full path. If a claim could not be grounded, say so in one line rather than asserting it.',
+    'or "Relevant Files" sections), no tool monologue, no compaction notices. Cite files relative',
+    'to their repository root (e.g. `alpha/src/foo.ts`, not the host path). If a claim could not',
+    'be grounded, say so in one line rather than asserting it.',
     '',
   );
   if (scope.projectId !== undefined) {
