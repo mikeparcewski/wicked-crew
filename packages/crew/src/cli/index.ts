@@ -646,10 +646,13 @@ function noDaemonRemedy(port: number): string {
   return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
 }
 
-/** `fetch` against the local daemon: a connection failure exits 1 with the remedy; anything else propagates. */
+export { withBearerHeader } from './bearer.js';
+import { withBearerHeader } from './bearer.js';
+
+/** `fetch` against the local daemon: injects `WICKED_CREW_TOKEN` as a bearer if set; a connection failure exits 1 with the remedy; anything else propagates. */
 async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await fetch(url, withBearerHeader(init));
   } catch (err) {
     if (isConnectionFailure(err)) {
       console.error(noDaemonRemedy(port));

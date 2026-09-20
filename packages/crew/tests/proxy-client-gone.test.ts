@@ -62,10 +62,11 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it('client destroys socket after 200 headers → forward() resolves, no unhandled rejection', async () => {
-    // 1. Upstream: write 200 SSE headers then stall
+    // 1. Upstream: write 200 SSE headers plus an initial keep-alive chunk so the headers
+    //    propagate through the pipe to the client (writeHead alone is buffered until data flows).
     const upstream = createHttpServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'transfer-encoding': 'chunked' });
-      res.flushHeaders(); // push headers without ending the response — real SSE pattern
+      res.write(':keepalive\n\n'); // flush headers through pipe — then stall
     });
     await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
     const upstreamPort = (upstream.address() as { port: number }).port;
@@ -85,7 +86,15 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
     await app.listen({ port: 0, host: '127.0.0.1' });
     const appPort = (app.server.address() as { port: number }).port;
 
-    // 4. Client makes a GET (not a create — takes the forward() branch, not forwardCreate)
+    // 4. Install an explicit unhandledRejection listener — if forward() rejects instead of
+    //    resolving, the rejection lands here and we assert it did not occur. Without this
+    //    listener the test relies on vitest's passive detection, which silently passes when
+    //    the rejection is swallowed before vitest sees it.
+    const unhandledRejections: unknown[] = [];
+    const rejectionHandler = (reason: unknown) => { unhandledRejections.push(reason); };
+    process.on('unhandledRejection', rejectionHandler);
+
+    // 5. Client makes a GET (not a create — takes the forward() branch, not forwardCreate)
     //    and destroys the socket once the proxied 200 header arrives.
     let got200 = false;
     await new Promise<void>((resolve, reject) => {
@@ -103,15 +112,15 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
       req.end();
     });
 
-    // 5. Cleanup (close after assertions so unhandled rejections fire before close)
+    // 6. Cleanup (close after assertions so unhandled rejections fire before close)
     await new Promise((r) => setTimeout(r, 100));
+    process.off('unhandledRejection', rejectionHandler);
     await app.close();
     await new Promise<void>((r) => upstream.close(() => r()));
 
-    // The client received the proxied 200.
     expect(got200).toBe(true);
-    // If forward() had rejected with ECONNRESET, vitest would catch an unhandledRejection and fail
-    // the test. Reaching here without a vitest-caught rejection means the suppression worked.
+    // An unhandled rejection here means forward() rejected instead of resolving — the suppression is broken.
+    expect(unhandledRejections).toHaveLength(0);
   }, 8000);
 
   it('upstream error WITHOUT client close → forward() rejects (surfaces as 502)', async () => {
@@ -144,7 +153,8 @@ describe('forward() — client-disconnect suppression (real HTTP servers)', () =
     await app.close();
     await new Promise<void>((r) => upstream.close(() => r()));
 
-    // The bridge crashed without the client disconnecting — forward() must reject → 5xx
+    // The bridge crashed without the client disconnecting — forward() must reject → 5xx.
+    // The proxy returns 500 (Fastify error handler) when the upstream errors before sending headers.
     expect(status).toBeGreaterThanOrEqual(500);
   }, 8000);
 });

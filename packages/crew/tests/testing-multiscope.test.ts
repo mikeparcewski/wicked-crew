@@ -440,15 +440,9 @@ describe('POST /testing/recon', () => {
       problem: 'x',
       clisJson: JSON.stringify([{ key: 'no-such-seat-xyz123' }]),
     });
-    // validateClisJson skips the check when the roster is empty (no seat keys to compare against).
-    // In tests the real registry is loaded, so the roster is non-empty and the check runs.
-    if (res.status === 400) {
-      expect(res.body['error']).toBe(SEAT_UNAVAILABLE_REASON);
-      expect(runLaunches).toHaveLength(0);
-    } else {
-      // Roster has no keys (addon not loaded) — clisJson is accepted and forwarded.
-      expect(res.status).toBe(201);
-    }
+    expect(res.status).toBe(400);
+    expect(res.body['error']).toBe(SEAT_UNAVAILABLE_REASON);
+    expect(runLaunches).toHaveLength(0);
   });
 });
 

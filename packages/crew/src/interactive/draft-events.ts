@@ -42,13 +42,10 @@ import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
 import {
-  DRAFT_SELF_CHECK_RULE,
   DRAFT_SKILL,
-  OUTLINE_NO_HTML_RULE,
   draftQualityClause,
   draftSkillArmLine,
   pageBudgetFor,
-  withDraftFloors,
   withDraftSkill,
   type SkillHeld,
 } from './draft-skill.js';
@@ -691,35 +688,7 @@ export async function startInteractiveDraftSubscriber(
     draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
     log(draftSkillArmLine('interactive-draft', draftSkillHeld));
 
-    // Upsert the governance floor rules and pin them to the relevant phases (#621). Each rule is
-    // content-addressed: upserting the same JSON deterministically returns the same hash, so
-    // restarting the daemon is idempotent. A failed upsert is non-fatal — the arm proceeds with
-    // validator_pin: null for that phase (the pre-#621 ungated behavior) and logs the reason.
-    let outlinePin: string | null = null;
-    let draftPin: string | null = null;
-    try {
-      outlinePin = await adapter.upsertConformanceRule(OUTLINE_NO_HTML_RULE);
-    } catch (err) {
-      log(
-        `[interactive-draft] could not upsert outline floor rule — outline phase will be ungated: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-    if (draftSkillHeld) {
-      try {
-        draftPin = await adapter.upsertConformanceRule(DRAFT_SELF_CHECK_RULE);
-      } catch (err) {
-        log(
-          `[interactive-draft] could not upsert draft self-check rule — draft phase will be ungated: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
-
-    const def = withDraftFloors(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld), outlinePin, draftPin);
-    await adapter.registerWorkflow(def);
+    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld));
   } catch (err) {
     log(
       `[interactive-draft] could not register the '${INTERACTIVE_DRAFT_WORKFLOW}' workflow — ` +

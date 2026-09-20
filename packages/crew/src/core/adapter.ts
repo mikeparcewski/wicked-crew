@@ -2371,9 +2371,9 @@ export class CoreAdapter {
     await this.core.upsertPolicy(JSON.stringify(policy));
   }
 
-  /** Upsert a conformance rule via the single-writer actor; returns its content-address hash. */
-  async upsertConformanceRule(rule: ConformanceRule): Promise<string> {
-    return await this.core.upsertConformanceRule(JSON.stringify(rule));
+  /** Upsert a conformance rule via the single-writer actor. */
+  async upsertConformanceRule(rule: ConformanceRule): Promise<void> {
+    await this.core.upsertConformanceRule(JSON.stringify(rule));
   }
 
   /**

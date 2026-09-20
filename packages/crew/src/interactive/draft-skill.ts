@@ -22,7 +22,7 @@
  * before (no floor), and the log line says so and names the fix (upgrade garden, republish).
  */
 
-import type { ConformanceRule, WorkflowDef } from '../core/types.js';
+import type { WorkflowDef } from '../core/types.js';
 
 /** The skill's name as the snapshot keys it (path-derived: `skills/draft/SKILL.md` → `wicked-garden-draft`). */
 export const DRAFT_SKILL = 'wicked-garden-draft';
@@ -150,70 +150,3 @@ export function draftSkillArmLine(seam: string, held: boolean): string {
         `(stamping it anyway would make the engine refuse every run at plan time: "the skills snapshot … does not hold the skills this run requires")`;
 }
 
-// ─── #621: conformance-floor rules for interactive-draft phases ───────────────
-
-/** Hard cap above which an outline is treated as a draft, not a plan. */
-export const OUTLINE_MAX_CHARS = 40_000;
-
-/**
- * Conformance rule enforcing that the outline phase produces a PLAN, not a draft.
- *
- * Content-addressed by the engine: the same JSON always hashes to the same pin, so
- * upserting on daemon restart is idempotent. Never mutate this object without also
- * updating the rule `id` (which would create a second rule, not update the first).
- */
-export const OUTLINE_NO_HTML_RULE: ConformanceRule = {
-  id: 'crew:interactive-draft/outline/no-html',
-  rule_type: 'policy',
-  statement:
-    'A recon phase plans; it does not draft. The outline output must contain no HTML markup: ' +
-    'no <html>, <!DOCTYPE>, or <body> elements are allowed. ' +
-    `Output exceeding ${OUTLINE_MAX_CHARS.toLocaleString()} characters is also treated as a draft, not an outline.`,
-  severity: 'error',
-  confidence: 1.0,
-  targets: {},
-  provenance: { source: 'crew', source_kinds: ['interactive'] },
-  steering_type: 'design-ux',
-};
-
-/**
- * Conformance rule requiring the wicked-garden-draft self-check to PASS before the draft
- * phase is done. Pinned to the draft phase only when the draft skill is held (the snapshot
- * contains `wicked-garden-draft`); when not held the draft phase remains ungated, exactly
- * as before #621.
- */
-export const DRAFT_SELF_CHECK_RULE: ConformanceRule = {
-  id: 'crew:interactive-draft/draft/self-check',
-  rule_type: 'policy',
-  statement:
-    'A draft phase must pass the wicked-garden-draft self-check before it is considered done. ' +
-    'The author must run the self-check command on the SAVED output file and the result must be PASS; ' +
-    'a FAIL verdict is the author\'s to resolve before the turn ends — never the evaluator\'s.',
-  severity: 'error',
-  confidence: 1.0,
-  targets: {},
-  provenance: { source: 'crew', source_kinds: ['interactive'] },
-  steering_type: 'design-ux',
-};
-
-/**
- * Apply `validator_pin` to the outline and/or draft phases of `def`.
- *
- * A null pin leaves the phase ungated (pre-#621 behaviour — used when the upsert fails).
- * Returns `def` unchanged (same reference) when both pins are null.
- */
-export function withDraftFloors(
-  def: WorkflowDef,
-  outlinePin: string | null,
-  draftPin: string | null,
-): WorkflowDef {
-  if (outlinePin === null && draftPin === null) return def;
-  return {
-    ...def,
-    phases: def.phases.map((p) => {
-      if (p.id === 'outline' && outlinePin !== null) return { ...p, validator_pin: outlinePin };
-      if (p.id === 'draft' && draftPin !== null) return { ...p, validator_pin: draftPin };
-      return p;
-    }),
-  };
-}

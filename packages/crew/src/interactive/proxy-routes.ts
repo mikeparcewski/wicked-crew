@@ -775,9 +775,6 @@ function forward(
           headers[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
         }
         reply.raw.writeHead(res.statusCode ?? 502, headers);
-        // Flush headers immediately so SSE clients see the 200 before any body chunk arrives
-        // (without this, writeHead buffers and the client blocks waiting for the first write).
-        reply.raw.flushHeaders();
         // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
         // Node flushes it because we never set a highWaterMark barrier in between.
         res.pipe(reply.raw);
