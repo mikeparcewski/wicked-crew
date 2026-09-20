@@ -59,6 +59,26 @@ export const DOC_CREATE_PATH = '/api/docs';
 /** Create bodies are a brief plus a few fields; anything bigger is not a create crew should buffer. */
 export const DOC_CREATE_BODY_MAX = 4 * 1024 * 1024;
 
+/** Shared with `api/testing.ts` — same message, different entry point (#631). */
+export const PROXY_SEAT_UNAVAILABLE_REASON =
+  'clisJson names a council seat that is not available in the current roster — check GET /roster for available seats and omit clisJson to use the default';
+
+/** crew#631: validate a doc/demo create `clisJson` against the current roster.
+ *  Mirrors `api/testing.ts validateClisJson` without the cross-module import. */
+function proxyValidateClisJson(clisJson: string, roster: unknown[]): string | null {
+  let seats: unknown;
+  try { seats = JSON.parse(clisJson); } catch { return PROXY_SEAT_UNAVAILABLE_REASON; }
+  if (!Array.isArray(seats)) return PROXY_SEAT_UNAVAILABLE_REASON;
+  const keys = new Set(
+    (roster as Array<{ key?: unknown }>).flatMap((s) => (typeof s.key === 'string' ? [s.key] : [])),
+  );
+  if (keys.size === 0) return null;
+  for (const seat of seats as Array<{ key?: unknown }>) {
+    if (typeof seat?.key === 'string' && !keys.has(seat.key)) return PROXY_SEAT_UNAVAILABLE_REASON;
+  }
+  return null;
+}
+
 /** Per-hop headers that must never be forwarded across a proxy (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
   'connection',
@@ -111,6 +131,9 @@ export interface InteractiveProxyDeps {
   /** The create-time doc → subject-repo binding store (F-046). Absent = the create is pure
    *  transport like every other route (a directly-driven route set with no grounding). */
   grounding?: DocGroundingStore;
+  /** The current council roster — when supplied, a doc/demo create body with a `clisJson` that
+   *  names a seat not in the roster is refused 400 before the bridge sees the request (#631). */
+  roster?: () => unknown[];
   log?: (msg: string) => void;
 }
 
@@ -164,7 +187,7 @@ export interface PreparedCreate {
    *  body was not a JSON object (pure passthrough — the bridge answers its own 400). */
   normalized?: DocCreateBody;
   /** Recorded under the doc name the bridge answers with, when the request named repositories. */
-  binding?: { projectId: string; repoRefs: string[]; style?: string | undefined };
+  binding?: { projectId: string; repoRefs: string[]; style?: string | undefined; clisJson?: string | undefined; channel?: 'studio' | 'cli' | 'api' | undefined; actor?: string | undefined };
   refusal?: DocCreateRefusal;
 }
 
@@ -404,6 +427,17 @@ export async function prepareDocCreate(
   // never by spreading the untrusted body: `repo_ref`/`repo_refs` were consumed above, and a field
   // the contract does not know is not forwarded.
   const str = (k: string): string | undefined => (typeof body[k] === 'string' ? (body[k] as string) : undefined);
+  // Per-doc council roster override and launch provenance — consumed here, NOT forwarded to the
+  // bridge (the bridge does not know these fields; the seam reads them from grounding at launch).
+  const clisJson = str('clisJson') ?? str('clis_json');
+  const VALID_DOC_CHANNELS = new Set(['studio', 'cli', 'api'] as const);
+  const rawChannel = str('channel');
+  const channel: 'studio' | 'cli' | 'api' | undefined =
+    rawChannel !== undefined && VALID_DOC_CHANNELS.has(rawChannel as 'studio' | 'cli' | 'api')
+      ? (rawChannel as 'studio' | 'cli' | 'api')
+      : undefined;
+  const rawActor = str('actor');
+  const actor: string | undefined = rawActor !== undefined && rawActor.length > 0 ? rawActor.slice(0, 256) : undefined;
   const name = str('name');
   const html = str('html');
   const url = str('url');
@@ -439,7 +473,9 @@ export async function prepareDocCreate(
     body: Buffer.from(JSON.stringify(normalized), 'utf8'),
     contentType: 'application/json',
     normalized,
-    ...(repoRefs.length > 0 ? { binding: { projectId, repoRefs, style } } : {}),
+    ...((repoRefs.length > 0 || clisJson !== undefined || channel !== undefined || actor !== undefined)
+      ? { binding: { projectId, repoRefs, style, ...(clisJson !== undefined ? { clisJson } : {}), ...(channel !== undefined ? { channel } : {}), ...(actor !== undefined ? { actor } : {}) } }
+      : {}),
   };
 }
 
@@ -491,6 +527,12 @@ export function registerInteractiveProxy(app: FastifyInstance, adapter: CoreAdap
         if (raw === null) return reply.code(413).send({ error: `create body exceeds ${DOC_CREATE_BODY_MAX} bytes` });
         create = await prepareDocCreate(raw, req.headers['content-type'], adapter, projectId, deps.log);
         if (create.refusal !== undefined) return reply.code(400).send(create.refusal);
+        // crew#631: validate the per-doc seat override against the current roster before the
+        // bridge sees the request — the same check the testing routes apply at their boundary.
+        if (create.binding?.clisJson !== undefined && deps.roster !== undefined) {
+          const seatErr = proxyValidateClisJson(create.binding.clisJson, deps.roster());
+          if (seatErr !== null) return reply.code(400).send({ error: seatErr });
+        }
         // The seams may see this doc's `doc.created` before the bridge has answered with its
         // name: mark the create in flight so they wait for the binding (doc-grounding.ts).
         if (create.binding !== undefined) createToken = grounding.beginCreate(projectId);
@@ -597,6 +639,7 @@ function forwardCreate(
     // Once the request body has been flushed to the socket the bridge may have acted on it: from
     // here on a failure is UNDETERMINED, not retryable (see the route's catch).
     let dispatched = false;
+    let clientGone = false;
     const fail = (err: Error): void => {
       (err as CreateForwardError).createDispatched = dispatched;
       rejectPromise(err);
@@ -607,7 +650,14 @@ function forwardCreate(
         dispatched = true;
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('error', (err) => fail(err));
+        res.on('error', (err) => {
+          if (clientGone && isClientGoneError(err)) {
+            req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected during doc create');
+            resolvePromise();
+            return;
+          }
+          fail(err);
+        });
         res.on('end', () => {
           const body = Buffer.concat(chunks);
           const status = res.statusCode ?? 502;
@@ -619,6 +669,9 @@ function forwardCreate(
                   project_id: create.binding.projectId,
                   repo_refs: create.binding.repoRefs,
                   ...(create.binding.style !== undefined ? { style: create.binding.style } : {}),
+                  ...(create.binding.clisJson !== undefined ? { clis_json: create.binding.clisJson } : {}),
+                  ...(create.binding.channel !== undefined ? { channel: create.binding.channel } : {}),
+                  ...(create.binding.actor !== undefined ? { actor: create.binding.actor } : {}),
                 });
                 log?.(
                   `interactive doc ${answer.name} (project ${create.binding.projectId}) is about ${create.binding.repoRefs.join(', ')} — grounding binding recorded`,
@@ -651,8 +704,18 @@ function forwardCreate(
       dispatched = true;
     });
     upstream.on('error', (err) => {
+      if (clientGone && isClientGoneError(err)) {
+        req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected during doc create');
+        if (reply.raw.headersSent) reply.raw.destroy();
+        resolvePromise();
+        return;
+      }
       if (reply.raw.headersSent) reply.raw.destroy();
       fail(err);
+    });
+    reply.raw.on('close', () => {
+      clientGone = true;
+      upstream.destroy();
     });
     upstream.end(create.body);
   });
@@ -661,6 +724,18 @@ function forwardCreate(
 function isConnectionRefused(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException | null)?.code;
   return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EHOSTUNREACH';
+}
+
+/**
+ * Errors that mean "the upstream tore down its side after the CLIENT already left" — normal
+ * teardown noise when a browser tab closes mid-stream. Only used when `clientGone` is already
+ * true so we are sure the client left first and the upstream is reacting to the destroyed socket.
+ */
+export function isClientGoneError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code === 'ECONNRESET' || code === 'ERR_STREAM_PREMATURE_CLOSE') return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg === 'aborted' || msg.toLowerCase().startsWith('aborted');
 }
 
 /** §5.6's failure shape: a machine-readable code plus a command the operator can actually run. */
@@ -683,6 +758,7 @@ function forward(
   prefix: string,
 ): Promise<void> {
   return new Promise<void>((resolvePromise, rejectPromise) => {
+    let clientGone = false;
     const upstream = httpRequest(
       {
         host: bridge.host,
@@ -699,11 +775,20 @@ function forward(
           headers[name] = name === 'location' && typeof value === 'string' ? rewriteLocation(value, bridge, prefix) : value;
         }
         reply.raw.writeHead(res.statusCode ?? 502, headers);
+        // Flush headers immediately so SSE clients see the 200 before any body chunk arrives
+        // (without this, writeHead buffers and the client blocks waiting for the first write).
+        reply.raw.flushHeaders();
         // No `pipeline` and no buffering layer: `pipe` forwards each chunk as it lands, and
         // Node flushes it because we never set a highWaterMark barrier in between.
         res.pipe(reply.raw);
         res.on('end', () => resolvePromise());
         res.on('error', (err) => {
+          if (clientGone && isClientGoneError(err)) {
+            req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected before upstream finished');
+            reply.raw.destroy();
+            resolvePromise();
+            return;
+          }
           reply.raw.destroy();
           rejectPromise(err);
         });
@@ -711,11 +796,22 @@ function forward(
     );
 
     upstream.on('error', (err) => {
+      if (clientGone && isClientGoneError(err)) {
+        req.log.info({ method: req.method, url: req.url }, 'proxy: client disconnected, upstream aborted');
+        if (reply.raw.headersSent) reply.raw.destroy();
+        resolvePromise();
+        return;
+      }
       if (reply.raw.headersSent) reply.raw.destroy();
       rejectPromise(err);
     });
     // If the client hangs up mid-stream (closing an SSE tab), stop pulling from the bridge.
-    reply.raw.on('close', () => upstream.destroy());
+    // clientGone prevents a race where the upstream then errors with ECONNRESET/aborted from
+    // being re-raised as an unhandled rejection when we already know the client left.
+    reply.raw.on('close', () => {
+      clientGone = true;
+      upstream.destroy();
+    });
     req.raw.pipe(upstream);
   });
 }

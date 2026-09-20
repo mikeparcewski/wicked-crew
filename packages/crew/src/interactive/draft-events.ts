@@ -41,7 +41,17 @@ import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BusEvent } from 'wicked-bus';
 import { InteractiveHandoffLedger } from './ledger.js';
-import { DRAFT_SKILL, draftQualityClause, draftSkillArmLine, pageBudgetFor, withDraftSkill, type SkillHeld } from './draft-skill.js';
+import {
+  DRAFT_SELF_CHECK_RULE,
+  DRAFT_SKILL,
+  OUTLINE_NO_HTML_RULE,
+  draftQualityClause,
+  draftSkillArmLine,
+  pageBudgetFor,
+  withDraftFloors,
+  withDraftSkill,
+  type SkillHeld,
+} from './draft-skill.js';
 import { crewStateHome } from '../projects/state-home.js';
 import { runDirInsideRepo, snapshotRepo, type SnapshotFailureReason } from './repo-snapshot.js';
 import { resolveInteractiveRoot } from './bridge-root.js';
@@ -553,6 +563,10 @@ export interface InteractiveDraftOptions {
    *  performs: tag the run in the live membership index + emit `wicked.crew.membership.attached`
    *  (the engine already attached the crew.run membership atomically with the launch). */
   onRunFiled?: (runId: string, projectId: string) => void;
+  /** Called after every successful `adapter.launchRun()` with the run id and provenance detail
+   *  (channel, actor from the create-time grounding binding). The server wires this to
+   *  `recordRunLaunched` so subscriber-launched runs appear in the audit trail and run DTOs. */
+  onRunLaunched?: (runId: string, detail: Record<string, unknown>) => void;
   /** The create-time doc → subject-repo bindings the proxy recorded (F-046, `doc-grounding.ts` —
    *  a `crew-grounding.json` sidecar beside the doc's `versions.json`); the server wires the
    *  daemon's shared instance. Absent = nothing was ever named on a create request: grounding falls
@@ -676,7 +690,36 @@ export async function startInteractiveDraftSubscriber(
     // The quality-floor skill rides only when the published snapshot holds it (draft-skill.ts).
     draftSkillHeld = (opts.skillHeld ?? (() => false))(DRAFT_SKILL);
     log(draftSkillArmLine('interactive-draft', draftSkillHeld));
-    await adapter.registerWorkflow(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld));
+
+    // Upsert the governance floor rules and pin them to the relevant phases (#621). Each rule is
+    // content-addressed: upserting the same JSON deterministically returns the same hash, so
+    // restarting the daemon is idempotent. A failed upsert is non-fatal — the arm proceeds with
+    // validator_pin: null for that phase (the pre-#621 ungated behavior) and logs the reason.
+    let outlinePin: string | null = null;
+    let draftPin: string | null = null;
+    try {
+      outlinePin = await adapter.upsertConformanceRule(OUTLINE_NO_HTML_RULE);
+    } catch (err) {
+      log(
+        `[interactive-draft] could not upsert outline floor rule — outline phase will be ungated: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    if (draftSkillHeld) {
+      try {
+        draftPin = await adapter.upsertConformanceRule(DRAFT_SELF_CHECK_RULE);
+      } catch (err) {
+        log(
+          `[interactive-draft] could not upsert draft self-check rule — draft phase will be ungated: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    const def = withDraftFloors(withDraftSkill(INTERACTIVE_DRAFT_WORKFLOW_DEF, draftSkillHeld), outlinePin, draftPin);
+    await adapter.registerWorkflow(def);
   } catch (err) {
     log(
       `[interactive-draft] could not register the '${INTERACTIVE_DRAFT_WORKFLOW}' workflow — ` +
@@ -1033,6 +1076,9 @@ export async function startInteractiveDraftSubscriber(
     // the project's first member: that grounded a brochure about wicked-studio on wicked-core.
     // Unbound docs skip this entirely and launch exactly as before.
     let decision: GroundingDecision | undefined;
+    let docClisJson: string | undefined;
+    let docChannel: 'studio' | 'cli' | 'api' | undefined;
+    let docActor: string | undefined;
     if (doc.projectId !== undefined) {
       // The sidecar sits beside the doc; a refused partition (bridge-root.ts) throws here and the
       // frame goes unanswered — fail closed, like the sibling seams' docs-root reads.
@@ -1041,6 +1087,9 @@ export async function startInteractiveDraftSubscriber(
           ? await groundingStore.waitFor(resolveDocsRoot(doc.projectId), doc.documentId, doc.projectId, GROUNDING_BINDING_WAIT_MS)
           : undefined;
       decision = await resolveGroundingRepos(adapter, doc.projectId, doc.brief, binding?.repo_refs, log);
+      docClisJson = binding?.clis_json;
+      docChannel = binding?.channel;
+      docActor = binding?.actor;
     }
 
     emitStatus({
@@ -1237,7 +1286,7 @@ export async function startInteractiveDraftSubscriber(
               )
             : ''),
         sessionId: runId,
-        clisJson: opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
+        clisJson: docClisJson ?? opts.clisJson ?? JSON.stringify(rosterOf(adapter, opts.roster)),
         workflow: INTERACTIVE_DRAFT_WORKFLOW,
         // A project-bound doc's governed draft is FILED (P7 gate DEFECT-1): the engine attaches
         // the crew.run membership atomically with the launch, so the run shows up in the
@@ -1301,6 +1350,10 @@ export async function startInteractiveDraftSubscriber(
       return;
     }
     if (doc.projectId !== undefined) opts.onRunFiled?.(runId, doc.projectId);
+    opts.onRunLaunched?.(runId, {
+      ...(docChannel !== undefined ? { channel: docChannel } : {}),
+      ...(docActor !== undefined ? { actor: docActor } : {}),
+    });
 
     // Upgrade the placeholder to a live flight: the heartbeat starts once the run exists.
     flight.heartbeat = setInterval(() => {

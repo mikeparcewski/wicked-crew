@@ -105,6 +105,7 @@ beforeAll(async () => {
   adapter.listConformanceRules = async () => listedRules;
   adapter.upsertConformanceRule = async (r: ConformanceRule) => {
     upsertedRules.push(r);
+    return 'stub-pin';
   };
   adapter.upsertPolicy = async (p) => {
     upsertedPolicies.push(p);

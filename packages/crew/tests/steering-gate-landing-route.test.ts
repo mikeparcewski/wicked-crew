@@ -127,6 +127,7 @@ beforeAll(async () => {
   };
   adapter.upsertConformanceRule = async (rule: ConformanceRule) => {
     upserted.push(rule);
+    return 'stub-pin';
   };
   adapter.listConformanceRules = async () => upserted;
   adapter.workOutput = async (unitId: string) => {

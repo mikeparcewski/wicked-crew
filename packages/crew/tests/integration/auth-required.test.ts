@@ -70,7 +70,7 @@ beforeAll(async () => {
   adapter.sessions = async () => [PARKED];
   adapter.confirmGate = async () => 'resumed';
   adapter.upsertPolicy = async () => undefined;
-  adapter.upsertConformanceRule = async () => undefined;
+  adapter.upsertConformanceRule = async () => 'stub-pin';
   adapter.getSettings = async () => ({ graphNodeLimit: 150 });
   adapter.updateSettings = async (patch: Partial<CrewSystemSettings>) =>
     ({ graphNodeLimit: 150, ...patch }) as CrewSystemSettings; // the daemon's own type: baseSkillPolicy is 'require' only (D-8b)

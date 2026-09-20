@@ -107,6 +107,9 @@ export const TestingReconSchema = z
       .min(1, 'repoRefs must name at least one registered repo — omit the field to scope by project alone')
       .optional(),
     ungated: z.boolean().optional(),
+    clisJson: z.string().optional(),
+    channel: z.enum(['studio', 'cli', 'api']).optional(),
+    actor: z.string().min(1).max(256).optional(),
   })
   .strict();
 
@@ -125,8 +128,35 @@ export const TestingAuthorSchema = z
       .optional(),
     ungated: z.boolean().optional(),
     deliver: z.enum(['pr', 'none']).optional(),
+    clisJson: z.string().optional(),
+    channel: z.enum(['studio', 'cli', 'api']).optional(),
+    actor: z.string().min(1).max(256).optional(),
   })
   .strict();
+
+/** Returned when `clisJson` names a seat key that is not present in the current roster (#631). */
+export const SEAT_UNAVAILABLE_REASON =
+  'clisJson names a council seat that is not available in the current roster — check GET /roster for available seats and omit clisJson to use the default';
+
+/**
+ * Returns `SEAT_UNAVAILABLE_REASON` if `clisJson` is provided and contains a seat `key` that is
+ * not in `roster`; returns `null` when the override is acceptable (or absent). Invalid JSON is
+ * treated as an unavailable-seat error so the caller hears a clear 400 rather than an engine fault.
+ */
+export function validateClisJson(clisJson: string | undefined, roster: unknown[]): string | null {
+  if (clisJson === undefined) return null;
+  let seats: unknown;
+  try { seats = JSON.parse(clisJson); } catch { return SEAT_UNAVAILABLE_REASON; }
+  if (!Array.isArray(seats)) return SEAT_UNAVAILABLE_REASON;
+  const rosterKeys = new Set(
+    (roster as Array<{ key?: unknown }>).flatMap((s) => (typeof s.key === 'string' ? [s.key] : [])),
+  );
+  if (rosterKeys.size === 0) return null; // roster not yet populated; skip the check
+  for (const seat of seats as Array<{ key?: unknown }>) {
+    if (typeof seat?.key === 'string' && !rosterKeys.has(seat.key)) return SEAT_UNAVAILABLE_REASON;
+  }
+  return null;
+}
 
 export interface TestingRoutesDeps {
   audit: AuditLog;
@@ -363,6 +393,8 @@ export function registerTestingRoutes(
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid recon body'));
       }
       const b = parsed.data;
+      const seatError = validateClisJson(b.clisJson, deps.roster());
+      if (seatError !== null) return reply.code(400).send({ error: seatError });
       let scope;
       try {
         scope = await resolveScopeRepos(adapter, {
@@ -481,6 +513,8 @@ export function registerTestingRoutes(
             ...gateDetail,
             repoRef: scope.repos[i]!.id,
             ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+            ...(b.channel !== undefined ? { channel: b.channel } : {}),
+            ...(b.actor !== undefined ? { actor: b.actor } : {}),
           });
         }
         return reply.code(201).send({
@@ -501,7 +535,7 @@ export function registerTestingRoutes(
         const input: LaunchRunInput = {
           problem: b.problem,
           sessionId: runId,
-          clisJson: JSON.stringify(deps.roster()),
+          clisJson: b.clisJson ?? JSON.stringify(deps.roster()),
           // crew#391: the intake gate rides EVERY spelling of the recon launch — the fallback
           // fan and the single run hold the same posture the banner promises.
           humanConfirm: gate,
@@ -550,6 +584,8 @@ export function registerTestingRoutes(
           ...gateDetail,
           ...(target !== null ? { repoRef: target.id } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+          ...(b.channel !== undefined ? { channel: b.channel } : {}),
+          ...(b.actor !== undefined ? { actor: b.actor } : {}),
         });
         fileIntoProject(runId, Date.now());
         runIds.push(runId);
@@ -599,6 +635,8 @@ export function registerTestingRoutes(
         return reply.code(400).send(invalidBody(parsed.error, 'Invalid author body'));
       }
       const b = parsed.data;
+      const seatError = validateClisJson(b.clisJson, deps.roster());
+      if (seatError !== null) return reply.code(400).send({ error: seatError });
       // NARROWED project scope (studio #263 review, F-4): with BOTH fields, `repoRefs` is the
       // SCOPE and `projectId` is the FILING — unlike the recon body, where both are unioned. The
       // studio's project-scoped "New test" with repo chips would otherwise have to fan one
@@ -660,7 +698,7 @@ export function registerTestingRoutes(
         deliverDefaulted = true;
       }
       const roster = deps.roster();
-      const clisJson = JSON.stringify(roster);
+      const clisJson = b.clisJson ?? JSON.stringify(roster);
       const plan = qeAuthorPlan(def, eligibleSeatKeys(roster), deliver === 'pr');
       /** The post-commit half of the §2.2 filing (the POST /runs idiom). */
       const fileIntoProject = (runId: string, attachedAt: number): void => {
@@ -719,6 +757,8 @@ export function registerTestingRoutes(
           gate,
           ...(b.ungated === true ? { ungated: true } : {}),
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
+          ...(b.channel !== undefined ? { channel: b.channel } : {}),
+          ...(b.actor !== undefined ? { actor: b.actor } : {}),
         });
         deps.groupIndex?.set(runId, { label });
         fileIntoProject(runId, Date.now());
