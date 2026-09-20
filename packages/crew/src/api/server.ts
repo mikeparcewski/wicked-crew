@@ -910,6 +910,7 @@ export async function createServer(
       // The quality-floor skill gate (draft-skill.ts): stamped only when the published snapshot holds it.
       skillHeld: (name) => skillsRuntime?.holdsSkill(name) ?? false,
       onRunFiled: fileRun,
+      onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       // F-046: the create-time grounding sidecar is read under the SAME per-project docs root the
       // proxy recorded it in.
       groundingStore: docGrounding,
@@ -982,6 +983,7 @@ export async function createServer(
       roster: rosterWithStanding,
       resolveDocsRoot: o.resolveDocsRoot ?? interactiveDocsRoot,
       onRunFiled: fileRun,
+      onRunLaunched: (runId, detail) => { recordRunLaunched(audit, runTimingIndex, DAEMON_ACTOR, runId, detail); },
       groundingStore: docGrounding,
       log: (m) => app.log.warn(m),
       logError: (m) => app.log.error(m),

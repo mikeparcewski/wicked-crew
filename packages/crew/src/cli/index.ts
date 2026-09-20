@@ -29,7 +29,6 @@ import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
 import { versionLines } from '../core/versions.js';
 import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
-import type { LaunchRunInput } from '../core/types.js';
 import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
 import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
 
@@ -533,17 +532,29 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const { adapter, port } = await bootstrap(opts);
-    const input: LaunchRunInput = {
+    // crew#632: send through the HTTP route so `run.launched` is stamped with channel: 'cli'.
+    const launchBody: Record<string, unknown> = {
       problem,
       sessionId: flag(argv, '--session') ?? randomUUID(),
       // The roster WITH the daemon's standing (F-RECON-002/003): `bootstrap` started the server,
       // which wired the adapter's roster provider — a signed-out seat is benched here too.
       clisJson: JSON.stringify(adapter.launchRoster()),
+      channel: 'cli',
     };
-    if (humanConfirm !== undefined) input.humanConfirm = humanConfirm;
-    if (workflow !== undefined) input.workflow = workflow;
-    if (repoRef !== undefined) input.repoRef = repoRef;
-    const runId = await adapter.launchRun(input);
+    if (humanConfirm !== undefined) launchBody['humanConfirm'] = humanConfirm;
+    if (workflow !== undefined) launchBody['workflow'] = workflow;
+    if (repoRef !== undefined) launchBody['repoRef'] = repoRef;
+    const launchRes = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(launchBody),
+    });
+    if (!launchRes.ok) {
+      const errBody = await launchRes.json().catch(() => ({ error: launchRes.statusText })) as { error?: string };
+      console.error(`launch failed (${launchRes.status}): ${errBody.error ?? launchRes.statusText}`);
+      process.exit(1);
+    }
+    const { runId } = (await launchRes.json()) as { runId: string };
     printReady({ mode: 'start', port, db: opts.dbPath, run: runId, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'resume') {
     const sessionId = flag(argv, '--session');
@@ -635,10 +646,13 @@ function noDaemonRemedy(port: number): string {
   return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
 }
 
-/** `fetch` against the local daemon: a connection failure exits 1 with the remedy; anything else propagates. */
+export { withBearerHeader } from './bearer.js';
+import { withBearerHeader } from './bearer.js';
+
+/** `fetch` against the local daemon: injects `WICKED_CREW_TOKEN` as a bearer if set; a connection failure exits 1 with the remedy; anything else propagates. */
 async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await fetch(url, withBearerHeader(init));
   } catch (err) {
     if (isConnectionFailure(err)) {
       console.error(noDaemonRemedy(port));

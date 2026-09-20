@@ -527,6 +527,14 @@ export const LaunchSchema = z.object({
    *  on disk until this run reaches a terminal state so the Continue-in-Build prefill is
    *  always reproducible. Optional; omit when the launch is not promoted from a chat. */
   chatId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/).optional(),
+  /** crew#632 — the surface that triggered this launch: `studio` (the web UI), `cli` (the
+   *  wicked-crew CLI), or `api` (a programmatic caller). Persisted on the `run.launched` audit
+   *  entry (`detail.channel`) and served on the run DTO; absent = origin unknown. */
+  channel: z.enum(['studio', 'cli', 'api']).optional(),
+  /** crew#632 — an opaque caller-supplied identifier for the user or system that triggered the
+   *  launch (e.g. a CI job name or a studio tab id). Persisted on the `run.launched` audit entry
+   *  (`detail.actor`) and served on the run DTO; absent = caller omitted it. */
+  actor: z.string().min(1).max(256).optional(),
 }).strict().refine((b) => b.deliver !== 'pr' || b.workflow !== undefined, {
   message: 'deliver: "pr" requires a workflow — a free-text run has no def to append the deliver phase to',
   path: ['deliver'],
@@ -999,6 +1007,11 @@ export function registerRoutes(
     // entry the daemon records at the run's terminal frame — ABSENT when it has none.
     const endedAt = runTimingIndex.endedAtFor(view.session.id);
     if (endedAt !== undefined) view.session.ended_at = endedAt;
+    // crew#632: launch surface and caller identity — served ABSENT when absent, never null.
+    const channel = runTimingIndex.channelFor(view.session.id);
+    if (channel !== undefined) view.session.channel = channel;
+    const launchActor = runTimingIndex.launchActorFor(view.session.id);
+    if (launchActor !== undefined) view.session.launch_actor = launchActor;
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
@@ -1026,7 +1039,7 @@ export function registerRoutes(
     const capabilities =
       typeof adapter.engineCapabilities === 'function'
         ? adapter.engineCapabilities()
-        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false };
+        : { deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false };
     // wicked-core#411 / crew#497: the state-home blocker rides the health probe as a WARNING. The
     // daemon still SERVES (status stays ok — studio must load and show the blocker) but refuses to
     // launch while the state home holds an entry the worker Read fence cannot classify. Re-surveyed
@@ -1670,6 +1683,9 @@ export function registerRoutes(
         // crew#619: the chat↔run link is durable so the retention maps can be rehydrated after a
         // daemon restart (rehydration reads `run.launched` entries and keeps non-terminal entries).
         ...(b.chatId !== undefined ? { chatId: b.chatId } : {}),
+        // crew#632: launch surface and caller identity — human-readable provenance on the audit trail.
+        ...(b.channel !== undefined ? { channel: b.channel } : {}),
+        ...(b.actor !== undefined ? { actor: b.actor } : {}),
       });
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
@@ -4688,6 +4704,8 @@ export function registerRoutes(
     settings: projectSettings,
     pool: interactiveBridges,
     ...(runtime.docGrounding !== undefined ? { grounding: runtime.docGrounding } : {}),
+    // crew#631: supply the standing roster so doc/demo creates can refuse an unavailable seat.
+    roster: () => rosterWithStanding(),
     log: (m) => app.log.warn(m),
   });
 
