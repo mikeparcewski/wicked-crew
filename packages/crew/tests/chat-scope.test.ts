@@ -70,6 +70,9 @@ function deps(overrides: Partial<ChatScopeDeps> = {}): ChatScopeDeps & { bindCal
       };
     },
     scratchBase: base,
+    // crew#642: default returns 1 (indexed) so existing file-exists→bound tests keep passing.
+    // New tests inject entityCount: async () => 0 to assert the zero-entity ungrounded path.
+    entityCount: async () => 1,
     ...overrides,
   };
 }
@@ -677,5 +680,73 @@ describe('the scratch root and its statement', () => {
     expect(existsSync(scope.cwd)).toBe(false);
     expect(index.delete('c9')).toBeUndefined();
     expect(index.delete('never-set')).toBeUndefined();
+  });
+});
+
+// crew#642 — ownGraph liveness: a graph file that holds zero entities is NOT grounded.
+describe('resolveChatScope — crew#642 entityCount liveness gate', () => {
+  it('a single repo whose graph file exists but holds ZERO entities reports ungrounded with the indexing remedy — FAILS on main (returns bound:true)', async () => {
+    // gamma's code_graph_db is written as an empty file in REPOS() (line ~50).
+    const res = await resolveChatScope(
+      { chatId: 'ec1', repoRefs: ['r-gamma'] },
+      deps({ entityCount: async () => 0 }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/holds no entities/);
+    expect(res.scope.graph.reason).toMatch(/index the repo/);
+    expect(res.engine.codeGraphDb).toBeNull();
+  });
+
+  it('a single repo whose graph file does NOT exist reports ungrounded (missing-file path unchanged)', async () => {
+    const res = await resolveChatScope(
+      { chatId: 'ec2', repoRefs: ['r-alpha'] },
+      deps({ entityCount: async () => 1 }), // would be grounded if the file existed
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/no code graph built yet/);
+    expect(res.engine.codeGraphDb).toBeNull();
+  });
+
+  it('a single repo with an existing, POPULATED graph (entityCount > 0) reports grounded', async () => {
+    const res = await resolveChatScope(
+      { chatId: 'ec3', repoRefs: ['r-gamma'] },
+      deps({ entityCount: async () => 100 }),
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(true);
+    expect(res.engine.codeGraphDb).toBe(join(base, 'graph-r-gamma.db'));
+  });
+
+  it('entityCount probe failure (throws) degrades to ungrounded — never a failed open', async () => {
+    const res = await resolveChatScope(
+      { chatId: 'ec4', repoRefs: ['r-gamma'] },
+      deps({ entityCount: async () => { throw new Error('estate unreachable'); } }),
+    );
+    // The `entityCount` throw propagates into the ownGraph catch → ungrounded, open succeeds.
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scope.graph.bound).toBe(false);
+  });
+
+  it('the project fallback to ownGraph also runs the entityCount check', async () => {
+    // Project declined to bind gamma (not a member); ownGraph fallback must apply entityCount.
+    const d = deps({
+      bindProjectGraph: async () => ({
+        binding: null,
+        reason: "repo 'r-gamma' is not a crew.repo member of project p1, so the project graph does not describe it; this run uses the repo's own code graph.",
+      }),
+      entityCount: async () => 0,
+    });
+    const res = await resolveChatScope({ chatId: 'ec5', projectId: 'p1', repoRefs: ['r-gamma'] }, d);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    // Zero entities → ungrounded, even though the project fallback path ran.
+    expect(res.scope.graph.bound).toBe(false);
+    expect(res.scope.graph.reason).toMatch(/holds no entities/);
   });
 });

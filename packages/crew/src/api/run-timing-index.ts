@@ -35,6 +35,10 @@ export class RunTimingIndex {
   private readonly runToChannel = new Map<string, 'studio' | 'cli' | 'api'>();
   /** runId → launch actor string (`AgentSession.launch_actor`; crew#632). */
   private readonly runToLaunchActor = new Map<string, string>();
+  /** runId → warm seat count at chat-promotion time (`AgentSession.chat_seat_count`; crew#641/#642). */
+  private readonly runToChatSeatCount = new Map<string, number>();
+  /** runId → whether the promoted chat was graph-grounded (`AgentSession.chat_grounded`; crew#641/#642). */
+  private readonly runToChatGrounded = new Map<string, boolean>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -53,6 +57,11 @@ export class RunTimingIndex {
       if (ch === 'studio' || ch === 'cli' || ch === 'api') this.runToChannel.set(runId, ch);
       const la = detail?.['actor'];
       if (typeof la === 'string' && la.length > 0) this.runToLaunchActor.set(runId, la);
+      // crew#641/#642 (item 5): chat promotion provenance.
+      const sc = detail?.['chatSeatCount'];
+      if (typeof sc === 'number') this.runToChatSeatCount.set(runId, sc);
+      const cg = detail?.['chatGrounded'];
+      if (typeof cg === 'boolean') this.runToChatGrounded.set(runId, cg);
     }
   }
 
@@ -107,6 +116,22 @@ export class RunTimingIndex {
   /** The launch actor string, or `undefined` (ABSENT when the launch did not name one). */
   launchActorFor(runId: string): string | undefined {
     return this.runToLaunchActor.get(runId);
+  }
+
+  /** Record the warm seat count and grounding state at chat-promotion time (crew#641/#642). */
+  setChatPromotion(runId: string, seatCount: number, grounded: boolean): void {
+    this.runToChatSeatCount.set(runId, seatCount);
+    this.runToChatGrounded.set(runId, grounded);
+  }
+
+  /** The warm seat count at chat-promotion, or `undefined` (ABSENT when not a chat-promoted run). */
+  chatSeatCountFor(runId: string): number | undefined {
+    return this.runToChatSeatCount.get(runId);
+  }
+
+  /** Whether the chat was graph-grounded at launch, or `undefined` (ABSENT when not chat-promoted). */
+  chatGroundedFor(runId: string): boolean | undefined {
+    return this.runToChatGrounded.get(runId);
   }
 
   /**

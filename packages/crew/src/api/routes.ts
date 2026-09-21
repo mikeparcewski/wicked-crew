@@ -69,7 +69,7 @@ import {
 import { DocRunIndex } from '../interactive/doc-run-index.js';
 import { listInteractiveDocs } from '../interactive/docs-index.js';
 import { TestSetIndex } from '../qe/test-sets.js';
-import { estateExe, resolveProjectGraphBinding } from '../projects/graph.js';
+import { estateExe, parseEstateTotals, resolveProjectGraphBinding } from '../projects/graph.js';
 import { registerProjectRoutes, type ProjectRoutesDeps } from '../projects/routes.js';
 import { registerCampaignRoutes } from '../campaigns/routes.js';
 import { registerGovernanceWikiRoutes } from './governance-wiki.js';
@@ -193,16 +193,10 @@ export interface RepoGraphReply {
   finding?: RepoFinding;
 }
 
-/**
- * The whole-graph counts from `wicked-estate stats --db` stdout (`nodes=N edges=M files=F …`, the
- * first line estate prints — `main.rs`'s `stats` summary). `undefined` when the line does not parse
- * (an older/newer estate, an error message): the caller leaves `CodeGraphData.totals` ABSENT.
- */
-export function parseEstateTotals(stdout: string): { nodes: number; edges: number; files: number } | undefined {
-  const m = /^nodes=(\d+) edges=(\d+) files=(\d+)/m.exec(stdout);
-  if (m === null) return undefined;
-  return { nodes: Number(m[1]), edges: Number(m[2]), files: Number(m[3]) };
-}
+// parseEstateTotals lives in projects/graph.ts — shared with chat-scope.ts (crew#642) to avoid
+// a circular import (routes.ts → chat-scope.ts). Re-exported here for backward compat
+// (tests import it from routes.js; see top-of-file import for local use).
+export { parseEstateTotals };
 
 function codeGraphDbOr503(repo: RepoEntry, reply: FastifyReply): string | null {
   try {
@@ -824,6 +818,10 @@ export interface RuntimeDeps {
   /** crew#619 — called when a run is launched with a `chatId`, to retain that chat's transcript
    *  until the run terminates. Absent in directly-driven route sets (tests). */
   linkChatRun?: (chatId: string, runId: string) => void;
+  /** crew#642 — entity-count probe for the chat scope's `ownGraph` liveness check. Injectable so
+   *  route tests never shell `wicked-estate` against mkdtemp fixtures. Absent = the dep carries
+   *  its own default (shells `estate stats --db`). */
+  entityCount?: (dbPath: string) => Promise<number>;
 }
 
 /**
@@ -1015,6 +1013,11 @@ export function registerRoutes(
     const state = resolveDelivery(view, conflictStrand);
     view.session.delivery = state.delivery;
     if (state.deliverUrl !== undefined) view.session.deliverUrl = state.deliverUrl;
+    // crew#641/#642 (item 5): chat promotion provenance — ABSENT when not a chat-promoted run.
+    const chatSeatCount = runTimingIndex.chatSeatCountFor(view.session.id);
+    if (chatSeatCount !== undefined) view.session.chat_seat_count = chatSeatCount;
+    const chatGrounded = runTimingIndex.chatGroundedFor(view.session.id);
+    if (chatGrounded !== undefined) view.session.chat_grounded = chatGrounded;
     return view;
   };
   // Resolved ONCE and shared by the project routes (which read/write `interactiveRoot`) and the
@@ -1651,6 +1654,16 @@ export function registerRoutes(
     }
     try {
       const runId = await adapter.launchRun(input);
+      // crew#641/#642 (item 5): when a run is promoted from a chat, record how many seats
+      // participated and whether the chat was grounded — so an intent authored by a single
+      // ungrounded model is distinguishable from one that survived a disagreement.
+      let chatSeatCount: number | undefined;
+      let chatGrounded: boolean | undefined;
+      if (b.chatId !== undefined) {
+        const chatSeats = await adapter.chatSeats(b.chatId).catch(() => []);
+        chatSeatCount = chatSeats.length;
+        chatGrounded = chatScopes.engineOf(b.chatId)?.codeGraphDb != null;
+      }
       // Who launched it — the engine's LaunchOptions carries no actor field
       // (checked, wicked-core-ts 0.6.0), so the crew-side trail is the system
       // of record for run provenance (task #88).
@@ -1683,10 +1696,17 @@ export function registerRoutes(
         // crew#619: the chat↔run link is durable so the retention maps can be rehydrated after a
         // daemon restart (rehydration reads `run.launched` entries and keeps non-terminal entries).
         ...(b.chatId !== undefined ? { chatId: b.chatId } : {}),
+        // crew#641/#642 (item 5): chat promotion provenance — seat count and grounding at launch.
+        ...(chatSeatCount !== undefined ? { chatSeatCount } : {}),
+        ...(chatGrounded !== undefined ? { chatGrounded } : {}),
         // crew#632: launch surface and caller identity — human-readable provenance on the audit trail.
         ...(b.channel !== undefined ? { channel: b.channel } : {}),
         ...(b.actor !== undefined ? { actor: b.actor } : {}),
       });
+      // Stamp the index live so the field is served without waiting for a daemon restart.
+      if (chatSeatCount !== undefined && chatGrounded !== undefined) {
+        runTimingIndex.setChatPromotion(runId, chatSeatCount, chatGrounded);
+      }
       if (b.retryOf !== undefined) retryIndex.set(runId, b.retryOf);
       if (revisesPr !== undefined) retryIndex.setRevisesPr(runId, revisesPr);
       if (b.campaignId !== undefined) groupIndex.set(runId, { campaignId: b.campaignId });
@@ -2229,7 +2249,12 @@ export function registerRoutes(
           ...(b.projectId !== undefined ? { projectId: b.projectId } : {}),
           repoRefs: [...(b.repoRef !== undefined ? [b.repoRef] : []), ...(b.repoRefs ?? [])],
         },
-        { ...chatScopeDeps(adapter), scratchBase: chatScopes.base, log: (m) => req.log.warn(m) },
+        {
+          ...chatScopeDeps(adapter),
+          scratchBase: chatScopes.base,
+          log: (m) => req.log.warn(m),
+          ...(runtime.entityCount !== undefined ? { entityCount: runtime.entityCount } : {}),
+        },
       );
       if (!resolution.ok) {
         chatScopes.release(chatId, token);
@@ -2438,12 +2463,28 @@ export function registerRoutes(
             ...(b.projectId !== undefined ? { project_id: b.projectId } : {}),
           } as CoreEvent);
         }
+        // crew#641: a chat with exactly ONE warm seat cannot disagree with itself — disclosed
+        // prominently so the caller does not have to reason about the refused[] array.
+        const warmSeat = seats.find((s) => s.ok);
+        const singleSeat =
+          warmSeat !== undefined && seats.filter((s) => s.ok).length === 1 && refused.length > 0
+            ? {
+                degraded: true as const,
+                warmed: warmSeat.cliKey,
+                refused,
+                message:
+                  `This chat has one seat (${warmSeat.cliKey}); it cannot disagree with itself. ` +
+                  `Refused: ${refused.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
+                  'The single-seat root cause is tracked as wicked-core#563; this run makes it visible.',
+              }
+            : undefined;
         return reply.code(201).send({
           chatId,
           seats,
           scope,
           refused,
           ...(projectAttachError !== undefined ? { projectAttachError } : {}),
+          ...(singleSeat !== undefined ? { singleSeat } : {}),
         });
       } catch (err) {
         // Nothing warmed: the scratch root prepared above must not linger — removed under the SAME
@@ -2518,7 +2559,25 @@ export function registerRoutes(
         chatTurns.reconcile(id, turn.turnId, seats);
         chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
       }
-      return reply.code(202).send({ seats, ...(turn !== null ? { turnId: turn.turnId } : {}) });
+      // crew#641: re-state single-seat degradation on every turn so it is visible in the transcript.
+      const refused202 = chatScopes.refusedOf(id);
+      const singleSeat202 =
+        seats.length === 1 && refused202 !== undefined && refused202.length > 0
+          ? {
+              degraded: true as const,
+              warmed: seats[0]!,
+              refused: refused202,
+              message:
+                `This chat has one seat (${seats[0]!}); it cannot disagree with itself. ` +
+                `Refused: ${refused202.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
+                'The single-seat root cause is tracked as wicked-core#563; this run makes it visible.',
+            }
+          : undefined;
+      return reply.code(202).send({
+        seats,
+        ...(turn !== null ? { turnId: turn.turnId } : {}),
+        ...(singleSeat202 !== undefined ? { singleSeat: singleSeat202 } : {}),
+      });
     } catch (err) {
       // Nothing went out: the reservation is retracted so the next send is not refused for it.
       if (turn !== null) chatTurns.abort(id, turn.turnId);

@@ -22,6 +22,8 @@ let chatScopes: ChatScopeIndex;
 let applied: boolean | null;
 /** The injected sign-in probe: `null` (unknown → admitted) unless a test says otherwise. */
 let signedIn: (seatKey: string) => boolean | null = () => null;
+/** crew#642 — entity-count probe: returns 1 (indexed) by default; override per-test for zero-entity. */
+let entityCount: (dbPath: string) => Promise<number> = async () => 1;
 /** Every frame the route broadcast to /ws (the thread's copy of a refusal). */
 let broadcast: unknown[];
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
@@ -45,6 +47,7 @@ function fakeAdapter(): CoreAdapter {
     chatOpen,
     chatScopeApplied: async () => applied,
     chatSeats: async () => ['claude'],
+    chatSend: async () => ['claude'],
     chatClose: async () => undefined,
   } as unknown as CoreAdapter;
 }
@@ -56,6 +59,7 @@ beforeEach(async () => {
   applied = true;
   chatOpen.mockClear();
   signedIn = () => null;
+  entityCount = async () => 1; // default: indexed; override per-test for crew#642 zero-entity path
   broadcast = [];
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
@@ -64,6 +68,8 @@ beforeEach(async () => {
     // Never the real dotfile probe: the suite must not read the developer's worker home.
     signedIn: (seatKey) => signedIn(seatKey),
     broadcast: (frame) => broadcast.push(frame),
+    // crew#642: never shell wicked-estate against mkdtemp fixtures.
+    entityCount: (dbPath) => entityCount(dbPath),
   });
   await app.ready();
 });
@@ -340,5 +346,77 @@ describe('POST /chats/:id/seats — re-seat named seats on a LIVE chat (F-W1-005
     expect((await app.inject({ method: 'POST', url: '/api/v1/chats/nope/seats', payload: {} })).statusCode).toBe(400);
     // Only the DELETE-d chat's own open reached the engine.
     expect(chatOpen.mock.calls.length - before).toBe(1);
+  });
+});
+
+describe('crew#641 — single-seat degradation disclosed on open and every turn', () => {
+  it('201 carries singleSeat when exactly one seat warmed and at least one was refused — FAILS on main (field absent)', async () => {
+    // claude warms; pi is refused by the engine.
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' cannot join a SCOPED chat: its ACP adapter asks no permissions" } : { cliKey: c, ok: true })),
+    );
+    const res = await open({ chatId: 'single', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as {
+      seats: { cliKey: string; ok: boolean }[];
+      refused: { cliKey: string }[];
+      singleSeat?: { degraded: boolean; warmed: string; refused: { cliKey: string }[]; message: string };
+    };
+    expect(body.singleSeat).toBeDefined();
+    expect(body.singleSeat!.degraded).toBe(true);
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refused.map((r) => r.cliKey)).toContain('pi');
+    expect(body.singleSeat!.message).toMatch(/one seat/);
+    expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
+    // No disclosure of refused seats if not present in PI's reason.
+    expect(body.singleSeat!.message).toMatch(/pi/);
+  });
+
+  it('201 carries NO singleSeat when two or more seats are warm', async () => {
+    // Both claude and opencode warm; no refused.
+    const res = await open({ chatId: 'two', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { singleSeat?: unknown };
+    expect(body.singleSeat).toBeUndefined();
+  });
+
+  it('202 carries singleSeat when the chat has one warm seat and refused seats are on record — FAILS on main (field absent)', async () => {
+    // Set up a single-seat chat (claude warm, pi refused by engine).
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' refused" } : { cliKey: c, ok: true })),
+    );
+    await open({ chatId: 'msg-single', clis: ['claude', 'pi'], repoRefs: ['alpha'] });
+    // fakeAdapter.chatSend returns ['claude'] (one warm seat).
+    const msgRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/msg-single/messages',
+      payload: { text: 'hello' },
+    });
+    expect(msgRes.statusCode).toBe(202);
+    const body = msgRes.json() as { seats: string[]; singleSeat?: { degraded: boolean; warmed: string } };
+    expect(body.seats).toEqual(['claude']);
+    expect(body.singleSeat).toBeDefined();
+    expect(body.singleSeat!.degraded).toBe(true);
+    expect(body.singleSeat!.warmed).toBe('claude');
+  });
+});
+
+describe('crew#642 — zero-entity graph reports ungrounded on the 201 scope', () => {
+  it('a zero-entity graph (entityCount → 0) reports ungrounded on the scope.graph — FAILS on main (returns bound:true)', async () => {
+    entityCount = async () => 0;
+    const res = await open({ chatId: 'zerogr', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { scope: { graph: { bound: boolean; reason: string } } };
+    expect(body.scope.graph.bound).toBe(false);
+    expect(body.scope.graph.reason).toMatch(/holds no entities/);
+    expect(body.scope.graph.reason).toMatch(/index the repo/);
+  });
+
+  it('a populated graph (entityCount → 1) reports grounded — guards over-fire', async () => {
+    entityCount = async () => 1;
+    const res = await open({ chatId: 'fullgr', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { scope: { graph: { bound: boolean } } };
+    expect(body.scope.graph.bound).toBe(true);
   });
 });
