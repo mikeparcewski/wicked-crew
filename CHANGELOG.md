@@ -10,6 +10,16 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+## [0.7.39] — 2026-09-21
+
+- **Pins core-ts ^0.7.30 and studio ^0.5.13.** core-ts 0.7.30 carries the council ballot budget
+  scaling with host load (#537), the bounded and testable load exemption (#557, #559), operator
+  notes surviving a deliver-gate `request_changes` (#549), the re-scoped write fence (#541, #540),
+  and floor/judge failing closed on an unclassifiable red base (#538, #539). studio 0.5.13 carries
+  the gate controls, composers, run cost and storyboard work, and is the dist this release bundles
+  via `build:with-studio` — the bundled UI moves with the pin, so both are bumped explicitly rather
+  than left to the caret.
+
 ### Fixed
 - **#495 — `worktree-sweep.ts` git children no longer inherit the daemon's `WICKED_ESTATE_DB`.** Both
   `execFile('git', …)` calls in `sweepDeliveredWorktree` (worktree remove and worktree prune) now
@@ -3091,7 +3101,8 @@ Initial release: the crew daemon — a REST `/api/v1` + WS bridge to the wicked-
 `wicked-core-ts`, with a terminal web bridge (browser ↔ daemon ↔ PTY over xterm.js) and the React
 studio console pointed at the run-model daemon.
 
-[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...HEAD
+[Unreleased]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.39...HEAD
+[0.7.39]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/mikeparcewski/wicked-crew/compare/v0.7.35...v0.7.36
