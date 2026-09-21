@@ -10,6 +10,8 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+<!-- CI control branch: base content only, no source change. Delete this branch after the run. -->
+
 ## [0.7.39] — 2026-09-21
 
 - **Pins core-ts ^0.7.30 and studio ^0.5.13.** core-ts 0.7.30 carries the council ballot budget
