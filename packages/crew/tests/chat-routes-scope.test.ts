@@ -26,6 +26,8 @@ let signedIn: (seatKey: string) => boolean | null = () => null;
 let entityCount: (dbPath: string) => Promise<number> = async () => 1;
 /** Every frame the route broadcast to /ws (the thread's copy of a refusal). */
 let broadcast: unknown[];
+/** chatId → the seats that actually warmed, filled by the adapter's `chatOpen` wrapper. */
+let warmByChat: Map<string, string[]>;
 /** Records exactly what the route hands the engine: `(chatId, clis, cwd, scope)`. */
 const chatOpen = vi.fn(async (...args: [string, string[], string?, unknown?]) =>
   args[1].map((c) => ({ cliKey: c, ok: true })),
@@ -44,10 +46,24 @@ function fakeAdapter(): CoreAdapter {
         code_graph_db: graphFile,
       },
     ],
-    chatOpen,
+    // Wraps the `chatOpen` spy (so every `mockImplementationOnce` in a test still applies) and
+    // records which seats actually WARMED for that chat. Without this the roster was the constant
+    // `['claude']`, which made the fixture structurally incapable of expressing a two-warm-seat
+    // chat — the case `singleSeat` must NOT fire on (review of #651, defect 2).
+    chatOpen: async (...args: [string, string[], string?, unknown?]) => {
+      const out = await chatOpen(...args);
+      warmByChat.set(args[0], out.filter((s) => s.ok).map((s) => s.cliKey));
+      return out;
+    },
     chatScopeApplied: async () => applied,
-    chatSeats: async () => ['claude'],
-    chatSend: async () => ['claude'],
+    // The WARM ROSTER of that chat — what `singleSeat` must be decided from.
+    chatSeats: async (chatId: string) => warmByChat.get(chatId) ?? [],
+    // The seats a turn REACHES: the named targets narrowed to what is warm, else everyone warm.
+    // A targeted send returning one seat is not a one-seat chat, and this fixture can now say so.
+    chatSend: async (chatId: string, _text: string, targets?: string[]) => {
+      const warm = warmByChat.get(chatId) ?? [];
+      return targets === undefined ? warm : targets.filter((t) => warm.includes(t));
+    },
     chatClose: async () => undefined,
   } as unknown as CoreAdapter;
 }
@@ -61,6 +77,7 @@ beforeEach(async () => {
   signedIn = () => null;
   entityCount = async () => 1; // default: indexed; override per-test for crew#642 zero-entity path
   broadcast = [];
+  warmByChat = new Map();
   chatScopes = new ChatScopeIndex(join(base, 'chats'));
   app = Fastify({ logger: false });
   registerRoutes(app, fakeAdapter(), new GateCache(), new ElicitationCache(), undefined, undefined, undefined, {
@@ -370,6 +387,50 @@ describe('crew#641 — single-seat degradation disclosed on open and every turn'
     expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
     // No disclosure of refused seats if not present in PI's reason.
     expect(body.singleSeat!.message).toMatch(/pi/);
+  });
+
+  // The boundary the first cut of this feature could not express: TWO warm seats WITH a refusal.
+  // `refused.length > 0` is satisfied, so only the seat count can keep the disclosure quiet — and on
+  // the 202 the count was read from the seats the TURN REACHED, which a targeted send makes 1.
+  const openTwoWarmOneRefused = async (chatId: string) => {
+    chatOpen.mockImplementationOnce(async (...args: [string, string[], string?, unknown?]) =>
+      args[1].map((c) => (c === 'pi' ? { cliKey: c, ok: false, error: "seat 'pi' refused" } : { cliKey: c, ok: true })),
+    );
+    const res = await open({ chatId, clis: ['claude', 'opencode', 'pi'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { seats: { cliKey: string; ok: boolean }[]; refused: unknown[]; singleSeat?: unknown };
+    expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude', 'opencode']);
+    expect(body.refused.length).toBe(1);
+    expect(body.singleSeat, 'two warm seats are not a degraded chat').toBeUndefined();
+    return body;
+  };
+
+  it('202 carries NO singleSeat on a BROADCAST to a two-warm-seat chat that had a refusal', async () => {
+    await openTwoWarmOneRefused('two-warm-broadcast');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/two-warm-broadcast/messages',
+      payload: { text: 'hello both' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: unknown };
+    expect(body.seats).toEqual(['claude', 'opencode']);
+    expect(body.singleSeat).toBeUndefined();
+  });
+
+  it('202 carries NO singleSeat on a TARGETED send to ONE seat of a two-warm-seat chat — the turn reached one seat, the chat still has two', async () => {
+    await openTwoWarmOneRefused('two-warm-targeted');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/two-warm-targeted/messages',
+      payload: { text: 'just you, claude', targets: ['claude'] },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: { message: string } };
+    // The turn reached exactly one seat…
+    expect(body.seats).toEqual(['claude']);
+    // …and that is NOT a degraded chat: opencode is still warm and can still disagree.
+    expect(body.singleSeat, 'a targeted send must not fabricate a single-seat degradation').toBeUndefined();
   });
 
   it('201 carries NO singleSeat when two or more seats are warm', async () => {

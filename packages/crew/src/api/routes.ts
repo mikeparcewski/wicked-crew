@@ -1659,10 +1659,17 @@ export function registerRoutes(
       // ungrounded model is distinguishable from one that survived a disagreement.
       let chatSeatCount: number | undefined;
       let chatGrounded: boolean | undefined;
+      // Both stay ABSENT unless the chat actually resolves: a closed or unknown chatId must read as
+      // "provenance unavailable", not as "promoted from an ungrounded zero-seat chat". A valid chat
+      // always has at least one warm seat (`crew-api-types` ChatOpenResponse), so 0 is not a value
+      // `chat_seat_count` can honestly hold.
       if (b.chatId !== undefined) {
-        const chatSeats = await adapter.chatSeats(b.chatId).catch(() => []);
-        chatSeatCount = chatSeats.length;
-        chatGrounded = chatScopes.engineOf(b.chatId)?.codeGraphDb != null;
+        const promotedFrom = await adapter.chatSeats(b.chatId).catch(() => null);
+        const scope = chatScopes.engineOf(b.chatId);
+        if (promotedFrom !== null && promotedFrom.length > 0 && scope !== undefined) {
+          chatSeatCount = promotedFrom.length;
+          chatGrounded = scope.codeGraphDb != null;
+        }
       }
       // Who launched it — the engine's LaunchOptions carries no actor field
       // (checked, wicked-core-ts 0.6.0), so the crew-side trail is the system
@@ -2541,7 +2548,12 @@ export function registerRoutes(
     // warm seats — so the turn can be opened BEFORE the engine call, in the same tick as the
     // predicate below: two racing sends can no longer both pass `inFlight` during the await, and a
     // `chatDelta` that lands before `chatSend` resolves is already stamped with its `turn_id`.
-    const audience = parsed.data.targets ?? (await adapter.chatSeats(id));
+    // crew#641 (review): the ROSTER and the AUDIENCE are different things and only one of them can
+    // answer "can this chat disagree with itself". Resolved ONCE here: `audience` is who this turn
+    // goes to (the named targets, else everyone warm), `warmRoster` is who is warm at all. A
+    // targeted send to one seat of a two-seat chat is not a degraded chat.
+    const warmRoster = await adapter.chatSeats(id);
+    const audience = parsed.data.targets ?? warmRoster;
     if (audience.length === 0) {
       return reply.code(409).send({ error: `chat '${id}' has no warm seats — open it first` });
     }
@@ -2560,15 +2572,19 @@ export function registerRoutes(
         chatTranscripts?.appendUser(id, turn.turnId, parsed.data.text, seats);
       }
       // crew#641: re-state single-seat degradation on every turn so it is visible in the transcript.
+      // Decided from `warmRoster` — the seats that are WARM — never from `seats`, which is only the
+      // seats this turn reached: a targeted send to one seat of a two-seat chat would otherwise
+      // announce a degradation that does not exist, and a false "you are degraded" sends an operator
+      // after a problem they do not have.
       const refused202 = chatScopes.refusedOf(id);
       const singleSeat202 =
-        seats.length === 1 && refused202 !== undefined && refused202.length > 0
+        warmRoster.length === 1 && refused202 !== undefined && refused202.length > 0
           ? {
               degraded: true as const,
-              warmed: seats[0]!,
+              warmed: warmRoster[0]!,
               refused: refused202,
               message:
-                `This chat has one seat (${seats[0]!}); it cannot disagree with itself. ` +
+                `This chat has one seat (${warmRoster[0]!}); it cannot disagree with itself. ` +
                 `Refused: ${refused202.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
                 'The single-seat root cause is tracked as wicked-core#563; this run makes it visible.',
             }
