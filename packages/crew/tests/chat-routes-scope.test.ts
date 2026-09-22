@@ -485,6 +485,206 @@ describe('crew#641 — single-seat degradation disclosed on open and every turn'
   });
 });
 
+// crew#650 — the other branch of #641's condition. `singleSeat` was gated on `refused.length > 0`,
+// so the case an operator is most likely to create — a chat opened with ONE seat on purpose, nothing
+// refused — opened silently: `ok: true`, `refused: []`, no disclosure at all. The chat is just as
+// unable to disagree with itself, which is the property the field exists to state.
+/** The disclosure as a consumer sees it (crew#650 + the #658 review's `refusalsKnown`). */
+type SingleSeat = {
+  degraded: boolean;
+  warmed: string;
+  refused: { cliKey: string }[];
+  refusalsKnown?: boolean;
+  message: string;
+};
+
+describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
+  it('201 carries singleSeat for a chat opened with exactly one seat and nothing refused', async () => {
+    const res = await open({ chatId: 'solo', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as {
+      seats: { cliKey: string; ok: boolean }[];
+      refused: unknown[];
+      singleSeat?: SingleSeat;
+    };
+    expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude']);
+    expect(body.refused).toEqual([]);
+    expect(body.singleSeat, 'one warm seat cannot disagree with itself, refusals or not').toBeDefined();
+    expect(body.singleSeat!.degraded).toBe(true);
+    expect(body.singleSeat!.warmed).toBe('claude');
+    // The refusal list rides along as EVIDENCE and is empty; it is not what triggers the field.
+    expect(body.singleSeat!.refused).toEqual([]);
+    expect(body.singleSeat!.message).toMatch(/one seat \(claude\)/);
+    expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
+    // …and it must NOT invent a refusal clause with nothing after it.
+    expect(body.singleSeat!.message, 'no "Refused:" clause when nothing was refused').not.toMatch(/Refused:/);
+    // The daemon just opened this chat, so the empty list is a RECORD, not a gap.
+    expect(body.singleSeat!.refusalsKnown).toBe(true);
+    // The 201 is the ONE route that witnessed the open, so it alone may describe it (third review
+    // of #658). Pinned here so the tense rule is not "quietly correct" in one direction only.
+    expect(body.singleSeat!.message, 'the open route may state what it just observed').toMatch(
+      /opened with a single seat/,
+    );
+  });
+
+  it('202 carries singleSeat on every turn of that chat', async () => {
+    await open({ chatId: 'solo-msg', clis: ['claude'], repoRefs: ['alpha'] });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/solo-msg/messages',
+      payload: { text: 'hello' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
+    expect(body.seats).toEqual(['claude']);
+    expect(body.singleSeat).toBeDefined();
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refused).toEqual([]);
+    expect(body.singleSeat!.message).not.toMatch(/Refused:/);
+    expect(body.singleSeat!.refusalsKnown, 'this daemon opened it — the empty list is a record').toBe(true);
+    // A TURN never describes the open, even when it happens to be right: this same route serves the
+    // chat that opened with two seats and lost one, and one sentence cannot be true for both.
+    expect(body.singleSeat!.message, 'a turn has no standing to describe the open').not.toMatch(
+      /opened with a single seat/,
+    );
+    expect(body.singleSeat!.message).toMatch(/one warm seat \(claude\)/);
+  });
+
+  it('a chat that OPENED with two warm seats and lost one to a release is not described as opened with one', async () => {
+    // The third review's HIGH, and nothing about it is unknown: both seats warm at open, so the
+    // record is a legitimate KNOWN `[]`. Then `opencode` blows its turn budget and the engine
+    // releases it (chat-turns.ts), which the fixture models by shrinking the warm roster. `refused`
+    // still describes OPEN TIME, `warmRoster` describes NOW, and a sentence built from both is false
+    // the moment they diverge.
+    await open({ chatId: 'duo-released', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
+    expect(warmByChat.get('duo-released')).toEqual(['claude', 'opencode']);
+    expect(chatScopes.refusedOf('duo-released'), 'both warmed: a real, known, empty record').toEqual([]);
+    warmByChat.set('duo-released', ['claude']); // opencode released mid-session
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/duo-released/messages',
+      payload: { text: 'still there?' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
+    expect(body.singleSeat, 'one warm seat now — the disclosure is still owed').toBeDefined();
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refusalsKnown, 'the record is real and empty; nothing here is unknown').toBe(true);
+    expect(
+      body.singleSeat!.message,
+      'it was opened with TWO seats — the turn route cannot see that, so it must not claim otherwise',
+    ).not.toMatch(/opened with a single seat/);
+    expect(body.singleSeat!.message, 'and no seat was refused — it was released').not.toMatch(/no other seat was refused/);
+    expect(body.singleSeat!.message).not.toMatch(/Refused:/);
+  });
+
+  it('202 still discloses for a single-seat chat this daemon did not open (post-restart: refusals unknown)', async () => {
+    // A restarted daemon holds no scope for a chat the engine still has warm: `refusedOf` answers
+    // `undefined`. That is "the refusals are unknown", not "the chat gained a seat" — the first guard
+    // read it as the latter and went silent.
+    warmByChat.set('survivor', ['claude']);
+    expect(chatScopes.refusedOf('survivor')).toBeUndefined();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/survivor/messages',
+      payload: { text: 'still one seat?' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: SingleSeat };
+    expect(body.seats).toEqual(['claude']);
+    expect(body.singleSeat, 'the chat is single-seated whether or not this daemon remembers why').toBeDefined();
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refused).toEqual([]);
+    // The prose FIRST, because that is the defect: this chat may have opened with ['claude','pi']
+    // and had pi refused, and the record is GONE rather than empty (review of #658). Asserting
+    // "opened with a single seat — no other seat was refused" here is two falsehoods in one
+    // sentence. Unknown is a third state and `[]` cannot carry it.
+    expect(
+      body.singleSeat!.message,
+      'the chat may have been opened with two seats, one refused — this daemon cannot know',
+    ).not.toMatch(/no other seat was refused/);
+    expect(body.singleSeat!.message, 'never assert a refusal that was not observed').not.toMatch(/Refused:/);
+    expect(body.singleSeat!.message).toMatch(/UNKNOWN/);
+    expect(body.singleSeat!.message).toMatch(/no refusal record/);
+    // …and the same distinction for a machine reader: `refused: []` is as ambiguous as the sentence.
+    expect(body.singleSeat!.refusalsKnown, 'this daemon has no refusal record for that chat').toBe(false);
+  });
+
+  it('the UNKNOWN record and a KNOWN-empty one are different answers, on the wire and in the prose', async () => {
+    // The distinction #651 got right for chat-promotion provenance (`null` for unreadable, `[]` for
+    // empty) applied here: if these two responses cannot be told apart, the disclosure is guessing.
+    await open({ chatId: 'known-empty', clis: ['claude'], repoRefs: ['alpha'] });
+    const known = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/known-empty/messages',
+      payload: { text: 'hello' },
+    });
+    expect(chatScopes.refusedOf('known-empty')).toEqual([]);
+
+    warmByChat.set('unknown-record', ['claude']);
+    expect(chatScopes.refusedOf('unknown-record')).toBeUndefined();
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/unknown-record/messages',
+      payload: { text: 'hello' },
+    });
+
+    const k = (known.json() as { singleSeat?: SingleSeat }).singleSeat!;
+    const u = (unknown.json() as { singleSeat?: SingleSeat }).singleSeat!;
+    // Same seat, same empty array — everything a consumer sees must still separate them.
+    expect(k.warmed).toBe(u.warmed);
+    expect(k.refused).toEqual(u.refused);
+    // The prose must already separate them. On a TURN neither may describe the open (third review of
+    // #658): the known-empty one says nothing about refusals at all, the unknown one says the record
+    // is gone — and neither claims the chat was opened with a single seat.
+    expect(k.message, 'a turn describes NOW, not the open').not.toMatch(/opened with a single seat/);
+    expect(k.message, 'nothing to say about a known-empty record on a turn').not.toMatch(/UNKNOWN/);
+    expect(u.message, 'an unknown record says so').toMatch(/UNKNOWN/);
+    expect(u.message).not.toMatch(/opened with a single seat/);
+    expect(k.message).not.toBe(u.message);
+    // …and so must the wire, for a consumer that reads fields rather than sentences.
+    expect(k.refusalsKnown).toBe(true);
+    expect(u.refusalsKnown).toBe(false);
+  });
+
+  // Boundary control for the WIDENED condition, and it has to earn that: the broadcast half passes on
+  // head and would pass against a `seats.length === 1` (reach) derivation too, because a broadcast
+  // reaches both seats — so it never touched the boundary it claimed to guard (third review of #658,
+  // defect 2). The TARGETED send is the half that discriminates: the turn reaches exactly one seat
+  // while the ROSTER still has two, so a reach-derived condition discloses and a roster-derived one
+  // stays quiet. The equivalent case for a chat WITH a refusal already exists above (#641); this is
+  // the one the no-refusal widening opened up.
+  it('a two-warm-seat chat with no refusals discloses NOTHING — on a broadcast AND on a send that reaches one seat', async () => {
+    const res = await open({ chatId: 'duo-norefuse', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
+    const msg = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/duo-norefuse/messages',
+      payload: { text: 'hello both' },
+    });
+    expect(msg.statusCode).toBe(202);
+    expect((msg.json() as { seats: string[]; singleSeat?: unknown }).seats).toEqual(['claude', 'opencode']);
+    expect((msg.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
+
+    // A SECOND chat: the broadcast above is still in flight on this fixture, and a send that targets
+    // a busy seat is refused 409 `turn_in_flight` (F-RECON-017) — the same reason the #641 cases
+    // above use one chat per turn.
+    const second = await open({ chatId: 'duo-norefuse-targeted', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
+    expect(second.statusCode).toBe(201);
+    const targeted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/duo-norefuse-targeted/messages',
+      payload: { text: 'just you, claude', targets: ['claude'] },
+    });
+    expect(targeted.statusCode).toBe(202);
+    const tb = targeted.json() as { seats: string[]; singleSeat?: unknown };
+    expect(tb.seats, 'the turn REACHED one seat…').toEqual(['claude']);
+    expect(tb.singleSeat, '…but the chat still has two warm seats and can still disagree').toBeUndefined();
+  });
+});
+
 describe('crew#642 — zero-entity graph reports ungrounded on the 201 scope', () => {
   it('a zero-entity graph (entityCount → 0) reports ungrounded on the scope.graph — FAILS on main (returns bound:true)', async () => {
     entityCount = async () => 0;

@@ -4431,18 +4431,43 @@ export interface ChatSeatRefusal {
 }
 
 /**
- * Single-seat degradation disclosure (crew#641): present on `POST /chats` → 201 and on
- * `POST /chats/:id/messages` → 202 when exactly ONE seat is warm and at least one was refused.
- * A single-seat chat cannot disagree with itself — named here so callers do not have to reason
+ * Single-seat degradation disclosure (crew#641/#650): present on `POST /chats` → 201 and on
+ * `POST /chats/:id/messages` → 202 whenever exactly ONE seat is warm — refusals or not, since a
+ * one-seat chat cannot disagree with itself either way. Named here so callers do not have to reason
  * about the `refused[]` array. The root cause is tracked as wicked-core#563.
  */
 export interface ChatSingleSeatDegradation {
   degraded: true;
   /** The one warm seat key (e.g. `"claude"`). */
   warmed: string;
-  /** Every seat that was refused, with its reason and source. */
+  /**
+   * The seats currently ON RECORD as refused, with each reason and source — EVIDENCE, not the
+   * trigger. It describes the daemon's RECORD (what the open, or the last `POST /chats/:id/seats`,
+   * observed); `warmed` describes the roster NOW, and the two are different moments.
+   *
+   * `[]` with `refusalsKnown: true` therefore means **no refusal is on record** — NOT "no seat was
+   * ever refused": a seat re-seated through `POST /chats/:id/seats` is removed from the record when
+   * it warms, and a seat RELEASED mid-session (it blew its turn budget) was never refused at all,
+   * yet either can leave a chat with one warm seat and an empty record. `[]` with `refusalsKnown:
+   * false` means the record is GONE — see that field.
+   */
   refused: ChatSeatRefusal[];
-  /** Human-readable summary naming the degradation, its cause, and wicked-core#563. */
+  /**
+   * Whether `refused` is the record this daemon actually holds (crew#650, review follow-up). `true`
+   * on every 201 (the daemon just opened the chat) and on a 202 for a chat it still holds. `false`
+   * on a 202 for a chat this daemon did not open — the engine keeps a warm session across a restart,
+   * the daemon's in-memory scope index does not — where `refused: []` means THE RECORD IS GONE, not
+   * that nothing was refused, and `message` says so instead of asserting either way. Absent on a
+   * daemon predating this field, where `[]` was ambiguous.
+   */
+  refusalsKnown?: boolean;
+  /**
+   * Human-readable summary naming the degradation, its cause, and wicked-core#563. It states only
+   * what the answering route witnessed: the 201 performed the open, so it may say the chat was
+   * opened with a single seat; a 202 knows the roster NOW and the refusal record and says nothing
+   * about how the chat came to look this way — the one warm seat may be the survivor of a two-seat
+   * chat whose other seat was released.
+   */
   message: string;
 }
 
@@ -4458,9 +4483,10 @@ export interface ChatOpenResponse {
    *  (api-types 0.35.0). Empty when every seat warmed; absent on a daemon predating the field. */
   refused?: ChatSeatRefusal[];
   /**
-   * crew#641: present when exactly one seat is warm and at least one was refused — the chat
-   * cannot disagree with itself. ABSENT when two or more seats are warm, or when none were
-   * refused. Absent on a daemon predating this field.
+   * crew#641/#650: present whenever exactly ONE seat is warm — the chat cannot disagree with
+   * itself, which is equally true when nothing was refused (a chat opened with one seat on
+   * purpose). ABSENT only when two or more seats are warm. Absent on a daemon predating this
+   * field; a daemon between #641 and #650 emitted it only when `refused` was non-empty.
    */
   singleSeat?: ChatSingleSeatDegradation;
 }
@@ -4473,8 +4499,14 @@ export interface ChatMessageResponse {
    *  daemon predating the turn index (crew ≥ 0.7.35). */
   turnId?: string;
   /**
-   * crew#641: re-stated on every turn when the chat has exactly one warm seat and at least one
-   * refused seat. ABSENT when two or more seats are warm. Absent on a daemon predating this field.
+   * crew#641/#650: re-stated on every turn when the chat has exactly one WARM seat — decided from
+   * the warm roster, never from the seats this turn reached, and never from whether refusals are
+   * still on record (a restarted daemon has none and the chat is still single-seated). ABSENT when
+   * two or more seats are warm. Absent on a daemon predating this field.
+   *
+   * This is a statement about NOW. It never describes how the chat was opened — the single warm seat
+   * may be the survivor of a multi-seat chat whose other seats were refused, re-seated or released —
+   * and only `POST /chats` → 201, which performed the open, says anything about that moment.
    */
   singleSeat?: ChatSingleSeatDegradation;
 }

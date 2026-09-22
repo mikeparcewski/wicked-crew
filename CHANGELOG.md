@@ -42,6 +42,30 @@ mentioned only where a daemon release depends on them.
   the guard runs on vitest's own coloured bytes, captured as a fixture. The entry point sets
   `process.exitCode` rather than calling `process.exit()`, which can drop buffered stdout — and with
   it the telemetry line — when the floor pipes the check's output.
+- **#650 — `singleSeat` is disclosed whenever exactly one seat is warm, refusals or not.** The
+  disclosure added for #641 was conditioned on `refused.length > 0`, so the case an operator is most
+  likely to create — a chat opened with a single seat on purpose — returned `ok: true` with no
+  signal at all, and the 202 went silent after a daemon restart (`chatScopes.refusedOf` no longer
+  knows the refusals of a chat this daemon did not open). Both the `POST /chats` 201 and the
+  `POST /chats/:id/messages` 202 now decide from the WARM SEAT COUNT alone, which is the property
+  the field states: *this chat has one seat; it cannot disagree with itself*. `refused` rides along
+  as evidence and is `[]` when there is none; the message drops its "Refused: …" clause rather than
+  emitting an empty one. The refusal record has THREE states, not two: known-and-named,
+  known-and-empty, and UNKNOWN — a chat this daemon did not open (the engine keeps a warm session
+  across a restart; the in-memory scope index does not). An unknown record no longer reads as "no
+  other seat was refused" — a sentence that would be false in both halves for a chat opened with two
+  seats where one was refused. It says the record is unavailable and asserts nothing either way, and
+  the new `ChatSingleSeatDegradation.refusalsKnown` carries the same distinction for a machine
+  reader, because `refused: []` is as ambiguous on the wire as the sentence was in prose. And each
+  route now states only what it witnessed: `refused` describes the daemon's RECORD (the open, or the
+  last re-seat) while the warm roster describes NOW, so a sentence built from both was false the
+  moment they diverged — a chat opened with two seats, both warm, whose second seat later blew its
+  turn budget and was released was told "It was opened with a single seat — no other seat was
+  refused", with nothing unknown anywhere in it. The 201 performed the open and may describe it; a
+  202 names refusals on record, says when the record is unavailable, and asserts nothing about how
+  the chat came to have one seat. Two or more warm seats still disclose nothing, and a targeted send that
+  reaches one seat of a two-seat chat still does not fabricate a degradation. Built in one place
+  (`singleSeatDisclosure`) so the two routes cannot drift.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
   `POST /chats/:id/messages` → 202 both carry a `singleSeat` field when exactly one seat warmed
   and at least one was refused. The field names the warm seat, the full refused list (with each
