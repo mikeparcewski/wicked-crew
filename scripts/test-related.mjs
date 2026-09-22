@@ -222,9 +222,12 @@ export function retryableFailureReason(output) {
  */
 export function failedTestFiles(output) {
   const out = [];
+  // Hoisted, like `retryableFailureReason` above: inside the loop this was one `replace` over the
+  // whole captured tail PER MATCH — and the normaliser's own doc promises one per call.
+  const text = stripAnsi(output);
   const re = /^\s*FAIL\s+(\S+)/gm;
   let m;
-  while ((m = re.exec(stripAnsi(output))) !== null) {
+  while ((m = re.exec(text)) !== null) {
     const p = m[1].replace(/\\/g, '/');
     if (!/\.(test|spec)\.[cm]?[jt]sx?$/.test(p)) continue;
     if (!out.includes(p)) out.push(p);
