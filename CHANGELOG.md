@@ -10,6 +10,26 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Fixed
+- **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
+  `POST /chats/:id/messages` → 202 both carry a `singleSeat` field when exactly one seat warmed
+  and at least one was refused. The field names the warm seat, the full refused list (with each
+  seat's reason and source), and a human-readable message that names the wicked-core#563 root
+  cause. Previously the caller had to inspect `refused[]` and infer degradation; now it is stated
+  explicitly so a UI or operator can surface it without reasoning about array membership.
+- **#642 — A repo graph is grounded only when `estate stats --db` reports `nodes > 0`.** The
+  chat-scope `ownGraph` check now calls `wicked-estate stats --db <path>` after confirming the
+  file exists; a database with zero entities (schema-only, never-indexed, or truncated) is
+  reported as ungrounded with the indexing remedy ("index the repo — wicked-estate index /
+  onboarding"). Previously `existsSync` alone was the gate, so a zero-byte or schema-only
+  estate.db falsely reported `bound: true` while the estate MCP answered "not found" about
+  everything and the seat burned its whole turn budget on grep fallback. The `entityCount` probe
+  is injectable so route and unit tests never shell out to estate. `parseEstateTotals` is now
+  shared between the repo-graph route and chat-scope via `projects/graph.ts` (no duplication).
+  `AgentSession` gains two additive fields for chat-promoted runs: `chat_seat_count` (warm seats
+  at launch) and `chat_grounded` (whether the chat was graph-grounded), so an intent authored by
+  a single ungrounded model is distinguishable from one that survived a disagreement.
+
 ## [0.7.39] — 2026-09-21
 
 - **Pins core-ts ^0.7.30 and studio ^0.5.13.** core-ts 0.7.30 carries the council ballot budget
