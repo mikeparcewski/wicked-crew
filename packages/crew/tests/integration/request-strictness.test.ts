@@ -17,12 +17,14 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -81,6 +83,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'crew-strictness-'));
   repoDir = mkdtempSync(join(tmpdir(), 'crew-strictness-repo-'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -105,8 +108,8 @@ afterAll(async () => {
   // Releases the event-pump thread. Closing the server alone leaves it delivering into a callback
   // whose state directory is about to be deleted.
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
-  rmSync(repoDir, { recursive: true, force: true });
+  removeScratch(dir);
+  removeScratch(repoDir);
 });
 
 describe('POST /runs rejects fields it does not know (FINDING-031)', () => {

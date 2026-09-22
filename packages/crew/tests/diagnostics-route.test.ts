@@ -4,7 +4,7 @@
 // audit to a temp file — plus a scratch `core.db` + `core.db.events/` fixture the handler
 // actually reads, and a fixture studio root carrying the shipped version manifest.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,6 +13,11 @@ import type { DiagnosticsResponse } from 'wicked-crew-api-types';
 
 import type { CoreAdapter } from '../src/core/adapter.js';
 import { createServer } from '../src/api/server.js';
+import { canonicalCrewStateHome } from '../src/skills/engine-env.js';
+import { removeScratch } from './setup/scratch.js';
+
+/** Whatever the process carried under the RETIRED engine-input name — crew must leave it untouched (v3.4 §2). */
+const stateHomeEnvBefore = process.env['WICKED_CREW_STATE_HOME'];
 
 // The engine BINARY names diagnostics probes — spelled by concatenation because
 // tests/core-checkout-policy.test.ts audits quoted `wicked-core` segments (FINDING-094).
@@ -72,6 +77,7 @@ beforeAll(async () => {
     dbPath,
     projectsSupported: () => false,
     getSettings: async () => ({}),
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: () => () => {},
   } as unknown as CoreAdapter;
 
@@ -80,7 +86,6 @@ beforeAll(async () => {
     auditPath: join(scratch, 'audit.log'),
     projectEvents: { disabled: true },
     interactiveWsRelay: { disabled: true },
-    seatHealthProbe: { enabled: false },
     stallWatchdog: { enabled: false },
     studioRoot,
   });
@@ -91,7 +96,7 @@ afterAll(async () => {
   await app.close();
   if (savedLogLevel === undefined) delete process.env['LOG_LEVEL'];
   else process.env['LOG_LEVEL'] = savedLogLevel;
-  rmSync(scratch, { recursive: true, force: true });
+  removeScratch(scratch);
 });
 
 describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
@@ -140,6 +145,41 @@ describe('GET /api/v1/diagnostics (route smoke on a scratch daemon)', () => {
       lastFallbackTs: null,
     });
     expect(body.acp.byCli['codex']).toBeUndefined(); // no traffic = no key, zeros never invented
+
+    // skills — the hermetic harness aims the seam at a source that holds no plugin, so the boot
+    // took the ABSENT-configuration rung: fallback, engine input unset, one skills.fallback finding.
+    expect(body.skills.state).toBe('fallback');
+    expect(body.skills.current).toBeNull();
+    // Unset — or whatever value this process booted with (an operator export survives the rung).
+    expect(body.skills.engineInput).toBe(process.env['WICKED_SKILLS_SNAPSHOT'] ?? null);
+    expect(body.skills.findings.map((f) => f.kind)).toEqual(['skills.fallback']);
+    expect(typeof body.skills.root).toBe('string');
+    // The canonical state home is REPORTED for humans whatever the skills outcome; it is NOT an engine
+    // input (v3.4 §2: core reads only WICKED_SKILLS_SNAPSHOT), so crew exports nothing under that name.
+    expect(typeof body.skills.stateHome).toBe('string');
+    expect(body.skills.stateHome).toBe(canonicalCrewStateHome());
+    expect(process.env['WICKED_CREW_STATE_HOME']).toBe(stateHomeEnvBefore);
+  });
+
+  it('governance (crew#495): a boot that resolved no store says so — store null, an honest record count, no outbox, a governance.store error', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/v1/diagnostics' });
+    const body = res.json() as DiagnosticsResponse;
+    // This route set was assembled around an adapter that exported nothing to the engine (a library
+    // boot) — the engine would dead-letter every governance emit, and the surface must say so rather
+    // than paint a store that does not exist.
+    expect(body.governance.store).toBeNull();
+    expect(body.governance.deadletters.path).toBeNull();
+    expect(body.governance.deadletters.count).toBe(0);
+    expect(body.governance.deadletters.byType).toEqual({});
+    expect(body.governance.deadletters.truncated).toBe(false);
+    // No store → nothing to count, on every engine: null, never 0.
+    expect(body.governance.records).toEqual({ total: null, sinceBoot: null });
+    const kinds = body.governance.findings.map((f) => f.kind);
+    expect(kinds).toContain('governance.store');
+    expect(body.governance.findings.find((f) => f.kind === 'governance.store')?.severity).toBe('error');
+    // The legacy HOME pointer may or may not exist on the machine running this; it is the ONLY
+    // other finding this daemon can raise.
+    expect(kinds.filter((k) => k !== 'governance.store' && k !== 'governance.legacy-outbox')).toEqual([]);
   });
 
   it('folds the daemon\'s own error-level log lines into recentErrors, newest first', async () => {

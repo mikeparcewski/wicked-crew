@@ -23,11 +23,13 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -190,6 +192,7 @@ beforeAll(async () => {
   // Boot the daemon against the STUB engine, real HTTP surface, scratch 79xx port
   // (ephemeral fallback keeps the suite hermetic if the port is taken on this host).
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   try {
     await app.listen({ port: 7943, host: '127.0.0.1' });
@@ -217,7 +220,7 @@ afterAll(async () => {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(dir);
   }
 });
 

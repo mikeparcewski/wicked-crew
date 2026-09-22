@@ -23,12 +23,13 @@
 // owns. Reachability is the defect; the seed step is the design.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { WorkflowDef } from '../src/core/types.js';
 import { SKIP_CORE_CHECKS, readCoreJson } from './support/core-checkout.js';
+import { removeScratch } from './setup/scratch.js';
 
 /**
  * The approved content-address pin core's `coverage` phase carries — READ FROM CORE, not transcribed.
@@ -72,7 +73,7 @@ afterAll(() => {
   // sidecars, so an immediate recursive remove can lose a race with a file being recreated and
   // fail ENOTEMPTY (observed intermittently — it passed on the first run and failed on the next).
   // `force` does not cover ENOTEMPTY; retries do.
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (dir) removeScratch(dir);
 });
 
 /** The served def, or a clear failure. The content tests below are meaningless without it, and a

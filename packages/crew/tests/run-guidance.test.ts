@@ -13,7 +13,7 @@
 //     (the restart path), newest write wins, and a cleared note stays cleared.
 
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +27,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 type MockAdapter = {
   sessionsDetail: ReturnType<typeof vi.fn>;
@@ -186,7 +187,7 @@ describe('CREW-UX-7 — the audit trail carries guidance and hydrates it back', 
 
   afterEach(async () => {
     await app?.close();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   function freshApp(auditPath: string): FastifyInstance {

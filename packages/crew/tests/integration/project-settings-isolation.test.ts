@@ -24,13 +24,14 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { setCrewStateHome, stateHomeOfDb } from '../../src/projects/state-home.js';
 import type { Project } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const MARKER = `/srv/decks-crew353-${process.pid}-${Date.now()}`;
 // Unique per run for the same reason as MARKER — the audit trail records the project NAME, and
@@ -96,7 +97,7 @@ afterAll(async () => {
   if (savedAuditOverride === undefined) delete process.env['WICKED_CREW_AUDIT_LOG'];
   else process.env['WICKED_CREW_AUDIT_LOG'] = savedAuditOverride;
   setCrewStateHome(undefined);
-  rmSync(work, { recursive: true, force: true });
+  removeScratch(work);
 });
 
 describe('project settings under an isolated state home (crew#353)', () => {

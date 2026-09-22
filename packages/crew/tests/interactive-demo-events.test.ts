@@ -25,7 +25,7 @@
 //    business; THIS seam's business is everything around it.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -47,11 +47,24 @@ import {
   demoReauthorIdempotencyKey,
   specSelfCheck,
   startInteractiveDemoSubscriber,
+  RECORDER_ERROR_SOURCE,
+  RECORDER_BROWSER_MISSING,
+  parseRecorderError,
 } from '../src/interactive/demo-events.js';
 import { DOC_CREATED, STATUS_POSTED, INTERACTIVE_PRODUCER, parseSourceDocCreated } from '../src/interactive/draft-events.js';
+import { DocGroundingStore } from '../src/interactive/doc-grounding.js';
+import { existsSync as fileExists, readdirSync, statSync, readFileSync as readText } from 'node:fs';
+import type { CoreAdapter as CoreAdapterType } from '../src/core/adapter.js';
 import { FEEDBACK_PROCESSED, EDIT_COMPLETED, startInteractiveEditSubscriber } from '../src/interactive/edit-events.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
+import { canSymlink } from './setup/can-symlink.js';
+import {
+  ensureProjectInteractiveRoot,
+  partitionsBase,
+  resolveProjectInteractiveRoot,
+} from '../src/interactive/bridge-root.js';
 
 const DEMO_PAYLOAD = {
   document_id: 'checkout-demo',
@@ -355,6 +368,9 @@ function fakeAdapter(): FakeAdapter {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
+        // The registry can always be LISTED (a core adapter method) — the run-dir guard fails
+        // closed on an unlistable registry (codex on #506). Tests that need repos override it.
+        listRepos: async () => [],
       } as unknown as CoreAdapter;
     },
   };
@@ -390,7 +406,7 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
 
   afterEach(async () => {
     for (const s of subs) await s.stop();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   /** Materialize a doc workspace the way interactive's initWorkspace does for a demo:
@@ -546,6 +562,317 @@ describe('startInteractiveDemoSubscriber (real bus, fake engine)', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(engine.launches.length).toBe(1);
     expect(sub.inFlightDocs()).toEqual(['checkout-demo']);
+  });
+
+  it('F-045/F-046: every frame carries project_id, and a repository NAMED at create time grounds the spec run on the app\'s own source — snapshotted into the inbox, named in the task, gone at finalize', async () => {
+    const bus = await import('wicked-bus');
+    // A two-repo project: the app's repo is NOT the first member.
+    const core = join(dir, 'wicked-engine');
+    const studio = join(dir, 'wicked-studio');
+    mkdirSync(join(core, 'src'), { recursive: true });
+    mkdirSync(join(studio, 'src'), { recursive: true });
+    writeFileSync(join(core, 'src', 'lib.rs'), 'fn main() {}\n', 'utf8');
+    writeFileSync(join(studio, 'src', 'routes.ts'), "export const routes = ['/runs/new'];\n", 'utf8');
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [
+        { member_kind: 'crew.repo', member_ref: 'repo-core' },
+        { member_kind: 'crew.repo', member_ref: 'repo-studio' },
+      ],
+      listRepos: async () => [
+        { id: 'repo-core', root_path: core },
+        { id: 'repo-studio', root_path: studio },
+      ],
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    // The proxy recorded the binding as a sidecar beside the doc's versions.json.
+    const grounding = new DocGroundingStore();
+    grounding.record(docsRoot, 'checkout-demo', { project_id: 'proj-7', repo_refs: ['repo-studio'] });
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      groundingStore: grounding,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const runDir = join(dir, 'demos', 'checkout-demo');
+    const snap = join(runDir, 'repos', 'repo-studio'); // dir = repo id (unique); the task names it wicked-studio
+    // THE named repo, not the first member; inside the run's own write root; named in the task.
+    expect(fileExists(join(snap, 'src', 'routes.ts'))).toBe(true);
+    expect(fileExists(join(runDir, 'repos', 'repo-core'))).toBe(false);
+    expect(launch.extraWriteRoots).toEqual([runDir]);
+    expect(launch.problem).toContain(`The application's source is the repository wicked-studio (offline snapshot at ${snap})`);
+    expect(launch.problem).not.toContain(studio); // the live root never reaches the worker
+    expect(launch.problem).not.toMatch(/[\n\r]/);
+
+    // F-045: pickup, the grounding line, and the heartbeats all carry project_id.
+    const frames = () =>
+      probeEvents.filter((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER);
+    await waitFor(() => frames().length >= 4);
+    for (const e of frames()) expect((e.payload as { project_id?: string }).project_id).toBe('proj-7');
+    expect(frames().some((e) => String((e.payload as { message?: string }).message).startsWith('Grounded on wicked-studio (named in your request)'))).toBe(true);
+
+    // Finalize: the spec lands, demo.requested carries project_id, and the snapshot is gone.
+    writeFileSync(
+      join(runDir, DEMO_SPEC_FILE),
+      "export const meta = { url: 'https://staging.example.com/app', title: 'Checkout' };\n" +
+        "export async function run({ page, step, meta }) { await page.goto(meta.url); await step('Sign in', async () => {}, { say: 'Sign in' }); }\n",
+      'utf8',
+    );
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === 'wicked.interactive.demo.requested'));
+    const requested = probeEvents.find((e) => e.event_type === 'wicked.interactive.demo.requested')!;
+    expect((requested.payload as { project_id?: string }).project_id).toBe('proj-7');
+    await waitFor(() => frames().some((e) => (e.payload as { state?: string }).state === 'complete'));
+    expect(frames().every((e) => (e.payload as { project_id?: string }).project_id === 'proj-7')).toBe(true);
+    expect(fileExists(snap), 'the launch-scoped snapshot must not outlive the run').toBe(false);
+  });
+
+  /** Every path under `root` with its contents — a byte-level fingerprint of a live checkout. */
+  function readdirDeep(root: string): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    const walk = (d: string): void => {
+      for (const name of readdirSync(d).sort()) {
+        const p = join(d, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else out.push([p.slice(root.length), readText(p, 'utf8')]);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  it('REFUSES the launch when the configured demo dir sits inside the app repository — BEFORE anything is created: no dir, no run, no ledger row, the live tree byte-identical (codex CRITICAL on #506)', async () => {
+    const bus = await import('wicked-bus');
+    // The repo is the sole member — and the demo dir is INSIDE it, so the run's write root would
+    // hand the worker write access inside the live repository.
+    const repoRoot = join(dir, 'app-repo');
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'app.ts'), 'export const app = 1;\n', 'utf8');
+    writeFileSync(join(repoRoot, 'README.md'), '# the app\n', 'utf8');
+    const before = JSON.stringify(readdirDeep(repoRoot));
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-app' }],
+      listRepos: async () => [{ id: 'repo-app', root_path: repoRoot }],
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const demoDir = join(repoRoot, 'inbox');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir,
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('overlaps the registered repository'),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    expect(engine.launches.length, 'a refused launch must not start a run').toBe(0);
+    expect(sub!.ledger.has('checkout-demo'), 'a refused launch earns no ledger row — a replay must retry').toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    // NOTHING was created inside the live repository — not the run dir, not a snapshot — and every
+    // file is byte-for-byte what it was.
+    expect(fileExists(demoDir)).toBe(false);
+    expect(JSON.stringify(readdirDeep(repoRoot))).toBe(before);
+    // The error frame carries project_id like every other (F-045).
+    const error = probeEvents.find((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error')!;
+    expect((error.payload as { project_id?: string }).project_id).toBe('proj-7');
+  });
+
+  it('FAILS CLOSED when the registry cannot be listed — refused with a status before anything is created, the live tree byte-identical (codex CRITICAL on #506)', async () => {
+    const bus = await import('wicked-bus');
+    const repoRoot = join(dir, 'app-repo-2');
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'app.ts'), 'export const app = 2;\n', 'utf8');
+    const before = JSON.stringify(readdirDeep(repoRoot));
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-app' }],
+      listRepos: async () => {
+        throw new Error('engine hiccup: registry unavailable');
+      },
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const demoDir = join(repoRoot, 'inbox');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir,
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() =>
+      probeEvents.some(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          (e.payload as { state?: string }).state === 'error' &&
+          String((e.payload as { message?: string }).message).includes('could not be verified against the registered repositories'),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    expect(engine.launches.length).toBe(0);
+    expect(sub!.ledger.has('checkout-demo')).toBe(false);
+    expect(sub!.inFlightDocs()).toEqual([]);
+    expect(fileExists(demoDir)).toBe(false);
+    expect(JSON.stringify(readdirDeep(repoRoot))).toBe(before);
+  });
+
+  it('marks the doc BUSY across the whole pre-launch window — a replayed doc.created during the registry/snapshot awaits never double-launches, and stop() sweeps a half-made snapshot (Copilot on #506)', async () => {
+    const bus = await import('wicked-bus');
+    const appRepo = join(dir, 'wicked-studio');
+    mkdirSync(join(appRepo, 'src'), { recursive: true });
+    writeFileSync(join(appRepo, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const engine = fakeAdapter();
+    const adapter = Object.assign(engine.asAdapter(), {
+      projectMembers: async () => [{ member_kind: 'crew.repo', member_ref: 'repo-studio' }],
+      // The registry read is what the pre-launch window waits on here.
+      listRepos: async () => {
+        await gate;
+        return [{ id: 'repo-studio', root_path: appRepo }];
+      },
+    }) as CoreAdapterType;
+    makeDemoWorkspace('checkout-demo');
+    const sub = await startInteractiveDemoSubscriber(adapter, {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      resolveDocsRoot: () => docsRoot,
+      log: () => {},
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await waitFor(() => sub!.inFlightDocs().includes('checkout-demo')); // busy BEFORE any launch
+    expect(engine.launches.length).toBe(0);
+    // A replayed doc.created while the first is still resolving: dropped, not a second flight.
+    await emitDocCreated(bus, 'checkout-demo', { project_id: 'proj-7' });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sub!.inFlightDocs()).toEqual(['checkout-demo']);
+    release();
+    await waitFor(() => engine.launches.length === 1);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(engine.launches.length, 'the replay must not double-launch').toBe(1);
+    expect(fileExists(join(dir, 'demos', 'checkout-demo', 'repos', 'repo-studio', 'src', 'a.ts'))).toBe(true);
+    // stop() with the run in flight sweeps its snapshot.
+    await sub!.stop();
+    expect(fileExists(join(dir, 'demos', 'checkout-demo', 'repos'))).toBe(false);
+  });
+
+  it('F-RECON-013 companion: the recorder\'s typed RecorderError on status.posted (interactive PR #224) is relayed — an ERROR-level line for recentErrors naming code/step/remedy + the spec run, the handle remembers it, and crew emits NOTHING back (never a replay)', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    makeDemoWorkspace('checkout-demo');
+    const errors: string[] = [];
+    const sub = await startSub(engine, { logError: (m: string) => errors.push(m) });
+    armProbe(bus);
+    await emitDocCreated(bus);
+    await waitFor(() => engine.launches.length === 1);
+    const runId = engine.launches[0]!.sessionId;
+    const before = probeEvents.length;
+
+    const db = bus.openDb({ db_path: busDb });
+    const config = bus.loadConfig({ db_path: busDb });
+    // The service's frame, byte-for-byte the PR #224 shape (the thread renders THIS line itself).
+    bus.emit(db, config, {
+      event_type: STATUS_POSTED,
+      domain: 'wicked-interactive',
+      subdomain: 'status',
+      payload: {
+        document_id: 'checkout-demo', project_id: 'proj-7', ts: new Date().toISOString(), state: 'error',
+        message: "Recording failed: the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg. Run `wicked-interactive doctor --install`, then Re-record.",
+        code: RECORDER_BROWSER_MISSING, source: RECORDER_ERROR_SOURCE, retryable: false,
+        error: "the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg",
+        remedy: 'wicked-interactive doctor --install', browser: 'chromium-headless-shell', missing: ['chromium-headless-shell', 'ffmpeg'],
+        install_command: 'node "/x/node_modules/playwright/cli.js" install chromium-headless-shell', playwright_version: '1.63.0', browsers_path: null,
+      },
+      producer_id: 'wi-service',
+    });
+    await waitFor(() => sub.recorderFailure('checkout-demo') !== undefined);
+    const failure = sub.recorderFailure('checkout-demo')!;
+    expect(failure.error).toEqual({
+      kind: RECORDER_BROWSER_MISSING, retryable: false,
+      message: "the recorder's browser is not installed — Playwright 1.63.0 needs chromium-headless-shell + ffmpeg",
+      remedy: 'wicked-interactive doctor --install', installCommand: 'node "/x/node_modules/playwright/cli.js" install chromium-headless-shell',
+      browser: 'chromium-headless-shell', missing: ['chromium-headless-shell', 'ffmpeg'],
+    });
+    expect(failure.runId).toBe(runId);
+    expect(failure.projectId).toBe('proj-7');
+    // recentErrors: the ring folds ERROR-level lines — this one names the run, the code, the remedy, and that Re-record will not help.
+    const line = errors.find((e) => e.includes('recording FAILED for doc checkout-demo'))!;
+    expect(line).toContain(`spec run ${runId}`);
+    expect(line).toContain(RECORDER_BROWSER_MISSING);
+    expect(line).toContain('Remedy: wicked-interactive doctor --install');
+    expect(line).toContain('Not retryable');
+    // Crew emitted NOTHING for it: no demo.requested replay, no crew status about the failure (the
+    // service's frame IS the thread line). The seam's own heartbeat for the still-open spec run may
+    // tick in this window — that is narration about the RUN, not about the recorder.
+    await new Promise((r) => setTimeout(r, 200));
+    const ours = probeEvents.slice(before).filter((e) => e.producer_id === INTERACTIVE_PRODUCER);
+    expect(ours.filter((e) => e.event_type === 'wicked.interactive.demo.requested')).toEqual([]);
+    expect(ours.filter((e) => JSON.stringify(e.payload).includes(RECORDER_BROWSER_MISSING))).toEqual([]);
+    expect(engine.launches.length).toBe(1);
+
+    // A step failure carries the step; our OWN error narration on the same topic is never read as the recorder's.
+    bus.emit(db, config, {
+      event_type: STATUS_POSTED, domain: 'wicked-interactive', subdomain: 'status',
+      payload: { document_id: 'checkout-demo', ts: new Date().toISOString(), state: 'error', message: 'Recording failed: step 3 failed', code: 'recording_step_failed', source: 'recorder', retryable: false, error: 'the step timed out', remedy: 'fix the step and Re-record', step: { index: 3, label: 'Open the scope' } },
+      producer_id: 'wi-service',
+    });
+    await waitFor(() => sub.recorderFailure('checkout-demo')?.error.kind === 'recording_step_failed');
+    expect(sub.recorderFailure('checkout-demo')!.error.step).toEqual({ index: 3, label: 'Open the scope' });
+    expect(errors.at(-1)).toContain('[step 3: Open the scope]');
+  });
+
+  it('parseRecorderError: only state:error + source:recorder + a string code; `error` beats the prefixed `message`; rejections', () => {
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'recording_failed', message: 'Recording failed: boom', retryable: false })).toEqual({
+      documentId: 'd', error: { kind: 'recording_failed', message: 'boom', retryable: false },
+    });
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'recording_in_flight', error: 'busy', retryable: true })!.error.retryable).toBe(true);
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'error', message: 'a plain seam error' })).toBeNull();
+    expect(parseRecorderError(STATUS_POSTED, { document_id: 'd', state: 'working', source: 'recorder', code: 'x' })).toBeNull();
+    expect(parseRecorderError(STATUS_POSTED, { document_id: '../x', state: 'error', source: 'recorder', code: 'x' })).toBeNull();
+    expect(parseRecorderError(DEMO_REQUESTED, { document_id: 'd', state: 'error', source: 'recorder', code: 'x' })).toBeNull();
   });
 
   it('finalize is copy-THEN-emit: installs the spec into the doc workspace, then demo.requested, then complete', async () => {
@@ -927,5 +1254,111 @@ describe('specSelfCheck — async run contract', () => {
   });
   it('still accepts the re-export form (asyncness lives at the declaration)', () => {
     expect(specSelfCheck(meta + 'async function run() {}\nexport { run };')).toBeNull();
+  });
+});
+
+// ── Copilot on #474: the seam's docs-root resolver is the CONTAINED one ──────────────────────────
+//
+// `server.ts` wires `resolveDocsRoot` to `resolveProjectInteractiveRoot`, which used to answer a
+// partition lexically: the routes refused a symlinked `projects/<id>` while this seam followed it
+// into another project's docs. Now both resolve through one containment walk. This case drives the
+// seam over a REAL bus with the resolver wired exactly as the server wires it.
+describe('startInteractiveDemoSubscriber — a symlinked partition is refused on the seam path (crew#474)', () => {
+  const SYMLINKS = canSymlink();
+  const NO_ENV: Record<string, string | undefined> = {};
+  let dir: string;
+  let home: string;
+  let busDb: string;
+  let subs: { stop(): Promise<void> | void }[];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'crew-idm-seam-'));
+    home = join(dir, 'home');
+    mkdirSync(home);
+    busDb = join(dir, 'bus.db');
+    subs = [];
+  });
+  afterEach(async () => {
+    for (const s of subs) await s.stop();
+    removeScratch(dir);
+  });
+
+  /** A demo doc at version 3 with a current spec — what a step-feedback handoff re-authors. */
+  function demoWorkspace(root: string, name: string): void {
+    const docDir = join(root, name);
+    mkdirSync(docDir, { recursive: true });
+    writeFileSync(
+      join(docDir, 'versions.json'),
+      JSON.stringify({ kind: 'demo', head: 3, versions: [{ version: 3, html_file: '_v3.html' }] }),
+      'utf8',
+    );
+    writeFileSync(join(docDir, '_v3.html'), '<section class="wi-demo">placeholder</section>', 'utf8');
+    writeFileSync(join(docDir, DEMO_SPEC_FILE), VALID_SPEC, 'utf8');
+  }
+
+  it.skipIf(!SYMLINKS)("a handoff for project A, whose partition is a link to B's, is NOT answered — B's own handoff for the same doc is", async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    // B is a real, route-materialized partition holding the demo doc; A is a link planted at projects/A → B.
+    const b = ensureProjectInteractiveRoot('p-b', null, NO_ENV, home);
+    demoWorkspace(b, 'checkout-demo');
+    symlinkSync(b, join(partitionsBase(home), 'p-a'), 'dir');
+
+    const logs: string[] = [];
+    const sub = await startInteractiveDemoSubscriber(engine.asAdapter(), {
+      dbPath: busDb,
+      pollIntervalMs: 25,
+      heartbeatMs: 60_000,
+      ledgerPath: join(dir, 'demo-ledger.json'),
+      demoDir: join(dir, 'demos'),
+      clisJson: SEATS,
+      // Wired as server.ts wires it: the project-aware resolver over the project's (null) setting.
+      resolveDocsRoot: (projectId) => resolveProjectInteractiveRoot(projectId, null, NO_ENV, home),
+      log: (m) => logs.push(m),
+    });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+
+    const db = bus.openDb({ db_path: busDb });
+    const config = bus.loadConfig({ db_path: busDb });
+    const handoff = (projectId: string): void => {
+      bus.emit(db, config, {
+        event_type: FEEDBACK_PROCESSED,
+        domain: 'wicked-interactive',
+        subdomain: 'feedback',
+        payload: {
+          document_id: 'checkout-demo',
+          project_id: projectId,
+          version: 3,
+          applied: [],
+          rejected: [],
+          stale: [],
+          awaiting_structural: 1,
+          structural_items: [
+            {
+              selector: '[data-wid="w-step-3"]',
+              instruction: 'also show the coupon field before paying',
+              fragment: '<li data-wid="w-step-3">Checkout</li>',
+            },
+          ],
+          ts: new Date().toISOString(),
+        },
+        producer_id: 'wi-service',
+      });
+    };
+
+    // A's handoff: the resolver refuses the link INSIDE the handler → the subscription's onError
+    // logs the refusal (naming the link), nothing launches, no ledger row is written.
+    handoff('p-a');
+    await waitFor(() => logs.some((m) => /is a symbolic link/.test(m)));
+    expect(logs.find((m) => /is a symbolic link/.test(m))).toContain(join(partitionsBase(home), 'p-a'));
+    expect(engine.launches).toHaveLength(0);
+    expect(sub!.ledger.has('checkout-demo:v3')).toBe(false);
+
+    // B's handoff for the SAME doc launches — the refusal was the link, not the document.
+    handoff('p-b');
+    await waitFor(() => engine.launches.length === 1);
+    expect(engine.launches[0]!.projectId).toBe('p-b');
+    expect(engine.launches[0]!.workflow).toBe(INTERACTIVE_DEMO_REAUTHOR_WORKFLOW);
   });
 });

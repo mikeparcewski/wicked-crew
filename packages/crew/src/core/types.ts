@@ -23,6 +23,8 @@ export type * from 'wicked-crew-api-types';
 
 import type { SystemSettings } from 'wicked-crew-api-types';
 
+import { DEFAULT_BASE_SKILL_REF, type BaseSkillPolicy } from '../skills/base-skill.js';
+
 /** The run id of the onboarding run started when a repo was registered. */
 export interface RepoOnboardRef {
   repoId: string;
@@ -41,8 +43,33 @@ export interface LaunchRunInput {
   entityMode?: string;
   /** Human-confirm gate policy: `none` (default) | `all` | `before:<ord>`. */
   humanConfirm?: string;
+  /**
+   * EXPLICIT opt-out of the engine's deliver gate (F-E2E-030). The composed `deliver` Tool phase
+   * pauses for a human before it pushes the run branch and opens the PR — whatever `humanConfirm`
+   * says — unless this is `true` (wicked-core `LaunchSpec.auto_deliver`). The HTTP boundary sets
+   * it ONLY from an explicit `deliverGate: 'auto'` on `POST /runs`; omitted, `false`, and
+   * `deliverGate: 'human'` all reach the engine as the gate. Never derived from `humanConfirm`:
+   * `none` is that field's default and typo fallback, not a statement about delivery.
+   */
+  autoDeliver?: boolean;
   /** Id of a registered repo to run within. Omit for a repo-less run. */
   repoRef?: string;
+  /**
+   * DES-L9 / crew#550 (`revisesPr`): the head BRANCH of the open pull request this run revises,
+   * resolved by the HTTP boundary from the PR number via `gh pr view` — the engine bases the run
+   * worktree on `origin/<baseRef>` (wicked-core `LaunchSpec.base_ref`, core-ts ≥ 0.7.27) and the
+   * composed deliver phase pushes the run's commits onto that branch instead of opening a second
+   * PR. Crew-INTERNAL: never on the wire (`LaunchRunBody` carries `revisesPr` only). The adapter
+   * fails CLOSED on an addon without the field — an older engine would base on the default branch
+   * and push a duplicate PR.
+   */
+  baseRef?: string;
+  /**
+   * The pull request `baseRef` was resolved from (DES-L9): number, head branch and URL — carried
+   * to the deliver phase so its script pushes `wicked/<run>` onto `refs/heads/<headRef>`, proves
+   * the tip, comments the run record on the PR (`gh pr comment`) and prints the PR URL last.
+   */
+  revisesPr?: { number: number; headRef: string; url: string };
   /** Workflow def id to drive (e.g. `domain-extraction`). Omit ⇒ free-text planning. */
   workflow?: string;
   /**
@@ -119,8 +146,25 @@ export interface LaunchRunInput {
 export const DEFAULT_WORKER_STALL_MINUTES = 15;
 
 /**
+ * Default `workerStallEscalateMinutes` (perf#4): silent minutes before the watchdog ACTS.
+ * The escalation ladder is ON BY DEFAULT as of perf#4 — run 616c8661 sat wedged for a full 2h
+ * turn ceiling (106 min of output silence) while the detection-only watchdog fired once and
+ * watched; the engine's `reassignUnit` supersedes the wedged turn safely (attempt bump + epoch
+ * cancel: the stale turn's late output drops, no double-charge), so acting is strictly better
+ * than watching. An explicit `workerStallEscalateMinutes: 0` disarms it (the crew#341 opt-out).
+ *
+ * WHY 30: the trigger clock (silence since the last CoreEvent) is exactly the clock a slow but
+ * legitimate first turn rides — the recon's max legitimate time-to-first-output across 68 units
+ * was 1,161s ≈ 19.35 min, which leaves only a 3–6% margin at a 20-minute threshold. 30 minutes
+ * gives ~55% headroom over that observed worst case while still recovering ~4x faster than the
+ * 2h ceiling. The 15-minute detection (notify) rung is unchanged.
+ */
+export const DEFAULT_WORKER_STALL_ESCALATE_MINUTES = 30;
+
+/**
  * Default `workerStallEscalateAction` (crew#341) when escalation is armed: recycle the wedged
- * cursor unit in place (engine `reassignUnit`).
+ * cursor unit via the engine's `reassignUnit` — routed to a DIFFERENT seat from the run's pool
+ * when one is available (perf#4), in place otherwise.
  */
 export const DEFAULT_WORKER_STALL_ESCALATE_ACTION = 'reassign' as const;
 
@@ -135,9 +179,9 @@ export const DEFAULT_WORKER_STALL_MAX_ESCALATIONS = 2;
  * (`workerStallMinutes`, crew#287; `workerStallEscalateMinutes` /
  * `workerStallEscalateAction` / `workerStallMaxEscalations`, crew#341) live in the published
  * contract as of api-types 0.18.0 and are INHERITED here — what remains local is the
- * `studio.*` restatement below. Note the escalation DEFAULT is OFF
- * (`workerStallEscalateMinutes` absent/0): automatic recovery on a run that is merely slow
- * would be worse than the wedge (crew#341's design).
+ * `studio.*` restatement below. Note the escalation ladder is ON BY DEFAULT as of perf#4
+ * (`workerStallEscalateMinutes` defaults to [`DEFAULT_WORKER_STALL_ESCALATE_MINUTES`]); an
+ * explicit `0` disarms it.
  */
 export interface CrewSystemSettings extends SystemSettings {
   /**
@@ -151,13 +195,32 @@ export interface CrewSystemSettings extends SystemSettings {
    * per-key byte cap" at the PUT boundary (`api/routes.ts` `STUDIO_SETTINGS_MAX_BYTES`).
    */
   [key: `studio.${string}`]: unknown;
+  /**
+   * RESTATED narrow (DES-L4 PR-⑧, D-8b): `'require'` is the only policy this daemon reads or writes.
+   * The published wire (`wicked-crew-api-types` 0.38.0 `SystemSettings.baseSkillPolicy`) still spells
+   * `'warn' | 'require'` — it predates the deletion; the union loses `'warn'` in the next api-types
+   * field list. `PUT /settings` refuses `'warn'` (400) and the settings.json loader refuses it by
+   * name, so nothing typed by the wire reaches a reader as `'warn'`. (The one-way wire pins —
+   * produced ⊆ published — hold: `'require'` ⊆ `'warn' | 'require'`.)
+   */
+  baseSkillPolicy?: BaseSkillPolicy;
 }
 
 export const DEFAULT_SETTINGS: CrewSystemSettings = {
   graphNodeLimit: 150,
   workerStallMinutes: DEFAULT_WORKER_STALL_MINUTES,
+  // perf#4 — the escalation ladder is armed by default: 30 silent minutes → reassign the wedged
+  // cursor unit to a different seat. An explicit 0 (via PUT /settings or settings.json) disarms.
+  workerStallEscalateMinutes: DEFAULT_WORKER_STALL_ESCALATE_MINUTES,
   // crew#393 — repo-scoped CODE-WORK launches (a def with an `executes_code` phase) DELIVER by
   // default: a completed code run ends with a PR, or with the operator's explicit
   // `deliver: 'none'` (or this setting flipped) saying why not.
   deliverDefault: 'pr',
+  // crew#554 (wicked-core#468) / DES-L4 PR-⑧ (D-8, D-8b) — every governed agent unit follows the
+  // cross-CLI discipline skill, and `'require'` is the ONLY policy: a published generation that
+  // lacks the skill REFUSES every launch at intake (the engine's `BaseSkillRefused`) — never a
+  // silently UNGROUNDED run (the deleted `'warn'` rung left every seat with no launcher and no
+  // shim, signalled only by a /health warning). `baseSkillRef: ''` is the one OFF switch.
+  baseSkillRef: DEFAULT_BASE_SKILL_REF,
+  baseSkillPolicy: 'require',
 };

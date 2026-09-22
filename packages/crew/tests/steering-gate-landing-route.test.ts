@@ -20,7 +20,7 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
@@ -28,6 +28,7 @@ import { createServer } from '../src/api/server.js';
 import { steeringInboxDir } from '../src/api/governance-steering.js';
 import { steeringProposalPath } from '../src/api/steering-landing.js';
 import type { ConformanceRule, SessionView } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -155,7 +156,7 @@ afterAll(async () => {
   adapter.close();
   if (priorInboxDir === undefined) delete process.env['WICKED_STEERING_INBOX_DIR'];
   else process.env['WICKED_STEERING_INBOX_DIR'] = priorInboxDir;
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 /** Land the proposal file the propose phase writes (the machine-readable primary source). */

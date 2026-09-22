@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +23,7 @@ import { registerInteractiveProxy } from '../../src/interactive/proxy-routes.js'
 import { ProjectSettingsStore } from '../../src/projects/settings.js';
 import type { CoreAdapter } from '../../src/core/adapter.js';
 import type { Project } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 /** The origin the daemon would thread in from its bound listen address. */
 const STUDIO_ORIGIN = 'http://127.0.0.1:7799';
@@ -190,7 +191,7 @@ afterAll(async () => {
       /* already gone */
     }
   }
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 const studioOriginNoise = (m: string): boolean => m.includes('studio origin');

@@ -20,11 +20,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchOptions } from 'wicked-core-ts';
+import { removeScratch } from './setup/scratch.js';
 
 let dir: string;
 let adapter: CoreAdapter;
@@ -47,7 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   adapter.close();
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 const BASE = { problem: 'p', clisJson: '[]' } as const;

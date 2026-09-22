@@ -32,12 +32,13 @@
 // is asserted in the same file, off the same fake adapter, differing only in `stub`.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from '../src/api/server.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SystemSettings, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 /** Every workflow id an interactive seam armed with the engine this boot. */
 let registered: string[];
@@ -52,6 +53,7 @@ function fakeAdapter(stub: boolean): CoreAdapter {
     stub,
     getSettings: async (): Promise<SystemSettings> => ({ graphNodeLimit: 150 }),
     projectsSupported: (): boolean => false,
+    onLaunch: (): (() => void) => () => undefined, // the launch hook createServer registers (skills keystone, codex round 4)
     onEvent: (): (() => void) => () => undefined,
     registerWorkflow: async (def: WorkflowDef): Promise<string> => {
       registered.push(def.id);
@@ -79,7 +81,7 @@ describe('crew#309: the stub engine is never an answerer', () => {
     tmp = mkdtempSync(join(tmpdir(), 'crew309-'));
   });
   afterEach(() => {
-    rmSync(tmp, { recursive: true, force: true });
+    removeScratch(tmp);
   });
 
   it('refuses to arm the interactive answering seams on a --stub daemon', async () => {

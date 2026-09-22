@@ -29,7 +29,7 @@
  */
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -43,6 +43,7 @@ import { projectGraphDb, projectGraphManifest, projectGraphRoot } from '../src/p
 import { setCrewStateHome, stateHomeOfDb } from '../src/projects/state-home.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const POSIX = process.platform !== 'win32';
 
@@ -210,7 +211,7 @@ describe.skipIf(!POSIX)('POST /graph/refresh under an isolated state home (crew#
     if (savedEnvRoot === undefined) delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
     else process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = savedEnvRoot;
     setCrewStateHome(undefined);
-    rmSync(work, { recursive: true, force: true });
+    removeScratch(work);
   });
 
   // Generous timeout: the case shells out (git init/commit + the stub estate) and has been

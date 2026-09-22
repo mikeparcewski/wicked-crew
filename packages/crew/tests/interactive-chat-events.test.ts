@@ -24,7 +24,7 @@
 //    rides, so the service lands the revision as a generated version. The engine is faked.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -43,8 +43,11 @@ import {
   startInteractiveChatSubscriber,
 } from '../src/interactive/chat-events.js';
 import { DRAFT_COMPLETED, STATUS_POSTED, INTERACTIVE_PRODUCER } from '../src/interactive/draft-events.js';
+import { mkdirSync as mkdirp } from 'node:fs';
+import { projectGraphDb, projectGraphManifest, repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { CoreEvent, LaunchRunInput, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 describe('parseChatPosted', () => {
   const payload = {
@@ -125,7 +128,7 @@ describe('readDocHead (contract b — the versions.json read)', () => {
     root = mkdtempSync(join(tmpdir(), 'crew-ich-root-'));
   });
   afterEach(() => {
-    rmSync(root, { recursive: true, force: true });
+    removeScratch(root);
   });
 
   function seedDoc(name: string, manifest: unknown): string {
@@ -200,7 +203,7 @@ describe('chatProblem (the worker prompt seed)', () => {
 
   it('caps a pasted-novel ask instead of ballooning the prompt', () => {
     const big = chatProblem({ ...ask, text: 'x'.repeat(10_000) }, '/i', '/o');
-    expect(big.length).toBeLessThan(2500);
+    expect(big.length).toBeLessThan(3200);
     expect(big).toContain('…');
   });
 
@@ -215,6 +218,37 @@ describe('chatProblem (the worker prompt seed)', () => {
     expect(problem).toContain('read it first: /i/current.html');
     expect(problem).toContain('exactly this absolute file path: /tmp/chats/k-revised.html');
     expect(problem).not.toMatch(/[\n\r\t]/);
+  });
+});
+
+describe('chatProblem recall clause (DES-MEM-FACETED-001 Phase 3)', () => {
+  const ask = { documentId: 'my-doc', text: 'make it bolder', sourceMessageId: 'm-1' };
+
+  it('PRESENT with the correct project intent JSON when an intent with a project is passed', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
+    expect(problem).toContain('call the wicked-estate MCP memory.recall tool with intent {"project":"proj-test"}');
+    expect(problem).not.toMatch(/[\n\r\t]/); // still single-line (FINDING-011)
+    // The recall clause is repo-LESS — it does NOT reintroduce the CREW-UX-8 repo grounding.
+    expect(problem).not.toContain('repository snapshot');
+  });
+
+  it('ABSENT when no intent / an empty intent is passed (back-compat — existing behavior)', () => {
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html')).not.toContain('memory.recall');
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html', {})).not.toContain('memory.recall');
+    // The unfiled/no-intent prompt is byte-identical to before this phase.
+    expect(chatProblem(ask, '/i/current.html', '/o/revised.html', {})).toBe(
+      chatProblem(ask, '/i/current.html', '/o/revised.html'),
+    );
+  });
+
+  it('carries only the defined axes in the embedded JSON (no undefined/null keys)', () => {
+    const problem = chatProblem(ask, '/i/current.html', '/o/revised.html', { project: 'proj-test' });
+    // The recall INTENT object is exactly {"project":...}; the propose clause legitimately carries a
+    // {"cli":"codex"} example, so scope the axis check to the recall intent rather than a blanket not.
+    expect(problem).toContain('intent {"project":"proj-test"} and');
+    expect(problem).not.toContain('undefined');
+    // the propose clause (write side) rides every interactive prompt
+    expect(problem).toContain('proposal.submit');
   });
 });
 
@@ -275,7 +309,7 @@ interface FakeAdapter {
  *  launches ungrounded) — the repo-backed test seeds it precisely to prove that. */
 interface RepoWorld {
   members?: Record<string, Array<{ member_kind: string; member_ref: string }>>;
-  repos?: Array<{ id: string; root_path: string }>;
+  repos?: Array<{ id: string; root_path: string; code_graph_db?: string }>;
 }
 
 function fakeAdapter(repoWorld?: RepoWorld): FakeAdapter {
@@ -343,7 +377,7 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
 
   afterEach(async () => {
     for (const s of subs) await s.stop();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   /** Seed a doc workspace the way interactive's initWorkspace/fork would leave it. The default
@@ -533,6 +567,39 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     expect(sub!.inFlightDocs()).toEqual([]);
   });
 
+  it('F-045: every frame for a project-bound ask carries project_id — pickup, heartbeat, terminal, and the announce', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    const docDir = join(docsRoot, 'pid-doc');
+    mkdirp(docDir, { recursive: true });
+    writeFileSync(join(docDir, 'versions.json'), JSON.stringify({ head: 1, versions: [{ version: 1, html_file: '_v1.html' }] }), 'utf8');
+    writeFileSync(join(docDir, '_v1.html'), '<html><body><h1 data-wid="w-h1">hi</h1></body></html>', 'utf8');
+    const sub = await startSub(engine, { heartbeatMs: 60 });
+    expect(sub).not.toBeNull();
+    subs.push(sub!);
+    armProbe(bus);
+
+    await emitChatPosted(bus, 'pid-doc', { project_id: 'proj-9', source_message_id: 'm-9' });
+    await waitFor(() => engine.launches.length === 1);
+    const launch = engine.launches[0]!;
+    const frames = () =>
+      probeEvents.filter(
+        (e) =>
+          e.event_type === STATUS_POSTED &&
+          e.producer_id === INTERACTIVE_PRODUCER &&
+          (e.payload as { document_id?: string }).document_id === 'pid-doc',
+      );
+    await waitFor(() => frames().length >= 3); // pickup + heartbeats
+    for (const e of frames()) expect((e.payload as { project_id?: string }).project_id).toBe('proj-9');
+
+    writeFileSync(join(launch.extraWriteRoots![0]!, 'revised.html'), '<html><body><h1>revised</h1></body></html>', 'utf8');
+    engine.fire({ type: 'sessionCompleted', session: launch.sessionId });
+    await waitFor(() => probeEvents.some((e) => e.event_type === DRAFT_COMPLETED));
+    expect((probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!.payload as { project_id?: string }).project_id).toBe('proj-9');
+    await waitFor(() => frames().some((e) => (e.payload as { state?: string }).state === 'complete'));
+    expect(frames().every((e) => (e.payload as { project_id?: string }).project_id === 'proj-9')).toBe(true);
+  });
+
   it('ROLE FILTER: agent narration echoes and feedback-batch echoes launch nothing', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
@@ -562,12 +629,26 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     seedDoc('kindless-doc'); // the real source-doc manifest shape: no kind field at all
     const sub = await startSub(engine);
     subs.push(sub!);
+    armProbe(bus);
 
-    await emitChatPosted(bus, 'demo-doc');
+    await emitChatPosted(bus, 'demo-doc', { project_id: 'proj-7' });
     await emitChatPosted(bus, 'never-created');
     await new Promise((r) => setTimeout(r, 300));
     expect(engine.launches.length).toBe(0);
     expect(sub!.ledger.size()).toBe(0);
+    // F-RECON-013: the demo ask is DECLINED ON THE THREAD (an error status naming what to do instead) —
+    // not dropped into a log line while the canvas shows "generating". The unknown doc stays silent
+    // (nothing to post to).
+    await waitFor(() =>
+      probeEvents.some((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER && (e.payload as { state?: string }).state === 'error'),
+    );
+    const declined = probeEvents.filter((e) => e.event_type === STATUS_POSTED && (e.payload as { state?: string }).state === 'error');
+    expect(declined.length).toBe(1);
+    const pl = declined[0]!.payload as { document_id: string; project_id?: string; message: string };
+    expect(pl.document_id).toBe('demo-doc');
+    expect(pl.project_id).toBe('proj-7');
+    expect(pl.message).toMatch(/demo storyboards are not supported yet/);
+    expect(pl.message).toMatch(/highlight the step/);
 
     // …while the kindless manifest — what interactive ACTUALLY writes for a source doc — is answered.
     await emitChatPosted(bus, 'kindless-doc', { source_message_id: 'm-kindless' });
@@ -849,5 +930,107 @@ describe('startInteractiveChatSubscriber (real bus, fake engine)', () => {
     const announce = probeEvents.find((e) => e.event_type === DRAFT_COMPLETED)!;
     expect((announce.payload as { html_path?: string }).html_path).toBe(inboxPath);
     expect(sub!.ledger.get(chatKey('repo-doc', 0, 'm-r'))?.emittedAt).toBeTruthy();
+  });
+
+  // ── grounding follow-on #1: the (read-only) estate MCP reaches the repo-less CHAT worker ──────
+  //
+  // The gap this closes: the chat seam filed `projectId` but NOT `projectGraph`, so its repo-less
+  // revise worker hit `run_code_graph_db → None → no estate MCP at all`. The fix is CAPABILITY-ONLY
+  // — resolve the project graph (repoRef undefined) and attach it. It is NOT the CREW-UX-8 revise
+  // split being reverted: no repoRef, no snapshot, no live-repo path in the prompt (all still
+  // asserted absent above) — only the index tools get attached. Binding is read from the on-disk
+  // manifest, never indexed.
+  describe('project-graph binding (grounding follow-on #1)', () => {
+    beforeEach(() => {
+      process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'] = join(dir, 'project-graphs');
+    });
+    afterEach(() => {
+      delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
+    });
+
+    /** A built project graph holding `repos` — the db AND the manifest, because `projectGraphStatus`
+     *  ignores a manifest whose database is gone. Mirrors project-graph-binding.test.ts::buildGraph. */
+    function buildProjectGraph(
+      projectId: string,
+      repos: Array<{ repoId: string; rootPath: string }>,
+    ): void {
+      const db = projectGraphDb(projectId);
+      mkdirSync(join(db, '..'), { recursive: true });
+      writeFileSync(db, 'a database is all existsSync checks for here');
+      writeFileSync(
+        projectGraphManifest(projectId),
+        JSON.stringify({
+          version: 1,
+          projectId,
+          repos: repos.map(({ repoId, rootPath }) => ({
+            repoId,
+            label: repoLabel(repoId),
+            rootPath,
+            head: 'abc1234def5678',
+            indexedAt: 1,
+          })),
+        }),
+      );
+    }
+
+    it('a FILED doc whose project graph is built launches with projectGraph.dbPath = the project graph db (repo-less, no label)', async () => {
+      const bus = await import('wicked-bus');
+      buildProjectGraph('proj-graph', [{ repoId: 'repo-a', rootPath: '/repos/repo-a' }]);
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('bound-doc');
+      const sub = await startSub(engine);
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'bound-doc', { source_message_id: 'm-g', project_id: 'proj-graph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-graph');
+      // The (read-only) estate MCP over the PROJECT's graph now reaches the repo-less revise worker.
+      expect(launch.projectGraph).toEqual({ dbPath: projectGraphDb('proj-graph') });
+      // repo-LESS: no repoLabel (the worker spans every bound repo), and STILL no repoRef/snapshot.
+      expect(launch.projectGraph?.repoLabel).toBeUndefined();
+      expect('repoRef' in launch).toBe(false);
+      expect(launch.problem).not.toContain('repository snapshot');
+    });
+
+    it('a FILED doc whose project graph was NEVER built launches with NO projectGraph key, and logs the degrade reason', async () => {
+      const bus = await import('wicked-bus');
+      const logged: string[] = [];
+      const engine = fakeAdapter({
+        members: { 'proj-nograph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('bound-doc');
+      const sub = await startSub(engine, { log: (m: string) => logged.push(m) });
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'bound-doc', { source_message_id: 'm-n', project_id: 'proj-nograph' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect(launch.projectId).toBe('proj-nograph');
+      expect('projectGraph' in launch).toBe(false);
+      // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
+      expect(logged.some((m) => /has not been built yet|repo-less run gets no code graph/.test(m))).toBe(true);
+    });
+
+    it('an UNFILED doc (no project_id) launches with NO projectGraph key — nothing to bind', async () => {
+      const bus = await import('wicked-bus');
+      const engine = fakeAdapter({
+        members: { 'proj-graph': [{ member_kind: 'crew.repo', member_ref: 'repo-a' }] },
+        repos: [{ id: 'repo-a', root_path: '/repos/repo-a', code_graph_db: '/repos/repo-a/.codegraph/estate.db' }],
+      });
+      seedDoc('free-doc');
+      const sub = await startSub(engine);
+      subs.push(sub!);
+
+      await emitChatPosted(bus, 'free-doc', { source_message_id: 'm-f' });
+      await waitFor(() => engine.launches.length === 1);
+      const launch = engine.launches[0]!;
+      expect('projectId' in launch).toBe(false);
+      expect('projectGraph' in launch).toBe(false);
+    });
   });
 });

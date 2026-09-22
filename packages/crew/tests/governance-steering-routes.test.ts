@@ -27,12 +27,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter, SteeringUnsupportedError, humanGatePhaseIds } from '../src/core/adapter.js';
 import { steeringInboxDir } from '../src/api/governance-steering.js';
 import { createServer } from '../src/api/server.js';
+import { removeScratch } from './setup/scratch.js';
 import type {
   ConformanceRule,
   LaunchRunInput,
@@ -128,7 +129,7 @@ afterAll(async () => {
   adapter.close();
   // close() returns before the actor thread finishes flushing SQLite's WAL sidecars, and
   // `force` does not cover the ENOTEMPTY that races with it — retries do (the repo pattern).
-  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  removeScratch(dir);
 });
 
 async function get(path: string) {

@@ -46,6 +46,8 @@ interface Sample {
 /** Fixture ids — MUST match tests/generated/harness.ts exports. */
 const RUN_DONE = 'run-fixture-done';
 const RUN_GATED = 'run-fixture-gated';
+const PROJECT_FIXTURE = 'proj-fixture';
+const REPO_FIXTURE = 'repo-fixture';
 
 const SAMPLES: Sample[] = [
   { method: 'GET', path: '/api/v1/health', positive: { status: 200 } },
@@ -74,6 +76,19 @@ const SAMPLES: Sample[] = [
     path: '/api/v1/runs/:id/guidance',
     positive: { status: 200, params: { id: RUN_DONE }, body: { text: 'generated note' } },
     validBody: { text: 'generated note' },
+  },
+  {
+    // F-046 — the typed interactive doc create (crew's proxy validates, canonicalizes and records
+    // the grounding binding before the fixture bridge answers `{ name, head, generating }`). The
+    // auto 400 (a body with no `name`) is the bridge's own refusal, relayed.
+    method: 'POST',
+    path: '/api/v1/projects/:projectId/interactive/api/docs',
+    positive: {
+      status: 200,
+      params: { projectId: PROJECT_FIXTURE },
+      body: { name: 'generated-doc', kind: 'source', brief: 'a generated-suite brief', repo_ref: REPO_FIXTURE },
+    },
+    validBody: { name: 'generated-doc', kind: 'source', brief: 'a generated-suite brief', repo_ref: REPO_FIXTURE },
   },
   {
     method: 'POST',

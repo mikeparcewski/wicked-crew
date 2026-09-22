@@ -9,12 +9,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, expect, describe, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { CoverageReport } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const REPO_REPORT = { coverage: 0.42, resolved: 21, accounted: 50 } as unknown as CoverageReport;
 const DAEMON_REPORT = { coverage: 1.0, resolved: 0, accounted: 0 } as unknown as CoverageReport;
@@ -48,7 +49,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 async function get(path: string) {

@@ -22,11 +22,13 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { execFileSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 const SEATS = JSON.stringify([
   { key: 'alpha', display_name: 'Alpha', binary: 'alpha', headless_invocation: 'alpha {PROMPT}' },
@@ -102,6 +104,22 @@ function sessionOf(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** Poll the run detail until `pred` holds (or time runs out) — returns the last session seen. */
+
+/**
+ * Where this suite's scratch (bare origin, clone, run worktree, engine db) lives. NOT the system temp
+ * dir on Linux CI: the engine's validator sandbox (wicked-core `validator.rs` — `bwrap --ro-bind / /
+ * … --tmpfs <std::env::temp_dir()>`) masks EVERYTHING under the temp dir except the run dir and the
+ * coverage store it re-binds, so a clone kept there — the linked worktree's real gitdir — and the bare
+ * origin are invisible to the pinned evidence floor at the deliver gate: git fails inside the sandbox
+ * and the floor denies with "no coverage report was produced … the script denied before writing one".
+ * GitHub's RUNNER_TEMP is outside /tmp; elsewhere the OS temp dir (macOS's sandbox-exec profile masks
+ * nothing). Production repositories never live under the temp dir, so this is a fixture concern only.
+ */
+function scratchBase(): string {
+  const runnerTemp = process.env['RUNNER_TEMP'];
+  return process.platform === 'linux' && runnerTemp !== undefined && runnerTemp !== '' ? runnerTemp : tmpdir();
+}
+
 async function waitForRun(
   runId: string,
   pred: (s: Record<string, unknown>) => boolean,
@@ -116,13 +134,20 @@ async function waitForRun(
     if (pred(last)) return last;
     await new Promise((r) => setTimeout(r, 200));
   }
+  // Name the rejected units' denial_reason too: a deliver refusal is text on the unit record, and
+  // without it a `status=failed delivery=none` timeout says nothing about WHICH refusal fired.
+  const { body } = await getJson(`/api/v1/runs/${runId}`);
+  const units = ((body['run'] as { units?: Array<Record<string, unknown>> }).units ?? [])
+    .filter((u) => u['status'] === 'rejected')
+    .map((u) => `${String(u['id'])}: ${String(u['denial_reason'] ?? '(no denial_reason)').slice(0, 600)}`);
   throw new Error(
-    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}`,
+    `timed out (${ms}ms) waiting for: ${label} — last status=${String(last['status'])} delivery=${String(last['delivery'])}` +
+      (units.length > 0 ? `; rejected units: ${units.join(' | ')}` : ''),
   );
 }
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'crew-deliver-e2e-'));
+  dir = mkdtempSync(join(scratchBase(), 'crew-deliver-e2e-'));
 
   // ── The scratch HOME every deliver spawn inherits: stub `gh` first on PATH ──
   const home = join(dir, 'home');
@@ -130,6 +155,15 @@ beforeAll(async () => {
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(home, '.bash_profile'), `export PATH="${bin}:$PATH"\n`);
+  // The engine's Linux validator sandbox (wicked-core `validator.rs`, `bwrap --ro-bind / /` …) masks
+  // six credential directories under HOME with `--tmpfs`; bwrap must CREATE a missing mount point,
+  // and under a read-only root that mkdir fails (EROFS) — the pinned evidence floor then never runs
+  // ("no coverage report was produced … the script denied before writing one"). macOS's
+  // `sandbox-exec` profile needs no such mount points, so only Linux CI saw it. Give the scratch HOME
+  // the directories the engine masks, empty. (Engine follow-up: mask only directories that exist.)
+  for (const rel of ['.aws', '.ssh', '.gnupg', '.claude', join('.config', 'wicked-council'), join('.config', 'gh')]) {
+    mkdirSync(join(home, rel), { recursive: true });
+  }
   writeFileSync(
     join(bin, 'gh'),
     [
@@ -175,6 +209,7 @@ beforeAll(async () => {
 
   // ── Boot the daemon in-process against the STUB engine, real HTTP surface ──
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -196,7 +231,7 @@ afterAll(async () => {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    removeScratch(dir);
   }
 });
 
@@ -212,6 +247,9 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
+      // core ≥ 11d3b66 (core-ts 0.7.24) gates the deliver phase by default (F-E2E-030); this rig's intent is a
+      // gate-free run (humanConfirm: 'none'), so it opts out per #543's contract — 'auto' is the explicit opt-out.
+      deliverGate: 'auto',
       // deliver DELIBERATELY OMITTED — the crew#393 default must engage it.
     });
     expect(launch.status).toBe(201);
@@ -246,6 +284,7 @@ describe('crew#393 end to end — default-on delivery, stranded surfacing, post-
       workflow: WORK_WORKFLOW.id,
       repoRef: repoId,
       humanConfirm: 'none',
+      // No deliverGate here: `deliver: 'none'` has no deliver phase to gate, and #543's schema refuses the pair.
       deliver: 'none',
     });
     expect(launch.status).toBe(201);

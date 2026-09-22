@@ -12,7 +12,7 @@
 //     the lineage back from that trail (the restart path).
 
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +26,7 @@ import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { LaunchRunInput, SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 type MockAdapter = {
   sessionsDetail: ReturnType<typeof vi.fn>;
@@ -266,7 +267,7 @@ describe('CREW-UX-3 — the audit trail carries lineage and hydrates it back', (
     // Guarded: a test that throws before `app` is assigned must surface ITS error,
     // not a secondary teardown TypeError masking it (Copilot, #306).
     await app?.close();
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('run.launched detail carries retryOf; a fresh RetryIndex hydrates it (restart path)', async () => {

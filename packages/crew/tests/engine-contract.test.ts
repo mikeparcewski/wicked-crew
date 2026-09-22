@@ -26,11 +26,12 @@ process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { CoreAdapter } from '../src/core/adapter.js';
 import type { RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 let adapter: CoreAdapter;
 let dir: string;
@@ -58,8 +59,8 @@ afterAll(() => {
   if (adapter) adapter.close();
   // See armed-workflow-served.test.ts: close() returns before the actor thread finishes flushing
   // SQLite's WAL sidecars, and `force` does not cover the ENOTEMPTY that races with it.
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  if (repoDir) rmSync(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (dir) removeScratch(dir);
+  if (repoDir) removeScratch(repoDir);
 });
 
 describe('the resolved wicked-core-ts is new enough for this code', () => {

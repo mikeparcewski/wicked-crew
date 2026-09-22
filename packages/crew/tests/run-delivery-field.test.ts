@@ -22,7 +22,7 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -33,6 +33,8 @@ import { QeGateCache } from '../src/qe/gate-events.js';
 import { MembershipIndex } from '../src/projects/membership-index.js';
 import {
   DeliveryIndex,
+  PROBE_FAILURE_TTL_MS,
+  VacuityProbeUnavailable,
   deliverUnitOf,
   deliveryStateOf,
   deliveryStateWithVacuity,
@@ -40,10 +42,12 @@ import {
   gitWorktreeIsClean,
   prUrlFrom,
 } from '../src/api/delivery-index.js';
+import { DeliveryDerivationCache } from '../src/api/delivery-cache.js';
 import { AuditLog } from '../src/api/audit.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView, WorkUnit } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 type MockAdapter = {
   sessionsDetail: ReturnType<typeof vi.fn>;
@@ -111,6 +115,7 @@ function buildApp(
   deliveryIndex: DeliveryIndex,
   worktreeExists?: (p: string) => boolean,
   worktreeIsClean?: (p: string) => Promise<boolean>,
+  deliveryCache?: DeliveryDerivationCache,
 ): FastifyInstance {
   const app = Fastify({ logger: false });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
@@ -133,6 +138,7 @@ function buildApp(
       deliveryIndex,
       ...(worktreeExists !== undefined ? { worktreeExists } : {}),
       ...(worktreeIsClean !== undefined ? { worktreeIsClean } : {}),
+      ...(deliveryCache !== undefined ? { deliveryCache } : {}),
     },
   );
   return app;
@@ -193,7 +199,7 @@ describe('crew#393 — session.delivery / deliverUrl on the run DTOs', () => {
       expect(detail.run.session['delivery']).toBe('stranded');
       expect('deliverUrl' in detail.run.session).toBe(false);
     } finally {
-      rmSync(worktree, { recursive: true, force: true });
+      removeScratch(worktree);
     }
   });
 
@@ -311,6 +317,21 @@ describe("crew#311 — the 'vacuous' split of 'stranded' and of the reaped 'none
     ).resolves.toEqual({ delivery: 'none' });
   });
 
+  it('a probe that cannot answer PROPAGATES — the derivation never converts absence into a label', async () => {
+    // PR #435 review: the caller (delivery cache / campaigns rollup) owns the degrade; the
+    // derivation itself must not quietly keep 'stranded' over a probe that failed.
+    const failing = {
+      worktreeExists: () => true,
+      worktreeIsClean: async () => {
+        throw new VacuityProbeUnavailable('git status could not answer', 'raced teardown');
+      },
+      runBranchIsEmpty: async () => false,
+    };
+    await expect(deliveryStateWithVacuity(S, undefined, failing)).rejects.toBeInstanceOf(
+      VacuityProbeUnavailable,
+    );
+  });
+
   it('delivered, non-completed, and repo-less runs never consult any probe', async () => {
     const p1 = probes({ clean: true, branchEmpty: true });
     await expect(
@@ -330,16 +351,36 @@ describe("crew#311 — the 'vacuous' split of 'stranded' and of the reaped 'none
     expect(p1.runBranchIsEmpty).not.toHaveBeenCalled();
   });
 
-  it("route-level: a vacuous completed run is LOUD on both GET /runs and GET /runs/:id", async () => {
+  it("route-level: a vacuous completed run is LOUD on both GET /runs and GET /runs/:id once the background cache derives it", async () => {
     const mockAdapter: MockAdapter = {
       sessionsDetail: vi
         .fn()
         .mockResolvedValue([view('run-empty', { repo_ref: 'repo-1', workdir: '/wt' })]),
       sessions: vi.fn().mockResolvedValue(['run-empty']),
     };
-    const app = buildApp(mockAdapter, new DeliveryIndex(), () => true, async () => true);
+    // Derivation moved off the request path (delivery-cache.ts, GET /runs p99): the routes read
+    // this cache, and the vacuity probes only ever run under its sweep — driven explicitly here,
+    // the way `createServer`'s 30s tick drives it in the daemon.
+    const index = new DeliveryIndex();
+    const cache = new DeliveryDerivationCache({
+      listViews: () => mockAdapter.sessionsDetail() as Promise<SessionView[]>,
+      probes: {
+        worktreeExists: () => true,
+        worktreeIsClean: async () => true,
+        runBranchIsEmpty: async () => false,
+      },
+      isDelivered: (runId) => index.urlFor(runId) !== undefined,
+    });
+    const app = buildApp(mockAdapter, index, () => true, async () => true, cache);
     try {
       await app.ready();
+      // COLD cache: the request degrades to the stat-only tri-state — 'stranded', never a probe.
+      const cold = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
+        runs: { session: Record<string, unknown> }[];
+      };
+      expect(cold.runs[0]!.session['delivery']).toBe('stranded');
+      // One background sweep later the label self-heals to the full derivation.
+      await cache.sweep();
       const list = (await app.inject({ method: 'GET', url: '/api/v1/runs' })).json() as {
         runs: { session: Record<string, unknown> }[];
       };
@@ -382,7 +423,7 @@ describe('gitWorktreeIsClean — the production probe over a real run-worktree l
   });
 
   afterEach(() => {
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   it('a pristine worktree is clean; an uncommitted file is not; a run-branch commit is not', async () => {
@@ -399,8 +440,26 @@ describe('gitWorktreeIsClean — the production probe over a real run-worktree l
     await expect(gitWorktreeIsClean()(wt)).resolves.toBe(false);
   });
 
-  it('fails toward NOT clean: a non-git directory never reads vacuous', async () => {
-    await expect(gitWorktreeIsClean()(base)).resolves.toBe(false);
+  it('a non-git directory is UNAVAILABLE (throws) — absence of an answer, never a verdict', async () => {
+    // PR #435 review: folding "git could not answer" into `false` let a raced probe be CACHED
+    // as an honest 'stranded'. The caller owns the degrade now, so the probe must say which it
+    // is — and it must never read vacuous either way.
+    await expect(gitWorktreeIsClean()(base)).rejects.toBeInstanceOf(VacuityProbeUnavailable);
+  });
+
+  it('memoizes a FAILURE only briefly (PROBE_FAILURE_TTL_MS), then re-probes for real', async () => {
+    let t = 0;
+    const probe = gitWorktreeIsClean(30_000, () => t);
+    // `base` is not a git repo yet: unavailable, and the failure is memoized…
+    await expect(probe(base)).rejects.toBeInstanceOf(VacuityProbeUnavailable);
+    git(base, ['init', '-q', '.']);
+    git(base, ['config', 'user.email', 't@example.invalid']);
+    git(base, ['config', 'user.name', 't']);
+    git(base, ['commit', '-q', '--allow-empty', '-m', 'base']); // HEAD must resolve for instrument 2
+    t = PROBE_FAILURE_TTL_MS - 1; // …within its short TTL the memoized throw stands (no spawn)…
+    await expect(probe(base)).rejects.toBeInstanceOf(VacuityProbeUnavailable);
+    t = PROBE_FAILURE_TTL_MS; // …and past it the truth is re-read: now a (clean, empty) repo.
+    await expect(probe(base)).resolves.toBe(true);
   });
 
   it('memoizes per path for the TTL, then re-probes', async () => {
@@ -452,7 +511,7 @@ describe('gitRunBranchIsEmpty — the reaped-worktree probe over the parent repo
   });
 
   afterEach(() => {
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   it('an empty run branch is POSITIVELY empty; one carrying a commit is not; a deleted one is empty', async () => {
@@ -473,15 +532,22 @@ describe('gitRunBranchIsEmpty — the reaped-worktree probe over the parent repo
     await expect(gitRunBranchIsEmpty(rootOf(repo))('r', 'run1')).resolves.toBe(true);
   });
 
-  it('fails toward NOT empty: unresolvable repo, throwing registry, non-git root', async () => {
+  it('a repo the registry no longer resolves reads FALSE (permanent state, honestly none)', async () => {
     await expect(gitRunBranchIsEmpty(rootOf(undefined))('r', 'run1')).resolves.toBe(false);
+  });
+
+  it('a throwing registry or a non-git root is UNAVAILABLE (throws), never a verdict', async () => {
+    // PR #435 review: these are transient infrastructure — a caller caching `false` here would
+    // pin a wrong 'none' exactly like the worktree probe pinned a wrong 'stranded'.
     await expect(
       gitRunBranchIsEmpty(async () => {
         throw new Error('registry down');
       })('r', 'run1'),
-    ).resolves.toBe(false);
+    ).rejects.toBeInstanceOf(VacuityProbeUnavailable);
     // A registered root that is not a git repo: rev-parse exits 128, never a clean miss.
-    await expect(gitRunBranchIsEmpty(rootOf(base))('r', 'run1')).resolves.toBe(false);
+    await expect(gitRunBranchIsEmpty(rootOf(base))('r', 'run1')).rejects.toBeInstanceOf(
+      VacuityProbeUnavailable,
+    );
   });
 
   it('memoizes per (repo, run) for the TTL, then re-probes', async () => {
@@ -511,7 +577,7 @@ describe('DeliveryIndex.hydrate — the restart path over the audit trail', () =
   });
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   });
 
   it('a fresh index answers from the trail; newest entry per run wins', async () => {

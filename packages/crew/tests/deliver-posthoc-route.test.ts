@@ -21,7 +21,7 @@
 
 import Fastify from 'fastify';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -33,9 +33,12 @@ import { MembershipIndex } from '../src/projects/membership-index.js';
 import { DeliveryIndex } from '../src/api/delivery-index.js';
 import { AuditLog } from '../src/api/audit.js';
 import { runDeliverScript } from '../src/api/post-hoc-deliver.js';
+import { RetryIndex } from '../src/api/retry-index.js';
+import type { RuntimeDeps } from '../src/api/routes.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { SessionView } from '../src/core/types.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 const RUN_ID = '83052f0b-96a8-4a99-ad2a-c84b75111ff0';
 
@@ -182,7 +185,7 @@ function buildApp(views: SessionView[], env: Record<string, string>): App {
       deliveryIndex: new DeliveryIndex(),
       deliverExec: (workdir, intent) => {
         calls += 1;
-        return runDeliverScript(workdir, intent, env);
+        return runDeliverScript(workdir, intent, undefined, env);
       },
     },
   );
@@ -193,7 +196,7 @@ const apps: FastifyInstance[] = [];
 
 afterEach(async () => {
   for (const a of apps.splice(0)) await a.close();
-  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  for (const r of roots.splice(0)) removeScratch(r);
 });
 
 describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#393)', () => {
@@ -329,7 +332,7 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
 
   it('409 when the worktree is gone — named, not a script crash', async () => {
     const fx = fixture();
-    rmSync(fx.workdir, { recursive: true, force: true });
+    removeScratch(fx.workdir);
     expect(existsSync(fx.workdir)).toBe(false);
     const { app, execCalls } = buildApp(
       [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })],
@@ -374,4 +377,127 @@ describe('POST /runs/:id/deliver — post-hoc delivery, driven for real (crew#39
     expect(err).toContain('could not run to completion');
     expect(err).toContain('ENOENT');
   });
+});
+
+// ── DES-L9 / crew#550 — a stranded REVISION re-pushes onto its PR's branch, never a new PR ────────
+//
+// The run revised PR #273 (its worktree was cut from `origin/wicked/prior-run`), committed its work,
+// and the push failed (the strand). Post-hoc, the daemon re-checks the PR is still OPEN through the
+// same resolver the launch used and hands the script the revision target: the PR branch gains
+// exactly the run's commit, no `wicked/<run>` branch appears on origin, and the answer is the PR's
+// URL. A PR that closed meanwhile is a named 409 — nothing pushed.
+describe('POST /runs/:id/deliver — a stranded REVISION re-pushes onto the PR branch (DES-L9)', () => {
+  const PR_BRANCH = 'wicked/prior-run';
+  const PR_URL = 'https://github.com/o/r/pull/273';
+
+  /** The revision fixture: a PR branch on origin, the run worktree cut FROM it with one committed
+   *  change of its own (the strand shape), and a stub gh that answers `pr view` / `pr comment`. */
+  function revisionFixture(): Fixture & { prHead: string } {
+    const fx = fixture();
+    const other = join(fx.root, 'other');
+    execFileSync('git', ['clone', '-q', fx.origin, other]);
+    git(other, 'config', 'user.email', 'prior@test');
+    git(other, 'config', 'user.name', 'prior');
+    git(other, 'checkout', '-q', '-b', PR_BRANCH);
+    writeFileSync(join(other, 'pr.txt'), 'the prior run\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-qm', 'fix: the prior run');
+    git(other, 'push', '-q', 'origin', PR_BRANCH);
+    const prHead = git(other, 'rev-parse', 'HEAD').trim();
+    // Re-cut the run worktree from the PR head (what the engine's `base_ref` mint does), with the
+    // run's own committed change on top and nothing pushed.
+    git(fx.clone, 'worktree', 'remove', '--force', fx.workdir);
+    git(fx.clone, 'branch', '-D', `wicked/${RUN_ID}`);
+    git(fx.clone, 'fetch', '-q', 'origin');
+    git(fx.clone, 'worktree', 'add', '-q', '-b', `wicked/${RUN_ID}`, fx.workdir, `origin/${PR_BRANCH}`);
+    writeFileSync(join(fx.workdir, 'pr.txt'), 'the prior run\nrevised after review\n');
+    git(fx.workdir, 'add', '-A');
+    git(fx.workdir, 'commit', '-qm', 'fix: revised after review');
+    writeFileSync(
+      join(fx.root, 'bin', 'gh'),
+      [
+        '#!/bin/sh',
+        'case "$1" in',
+        '  api) echo "tester";;',
+        '  pr) case "$2" in view) echo "OPEN";; comment) echo "commented";; *) echo "gh: unexpected $*" >&2; exit 2;; esac;;',
+        '  *) echo "gh: unexpected $*" >&2; exit 2;;',
+        'esac',
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(join(fx.root, 'bin', 'gh'), 0o755);
+    return { ...fx, prHead };
+  }
+
+  function buildRevisionApp(fx: Fixture, resolve: NonNullable<RuntimeDeps['resolvePullRequest']>): FastifyInstance {
+    const retryIndex = new RetryIndex();
+    retryIndex.setRevisesPr(RUN_ID, { number: 273, headRef: PR_BRANCH, url: PR_URL });
+    const views = [view(RUN_ID, { repo_ref: 'repo-1', workdir: fx.workdir })];
+    const mockAdapter = {
+      sessionsDetail: vi.fn(async () => views),
+      sessions: vi.fn(async () => [RUN_ID]),
+      listRepos: vi.fn(async () => [{ id: 'repo-1', name: 'repo-1', root_path: fx.clone, registered_at: 1 }]),
+    } as unknown as CoreAdapter;
+    const app = Fastify({ logger: false });
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+      if (!body) return done(null, undefined);
+      try {
+        done(null, JSON.parse(body as string));
+      } catch (e) {
+        done(e as Error);
+      }
+    });
+    registerRoutes(
+      app,
+      mockAdapter,
+      new GateCache(),
+      new ElicitationCache(),
+      new QeGateCache(),
+      { bus: null, index: new MembershipIndex(), log: () => undefined },
+      { audit: AuditLog.noop(), authMode: 'off' },
+      {
+        deliveryIndex: new DeliveryIndex(),
+        retryIndex,
+        resolvePullRequest: resolve,
+        // The revision target rides `opts` — this harness passes it through (the crew#393 one drops it).
+        deliverExec: (workdir, intent, opts) => runDeliverScript(workdir, intent, opts, fx.env),
+      },
+    );
+    return app;
+  }
+
+  it('re-checks the PR is OPEN, pushes exactly the run’s commit onto its branch, answers the PR URL — no new PR', async () => {
+    const fx = revisionFixture();
+    const app = buildRevisionApp(fx, async () => ({ ok: true, pr: { number: 273, headRef: PR_BRANCH, url: PR_URL, state: 'OPEN' } }));
+    apps.push(app);
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ prUrl: PR_URL });
+    expect(git(fx.origin, 'rev-list', '--count', `${fx.prHead}..${PR_BRANCH}`).trim()).toBe('1');
+    expect(git(fx.origin, 'log', '-1', '--format=%s', PR_BRANCH).trim()).toBe('fix: revised after review');
+    expect(originBranches(fx).sort()).toEqual(['main', PR_BRANCH].sort());
+    // …and the wire now reads delivered at the PR's URL.
+    const one = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+      run: { session: Record<string, unknown> };
+    };
+    expect(one.run.session['delivery']).toBe('delivered');
+    expect(one.run.session['deliverUrl']).toBe(PR_URL);
+  }, 60_000);
+
+  it('409 by name when the PR closed meanwhile — nothing pushed, the strand stays', async () => {
+    const fx = revisionFixture();
+    const app = buildRevisionApp(fx, async () => ({ ok: false, error: 'revisesPr #273 is MERGED — only an open pull request can be revised' }));
+    apps.push(app);
+    await app.ready();
+
+    const res = await app.inject({ method: 'POST', url: `/api/v1/runs/${RUN_ID}/deliver` });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'revisesPr #273 is MERGED — only an open pull request can be revised' });
+    expect(git(fx.origin, 'rev-parse', PR_BRANCH).trim()).toBe(fx.prHead);
+    expect(originBranches(fx).sort()).toEqual(['main', PR_BRANCH].sort());
+  }, 60_000);
 });

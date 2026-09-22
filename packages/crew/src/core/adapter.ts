@@ -33,10 +33,15 @@ import type {
   CampaignDef,
 } from './types.js';
 import { DEFAULT_SETTINGS } from './types.js';
+import { BASE_SKILL_REF_SHAPE } from '../skills/base-skill.js';
 import { execCapped } from './exec.js';
-import { composeDeliverWorkflow, DELIVER_PHASE_ID } from './deliver.js';
+import { BUG_FIX_SWEEP_INSTRUCTIONS, composeDeliverWorkflow, DELIVER_PHASE_ID, EVIDENCE_FLOOR_PIN } from './deliver.js';
+import { engineCampaignDef, engineRosterJson } from './engine-roster.js';
+import { QE_AUTHOR_TESTS_WORKFLOW_DEF } from '../qe/author-workflow.js';
 import { CAMPAIGN_WORKFLOW_PREFIX } from '../campaigns/plan.js';
 import { composeDeliverableFloor, DELIVERABLE_FLOOR_PHASE_ID } from './deliverable-floor.js';
+import { resolveProjectGraphBinding, type ProjectGraphBinding } from '../projects/graph.js';
+import { applyGovernanceStoreEnv, isStoreSpec, type GovernanceStoreLocation } from './governance-store.js';
 
 
 
@@ -142,12 +147,68 @@ export function readOverlayWorkflows(
   return out;
 }
 
+// The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
+// require even though this daemon is ESM. This module is the ONLY place that
+// touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
+// `subscribe` seam has a blast radius of exactly one file. Declared ABOVE the
+// helpers that use it (review-L10-593 nit 3: a default parameter read it before
+// its declaration in source order — fine at call time, a reader trap).
+const require = createRequire(import.meta.url);
+
+/** The gate-hook binary's file name on this host. */
+export const WICKED_CORE_EXE_NAME = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+
+/**
+ * The `wicked-core-ts` platform package for this host — the five names `napi-release.yml` publishes
+ * (`wicked-core-ts-darwin-arm64`, `-darwin-x64`, `-linux-x64-gnu`, `-linux-arm64-gnu`,
+ * `-win32-x64-msvc`); `undefined` for a platform/arch pair no package exists for.
+ */
+export function wickedCoreTsPlatformPackage(platform: string = process.platform, arch: string = process.arch): string | undefined {
+  const abi =
+    platform === 'darwin' && arch === 'arm64' ? 'darwin-arm64'
+    : platform === 'darwin' && arch === 'x64' ? 'darwin-x64'
+    : platform === 'linux' && arch === 'x64' ? 'linux-x64-gnu'
+    : platform === 'linux' && arch === 'arm64' ? 'linux-arm64-gnu'
+    : platform === 'win32' && arch === 'x64' ? 'win32-x64-msvc'
+    : undefined;
+  return abi === undefined ? undefined : `wicked-core-ts-${abi}`;
+}
+
+/**
+ * The `wicked-core` hook binary BUNDLED inside this install's platform package (core#405, F-009 —
+ * FIX-IT-ALL L10-9 crew half; core-ts ≥ 0.7.26 ships it beside the `.node`, stamped
+ * `wickedCoreVersion` = the engine semver the addon's gate compares against `--version`). ONE lookup
+ * (review-L10-593 nit 2, D2): the resolver's candidate `node_modules` dirs for this module — the
+ * same sidestep `installedPackageVersion` uses, because a platform package's exports map may not
+ * expose `./package.json` — checked for `<dir>/<pkg>/<exe>`. The binary found is the one that shipped
+ * WITH this addon, never a stale copy in the operator's home. `undefined` when no platform package
+ * resolves or it carries no binary (a pre-0.7.26 package).
+ */
+export function bundledWickedCoreExe(
+  exeName: string = WICKED_CORE_EXE_NAME,
+  pkg: string | undefined = wickedCoreTsPlatformPackage(),
+  resolvePaths: (id: string) => string[] | null = (id) => require.resolve.paths(id),
+): string | undefined {
+  if (pkg === undefined) return undefined;
+  for (const dir of resolvePaths(pkg) ?? []) {
+    const p = join(dir, pkg, exeName);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 /** Find the wicked-core standalone binary for the gate-hook command.
  * Checks common install locations so the Rust actor can build a correct
  * hook command even when loaded as a napi addon (where current_exe() = node).
+ * Order (core#405): the binary bundled in THIS install's platform package first — it shipped with
+ * the addon that will check its semver — then the home-dir installs (the stale-copy class: a
+ * `.local/bin` symlink once held an old build), the monorepo dev build, PATH. `WICKED_CORE_EXE`
+ * set by the operator still wins (the caller only fills it when unset).
  */
 function locateWickedCoreExe(): string | undefined {
-  const exeName = process.platform === 'win32' ? 'wicked-core.exe' : 'wicked-core';
+  const exeName = WICKED_CORE_EXE_NAME;
+  const bundled = bundledWickedCoreExe(exeName);
+  if (bundled !== undefined) return bundled;
   const candidates: string[] = [];
   // User-local install (cargo install / manual).
   const home = process.env.HOME ?? process.env.USERPROFILE;
@@ -162,15 +223,9 @@ function locateWickedCoreExe(): string | undefined {
   for (const dir of pathDirs) {
     candidates.push(join(dir, exeName));
   }
-  const { existsSync } = require('node:fs') as typeof import('node:fs');
   return candidates.find((p) => existsSync(p));
 }
 
-// The native addon is a CommonJS cdylib (`index.node`); load it with a CJS
-// require even though this daemon is ESM. This module is the ONLY place that
-// touches wicked-core-ts (DES-STUDIO-001 §5.2/§5.3), so the FINALIZING
-// `subscribe` seam has a blast radius of exactly one file.
-const require = createRequire(import.meta.url);
 
 // ── Governance methods (crew#40/42) ──────────────────────────────────────────
 // These instance methods are present on the napi `Core` class after the Rust
@@ -246,7 +301,11 @@ type GovernanceMethods = {
 
 /** Chat sessions (core#134): warm ACP seat pool + group fan-out. */
 type ChatMethods = {
-  chatOpen(chatId: string, clisJson: string, cwd?: string | null): Promise<string>;
+  /** `scopeJson` (`{codeGraphDb, readRoots}`, wicked-core#410 / crew#502) is IGNORED by an addon
+   *  predating it — napi drops undeclared trailing args — which `chatScopeApplied` detects. */
+  chatOpen(chatId: string, clisJson: string, cwd?: string | null, scopeJson?: string | null): Promise<string>;
+  /** `cwd` is accepted for wire compatibility and ignored since wicked-core#410: every turn runs in
+   *  the scope recorded at `chatOpen`. */
   chatSend(chatId: string, text: string, targetsJson?: string | null, cwd?: string | null): Promise<string>;
   chatSeats(chatId: string): Promise<string>;
   chatClose(chatId: string): Promise<string>;
@@ -337,6 +396,35 @@ interface CoreConstructor {
   spawn(path: string): CoreHandleFull;
   spawnStub(path: string): CoreHandleFull;
   registryRoster(): string;
+  // crew#495 companion statics (wicked-core-ts ≥ the release carrying them). Optional for the same
+  // reason as `GovernanceMethods.retirePolicy`, and not hypothetically: NO released addon carries
+  // them yet, so `/diagnostics.governance.records` answers `null` ("cannot count") rather than a
+  // fabricated 0 and `wicked-crew governance replay` says "upgrade the engine" until one does.
+  /** EVENT nodes on the estate store at `dbPath` (a read-only connection), as a JSON number string. */
+  eventStoreCount?(dbPath: string): Promise<string>;
+  /** Replay a dead-letter outbox (the engine's NDJSON spool records) into the estate store at
+   *  `dbPath`; resolves to a JSON `{ read, replayed, failed: [{ line, reason }] }` report. */
+  replayEmitOutbox?(outboxPath: string, dbPath: string): Promise<string>;
+  /** The state-home PREFLIGHT (wicked-core#411 / crew#497; wicked-core-ts ≥ the release carrying
+   *  it): survey the state home the worker Read fence classifies and report every entry its
+   *  registry cannot classify — resolves to the JSON `{ stateHome, derivedFrom, unregistered,
+   *  refusesLaunches, error, remedy }`. Optional for the same reason as the statics above: the
+   *  pinned addon predates it, and crew classifies with its own registry copy until it lands
+   *  (`projects/state-home-preflight.ts`). */
+  preflightStateHome?(snapshotPath: string | null, dbPath: string): Promise<string>;
+}
+
+/** The engine's replay report (`Core.replayEmitOutbox`), parsed. */
+export interface EmitOutboxReplayReport {
+  /** Non-empty lines read from the outbox. */
+  read: number;
+  /** Entries written to the store as EVENT nodes. */
+  replayed: number;
+  /** Entries that did not land — the ORIGINAL line verbatim (so the caller can keep it dead-lettered) and why. */
+  failed: Array<{ line: string; reason: string }>;
+  /** Entries already on the store from an earlier replay (deterministic replay ids make a re-replay a
+   *  no-op); absent on an engine that predates the field. */
+  already_present?: number;
 }
 
 const { Core } = require('wicked-core-ts') as { Core: CoreConstructor };
@@ -375,6 +463,39 @@ function addonSupportsProjectGraph(): boolean {
  * the numeric MAJOR.MINOR.PATCH prefix fixes that, and a second copy of the fix is a second chance
  * to lose it. No match ⇒ unparseable ⇒ fail closed.
  */
+/**
+ * The wave-3 arms (wicked-core PR-1B `action` / `amendScope`, PR-1D `denial_gate`) need an addon of
+ * at least 0.7.27. ONE fail-closed rule for all of them (review-L1-598 M1): a napi call silently
+ * DROPS a field the addon does not declare — a `request_changes` would run as a plain reject, an
+ * `auto_reject` campaign would `hold` forever exactly when told not to — so a caller that asked for
+ * an arm the installed engine lacks is REFUSED with a named reason (the routes answer 409), never
+ * served a silent no-op. `null` ⇒ the addon carries the arms. `supported` is injectable so the
+ * old-addon path is unit-testable without booting an engine.
+ */
+export function armsUnsupportedReason(
+  feature: string,
+  remedy: string,
+  supported: boolean = addonAtLeast(0, 7, 27),
+): string | null {
+  return supported
+    ? null
+    : `${feature} needs wicked-core-ts >= 0.7.27 (installed engine is older) — ${remedy}`;
+}
+
+/** The recogniser the routes map to 409: the engine-too-old refusal above, by its fixed phrase. */
+export const ENGINE_TOO_OLD_RE = /needs wicked-core-ts >= /;
+
+/**
+ * Does the installed engine bench a seat whose ballots fail PERSISTENTLY without a recognised
+ * reason (wicked-core #523's unclassified arm, 3D')? From 0.7.27 only. crew deleted its own
+ * cross-run bench in the same release (BC-15) on the strength of that arm, and the runtime pin
+ * still allows 0.7.26 — so the one place that matters (the daemon's boot log) says which engine it
+ * has. `supported` is injectable so the old-engine path is unit-testable without an addon.
+ */
+export function engineBenchesUnclassifiedSeats(supported: boolean = addonAtLeast(0, 7, 27)): boolean {
+  return supported;
+}
+
 function addonAtLeast(maj: number, min: number, pat: number): boolean {
   try {
     const pkg = require('wicked-core-ts/package.json') as { version?: string };
@@ -421,19 +542,17 @@ function addonAtLeast(maj: number, min: number, pat: number): boolean {
  */
 const CORE_SEEDED_WORKFLOWS = new Set(['feature', 'bug', 'migration', 'onboarding', 'collab']);
 
-/**
- * The content-address of core's built-in evidence floor (`builtin_floors::EVIDENCE_FLOOR_PIN`),
- * carried on the Evaluator phase of feature/bug/migration.
- *
- * Duplicating a hash is a real cost, paid because the alternative is worse. What `listWorkflows()`
- * serves IS what `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads
- * as "this phase is ungated" — the opposite of the truth for the three phases core gates. Reporting
- * a gate that exists is the honest failure direction; the drift guard in
- * `tests/armed-workflow-served.test.ts` fails loudly on a developer machine the moment core's value
- * moves. This is display only: as of FINDING-049 these defs are never written to core's overlay dir
- * (see CORE_SEEDED_WORKFLOWS), so a stale value here cannot reach the engine.
- */
-const EVIDENCE_FLOOR_PIN = 'e2e7af1db9e48454';
+// `EVIDENCE_FLOOR_PIN` (imported from ./deliver.js, defined once) is carried on the Evaluator phase
+// of feature/bug/migration AND, since wicked-core F-039, on their code-writing Creator phases
+// (`build`/`fix`/`execute`) — so the gate that was supposed to make the change re-derives its diff
+// and a distinct seat judges it, instead of approving nothing. What `listWorkflows()` serves IS what
+// `GET /api/v1/workflows` and the work-mode selector show, and a `null` here reads as "this phase
+// is ungated" — the opposite of the truth. Since wicked-core#414 the engine also REFUSES a mirror
+// that lags (a code phase whose gate evaluates nothing is rejected as authored), so these values
+// are part of the contract with the engine, not display only: the drift guards in
+// `tests/armed-workflow-served.test.ts` and `tests/builtin-overlay-shadow.test.ts` fail loudly
+// the moment core's defs move. As of FINDING-049 these defs are never written to core's overlay dir
+// (see CORE_SEEDED_WORKFLOWS).
 
 export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
   {
@@ -467,7 +586,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'clarify', kind: 'recon', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'design', kind: 'recon', gate_type: 'strategy', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['clarify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'build', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['design'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'build', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['design'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'adversarial-review', kind: 'review', gate_type: 'execution', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['build'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'test', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['build'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'review', kind: 'review', gate_type: 'execution', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['test'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -478,7 +597,10 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     phases: [
       { id: 'triage', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'reproduce', kind: 'test', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['triage'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'fix', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      // DES-L9 (BC-60, core#432): the retired-behaviour sweep — the SAME literal core's `bug_def()` carries (wicked-core #522); pinned by a test
+      // so the two carriers cannot drift. `builtin-overlay-shadow.test.ts` tolerates exactly this one field while core MAIN has not merged #522
+      // (crew CI compares this mirror with core main); row 6.9 (the `^0.7.27` pin) removes that tolerance.
+      { id: 'fix', kind: 'build', instructions: BUG_FIX_SWEEP_INSTRUCTIONS, gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['reproduce'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['fix'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
     ],
   },
@@ -486,7 +608,7 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
     id: 'migration',
     phases: [
       { id: 'plan', kind: 'recon', gate_type: 'strategy', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
-      { id: 'execute', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['plan'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+      { id: 'execute', kind: 'build', gate_type: 'execution', gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['plan'], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'cutover', kind: 'build', gate_type: 'execution', gate: { human_confirm: { unconditional: true } }, executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: ['execute'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'verify', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: [], depends_on: ['cutover'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: EVIDENCE_FLOOR_PIN },
       { id: 'cleanup', kind: 'build', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['verify'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
@@ -506,6 +628,51 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'stack', kind: 'recon', instructions: 'Identify the technology stack from the manifests (package.json, Cargo.toml, pyproject.toml, ...): languages, frameworks, build tools, key dependencies. Build on the structure summary provided as prior context; do not re-map the layout.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'conventions', kind: 'recon', instructions: 'Identify the working conventions: naming, module boundaries, test placement and style, lint/format configuration, CI expectations. Build on the prior phases\' outputs provided as context; do not re-survey structure or stack.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['stack'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
       { id: 'synthesize', kind: 'recon', instructions: 'Do not re-survey the repository. Merge the three prior phase outputs provided as context into one coherent survey — structure, then stack, then conventions — resolving overlaps and flagging any contradictions between them.', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['structure', 'stack', 'conventions'], role: 'neutral', skill_ref: null, allowed_skills: [], validator_pin: null },
+    ],
+  },
+  {
+    // capture-learnings (DES-MEM-FACETED-001 write side, onboarding): survey a just-indexed repo,
+    // then propose its durable learnings — BOTH faceted MEMORIES and repo POLICIES — as inert estate
+    // `proposal.submit` proposals (through garden's estate shim) a human later reviews.
+    //
+    // ONE workflow, not four. "Go multi-workflow" is realized as multi-PHASE composition inside a
+    // single governed run, NOT as separate churn-analysis / hotspot-read / derive-memories /
+    // derive-policies RUNS, because:
+    //   • Context threading: the learning method is a dependent chain (churn ranking → hotspot
+    //     cross-reference → capture). Crew threads each phase's output into the next phase's prompt
+    //     automatically (plan.rs folds prior context); separate runs share NOTHING, so a split would
+    //     sever that thread and each run would re-establish repo understanding from scratch.
+    //   • Council cost: every phase convenes a ~6-seat council (the ecosystem's spikiest operation,
+    //     serialized on purpose). Four runs multiply that; three phases in one run pay it once each.
+    //   • The Memories-vs-Policies review split is a proposal-KIND concern, not a workflow-identity
+    //     one: `kind_type` routes memory→studio Memories and policy:<type>→Steering downstream, so a
+    //     SINGLE `capture` phase emits both from the one shared understanding — splitting derive-
+    //     memories / derive-policies would re-run a council over the same context for no new evidence.
+    //   • Reuse already lives below the run: the reusable unit is the SKILL (and hotspot-read is
+    //     already a reusable capability via `wicked-garden-search`; survey via `survey-repo`).
+    //
+    // The METHOD lives in the garden skill `wicked-garden-repo-learn`, referenced per-phase by
+    // `skill_ref` — the engine emits only a short `Invoke your skill "wicked-garden:repo-learn"…`
+    // directive and the worker loads SKILL.md from the installed plugin. The bounded git-churn
+    // sampling, the estate tool names (reached through the shim), and the proposal payload schemas that used to sit inline as
+    // ~600-column prose now live in that skill; the inline `instructions` here are a one-line phase
+    // ORIENTATION only. That matters because a governed worker's prompt rides a single PTY line capped
+    // at 1022 bytes (>=1023B is SILENTLY discarded — wicked-core execute_wrapped.rs), and the planner
+    // folds this text onto that line alongside the run intent, so long inline prose here would blow
+    // the line. Crew-only (NOT core-seeded), so the overlay write is the only def the engine resolves
+    // — no core mirror, and deliberately NOT in builtin-overlay-shadow's MIRRORED_IDS.
+    //
+    // The shim's `wicked-estate-mcp --readonly` opens the operator GLOBAL memory store and permits
+    // `proposal.submit` (a safe write, provenance server-stamped from the WICKED_RUN_* markers on the
+    // worker env — DES-L4 PR-③/⑦; there is no CLI-registered estate MCP on the worker any more),
+    // so proposals land in the same queue the studio Memories/Policies surfaces review. Onboarding IS
+    // about the repo, so the skill tags learnings `repo:`/`project:`.
+    id: 'capture-learnings',
+    is_system: true,
+    phases: [
+      { id: 'churn', kind: 'recon', instructions: "Phase 1/3 CHURN: produce a ranked list of this repo's most actively-changed files and directories over the last ~12 months, plus the repo's real name (manifest or git remote) and parent project. Use the skill's bounded/sampled git-churn method — never stream the whole history. Do not read code deeply yet; the next phase targets these areas.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'hotspots', kind: 'recon', instructions: "Phase 2/3 HOTSPOTS: cross-reference the prior churn ranking with wicked-estate hotspot / blast-radius signals to find the load-bearing code, then READ it through the estate shim (`wicked-garden run scripts/_estate_client.py --readonly call …`, the skill's grounding path) to build a real technical understanding of how the system fits together — not a file listing. Reuse wicked-garden-search for the hotspot signals; follow the skill.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['churn'], role: 'neutral', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
+      { id: 'capture', kind: 'build', instructions: "Phase 3/3 CAPTURE: from the prior churn + hotspot understanding, submit durable learnings as estate proposals through the shim's `propose` per the skill's capture contract — BOTH memories (facts / how-it-works) and policies (enforced conventions), one proposal per item, tagged repo/project. Each is inert until human review; never include secrets or personal data; capturing nothing is acceptable.", gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['hotspots'], role: 'creator', skill_ref: 'wicked-garden-repo-learn', allowed_skills: [], validator_pin: null },
     ],
   },
   {
@@ -560,6 +727,14 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       { id: 'verdict', kind: 'review', gate_type: 'value', gate: { human_confirm: { unconditional: false } }, executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['revise'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: null },
     ],
   },
+  // The governed test-authoring workflow (wave 6 — F-7R2-003/004/005/012/014/015, R4-r2): recon →
+  // author (creator, evidence-floor pinned) → verify (a TOOL phase that RUNS every produced test
+  // under the repository's own harness and fails the unit when one fails or never ran) → review
+  // (evaluator ≠ creator). Delivery is appended per run by the engine-side composition (`deliver:
+  // "pr"`), never performed by a worker. Def + verify script live in `qe/author-workflow.ts` so the
+  // e2e can assert the script's behaviour without reaching into this array. Crew-only drop-in (NOT
+  // core-seeded); the `wicked-garden-qe` skill carries the method (plan/author/review actions).
+  QE_AUTHOR_TESTS_WORKFLOW_DEF,
   // The one workflow that ARMS the dual-validator gate: `coverage` carries an approved
   // `validator_pin`, so layer 1 is live here and inert in every entry above. Transcribed
   // field-for-field from the source of truth, `wicked-core/workflows/domain-extraction.json`
@@ -585,10 +760,16 @@ export const BUILTIN_WORKFLOWS: WorkflowDef[] = [
       // gate (reads the store) and domain-graph's fail-closed-on-coverage<1.0 — not a worktree file.
       // Only coverage emits a genuine standalone report the deterministic floor reads. Declaring
       // phantom files failed every phase under core's FINDING-101 deliverable gate.
+      //
+      // `coverage` is `executes_code: true` (wicked-core#414): it WRITES `coverage-report.json`
+      // into the worktree for its pinned validator to read, and an `executes_code: false` phase
+      // may write nothing there — the worktree guard has no exemptions, declared deliverables
+      // included. Its role stays `evaluator`; the deliver default keys off code-writing
+      // NON-EVALUATOR phases (`executes_code && role !== 'evaluator'`), so this def never delivers.
       { id: 'survey', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'analyze', kind: 'recon', gate_type: null, gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['survey'], role: 'neutral', skill_ref: 'wicked-garden-domain', allowed_skills: [], validator_pin: null },
       { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: ['analyze'], role: 'creator', skill_ref: 'wicked-garden-domain-extractor', allowed_skills: [], validator_pin: null },
-      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: false, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
+      { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: 'wicked-garden-domain-coverage', allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
       // domain-graph is a DETERMINISTIC Tool that runs `wicked-core domain-graph`, which PERSISTS the
       // domain/requirement/rule graph into the repo store (core#237) — not an LLM skill that could hit
       // a non-persisting hermetic fallback. Mirrors wicked-core/workflows/domain-extraction.json.
@@ -715,6 +896,23 @@ export class GovernanceScoreboardUnsupportedError extends Error {
   }
 }
 
+/**
+ * Replaying a dead-letter outbox is not available in this deployment — the installed
+ * wicked-core-ts predates the `Core.replayEmitOutbox` static (crew#495's engine companion). Typed
+ * for the same reason as `SteeringUnsupportedError`: the CLI says "upgrade the engine" (exit 2) and
+ * never pretends the entries landed. Gated on METHOD PRESENCE, the campaigns doctrine.
+ */
+export class GovernanceReplayUnsupportedError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} is not supported by this wicked-core build (the installed wicked-core-ts has no ` +
+        'replayEmitOutbox binding — upgrade it to a release carrying the crew#495 governance ' +
+        'store companion)',
+    );
+    this.name = 'GovernanceReplayUnsupportedError';
+  }
+}
+
 /** The engine's own way of reporting a build that cannot do chat, raised at call time. */
 const ENGINE_CHAT_UNSUPPORTED = /chat unsupported/i;
 
@@ -725,6 +923,20 @@ export interface ChatSummary {
   seats: string[];
   /** Seconds since the chat's last open/ensure/turn; `null` when it has no activity stamp. */
   idleSecs: number | null;
+  /** The scope the engine recorded at open (wicked-core#410 / crew#502): where the seats run, the
+   *  graph their read-only estate MCP is bound to, the roots in scope. ABSENT (not null) on an
+   *  engine predating chat scope — `chatScopeApplied` reads exactly that difference. */
+  cwd?: string | null;
+  codeGraphDb?: string | null;
+  readRoots?: string[];
+}
+
+/** What the daemon hands the engine as a chat's scope — `chatOpen`'s `scopeJson`, parsed. */
+export interface ChatScopeJson {
+  /** The estate graph the seats' READ-ONLY estate MCP is bound to; `null` ⇒ no estate MCP. */
+  codeGraphDb: string | null;
+  /** The repository roots in scope, absolute. */
+  readRoots: string[];
 }
 
 /** A parsed-CoreEvent listener. */
@@ -750,6 +962,14 @@ export interface CoreAdapterOptions {
   engineExec?: boolean;
   /** The wicked-bus SQLite db the exec seam publishes/consumes over. Required when `engineExec` is on. */
   busDbPath?: string;
+  /**
+   * The governance store + dead-letter outbox this daemon hands the engine (crew#495 / F-022) —
+   * resolved by the CLI (`core/governance-store.ts`), exported to `process.env` HERE, before the
+   * Core exists, as `WICKED_ESTATE_DB` + `WICKED_APPS_EMIT_DEADLETTER` (the emit seam reads both at
+   * emit time). Absent — a library boot, a unit test — exports nothing: the engine keeps whatever
+   * the process carried (the hermetic test arming included) and `/diagnostics` reports `store: null`.
+   */
+  governanceStore?: GovernanceStoreLocation;
 }
 
 
@@ -843,10 +1063,27 @@ export function humanGatePhaseIds(wf: WorkflowDef): string[] {
  * endpoint and the WS fan-out funnel through this stable API — so when the
  * in-flight core-ts subscribe/teardown signature lands, only this file changes.
  */
+/**
+ * A launch the daemon hands the engine — or one the engine refused. `handed` is notified BEFORE the
+ * engine call (the skills seam opens a generation pin for the launch, so no worker spawn can read
+ * `WICKED_SKILLS_SNAPSHOT` ahead of the pin — live-generations.ts); `rejected` follows a call that
+ * threw (nothing will ever spawn for it). Every path a spawn can originate from goes through here:
+ * `launchRun` (POST /runs, onboarding, testing, steering), `resumeRun`, `confirmGate`,
+ * `launchCampaign`, `resumeCampaign`.
+ */
+export interface LaunchNotice {
+  kind: 'run' | 'campaign';
+  /** The run's session id (`LaunchRunInput.sessionId` / the run id) or the campaign's `CampaignDef.id`. */
+  id: string;
+  status: 'handed' | 'rejected';
+}
+export type LaunchListener = (notice: LaunchNotice) => void;
+
 export class CoreAdapter {
   private readonly core: CoreHandleFull;
   private readonly subscription: Subscription;
   private readonly listeners = new Set<CoreEventListener>();
+  private readonly launchListeners = new Set<LaunchListener>();
   private closed = false;
   /** Built-in workflow ids whose overlay JSON has been written this process lifetime. */
   private readonly _builtinOverlayWritten = new Set<string>();
@@ -875,6 +1112,58 @@ export class CoreAdapter {
    * `api/server.ts`, crew#309).
    */
   readonly stub: boolean;
+  /** The governance store this adapter exported to the engine (crew#495), or `null` when none was resolved. */
+  readonly governanceStore: GovernanceStoreLocation | null;
+  /**
+   * This daemon's own bound origin, resolved LAZILY (crew#524): the adapter exists before the
+   * server listens, so `registerRoutes` hands a getter rather than a value. The deliver phase
+   * composed for a run bakes the origin in, so its script can ask `GET /runs/:id/deliver-text`
+   * for the run-derived PR text at delivery time and the PR body can link the run. `null` (a
+   * CLI-driven adapter with no daemon) ⇒ the script carries only its launch-time text.
+   */
+  private deliverApiOrigin: (() => string | null) | null = null;
+
+  /** Hand the adapter the way to learn this daemon's own origin (see `deliverApiOrigin`). */
+  setDeliverApiOrigin(get: () => string | null): void {
+    this.deliverApiOrigin = get;
+  }
+
+  /**
+   * Called once per run THIS adapter launches OFF the `POST /runs` path — today the onboarding run
+   * (`_doOnboardingLaunch`, the one site `POST /repos`, `POST /repos/:id/onboard` and the
+   * clone-then-register path all reach; the last is adapter-internal, which is why this cannot live
+   * in the routes) — after the engine accepted the launch. `createServer` wires it to
+   * `recordRunLaunched`, so those runs gain a `run.launched` trail entry and a `created_at`
+   * (crew#496 / studio#230; DES-L8 §5 PR-8B). `null` = a CLI-driven adapter with no daemon:
+   * nothing recorded, the pre-field answer. Best-effort: a recorder that throws never fails the
+   * launch the engine already accepted.
+   */
+  private onRunLaunched: ((runId: string, detail: Record<string, unknown>) => void) | null = null;
+
+  /** Hand the adapter the daemon's launch recorder (see `onRunLaunched`). */
+  setOnRunLaunched(record: (runId: string, detail: Record<string, unknown>) => void): void {
+    this.onRunLaunched = record;
+  }
+
+  /**
+   * The roster a launch THIS adapter originates should carry — the daemon's roster WITH crew's
+   * standing (`api/roster-standing.ts`) once `createServer` wires it, else the raw registry.
+   * F-RECON-002/003: the onboarding launch (`seatsForWorkflow`) and `wicked-crew start` handed the
+   * engine `CoreAdapter.roster()` undecorated, so `launchRun`'s `engineRosterJson` had no
+   * `council_eligible` to bench on and signed-out seats were convened. Resolved LAZILY, like the
+   * origin above: the adapter exists before the tracker that knows the seats' standing does.
+   */
+  private rosterProvider: (() => unknown[]) | null = null;
+
+  /** Hand the adapter the daemon's standing roster accessor (see `launchRoster`). */
+  setRosterProvider(get: () => unknown[]): void {
+    this.rosterProvider = get;
+  }
+
+  /** The seat pool a launch from this adapter carries: standing-decorated when wired, else raw. */
+  launchRoster(): unknown[] {
+    return this.rosterProvider !== null ? this.rosterProvider() : CoreAdapter.roster();
+  }
 
   constructor(opts: CoreAdapterOptions) {
     // Arm the EVENT-DRIVEN execution-mediation seam BEFORE spawning the Core: the Rust actor reads
@@ -907,6 +1196,13 @@ export class CoreAdapter {
       if (wcExe) process.env['WICKED_CORE_EXE'] = wcExe;
     }
 
+    // The governance store (crew#495): export the engine's store + outbox variables and create the
+    // sidecar BEFORE the engine exists, in the same breath as the other engine env above. Without
+    // this, every `wicked.*` governance event the engine emits dead-letters under the operator's
+    // HOME — silently, on every default install.
+    this.governanceStore = opts.governanceStore ?? null;
+    if (this.governanceStore !== null) applyGovernanceStoreEnv(this.governanceStore);
+
     this.stub = opts.stub === true;
     this.dbPath = opts.dbPath;
     this.core = this.stub ? Core.spawnStub(opts.dbPath) : Core.spawn(opts.dbPath);
@@ -931,12 +1227,140 @@ export class CoreAdapter {
     });
   }
 
+  /**
+   * The engine's EVENT-node counter over an estate store (`Core.eventStoreCount`, crew#495's
+   * companion binding), or `null` when the installed addon predates it — `/diagnostics.governance`
+   * then reports `records: { total: null, sinceBoot: null }`, honestly, never a fabricated 0. A
+   * store FILE that does not exist yet counts as 0: nothing has landed, which is a number, not an
+   * unknown (the engine's read-only open refuses a missing file, and that refusal is not "unknown").
+   */
+  static eventStoreCounter(): ((dbPath: string) => Promise<number>) | null {
+    const fn = Core.eventStoreCount;
+    if (typeof fn !== 'function') return null;
+    return async (dbPath: string): Promise<number> => {
+      if (!isStoreSpec(dbPath) && !existsSync(dbPath)) return 0;
+      const raw = await fn.call(Core, dbPath);
+      const n = Number(JSON.parse(raw));
+      if (!Number.isInteger(n) || n < 0) throw new Error(`eventStoreCount answered a non-count: ${raw}`);
+      return n;
+    };
+  }
+
+  /**
+   * The engine's state-home preflight (wicked-core#411 / crew#497), or `null` on an addon without
+   * `Core.preflightStateHome` — crew's `StateHomeWatch` then classifies with its own registry copy
+   * and says so (`source: 'crew'`), never a fabricated clean answer.
+   */
+  static stateHomePreflighter(): ((snapshotPath: string | null, dbPath: string) => Promise<string>) | null {
+    const fn = Core.preflightStateHome;
+    if (typeof fn !== 'function') return null;
+    return (snapshotPath: string | null, dbPath: string): Promise<string> => fn.call(Core, snapshotPath, dbPath);
+  }
+
+  /** Whether the installed addon can replay a dead-letter outbox (`Core.replayEmitOutbox`, crew#495). */
+  static replayEmitOutboxSupported(): boolean {
+    return typeof Core.replayEmitOutbox === 'function';
+  }
+
+  /**
+   * Replay the engine's NDJSON spool records at `outboxPath` into the estate store at `dbPath` —
+   * the engine writes each as the EVENT node it should have been (its original `ts` restored where
+   * the record carries one). Throws {@link GovernanceReplayUnsupportedError} on an older addon.
+   */
+  static async replayEmitOutbox(outboxPath: string, dbPath: string): Promise<EmitOutboxReplayReport> {
+    const fn = Core.replayEmitOutbox;
+    if (typeof fn !== 'function') {
+      throw new GovernanceReplayUnsupportedError('Replaying a dead-letter outbox');
+    }
+    const raw = await fn.call(Core, outboxPath, dbPath);
+    const parsed = JSON.parse(raw) as Partial<EmitOutboxReplayReport>;
+    if (
+      typeof parsed.read !== 'number' ||
+      typeof parsed.replayed !== 'number' ||
+      !Array.isArray(parsed.failed)
+    ) {
+      throw new Error(`replayEmitOutbox answered an unexpected report: ${raw.slice(0, 200)}`);
+    }
+    return {
+      read: parsed.read,
+      replayed: parsed.replayed,
+      failed: parsed.failed,
+      ...(typeof parsed.already_present === 'number' ? { already_present: parsed.already_present } : {}),
+    };
+  }
+
   /** Register a CoreEvent listener. Returns an unsubscribe function. */
   onEvent(listener: CoreEventListener): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Register a launch listener (`LaunchNotice`). Returns an unsubscribe function. */
+  onLaunch(listener: LaunchListener): () => void {
+    this.launchListeners.add(listener);
+    return () => {
+      this.launchListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Deliver a launch notice to EVERY listener; a listener's failure PROPAGATES (codex round 6 on
+   * crew#480 — the notices used to be delivered under a swallowing try/catch). The `handed` notice is
+   * what pins the skills generation the launch is about to read (skills/runtime.ts →
+   * live-generations.ts): a pin that could not be recorded means the generation could be reaped
+   * under the spawn, so the launch must not proceed and the failure is the launch's failure. Every
+   * listener is still notified (a later one is not skipped because an earlier one threw); the FIRST
+   * error is what propagates.
+   */
+  private notifyLaunch(notice: LaunchNotice): void {
+    let failure: { err: unknown } | null = null;
+    for (const listener of this.launchListeners) {
+      try {
+        listener(notice);
+      } catch (err) {
+        if (failure === null) failure = { err };
+      }
+    }
+    if (failure !== null) throw failure.err instanceof Error ? failure.err : new Error(String(failure.err));
+  }
+
+  /**
+   * Hand a launch to the engine with its notices: `handed` BEFORE the call (the pin is open before
+   * any spawn can read the env), `rejected` when the call throws (nothing will spawn — the pin is
+   * released). The result and the error pass through untouched.
+   *
+   * A listener that FAILS on `handed` fails the launch: the engine is never called (nothing spawns
+   * against a generation nobody pinned), the other listeners get `rejected` so whatever they did
+   * record is released, and the listener's error surfaces to the caller as the launch error —
+   * never swallowed (codex round 6). A listener failing on `rejected` cannot un-launch anything;
+   * the primary error keeps precedence and the secondary one is logged, not lost.
+   */
+  private async handedToEngine<T>(kind: LaunchNotice['kind'], id: string, call: () => Promise<T>): Promise<T> {
+    try {
+      this.notifyLaunch({ kind, id, status: 'handed' });
+    } catch (err) {
+      this.releaseAfterFailure(kind, id, err);
+      throw err;
+    }
+    try {
+      return await call();
+    } catch (err) {
+      this.releaseAfterFailure(kind, id, err);
+      throw err;
+    }
+  }
+
+  /** Deliver `rejected` while a launch is already failing with `primary`: a secondary listener failure is logged, never masks the primary. */
+  private releaseAfterFailure(kind: LaunchNotice['kind'], id: string, primary: unknown): void {
+    try {
+      this.notifyLaunch({ kind, id, status: 'rejected' });
+    } catch (secondary) {
+      console.warn(
+        `[crew] launch ${kind}:${id} failed (${primary instanceof Error ? primary.message : String(primary)}) and a launch listener ALSO failed while releasing its pin: ${secondary instanceof Error ? secondary.message : String(secondary)} — the pin may be held until the run's terminal frame`,
+      );
+    }
   }
 
   /** The production council roster (static), parsed to seats. */
@@ -949,16 +1373,63 @@ export class CoreAdapter {
     return this.core.ping();
   }
 
+  /**
+   * What THIS daemon's engine addon can do — served on `GET /health.capabilities` so a client
+   * (the studio composer) promises only what the deployment keeps. `deliverGate`: the engine
+   * pauses before the composed `deliver` phase unless the launch opted out (F-E2E-030,
+   * wicked-core-ts ≥ 0.7.24). Version-derived like the other addon probes above — a napi object
+   * silently ignores fields an older addon does not declare, so the version is the only honest
+   * signal until the field lands.
+   */
+  engineCapabilities(): { deliverGate: boolean; revisesPr: boolean; chatIdOnLaunch: boolean; seatChipOnCreate: boolean } {
+    return {
+      deliverGate: addonAtLeast(0, 7, 24),
+      // DES-L9 / crew#550: `LaunchRunBody.revisesPr` needs the engine's `LaunchSpec.base_ref`
+      // (wicked-core-ts ≥ 0.7.27) — an older addon would base on the default branch and push a
+      // duplicate PR, so the route fails closed and the composer hides the affordance.
+      revisesPr: addonAtLeast(0, 7, 27),
+      // crew#619: `LaunchRequest.chatId` is crew-side; always available once this daemon is deployed.
+      chatIdOnLaunch: true,
+      // crew#631: per-doc `clisJson` on interactive create bodies; always available once deployed.
+      seatChipOnCreate: true,
+    };
+  }
+
   /** Launch an interactive, resumable run → the run id. */
   async launchRun(input: LaunchRunInput): Promise<string> {
     const opts: LaunchOptions = {
       problem: input.problem,
       sessionId: input.sessionId,
-      clisJson: input.clisJson,
+      // The roster crew hands the ENGINE (wave 6, `core/engine-roster.ts`): the studio round-trips
+      // `GET /roster` seats — decorated with crew's own `health {status}`, `auth`, `council_eligible`
+      // readings — into `clisJson`; the wave-6 engine grew `AgenticCli.health {usable, reason}` under
+      // the SAME key, so the readings are stripped and `council_eligible` becomes the engine's
+      // bench verdict. An older engine ignores the stamp; a newer one benches the seat for the run.
+      clisJson: engineRosterJson(input.clisJson),
     };
     if (input.entityMode !== undefined) opts.entityMode = input.entityMode;
     if (input.humanConfirm !== undefined) opts.humanConfirm = input.humanConfirm;
+    if (input.autoDeliver === true) {
+      // F-E2E-030: the explicit deliver-gate opt-out (`LaunchOptions.autoDeliver`, wicked-core-ts
+      // ≥ 0.7.24). Sent ONLY when true — the engine's default is the gate, and an addon that
+      // predates the field ignores it (such an engine has no deliver gate to opt out of, so the
+      // launch behaves exactly as it did before this field existed). Typed through a widening so
+      // this compiles against the pinned addon's typings until the pin moves.
+      (opts as LaunchOptions & { autoDeliver?: boolean }).autoDeliver = true;
+    }
     if (input.repoRef !== undefined) opts.repoRef = input.repoRef;
+    if (input.baseRef !== undefined) {
+      // DES-L9 / crew#550: the revised PR's head branch as the run's base (`LaunchSpec.base_ref`,
+      // wicked-core-ts ≥ 0.7.27). Fail CLOSED on an older addon — napi ignores undeclared fields,
+      // and a run silently based on the default branch would push a DUPLICATE pull request.
+      if (!addonAtLeast(0, 7, 27)) {
+        throw new Error(
+          'revisesPr needs wicked-core-ts >= 0.7.27; the installed addon would silently ignore the ' +
+            'base and the run would open a second pull request instead of revising the first',
+        );
+      }
+      (opts as LaunchOptions & { baseRef?: string }).baseRef = input.baseRef;
+    }
     if (input.projectId !== undefined) {
       // Fail CLOSED on an old addon: silently dropping projectId would launch an unfiled run the
       // caller believed was filed — the exact failure §2.2 exists to prevent.
@@ -977,6 +1448,23 @@ export class CoreAdapter {
         );
       }
       opts.extraWriteRoots = input.extraWriteRoots;
+    }
+    // SAFETY NET (grounding follow-on #1): ANY project-filed launch that did not already resolve a
+    // project-graph binding gets one here, so no future project-filed caller can silently ship a run
+    // that sees only its own repo — the exact gap the chat/edit seams had (projectId filed WITHOUT
+    // projectGraph → `run_code_graph_db → None` → no estate MCP). The `=== undefined` guard means the
+    // seams that ALREADY resolved (draft/demo/chat/edit — and POST /runs via routes.ts) pass their
+    // own `projectGraph` and are NOT re-resolved here. `repoRef` is threaded through so a repo-bound
+    // launch gets the `repoLabel` the cross-field validation below requires; a repo-less one binds
+    // with no label. Resolving reads the on-disk manifest and NEVER indexes; any failure degrades to
+    // no binding (the launch is unaffected). Whatever it sets flows into the SAME version-guard +
+    // cross-field validation below — capability-only, never a prompt/repo/snapshot change. The
+    // graph.ts→adapter import is type-only on graph.ts's side, so this value import is no runtime cycle.
+    if (input.projectId !== undefined && input.projectGraph === undefined) {
+      const decision = await resolveProjectGraphBinding(this, input.projectId, input.repoRef).catch(
+        (): { binding: ProjectGraphBinding | null } => ({ binding: null }),
+      );
+      if (decision.binding !== null) input.projectGraph = decision.binding;
     }
     if (input.projectGraph !== undefined) {
       // Fail CLOSED on an old addon (napi ignores undeclared fields): the run would silently get
@@ -1065,11 +1553,21 @@ export class CoreAdapter {
           // second `deliver` phase would collide on id — launch the def as-is; the intent
           // ("this run opens its PR") is already satisfied.
         } else {
-          // The run's intent rides along so the commit the deliver phase makes NAMES what it
-          // delivered (`wicked-crew run <id>: <intent>`, #318) instead of being an anonymous
-          // blob. Composition stays DEFERRED (#319): deliver and the deliverable floor fold
-          // into one def and one registration below, never two armed ids.
-          composed = composeDeliverWorkflow(composed, input.sessionId, input.problem);
+          // The run's intent rides along so the PR title and the commit subject NAME what was
+          // delivered (#318 — composed from the intent, never `--fill`, crew#524) instead of an
+          // anonymous blob; the repo and this daemon's origin ride too, so the phase's fallback
+          // text names the run and its script knows which daemon to ask for the run record.
+          // Composition stays DEFERRED (#319): deliver and the deliverable floor fold into one
+          // def and one registration below, never two armed ids.
+          composed = composeDeliverWorkflow(composed, input.sessionId, input.problem, {
+            repoRef: input.repoRef ?? null,
+            apiOrigin: this.deliverApiOrigin?.() ?? null,
+            // DES-L9: the revised PR (push target) and the push identity for the gate card —
+            // GH_ACCOUNT's value and whether GH_TOKEN is exported (presence only, never the value).
+            revisesPr: input.revisesPr ?? null,
+            ghAccount: process.env['GH_ACCOUNT'] ?? null,
+            ghTokenPinned: typeof process.env['GH_TOKEN'] === 'string' && process.env['GH_TOKEN'] !== '',
+          });
         }
       }
       if (composed !== null && composed.id !== input.workflow) {
@@ -1116,17 +1614,32 @@ export class CoreAdapter {
           'deliverable floor to',
       );
     }
-    return this.core.launchRun(opts);
+    return this.handedToEngine('run', input.sessionId, () => this.core.launchRun(opts));
   }
 
   /** Resume a run from its persisted cursor → the status token. */
   resumeRun(runId: string): Promise<string> {
-    return this.core.resumeRun(runId);
+    return this.handedToEngine('run', runId, () => this.core.resumeRun(runId));
   }
 
-  /** Resolve a human gate: approve (optional amend) or reject → the status token. */
-  confirmGate(runId: string, approve: boolean, amend?: string): Promise<string> {
-    return this.core.confirmGate(runId, approve, amend);
+  /** Resolve a human gate: approve (optional amend) / request changes / reject → the status token.
+   *  (DES-L1 PR-2) `action` and `amendScope` are the 0.7.27 arms: on an older addon a napi call
+   *  would silently DROP them — a `request_changes` would run as a plain reject — so they fail
+   *  CLOSED on version (the `extraWriteRoots` / `projectGraph` doctrine); absent, the call is the
+   *  three-arg one every engine understands. */
+  confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string> {
+    return this.handedToEngine('run', runId, () => {
+      if (action === undefined && amendScope === undefined) {
+        return this.core.confirmGate(runId, approve, amend);
+      }
+      const why = armsUnsupportedReason('the gate arms `action` / `amendScope`', 'approve or reject without them');
+      if (why !== null) throw new Error(why);
+      // The 0.7.27 binding takes the two trailing optionals; typed here until the pin moves.
+      const core = this.core as unknown as {
+        confirmGate(runId: string, approve: boolean, amend?: string, action?: string, amendScope?: string): Promise<string>;
+      };
+      return core.confirmGate(runId, approve, amend, action, amendScope);
+    });
   }
 
   /** Cancel a run → the status token. */
@@ -1171,10 +1684,28 @@ export class CoreAdapter {
    *  `readOverlayWorkflows` skips the `campaign-` prefix). */
   async launchCampaign(def: CampaignDef, workflows: WorkflowDef[] = []): Promise<string> {
     const surface = this._campaigns('Launching a campaign');
+    // (review-L1-598 M1) `denial_gate` is a 0.7.27 def field; an older addon's serde IGNORES it and
+    // the operator who asked for `auto_reject` would get `hold` — refuse by name instead (same rule
+    // as the gate arms), before any workflow is armed.
+    if ((def as { denial_gate?: unknown }).denial_gate !== undefined) {
+      const why = armsUnsupportedReason(
+        'the campaign knob `denialGate`',
+        'launch without it (the engine then holds every escalation gate for a human)',
+      );
+      if (why !== null) throw new Error(why);
+    }
     for (const wf of workflows) {
       await this._armCampaignWorkflow(wf);
     }
-    return surface.launchCampaign(JSON.stringify(def));
+    // The roster crew hands the ENGINE (F-086, the campaign half of wave 6's `core/engine-roster.ts`):
+    // a def built from `rosterWithStanding()` carries crew's `health {status}` / `auth` /
+    // `council_eligible` readings on every node's `run_spec.clis`; core-ts ≥ 0.7.22 parses `health`
+    // as `{usable, reason?}` and refuses the def ("missing field `usable`"). Translate per node
+    // exactly as `launchRun` does — on a copy, never the caller's def (the route reads it after this).
+    const engineDef = engineCampaignDef(def);
+    // The campaign's DAG-node runs are launched INSIDE the engine (their ids are minted there), so
+    // the campaign is what the daemon can account for: pinned under `def.id` until its terminal frame.
+    return this.handedToEngine('campaign', def.id, () => surface.launchCampaign(JSON.stringify(engineDef)));
   }
 
   /** Arm one composed campaign-node workflow: validate-then-persist (the FINDING-002 ordering —
@@ -1196,7 +1727,8 @@ export class CoreAdapter {
 
   /** Resume a campaign from its persisted state → the campaign status token. */
   resumeCampaign(id: string): Promise<string> {
-    return this._campaigns('Resuming a campaign').resumeCampaign(id);
+    const surface = this._campaigns('Resuming a campaign');
+    return this.handedToEngine('campaign', id, () => surface.resumeCampaign(id));
   }
 
   /** Cancel a campaign (in-flight node Runs cancelled, the rest marked) → the status token. */
@@ -1459,13 +1991,44 @@ export class CoreAdapter {
 
   // ── Chat sessions (core#134 / crew#165) ────────────────────────────────────
 
+  /**
+   * Open a chat in a SCOPE (wicked-core#410 / crew#502): `cwd` is the seats' working directory
+   * (the chat's scratch root — the route never passes a repo or the daemon's cwd), `scope` the
+   * graph and read roots. An addon predating chat scope honours `cwd` and silently drops `scope`;
+   * callers that promise grounding confirm it with {@link chatScopeApplied} rather than assume.
+   */
   async chatOpen(
     chatId: string,
     clis: string[],
     cwd?: string,
+    scope?: ChatScopeJson,
   ): Promise<{ cliKey: string; ok: boolean; error?: string }[]> {
-    const raw = await this.core.chatOpen(chatId, JSON.stringify(clis), cwd ?? null);
+    const raw = await this.core.chatOpen(
+      chatId,
+      JSON.stringify(clis),
+      cwd ?? null,
+      scope === undefined ? null : JSON.stringify(scope),
+    );
     return JSON.parse(raw) as { cliKey: string; ok: boolean; error?: string }[];
+  }
+
+  /**
+   * Did the engine RECORD a scope for `chatId` (wicked-core#410)? `true` when its `chatList` row
+   * carries the scope fields, `false` when the row exists without them (an addon that ignored
+   * `scopeJson` — the chat runs in its cwd but with no estate MCP and no advertised roots), `null`
+   * when it cannot be told (no enumerate surface, or no row). Read, never inferred from a version
+   * pin: the field's presence IS the capability.
+   */
+  async chatScopeApplied(chatId: string): Promise<boolean | null> {
+    let chats: ChatSummary[];
+    try {
+      chats = await this.chatList();
+    } catch {
+      return null;
+    }
+    const row = chats.find((c) => c.chatId === chatId);
+    if (row === undefined) return null;
+    return 'readRoots' in row;
   }
 
   async chatSend(
@@ -1690,16 +2253,57 @@ export class CoreAdapter {
     await this.launchRun({
       problem: `Onboard repository: ${repoName}`,
       sessionId: runId,
-      clisJson: JSON.stringify(CoreAdapter.roster()),
+      // The run's seat pool is the seats the WORKFLOW can use (F-2R2-010): onboarding is two tool
+      // phases routed to the `wicked-estate` executor, so its pool is empty — not the whole roster
+      // dressed up as a 5-seat run with four signed-out seats.
+      clisJson: JSON.stringify(this.seatsForWorkflow('onboarding')),
       workflow: 'onboarding',
       repoRef: repoId,
     });
     this.repoOnboardRunIds.set(repoId, runId);
+    // The launch record the daemon keeps for every POST /runs launch, for THIS path too (crew#496):
+    // it dates the run (`created_at`) and files it with the others. After the engine accepted the
+    // launch, never before; a failing recorder is logged, not a launch failure.
+    if (this.onRunLaunched !== null) {
+      try {
+        this.onRunLaunched(runId, { workflow: 'onboarding', repoRef: repoId, repoName, deliver: 'none' });
+      } catch (err) {
+        console.warn(
+          `[crew] onboarding run ${runId} launched but its launch record failed (reads undated): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * The roster a run of `workflowId` should carry as its seat pool. A workflow whose every phase
+   * runs a TOOL executor convenes no council and dispatches no seat, so its pool is `[]` — the
+   * engine routes each unit `tool` without consulting the pool (verified against the engine: an
+   * onboarding launch with `clis: []` distributes both units to `wicked-estate`). Any workflow
+   * with an agent phase — or one this daemon cannot read — gets the full roster, as before.
+   */
+  seatsForWorkflow(workflowId: string): unknown[] {
+    const def = this.getWorkflow(workflowId);
+    // The roster WITH standing when the daemon wired one (F-RECON-002/003) — `launchRun` then
+    // benches `council_eligible: false` seats through `engineRosterJson`.
+    if (def === null || def.phases.length === 0) return this.launchRoster();
+    const toolOnly = def.phases.every((p) => p.executor?.type === 'tool');
+    return toolOnly ? [] : this.launchRoster();
   }
 
   /** Return the onboarding run id for a repo (undefined if not launched this session). */
   getOnboardRunId(repoId: string): string | undefined {
     return this.repoOnboardRunIds.get(repoId);
+  }
+
+  /** The repo an onboarding run launched by THIS daemon process was for (undefined for any other run). */
+  onboardedRepoOf(runId: string): string | undefined {
+    for (const [repoId, id] of this.repoOnboardRunIds) {
+      if (id === runId) return repoId;
+    }
+    return undefined;
   }
 
   /** List every registered repo. */
@@ -2263,12 +2867,43 @@ export class CoreAdapter {
         const r = parsed.worker_config_root;
         if (typeof r !== 'string' || (r !== '' && !isAbsolute(r))) delete parsed.worker_config_root;
       }
+      // The skills root is NOT a setting (skills keystone, codex round 5): `<state home>/skills`,
+      // full stop. A `skills_root` left in a pre-release settings.json is dropped on read, never
+      // honored — like the v3 `skills_mirror` knob withdrawn before it (design v3.2 §1 — wicked
+      // never writes into the user's CLI directories).
+      if ('skills_root' in parsed) delete (parsed as Record<string, unknown>)['skills_root'];
+      if ('skills_mirror' in parsed) delete (parsed as Record<string, unknown>)['skills_mirror'];
       // deliverDefault (crew#393): 'pr' | 'none' only — same values PUT /settings admits. A
       // hand-edited anything-else falls back to the shipped default ('pr') rather than turning
       // the repo-scoped delivery default into an unparseable third state.
       if ('deliverDefault' in parsed) {
         const d = parsed.deliverDefault;
         if (d !== 'pr' && d !== 'none') delete parsed.deliverDefault;
+      }
+      // baseSkillRef / baseSkillPolicy (crew#554): the same shapes PUT /settings admits — a string
+      // skill name (`""` = off) and `'require'`, the ONLY policy. A hand-edited baseSkillRef of any
+      // other shape falls back to the shipped default rather than exporting garbage as the engine's
+      // `WICKED_BASE_SKILL_REF` (which would refuse every launch at intake by a name nobody typed).
+      // baseSkillPolicy is different: the `'warn'` rung is DELETED, not disabled (DES-L4 PR-⑧, D-8b),
+      // and a settings.json written by crew ≤ 0.7.34 carries `warn` once its first PUT /settings
+      // merged the old default into the file. That value is REFUSED by name, loudly — the daemon must
+      // never boot reporting `warn` while behaving `require` — and the shipped default applies.
+      if ('baseSkillRef' in parsed) {
+        const r = parsed.baseSkillRef;
+        if (typeof r !== 'string' || !BASE_SKILL_REF_SHAPE.test(r.trim())) delete parsed.baseSkillRef;
+      }
+      if ('baseSkillPolicy' in parsed) {
+        const p: unknown = parsed.baseSkillPolicy;
+        if (p !== 'require') {
+          delete parsed.baseSkillPolicy;
+          console.error(
+            `[settings] refused baseSkillPolicy ${JSON.stringify(p)} in ${settingsFilePath()}: 'require' is the ` +
+              `only accepted value. The 'warn' rung was deleted in crew 0.7.35 — it ran seats UNGROUNDED — and a ` +
+              `settings.json written by an earlier crew carries it once PUT /settings merged the old default in. ` +
+              `The daemon reads 'require' (the base skill is required at intake); remove the key from the file, ` +
+              `or set baseSkillRef "" to turn the base skill off explicitly. Nothing else in settings.json is affected.`,
+          );
+        }
       }
       // Skin-owned `studio.*` blobs (crew#325): the same per-key cap the PUT /settings route
       // enforces. The write cap alone cannot hold it — `updateSettings` reads through here, so a

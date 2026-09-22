@@ -18,14 +18,15 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { tokenHash } from '../../src/api/auth.js';
-import type { AuditEntry, SessionView, SystemSettings } from '../../src/core/types.js';
+import type { AuditEntry, CrewSystemSettings, SessionView } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const TOKENS = {
   observer: 'obs-token-1',
@@ -71,8 +72,8 @@ beforeAll(async () => {
   adapter.upsertPolicy = async () => undefined;
   adapter.upsertConformanceRule = async () => undefined;
   adapter.getSettings = async () => ({ graphNodeLimit: 150 });
-  adapter.updateSettings = async (patch: Partial<SystemSettings>) =>
-    ({ graphNodeLimit: 150, ...patch }) as SystemSettings;
+  adapter.updateSettings = async (patch: Partial<CrewSystemSettings>) =>
+    ({ graphNodeLimit: 150, ...patch }) as CrewSystemSettings; // the daemon's own type: baseSkillPolicy is 'require' only (D-8b)
   adapter.projectGet = async (id: string) =>
     ({ id, name: 'p', description: null, status: 'active', scope: `project:${id}`, created_at: 1, updated_at: 1 });
   adapter.projectUpdate = async (id: string, patch: { name?: string; status?: string }) =>
@@ -111,7 +112,7 @@ afterAll(async () => {
   await app.close();
   await localApp.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 function call(

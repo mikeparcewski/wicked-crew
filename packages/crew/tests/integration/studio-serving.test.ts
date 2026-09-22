@@ -9,11 +9,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const SHELL = [
   '<!doctype html>',
@@ -45,7 +46,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 describe('studio serving (static + SPA fallback alongside API/WS)', () => {
@@ -123,7 +124,7 @@ describe('headless degradation (no bundle present)', () => {
     } finally {
       await headlessApp.close();
       headlessAdapter.close();
-      rmSync(headlessDir, { recursive: true, force: true });
+      removeScratch(headlessDir);
     }
   });
 });

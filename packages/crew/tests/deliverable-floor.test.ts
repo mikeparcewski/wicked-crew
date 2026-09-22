@@ -7,7 +7,7 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -19,6 +19,7 @@ import {
 } from '../src/core/deliverable-floor.js';
 import { BUILTIN_WORKFLOWS } from '../src/core/adapter.js';
 import type { PhaseDef, WorkflowDef } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 /**
  * Run the floor exactly as wicked-core's `run_tool_cmd` will: argv[0] then the phase's argv.
@@ -47,7 +48,7 @@ describe('the floor script (executed, not grepped)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'deliverable-floor-'));
   // Fixtures are real files on disk because the script stats them; remove them when the suite
   // ends so repeated runs do not litter tmpdir (Copilot, #319).
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  afterAll(() => removeScratch(dir));
 
   it('PASSES when every declared artifact exists with bytes, and says what it found', () => {
     const a = join(dir, 'a.html');

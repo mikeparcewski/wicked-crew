@@ -10,6 +10,45 @@ export interface GateCacheEntry {
   lifecycle: 'open';
   /** When the daemon observed the gate. */
   receivedAt: string;
+  /**
+   * Present ONLY when the gate prompt reads as a pure sandbox/tool refusal — the worker reported it
+   * could not act, with no sign of productive work (issue #419). A warning for the operator, never a
+   * gate decision; omitted entirely on a normal gate so the wire is byte-identical.
+   */
+  refusal?: { matched: boolean; reason: string };
+}
+
+/**
+ * Detect whether a gate prompt is a PURE sandbox/tool refusal — the worker reporting it could not
+ * act (read-only sandbox, rejected writes, "could not modify/regenerate"), with NO sign it did real
+ * work (issue #419). Returns `{ matched: true, reason }` only when a refusal signature fires AND no
+ * work-done phrase vetoes it; `undefined` otherwise. This is a WARNING signal surfaced on the gate
+ * wire so an operator does not approve a refusal as if it were work — it never gates a decision.
+ *
+ * The bias is deliberately toward NOT flagging: a genuine work transcript that merely mentions
+ * "sandbox"/"blocked", or a mixed turn that refused one tool but did real work elsewhere, must not
+ * be flagged. A missed refusal is a lesser harm than a false one.
+ */
+export function detectRefusal(text: string): { matched: boolean; reason: string } | undefined {
+  const SIGNATURES: Array<{ re: RegExp; reason: string }> = [
+    { re: /blocked by[^.\n]*read-only (?:sandbox|workspace)/i, reason: 'blocked by a read-only sandbox' },
+    { re: /writes?\s+(?:are|were)\s+rejected/i, reason: 'sandbox rejected writes' },
+    { re: /could not (?:modify|regenerate|write|create)\b/i, reason: 'could not modify or regenerate files' },
+    { re: /\bno files?\s+(?:were|was)\s+(?:changed|modified|written|created)\b/i, reason: 'no files were changed' },
+    { re: /\bi\s+(?:cannot|can[’'`]?t)\s+(?:edit|modify|delete|write|create)\b/i, reason: 'refused a write operation' },
+    {
+      re: /network access[^.\n]*(?:unavailable|forbidden|blocked)|environment (?:forbids|prohibits)/i,
+      reason: 'blocked network/environment access',
+    },
+  ];
+  // Any of these means the turn did real work — veto the flag. Err toward NOT flagging.
+  const WORK_DONE =
+    /\bi\s+(?:fixed|implemented|added|changed|edited|wrote|created|updated|refactored|regenerated)\b|\bran\s+tests?\b|\btests?\s+(?:pass|passed|green)\b|\ball tests\b|\bthe fix\b|\bcommitted\b|\bsuccessfully\b|\bchanged\s+\d+\s+(?:files?|packages?)|\b\d+\s+(?:files?|packages?)\s+changed\b|\b\d+\s+(?:insertions?|deletions?)\b|\bdiff --git\b|\b\d+\s+passed\b/i;
+
+  const hit = SIGNATURES.find((s) => s.re.test(text));
+  if (hit === undefined) return undefined;
+  if (WORK_DONE.test(text)) return undefined;
+  return { matched: true, reason: hit.reason };
 }
 
 /**
@@ -38,11 +77,14 @@ function fold(entries: Map<string, GateCacheEntry>, event: CoreEvent): void {
   switch (event.type) {
     case 'awaitingHuman':
       if (typeof event.ord === 'number' && typeof event.prompt === 'string') {
+        const refusal = detectRefusal(event.prompt);
         entries.set(session, {
           ord: event.ord,
           prompt: event.prompt,
           lifecycle: 'open',
           receivedAt: observedAt(event),
+          // Spread only when matched, so a normal gate's entry is byte-identical (no `refusal` key).
+          ...(refusal !== undefined ? { refusal } : {}),
         });
       }
       break;

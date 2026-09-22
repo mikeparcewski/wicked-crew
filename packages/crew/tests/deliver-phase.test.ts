@@ -10,8 +10,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DELIVER_BASE_MOVED_MARKER as BASE_MOVED_MARKER,
   DELIVER_LIFT_CONFLICT_MARKER as LIFT_CONFLICT_MARKER,
+  DELIVER_PREFLIGHT_CHANGED_MARKER as PREFLIGHT_CHANGED_MARKER,
   DELIVER_PHASE_ID,
+  DELIVER_TEXT_HEREDOC,
+  EVIDENCE_FLOOR_PIN,
   composeDeliverWorkflow,
   deliverPrPhase,
   deliverPrScript,
@@ -27,6 +31,16 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain('R=$(basename "$PWD")');
     expect(script).toContain('B="wicked/$R"');
     expect(script).toContain('git branch --show-current');
+  });
+
+  // Review F-527-003 — the default ref is derived as the engine derives it (origin/HEAD when it
+  // resolves, else origin/main, else origin/master), tolerating a dangling origin/HEAD, so a repo
+  // whose base is origin/master never reads as a moved base. Driven for real in deliver-script-exec.
+  it('derives origin’s default branch with the engine’s fallback chain, tolerating a dangling origin/HEAD', () => {
+    expect(script).toContain('D=$(git symbolic-ref -q --short refs/remotes/origin/HEAD || true)');
+    expect(script).toContain('if [ -z "$D" ] || ! git rev-parse --verify -q "$D^{commit}" >/dev/null; then');
+    expect(script).toContain('elif git rev-parse --verify -q origin/master^{commit} >/dev/null; then D=origin/master;');
+    expect(script.indexOf('D=$(git symbolic-ref')).toBeLessThan(script.indexOf('DEF="${D#origin/}"'));
   });
 
   it('REFUSES to push main/master (and a detached-HEAD empty name)', () => {
@@ -68,19 +82,25 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toContain(`${LIFT_CONFLICT_MARKER} — rebase`);
   });
 
-  // crew#418 A — a non-fast-forward push (the remote run branch moved) is a lift collision too:
-  // the marker rides it, and every OTHER push failure stays a loud plain failure.
-  it('marks a non-fast-forward push as a LIFT-CONFLICT, other push failures stay plain', () => {
-    expect(script).toContain('if PUSHOUT=$(git push -u origin "$B" 2>&1); then');
+  // crew#418/#432 — a rejected push happens after the run work was committed. Both a remote
+  // branch race and auth/transport/hook failures must strand recoverably for a post-hoc retry.
+  it('marks every push failure as a recoverable LIFT-CONFLICT', () => {
+    // DES-L9: one push seam — the new-PR push (`-u origin "$B"`) or, for a revision, the refspec
+    // onto the PR's head branch — captured the same way, so every failure takes the arms below.
+    expect(script).toContain('_push() { if [ -n "$TARGET" ]; then git push origin "$B:refs/heads/$TARGET"; else git push -u origin "$B"; fi; }');
+    expect(script).toContain('if PUSHOUT=$(_push 2>&1); then');
     expect(script).toMatch(/\*non-fast-forward\*[^\n]*LIFT-CONFLICT[^\n]*non-fast-forward[^\n]*nothing was pushed/);
-    // The catch-all arm carries NO marker — auth/network/hook failures are terminal, not stranded.
+    // The catch-all carries the same marker — auth/network/hook failures preserve committed work.
     const plainArm = script.split('\n').find((l) => l.includes('deliver: git push of $B failed'))!;
-    expect(plainArm).not.toContain('LIFT-CONFLICT');
+    expect(plainArm).toContain('LIFT-CONFLICT');
+    expect(plainArm).toContain('PUSHERR="${PUSHOUT:0:96}');
+    expect(plainArm).toContain(': > "$S"');
+    expect(plainArm).toContain('retry POST /runs/:id/deliver');
   });
 
   it('pushes -u and opens the PR with gh, URL as the last line', () => {
     expect(script).toContain('git push -u origin "$B"');
-    expect(script).toContain('gh pr create --head "$B" --fill');
+    expect(script).toContain('gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body"');
     const lines = script.trimEnd().split('\n');
     expect(lines[lines.length - 1]).toBe('echo "$URL"');
   });
@@ -88,30 +108,118 @@ describe('deliverPrScript (the hardened field script)', () => {
   // crew#317 — the three defects, pinned as script properties. The BEHAVIOUR of each is driven
   // for real against temp git repos in deliver-script-exec.test.ts; these keep the shape from
   // regressing without paying for a git repo per assertion.
-  it('STAGES AND COMMITS the run’s work before it pushes anything', () => {
-    expect(script).toContain('git add -A');
-    expect(script).toContain('git diff --cached --quiet || git commit -q -m "$M"');
+  it('stages tracked work then classifies untracked paths before it pushes anything (crew#434)', () => {
+    // Tracked changes always ride; the blanket `git add -A` is gone.
+    expect(script).toContain('git add -u');
+    // No `git add -A` STAGING command (a whole line, however indented): the crew#434 classifier
+    // replaced the sweep. The wicked-core#433 preflight guard's `_tree()` helper does spell
+    // `git add -A` — into a SCRATCH index (`GIT_INDEX_FILE="$TD/preidx"`, same line), for a tree id,
+    // never the real index — so the pin is anchored on a staging line, not on the substring.
+    expect(script).not.toMatch(/^\s*git add -A/m);
+    expect(script).toContain('GIT_INDEX_FILE="$TD/preidx" git add -A -- .');
+    expect(script).toContain('S=.wicked-crew-delivery-stranded');
+    // Untracked candidates are enumerated per-file (gitignore honored, NUL-delimited) and staged
+    // individually — not swept.
+    expect(script).toContain('git ls-files --others --exclude-standard -z');
+    expect(script).toContain('git add -- "$F"');
+    // The scratch/key-material denylist, the socket-name rule, the scratch dirs, and the size cap.
+    expect(script).toContain('*.db|*.db-wal|*.db-shm|*.sqlite');
+    expect(script).toContain('.envrc');
+    expect(script).toContain('*.pem|*.key|*.p12|*.pfx|id_rsa*|*credentials*');
+    expect(script).toContain('*socket*'); // matched against the lowercased basename
+    expect(script).toContain('tr "[:upper:]" "[:lower:]"');
+    expect(script).toContain('*/tmp/*|*/.tmp/*|*/scratch/*|*/.cache/*|*/coverage/*');
+    expect(script).toContain('-gt 1048576');
+    // A GUARD, NOT A SILENT DROP: every exclusion is reported with its reason.
+    expect(script).toContain('deliver: EXCLUDED ($RN): $F');
+    // `--cleanup=whitespace`: a `commit.cleanup=strip` config must not eat the `## …` headings (W3-K1).
+    expect(script).toContain('git diff --cached --quiet || git commit -q --cleanup=whitespace -F "$TD/text"');
     // The commit precedes both the rebase (which refuses a dirty tree) and the push.
-    expect(script.indexOf('git add -A')).toBeLessThan(script.indexOf('git rebase'));
+    expect(script.indexOf('git add -u')).toBeLessThan(script.indexOf('git rebase'));
     expect(script.indexOf('git commit')).toBeLessThan(script.indexOf('git push -u origin'));
     // Author identity is the repo's own — crew never bakes one in.
     expect(script).not.toContain('user.email');
     expect(script).not.toContain('user.name');
   });
 
-  it('names the run AND its intent in the commit subject, single-line-safe', () => {
-    const withIntent = deliverPrScript('add the attention-reason helper');
-    expect(withIntent).toContain("I='add the attention-reason helper'");
-    expect(withIntent).toContain('M="wicked-crew run $R: $I"');
-    // No intent ⇒ the run id alone, never a dangling separator.
-    expect(script).toContain("I=''");
-    expect(script).toContain('else M="wicked-crew run $R"');
-    // A hostile intent can neither escape the single-quoted assignment nor add a line.
-    const hostile = deliverPrScript("x'; rm -rf /; echo '\n\nsecond line");
-    expect(hostile).not.toContain("rm -rf /'");
-    const assignment = hostile.split('\n').filter((l) => l.startsWith("I='"));
-    expect(assignment).toHaveLength(1);
-    expect(assignment[0]).toBe("I='x; rm -rf /; echo second line'");
+  // crew#524 / F-3R2-014 — the commit message and the PR title/body are COMPOSED from the run
+  // (`core/deliver-text.ts`), never `--fill`: the script asks the launching daemon for the
+  // run-derived text and falls back to the launch-time composition it carries in a QUOTED heredoc.
+  it('composes the PR/commit text from the intent — title as line 1, fetched from the daemon first, embedded fallback second', () => {
+    const withIntent = deliverPrScript('add the attention-reason helper', {
+      runId: 'run-1',
+      apiOrigin: 'http://127.0.0.1:7701',
+    });
+    // The callback to THIS daemon for the run-derived text, then the embedded fallback.
+    expect(withIntent).toContain("API='http://127.0.0.1:7701'");
+    expect(withIntent).toContain('"$API/api/v1/runs/$RUNID/deliver-text"');
+    // The LAUNCH run id rides pre-encoded as one path segment; the branch-derived id is only the
+    // fallback, percent-encoded byte-wise by the script (Copilot on #525).
+    expect(withIntent).toContain("RUNID='run-1'");
+    expect(withIntent).toContain('[ -n "$RUNID" ] || RUNID=$(_urlenc "${B#wicked/}")');
+    expect(deliverPrScript('x', { runId: "run/../../etc:passwd#1?q='z'" })).toContain(
+      "RUNID='run%2F..%2F..%2Fetc%3Apasswd%231%3Fq%3D%27z%27'",
+    );
+    expect(script).toContain("RUNID=''"); // no launch id known ⇒ derived + encoded at run time
+    // The fetched text is used ONLY when it is framed (title / blank / body) — a 200 that is not
+    // the run record falls back (Copilot on #525).
+    expect(withIntent).toContain('&& _framed "$TD/text"; then');
+    expect(withIntent).toMatch(/_framed\(\) \{ \[ -s "\$1" \] && \[ -n "\$\(sed -n 1p "\$1"\)" \] && \[ -z "\$\(sed -n 2p "\$1"\)" \]/);
+    expect(withIntent).toContain('using the launch-time PR text');
+    expect(withIntent).toContain(`cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`);
+    // Both carriers are FRAMED the same and parsed once: line 1 title, line 2 blank, then body.
+    expect(withIntent).toContain('TITLE=$(sed -n 1p "$TD/text")');
+    expect(withIntent).toContain(`sed '1,2d' "$TD/text" > "$TD/body"`);
+    const lines = withIntent.split('\n');
+    const open = lines.indexOf(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`);
+    expect(open).toBeGreaterThan(-1);
+    expect(lines[open + 1]).toBe('add the attention-reason helper'); // the title, whole
+    expect(lines[open + 2]).toBe('');
+    expect(lines.slice(open + 3, lines.indexOf(DELIVER_TEXT_HEREDOC, open)).join('\n')).toContain(
+      'Delivered by [wicked-crew](https://wc.wickedagile.com) run `run-1`.',
+    );
+    // The commit message IS that text (git takes the first paragraph as the subject); the cleanup
+    // mode keeps the `## …` headings under a `commit.cleanup=strip` config (W3-K1).
+    expect(withIntent).toContain('git commit -q --cleanup=whitespace -F "$TD/text"');
+    // No origin ⇒ no callback is even attempted, and the output SAYS which text is used (Copilot
+    // on #525) — every branch names its reason.
+    expect(script).toContain("API=''");
+    expect(script).toContain('no daemon origin was known when this run launched — using the launch-time PR text');
+    expect(script).toContain('curl is not available in this shell — using the launch-time PR text');
+    expect(script).toContain('did not answer with the run record — using the launch-time PR text');
+    expect(script).toContain('deliver: PR text composed from the run record ($API)');
+    // A hostile intent cannot break out of the quoted heredoc: no expansion happens inside it, CR
+    // and control characters are removed, and a line equal to the base delimiter is NOT dropped —
+    // the delimiter moves instead (Copilot on #525: dropping it could delete the title line).
+    const hostile = deliverPrScript(
+      `x'; rm -rf /; echo '$(id) \`id\`\r\n${DELIVER_TEXT_HEREDOC}\nsecond line`,
+      { runId: 'run-1' },
+    );
+    const hl = hostile.split('\n');
+    const hOpen = hl.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    const chosen = /<<'([^']+)'$/.exec(hl[hOpen]!)![1]!;
+    expect(chosen).toBe(`${DELIVER_TEXT_HEREDOC}_1`); // suffixed away from the colliding line
+    const hClose = hl.indexOf(chosen, hOpen + 1);
+    expect(hClose).toBeGreaterThan(hOpen);
+    expect(hl.slice(hOpen + 1, hClose)).toContain(DELIVER_TEXT_HEREDOC); // the intent's line rides verbatim
+    expect(hl.indexOf(chosen, hClose + 1)).toBe(-1); // exactly one closing delimiter
+    expect(hostile).not.toContain('\r');
+    // Anything after the heredoc is the script's own text again.
+    expect(hl[hClose + 1]).toBe('fi');
+    // The degenerate case Copilot named: the intent's FIRST line is the base delimiter — it is the
+    // title, it stays line 1 of the heredoc, and the framing is intact.
+    const titled = deliverPrScript(`${DELIVER_TEXT_HEREDOC}\n\nbody`, { runId: 'run-1' }).split('\n');
+    const tOpen = titled.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    expect(titled[tOpen]).toBe(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}_1'`);
+    expect(titled[tOpen + 1]).toBe(DELIVER_TEXT_HEREDOC);
+    expect(titled[tOpen + 2]).toBe('');
+    // …and when the text ALSO carries the first suffix, the delimiter keeps moving.
+    const twice = deliverPrScript(`${DELIVER_TEXT_HEREDOC}\n${DELIVER_TEXT_HEREDOC}_1\nbody`, { runId: 'run-1' });
+    expect(twice).toContain(`<<'${DELIVER_TEXT_HEREDOC}_2'`);
+    // An origin that is not a plain http(s) origin is never spliced in.
+    expect(deliverPrScript('x', { apiOrigin: "http://h'; rm -rf /; echo '" })).toContain("API=''");
+    expect(deliverPrScript('x', { apiOrigin: 'ftp://h:1' })).toContain("API=''");
+    expect(deliverPrScript('x', { apiOrigin: 'http://[::1]:7701/' })).toContain("API='http://[::1]:7701'");
   });
 
   it('FAILS LOUDLY with nothing pushed when there is nothing to deliver', () => {
@@ -123,8 +231,66 @@ describe('deliverPrScript (the hardened field script)', () => {
     expect(script).toMatch(/nothing to deliver[^\n]*nothing was pushed"; exit 1; \}/);
   });
 
+  // wicked-core#431 / #433 — the engine lifts + re-verifies BEFORE this script and pins the tip it
+  // verified against in WICKED_DELIVER_VERIFIED_BASE; the script closes the fetch→push race by refusing
+  // a default branch that moved past it. Pinned as script properties; driven for real (delivers on a
+  // matching pin, refuses on a moved one with the worktree untouched) in deliver-script-exec.test.ts.
+  it('pins the engine-verified base: refuses when origin/<default> moved past WICKED_DELIVER_VERIFIED_BASE, before staging (wicked-core#431)', () => {
+    // DES-L9: new-PR mode only — a revision keeps the PR's history (the engine's lift is Skipped for
+    // a branch with its own commits, so no verified base is pinned there).
+    expect(script).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then');
+    expect(script).toContain('T=$(git rev-parse --verify -q "$D^{commit}" || true)');
+    expect(script).toMatch(
+      /\[ "\$T" = "\$WICKED_DELIVER_VERIFIED_BASE" \] \|\| \{ echo "deliver: the engine verified this work against[^\n]*exit 1; \}/,
+    );
+    // NOT a strand: the refusal carries no LIFT-CONFLICT marker — a post-hoc lift would push a tree
+    // nobody verified on the new base; the remedy is the engine's own retry.
+    const line = script.split('\n').find((l) => l.includes(BASE_MOVED_MARKER))!;
+    expect(line).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(line).toContain('Nothing was staged, committed or pushed');
+    // The marker TRAILS the refusal (review F-527-001): the engine keeps head-150 + tail-250 of the
+    // whole output and this line follows the fetch chatter, so only a trailing marker reliably lands
+    // in the excerpt crew's triage and strand derivation read.
+    expect(line).toMatch(/Nothing was staged, committed or pushed; deliver: BASE MOVED since verification \(/);
+    const echoed = line.slice(line.indexOf('echo "'));
+    expect(echoed.length - echoed.indexOf(BASE_MOVED_MARKER)).toBeLessThan(200);
+    // Ordered: after the script's own fetch, before anything is staged or committed, before the push.
+    const at = script.indexOf(BASE_MOVED_MARKER);
+    expect(at).toBeGreaterThan(script.indexOf('git fetch origin'));
+    expect(at).toBeLessThan(script.indexOf('git add -u'));
+    expect(at).toBeLessThan(script.indexOf('git push -u origin'));
+    // Absent pin ⇒ the whole block is skipped: the check is guarded on the variable being non-empty.
+    expect(script.indexOf('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ]')).toBeLessThan(at);
+  });
+
+  // wicked-core#433 review addendum — the crew#426 preflight runs AFTER the engine's verification;
+  // when it changes the worktree an engine-driven delivery refuses (a post-hoc lift discloses).
+  // Pinned as script properties; driven for real in deliver-script-exec.test.ts.
+  it('refuses when the preflight CHANGED the verified tree — unless the lift is post-hoc, which discloses', () => {
+    // Seeded from HEAD, errors loud (review F-527-007).
+    expect(script).toContain('_tree() { rm -f "$TD/preidx"; GIT_INDEX_FILE="$TD/preidx" git read-tree HEAD && GIT_INDEX_FILE="$TD/preidx" git add -A -- . && GIT_INDEX_FILE="$TD/preidx" git write-tree; }');
+    expect(script).toContain('  T0=$(_tree) || {');
+    expect(script).toContain('  T1=$(_tree) || {');
+    expect(script).toContain('  if [ "$T0" != "$T1" ]; then');
+    const refusal = script.split('\n').find((l) => l.includes(PREFLIGHT_CHANGED_MARKER))!;
+    expect(refusal).toContain('if [ -z "${WICKED_DELIVER_POSTHOC:-}" ]; then');
+    // The marker TRAILS the line, followed by the file list (review F-527-001).
+    expect(refusal).toMatch(/Nothing was staged, committed or pushed; deliver: PREFLIGHT CHANGED the verified tree: \$\{CH\}"; exit 1; fi$/);
+    expect(refusal).not.toContain(LIFT_CONFLICT_MARKER);
+    expect(script).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    // Ordered: T0 before the install, the verdict after the codegen and before anything is staged.
+    const t0 = script.indexOf('T0=$(_tree)');
+    expect(t0).toBeGreaterThan(-1);
+    expect(t0).toBeLessThan(script.indexOf('npm install --prefer-offline'));
+    expect(script.indexOf('T1=$(_tree)')).toBeGreaterThan(script.indexOf('generate:api-tests'));
+    expect(script.indexOf(PREFLIGHT_CHANGED_MARKER)).toBeLessThan(script.indexOf('git add -u'));
+  });
+
   it('captures gh’s output and status separately — no `| tail -1` verdict laundering', () => {
-    expect(script).toContain('if ! OUT=$(gh pr create --head "$B" --fill 2>&1); then');
+    expect(script).toContain(
+      'if ! OUT=$(gh pr create --head "$B" --title "$TITLE" --body-file "$TD/body" 2>&1); then',
+    );
+    expect(script).not.toContain('--fill');
     expect(script).toContain('deliver: gh pr create failed for $B — no PR was opened');
     // The gh invocation must not be piped at all: the phase's verdict is gh's own status.
     const ghLine = script.split('\n').find((l) => l.includes('gh pr create'))!;
@@ -145,10 +311,65 @@ describe('deliverPrScript (the hardened field script)', () => {
     // The field overlay guarded a personal account by name; that must never ship in crew.
     expect(script).not.toContain('mikeparcewski');
     expect(script).toContain('GH_ACCOUNT');
-    // The switch only runs when GH_ACCOUNT is set AND differs from the current login.
+    // The identity check reads gh's ACTIVE login and only acts when GH_ACCOUNT is set.
     expect(script).toContain('gh api user -q .login');
-    expect(script).toContain('gh auth switch --hostname github.com --user "$GH_ACCOUNT"');
     expect(script).toMatch(/if \[ -n "\$\{GH_ACCOUNT:-\}" \]/);
+  });
+
+  // DES-L9 D-18 (FIX-IT-ALL row 0.11, PR-L9-crew-0 — tests first): with GH_ACCOUNT set and a
+  // differing (or unreadable) active login the phase REFUSES — `deliver: identity mismatch — …;
+  // nothing was staged, committed or pushed …` — and the `gh auth switch` is DELETED: the daemon's
+  // push identity is what its gh (or GH_TOKEN) holds, disclosed at the deliver gate, never flipped
+  // at push time (crew #549, F-RC1-010). FIXED by PR-L9-crew: the switch is gone, the refusal is in.
+  it('FIXED (DES-L9 D-18, PR-L9-crew): the identity guard REFUSES on a mismatch — no `gh auth switch` in the script', () => {
+    expect(script).not.toContain('gh auth switch');
+    expect(script).toContain('deliver: identity mismatch');
+    expect(script).toContain('nothing was staged, committed or pushed');
+    // The identity is read ONCE, before the fetch, so the refusal is the phase's whole output.
+    expect(script.indexOf('L=$(gh api user -q .login')).toBeLessThan(script.indexOf('git fetch origin'));
+    // Unset ⇒ disclosed, never silent.
+    expect(script).toContain('GH_ACCOUNT not set — not pinned');
+    expect(script).toContain('GH_ACCOUNT pinned by GH_TOKEN');
+    expect(script).toContain('GH_ACCOUNT from the gh keyring — export GH_TOKEN to pin it');
+  });
+
+  // DES-L9 / crew#550 — REVISION mode: the script pushes onto the PR's head branch and never
+  // opens a second PR; a moved or vanished head is refused BEFORE staging, without a strand marker.
+  it('REVISION mode pushes onto the PR branch, comments the record, refuses a moved head without a marker', () => {
+    const rev = deliverPrScript('revise it', {
+      runId: 'r-1',
+      revisesPr: { number: 273, headRef: 'wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595', url: 'https://github.com/o/r/pull/273' },
+    });
+    expect(rev).toContain("PRNUM='273'");
+    expect(rev).toContain("TARGET='wicked/cd3ea61d-9f4f-406d-972b-13ace3a87595'");
+    expect(rev).toContain("PRURL='https://github.com/o/r/pull/273'");
+    expect(rev).toContain('git merge-base --is-ancestor "origin/$TARGET" "$B"');
+    const moved = rev.split('\n').find((l) => l.includes("branch moved since this run based on it"))!;
+    expect(moved).not.toContain('LIFT-CONFLICT');
+    expect(moved).toContain("deliver: pull request #$PRNUM's branch moved — refused; nothing was pushed");
+    expect(rev).toContain('no longer exists on the remote; nothing was staged, committed or pushed');
+    expect(rev).toContain('the run added no commit on top of PR #$PRNUM');
+    expect(rev).toContain('gh pr comment "$PRNUM" --body-file "$TD/body"');
+    expect(rev).toContain('gh pr view "$PRNUM" --json state -q .state');
+    // The rebase onto the default branch and the verified-base check are new-PR-mode only.
+    expect(rev).toContain('if [ -z "$TARGET" ]; then\nif ! git rebase "$D" "$B"; then');
+    expect(rev).toContain('if [ -n "${WICKED_DELIVER_VERIFIED_BASE:-}" ] && [ -z "$TARGET" ]; then');
+    // No revision ⇒ empty inputs, byte-identical script otherwise.
+    expect(script).toContain("PRNUM=''");
+    expect(script).toContain("TARGET=''");
+    // Unsafe inputs are refused at compose time — never spliced.
+    expect(() => deliverPrScript('x', { revisesPr: { number: 1, headRef: "a'b", url: 'https://github.com/o/r/pull/1' } })).toThrow(/head branch name/);
+    expect(() => deliverPrScript('x', { revisesPr: { number: 1, headRef: 'ok', url: 'javascript:alert(1)' } })).toThrow(/pull request URL/);
+    expect(() => deliverPrScript('x', { revisesPr: { number: 0, headRef: 'ok', url: 'https://github.com/o/r/pull/1' } })).toThrow(/pull request number/);
+  });
+
+  // F-BM-002 (crew#579): the scratch DIRECTORIES are excluded at enumeration — one git call, one
+  // line per directory — never a fork per file for a path the classifier would exclude anyway.
+  it('excludes the scratch directories at enumeration and reports each once with a count (F-BM-002)', () => {
+    expect(script).toContain("git ls-files --others --exclude-standard -z -- . ':(exclude)tmp' ':(exclude).tmp' ':(exclude)scratch' ':(exclude).cache' ':(exclude)coverage'");
+    expect(script).toContain('for SD in tmp .tmp scratch .cache coverage; do');
+    expect(script).toContain('deliver: EXCLUDED (scratch-dir): $SD/ ($N files)');
+    expect(script.indexOf('for SD in tmp')).toBeLessThan(script.indexOf('while IFS= read -r -d "" F; do'));
   });
 
   // crew#317: the overlay def that shipped run d1bc72c2 began `set -e` with NO pipefail, which
@@ -180,15 +401,16 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
   });
 
   // crew#317 — the delivering phase was the one phase nothing re-derived (`verified_evidence:
-  // false`, `validator_pin: null`, `governed=false`). It now declares verified_evidence, which
-  // core's `enforce_verified_evidence` arms AT REGISTRATION with the built-in evidence floor
-  // (EVIDENCE_FLOOR_PIN — "the run left a change in its worktree"). The pin stays null on OUR
-  // side deliberately: `attach_pinned_validators` is fail-closed on a pin that is not vaulted,
-  // and crew has no provision/approve surface, so a crew-minted pin would bail every run.
-  it('declares verified_evidence so the engine floors it, and mints no pin of its own', () => {
+  // false`, `validator_pin: null`, `governed=false`). It declares verified_evidence AND pins the
+  // built-in evidence floor explicitly (EVIDENCE_FLOOR_PIN — "the run left a change in its
+  // worktree"): since wicked-core#414 the engine judges a def as authored and REFUSES a flagged
+  // phase with no pin, and the floor is the one pin that always resolves (seeded on core's plan
+  // path) — crew still mints no pin of its own.
+  it('declares verified_evidence and pins the built-in evidence floor explicitly', () => {
     const phase = deliverPrPhase(['review']);
     expect(phase.verified_evidence).toBe(true);
-    expect(phase.validator_pin).toBeNull();
+    expect(phase.validator_pin).toBe(EVIDENCE_FLOOR_PIN);
+    expect(EVIDENCE_FLOOR_PIN).toBe('e2e7af1db9e48454');
   });
 
   it('threads the run intent into the script it carries', () => {
@@ -197,7 +419,10 @@ describe('deliverPrPhase (the PhaseDef shape core accepts)', () => {
       type: 'tool',
       cmd: ['bash', '-lc', deliverPrScript('ship the deliver fix')],
     });
-    expect((phase.executor as { cmd: string[] }).cmd[2]).toContain("I='ship the deliver fix'");
+    // The intent is the title (heredoc line 1) — the F-3R2-014 headline never comes back.
+    const cmd = (phase.executor as { cmd: string[] }).cmd[2]!.split('\n');
+    expect(cmd[cmd.indexOf(`  cat > "$TD/text" <<'${DELIVER_TEXT_HEREDOC}'`) + 1]).toBe('ship the deliver fix');
+    expect(cmd.join('\n')).not.toContain('wicked-crew run $R:');
   });
 });
 
@@ -230,6 +455,36 @@ describe('composeDeliverWorkflow (per-run composition)', () => {
     expect(composed.id).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
   });
 
+  it('embeds a BOUNDED fallback: a 300 KB intent cannot E2BIG the `bash -lc` argument (Copilot on #525)', () => {
+    const huge = `ship the thing\n\n${'y'.repeat(300_000)}\n\nfix issue #3`;
+    const cmd = deliverPrScript(huge, { runId: 'run-1' });
+    expect(cmd.length).toBeLessThan(64 * 1024);
+    expect(cmd).toContain('the full text is on the run record');
+    const lines = cmd.split('\n');
+    const open = lines.findIndex((l) => l.startsWith(`  cat > "$TD/text" <<'`));
+    expect(lines[open + 1]).toBe('ship the thing'); // the title still comes first
+    // A normal intent is embedded whole, with no note.
+    expect(deliverPrScript('ship the thing', { runId: 'run-1' })).not.toContain('the full text is on the run record');
+  });
+
+  it('bakes the daemon origin, the run link, the repo and the phase list into the deliver phase (crew#524)', () => {
+    const composed = composeDeliverWorkflow(feature, 'run-123', 'ship it (fixes #9)', {
+      repoRef: 'wicked-crew',
+      apiOrigin: 'http://127.0.0.1:7701',
+    });
+    const deliver = composed.phases[composed.phases.length - 1]!;
+    const cmd = (deliver.executor as { cmd: string[] }).cmd[2]!;
+    expect(cmd).toContain("API='http://127.0.0.1:7701'");
+    expect(cmd).toContain('- Run: [`run-123`](http://127.0.0.1:7701/runs/run-123)');
+    expect(cmd).toContain('workflow `feature` · repo `wicked-crew`');
+    expect(cmd).toContain('Fixes #9');
+    for (const p of feature.phases) expect(cmd).toContain(`| \`${p.id}\` | ${p.kind} | ${p.role} |`);
+    // Without a daemon (CLI-driven launch): no callback, no link, still a full fallback text.
+    const bare = (composeDeliverWorkflow(feature, 'run-123', 'ship it').phases.at(-1)!.executor as { cmd: string[] }).cmd[2]!;
+    expect(bare).toContain("API=''");
+    expect(bare).toContain('- Run: `run-123`');
+  });
+
   it('refuses a def that already delivers — the caller launches it as-is instead', () => {
     const alreadyDelivering: WorkflowDef = {
       id: 'feature-pr',
@@ -257,18 +512,18 @@ describe('deliver review follow-ups (#303)', () => {
   });
 });
 
-// crew#317 — the deliver phase's governance is a CROSS-REPO claim: crew sets a flag and relies on
-// wicked-core to turn it into a real gate. Transcribing that belief into a comment is the drift
+// crew#317 → wicked-core#414 — the deliver phase's governance is a CROSS-REPO claim: crew pins a
+// floor and relies on wicked-core to run it. Transcribing that belief into a comment is the drift
 // this repo keeps paying for (FINDING-049/-084/-088), so it is DERIVED from core's own source, in
 // the established style of the sibling drift guards.
 //
 // The mechanism, in core's `workflow.rs`: `WorkflowRegistry::register` — the choke point every def
-// crosses, including crew's per-run `registerWorkflow` — calls `enforce_verified_evidence`, which
-// pins `builtin_floors::EVIDENCE_FLOOR_PIN` onto any `verified_evidence` phase that names no
-// validator of its own. That is why `deliverPrPhase` can declare the flag and leave the pin null:
-// crew cannot mint a pin (`attach_pinned_validators` is fail-closed on one that is not vaulted,
-// and crew has no provision/approve surface), but it can declare the requirement.
-describe.skipIf(SKIP_CORE_CHECKS)('the engine really arms verified_evidence (cross-repo)', () => {
+// crosses, including crew's per-run `registerWorkflow` — judges the def AS AUTHORED and REFUSES a
+// `verified_evidence` phase that names no validator (`refuse_unpinned_verified_evidence`). Nothing
+// is armed on crew's behalf any more (the old `enforce_verified_evidence` is gone), which is why
+// `deliverPrPhase` pins `EVIDENCE_FLOOR_PIN` itself — the one pin that always resolves — and why
+// that pin must equal core's constant.
+describe.skipIf(SKIP_CORE_CHECKS)('the engine refuses an unpinned verified_evidence phase as authored (cross-repo)', () => {
   const workflowRs = (): string => {
     const path = join(requireCoreDir(), 'src', 'workflow.rs');
     try {
@@ -276,21 +531,27 @@ describe.skipIf(SKIP_CORE_CHECKS)('the engine really arms verified_evidence (cro
     } catch (e) {
       throw new Error(
         `cannot read core's src/workflow.rs at ${path}: ${e instanceof Error ? e.message : String(e)}\n` +
-          "  The deliver phase's ONLY governance is core arming its verified_evidence flag with " +
-          'the built-in evidence floor. If that moved, follow it — do not delete this guard.',
+          "  The deliver phase's ONLY governance is the evidence floor it pins, which core runs " +
+          'because it is pinned. If registration moved, follow it — do not delete this guard.',
       );
     }
   };
 
-  it('register() runs enforce_verified_evidence, which floors an unpinned flagged phase', () => {
+  it('register() refuses a flagged phase with no pin — and no longer arms one', () => {
     const src = workflowRs();
-    expect(src).toContain('let def = enforce_verified_evidence(def);');
-    expect(src).toContain('fn enforce_verified_evidence(mut def: WorkflowDef) -> WorkflowDef {');
-    // Flagged AND unpinned is exactly the shape deliverPrPhase ships.
-    expect(src).toContain('if !phase.verified_evidence || phase.validator_pin.is_some() {');
+    expect(src).toContain('refuse_unpinned_verified_evidence(&def)?;');
     expect(src).toContain(
-      'phase.validator_pin = Some(crate::builtin_floors::EVIDENCE_FLOOR_PIN.to_string());',
+      'fn refuse_unpinned_verified_evidence(def: &WorkflowDef) -> Result<(), WorkflowDefError> {',
     );
+    expect(src).toContain('.find(|p| p.verified_evidence && p.validator_pin.is_none())');
+    // The arming pass is gone: a def is what it says it is.
+    expect(src).not.toContain('fn enforce_verified_evidence(');
+    expect(src).not.toContain('fn carry_shadowed_pins(');
+  });
+
+  it("crew's pin IS core's built-in evidence floor", () => {
+    const floors = readFileSync(join(requireCoreDir(), 'src', 'builtin_floors.rs'), 'utf8');
+    expect(floors).toContain(`pub const EVIDENCE_FLOOR_PIN: &str = "${EVIDENCE_FLOOR_PIN}";`);
   });
 
   it('the floor it arms re-derives done from the worktree, committed work included', () => {

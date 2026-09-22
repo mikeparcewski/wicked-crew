@@ -6,11 +6,12 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
+import { removeScratch } from '../setup/scratch.js';
 
 let app: Awaited<ReturnType<typeof createServer>>;
 let adapter: CoreAdapter;
@@ -32,7 +33,7 @@ afterAll(async () => {
   // been seen to leak — but leaving the pump thread alive past teardown is the same latent gap
   // that made `request-strictness` flaky, and closing is what the other adapter-using suites do.
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 describe('chat routes (stub engine)', () => {
@@ -56,6 +57,60 @@ describe('chat routes (stub engine)', () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error ?? '').toMatch(/chat unsupported|ACP/i);
+  });
+
+  // crew#502: the scope is resolved and validated BEFORE any seat warms — so these reach a
+  // verdict on the stub engine (which cannot open chats at all) exactly because nothing was opened.
+  it('POST /chats with an unknown repoRef is a 404 naming EVERY missing ref, before any seat warms', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'scoped-404', repoRefs: ['no-such-repo', 'nor-this-one'] }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string; missing?: string[] };
+    expect(body.missing).toEqual(['no-such-repo', 'nor-this-one']);
+    expect(body.error ?? '').toContain("'no-such-repo'");
+    expect(body.error ?? '').toContain("'nor-this-one'");
+  });
+
+  it('POST /chats with the legacy single repoRef is validated the same way', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'legacy-404', repoRef: 'no-such-repo' }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { missing?: string[] };
+    expect(body.missing).toEqual(['no-such-repo']);
+  });
+
+  it('POST /chats refuses an empty repoRefs list (400) and a chat id that cannot name a scratch directory (400)', async () => {
+    const empty = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'c-empty', repoRefs: [] }),
+    });
+    expect(empty.status).toBe(400);
+    // `..` passes the id's character class; the scope resolver refuses it before creating anything.
+    const dotdot = await fetch(`${baseUrl}/api/v1/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: '..', clis: ['claude'] }),
+    });
+    expect(dotdot.status).toBe(400);
+    const body = (await dotdot.json()) as { error?: string };
+    expect(body.error ?? '').toMatch(/scratch directory/);
+  });
+
+  it('GET /chats/:id carries `scope` (null for a chat this daemon never opened) beside the seats', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats/never-opened`);
+    expect([200, 400]).toContain(res.status);
+    if (res.status === 200) {
+      const body = (await res.json()) as { chatId?: string; seats?: unknown; scope?: unknown };
+      expect(body.chatId).toBe('never-opened');
+      expect(body.scope).toBeNull();
+    }
   });
 
   it('POST /chats/:id/messages on an unopened chat is a 4xx, not a hang', async () => {
@@ -100,6 +155,41 @@ describe('chat routes (stub engine)', () => {
       // what is pinned is the property that matters to an operator — the body names the missing
       // capability rather than blaming their request.
       expect(body.error ?? '').toMatch(/(not yet supported|unsupported)/i);
+    }
+  });
+
+  // F-W1-005 (review MED-2): the re-seat route through the REAL adapter + NAPI, not a mock. The
+  // stub engine opens no chats, so what this pins is the honest half — the route reaches the
+  // engine seam and refuses a chat this daemon does not hold, rather than minting one or hanging.
+  // The no-eviction half is the ENGINE's contract and is pinned in wicked-core's own suite
+  // (`acp_runner.rs` `reopening_with_a_new_scope_evicts_the_old_seats_and_a_seatless_chat_holds_no_scope`
+  // — "a same-scope re-open evicts nothing"): `chat_open` retains every session unless the
+  // recorded scope CHANGED, then ensures only the named `clis`, so seats outside the subset are
+  // never touched. This route hands the engine the scope recorded at open, verbatim.
+  it('POST /chats/:id/seats on a chat this daemon never opened is a 404 — never a fresh chat, never a hang', async () => {
+    const res = await fetch(`${baseUrl}/api/v1/chats/never-opened/seats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clis: ['claude'] }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/not open on this daemon/);
+    // The refusal did not invent a chat: the enumerate surface is still empty.
+    const list = await fetch(`${baseUrl}/api/v1/chats`);
+    if (list.status === 200) {
+      expect(((await list.json()) as { chats?: unknown[] }).chats ?? []).toEqual([]);
+    }
+  });
+
+  it('POST /chats/:id/seats validates its body before touching the engine', async () => {
+    for (const payload of [{}, { clis: [] }, { clis: ['a'], extra: 1 }]) {
+      const res = await fetch(`${baseUrl}/api/v1/chats/never-opened/seats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status, JSON.stringify(payload)).toBe(400);
     }
   });
 });

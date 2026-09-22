@@ -16,7 +16,7 @@
  * project that cannot answer must not reach the binary at all.
  */
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +28,7 @@ import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { attributeHits, CO_LOCATION_NOTE } from '../src/projects/graph.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const PROJECT_ID = 'proj_test_graph';
 
@@ -64,6 +65,26 @@ function repo(id: string): RepoEntry {
     default_branch: 'main',
     registered_at: 0,
     code_graph_db: join('/repos', id, '.codegraph', 'estate.db'),
+  };
+}
+
+/**
+ * A repo record as a CURRENT engine publishes it when it resolved NO repo-graph root
+ * (wicked-core#406): `code_graph_db` present but EMPTY, plus the `code_graph_root_unresolvable`
+ * finding whose message names the remedy (the daemon's environment, not a reinstall).
+ */
+function unresolvableRepo(id: string): RepoEntry {
+  return {
+    ...repo(id),
+    code_graph_db: '',
+    findings: [
+      {
+        code: 'code_graph_root_unresolvable',
+        message:
+          'no repo-graph root resolves for this daemon (no WICKED_ESTATE_REPO_GRAPH_ROOT override, no state home, no HOME / USERPROFILE): the repo has no code graph until one does',
+        path: null,
+      },
+    ],
   };
 }
 
@@ -118,7 +139,7 @@ beforeEach(() => {
 afterEach(async () => {
   await fixture.app?.close();
   delete process.env['WICKED_CREW_PROJECT_GRAPH_ROOT'];
-  rmSync(fixture.graphRoot, { recursive: true, force: true });
+  removeScratch(fixture.graphRoot);
 });
 
 describe('GET /projects/:id/graph — the graph reports its own standing', () => {
@@ -146,8 +167,11 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     expect(res.statusCode).toBe(200);
     const { status } = res.json() as { status: Record<string, unknown> };
     expect(status['state']).toBe('not-indexed');
-    expect(status['detail']).toMatch(/2 repo member\(s\) but no code graph yet/);
-    expect(status['detail']).toMatch(/graph\/refresh/);
+    // Customer copy (F-2R2-008): the page action, the member count — never the raw route, which
+    // rides on `action` for the UI to wire.
+    expect(status['detail']).toMatch(/has not been built yet — build it from the project page \(2 member repositories\)/);
+    expect(status['detail']).not.toMatch(/POST/);
+    expect(status['action']).toBe('projects.graph.refresh');
     expect(status['missingRepos']).toEqual(['wicked-ledger', 'wicked-vault']);
     // Every member is listed with the label its rows WILL carry, so an operator can predict the
     // provenance strings before the first refresh.
@@ -203,6 +227,24 @@ describe('GET /projects/:id/graph — the graph reports its own standing', () =>
     // repoPaths.ts's message, carried through verbatim — it already names the remedy.
     expect(status['detail']).toMatch(/carries no code_graph_db/);
     expect(status['detail']).toMatch(/wicked-core#170/);
+  });
+
+  it("a CURRENT engine with no resolvable repo-graph root is NOT 'engine-too-old': its own finding, 503", async () => {
+    // wicked-core#406: the empty `code_graph_db` shape is shared with a stale addon, but the engine
+    // says which it is (`findings[]`). Classifying it as engine-too-old (501) would tell the
+    // operator to reinstall a current addon; the remedy is the daemon's environment.
+    fixture.app = build({
+      members: [repoMember('wicked-ledger')],
+      repos: [unresolvableRepo('wicked-ledger')],
+      graphRoot: fixture.graphRoot,
+    });
+    const res = await fixture.app.inject({ method: 'GET', url: `/api/v1/projects/${PROJECT_ID}/graph` });
+    expect(res.statusCode).toBe(503);
+    const body = res.json() as { error: string; status?: Record<string, unknown> };
+    expect(body.status).toBeUndefined();
+    expect(body.error).toMatch(/no repo-graph root resolves for this daemon/);
+    expect(body.error).not.toMatch(/wicked-core#170/);
+    expect(body.error).not.toMatch(/engine-too-old/);
   });
 
   it('the synthesized default project can never have a graph, and says why', async () => {

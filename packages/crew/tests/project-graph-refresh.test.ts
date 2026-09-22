@@ -47,6 +47,7 @@ import { ProjectSettingsStore } from '../src/projects/settings.js';
 import { repoLabel } from '../src/projects/graph-paths.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { Project, ProjectMember, RepoEntry } from '../src/core/types.js';
+import { removeScratch } from './setup/scratch.js';
 
 const POSIX = process.platform !== 'win32';
 const PROJECT_ID = 'proj_refresh';
@@ -359,7 +360,7 @@ afterEach(async () => {
   delete process.env['STUB_DROPS_REPO'];
   delete process.env['STUB_INDEX_DELAY_MS'];
   delete process.env['STUB_INDEX_STDERR'];
-  rmSync(fx.work, { recursive: true, force: true });
+  removeScratch(fx.work);
 });
 
 describe.skipIf(!POSIX)('POST /projects/:id/graph/refresh — the build itself', () => {

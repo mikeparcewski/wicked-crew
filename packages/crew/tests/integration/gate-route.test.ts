@@ -14,12 +14,13 @@
 process.env['WICKED_MEMORY_EMBEDDER'] = 'hash';
 
 import { afterAll, afterEach, beforeAll, beforeEach, expect, describe, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { RecordedEvent, SessionView } from '../../src/core/types.js';
+import { removeScratch } from '../setup/scratch.js';
 
 const PARKED = 'parked-run';
 const FINISHED = 'finished-run';
@@ -71,7 +72,7 @@ afterEach(async () => {
 
 afterAll(() => {
   adapter.close();
-  rmSync(dir, { recursive: true, force: true });
+  removeScratch(dir);
 });
 
 async function getGate(id: string) {

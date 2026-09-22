@@ -30,6 +30,7 @@ import {
 } from '../src/api/run-files.js';
 import type { CoreAdapter } from '../src/core/adapter.js';
 import type { FastifyInstance } from 'fastify';
+import { removeScratch } from './setup/scratch.js';
 
 /** git with a hermetic identity — no dependence on the developer's ~/.gitconfig. */
 function git(cwd: string, ...args: string[]): string {
@@ -130,7 +131,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
 
   afterAll(async () => {
     await app.close();
-    rmSync(base, { recursive: true, force: true });
+    removeScratch(base);
   });
 
   const getFile = (runId: string, path?: string) =>
@@ -331,7 +332,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
     try {
       const ok = await scoped.inject({ method: 'GET', url: '/api/v1/runs/run-clean/diff' });
       expect(ok.statusCode).toBe(200);
-      expect(ok.json()).toEqual({ diff: '', truncated: false });
+      expect(ok.json()).toEqual({ diff: '', truncated: false, source: 'worktree' });
     } finally {
       await scoped.close();
     }
@@ -340,7 +341,7 @@ describe('GET /runs/:id/files + /runs/:id/diff (DES-FEEDBACK-002 CREW-1)', () =>
   it('a non-git workdir answers an empty diff rather than an error (the git-history tolerance)', async () => {
     const res = await getDiff('run-nogit');
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ diff: '', truncated: false });
+    expect(res.json()).toEqual({ diff: '', truncated: false, source: 'worktree' });
   });
 
   // ── diff: caps ────────────────────────────────────────────────────────────
