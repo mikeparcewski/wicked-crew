@@ -485,6 +485,84 @@ describe('crew#641 — single-seat degradation disclosed on open and every turn'
   });
 });
 
+// crew#650 — the other branch of #641's condition. `singleSeat` was gated on `refused.length > 0`,
+// so the case an operator is most likely to create — a chat opened with ONE seat on purpose, nothing
+// refused — opened silently: `ok: true`, `refused: []`, no disclosure at all. The chat is just as
+// unable to disagree with itself, which is the property the field exists to state.
+describe('crew#650 — singleSeat is disclosed with NO refusals at all', () => {
+  it('201 carries singleSeat for a chat opened with exactly one seat and nothing refused', async () => {
+    const res = await open({ chatId: 'solo', clis: ['claude'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as {
+      seats: { cliKey: string; ok: boolean }[];
+      refused: unknown[];
+      singleSeat?: { degraded: boolean; warmed: string; refused: unknown[]; message: string };
+    };
+    expect(body.seats.filter((s) => s.ok).map((s) => s.cliKey)).toEqual(['claude']);
+    expect(body.refused).toEqual([]);
+    expect(body.singleSeat, 'one warm seat cannot disagree with itself, refusals or not').toBeDefined();
+    expect(body.singleSeat!.degraded).toBe(true);
+    expect(body.singleSeat!.warmed).toBe('claude');
+    // The refusal list rides along as EVIDENCE and is empty; it is not what triggers the field.
+    expect(body.singleSeat!.refused).toEqual([]);
+    expect(body.singleSeat!.message).toMatch(/one seat \(claude\)/);
+    expect(body.singleSeat!.message).toMatch(/wicked-core#563/);
+    // …and it must NOT invent a refusal clause with nothing after it.
+    expect(body.singleSeat!.message, 'no "Refused:" clause when nothing was refused').not.toMatch(/Refused:/);
+  });
+
+  it('202 carries singleSeat on every turn of that chat', async () => {
+    await open({ chatId: 'solo-msg', clis: ['claude'], repoRefs: ['alpha'] });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/solo-msg/messages',
+      payload: { text: 'hello' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: { warmed: string; refused: unknown[]; message: string } };
+    expect(body.seats).toEqual(['claude']);
+    expect(body.singleSeat).toBeDefined();
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refused).toEqual([]);
+    expect(body.singleSeat!.message).not.toMatch(/Refused:/);
+  });
+
+  it('202 still discloses for a single-seat chat this daemon did not open (post-restart: refusals unknown)', async () => {
+    // A restarted daemon holds no scope for a chat the engine still has warm: `refusedOf` answers
+    // `undefined`. That is "the refusals are unknown", not "the chat gained a seat" — the old guard
+    // read it as the latter and went silent.
+    warmByChat.set('survivor', ['claude']);
+    expect(chatScopes.refusedOf('survivor')).toBeUndefined();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/survivor/messages',
+      payload: { text: 'still one seat?' },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = res.json() as { seats: string[]; singleSeat?: { warmed: string; refused: unknown[] } };
+    expect(body.seats).toEqual(['claude']);
+    expect(body.singleSeat, 'the chat is single-seated whether or not this daemon remembers why').toBeDefined();
+    expect(body.singleSeat!.warmed).toBe('claude');
+    expect(body.singleSeat!.refused).toEqual([]);
+  });
+
+  // Declared boundary control, NOT a regression guard: this one passes on head too (the old guard
+  // was strictly narrower). It exists because the fix WIDENS the condition, and it fails against the
+  // plausible over-widenings — disclosing on any chat, or on the seats a turn happened to reach.
+  it('a two-warm-seat chat with no refusals still discloses NOTHING — the count is the trigger', async () => {
+    const res = await open({ chatId: 'duo-norefuse', clis: ['claude', 'opencode'], repoRefs: ['alpha'] });
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
+    const msg = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chats/duo-norefuse/messages',
+      payload: { text: 'hello both' },
+    });
+    expect(msg.statusCode).toBe(202);
+    expect((msg.json() as { singleSeat?: unknown }).singleSeat).toBeUndefined();
+  });
+});
+
 describe('crew#642 — zero-entity graph reports ungrounded on the 201 scope', () => {
   it('a zero-entity graph (entityCount → 0) reports ungrounded on the scope.graph — FAILS on main (returns bound:true)', async () => {
     entityCount = async () => 0;

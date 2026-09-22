@@ -30,6 +30,17 @@ mentioned only where a daemon release depends on them.
   the guard runs on vitest's own coloured bytes, captured as a fixture. The entry point sets
   `process.exitCode` rather than calling `process.exit()`, which can drop buffered stdout — and with
   it the telemetry line — when the floor pipes the check's output.
+- **#650 — `singleSeat` is disclosed whenever exactly one seat is warm, refusals or not.** The
+  disclosure added for #641 was conditioned on `refused.length > 0`, so the case an operator is most
+  likely to create — a chat opened with a single seat on purpose — returned `ok: true` with no
+  signal at all, and the 202 went silent after a daemon restart (`chatScopes.refusedOf` no longer
+  knows the refusals of a chat this daemon did not open). Both the `POST /chats` 201 and the
+  `POST /chats/:id/messages` 202 now decide from the WARM SEAT COUNT alone, which is the property
+  the field states: *this chat has one seat; it cannot disagree with itself*. `refused` rides along
+  as evidence and is `[]` when there is none; the message drops its "Refused: …" clause rather than
+  emitting an empty one. Two or more warm seats still disclose nothing, and a targeted send that
+  reaches one seat of a two-seat chat still does not fabricate a degradation. Built in one place
+  (`singleSeatDisclosure`) so the two routes cannot drift.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
   `POST /chats/:id/messages` → 202 both carry a `singleSeat` field when exactly one seat warmed
   and at least one was refused. The field names the warm seat, the full refused list (with each

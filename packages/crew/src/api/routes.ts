@@ -844,6 +844,38 @@ export const ChatOpenSchema = z.object({
   projectId: z.string().min(1).optional(),
 }).strict();
 
+/**
+ * The `singleSeat` disclosure (crew#641, hole closed in crew#650) — built in ONE place so the 201
+ * and the 202 cannot drift.
+ *
+ * The property this field states is **"this chat has one seat; it cannot disagree with itself"**,
+ * and that is true of every one-warm-seat chat. The first cut also required `refused.length > 0`,
+ * so the case an operator is most likely to create — a chat deliberately opened with a single seat
+ * — returned `ok: true` with no signal at all, which is the exact failure mode #641 was filed
+ * about. It also made the 202 go quiet after a restart, when `refusedOf` no longer knows the
+ * refusals, even though the chat is just as single-seated as it was a minute earlier.
+ *
+ * `refused` therefore rides along as EVIDENCE when there is any, and is `[]` when there is none —
+ * it never decides whether the caller is told. The message keeps the refusal clause only when
+ * there are refusals to name; a "Refused: ." clause would be a worse disclosure than none.
+ */
+function singleSeatDisclosure(
+  warmed: string,
+  refused: ChatSeatRefusal[],
+): { degraded: true; warmed: string; refused: ChatSeatRefusal[]; message: string } {
+  return {
+    degraded: true,
+    warmed,
+    refused,
+    message:
+      `This chat has one seat (${warmed}); it cannot disagree with itself. ` +
+      (refused.length > 0
+        ? `Refused: ${refused.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. `
+        : 'It was opened with a single seat — no other seat was refused. ') +
+      'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
+  };
+}
+
 export function registerRoutes(
   app: FastifyInstance,
   adapter: CoreAdapter,
@@ -2472,19 +2504,8 @@ export function registerRoutes(
         }
         // crew#641: a chat with exactly ONE warm seat cannot disagree with itself — disclosed
         // prominently so the caller does not have to reason about the refused[] array.
-        const warmSeat = seats.find((s) => s.ok);
-        const singleSeat =
-          warmSeat !== undefined && seats.filter((s) => s.ok).length === 1 && refused.length > 0
-            ? {
-                degraded: true as const,
-                warmed: warmSeat.cliKey,
-                refused,
-                message:
-                  `This chat has one seat (${warmSeat.cliKey}); it cannot disagree with itself. ` +
-                  `Refused: ${refused.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
-                  'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
-              }
-            : undefined;
+        const warm = seats.filter((s) => s.ok);
+        const singleSeat = warm.length === 1 ? singleSeatDisclosure(warm[0]!.cliKey, refused) : undefined;
         return reply.code(201).send({
           chatId,
           seats,
@@ -2576,18 +2597,12 @@ export function registerRoutes(
       // seats this turn reached: a targeted send to one seat of a two-seat chat would otherwise
       // announce a degradation that does not exist, and a false "you are degraded" sends an operator
       // after a problem they do not have.
-      const refused202 = chatScopes.refusedOf(id);
+      // crew#650: `refusedOf` is `undefined` for a chat THIS daemon did not open (a restart drops
+      // the index) — that is "the refusals are unknown", not "the chat gained a seat". The
+      // disclosure is decided by the warm roster alone; unknown refusals spell as none.
       const singleSeat202 =
-        warmRoster.length === 1 && refused202 !== undefined && refused202.length > 0
-          ? {
-              degraded: true as const,
-              warmed: warmRoster[0]!,
-              refused: refused202,
-              message:
-                `This chat has one seat (${warmRoster[0]!}); it cannot disagree with itself. ` +
-                `Refused: ${refused202.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. ` +
-                'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
-            }
+        warmRoster.length === 1
+          ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id) ?? [])
           : undefined;
       return reply.code(202).send({
         seats,

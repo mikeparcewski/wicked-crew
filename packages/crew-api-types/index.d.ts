@@ -4440,7 +4440,9 @@ export interface ChatSingleSeatDegradation {
   degraded: true;
   /** The one warm seat key (e.g. `"claude"`). */
   warmed: string;
-  /** Every seat that was refused, with its reason and source. */
+  /** Every seat that was refused, with its reason and source — EVIDENCE, not the trigger: `[]` when
+   *  the chat was opened with a single seat and nothing was refused (crew#650), and `[]` likewise on
+   *  a 202 for a chat this daemon did not open (the refusals are unknown; the seat count is not). */
   refused: ChatSeatRefusal[];
   /** Human-readable summary naming the degradation, its cause, and wicked-core#563. */
   message: string;
@@ -4458,9 +4460,10 @@ export interface ChatOpenResponse {
    *  (api-types 0.35.0). Empty when every seat warmed; absent on a daemon predating the field. */
   refused?: ChatSeatRefusal[];
   /**
-   * crew#641: present when exactly one seat is warm and at least one was refused — the chat
-   * cannot disagree with itself. ABSENT when two or more seats are warm, or when none were
-   * refused. Absent on a daemon predating this field.
+   * crew#641/#650: present whenever exactly ONE seat is warm — the chat cannot disagree with
+   * itself, which is equally true when nothing was refused (a chat opened with one seat on
+   * purpose). ABSENT only when two or more seats are warm. Absent on a daemon predating this
+   * field; a daemon between #641 and #650 emitted it only when `refused` was non-empty.
    */
   singleSeat?: ChatSingleSeatDegradation;
 }
@@ -4473,8 +4476,10 @@ export interface ChatMessageResponse {
    *  daemon predating the turn index (crew ≥ 0.7.35). */
   turnId?: string;
   /**
-   * crew#641: re-stated on every turn when the chat has exactly one warm seat and at least one
-   * refused seat. ABSENT when two or more seats are warm. Absent on a daemon predating this field.
+   * crew#641/#650: re-stated on every turn when the chat has exactly one WARM seat — decided from
+   * the warm roster, never from the seats this turn reached, and never from whether refusals are
+   * still on record (a restarted daemon has none and the chat is still single-seated). ABSENT when
+   * two or more seats are warm. Absent on a daemon predating this field.
    */
   singleSeat?: ChatSingleSeatDegradation;
 }
