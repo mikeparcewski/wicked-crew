@@ -10,6 +10,18 @@ mentioned only where a daemon release depends on them.
 
 ## [Unreleased]
 
+### Tests
+- **#655 — Chat-promotion provenance is pinned on the path that carries a value.**
+  `tests/chat-promotion-provenance.test.ts` previously asserted only the ABSENT answer, which a tree
+  that stamps nothing satisfies. Five cases now pin the stamping seams: a chat that RESOLVES puts
+  `chat_seat_count` / `chat_grounded` on the `GET /runs/:id` DTO; an ungrounded chat reports
+  `chat_grounded: false` (a real value, distinct from absent); the `run.launched` trail entry carries
+  the same pair; a FRESH `RunTimingIndex` hydrated from that trail answers both after a restart; and
+  a chat that resolves to zero warm seats still stamps nothing. Each was checked against a tree with
+  the stamping removed — deleting the launch-time computation fails four, deleting the DTO
+  decoration fails two, deleting the live `setChatPromotion` fails two, and deleting the hydrate
+  branch fails exactly the restart case.
+
 ### Fixed
 - **#649 — The `test_targeted` repo-checks floor no longer reports ambient host load as a
   regression.** `scripts/test-related.mjs` now re-runs a DEADLINE failure once before recording it:
