@@ -423,6 +423,20 @@ export interface AgentSession {
    * ADDITIONAL annotation the caller may attach (e.g. a CI job name or a studio tab id).
    */
   launch_actor?: string;
+  /**
+   * The number of warm seats in the chat this run was promoted from (crew#641/#642, item 5).
+   * ABSENT — never `null` — when the run was not promoted from a chat (`chatId` absent at launch)
+   * or on a daemon predating this field. A value of `1` means the intent was authored by a single
+   * model that could not disagree with itself.
+   */
+  chat_seat_count?: number;
+  /**
+   * Whether the chat this run was promoted from was graph-grounded at launch (crew#641/#642,
+   * item 5). `true` = at least one repo graph was bound and held entities; `false` = ungrounded.
+   * ABSENT — never `null` — when the run was not promoted from a chat or on a daemon predating
+   * this field.
+   */
+  chat_grounded?: boolean;
 }
 
 /** An ordered unit of work within a run (`WorkUnit`). */
@@ -4416,6 +4430,22 @@ export interface ChatSeatRefusal {
   source?: ChatRefusalSource;
 }
 
+/**
+ * Single-seat degradation disclosure (crew#641): present on `POST /chats` → 201 and on
+ * `POST /chats/:id/messages` → 202 when exactly ONE seat is warm and at least one was refused.
+ * A single-seat chat cannot disagree with itself — named here so callers do not have to reason
+ * about the `refused[]` array. The root cause is tracked as wicked-core#563.
+ */
+export interface ChatSingleSeatDegradation {
+  degraded: true;
+  /** The one warm seat key (e.g. `"claude"`). */
+  warmed: string;
+  /** Every seat that was refused, with its reason and source. */
+  refused: ChatSeatRefusal[];
+  /** Human-readable summary naming the degradation, its cause, and wicked-core#563. */
+  message: string;
+}
+
 /** `POST /chats` → 201. */
 export interface ChatOpenResponse {
   chatId: string;
@@ -4427,6 +4457,26 @@ export interface ChatOpenResponse {
   /** Every seat that was asked for or defaulted and is NOT in `seats` as warm, with its reason
    *  (api-types 0.35.0). Empty when every seat warmed; absent on a daemon predating the field. */
   refused?: ChatSeatRefusal[];
+  /**
+   * crew#641: present when exactly one seat is warm and at least one was refused — the chat
+   * cannot disagree with itself. ABSENT when two or more seats are warm, or when none were
+   * refused. Absent on a daemon predating this field.
+   */
+  singleSeat?: ChatSingleSeatDegradation;
+}
+
+/** `POST /chats/:id/messages` → 202. */
+export interface ChatMessageResponse {
+  /** The seats the engine delivered the message to (warm seat keys). */
+  seats: string[];
+  /** The turn id stamped on every `chatDelta` / `chatReply` frame for this message. Absent on a
+   *  daemon predating the turn index (crew ≥ 0.7.35). */
+  turnId?: string;
+  /**
+   * crew#641: re-stated on every turn when the chat has exactly one warm seat and at least one
+   * refused seat. ABSENT when two or more seats are warm. Absent on a daemon predating this field.
+   */
+  singleSeat?: ChatSingleSeatDegradation;
 }
 
 /**
