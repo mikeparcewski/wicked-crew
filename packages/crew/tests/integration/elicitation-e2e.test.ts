@@ -29,6 +29,7 @@ import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
   type: string;
@@ -106,7 +107,11 @@ rl.on('line', (line) => {
   } else if (msg.id === 'elicit-1' && msg.method === undefined) {
     const r = msg.result ?? {};
     const answer = r.action === 'accept' ? String((r.content ?? {}).response ?? '') : '(' + String(r.action) + ')';
-    w({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'stub-elicit-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ELICIT-ANSWER:' + answer } } } });
+    // A short REPORT around the echo: an admitted seat's unit is governed, and the engine's
+    // substance floor rejects a clean-worktree phase whose whole transcript is under 200 chars
+    // ("phase produced no reviewable substance") — a real agent narrates what it did; so does this one.
+    const report = 'Asked the operator whether to ship the release through an ACP elicitation with an enum-constrained schema (ship-it / hold-off), blocked the turn until the human resolved it through the daemon, and recorded the resolution below so the transcript shows the answer that actually reached this worker. No files were touched; the phase declares executes_code:false.';
+    w({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'stub-elicit-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: report + '\\n' + 'ELICIT-ANSWER:' + answer } } } });
     w({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
   }
 });
@@ -153,6 +158,13 @@ beforeAll(async () => {
       `binary = ${JSON.stringify(verifiedShim)}`,
       `start_args = [${JSON.stringify(agentPath)}]`,
       'transport = "stdio"',
+      // wicked-core#433 (F-3R2-009): an `executes_code: false` unit on an ACP seat NOT admitted to
+      // input governance no longer starts an ACP turn — it is rerouted to the wrapped carrier
+      // (`acpFallback {fallbackKind: "read_only_requires_wrapped"}`), which would take this stub off
+      // the very transport under test. Admit it: the engine then holds the seat read-only by
+      // answering write-class `session/request_permission` calls with the reject option — vacuous
+      // here, the stub makes no tool calls — and the unit stays on ACP.
+      'acp_input_governance = true',
       '',
     ].join('\n'),
   );
@@ -160,6 +172,7 @@ beforeAll(async () => {
   // REAL engine — stub: false. The stub engine has no ACP runner, so only the production
   // spawn exercises the elicitation path end-to-end.
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: false });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

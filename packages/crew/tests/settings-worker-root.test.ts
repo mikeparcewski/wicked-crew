@@ -81,7 +81,14 @@ describe('PUT/GET /settings worker_config_root', () => {
     expect(process.env['WICKED_WORKER_HOME']).toBe(dir);
 
     const get = await app.inject({ method: 'GET', url: '/api/v1/settings' });
-    expect((get.json() as { settings: SystemSettings }).settings.worker_config_root).toBe(dir);
+    const body = get.json() as { settings: SystemSettings; path?: string };
+    expect(body.settings.worker_config_root).toBe(dir);
+    // crew#494 (F-007 — FIX-IT-ALL L10-6): the daemon names the settings file it actually reads and
+    // writes — `WICKED_CREW_SYSTEM_SETTINGS` honoured (the harness arms it per process), never a
+    // literal the UI spells; additive `path` (api-types 0.38.0, adjudicated §4.6).
+    expect(body.path).toBe(process.env['WICKED_CREW_SYSTEM_SETTINGS']);
+    expect(typeof body.path).toBe('string');
+    expect(body.path).not.toBe('');
   });
 
   it('clearing with "" persists the empty default and restores the boot-time env (crew#396)', async () => {

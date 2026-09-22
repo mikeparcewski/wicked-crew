@@ -26,6 +26,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { childEnvWithBootEstateDb } from './governance-store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -110,7 +111,16 @@ export async function execCapped(
   // overridable by ACCIDENT, only on purpose.
   const maxBuffer = resolveMaxBuffer(opts);
   try {
-    return await execFileAsync(file, args, { ...opts, maxBuffer });
+    // Every crew child gets the process env with the engine-only store variables restored to their
+    // BOOT values (`childEnvWithBootEstateDb`): the daemon exports its governance store as
+    // WICKED_ESTATE_DB for the in-process engine, and that is nobody else's business — not git's,
+    // uv's, the estate CLI's or a version probe's. An explicit `opts.env` is scrubbed the same way,
+    // so a caller that spreads `process.env` is covered too.
+    return await execFileAsync(file, args, {
+      ...opts,
+      maxBuffer,
+      env: childEnvWithBootEstateDb(opts.env ?? process.env),
+    });
   } catch (err) {
     if (isMaxBufferError(err)) throw new ExecOutputTooLarge(file, maxBuffer);
     throw err;

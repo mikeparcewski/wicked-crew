@@ -31,6 +31,7 @@ import { WebSocket } from 'ws';
 import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
   type: string;
@@ -157,6 +158,13 @@ beforeAll(async () => {
       `binary = ${JSON.stringify(process.execPath)}`,
       `start_args = [${JSON.stringify(agentPath)}, ${JSON.stringify(pidFile)}, ${JSON.stringify(completeFlag)}]`,
       'transport = "stdio"',
+      // wicked-core#433 (F-3R2-009): an `executes_code: false` unit on an ACP seat NOT admitted to
+      // input governance no longer starts an ACP turn — it is rerouted to the wrapped carrier
+      // (`acpFallback {fallbackKind: "read_only_requires_wrapped"}`), which would take this stub off
+      // the very transport under test. Admit it: the engine then holds the seat read-only by
+      // answering write-class `session/request_permission` calls with the reject option — vacuous
+      // here, the stub makes no tool calls — and the unit stays on ACP.
+      'acp_input_governance = true',
       '',
     ].join('\n'),
   );
@@ -165,6 +173,7 @@ beforeAll(async () => {
   // spawn exercises the session cache, the reader-thread death detection, and the
   // single-shot fallback under test.
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: false });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

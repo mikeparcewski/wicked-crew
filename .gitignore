@@ -27,3 +27,5 @@ packages/crew/*.tgz
 
 # runtime scratch (node compile cache, session/trace dumps, jiti)
 tmp/
+!.wicked/checks.json
+docs/testing/

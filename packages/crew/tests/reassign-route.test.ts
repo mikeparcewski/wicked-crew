@@ -103,12 +103,15 @@ describe('POST /runs/:id/reassign — the manual operator lever (crew#442)', () 
     expect((res.json() as { error: string }).error).toContain('not found');
   });
 
-  it('409s a run that is not executing, naming the actual status', async () => {
+  it('409s an awaiting_human run — naming the status — when the adapter cannot approve the gate on the caller’s behalf (wave 6, F-7R2-007: a capable adapter approves-then-reassigns instead — see reassign-awaiting-human.test.ts)', async () => {
     views = [view('r-esc', 'awaiting_human', 0, [{ ord: 1, cli: 'claude' }])];
     const res = await post('r-esc');
     expect(res.statusCode).toBe(409);
     expect((res.json() as { error: string }).error).toContain('awaiting_human');
     expect((res.json() as { error: string }).error).toContain('not executing');
+    // Named, never a TypeError dressed as a refusal (this fake adapter has no confirmGate).
+    expect((res.json() as { error: string }).error).toContain('POST /runs/r-esc/gate');
+    expect((res.json() as { error: string }).error).not.toContain('is not a function');
   });
 
   it('409s a completed run too', async () => {

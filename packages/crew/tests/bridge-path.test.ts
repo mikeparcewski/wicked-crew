@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { ensureBridgesOnPath, findBridgeBinDir } from '../src/core/bridge-path.js';
+import { fileURLToPath } from 'node:url';
+import { ensureBridgesOnPath, ensurePiLauncherCommand, findBridgeBinDir, PI_ACP_COMMAND_ENV, piLauncherIn } from '../src/core/bridge-path.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -75,5 +76,56 @@ describe('ensureBridgesOnPath', () => {
     const before = process.env['PATH'];
     expect(ensureBridgesOnPath(start)).toBeNull();
     expect(process.env['PATH']).toBe(before);
+  });
+});
+
+// ── The pi launcher seam (F-079) ───────────────────────────────────────────────────────────────
+//
+// The pi seat's ACP carrier (community pi-acp) spawns whatever `PI_ACP_PI_COMMAND` names as pi;
+// the daemon points it at the packaged `wicked-pi` launcher, which turns the engine's
+// `WICKED_PI_SKILL_DIRS` into `--no-skills --skill <dir>…`. An operator's own value wins.
+
+const LAUNCHER_SHIM = process.platform === 'win32' ? 'wicked-pi.cmd' : 'wicked-pi';
+
+/** A `.bin` with the bridge probe shim and, optionally, the launcher shim beside it. */
+function launcherFixture(withLauncher: boolean): { bin: string; start: string } {
+  const { root, start } = fixture('codex-acp');
+  const bin = join(root, 'node_modules', '.bin');
+  if (withLauncher) writeFileSync(join(bin, LAUNCHER_SHIM), '#!/bin/sh\n', { mode: 0o755 });
+  return { bin, start };
+}
+
+describe('ensurePiLauncherCommand', () => {
+  it('sets PI_ACP_PI_COMMAND to the wicked-pi shim beside the bridges when it is unset', () => {
+    const { bin, start } = launcherFixture(true);
+    const env: NodeJS.ProcessEnv = {};
+    expect(ensurePiLauncherCommand(start, env)).toBe(join(bin, LAUNCHER_SHIM));
+    expect(env[PI_ACP_COMMAND_ENV]).toBe(join(bin, LAUNCHER_SHIM));
+    expect(piLauncherIn(bin)).toBe(join(bin, LAUNCHER_SHIM));
+  });
+
+  it('respects an operator\'s own PI_ACP_PI_COMMAND (never overwritten) and answers it', () => {
+    const { start } = launcherFixture(true);
+    const env: NodeJS.ProcessEnv = { [PI_ACP_COMMAND_ENV]: '/opt/my-pi-wrapper' };
+    expect(ensurePiLauncherCommand(start, env)).toBe('/opt/my-pi-wrapper');
+    expect(env[PI_ACP_COMMAND_ENV]).toBe('/opt/my-pi-wrapper');
+  });
+
+  it('leaves the environment alone when this install has no launcher shim (an older agent-acp-bridges) or no bridges at all', () => {
+    const { start } = launcherFixture(false);
+    const env: NodeJS.ProcessEnv = {};
+    expect(ensurePiLauncherCommand(start, env)).toBeNull();
+    expect(env[PI_ACP_COMMAND_ENV]).toBeUndefined();
+    const bare = mkdtempSync(join(tmpdir(), 'bridge-path-none-'));
+    cleanups.push(() => rmSync(bare, { recursive: true, force: true }));
+    expect(ensurePiLauncherCommand(bare, env)).toBeNull();
+    expect(env[PI_ACP_COMMAND_ENV]).toBeUndefined();
+  });
+
+  it('the real workspace install carries the launcher shim beside the bridges (the artifact behind the seam)', () => {
+    const start = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src', 'core');
+    const bin = findBridgeBinDir(start);
+    expect(bin, 'run npm install first').not.toBeNull();
+    expect(piLauncherIn(bin as string)).not.toBeNull();
   });
 });

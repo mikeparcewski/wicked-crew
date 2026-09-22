@@ -203,7 +203,7 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'engine-repo');
 
     expect(binding).toBeNull();
-    expect(reason).toMatch(/no code graph yet/);
+    expect(reason).toMatch(/has not been built yet — build it from the project page/);
     expect(reason).toMatch(/own repo's code graph/);
     // The launch touched nothing. An index here would block the response for as long as the
     // slowest member repo takes.
@@ -222,9 +222,30 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     const { binding, reason } = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined);
 
     expect(binding).toBeNull();
-    expect(reason).toMatch(/no code graph yet/);
+    expect(reason).toMatch(/has not been built yet — build it from the project page/);
     expect(reason).toMatch(/repo-less run gets no code graph/);
     expect(reason).not.toMatch(/own repo's code graph/);
+  });
+
+  /**
+   * A CHAT asking for the binding is neither run shape (F-2R2-008): it has no worktree and no own
+   * repo, and it keeps reading the scoped roots directly. The fresh rig's 9-repo project chat was
+   * told "this repo-less run gets no code graph" — developer words, and wrong ones. The customer
+   * copy names the page action; the route rides on `action` for the UI.
+   */
+  it('tells a CHAT that it still reads the repositories directly, in customer copy, with the UI action to build the graph', async () => {
+    const adapter = adapterFor([repoMember('engine-repo')], [repo('engine-repo')]);
+
+    const decision = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined, process.env, { subject: 'chat' });
+
+    expect(decision.binding).toBeNull();
+    expect(decision.reason).toBe(
+      "This project's code graph has not been built yet — build it from the project page (1 member repository). " +
+        'Chat still reads the repositories directly.',
+    );
+    expect(decision.reason).not.toMatch(/repo-less run/);
+    expect(decision.reason).not.toMatch(/POST \/api/);
+    expect(decision.action).toBe('projects.graph.refresh');
   });
 
   /** The unreadable-membership path degrades too, and owes a repo-less run the same honesty. */
@@ -245,6 +266,40 @@ describe('resolveProjectGraphBinding — what a run launched into a project gets
     expect(repoless.reason).toMatch(/could not be read/);
     expect(repoless.reason).toMatch(/repo-less run gets no code graph/);
     expect(repoless.reason).not.toMatch(/own repo's code graph/);
+  });
+
+  /**
+   * wicked-core#406: a CURRENT engine that resolved NO repo-graph root publishes an empty
+   * `code_graph_db` and a `code_graph_root_unresolvable` finding. There is no per-repo graph to
+   * degrade to — the engine ships the worker no estate tools — so the recorded reason must say
+   * "no graph" and name the environment fault, never "uses its own repo's code graph".
+   */
+  it('does not promise the repo graph when the engine resolved no repo-graph root at all', async () => {
+    const unresolvable: RepoEntry = {
+      ...repo('engine-repo'),
+      code_graph_db: '',
+      findings: [
+        {
+          code: 'code_graph_root_unresolvable',
+          message: 'no repo-graph root resolves for this daemon (no WICKED_ESTATE_REPO_GRAPH_ROOT override, no state home, no HOME / USERPROFILE): the repo has no code graph until one does',
+          path: null,
+        },
+      ],
+    };
+    const adapter = adapterFor([repoMember('engine-repo')], [unresolvable]);
+
+    const bound = await resolveProjectGraphBinding(adapter, PROJECT_ID, 'engine-repo');
+    const repoless = await resolveProjectGraphBinding(adapter, PROJECT_ID, undefined);
+
+    for (const decision of [bound, repoless]) {
+      expect(decision.binding).toBeNull();
+      expect(decision.reason).toMatch(/no code graph can be bound/);
+      expect(decision.reason).toMatch(/no repo-graph root resolves for this daemon/);
+      expect(decision.reason).toMatch(/gets no code graph/);
+      expect(decision.reason).not.toMatch(/own repo's code graph/);
+      expect(decision.reason).not.toMatch(/could not be read/);
+      expect(decision.reason).not.toMatch(/wicked-core#170/);
+    }
   });
 
   /** Filing a run into a project and attaching its repo are separate acts; one can happen alone. */

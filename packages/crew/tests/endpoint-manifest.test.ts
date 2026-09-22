@@ -45,10 +45,16 @@ describe('endpoint-manifest.json (TH-11)', () => {
     const launch = byKey.get('POST /api/v1/runs');
     expect(launch?.requestType).toBe('LaunchRunBody');
     // 501: campaignId attach on an engine addon without the campaign bindings (wicked-studio#27).
-    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 501]);
+    expect(launch?.statusCodes).toEqual([201, 400, 404, 409, 422, 501]);
     const gate = byKey.get('POST /api/v1/runs/:id/gate');
     expect(gate?.requestType).toBe('GateDecision');
     expect(gate?.statusCodes).toEqual([200, 400, 404, 409]);
+    // wicked-core#406 follow-up: the project-graph routes declare their refusal codes — 501 (addon
+    // predates code_graph_db), 503 (a current engine resolved no repo-graph root), 404/409/400.
+    expect(byKey.get('GET /api/v1/projects/:id/graph')?.statusCodes).toEqual([200, 404, 501, 503]);
+    expect(byKey.get('POST /api/v1/projects/:id/graph/refresh')?.statusCodes).toEqual([200, 400, 404, 409, 501, 503]);
+    expect(byKey.get('GET /api/v1/projects/:id/graph/blast-radius')?.statusCodes).toEqual([200, 400, 404, 501, 503]);
+    expect(byKey.get('GET /api/v1/projects/:id/graph/search')?.statusCodes).toEqual([200, 400, 404, 501, 503]);
     const guidance = byKey.get('PUT /api/v1/runs/:id/guidance');
     expect(guidance?.requestType).toBe('SetGuidanceBody');
     expect(guidance?.responseType).toBe('SetGuidanceResult');

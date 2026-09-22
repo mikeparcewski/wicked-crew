@@ -20,10 +20,16 @@ import { DEFAULT_PROJECT_ID } from '../projects/default-project.js';
 import type { ProjectSettingsStore } from '../projects/settings.js';
 import { ensureProjectInteractiveRoot } from './bridge-root.js';
 
-/** The injectable halves of the resolution — a test harness points both away from the real home.
- *  Every interactive route's deps object satisfies this structurally, so a route passes its deps. */
+/** The injectable halves of the resolution — a test harness points them away from the real
+ *  machine. Every interactive route's deps object satisfies this structurally, so a route passes
+ *  its deps. Since crew 0.7.35 (D-L7-1) the DEFAULT root hangs off the daemon STATE HOME, not HOME:
+ *  `stateHome` places it (and the partitions under it); `home` only expands `~` in an explicit
+ *  `interactiveRoot` setting. */
 export interface ProjectRootOptions {
   env?: NodeJS.ProcessEnv;
+  /** The daemon state home the default docs root resolves under; default `crewStateHome()`. */
+  stateHome?: string;
+  /** The HOME a leading `~` in an EXPLICIT setting expands against; default `homedir()`. */
   home?: string;
 }
 
@@ -53,5 +59,5 @@ export async function projectDocsRoot(
       partition = DEFAULT_PROJECT_ID;
     }
   }
-  return ensureProjectInteractiveRoot(partition, settings.get(projectId), opts.env ?? process.env, opts.home);
+  return ensureProjectInteractiveRoot(partition, settings.get(projectId), opts.env ?? process.env, opts.stateHome, opts.home);
 }

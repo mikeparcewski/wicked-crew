@@ -1,0 +1,71 @@
+{
+  "description": "The INTERNAL evals corpus: five wicked repos at pinned prior release tags (constants). Moving a tag is a deliberate PR: edit `tag`, run `node scripts/evals-internal-corpus.mjs pin`, commit. Never shipped in the product.",
+  "release_tag_pattern": "^v\\d+\\.\\d+\\.\\d+$",
+  "window_rule": {
+    "min_commits": 50,
+    "max_age_days": 180
+  },
+  "repos": [
+    {
+      "repo": "wicked-crew",
+      "remote": "https://github.com/mikeparcewski/wicked-crew.git",
+      "tag": "v0.7.24",
+      "commit_sha": "0392c36eca6bc4256cc3f98a370788c77bfb220d",
+      "tag_date": "2026-09-08",
+      "action_window_from_tag": "v0.7.8",
+      "action_window_from_sha": "7f363c9c02d55daadd3baabaf2118d8ece4582a3",
+      "action_window_from_date": "2026-09-01",
+      "commits": 54,
+      "notes": "window v0.7.8..v0.7.24 = 54 commits (>= 50 floor met after walking back 16 release tags)"
+    },
+    {
+      "repo": "wicked-estate",
+      "remote": "https://github.com/mikeparcewski/wicked-estate.git",
+      "tag": "v0.16.6",
+      "commit_sha": "1771e5f3646171f5d7ba65275171cf8cbc6951b0",
+      "tag_date": "2026-09-07",
+      "action_window_from_tag": "v0.14.5",
+      "action_window_from_sha": "bf6cebf5829d1ee7447deba0de857337474503ae",
+      "action_window_from_date": "2026-08-12",
+      "commits": 50,
+      "notes": "window v0.14.5..v0.16.6 = 50 commits (>= 50 floor met after walking back 11 release tags)"
+    },
+    {
+      "repo": "wicked-garden",
+      "remote": "https://github.com/mikeparcewski/wicked-garden.git",
+      "tag": "v12.31.0",
+      "commit_sha": "fe5e38f9cc9af4e2dc2cbe111498c795352cf3f2",
+      "tag_date": "2026-08-14",
+      "action_window_from_tag": "v12.29.1",
+      "action_window_from_sha": "452d3c557567f5486d80301279413b9109b66825",
+      "action_window_from_date": "2026-07-21",
+      "commits": 50,
+      "notes": "window v12.29.1..v12.31.0 = 50 commits (>= 50 floor met after walking back 2 release tags)"
+    },
+    {
+      "repo": "wicked-interactive",
+      "remote": "https://github.com/mikeparcewski/wicked-interactive.git",
+      "tag": "v0.8.1",
+      "commit_sha": "10b774f2811ad850f33b860f75ae806cbcf55d9a",
+      "tag_date": "2026-08-24",
+      "action_window_from_tag": "v0.6.0",
+      "action_window_from_sha": "f06d99acc6146db7df6fb35d3c26babf44dbc8a2",
+      "action_window_from_date": "2026-07-11",
+      "commits": 86,
+      "notes": "window v0.6.0..v0.8.1 = 86 commits (>= 50 floor met after walking back 4 release tags)"
+    },
+    {
+      "repo": "wicked-studio",
+      "remote": "https://github.com/mikeparcewski/wicked-studio.git",
+      "tag": "v0.5.0",
+      "commit_sha": "811690f6e571615097fff6e3ebf54649f20e33f5",
+      "tag_date": "2026-09-08",
+      "action_window_from_tag": "v0.4.1",
+      "action_window_from_sha": "8bbabb483990a11cfad3a22b6142db1c64f8820e",
+      "action_window_from_date": "2026-08-29",
+      "commits": 53,
+      "notes": "window v0.4.1..v0.5.0 = 53 commits (>= 50 floor met after walking back 15 release tags)"
+    }
+  ],
+  "pin_hash": "sha256:aaf2dd56367978ec0539895db68c971c1d00fb9b1de33e4d9e9e30aff5bce43e"
+}

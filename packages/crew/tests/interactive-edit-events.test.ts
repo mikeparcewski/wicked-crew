@@ -641,6 +641,31 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
     expect(filed).toEqual([[engine.launches[0]!.sessionId, 'proj-42']]);
   });
 
+  it('F-045: every frame for a project-bound handoff carries project_id — pickup, heartbeat, and the terminal error line', async () => {
+    const bus = await import('wicked-bus');
+    const engine = fakeAdapter();
+    await arm(engine, { heartbeatMs: 60 });
+    armProbe(bus);
+    await emitFeedbackProcessed(bus, { project_id: 'proj-42' });
+    await waitFor(() => engine.launches.length === 1);
+    const frames = () =>
+      probeEvents.filter((e) => e.event_type === STATUS_POSTED && e.producer_id === INTERACTIVE_PRODUCER);
+    await waitFor(() => frames().length >= 3);
+    for (const e of frames()) expect((e.payload as { project_id?: string }).project_id).toBe('proj-42');
+    engine.fire({ type: 'sessionFailed', session: engine.launches[0]!.sessionId, ord: 1 });
+    await waitFor(() => frames().some((e) => (e.payload as { state?: string }).state === 'error'));
+    expect(frames().every((e) => (e.payload as { project_id?: string }).project_id === 'proj-42')).toBe(true);
+    // An UNFILED handoff's frames carry none — never a fabricated 'default'.
+    await emitFeedbackProcessed(bus, { document_id: 'free-doc' });
+    await waitFor(() => engine.launches.length === 2);
+    const free = () =>
+      probeEvents.filter(
+        (e) => e.event_type === STATUS_POSTED && (e.payload as { document_id?: string }).document_id === 'free-doc',
+      );
+    await waitFor(() => free().length >= 1);
+    for (const e of free()) expect('project_id' in (e.payload as object)).toBe(false);
+  });
+
   it('a REPLAYED handoff launches no second run — but the SAME doc’s next version does', async () => {
     const bus = await import('wicked-bus');
     const engine = fakeAdapter();
@@ -846,7 +871,7 @@ describe('startInteractiveEditSubscriber (real bus, fake engine)', () => {
       expect(launch.projectId).toBe('proj-nograph');
       expect('projectGraph' in launch).toBe(false);
       // The decision is RECORDED even on the degrade — a repo-less run is told it gets NOTHING.
-      expect(logged.some((m) => /no code graph yet|repo-less run gets no code graph/.test(m))).toBe(true);
+      expect(logged.some((m) => /has not been built yet|repo-less run gets no code graph/.test(m))).toBe(true);
     });
 
     it('an UNFILED edit (no project_id) launches with NO projectGraph key — nothing to bind', async () => {

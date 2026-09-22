@@ -24,6 +24,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { Campaign } from '../../src/core/types.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 import { quiesceCampaign } from '../setup/quiesce.js';
 
 const require = createRequire(import.meta.url);
@@ -101,6 +102,7 @@ beforeAll(async () => {
   await adapter.registerRepo('alpha', join(scratch, 'repos', 'alpha'));
   await adapter.registerRepo('beta', join(scratch, 'repos', 'beta'));
 
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter, { auditPath: join(scratch, 'audit.log') });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

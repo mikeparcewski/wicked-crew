@@ -20,8 +20,8 @@
 // resolution, partition containment, pool keying, directory creation, and the static-over-wildcard
 // routing all run on the production code paths.
 //
-// Every case gets a FRESH rig (`startRig`): its own scratch home (so the "default root" is a
-// scratch dir and nothing touches the developer's `~/wicked-interactive`), settings file, pool,
+// Every case gets a FRESH rig (`startRig`): its own scratch STATE HOME (so the "default root" —
+// `<state home>/interactive/docs` since crew 0.7.35, D-L7-1 — is a scratch dir), settings file, pool,
 // and server. Cases share nothing — no seeded doc, no cached bridge, no partition an earlier case
 // created — so each states its whole precondition and can run alone or reordered. `env` is an
 // explicit empty object so a shell's `WICKED_INTERACTIVE_ROOT` can neither leak in nor mask the
@@ -150,8 +150,8 @@ interface Rig {
 
 async function startRig(): Promise<Rig> {
   const dir = mkdtempSync(join(tmpdir(), 'wi-doc-list-'));
-  const home = join(dir, 'home');
-  const legacyRoot = defaultInteractiveRoot(home);
+  const stateHome = join(dir, 'state-home');
+  const legacyRoot = defaultInteractiveRoot(stateHome);
   const boundRoot = join(dir, 'bound-docs');
   const settingsPath = join(dir, 'project-settings.json');
   writeFileSync(settingsPath, JSON.stringify({ projects: { 'p-bound': { interactiveRoot: boundRoot } } }));
@@ -168,7 +168,7 @@ async function startRig(): Promise<Rig> {
   });
   const app = Fastify({ logger: false });
   const adapter = stubAdapter(new Set(KNOWN_PROJECTS));
-  const deps = { settings: new ProjectSettingsStore(settingsPath), pool, env: {}, home };
+  const deps = { settings: new ProjectSettingsStore(settingsPath), pool, env: {}, stateHome };
   registerInteractiveProxy(app, adapter, deps);
   registerInteractiveDocList(app, adapter, deps);
   await app.listen({ port: 0, host: '127.0.0.1' });
