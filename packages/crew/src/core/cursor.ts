@@ -9,6 +9,13 @@ export interface CursorUnit {
   ord: number;
   /** The cursor's assigned seat — absent when the engine hasn't assigned one yet. */
   cli?: string;
+  /** What runs the unit (crew #580 / #581, DES-L3 addendum): `tool` = the engine's own command
+   *  (`tool_cmd` on the unit DTO — the deliver script, a wicked-estate index), `agent` = a CLI
+   *  seat. The stall watchdog never fails a tool unit over to a seat — there is none to fail to. */
+  executor: 'tool' | 'agent';
+  /** The cursor's declared phase role when the def carries one (`evaluator` / `creator` / …);
+   *  absent on free-text units. Read by the watchdog's role-aware failover (DES-L3 PR-3E). */
+  role?: string;
 }
 
 /**
@@ -18,5 +25,11 @@ export interface CursorUnit {
 export function resolveCursorUnit(view: SessionView): CursorUnit | undefined {
   const cursor = [...view.units].sort((a, b) => a.ord - b.ord)[view.session.unit_ix];
   if (cursor === undefined) return undefined;
-  return { ord: cursor.ord, ...(cursor.assigned_cli != null ? { cli: cursor.assigned_cli } : {}) };
+  const role = (cursor as { role?: unknown }).role;
+  return {
+    ord: cursor.ord,
+    ...(cursor.assigned_cli != null ? { cli: cursor.assigned_cli } : {}),
+    executor: cursor.tool_cmd != null ? 'tool' : 'agent',
+    ...(typeof role === 'string' ? { role } : {}),
+  };
 }

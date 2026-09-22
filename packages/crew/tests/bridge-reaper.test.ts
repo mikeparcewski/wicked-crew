@@ -18,9 +18,10 @@
  * bridge added or removed there cannot silently escape the reaper here.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -28,16 +29,21 @@ import {
   BRIDGE_BINS,
   BRIDGE_KILL_GRACE_MS,
   BridgeReaper,
+  INTERACTIVE_BIN,
   ORPHAN_SWEEP_DEFAULT_MS,
   WORKER_CLI_BINS,
   discoverBridgeChildren,
+  isInteractiveServe,
   orphanSweepMs,
   parseBridgeChildren,
+  parseOrphanedInteractiveBridges,
   parseOrphanedRunProcesses,
   reapOrphansAtBoot,
+  rootArgOf,
   startOrphanSweep,
   sweepOrphanedRunProcesses,
 } from '../src/core/bridge-reaper.js';
+import { CREW_SIDECAR_NAME, parentPidOf, pidAlive, readCrewSidecar, type CrewSidecar } from '../src/interactive/bridge-pool.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, '..');
@@ -335,9 +341,22 @@ describe('orphaned run-process sweep (crew#340)', () => {
   });
 
   it('WORKER_CLI_BINS names the CLIs the declared bridges drive', () => {
-    // agy-acp→agy, claude-agent-acp→claude, codex-acp→codex, pi-acp→pi. A bridge added
-    // to BRIDGE_BINS whose CLI is missing here escapes the orphan sweep — keep them in step.
-    expect([...WORKER_CLI_BINS].sort()).toEqual(['agy', 'claude', 'codex', 'pi']);
+    // agy-acp→agy, claude-agent-acp→claude, codex-acp→codex, pi-acp→pi (through the wicked-pi
+    // launcher, F-079). A bridge added to BRIDGE_BINS whose CLI is missing here escapes the
+    // orphan sweep — keep them in step.
+    expect([...WORKER_CLI_BINS].sort()).toEqual(['agy', 'claude', 'codex', 'pi', 'wicked-pi']);
+  });
+
+  it('the wicked-pi launcher (pi-acp → wicked-pi → pi) is an orphan the sweep sees — as the npm shim runs it (`node …/wicked-pi.mjs`) and as a bare bin; `wicked-pi` never matches inside another token', () => {
+    const listing = [
+      '  920     1 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc --no-themes',
+      '  921     1 /repo/node_modules/.bin/wicked-pi --mode rpc',
+      String.raw`  922     1 "C:\repo\node_modules\.bin\wicked-pi.cmd" --mode rpc`,
+      '  923   700 node /repo/node_modules/agent-acp-bridges/wicked-pi.mjs --mode rpc', // parented: pi-acp alive
+      '  924     1 node /x/not-wicked-pi.mjs', // embedded token
+      '  925     1 node /x/wicked-pi-backup.mjs', // hyphen-adjacent
+    ].join('\n');
+    expect(parseOrphanedRunProcesses(listing).sort(byNumber)).toEqual([920, 921, 922]);
   });
 
   it('reapOrphansAtBoot SIGTERMs only worktree-cwd orphans (worker CLIs included)', () => {
@@ -465,3 +484,273 @@ describe('bridge token boundaries (#300 post-merge review)', () => {
     expect(parseBridgeChildren(listing, 10)).toEqual([12, 13, 15, 16]);
   });
 });
+
+// ── Interactive bridge trees (F-W1-103, FIX-IT-ALL wave 1) ──────────────────────────────
+//
+// The shapes below are the two orphans the WAVE-1 gate found (~20 h old, ports :4400/:4402,
+// paths anonymised): an `npm exec` wrapper reparented to init whose child is the server that
+// holds the port. A live daemon's pair (ppid = the daemon) and an operator's own `serve` (shell-
+// parented, or nohup'd with NO crew sidecar) sit beside them and must never be touched.
+describe('interactive bridge trees (F-W1-103)', () => {
+  const DOCS = '/home/op/wicked-interactive/docs';
+  const PROJ = `${DOCS}/projects/proj_178933212081900000`;
+  const STATE = '/home/op/.wicked-crew/interactive/docs/proj_2';
+  // ps pads the wrapper line with trailing blanks — real output, kept.
+  const WRAPPER_4400 = ` 96633     1 npm exec ${INTERACTIVE_BIN}@^0.9.2 serve --root ${PROJ}      `;
+  const SERVER_4400 = ` 98034 96633 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root ${PROJ}`;
+  const WRAPPER_4402 = `  8687     1 npm exec ${INTERACTIVE_BIN}@^0.9.2 serve --root ${DOCS}`;
+  const SERVER_4402 = `  9488  8687 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root ${DOCS}`;
+  // The live daemon (pid 6556) and the pair it spawned.
+  const DAEMON = '  6556     1 node /opt/homebrew/bin/wicked-crew serve';
+  const LIVE_WRAPPER = ` 84428  6556 npm exec ${INTERACTIVE_BIN}@^0.9.3 serve --root ${STATE}`;
+  const LIVE_SERVER = ` 84710 84428 node /home/op/.npm/_npx/d9b4/node_modules/.bin/${INTERACTIVE_BIN} serve --root ${STATE}`;
+  const LIVE_PLAIN_CHILD = ' 84711 84428 node /some/helper.js'; // a wrapper child that is NOT a serve
+  // A server whose wrapper already died (the pre-fix shutdown sweep never signalled either, but a
+  // wrapper can die alone): reparented to init on its own.
+  const BARE_SERVER = ` 91000     1 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root /home/op/.wicked-crew/interactive/docs`;
+  // The operator's own bridges: from a terminal (shell-parented), and nohup'd (ppid 1, no sidecar).
+  const OPERATOR_SERVE = ` 77001 51000 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root /home/op/notes`;
+  const NOHUP_SERVE = ` 77002     1 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root /home/op/notes`;
+  // Lookalikes: a different package that starts with the same letters; the same package doing
+  // something other than serving; a serve with a relative root (never spawned by crew).
+  const LOOKALIKE = ` 77003     1 node /opt/bin/${INTERACTIVE_BIN}-export serve --root /x`;
+  const NOT_SERVE = ` 77004     1 npm exec ${INTERACTIVE_BIN}@^0.9.3 render --root /x`;
+  const RELATIVE_ROOT = ` 77005     1 node /opt/npm/bin/${INTERACTIVE_BIN} serve --root docs`;
+  const ALL = [
+    WRAPPER_4400, SERVER_4400, WRAPPER_4402, SERVER_4402, DAEMON, LIVE_WRAPPER, LIVE_SERVER, LIVE_PLAIN_CHILD,
+    BARE_SERVER, OPERATOR_SERVE, NOHUP_SERVE, LOOKALIKE, NOT_SERVE, RELATIVE_ROOT, '', 'not a process line',
+  ].join('\n');
+
+  it('isInteractiveServe: the npx spec, the shim and the package path all count; a lookalike package or a non-serve subcommand never does', () => {
+    expect(isInteractiveServe(`npm exec ${INTERACTIVE_BIN}@^0.9.2 serve --root /x`)).toBe(true);
+    expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} serve --root /x`)).toBe(true);
+    expect(isInteractiveServe(`node /repo/node_modules/${INTERACTIVE_BIN}/dist/cli.js serve --root /x`)).toBe(true);
+    expect(isInteractiveServe(`"C:\\Users\\op\\AppData\\npm\\${INTERACTIVE_BIN}.cmd" serve --root C:\\docs`)).toBe(true);
+    // Interactive's options come AFTER the subcommand (`serve --root <dir> [--port N]`); a token
+    // between the bin and `serve` is not how any bridge is spawned, so it is not a bridge.
+    expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} --port 4400 serve --root /x`)).toBe(false);
+    expect(isInteractiveServe(`node /opt/bin/${INTERACTIVE_BIN}-export serve --root /x`)).toBe(false);
+    expect(isInteractiveServe(`npm exec ${INTERACTIVE_BIN}@^0.9.3 render --root /x`)).toBe(false);
+    // `serve` must be the token right after the bin (review NIT): a render whose option VALUE is
+    // `serve` is not a bridge — the shutdown path has no sidecar gate to catch it.
+    expect(isInteractiveServe(`npm exec ${INTERACTIVE_BIN}@^0.9.3 render --mode serve --root /x`)).toBe(false);
+    expect(isInteractiveServe(`node /opt/npm/bin/${INTERACTIVE_BIN} --root /x`)).toBe(false);
+    expect(isInteractiveServe('node /opt/homebrew/bin/wicked-crew serve')).toBe(false);
+  });
+
+  it('rootArgOf: absolute roots only; `--root=`, quoted and space-bearing values; trailing ps padding dropped', () => {
+    expect(rootArgOf(`npm exec x serve --root ${PROJ}      `)).toBe(PROJ);
+    expect(rootArgOf('node x serve --root=/a/b --port 4400')).toBe('/a/b');
+    expect(rootArgOf('node x serve --root /a/b c --port 4400')).toBe('/a/b c');
+    expect(rootArgOf('node x serve --root "/a/b c"')).toBe('/a/b c');
+    expect(rootArgOf("node x serve --root '/a/b c' --host 127.0.0.1")).toBe('/a/b c');
+    expect(rootArgOf('node x serve --root docs')).toBeNull();
+    expect(rootArgOf('node x serve')).toBeNull();
+    expect(rootArgOf('node x serve --root')).toBeNull();
+  });
+
+  it('parseBridgeChildren reaps the wrapper the daemon spawned AND its server child (the grandchild npm never signals); a plain grandchild and other trees are untouched', () => {
+    expect(parseBridgeChildren(ALL, 6556)).toEqual([84428, 84710]);
+    // The wrapper alone, when the server has not exec\'d yet, is still a target.
+    expect(parseBridgeChildren([DAEMON, LIVE_WRAPPER].join('\n'), 6556)).toEqual([84428]);
+    // The existing bridge-binary rule is unchanged beside it.
+    const acp = `  700  6556 node /repo/node_modules/.bin/${BRIDGE_BINS[1]}`;
+    expect(parseBridgeChildren([DAEMON, acp, LIVE_WRAPPER, LIVE_SERVER].join('\n'), 6556)).toEqual([700, 84428, 84710]);
+  });
+
+  it('parseOrphanedInteractiveBridges: every ppid-1 tree with an absolute --root, wrapper first then its serve children; parented trees and lookalikes excluded', () => {
+    expect(parseOrphanedInteractiveBridges(ALL)).toEqual([
+      { root: PROJ, pids: [96633, 98034] },
+      { root: DOCS, pids: [8687, 9488] },
+      { root: '/home/op/.wicked-crew/interactive/docs', pids: [91000] },
+      { root: '/home/op/notes', pids: [77002] }, // the nohup'd operator bridge is PARSED — the sidecar gate below refuses it
+    ]);
+    // Interactive processes are not run processes: the worktree-gated sweep never sees them.
+    expect(parseOrphanedRunProcesses(ALL)).toEqual([]);
+  });
+
+  /** A fake sidecar store: docs root → what crew recorded there. */
+  const sidecars = (table: Record<string, Partial<CrewSidecar> & { pid: number }>) =>
+    (root: string): CrewSidecar | null => {
+      const s = table[root];
+      return s === undefined ? null : { env: {}, startedBy: 'wicked-crew', startedAt: '', ...s };
+    };
+  const DEAD_OWNER = 30379; // the daemon both recorded orphans named — long gone
+  /** A fake owner check: every recorded owner is alive except the listed pids. */
+  const ownerGone = (...dead: number[]) => (s: CrewSidecar): boolean => !dead.includes(s.ownerPid ?? -1);
+
+  it('reapOrphansAtBoot reaps a crew-recorded tree whose owner daemon is gone — the wrapper AND the server; run-process orphans still need their worktree cwd', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    const reaped = reapOrphansAtBoot({
+      list: () => ALL,
+      cwdInWorktree: () => false,
+      sidecar: sidecars({
+        [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER },
+        [DOCS]: { pid: 9488, ownerPid: DEAD_OWNER },
+      }),
+      ownerAlive: ownerGone(DEAD_OWNER),
+      kill: (pid, sig) => signals.push([pid, sig]),
+    });
+    expect(reaped.sort(byNumber)).toEqual([8687, 9488, 96633, 98034]);
+    expect(signals.every(([, s]) => s === 'SIGTERM')).toBe(true);
+    // The live daemon's pair, the operator's bridges and the lookalikes were never signalled.
+    expect(signals.map(([p]) => p).sort(byNumber)).toEqual([8687, 9488, 96633, 98034]);
+  });
+
+  it('the sidecar gate: no sidecar (operator / nohup), a sidecar naming ANOTHER pid, no proven owner, or a LIVE owner all leave the tree alone', () => {
+    const signals: number[] = [];
+    const reaped = reapOrphansAtBoot({
+      list: () => ALL,
+      cwdInWorktree: () => false,
+      sidecar: sidecars({
+        // PROJ: no sidecar at all — nobody recorded it (an operator's own serve).
+        [DOCS]: { pid: 4242, ownerPid: DEAD_OWNER }, // names a pid that is not in this tree — a stale record
+        ['/home/op/.wicked-crew/interactive/docs']: { pid: 91000 }, // a pre-#506 sidecar: no proven owner
+        ['/home/op/notes']: { pid: 77002, ownerPid: 6556 }, // owner alive — that daemon adopted it and stamped itself
+      }),
+      ownerAlive: ownerGone(DEAD_OWNER),
+      kill: (pid) => signals.push(pid),
+    });
+    expect(reaped).toEqual([]);
+    expect(signals).toEqual([]);
+  });
+
+  it('the live sweep escalates an interactive tree like any orphan: SIGTERM on sight, SIGKILL for whatever is still listed one tick later', () => {
+    const signals: Array<[number, NodeJS.Signals | 0]> = [];
+    const io = {
+      list: () => [WRAPPER_4400, SERVER_4400].join('\n'),
+      cwdInWorktree: () => false,
+      sidecar: sidecars({ [PROJ]: { pid: 98034, ownerPid: DEAD_OWNER } }),
+      ownerAlive: ownerGone(DEAD_OWNER),
+      kill: (pid: number, sig: NodeJS.Signals | 0) => signals.push([pid, sig]),
+    };
+    const pending = new Set<number>();
+    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [96633, 98034], killed: [] });
+    expect(sweepOrphanedRunProcesses(pending, io)).toEqual({ terminated: [], killed: [96633, 98034] });
+    expect(signals).toEqual([[96633, 'SIGTERM'], [98034, 'SIGTERM'], [96633, 'SIGKILL'], [98034, 'SIGKILL']]);
+    expect(pending.size).toBe(0);
+  });
+
+  // Review finding 4 (crew #606): the DEFAULT seams wired end to end — real `ps`, the real sidecar
+  // reader, the real owner check (pid + start time) and a real SIGTERM. A wrapper spawns its "server"
+  // and EXITS, so the server is reparented to init exactly like the recorded orphans; a real
+  // `.wi-serve.crew.json` in the fixture root names it with an owner pid that is gone.
+  it.skipIf(process.platform === 'win32')(
+    'end to end with the default seams: a serve orphaned by its dead wrapper, recorded by a dead owner, is reaped at boot — fenced to the fixture root',
+    async (ctx) => {
+      const root = mkdtempSync(join(tmpdir(), 'wi-reap-e2e-'));
+      const WRAPPER = `
+        const { spawn } = require('node:child_process');
+        const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ...process.argv.slice(1)], { detached: true, stdio: 'ignore' });
+        c.unref();
+        process.stdout.write(String(c.pid) + '\\n');
+      `;
+      const wrapper = spawn(process.execPath, ['-e', WRAPPER, INTERACTIVE_BIN, 'serve', '--root', root], {
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      const serverPid = Number(
+        await new Promise<string>((resolve, reject) => {
+          wrapper.once('error', reject);
+          wrapper.stdout?.once('data', (d: Buffer) => resolve(String(d).trim()));
+        }),
+      );
+      await once(wrapper, 'exit');
+      try {
+        expect(Number.isInteger(serverPid) && serverPid > 0).toBe(true);
+        // Reparenting to init is the precondition the production sweep keys on. A subreaper
+        // environment (some containers) keeps a different parent — there the case is skipped, never faked.
+        await waitUntil(() => parentPidOf(serverPid) === 1, 5_000).catch(() => undefined);
+        if (parentPidOf(serverPid) !== 1) ctx.skip();
+        const deadOwner = spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid ?? 999_999;
+        expect(pidAlive(deadOwner)).toBe(false);
+        // (Built through the fake-store helper above: the harness-hygiene source scan reads an
+        // inline child-env option near a child-process call as a stripped child env, and the
+        // sidecar's own field of that name would look like one — this is a sidecar field.)
+        const recorded = sidecars({ [root]: { pid: serverPid, ownerPid: deadOwner, ownerStartedAt: 'Thu Jan  1 00:00:00 1970' } })(root);
+        writeFileSync(join(root, CREW_SIDECAR_NAME), JSON.stringify(recorded), 'utf8');
+        expect(readCrewSidecar(root)?.pid).toBe(serverPid);
+        // Default `list`, `ownerAlive` and `kill`. The sidecar READER is fenced to the fixture root
+        // and the run-process arm is switched off: a test must never reap a process outside its own
+        // fixture — the host it runs on may carry real orphans the production sweep exists for.
+        const reaped = reapOrphansAtBoot({
+          cwdInWorktree: () => false,
+          sidecar: (r) => (r === root ? readCrewSidecar(r) : null),
+        });
+        expect(reaped).toEqual([serverPid]);
+        await waitUntil(() => !pidAlive(serverPid), 5_000);
+        expect(pidAlive(serverPid)).toBe(false);
+      } finally {
+        try {
+          process.kill(serverPid, 'SIGKILL');
+        } catch {
+          /* gone */
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  // The proof the hand-off asked for: start a bridge-shaped tree (wrapper → server), hold no handle
+  // to the server, and show the daemon's shutdown path finds and reaps BOTH through the real
+  // process table. Before this change the wrapper was not a target and the server was invisible.
+  it.skipIf(process.platform === 'win32')(
+    'shutdown reaps a real wrapper → server tree spawned like the pool does, server included',
+    async () => {
+      // The wrapper: spawns its "server" (same token, same --root), prints the server pid, idles.
+      const WRAPPER = `
+        const { spawn } = require('node:child_process');
+        const args = process.argv.slice(1);
+        const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ...args], { stdio: ['ignore', 'ignore', 'inherit'] });
+        process.stdout.write(String(c.pid) + '\\n');
+        setInterval(() => {}, 1000);
+      `;
+      const root = join(PKG_ROOT, 'never-created-f-w1-103');
+      const wrapper = spawn(process.execPath, ['-e', WRAPPER, INTERACTIVE_BIN, 'serve', '--root', root], {
+        stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      const serverPid = Number(
+        await new Promise<string>((resolve, reject) => {
+          wrapper.once('error', reject);
+          wrapper.stdout?.once('data', (d: Buffer) => resolve(String(d).trim()));
+        }),
+      );
+      const wrapperPid = pidOf(wrapper);
+      const wrapperExited = once(wrapper, 'exit');
+      try {
+        expect(Number.isInteger(serverPid) && serverPid > 0).toBe(true);
+        // Real process table: both generations are discovered as this process's bridge children.
+        await waitUntil(() => discoverBridgeChildren(process.pid).includes(serverPid), 5_000);
+        expect(discoverBridgeChildren(process.pid)).toEqual(expect.arrayContaining([wrapperPid, serverPid]));
+        expect(pidAlive(serverPid)).toBe(true);
+
+        const report = await new BridgeReaper({ graceMs: 2_000 }).shutdown();
+
+        const [, signal] = (await wrapperExited) as [number | null, NodeJS.Signals | null];
+        expect(signal).toBe('SIGTERM');
+        expect(report.terminated).toEqual(expect.arrayContaining([wrapperPid, serverPid]));
+        expect(report.killed).toEqual([]);
+        // The server — nobody's child now — is gone too, not merely reparented to init.
+        await waitUntil(() => !pidAlive(serverPid), 5_000);
+        expect(pidAlive(serverPid)).toBe(false);
+      } finally {
+        for (const pid of [serverPid, wrapperPid]) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            /* gone */
+          }
+        }
+      }
+    },
+    20_000,
+  );
+});
+
+async function waitUntil(cond: () => boolean, ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('waitUntil timed out');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}

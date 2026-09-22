@@ -16,8 +16,30 @@
 import type { AuditLog } from './audit.js';
 import type { AuditEntry } from '../core/types.js';
 
+/** The pull request a run REVISES (DES-L9 / crew#550) — the durable record is the `run.launched`
+ *  audit entry's `detail.revisesPr` (number, head branch, URL), written beside `retryOf`. */
+export interface RevisesPrRecord {
+  number: number;
+  headRef: string;
+  url: string;
+}
+
+function revisesPrOf(detail: Record<string, unknown> | undefined): RevisesPrRecord | undefined {
+  const v = detail?.['revisesPr'];
+  if (v === null || typeof v !== 'object') return undefined;
+  const r = v as Record<string, unknown>;
+  const number = r['number'];
+  const headRef = r['headRef'];
+  const url = r['url'];
+  if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) return undefined;
+  if (typeof headRef !== 'string' || headRef === '' || typeof url !== 'string') return undefined;
+  return { number, headRef, url };
+}
+
 export class RetryIndex {
   private readonly runToRetryOf = new Map<string, string>();
+  /** DES-L9: run → the PR it revises, from the same `run.launched` entry (post-hoc re-push reads it). */
+  private readonly runToRevisesPr = new Map<string, RevisesPrRecord>();
 
   /**
    * Consume pre-read `run.launched` entries — the seam that lets `createServer` feed this index
@@ -28,6 +50,10 @@ export class RetryIndex {
       const retryOf = entry.detail?.['retryOf'];
       if (typeof entry.runId === 'string' && typeof retryOf === 'string') {
         this.runToRetryOf.set(entry.runId, retryOf);
+      }
+      const revises = revisesPrOf(entry.detail);
+      if (typeof entry.runId === 'string' && revises !== undefined) {
+        this.runToRevisesPr.set(entry.runId, revises);
       }
     }
   }
@@ -58,5 +84,16 @@ export class RetryIndex {
   /** The run id this run retries, or `undefined` (the DTO spells that as an ABSENT field). */
   retryOfFor(runId: string): string | undefined {
     return this.runToRetryOf.get(runId);
+  }
+
+  /** DES-L9: record the PR a run revises (the same post-commit point that writes the trail entry). */
+  setRevisesPr(runId: string, pr: RevisesPrRecord): void {
+    this.runToRevisesPr.set(runId, pr);
+  }
+
+  /** The PR this run revises, or `undefined` — a post-hoc `POST /runs/:id/deliver` on a stranded
+   *  revision re-pushes to THAT branch (after re-checking the PR is still OPEN), never a new PR. */
+  revisesPrFor(runId: string): RevisesPrRecord | undefined {
+    return this.runToRevisesPr.get(runId);
   }
 }
