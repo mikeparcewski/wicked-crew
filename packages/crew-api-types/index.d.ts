@@ -4440,20 +4440,34 @@ export interface ChatSingleSeatDegradation {
   degraded: true;
   /** The one warm seat key (e.g. `"claude"`). */
   warmed: string;
-  /** Every seat that was refused, with its reason and source — EVIDENCE, not the trigger. Read it
-   *  WITH {@link ChatSingleSeatDegradation.refusalsKnown}: `[]` means "none were refused" only when
-   *  that flag is `true`. */
+  /**
+   * The seats currently ON RECORD as refused, with each reason and source — EVIDENCE, not the
+   * trigger. It describes the daemon's RECORD (what the open, or the last `POST /chats/:id/seats`,
+   * observed); `warmed` describes the roster NOW, and the two are different moments.
+   *
+   * `[]` with `refusalsKnown: true` therefore means **no refusal is on record** — NOT "no seat was
+   * ever refused": a seat re-seated through `POST /chats/:id/seats` is removed from the record when
+   * it warms, and a seat RELEASED mid-session (it blew its turn budget) was never refused at all,
+   * yet either can leave a chat with one warm seat and an empty record. `[]` with `refusalsKnown:
+   * false` means the record is GONE — see that field.
+   */
   refused: ChatSeatRefusal[];
   /**
-   * Whether `refused` is the COMPLETE record (crew#650, review follow-up). `true` on every 201 (the
-   * daemon just opened the chat) and on a 202 for a chat it still holds. `false` on a 202 for a chat
-   * this daemon did not open — the engine keeps a warm session across a restart, the daemon's
-   * in-memory scope index does not — where `refused: []` means THE RECORD IS GONE, not that nothing
-   * was refused, and `message` says so instead of asserting either way. Absent on a daemon predating
-   * this field, where `[]` was ambiguous.
+   * Whether `refused` is the record this daemon actually holds (crew#650, review follow-up). `true`
+   * on every 201 (the daemon just opened the chat) and on a 202 for a chat it still holds. `false`
+   * on a 202 for a chat this daemon did not open — the engine keeps a warm session across a restart,
+   * the daemon's in-memory scope index does not — where `refused: []` means THE RECORD IS GONE, not
+   * that nothing was refused, and `message` says so instead of asserting either way. Absent on a
+   * daemon predating this field, where `[]` was ambiguous.
    */
   refusalsKnown?: boolean;
-  /** Human-readable summary naming the degradation, its cause, and wicked-core#563. */
+  /**
+   * Human-readable summary naming the degradation, its cause, and wicked-core#563. It states only
+   * what the answering route witnessed: the 201 performed the open, so it may say the chat was
+   * opened with a single seat; a 202 knows the roster NOW and the refusal record and says nothing
+   * about how the chat came to look this way — the one warm seat may be the survivor of a two-seat
+   * chat whose other seat was released.
+   */
   message: string;
 }
 
@@ -4489,6 +4503,10 @@ export interface ChatMessageResponse {
    * the warm roster, never from the seats this turn reached, and never from whether refusals are
    * still on record (a restarted daemon has none and the chat is still single-seated). ABSENT when
    * two or more seats are warm. Absent on a daemon predating this field.
+   *
+   * This is a statement about NOW. It never describes how the chat was opened — the single warm seat
+   * may be the survivor of a multi-seat chat whose other seats were refused, re-seated or released —
+   * and only `POST /chats` → 201, which performed the open, says anything about that moment.
    */
   singleSeat?: ChatSingleSeatDegradation;
 }

@@ -867,17 +867,31 @@ export const ChatOpenSchema = z.object({
  * distinction #651 got right for chat-promotion provenance (`.catch(() => null)`, never `[]`):
  * unreadable and empty are different answers, and only one of them may be asserted.
  *
- *   • refusals known, non-empty → name them;
- *   • refusals known, empty     → say the chat was opened with a single seat;
- *   • refusals UNKNOWN          → say the record is unavailable and assert NOTHING either way.
+ * TWO MOMENTS, and only one route witnessed each (third review of #658). `refused` describes the
+ * daemon's record — what the OPEN (or the last re-seat) observed; `warmRoster` describes NOW. Any
+ * sentence built from both fabricates the instant they diverge, and they diverge routinely: a seat
+ * that blows its turn budget is RELEASED by the engine (`chat-turns.ts`), a re-seat clears an entry
+ * from the record, a restart drops the record entirely. A chat opened with `['claude','opencode']`
+ * — both warm, nothing refused, nothing unknown — whose `opencode` is later released would have been
+ * told *"It was opened with a single seat — no other seat was refused"*: false in both halves, with
+ * no `undefined` anywhere near it. So `at` names the moment the caller is asking about:
  *
- * `refusalsKnown` carries the same distinction for a machine reader, because `refused: []` is
- * exactly as ambiguous on the wire as the sentence was in prose.
+ *   • `'open'` — the 201. This route just performed the open, so it is the ONLY one with standing to
+ *     describe it: refusals known and empty ⇒ it may say the chat was opened with a single seat.
+ *   • `'turn'` — the 202. It knows the roster NOW and the refusal record; it knows nothing about how
+ *     the chat came to look like this. Refusals known and empty ⇒ it says NOTHING about opening.
+ *     It still names refusals that are on record, and still says so when the record is unavailable —
+ *     both are statements about the record it holds, not about a moment it did not see.
+ *
+ * `refusalsKnown` carries the known/unknown distinction for a machine reader, because `refused: []`
+ * is exactly as ambiguous on the wire as the sentence was in prose.
  */
 function singleSeatDisclosure(
   warmed: string,
   /** `undefined` = this daemon has no refusal record for the chat (it did not open it). */
   refused: ChatSeatRefusal[] | undefined,
+  /** Which moment the caller is asking about — see the note above; only `'open'` may describe one. */
+  at: 'open' | 'turn',
 ): {
   degraded: true;
   warmed: string;
@@ -891,7 +905,11 @@ function singleSeatDisclosure(
     list.length > 0
       ? `Refused: ${list.map((r) => `${r.cliKey} (${r.reason})`).join('; ')}. `
       : known
-        ? 'It was opened with a single seat — no other seat was refused. '
+        ? at === 'open'
+          ? 'It was opened with a single seat — no other seat was refused. '
+          : // A turn has no standing to say how the chat was opened: this seat may be the survivor of
+            // a two-seat chat whose other seat was released mid-session. Say nothing.
+            ''
         : 'This daemon holds no refusal record for this chat — it was opened before a restart — so ' +
           'whether another seat was refused is UNKNOWN: the empty refused[] means the record is gone, ' +
           'not that nothing was refused. ';
@@ -901,7 +919,8 @@ function singleSeatDisclosure(
     refused: list,
     refusalsKnown: known,
     message:
-      `This chat has one seat (${warmed}); it cannot disagree with itself. ` +
+      // "warm" on a turn: the claim is about the roster as it stands, not about how it got there.
+      `This chat has one ${at === 'open' ? 'seat' : 'warm seat'} (${warmed}); it cannot disagree with itself. ` +
       refusalClause +
       'The single-seat root cause is tracked as wicked-core#563; this chat makes it visible.',
   };
@@ -2536,7 +2555,7 @@ export function registerRoutes(
         // crew#641: a chat with exactly ONE warm seat cannot disagree with itself — disclosed
         // prominently so the caller does not have to reason about the refused[] array.
         const warm = seats.filter((s) => s.ok);
-        const singleSeat = warm.length === 1 ? singleSeatDisclosure(warm[0]!.cliKey, refused) : undefined;
+        const singleSeat = warm.length === 1 ? singleSeatDisclosure(warm[0]!.cliKey, refused, 'open') : undefined;
         return reply.code(201).send({
           chatId,
           seats,
@@ -2634,7 +2653,7 @@ export function registerRoutes(
       // the builder (never `?? []`, review of #658): only it may decide what an unknown record is
       // allowed to claim.
       const singleSeat202 =
-        warmRoster.length === 1 ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id)) : undefined;
+        warmRoster.length === 1 ? singleSeatDisclosure(warmRoster[0]!, chatScopes.refusedOf(id), 'turn') : undefined;
       return reply.code(202).send({
         seats,
         ...(turn !== null ? { turnId: turn.turnId } : {}),

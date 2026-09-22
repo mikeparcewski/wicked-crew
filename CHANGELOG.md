@@ -44,7 +44,14 @@ mentioned only where a daemon release depends on them.
   other seat was refused" — a sentence that would be false in both halves for a chat opened with two
   seats where one was refused. It says the record is unavailable and asserts nothing either way, and
   the new `ChatSingleSeatDegradation.refusalsKnown` carries the same distinction for a machine
-  reader, because `refused: []` is as ambiguous on the wire as the sentence was in prose. Two or more warm seats still disclose nothing, and a targeted send that
+  reader, because `refused: []` is as ambiguous on the wire as the sentence was in prose. And each
+  route now states only what it witnessed: `refused` describes the daemon's RECORD (the open, or the
+  last re-seat) while the warm roster describes NOW, so a sentence built from both was false the
+  moment they diverged — a chat opened with two seats, both warm, whose second seat later blew its
+  turn budget and was released was told "It was opened with a single seat — no other seat was
+  refused", with nothing unknown anywhere in it. The 201 performed the open and may describe it; a
+  202 names refusals on record, says when the record is unavailable, and asserts nothing about how
+  the chat came to have one seat. Two or more warm seats still disclose nothing, and a targeted send that
   reaches one seat of a two-seat chat still does not fabricate a degradation. Built in one place
   (`singleSeatDisclosure`) so the two routes cannot drift.
 - **#641 — Single-seat chat degradation is now disclosed prominently.** `POST /chats` → 201 and
