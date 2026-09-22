@@ -31,10 +31,14 @@ import {
   type VacuityProbes,
 } from '../api/delivery-index.js';
 import type { GroupIndex } from '../api/group-index.js';
+import type { TestSetIndex } from '../qe/test-sets.js';
 
 /** The delivery machinery shared with the run DTOs — injected by `registerRoutes`. */
 export interface RollupDeps {
   groupIndex: GroupIndex;
+  /** The registered test sets (wave 6, F-7R2-014) served beside the campaigns as `test_sets` —
+   *  `createServer` hydrates one from the trail; a directly-driven route set may omit it. */
+  testSets?: TestSetIndex;
   /** The `DeliveryIndex` record (the durable `run.delivered` fact). */
   deliveryUrlFor: (runId: string) => string | undefined;
   /** The shared TTL-memoized probes behind `'stranded'`/`'vacuous'`. */
@@ -42,6 +46,11 @@ export interface RollupDeps {
   /** ERROR-level channel — only a NON-probe derivation throw (a defect) is reported here; the
    *  expected probe-unavailable degrade stays quiet (the probe layer already said it). */
   logDefect?: (msg: string) => void;
+  /** Def-awareness (crew#481 / D-14) — the SAME `runCanDeliver(view, resolveRunWorkflow(…))` the
+   *  run DTOs' delivery cache applies, so a completed `capture-learnings` node reads `'none'` here
+   *  AND on `GET /runs` (the split-brain this surface's charter forbids). Absent ⇒ every completed
+   *  repo-scoped node is a candidate — today's behaviour for a directly-driven route set. */
+  canDeliver?: (view: SessionView) => boolean;
 }
 
 /** Index a session list by run id — built once per request from ONE `sessionsDetail()` read. */
@@ -59,9 +68,10 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
   const url = deps.deliveryUrlFor(view.session.id);
   if (url !== undefined) return { delivery: 'delivered', deliverUrl: url };
   if (isDeliverConflictStranded(view)) return { delivery: 'stranded' };
+  const canDeliver = deps.canDeliver?.(view) ?? true;
   let state: DeliveryState;
   try {
-    state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity);
+    state = await deliveryStateWithVacuity(view.session, undefined, deps.vacuity, canDeliver);
   } catch (err) {
     // The production probes throw `VacuityProbeUnavailable` when git could not answer — the
     // absence of an answer, not a verdict (PR #435 review). Serve THIS request the stat-only
@@ -76,7 +86,7 @@ async function deliveryOf(view: SessionView, deps: RollupDeps): Promise<Campaign
         }`,
       );
     }
-    state = deliveryStateOf(view.session, undefined, deps.vacuity.worktreeExists);
+    state = deliveryStateOf(view.session, undefined, deps.vacuity.worktreeExists, canDeliver);
   }
   return {
     delivery: state.delivery,

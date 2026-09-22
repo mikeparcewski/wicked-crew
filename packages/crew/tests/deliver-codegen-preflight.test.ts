@@ -18,6 +18,12 @@
 // version and the REAL `deliverPrScript` runs; we assert the delivered branch on the bare origin
 // carries all four versions in agreement and that a fresh `npm ci` on it succeeds.
 //
+// Since wicked-core#433 (review addendum) the repair is TWO steps on an engine-driven run: the
+// preflight regenerates in place and the script REFUSES to push a tree the engine did not verify
+// (`deliver: PREFLIGHT CHANGED the verified tree`); the engine's approved retry re-verifies the
+// changed tree and the second run delivers. A post-hoc lift (`WICKED_DELIVER_POSTHOC=1`) stays one
+// step. Both shapes are asserted below.
+//
 // LOCAL bare remotes + a fake `gh` only — never a real GitHub PR. `gh` is a script on a PATH we
 // control; the script runs as a login shell (`bash -lc`, the production invocation), so HOME points
 // at a temp dir whose `.bash_profile` prepends the fake bin (sourced after /etc/profile's
@@ -205,8 +211,29 @@ describe('deliver preflight — internal version bump propagates to codegen + lo
       version: '0.20.0',
     });
 
+    // wicked-core#433 review addendum: an ENGINE-driven delivery (no WICKED_DELIVER_POSTHOC) must
+    // not push a tree its own preflight just changed — the engine verified the worktree BEFORE the
+    // script ran. So the FIRST attempt regenerates in place and REFUSES, naming the files and pushing
+    // nothing; the engine's approved retry then re-verifies the changed tree and this script — whose
+    // preflight now regenerates nothing — delivers it. The crew#426 repair costs one gate approval
+    // and ships verified.
+    const first = runDeliver(fx, 'add an API wire field (bumps api-types)');
+    expect(first.status, first.output).not.toBe(0);
+    expect(first.output).toContain('deliver: PREFLIGHT CHANGED the verified tree');
+    for (const f of ['package-lock.json', 'packages/crew/endpoint-manifest.json', 'packages/crew/tests/generated/api-sample.generated.test.ts']) {
+      expect(first.output, f).toContain(f);
+    }
+    expect(first.output).toContain('Nothing was staged, committed or pushed');
+    expect(git(fx.origin, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').trim()).toBe('main');
+    // The regenerated artifacts are LEFT in the worktree, unstaged, beside the run's bump.
+    const status = git(fx.workdir, 'status', '--porcelain');
+    expect(status).toContain(' M packages/crew/endpoint-manifest.json');
+    expect(status).toContain(' M packages/crew-api-types/package.json');
+
+    // The retry (after the engine re-verified the changed tree): the preflight is a no-op now.
     const r = runDeliver(fx, 'add an API wire field (bumps api-types)');
     expect(r.status, r.output).toBe(0);
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
     expect(r.output).toContain('https://github.com/o/r/pull/426');
 
     // Inspect the DELIVERED tree on the bare origin (not the worktree) — this is what the PR carries.
@@ -258,6 +285,12 @@ describe('deliver preflight — internal version bump propagates to codegen + lo
       npm_config_registry: 'http://127.0.0.1:1/',
       npm_config_fetch_retries: '0',
     };
+    // Two steps on an engine-driven run (see the first test): the preflight regenerates and refuses,
+    // the retry delivers — BOTH with the registry unreachable.
+    const first = runDeliver(fx, 'add an API wire field (bumps api-types)', offline);
+    expect(first.status, first.output).not.toBe(0);
+    expect(first.output).toContain('deliver: PREFLIGHT CHANGED the verified tree');
+    expect(first.output).not.toContain('ECONNREFUSED');
     const r = runDeliver(fx, 'add an API wire field (bumps api-types)', offline);
     expect(r.status, r.output).toBe(0);
     expect(r.output).toContain('https://github.com/o/r/pull/426');
@@ -281,6 +314,28 @@ describe('deliver preflight — internal version bump propagates to codegen + lo
       env: { ...process.env, ...offline },
     });
     expect(ci.status, `${ci.stdout ?? ''}${ci.stderr ?? ''}`).toBe(0);
+  }, 120_000);
+
+  it('a POST-HOC lift (WICKED_DELIVER_POSTHOC=1) repairs and delivers in ONE step, saying what it regenerated', () => {
+    // `POST /runs/:id/deliver` runs this script with no engine verification to protect (the daemon
+    // sets the variable): the crew#426 repair stays one step there — regenerate, commit, push — and
+    // the output names the tracked files it rewrote.
+    const fx = fixture();
+    writeJson(join(fx.workdir, 'packages', 'crew-api-types', 'package.json'), {
+      name: 'wicked-crew-api-types',
+      version: '0.20.0',
+    });
+
+    const r = runDeliver(fx, 'add an API wire field (bumps api-types)', { WICKED_DELIVER_POSTHOC: '1' });
+    expect(r.status, r.output).toBe(0);
+    expect(r.output).toContain('https://github.com/o/r/pull/426');
+    expect(r.output).toContain('deliver: preflight regenerated tracked files on a post-hoc lift');
+    expect(r.output).toContain('packages/crew/endpoint-manifest.json');
+    expect(r.output).not.toContain('PREFLIGHT CHANGED');
+    const branch = `wicked/${RUN_ID}`;
+    const show = (p: string): string => git(fx.origin, 'show', `${branch}:${p}`);
+    expect(JSON.parse(show('packages/crew/endpoint-manifest.json')).apiTypesVersion).toBe('0.20.0');
+    expect(JSON.parse(show('package-lock.json')).packages['packages/crew-api-types'].version).toBe('0.20.0');
   }, 120_000);
 
   it('is a NO-OP for a non-npm repo — no lockfile, nothing to re-sync (guard holds)', () => {

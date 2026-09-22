@@ -4,9 +4,10 @@
  * the service itself (atomic sidecar), never into the derived artifact.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, writeFile, readFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   listRequirements,
   getRequirement,
@@ -17,9 +18,10 @@ import type { RepoEntry } from '../src/core/types.js';
 /**
  * Where THIS FILE puts a code graph, in one place.
  *
- * The test plays the engine here: `storeRepo` writes a sqlite db and `repoAt` publishes its path on
- * the entry, exactly as `register_repo` would. Two writers of one path is what FINDING-069 was, and
- * a test file is not exempt — so both go through this.
+ * `repoAt` publishes the path on the entry exactly as `register_repo` would; since crew#548 the
+ * service never OPENS it (one SQLite library per db file per process — the store read is gone), so
+ * the only test that writes there does so to prove it is not read. Two writers of one path is what
+ * FINDING-069 was, and a test file is not exempt — so both go through this.
  *
  * The value is arbitrary. Nothing here pins the engine's spelling; core's `repo.rs` does that, on
  * the side that owns it. Point this anywhere and every test still passes.
@@ -34,9 +36,8 @@ function codeGraphAt(root: string): string {
  * The service takes the whole entry rather than a root path, because `code_graph_db` is resolved by
  * the engine and never re-derived by this package — that re-derivation is what FINDING-069 was.
  *
- * Most fixtures leave the file absent, which is the artifact-fallback case. The
- * `live estate store` block below is the exception: it writes a real db at [`codeGraphAt`] first,
- * so the service reads the store instead.
+ * The fixtures leave the file absent (or unreadable — see the `one source` block): the artifact is
+ * the only source the service reads.
  */
 function repoAt(root: string): RepoEntry {
   return {
@@ -253,147 +254,43 @@ describe('requirements service', () => {
   });
 });
 
-const hasSqlite = await (async () => {
-  try {
-    const name = 'node:sqlite';
-    await import(name);
-    return true;
-  } catch {
-    return false;
-  }
-})();
 
-// Without the sqlite builtin the service falls back to the artifact by design —
-// these tests cover the primary path and need the builtin the daemon runs with.
-describe.skipIf(!hasSqlite)('requirements service — live estate store (primary source)', () => {
-  async function storeRepo(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), 'req-store-'));
-    const graphDb = codeGraphAt(root);
-    await mkdir(dirname(graphDb), { recursive: true });
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(graphDb);
-    db.exec(`
-      CREATE TABLE symbols (sid INTEGER PRIMARY KEY, sym TEXT);
-      CREATE TABLE nodes (symbol INTEGER, name TEXT, file TEXT,
-                          requirement TEXT, requirement_validated INTEGER DEFAULT 0);
-      CREATE TABLE annotations (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                node_sym INTEGER NOT NULL, key TEXT, value TEXT,
-                                confidence REAL);
-    `);
-    db.exec(`
-      INSERT INTO symbols VALUES (1, 'src::chargeTax()'), (2, 'src::refund()'), (3, 'src::helper()');
-      INSERT INTO nodes VALUES
-        (1, 'chargeTax', 'billing/tax.ts', 'Invoice totals must apply tax after summing line items', 1),
-        (2, 'refund', 'billing/refund.ts', '[RISK] refund: below confidence threshold — Refunds over threshold need approval', 0),
-        (3, 'helper', 'lib/util.ts', NULL, 0);
-      INSERT INTO annotations (node_sym, key, value, confidence) VALUES
-        (1, 'RULE-aaa', 'Invoice totals must apply tax after summing line items', 0.95);
-    `);
-    db.close();
-    return root;
-  }
-
-  it('serves validated statements and RISK flags straight from the store', async () => {
-    const root = await storeRepo();
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(page!.total).toBe(2); // requirement-less nodes are not requirements
-    const tax = page!.items.find((i) => i.title === 'chargeTax')!;
-    expect(tax.statement).toBe('Invoice totals must apply tax after summing line items');
-    expect(tax.status).toBe('validated');
-    expect(tax.risk).toBe(false);
-    const refund = page!.items.find((i) => i.title === 'refund')!;
-    expect(refund.risk).toBe(true);
-    expect(refund.riskSource).toBe('data');
-    expect(refund.domain).toBe('billing');
-    expect(refund.category).toBe('functional'); // .ts source → product code
+// crew#548 (F-RC1-041 — FIX-IT-ALL L10-3, register BC-64): the live-store read is GONE. The engine
+// holds the repo's code-graph file open through its own rusqlite; a second SQLite library on the
+// same file in the same process is the F-E2E-021 class (one library per db file per process,
+// crew#541). The artifact is the one source; a repo without one answers null (the route's 404).
+describe('requirements service — one source, one SQLite library (crew#548)', () => {
+  it('a repo with a code-graph db but NO artifact answers null — the store is never read', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'req-nostore-'));
+    await mkdir(dirname(codeGraphAt(root)), { recursive: true });
+    // Whatever sits at the code-graph path is never opened: an unreadable "db" must not matter.
+    await writeFile(codeGraphAt(root), 'not a database', 'utf8');
+    expect(await listRequirements(repoAt(root), { offset: 0, limit: 10 })).toBeNull();
+    expect(await getRequirement(repoAt(root), 'x::y')).toBeNull();
+    expect(await patchRequirement(repoAt(root), 'x::y', { notes: 'n' })).toBeNull();
   });
 
-  it('classifies lockfile/data-fixture statements as config-data and filters them', async () => {
-    const root = await storeRepo();
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(codeGraphAt(root));
-    db.exec(`
-      INSERT INTO symbols VALUES (4, 'lock::version#'), (5, 'fixture::garak#');
-      INSERT INTO nodes VALUES
-        (4, 'lockfileVersion', 'pnpm-lock.yaml', 'The lock file must conform to format version 9.0', 1),
-        (5, 'memories', 'add-ins/memories/redteam/garak.json', 'Adversarial testing via Garak is required', 1);
-    `);
-    db.close();
-    const functional = await listRequirements(repoAt(root), { category: 'functional', offset: 0, limit: 10 });
-    expect(functional!.items.some((i) => i.title === 'lockfileVersion')).toBe(false);
-    expect(functional!.items.some((i) => i.title === 'memories')).toBe(false);
-    expect(functional!.items.some((i) => i.title === 'chargeTax')).toBe(true);
-    const config = await listRequirements(repoAt(root), { category: 'config-data', offset: 0, limit: 10 });
-    expect(config!.total).toBe(2);
-  });
-
-  it('search matches statement text; detail carries rule annotations', async () => {
-    const root = await storeRepo();
-    const page = await listRequirements(repoAt(root), { q: 'tax summing', offset: 0, limit: 10 });
-    expect(page!.total).toBe(1);
-    const detail = await getRequirement(repoAt(root), page!.items[0]!.key);
-    expect(detail!.ruleCount).toBe(1);
-    expect((detail!.businessRules[0] as { confidence: number }).confidence).toBe(0.95);
-  });
-
-  it('store takes precedence over a stale artifact, and overrides patch by symbol key', async () => {
-    const root = await storeRepo();
-    // stale artifact present alongside the store — the store must win
-    const dir = join(root, '.wicked-estate', 'requirements');
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'requirements_graph.json'),
-      JSON.stringify({ domains: { stale: { requirements: { 'REQ-001': { title: 'OLD.md' } } } } }),
-    );
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(page!.items.some((i) => i.title === 'OLD.md')).toBe(false);
-    // …and it SAYS the store won. Content assertions alone can't distinguish "served the
-    // store" from "served an artifact that happens to agree" (FINDING-065).
-    expect(page!.source).toBe('store');
-    const key = page!.items.find((i) => i.title === 'refund')!.key;
-    const patched = await patchRequirement(repoAt(root), key, { risk: false, notes: 'reviewed' });
-    expect(patched!.risk).toBe(false);
-    expect(patched!.riskSource).toBe('operator');
-    const raw = JSON.parse(await readFile(join(dir, 'requirements_overrides.json'), 'utf8'));
-    expect(raw[key].notes).toBe('reviewed');
-  });
-
-  /**
-   * ORPHANED OVERRIDES — the migration hole. Store-built indexes key overrides by the estate
-   * SymbolId string; an id-scheme migration (full re-extract) re-mints method/field ids, so an
-   * override keyed by the OLD id matches nothing and the lookup just misses — the operator's edit
-   * vanishes with no trace. The service counts those keys instead of dropping them silently.
-   */
-  it('counts override keys that match no store row instead of dropping them silently', async () => {
-    const root = await storeRepo();
-    const dir = join(root, '.wicked-estate', 'requirements');
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'requirements_overrides.json'),
-      JSON.stringify({
-        // A key the store still mints — matched, not orphaned.
-        'src::chargeTax()': { notes: 'still attached' },
-        // Two old-scheme method ids the re-extract no longer produces.
-        'src::Repo.save()': { risk: true, notes: 'edited before the migration' },
-        'src::Repo.load()': { title: 'stale too' },
-      }),
-      'utf8',
-    );
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(page!.source).toBe('store');
-    expect(page!.orphanedOverrides).toBe(2);
-    // The matched override still applies — orphan counting must not disturb the merge.
-    const detail = await getRequirement(repoAt(root), 'src::chargeTax()');
-    expect(detail!.notes).toBe('still attached');
-  });
-
-  it('reports zero orphans when every override key matches', async () => {
-    const root = await storeRepo();
-    const page = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(page!.orphanedOverrides).toBe(0);
-    const key = page!.items[0]!.key;
-    await patchRequirement(repoAt(root), key, { notes: 'attached' });
-    const after = await listRequirements(repoAt(root), { offset: 0, limit: 10 });
-    expect(after!.orphanedOverrides).toBe(0);
+  it('src/ carries no `node:sqlite` outside comments (the daemon holds exactly one SQLite library per db file)', async () => {
+    const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+    const offenders: string[] = [];
+    async function walk(dir: string): Promise<void> {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await walk(p);
+          continue;
+        }
+        if (!/\.(ts|mts|cts|js|mjs|cjs)$/.test(entry.name)) continue;
+        const lines = (await readFile(p, 'utf8')).split('\n');
+        lines.forEach((line, ix) => {
+          if (!line.includes('node:sqlite')) return;
+          const t = line.trim();
+          if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return; // prose, not an import
+          offenders.push(`${p}:${ix + 1}: ${t}`);
+        });
+      }
+    }
+    await walk(srcRoot);
+    expect(offenders, 'a second SQLite library in the daemon (F-E2E-021 class)').toEqual([]);
   });
 });

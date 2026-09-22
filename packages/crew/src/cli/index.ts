@@ -1,17 +1,36 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CoreAdapter } from '../core/adapter.js';
-import { ensureBridgesOnPath } from '../core/bridge-path.js';
+import { ensureBridgesOnPath, ensurePiLauncherCommand, PI_ACP_COMMAND_ENV } from '../core/bridge-path.js';
 import { bridgeReaper, reapOrphansAtBoot, startOrphanSweep } from '../core/bridge-reaper.js';
 import { daemonSignalLog } from '../core/daemon-signal-log.js';
 import { startServer } from '../api/server.js';
 import { resolveAuthMode } from '../api/auth.js';
 import { crewStateHome, setCrewStateHome, stateHomeOfDb } from '../projects/state-home.js';
+import { assertWickedRootsOutsideStateHome, StateHomePlacementError } from '../projects/state-home-preflight.js';
+import { CrewBusError, resolveCrewBus, type CrewBusLocation } from '../interactive/bus-location.js';
+import {
+  applyEmitOrigin,
+  emitOrigin,
+  EMIT_DEADLETTER_ENGINE_ENV,
+  ESTATE_DB_ENGINE_ENV,
+  GOVERNANCE_DB_ENV,
+  GOVERNANCE_DB_FLAG,
+  GovernanceStoreError,
+  legacyHomeOutboxPath,
+  resolveGovernanceStore,
+  type GovernanceStoreLocation,
+} from '../core/governance-store.js';
+import { probeLegacyOutbox, replayCommand } from '../api/governance-health.js';
+import { crewPackageVersion, runGovernance } from './governance.js';
 import { runMcpServer } from './mcp.js';
-import type { LaunchRunInput } from '../core/types.js';
+import { versionLines } from '../core/versions.js';
+import { DAEMON_PORT_ENV, DEFAULT_DAEMON_PORT, daemonPortSource, resolveDaemonPort } from './port.js';
+import { INTERACTIVE_DEFAULT_RANGE, INTERACTIVE_SPEC_ENV, resolveInteractiveSpec } from '../interactive/bridge-pool.js';
+import { defaultInteractiveRoot, legacyHomeDocsNotice, recorderBrowsersPath } from '../interactive/bridge-root.js';
 
 const [, , command, ...argv] = process.argv;
 
@@ -41,6 +60,13 @@ interface BootstrapOpts {
   qeGateEvents: boolean;
   /** Bus db for the QE subscription; `undefined` = wicked-bus's own default resolution. */
   qeBusDbPath: string | undefined;
+  /** The CROSS-PRODUCT bus (F-043): the interactive seams, the project bus, the /ws relay AND the
+   *  spawned bridge meet here — see `interactive/bus-location.ts` for the resolution. */
+  crewBus: CrewBusLocation;
+  /** The governance store + dead-letter outbox handed to the engine (crew#495 / F-022):
+   *  `--governance-db` › `WICKED_CREW_GOVERNANCE_DB` › an inherited `WICKED_ESTATE_DB` › the
+   *  daemon's OWN `<core db>.governance/governance.db` — see `core/governance-store.ts`. */
+  governanceStore: GovernanceStoreLocation;
   /** DEFAULT ON (#261): answer project-bound wicked-interactive doc.created with a governed draft run. */
   interactiveDraftEvents: boolean;
   /** DEFAULT ON (#261): answer wicked-interactive structural feedback handoffs with a governed edit run. */
@@ -66,8 +92,8 @@ function stateHome(): string {
 
 function parseBootstrap(args: string[]): BootstrapOpts {
   const dbPath = flag(args, '--db') ?? join(stateHome(), 'core.db');
-  const portStr = flag(args, '--port') ?? process.env['CREW_PORT'];
-  const port = portStr !== undefined ? Number(portStr) : 7701;
+  // F-W1-101: the ONE daemon-port resolver — `status`/`gate` resolve the same way (cli/port.ts).
+  const port = resolveDaemonPort(args);
   const stub = hasFlag(args, '--stub') || process.env['WICKED_CORE_STUB'] === '1';
   // OPT-IN: arm the event-driven execution-mediation seam (default OFF → in-process path).
   // `--engine-exec` flag or WICKED_BUS_EXEC env turns it on; `--bus-db` / WICKED_BUS_DB sets the bus db.
@@ -97,6 +123,57 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // `~/.wicked-crew/bus.db` fallback: that default is crew-private, and the QE
   // events are cross-product traffic that never lands there.
   const qeBusDbPath = flag(args, '--bus-db') ?? process.env['WICKED_BUS_DB'];
+  // The CROSS-PRODUCT bus (acceptance findings F-042/F-043) — the interactive seams, the project
+  // bus, the /ws relay (which used to open wicked-bus's default REGARDLESS of --bus-db) and the
+  // bridge crew spawns (handed the directory as WICKED_BUS_DATA_DIR, bridge-pool.ts) all meet on
+  // ONE db: an explicit --bus-db / WICKED_BUS_DB, else WICKED_BUS_DATA_DIR, else the daemon's OWN
+  // `<core db>.bus/bus.db` — a sidecar of the core db, so two daemons on one host never share a
+  // bus by default. `interactive/bus-location.ts` says why a sidecar and not `<state home>/bus/`.
+  let crewBus: CrewBusLocation;
+  try {
+    crewBus = resolveCrewBus({
+      explicitDb: qeBusDbPath,
+      envDataDir: process.env['WICKED_BUS_DATA_DIR'],
+      coreDbPath: dbPath,
+    });
+  } catch (err) {
+    // An explicit bus db the bridge could never share is a CONFIG error — refuse to boot rather
+    // than run a daemon and its bridge on two buses (codex on crew#506).
+    if (!(err instanceof CrewBusError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
+  // The governance store (crew#495 / F-022). The engine's emit seam writes every `wicked.*`
+  // governance event — conformance claims, phase transitions, rule lifecycle — to the estate store
+  // named by WICKED_ESTATE_DB, and `serve` never set it: on every default install EVERY such event
+  // dead-lettered to an outbox under the operator's HOME, silently. Resolution: an explicit
+  // --governance-db / WICKED_CREW_GOVERNANCE_DB, else an inherited WICKED_ESTATE_DB (the engine's
+  // own variable, honoured), else the daemon's OWN `<core db>.governance/governance.db` — a sidecar
+  // for the same fence reason as the bus above. The dead-letter outbox lives in that sidecar too
+  // (an explicit WICKED_APPS_EMIT_DEADLETTER wins), never under HOME.
+  const governanceDbFlag = flag(args, GOVERNANCE_DB_FLAG);
+  if (hasFlag(args, GOVERNANCE_DB_FLAG) && (governanceDbFlag === undefined || governanceDbFlag.startsWith('-'))) {
+    console.error(`${GOVERNANCE_DB_FLAG} requires a value (got: ${governanceDbFlag ?? '(missing)'})`);
+    process.exit(1);
+  }
+  let governanceStore: GovernanceStoreLocation;
+  try {
+    governanceStore = resolveGovernanceStore({
+      flagDb: governanceDbFlag,
+      envCrewDb: process.env[GOVERNANCE_DB_ENV],
+      envEstateDb: process.env[ESTATE_DB_ENGINE_ENV],
+      envOutbox: process.env[EMIT_DEADLETTER_ENGINE_ENV],
+      coreDbPath: dbPath,
+      busDbPath: crewBus.dbPath,
+    });
+  } catch (err) {
+    // A store the engine cannot honour (a URL spec on the SQLite-only emit seam) or must not share
+    // (the core db, the bus db) is a CONFIG error — refuse to boot rather than run a daemon that
+    // dead-letters every governance event or puts a second writer on the actor's store.
+    if (!(err instanceof GovernanceStoreError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
   // DEFAULT ON (closes #261): answer wicked-interactive's `doc.created` (kind:source) with a
   // governed `interactive-draft` run. The bus is already required for the project bridge.
   // Project-bound docs launch FILED runs; unbound (Unfiled) docs launch unfiled governed runs
@@ -132,7 +209,7 @@ function parseBootstrap(args: string[]): BootstrapOpts {
   // Deterministic-worker override for harnesses (a JSON AgenticCli array); unset = the roster.
   const interactiveSeats = process.env['WICKED_INTERACTIVE_SEATS'];
   return {
-    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath,
+    dbPath, port, stub, engineExec, busDbPath, qeGateEvents, qeBusDbPath, crewBus, governanceStore,
     interactiveDraftEvents, interactiveEditEvents, interactiveChatEvents, interactiveDemoEvents,
     interactiveSeats,
   };
@@ -146,6 +223,15 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // environment. Makes a plain `npm install` deployment fully self-contained (no
   // global installs, no hand-made symlinks).
   ensureBridgesOnPath();
+  // The pi seat's ACP carrier (community pi-acp) spawns whatever `PI_ACP_PI_COMMAND` names as pi:
+  // point it at the packaged `wicked-pi` launcher, which turns the engine's `WICKED_PI_SKILL_DIRS`
+  // into pi's `--no-skills --skill <dir>…` (F-079). An operator's own value is left alone.
+  // Expected on an install whose `agent-acp-bridges` predates 1.1.0 (no `wicked-pi` bin yet):
+  // ONE warning naming the remedy, not an error on every boot (review of #532, F-3).
+  const piCommand = ensurePiLauncherCommand();
+  if (piCommand === null) {
+    console.warn(`[crew] ${PI_ACP_COMMAND_ENV} not set — no wicked-pi launcher beside the ACP bridges (agent-acp-bridges < 1.1.0): a pi seat over ACP receives no skills; upgrade with \`npm i agent-acp-bridges@^1.1.0\` (bundled with wicked-crew once bridges-v1.1.0 is published)`);
+  }
   // Every crew-side durable store follows the SAME state home as the core db (crew#330 for the
   // project graphs, crew#353 for the project settings): a daemon isolated with
   // `--db $SCRATCH/core.db` must not write 40+ MB graphs — or the operator's project settings —
@@ -153,11 +239,83 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
   // so the default daemon is byte-identical; the explicit per-store env overrides
   // (WICKED_CREW_PROJECT_GRAPH_ROOT, WICKED_CREW_PROJECT_SETTINGS) still outrank this.
   setCrewStateHome(stateHomeOfDb(opts.dbPath));
+  // wicked-core#411 / crew#497 (F-RC1-011): refuse to boot with a `WICKED_*` root variable pointed
+  // inside that state home — BEFORE the engine spawns and before any seam seeds anything there
+  // (`createServer` re-asserts it for library boots). The rig's `WICKED_WORKFLOWS_DIR=<state
+  // home>/workflows` made crew seed drop-in defs into an entry the fence could not classify, and
+  // every worker launch was refused — at each run's first worker, while the daemon booted green.
+  // The message names the variable, the entry it would create and the remedy; exit 1 like every
+  // other configuration error above.
+  try {
+    assertWickedRootsOutsideStateHome(process.env, crewStateHome());
+  } catch (err) {
+    if (!(err instanceof StateHomePlacementError)) throw err;
+    console.error(`[crew] ${err.message}`);
+    process.exit(1);
+  }
+  const { crewBus } = opts;
+  console.error(`[crew] cross-product bus: ${crewBus.dbPath} (${crewBus.source})`);
+  // wicked-bus (better-sqlite3 underneath) does not create a missing parent: the sidecar dir —
+  // or an explicit dir — must exist before the seams open the db, or every seam disables itself.
+  mkdirSync(dirname(crewBus.dbPath), { recursive: true });
+  // The governance store (crew#495): say which rule won, stamp the origin the engine copies onto
+  // any dead letter it spools, and point at a pre-fix outbox under HOME if one is still sitting
+  // there — the adapter exports the store/outbox variables to the engine before it spawns.
+  const { governanceStore } = opts;
+  console.error(
+    `[crew] governance store: ${governanceStore.displayPath} (${governanceStore.source}); ` +
+      `dead letters: ${governanceStore.outboxPath} (${governanceStore.outboxSource})`,
+  );
+  // The interactive bridge crew will spawn (F-081): the default range, or the operator's
+  // WICKED_INTERACTIVE_SPEC when it is a semver range — an invalid value is named and ignored.
+  const interactive = resolveInteractiveSpec();
+  console.error(
+    `[crew] interactive bridge: npx ${interactive.spec} (${interactive.source === 'env' ? `${INTERACTIVE_SPEC_ENV} override` : 'default range'})` +
+      (interactive.rejected === undefined
+        ? ''
+        : ` — ${INTERACTIVE_SPEC_ENV}=${JSON.stringify(interactive.rejected)} is not a semver range (^0.9.2, 0.9.2, >=0.9.2 <1.0.0) and was ignored`),
+  );
+  if (interactive.belowFloor === true) {
+    console.warn(
+      `[crew] ${INTERACTIVE_SPEC_ENV}=${interactive.range} is BELOW crew's need floor ${INTERACTIVE_DEFAULT_RANGE}: the override is ` +
+        'honoured, but routes and frames crew relies on may be missing on that release (DELETE /api/docs/:doc retire arrived in 0.9.1; ' +
+        'the recorder preflight and the typed RecorderError frames the demo seam relays arrived in 0.9.2)',
+    );
+  }
+  // D-L7-1 / BC-49 (0.7.35): the shared default docs root and the recorder browsers both live under
+  // this daemon's state home now — say where, and say ONCE if documents were left under the old
+  // HOME default (they are not moved; the notice carries the remedy).
+  console.error(`[crew] interactive default docs root: ${defaultInteractiveRoot()} · recorder browsers: ${recorderBrowsersPath()}`);
+  const legacyDocs = legacyHomeDocsNotice();
+  if (legacyDocs !== null) console.warn(`[crew] interactive: ${legacyDocs}`);
+  const crewVersion = crewPackageVersion();
+  applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath }));
+  const legacyOutbox = await probeLegacyOutbox(legacyHomeOutboxPath(), governanceStore.coreDbPath);
+  if (legacyOutbox !== null && legacyOutbox.path !== governanceStore.outboxPath) {
+    if (legacyOutbox.scope === 'host') {
+      // Cannot be attributed to this daemon (F-2R2-006; #533 review F-3 wording): an isolated state
+      // home shares HOME with every daemon on the host. Inspect read-only; the replay is withheld —
+      // it would import another daemon's dead letters.
+      console.error(
+        `[crew] a pre-fix dead-letter outbox exists at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
+          'found under HOME — shared across daemons on this host; cannot be attributed to this daemon (its state home is ' +
+          `${stateHomeOfDb(governanceStore.coreDbPath)}); inspect read-only with ${replayCommand(legacyOutbox.path, null)} --dry-run; ` +
+          'replay into this store is withheld',
+      );
+    } else {
+      console.warn(
+        `[crew] a pre-fix dead-letter outbox exists under HOME at ${legacyOutbox.path} (${legacyOutbox.bytes} bytes) — ` +
+          `governance events this daemon's earlier versions could not store; inspect with ${replayCommand(legacyOutbox.path, governanceStore)} --dry-run, ` +
+          'then replay it into this daemon\'s store with the same command',
+      );
+    }
+  }
   const adapter = new CoreAdapter({
     dbPath: opts.dbPath,
     stub: opts.stub,
     engineExec: opts.engineExec,
     busDbPath: opts.busDbPath,
+    governanceStore,
   });
   adapterRef = adapter;
   const serverOptions = {
@@ -173,8 +331,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveDraftEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            // The cross-product bus (F-043): explicit --bus-db / WICKED_BUS_DB › WICKED_BUS_DATA_DIR › <core db>.bus.
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -183,8 +341,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveEditEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -193,8 +350,7 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveChatEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
@@ -203,20 +359,20 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
       ? {
           interactiveDemoEvents: {
             enabled: true,
-            // Same bus-db resolution as the QE seam (explicit wins; else wicked-bus defaults).
-            ...(opts.qeBusDbPath !== undefined ? { dbPath: opts.qeBusDbPath } : {}),
+            dbPath: crewBus.dbPath,
             ...(opts.interactiveSeats !== undefined ? { clisJson: opts.interactiveSeats } : {}),
           },
         }
       : {}),
     // Projects (DES-PROJECT-001): default-ON, loud-non-fatal. Bus-db resolution follows the
-    // cross-product seams above (explicit --bus-db / WICKED_BUS_DB wins; otherwise wicked-bus's
-    // own default, where interactive's service also lands) — NOT the exec seam's crew-private
-    // fallback: `wicked.crew.project.*` and the interactive activity bridge are cross-product
-    // traffic, and the two skins must meet on one db.
-    ...(opts.qeBusDbPath !== undefined
-      ? { projectEvents: { dbPath: opts.qeBusDbPath } }
-      : {}),
+    // cross-product seams above — `wicked.crew.project.*`, the interactive activity bridge and the
+    // /ws relay are cross-product traffic, and the bridge crew spawns must meet them on ONE db
+    // (F-043) — NOT the exec seam's crew-private fallback.
+    projectEvents: { dbPath: crewBus.dbPath },
+    interactiveWsRelay: { dbPath: crewBus.dbPath },
+    // F-042/F-043: what the spawned bridge is told — the bus dir this daemon's seams read, and the
+    // daemon's own origin (resolved by the pool from the bound address).
+    interactiveBridge: { busDataDir: crewBus.dataDir },
   };
   const { port } = await startServer(
     adapter,
@@ -224,6 +380,8 @@ async function bootstrap(opts: BootstrapOpts): Promise<{ adapter: CoreAdapter; p
     undefined,
     Object.keys(serverOptions).length > 0 ? serverOptions : undefined,
   );
+  // Now that the port is known, complete the origin stamp (the engine reads it at emit time).
+  applyEmitOrigin(emitOrigin({ version: crewVersion, pid: process.pid, coreDbPath: opts.dbPath, port }));
   installShutdownHandlers();
   return { adapter, port };
 }
@@ -234,11 +392,12 @@ function installShutdownHandlers(): void {
     if (shuttingDown) return;
     shuttingDown = true;
     void (async () => {
-      // Reap ACP bridge children BEFORE this process goes away (crew#285): the engine's
-      // in-memory kill handles die with the daemon, so this is the last actor that can
-      // still find the bridges (they are our direct OS children). SIGTERM, a ~2 s grace,
-      // then SIGKILL for anything that ignored it. Best-effort — a reap failure must
-      // never block shutdown.
+      // Reap bridge children BEFORE this process goes away — the ACP bridges (crew#285: the
+      // engine's in-memory kill handles die with the daemon) and the interactive bridge trees
+      // the pool spawned (F-W1-103: the npm wrapper AND its server child). This is the last
+      // actor that can still find them (they are our direct OS children / grandchildren).
+      // SIGTERM, a ~2 s grace, then SIGKILL for anything that ignored it. Best-effort — a reap
+      // failure must never block shutdown.
       try {
         await bridgeReaper.shutdown();
       } catch {
@@ -283,6 +442,13 @@ function printReady(fields: Record<string, unknown>): void {
 async function main(): Promise<void> {
   const t0 = performance.now();
 
+  // crew#493 (F-003): `wicked-crew --version` answered "Unknown command". The three lines are the
+  // versions of THIS install (never the daemon on a port — that is `GET /api/v1/diagnostics`).
+  if (command === 'version' || command === '--version' || command === '-V') {
+    console.log(versionLines().join('\n'));
+    return;
+  }
+
   if (command === 'serve') {
     if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
       console.log(
@@ -291,9 +457,19 @@ async function main(): Promise<void> {
         'Start the wicked-crew daemon.\n' +
         '\n' +
         'Options:\n' +
-        '  --port <n>                      Port to listen on (default: 7701, env: CREW_PORT)\n' +
+        `  --port <n>                      Port to listen on (default: ${DEFAULT_DAEMON_PORT}, env: ${DAEMON_PORT_ENV})\n` +
         '  --db <path>                     Core database path (default: ~/.wicked-crew/core.db)\n' +
-        '  --bus-db <path>                 Bus database path (default: ~/.wicked-crew/bus.db, env: WICKED_BUS_DB)\n' +
+        '  --bus-db <path>                 Bus database path (env: WICKED_BUS_DB) for the interactive/project seams,\n' +
+        '                                  the /ws relay and the bridge crew spawns (default: $WICKED_BUS_DATA_DIR/bus.db,\n' +
+        '                                  else <core db>.bus/bus.db); --engine-exec defaults to <state home>/bus.db\n' +
+        '  --governance-db <path>          Governance store the engine writes conformance claims, phase transitions and\n' +
+        '                                  rule-lifecycle events to (env: WICKED_CREW_GOVERNANCE_DB; an inherited\n' +
+        '                                  WICKED_ESTATE_DB is honoured next; default <core db>.governance/governance.db).\n' +
+        '                                  The emit seam stores to SQLite only: a URL-form WICKED_ESTATE_DB (postgres://…)\n' +
+        '                                  in the shell refuses boot until --governance-db names a SQLite file.\n' +
+        '                                  Dead letters spool to <core db>.governance/emit-outbox.ndjson by default — under the\n' +
+        '                                  state home, not HOME (an explicit WICKED_APPS_EMIT_DEADLETTER is honoured);\n' +
+        '                                  see `wicked-crew governance replay`\n' +
         '  --stub                          Use stub engine (env: WICKED_CORE_STUB=1)\n' +
         '  --engine-exec                   Arm event-driven execution seam (env: WICKED_BUS_EXEC)\n' +
         '  --qe-gate-events                Consume QE gate bus events (env: WICKED_QE_GATE_EVENTS)\n' +
@@ -309,9 +485,10 @@ async function main(): Promise<void> {
     // Boot sweep (crew#285): bridges orphaned by a PRIOR daemon generation are
     // reparented to init and would otherwise live forever — shutdown-path reaping
     // can never see them. Conservative: only ppid==1 matches, so another live
-    // daemon's bridges are untouched.
+    // daemon's bridges are untouched. Interactive bridge trees join under the sidecar
+    // gate (F-W1-103): crew's own sidecar names the pid and its owner daemon is gone.
     const orphans = reapOrphansAtBoot();
-    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker process(es) from a previous daemon: ${orphans.join(', ')}`);
+    if (orphans.length > 0) console.warn(`[bridge-reaper] reaped ${orphans.length} orphaned bridge/worker/interactive process(es) from a previous daemon (crew#285 / F-W1-103): ${orphans.join(', ')}`);
     // Live sweep (crew#340): kill -9 on a bridge mid-run orphans its worker CLI NOW, and
     // that orphan holds the shared worker config home hostage until reaped — the boot
     // sweep only helps the NEXT daemon. Unref'd timer; SIGTERM, then SIGKILL a tick later.
@@ -321,6 +498,9 @@ async function main(): Promise<void> {
       mode: 'serve',
       port,
       db: opts.dbPath,
+      // Where the engine's governance events land (crew#495) — an evidence harness can open it
+      // (a URL spec's credentials redacted; the raw value went to the engine only).
+      governanceDb: opts.governanceStore.displayPath,
       stub: opts.stub,
       // The identity seam's resolved mode (task #88): `required` under
       // WICKED_RUNTIME=team / WICKED_CREW_AUTH=required, else `off` (local).
@@ -352,15 +532,29 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const { adapter, port } = await bootstrap(opts);
-    const input: LaunchRunInput = {
+    // crew#632: send through the HTTP route so `run.launched` is stamped with channel: 'cli'.
+    const launchBody: Record<string, unknown> = {
       problem,
       sessionId: flag(argv, '--session') ?? randomUUID(),
-      clisJson: JSON.stringify(CoreAdapter.roster()),
+      // The roster WITH the daemon's standing (F-RECON-002/003): `bootstrap` started the server,
+      // which wired the adapter's roster provider — a signed-out seat is benched here too.
+      clisJson: JSON.stringify(adapter.launchRoster()),
+      channel: 'cli',
     };
-    if (humanConfirm !== undefined) input.humanConfirm = humanConfirm;
-    if (workflow !== undefined) input.workflow = workflow;
-    if (repoRef !== undefined) input.repoRef = repoRef;
-    const runId = await adapter.launchRun(input);
+    if (humanConfirm !== undefined) launchBody['humanConfirm'] = humanConfirm;
+    if (workflow !== undefined) launchBody['workflow'] = workflow;
+    if (repoRef !== undefined) launchBody['repoRef'] = repoRef;
+    const launchRes = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(launchBody),
+    });
+    if (!launchRes.ok) {
+      const errBody = await launchRes.json().catch(() => ({ error: launchRes.statusText })) as { error?: string };
+      console.error(`launch failed (${launchRes.status}): ${errBody.error ?? launchRes.statusText}`);
+      process.exit(1);
+    }
+    const { runId } = (await launchRes.json()) as { runId: string };
     printReady({ mode: 'start', port, db: opts.dbPath, run: runId, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'resume') {
     const sessionId = flag(argv, '--session');
@@ -373,54 +567,151 @@ async function main(): Promise<void> {
     const status = await adapter.resumeRun(sessionId);
     printReady({ mode: 'resume', port, db: opts.dbPath, run: sessionId, status, startupMs: Math.round(performance.now() - t0) });
   } else if (command === 'gate') {
+    if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) { console.log(GATE_USAGE); return; }
     await runGate(argv);
   } else if (command === 'status') {
+    if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) { console.log(STATUS_USAGE); return; }
     await runStatus(argv);
   } else if (command === 'mcp') {
-    const portStr = flag(argv, '--port');
-    const port = portStr !== undefined ? Number(portStr) : 7701;
+    // The MCP server CONNECTS to the daemon at this port — a daemon-client verb, so the port is
+    // resolved like every other (F-W1-101): `--port`, else CREW_PORT, else the default.
+    const port = resolveDaemonPort(argv);
     if (!Number.isFinite(port) || !Number.isInteger(port) || port < 1 || port > 65535) {
-      console.error(`--port must be an integer between 1 and 65535 (got: ${portStr ?? '(missing)'})`);
+      const given = daemonPortSource(argv);
+      console.error(`--port / ${DAEMON_PORT_ENV} must be an integer between 1 and 65535 (got: ${given.raw ?? '(missing)'} from ${given.from})`);
       process.exit(1);
     }
     await runMcpServer(port);
+  } else if (command === 'governance') {
+    await runGovernance(argv);
   } else {
     console.error(`Unknown command: ${command ?? '(none)'}`);
-    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp');
+    console.error('Usage: wicked-crew serve|start|resume|gate|status|mcp|governance|version');
+    console.error(
+      '  version | --version | -V   the versions of THIS install (wicked-crew, wicked-core-ts, bundled studio);\n' +
+        '                             for the daemon running on a port, GET http://127.0.0.1:<port>/api/v1/diagnostics',
+    );
     process.exit(1);
   }
+}
+
+// ── The two daemon-client verbs (`gate`, `status`) — crew#551 (F-RC1-044) ─────────────────────
+//
+// After a reboot the daemon is gone; `wicked-crew status` used to print the whole
+// `TypeError: fetch failed … ECONNREFUSED` stack through `main().catch` and exit 1, and a non-2xx
+// answer printed the error body as JSON and exited 0 (so a script could not tell "the daemon is
+// down" from "there are no runs"). ONE wrapper around the two bare `fetch` calls: a connection
+// failure is one remedy line on stderr, exit 1, no stack; a non-2xx answer is
+// `wicked-crew: <verb> failed: <status> <body>`, exit 1. The 2xx output is unchanged.
+
+/** undici's `TypeError: fetch failed` carries the socket error as `cause`; these codes mean "nothing answered". */
+const CONNECTION_FAILURE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND']);
+
+function isConnectionFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { cause?: { code?: unknown } }).cause?.code;
+  if (typeof code === 'string' && CONNECTION_FAILURE_CODES.has(code)) return true;
+  return err instanceof TypeError && err.message === 'fetch failed';
+}
+
+// Subcommand usage (F-W1-101: `wicked-crew status --help` answered "Unknown command"). Printed on
+// stdout with exit 0, like `serve --help`; both name the port resolution every verb shares.
+const PORT_LINE = `  --port <n>       daemon port (default: ${DEFAULT_DAEMON_PORT}, env: ${DAEMON_PORT_ENV}) — resolved exactly as \`serve\` resolves its listening port`;
+const STATUS_USAGE = [
+  'Usage: wicked-crew status [--run <id>] [--port <n>]',
+  '',
+  'Print the runs (or one run) of the daemon on this host as JSON. Exit 1 with a one-line remedy',
+  'when no daemon answers, exit 1 on a non-2xx answer.',
+  '',
+  'Options:',
+  '  --run <id>       one run (alias: --session <id>); default: the run list',
+  PORT_LINE,
+  '  -h, --help       this text',
+].join('\n');
+const GATE_USAGE = [
+  'Usage: wicked-crew gate --run <id> [--reject] [--amend <text>] [--port <n>]',
+  '',
+  'Answer the human gate a run is parked at: approve (default) or --reject; --amend steers the retry.',
+  '',
+  'Options:',
+  '  --run <id>       the run (alias: --session <id>) — required',
+  '  --reject         reject instead of approve',
+  '  --amend <text>   steering text carried with the approval',
+  PORT_LINE,
+  '  -h, --help       this text',
+].join('\n');
+
+/** The one remedy line for "no daemon answering" — operator terms, no stack. */
+function noDaemonRemedy(port: number): string {
+  return `wicked-crew: no daemon answering on 127.0.0.1:${port} — start it with \`wicked-crew serve\` (crew#551)`;
+}
+
+export { withBearerHeader } from './bearer.js';
+import { withBearerHeader } from './bearer.js';
+
+/** `fetch` against the local daemon: injects `WICKED_CREW_TOKEN` as a bearer if set; a connection failure exits 1 with the remedy; anything else propagates. */
+async function daemonFetch(port: number, url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, withBearerHeader(init));
+  } catch (err) {
+    if (isConnectionFailure(err)) {
+      console.error(noDaemonRemedy(port));
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+/** A non-2xx answer from the daemon: one line naming the verb, the status and the body; exit 1. */
+async function failNon2xx(verb: string, res: Response): Promise<never> {
+  console.error(`wicked-crew: ${verb} failed: ${res.status} ${await res.text()}`);
+  process.exit(1);
 }
 
 async function runGate(args: string[]): Promise<void> {
   const runId = flag(args, '--run') ?? flag(args, '--session');
   const approve = !hasFlag(args, '--reject');
   const amend = flag(args, '--amend');
-  const port = flag(args, '--port') !== undefined ? Number(flag(args, '--port')) : 7701;
+  const port = resolveDaemonPort(args);
   if (!runId) {
-    console.error('Usage: wicked-crew gate --run <id> [--reject] [--amend <text>] [--port <n>]');
+    console.error(GATE_USAGE);
     process.exit(1);
   }
   const body: Record<string, unknown> = { approve };
   if (amend !== undefined) body['amend'] = amend;
-  const res = await fetch(`http://127.0.0.1:${port}/api/v1/runs/${runId}/gate`, {
+  const res = await daemonFetch(port, `http://127.0.0.1:${port}/api/v1/runs/${runId}/gate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    console.error(`Gate action failed: ${res.status} ${await res.text()}`);
-    process.exit(1);
-  }
+  if (!res.ok) await failNon2xx('gate', res);
   console.log(`Gate ${approve ? 'approve' : 'reject'} applied to run ${runId}`);
 }
 
 async function runStatus(args: string[]): Promise<void> {
   const runId = flag(args, '--run') ?? flag(args, '--session');
-  const port = flag(args, '--port') !== undefined ? Number(flag(args, '--port')) : 7701;
+  const port = resolveDaemonPort(args);
   const base = `http://127.0.0.1:${port}/api/v1`;
   const url = runId ? `${base}/runs/${runId}` : `${base}/runs`;
-  const res = await fetch(url);
+  const res = await daemonFetch(port, url);
+  if (!res.ok) await failNon2xx('status', res);
   console.log(JSON.stringify(await res.json(), null, 2));
+  // F-W1-102: a daemon whose base skill is REQUIRED and not handed (the crew-only install — no
+  // wicked-garden) refuses EVERY launch at intake while `/runs` is an honest `[]`. `status` says why,
+  // on stderr so stdout stays the JSON a script parses — quoting the SAME `skills.base-skill` finding
+  // `/health` carries (`baseSkill.finding`, `warnings[]`) and the 422 launch body names; exit 0 (the
+  // daemon is up; this is its configuration state). An older daemon without the field says nothing.
+  const health = await daemonFetch(port, `${base}/health`);
+  if (health.ok) {
+    let message: unknown;
+    try {
+      const body = (await health.json()) as { baseSkill?: { finding?: { message?: unknown } | null } | null };
+      message = body.baseSkill?.finding?.message;
+    } catch {
+      message = undefined;
+    }
+    if (typeof message === 'string' && message.length > 0) console.error(`wicked-crew: ${message}`);
+  }
 }
 
 main().catch((err) => {

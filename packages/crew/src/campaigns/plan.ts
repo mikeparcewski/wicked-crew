@@ -65,8 +65,15 @@ export function scenarioWorkflowId(campaignId: string, scenarioId: string): stri
 
 /** A built campaign: the engine def plus the per-node Tool workflows the adapter must arm
  *  (hot-register + overlay-persist) BEFORE the def launches. */
+/** The engine's `CampaignDef.denial_gate` (wicked-core ≥ 0.7.27; DES-L1 PR-1D). Typed HERE until
+ *  wicked-crew-api-types carries `CampaignDef.denial_gate?` / `LaunchCampaignBody.denialGate?`
+ *  (0.39.0) — the engine's serde reads it today; `engineCampaignDef` spreads the def verbatim. */
+export type CampaignDenialGate = 'hold' | 'auto_reject';
+export type EngineCampaignDef = CampaignDef & { denial_gate?: CampaignDenialGate };
+export type LaunchCampaignBodyWithDenialGate = LaunchCampaignBody & { denialGate?: CampaignDenialGate };
+
 export interface BuiltCampaign {
-  def: CampaignDef;
+  def: EngineCampaignDef;
   workflows: WorkflowDef[];
 }
 
@@ -371,7 +378,7 @@ function toolPhase(cmd: string[]): PhaseDef {
  * `defaultClis` is the parsed council roster used for every node that does not carry its own —
  * Tool nodes never convene it (the phase bypasses the council), agent nodes do.
  */
-export function buildCampaign(body: LaunchCampaignBody, defaultClis: unknown[]): BuiltCampaign {
+export function buildCampaign(body: LaunchCampaignBodyWithDenialGate, defaultClis: unknown[]): BuiltCampaign {
   const campaignId = body.id ?? `campaign-${Date.now().toString(36)}`;
   if (!SAFE_ID.test(campaignId) || campaignId.length > MAX_CAMPAIGN_ID) {
     throw new Error(
@@ -424,6 +431,9 @@ export function buildCampaign(body: LaunchCampaignBody, defaultClis: unknown[]):
       edges,
       policy: body.policy ?? 'continue_independent',
       max_concurrency: body.maxConcurrency ?? 2,
+      // Absent ⇒ the engine's default (`hold`, today's behaviour) — never spelled here, so an
+      // older engine sees exactly the def it saw before.
+      ...(body.denialGate !== undefined ? { denial_gate: body.denialGate } : {}),
     },
     workflows,
   };

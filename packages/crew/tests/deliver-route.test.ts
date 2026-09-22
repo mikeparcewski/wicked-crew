@@ -1,6 +1,6 @@
 // crew#293 — POST /runs accepts deliver:"pr" and threads it to the adapter.
 // crew#393 — the deliver DEFAULT: a repo-scoped launch that names a CODE-WORK workflow (a def
-// with at least one `executes_code` phase) delivers unless somebody said otherwise (per-launch
+// with at least one non-evaluator `executes_code` phase) delivers unless somebody said otherwise (per-launch
 // `deliver: 'none'`, or the daemon's `deliverDefault` setting); repo-less, free-text, and
 // read-only-workflow launches (chat and its kin — the deliver script fails a clean worktree
 // loudly, so defaulting it on would fail every repo-scoped chat) default to no deliver phase.
@@ -24,6 +24,16 @@ const CODE_WORK_DEF = {
   id: 'feature',
   phases: [
     { id: 'build', kind: 'build', gate_type: null, gate: 'auto', executes_code: true, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+  ],
+} as unknown as WorkflowDef;
+
+/** An EVALUATOR that executes code (domain-extraction's `coverage` writes its own report into the
+ *  tree, wicked-core#414) and no other code phase anywhere — nothing to deliver. */
+const EVALUATOR_CODE_DEF = {
+  id: 'domain-extraction',
+  phases: [
+    { id: 'extract', kind: 'recon', gate_type: 'value', gate: 'auto', executes_code: false, verified_evidence: false, required_deliverables: [], depends_on: [], role: 'creator', skill_ref: null, allowed_skills: [], validator_pin: null },
+    { id: 'coverage', kind: 'test', gate_type: 'execution', gate: { human_confirm_if: 'verdict_not_pass' }, executes_code: true, verified_evidence: true, required_deliverables: ['coverage-report.json'], depends_on: ['extract'], role: 'evaluator', skill_ref: null, allowed_skills: [], validator_pin: 'bfe4020a365c598b' },
   ],
 } as unknown as WorkflowDef;
 
@@ -92,6 +102,67 @@ describe('POST /runs deliver option (crew#293)', () => {
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect(input.workflow).toBe('feature');
     expect(input.deliver).toBe('pr');
+  });
+
+  // F-E2E-030 — the deliver gate: the engine confirms the push by default; only an explicit
+  // `deliverGate: 'auto'` reaches the adapter as `autoDeliver: true`.
+  it('deliverGate:"auto" threads autoDeliver: true to launchRun (the explicit opt-out)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'auto' },
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.deliver).toBe('pr');
+    expect(input.autoDeliver).toBe(true);
+  });
+
+  it('omitting deliverGate, or sending "human", leaves autoDeliver OFF the input — the gate is the engine default', async () => {
+    for (const extra of [{}, { deliverGate: 'human' }]) {
+      mockAdapter.launchRun.mockClear();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/runs',
+        payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', ...extra },
+      });
+      expect(res.statusCode).toBe(201);
+      const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+      expect('autoDeliver' in input).toBe(false);
+    }
+  });
+
+  it('humanConfirm:"none" is NOT a deliver-gate opt-out (it is that field\'s default and typo fallback)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', humanConfirm: 'none' },
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect(input.humanConfirm).toBe('none');
+    expect('autoDeliver' in input).toBe(false);
+  });
+
+  it('400 on deliverGate with deliver:"none" — nothing to gate, said loudly', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'none', deliverGate: 'auto' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.stringify(res.json())).toMatch(/no deliver phase to gate/);
+    expect(mockAdapter.launchRun).not.toHaveBeenCalled();
+  });
+
+  it('400 on an unknown deliverGate — "human" and "auto" are the only two', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/runs',
+      payload: { problem: 'ship it', clisJson: '[]', workflow: 'feature', deliver: 'pr', deliverGate: 'yolo' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(mockAdapter.launchRun).not.toHaveBeenCalled();
   });
 
   it('omitting deliver on a REPO-LESS workflow launch leaves the field off entirely (crew#393)', async () => {
@@ -236,6 +307,23 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     expect(mockAdapter.getSettings).not.toHaveBeenCalled();
   });
 
+  it('a def whose only code phase is an EVALUATOR (domain-extraction) defaults to none', async () => {
+    // `coverage` executes code only to write its own report for its validator; nothing else wrote
+    // anything a PR could carry — defaulting deliver on would fail every domain-extraction run.
+    // (A neutral Tool phase that writes IS code work — the deliver e2e fixtures rely on that.)
+    mockAdapter.getWorkflow.mockReturnValue(EVALUATOR_CODE_DEF);
+    const res = await launch({
+      problem: 'extract the domain',
+      clisJson: '[]',
+      workflow: 'domain-extraction',
+      repoRef: 'repo-1',
+    });
+    expect(res.statusCode).toBe(201);
+    const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
+    expect('deliver' in input).toBe(false);
+    expect(mockAdapter.getSettings).not.toHaveBeenCalled();
+  });
+
   it('an UNKNOWN workflow id defaults to none (the launch fails on its own workflow error, not a deliver-flavored one)', async () => {
     mockAdapter.getWorkflow.mockReturnValue(null);
     const res = await launch({
@@ -261,5 +349,39 @@ describe('POST /runs deliver DEFAULT for repo-scoped launches (crew#393)', () =>
     expect(res.statusCode).toBe(201);
     const input = mockAdapter.launchRun.mock.calls[0]![0] as LaunchRunInput;
     expect(input.deliver).toBe('pr');
+  });
+});
+
+// F-E2E-030 — `GET /health.capabilities.deliverGate`: the composer promises the gate only when the
+// deployment keeps it.
+describe('GET /health capabilities (F-E2E-030)', () => {
+  it('reports the engine probe when the adapter has one', async () => {
+    const app = buildApp({
+      launchRun: vi.fn(),
+      getSettings: vi.fn(),
+      getWorkflow: vi.fn(),
+      ping: vi.fn().mockResolvedValue('ok'),
+      engineCapabilities: vi.fn().mockReturnValue({ deliverGate: true }),
+    } as unknown as MockAdapter);
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'ok', ping: 'ok', capabilities: { deliverGate: true } });
+    await app.close();
+  });
+
+  it('reports NO deliver gate when the adapter cannot probe the addon — never an invented capability', async () => {
+    const app = buildApp({
+      launchRun: vi.fn(),
+      getSettings: vi.fn(),
+      getWorkflow: vi.fn(),
+      ping: vi.fn().mockResolvedValue('ok'),
+    } as unknown as MockAdapter);
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+    // DES-L9: `revisesPr` rides beside `deliverGate` — a stub-driven route set honestly reports neither.
+    // crew#619: `chatIdOnLaunch` is a crew-side constant so it is always false when engineCapabilities throws.
+    expect(res.json().capabilities).toEqual({ deliverGate: false, revisesPr: false, chatIdOnLaunch: false, seatChipOnCreate: false });
+    await app.close();
   });
 });

@@ -17,16 +17,27 @@
 // - `true` is "a credential artifact exists", NOT "the credential still works". An expired
 //   OAuth token reads `true` here; seat HEALTH (crew#274) is what catches it failing live.
 //
-// Per-seat rules (each documented at its branch):
-//   claude    — the WORKER config home's `.claude.json` (per-config-dir keychain entry means the
-//               file is the observable half; see below), under `WICKED_WORKER_HOME`/the default.
-//   codex     — `~/.codex/auth.json` presence.
-//   copilot   — env token (COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN) → true; installed but no
-//               env → null (keychain state unknowable cheaply — NOT false); no trace → false.
-//   opencode  — `~/.local/share/opencode/auth.json` presence.
-//   pi        — `~/.pi/agent/auth.json` presence.
-//   agy       — any `.json` under `~/.antigravitycli/` → true; else null (keyring unknowable).
+// Per-seat rules (each documented at its branch). EVERY known seat is probed under its OWN root
+// in the worker home (wicked-core#410, F-010: the engine now runs codex/pi/copilot/opencode seats
+// under `<worker home>/<seat>` through the CLI's own configuration-home variable, exactly as claude
+// runs under `<worker home>/claude`) — so the roster says whether the SEAT is signed in, never
+// whether the operator is. The layout mirrors `wicked_apps_core::spawn::seat_config_for`:
+//   claude    — `<root>/claude/.claude.json` with an `oauthAccount` (per-config-dir keychain entry
+//               means the file is the observable half; see below).
+//   codex     — `<root>/codex/auth.json` (`CODEX_HOME=<root>/codex`).
+//   copilot   — env token (COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN) → true; else
+//               `<root>/copilot/config.json` (`COPILOT_HOME`) recording a logged-in user → true;
+//               installed but no user → null (keychain state unknowable cheaply — NOT false);
+//               no trace → false.
+//   opencode  — `<root>/opencode/data/opencode/auth.json` (`XDG_DATA_HOME=<root>/opencode/data`).
+//   pi        — `<root>/pi/auth.json` (`PI_CODING_AGENT_DIR=<root>/pi`).
+//   agy       — any `.json` under `~/.gemini/` (the installed agy's layout) → true; else null
+//               (keyring unknowable; no
+//               configuration-home variable is known for agy, so it runs where the operator does).
 //   unknown   — null (a seat this module has no rule for is exactly "unknown").
+// Under the operator's inherit hatch (`WICKED_WORKER_INHERIT_OPERATOR_CONFIG` set in the daemon's
+// env) every seat runs on the operator's OWN configuration, so the probes read the CLIs' default
+// homes instead (`~/.codex`, `~/.pi/agent`, `~/.copilot`, `~/.local/share/opencode`, `~/.claude`).
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -40,6 +51,48 @@ import { join } from 'node:path';
 export interface SigninProbeIo {
   home?: string;
   env?: Record<string, string | undefined>;
+}
+
+/** Key names under which a credential file keeps the secret itself (any depth) — WHOLE names, so
+ *  `keyring`, `apiVersion`, `monkey` never read as a credential (review L-4 of #536): `key`,
+ *  `api_key` / `OPENAI_API_KEY`, `token` / `access_token` / `id_token`, `secret`, `password`,
+ *  `credential(s)`, `access` / `refresh` (pi's OAuth pair), `bearer`. */
+const CREDENTIAL_KEY_RE =
+  /^(?:.*[_-])?(?:api[_-]?key|key|token|secret|password|credentials?|access(?:[_-]?token)?|refresh(?:[_-]?token)?|bearer)$/i;
+
+/**
+ * Whether a credential file's CONTENT carries a credential (F-A45-006): a JSON object (or array)
+ * holding, at any depth ≤ 4, a NON-EMPTY string under a key that names a secret (`key`, `token`,
+ * `access`/`refresh`, `OPENAI_API_KEY`, …). The fresh rig's pi `auth.json` was `{}` — present, and
+ * every ballot failed "No API key found" — so PRESENCE alone is not a sign-in: `{}`, `[]`, a type
+ * marker with no secret (`{"type":"api_key"}`), malformed JSON and an empty file all read `false`.
+ */
+export function hasCredentialShape(raw: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  const walk = (v: unknown, depth: number, keyed: boolean): boolean => {
+    if (depth > 4) return false;
+    if (typeof v === 'string') return keyed && v.trim() !== '';
+    if (Array.isArray(v)) return v.some((x) => walk(x, depth + 1, keyed));
+    if (typeof v === 'object' && v !== null) {
+      return Object.entries(v as Record<string, unknown>).some(([k, x]) => walk(x, depth + 1, CREDENTIAL_KEY_RE.test(k)));
+    }
+    return false;
+  };
+  return walk(parsed, 0, false);
+}
+
+/** The credential-file probe: present AND credential-shaped ({@link hasCredentialShape}). */
+function credentialFilePresent(path: string): boolean {
+  try {
+    return hasCredentialShape(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -57,6 +110,14 @@ export function signedInHeuristic(
 ): boolean | null {
   const home = io.home ?? homedir();
   const env = io.env ?? process.env;
+  // The one hatch every engine spawn honours (wicked_apps_core::spawn::INHERIT_OPERATOR_CONFIG_ENV):
+  // set, the seats run on the operator's own CLI homes and so does this probe.
+  const inherit = env['WICKED_WORKER_INHERIT_OPERATOR_CONFIG'] !== undefined;
+  // The worker home base the engine resolves (`WICKED_WORKER_HOME`, else `~/.wicked-worker`);
+  // each seat's root is `<base>/<seat>`.
+  const root = workerConfigRoot !== undefined && workerConfigRoot !== ''
+    ? workerConfigRoot
+    : join(home, '.wicked-worker');
 
   switch (seatKey) {
     case 'claude': {
@@ -66,10 +127,7 @@ export function signedInHeuristic(
       // but `/login` also writes an `oauthAccount` block into that dir's `.claude.json`, which
       // is: present-with-key means a login completed for the WORKER home (not the operator's
       // own ~/.claude). Heuristic by construction — a revoked token still reads true.
-      const root = workerConfigRoot !== undefined && workerConfigRoot !== ''
-        ? workerConfigRoot
-        : join(home, '.wicked-worker');
-      const file = join(root, 'claude', '.claude.json');
+      const file = inherit ? join(home, '.claude', '.claude.json') : join(root, 'claude', '.claude.json');
       try {
         const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
         return typeof parsed === 'object' && parsed !== null && 'oauthAccount' in parsed;
@@ -79,8 +137,11 @@ export function signedInHeuristic(
     }
 
     case 'codex':
-      // `codex login` writes ~/.codex/auth.json (tokens live IN the file — presence is the state).
-      return existsSync(join(home, '.codex', 'auth.json'));
+      // `codex login` writes `$CODEX_HOME/auth.json` (tokens live IN the file — presence is the
+      // state); the seat's CODEX_HOME is `<root>/codex` (wicked-core#410).
+      return credentialFilePresent(
+        inherit ? join(home, '.codex', 'auth.json') : join(root, 'codex', 'auth.json'),
+      );
 
     case 'copilot': {
       // Env token wins: copilot honors these directly, and a set token IS a signed-in seat.
@@ -92,8 +153,11 @@ export function signedInHeuristic(
       // USER in config.json (`lastLoggedInUser` / `loggedInUsers`) — verified in the field: a
       // successful sign-in left the chip on null-neutral and the Sign in button up, reading as
       // "didn't work". The file is JSONC (comment header), so this parses key-presence
-      // leniently rather than JSON.parse-ing the whole document.
-      const cfg = join(home, '.copilot', 'config.json');
+      // leniently rather than JSON.parse-ing the whole document. The seat's config home is
+      // `COPILOT_HOME=<root>/copilot` (wicked-core#410); the keychain entry itself is per-user.
+      const cfg = inherit
+        ? join(home, '.copilot', 'config.json')
+        : join(root, 'copilot', 'config.json');
       if (existsSync(cfg)) {
         try {
           const raw = readFileSync(cfg, 'utf8');
@@ -122,20 +186,32 @@ export function signedInHeuristic(
     }
 
     case 'opencode':
-      // `opencode auth login` writes the credential file itself — presence is the state.
-      return existsSync(join(home, '.local', 'share', 'opencode', 'auth.json'));
+      // `opencode auth login` writes `$XDG_DATA_HOME/opencode/auth.json` — presence is the state;
+      // the seat's XDG_DATA_HOME is `<root>/opencode/data` (wicked-core#410).
+      return credentialFilePresent(
+        inherit
+          ? join(home, '.local', 'share', 'opencode', 'auth.json')
+          : join(root, 'opencode', 'data', 'opencode', 'auth.json'),
+      );
 
     case 'pi':
-      // pi's auth flow writes ~/.pi/agent/auth.json — presence is the state.
-      return existsSync(join(home, '.pi', 'agent', 'auth.json'));
+      // pi's auth flow writes `$PI_CODING_AGENT_DIR/auth.json` — presence is the state; the
+      // seat's agent dir is `<root>/pi` (wicked-core#410).
+      // A credential-SHAPED file, not mere presence (F-A45-006): the fresh rig's pi `auth.json` was
+      // `{}` and every ballot failed "No API key found" while the roster read `signed_in: true`.
+      return credentialFilePresent(
+        inherit ? join(home, '.pi', 'agent', 'auth.json') : join(root, 'pi', 'auth.json'),
+      );
 
     case 'agy': {
-      // Antigravity keeps its credential in the OS keyring; a `.json` in ~/.antigravitycli/ is
+      // Antigravity keeps its credential in the OS keyring; a `.json` under ~/.gemini/ (the
+      // installed agy's configuration directory — verified by the independent review; the earlier
+      // `~/.antigravitycli` spelling was a stale guess) is
       // the observable artifact a completed login leaves behind. Missing dir OR dir-with-no-json
       // both mean the keyring state is unknowable cheaply → null (only a json upgrades to true).
       let entries: string[];
       try {
-        entries = readdirSync(join(home, '.antigravitycli'));
+        entries = readdirSync(join(home, '.gemini'));
       } catch {
         return null;
       }

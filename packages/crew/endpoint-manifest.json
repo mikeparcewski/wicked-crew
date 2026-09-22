@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "apiTypesVersion": "0.26.0",
+  "apiTypesVersion": "0.38.0",
   "endpoints": [
     {
       "method": "GET",
@@ -71,15 +71,26 @@
       "method": "GET",
       "path": "/api/v1/chats",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "ChatListResponse",
+      "statusCodes": [
+        200,
+        400,
+        501
+      ]
     },
     {
       "method": "POST",
       "path": "/api/v1/chats",
-      "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "requestType": "ChatOpenBody",
+      "responseType": "ChatOpenResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
+        500,
+        501
+      ]
     },
     {
       "method": "DELETE",
@@ -92,8 +103,11 @@
       "method": "GET",
       "path": "/api/v1/chats/:id",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "ChatDetailResponse",
+      "statusCodes": [
+        200,
+        400
+      ]
     },
     {
       "method": "POST",
@@ -101,6 +115,18 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/chats/:id/seats",
+      "requestType": "ChatSeatsBody",
+      "responseType": "ChatSeatsResponse",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409
+      ]
     },
     {
       "method": "GET",
@@ -270,6 +296,15 @@
     },
     {
       "method": "GET",
+      "path": "/api/v1/interactive/docs",
+      "requestType": null,
+      "responseType": "InteractiveDocsListing",
+      "statusCodes": [
+        200
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/api/v1/memory",
       "requestType": null,
       "responseType": "ListMemoriesResponse",
@@ -348,28 +383,52 @@
       "path": "/api/v1/projects/:id/graph",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",
       "path": "/api/v1/projects/:id/graph/blast-radius",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "POST",
       "path": "/api/v1/projects/:id/graph/refresh",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",
       "path": "/api/v1/projects/:id/graph/search",
       "requestType": null,
       "responseType": null,
-      "statusCodes": []
+      "statusCodes": [
+        200,
+        400,
+        404,
+        501,
+        503
+      ]
     },
     {
       "method": "GET",
@@ -469,6 +528,21 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/v1/projects/:projectId/interactive/api/docs",
+      "requestType": "InteractiveDocCreateRequest",
+      "responseType": "InteractiveDocCreateResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        413,
+        502,
+        503
+      ]
+    },
+    {
       "method": "DELETE",
       "path": "/api/v1/projects/:projectId/interactive/docs/:doc",
       "requestType": null,
@@ -554,8 +628,13 @@
       "method": "GET",
       "path": "/api/v1/repos/:id/graph",
       "requestType": null,
-      "responseType": null,
-      "statusCodes": []
+      "responseType": "RepoGraphResponse",
+      "statusCodes": [
+        200,
+        404,
+        500,
+        503
+      ]
     },
     {
       "method": "GET",
@@ -626,6 +705,7 @@
         400,
         404,
         409,
+        422,
         501
       ]
     },
@@ -670,6 +750,16 @@
         404,
         409,
         500
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/:id/deliver-text",
+      "requestType": null,
+      "responseType": null,
+      "statusCodes": [
+        200,
+        404
       ]
     },
     {
@@ -806,6 +896,175 @@
       "statusCodes": []
     },
     {
+      "method": "GET",
+      "path": "/api/v1/skills",
+      "requestType": null,
+      "responseType": "SkillsManifestResponse",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills",
+      "requestType": "AddSkillBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/disable",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/enable",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/:name/files",
+      "requestType": null,
+      "responseType": "SkillFileTree",
+      "statusCodes": [
+        200,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/:name/files/*",
+      "requestType": null,
+      "responseType": "SkillReadResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/skills/:name/files/*",
+      "requestType": "PutSkillFileBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/replace",
+      "requestType": "ReplaceSkillBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/:name/reset",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/analyze",
+      "requestType": null,
+      "responseType": "SkillAnalyzeResult",
+      "statusCodes": [
+        200,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/publish",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillPublishResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/skills/refresh-baseline",
+      "requestType": "SkillRevisionBody",
+      "responseType": "SkillRefreshResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        502,
+        503
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/skills/support/*",
+      "requestType": null,
+      "responseType": "SkillReadResult",
+      "statusCodes": [
+        200,
+        400,
+        404,
+        503
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/skills/support/*",
+      "requestType": "PutSkillFileBody",
+      "responseType": "SkillMutationResult",
+      "statusCodes": [
+        200,
+        400,
+        409,
+        503
+      ]
+    },
+    {
       "method": "POST",
       "path": "/api/v1/terminals",
       "requestType": null,
@@ -825,6 +1084,20 @@
       "requestType": null,
       "responseType": null,
       "statusCodes": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/testing/author",
+      "requestType": "TestingAuthorBody",
+      "responseType": "TestingAuthorResponse",
+      "statusCodes": [
+        201,
+        400,
+        404,
+        409,
+        500,
+        501
+      ]
     },
     {
       "method": "POST",

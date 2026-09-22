@@ -32,10 +32,11 @@
  * # Honest degradation
  *
  * Every path out of here names its cause. A project with no repo members, one whose graph was never
- * built, one whose member repo the registry no longer knows, and an addon too old to publish
- * `code_graph_db` are four different situations with four different remedies; collapsing them into
- * an empty result set is the failure estate's own R3 rule exists to prevent, and it is the failure
- * FINDING-069 actually shipped.
+ * built, one whose member repo the registry no longer knows, an addon too old to publish
+ * `code_graph_db`, and a CURRENT engine that resolved no repo-graph root at all
+ * (`CodeGraphRootUnresolvableError` → the routes' 503; wicked-core#406) are five different
+ * situations with five different remedies; collapsing them into an empty result set is the failure
+ * estate's own R3 rule exists to prevent, and it is the failure FINDING-069 actually shipped.
  */
 
 import { existsSync } from 'node:fs';
@@ -44,9 +45,10 @@ import { dirname } from 'node:path';
 
 import type { CoreAdapter } from '../core/adapter.js';
 import { ExecOutputTooLarge, execCapped } from '../core/exec.js';
-import { codeGraphDb } from '../core/repoPaths.js';
+import { codeGraphDb, CodeGraphRootUnresolvableError } from '../core/repoPaths.js';
 import type {
   ProjectBlastRadius,
+  ProjectGraphAction,
   ProjectGraphHit,
   ProjectGraphRefreshResult,
   ProjectGraphRepo,
@@ -76,8 +78,10 @@ export const EXACT_NAME_NOTE =
   'returns no matches even when the symbol exists. An empty `matches` means "no symbol by that ' +
   'exact name", never "not in this project".';
 
-/** `wicked-estate`, overridable exactly as `WICKED_CORE_EXE` overrides `wicked-core` in routes.ts. */
-function estateExe(env: NodeJS.ProcessEnv = process.env): string {
+/** `wicked-estate`, overridable exactly as `WICKED_CORE_EXE` overrides `wicked-core` in routes.ts.
+ *  Exported (DES-L8 PR-8D) so the repo-graph route's `stats` spawn rides the same override the
+ *  project-graph refresh and its test stub already use — one spelling of which binary answers. */
+export function estateExe(env: NodeJS.ProcessEnv = process.env): string {
   return env['WICKED_ESTATE_EXE'] ?? 'wicked-estate';
 }
 
@@ -397,13 +401,18 @@ function buildStatus({ projectId, members, manifest, dbExists, env }: StatusInpu
     };
   }
   if (!dbExists || indexedCount === 0) {
+    // Customer copy (F-2R2-008): this sentence is what a chat's scope card and the project page
+    // show a person, so it names the page action, not the route — the route rides on `action` for
+    // the UI to wire. The member count says how big the build is.
+    const n = members.repos.length;
     return {
       ...base,
       state: 'not-indexed',
       detail:
-        `Project ${projectId} has ${members.repos.length} repo member(s) but no code graph yet. ` +
-        `Build it with POST /api/v1/projects/${projectId}/graph/refresh.` +
-        (dangling === '' ? '' : ` (${dangling} is a member the repo registry does not know.)`),
+        `This project's code graph has not been built yet — build it from the project page ` +
+        `(${n} member repositor${n === 1 ? 'y' : 'ies'}).` +
+        (dangling === '' ? '' : ` (${dangling} is listed as a member but is no longer a registered repository.)`),
+      action: 'projects.graph.refresh',
     };
   }
   if (indexedCount === 1) {
@@ -451,6 +460,10 @@ function assertEngineFresh(repos: MemberRepo[]): void {
     try {
       codeGraphDb(m.repo);
     } catch (err) {
+      // A CURRENT engine that resolved no repo-graph root (wicked-core#406) is not a stale addon:
+      // its remedy is the daemon's environment, and "engine too old" (501, reinstall) would send
+      // the operator the wrong way. Let it through with its own class; the routes classify it.
+      if (err instanceof CodeGraphRootUnresolvableError) throw err;
       throw new ProjectGraphEngineTooOldError(message(err));
     }
   }
@@ -754,6 +767,9 @@ export interface ProjectGraphBindingDecision {
   binding: ProjectGraphBinding | null;
   /** One sentence: what the run got, and what would change it. */
   reason: string;
+  /** The UI action that would change a `binding: null` outcome, when one would (F-2R2-008):
+   *  `projects.graph.refresh` = build/refresh the project graph from the project page. */
+  action?: ProjectGraphAction;
 }
 
 /**
@@ -780,10 +796,23 @@ function labelList(labels: string[]): string {
  * gets nothing. Telling such a run it "uses its own repo's code graph" names a graph that does not
  * exist and sends whoever is debugging it looking for one.
  */
-function degradedTo(repoRef: string | undefined): string {
+function degradedTo(repoRef: string | undefined, subject: BindingSubject): string {
+  if (subject === 'chat') return 'Chat still reads the repositories directly.';
   return repoRef === undefined
     ? 'This repo-less run gets no code graph.'
     : "This run uses its own repo's code graph in the meantime.";
+}
+
+/**
+ * WHO is asking for the binding — a governed run or a chat. The two degrade to different things
+ * (a chat has no worktree and no "own repo", it keeps reading the scoped roots directly), and
+ * F-2R2-008 recorded a 9-repo project chat being told "this repo-less run gets no code graph".
+ */
+export type BindingSubject = 'run' | 'chat';
+
+export interface ResolveBindingOptions {
+  /** Default `'run'`. */
+  subject?: BindingSubject;
 }
 
 /**
@@ -816,24 +845,39 @@ export async function resolveProjectGraphBinding(
   projectId: string,
   repoRef: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  opts: ResolveBindingOptions = {},
 ): Promise<ProjectGraphBindingDecision> {
+  const subject: BindingSubject = opts.subject ?? 'run';
   let status: ProjectGraphStatus;
   try {
     status = await projectGraphStatus(adapter, projectId, env);
   } catch (err) {
+    // A CURRENT engine that resolved no repo-graph root at all (wicked-core#406): there is no
+    // per-repo graph to degrade to either — the engine will ship the worker no estate tools —
+    // so the reason must not promise one. Name the environment fault instead; it is the remedy.
+    if (err instanceof CodeGraphRootUnresolvableError) {
+      return {
+        binding: null,
+        reason:
+          `no code graph can be bound: ${err.finding.message}. This run gets no code graph ` +
+          `(not the project's, not its own repo's) until the daemon's environment resolves a ` +
+          `repo-graph root.`,
+      };
+    }
     // Resolving the binding is an ENHANCEMENT to the launch. A project whose membership cannot be
     // read, or an addon too old to vouch for repo graph paths, must not take the run down with it —
     // the run is still perfectly launchable against its own repo's graph.
     return {
       binding: null,
-      reason: `the project graph could not be read (${message(err)}). ${degradedTo(repoRef)}`,
+      reason: `the project graph could not be read (${message(err)}). ${degradedTo(repoRef, subject)}`,
     };
   }
 
   if (status.dbPath === null) {
     return {
       binding: null,
-      reason: `${status.detail} ${degradedTo(repoRef)}`,
+      reason: `${status.detail} ${degradedTo(repoRef, subject)}`,
+      ...(status.action !== undefined ? { action: status.action } : {}),
     };
   }
 
@@ -844,7 +888,8 @@ export async function resolveProjectGraphBinding(
     if (indexed.length === 0) {
       return {
         binding: null,
-        reason: `${status.detail} ${degradedTo(repoRef)}`,
+        reason: `${status.detail} ${degradedTo(repoRef, subject)}`,
+        ...(status.action !== undefined ? { action: status.action } : {}),
       };
     }
     // The COUNT is exact; the label list is capped. This string is a log line on every repo-less

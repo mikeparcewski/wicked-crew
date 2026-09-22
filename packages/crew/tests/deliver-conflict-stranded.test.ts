@@ -337,7 +337,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     git(fx.clone, 'push', '-q', 'origin', 'main');
 
     // Prove the deliver script REALLY refuses with the marker here (nothing pushed).
-    const first = await runDeliverScript(fx.workdir, 'run change', fx.env);
+    const first = await runDeliverScript(fx.workdir, 'run change', undefined, fx.env);
     expect(first.status).not.toBe(0);
     expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
     expect(originBranches(fx)).toEqual(['main']);
@@ -361,7 +361,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
       worktreeIsClean: gitWorktreeIsClean(),
       deliverExec: (workdir, intent) => {
         calls += 1;
-        return runDeliverScript(workdir, intent, fx.env);
+        return runDeliverScript(workdir, intent, undefined, fx.env);
       },
     });
     apps.push(app);
@@ -412,7 +412,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     writeFileSync(hook, '#!/bin/sh\necho "remote: HTTP 403 authentication failed" >&2\nexit 1\n');
     chmodSync(hook, 0o755);
 
-    const first = await runDeliverScript(fx.workdir, 'auth retry', fx.env);
+    const first = await runDeliverScript(fx.workdir, 'auth retry', undefined, fx.env);
     expect(first.status).not.toBe(0);
     expect(first.output).toContain('HTTP 403 authentication failed');
     expect(first.output).toContain(DELIVER_LIFT_CONFLICT_MARKER);
@@ -431,7 +431,7 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     const app = buildApp([view({ status: 'failed', workdir: fx.workdir, units })], {
       worktreeExists: (p) => existsSync(p),
       worktreeIsClean: gitWorktreeIsClean(),
-      deliverExec: (workdir, intent) => runDeliverScript(workdir, intent, fx.env),
+      deliverExec: (workdir, intent) => runDeliverScript(workdir, intent, undefined, fx.env),
     });
     apps.push(app);
     await app.ready();
@@ -450,4 +450,57 @@ describe('crew#418 A — strand then lift, end-to-end on real git', () => {
     expect((retried.json() as { prUrl: string }).prUrl).toBe('https://github.com/o/r/pull/71');
     expect(originBranches(fx)).toContain(`wicked/${RUN_ID}`);
   }, 90_000);
+});
+
+// wicked-core#431 / #433 — the ENGINE now lifts before the script runs and authors the deliver
+// unit's refusal itself. Its LIFT-CONFLICT remedy carries crew's marker as its prefix ON PURPOSE (the
+// worktree was left exactly as verified — a post-hoc lift is safe); its failed RE-VERIFY leaves an
+// UNVERIFIED lifted tree in the worktree and must never be offered a post-hoc push.
+describe('wicked-core#431 — the engine’s deliver lift speaks the marker; only its CONFLICT strands', () => {
+  /** `deliver_lift.rs` `LiftOutcome::Conflict`, as the unit's denial_reason carries it. */
+  const engineConflict =
+    'Worker FAILED on unit 5 (triage: the deliver step exited non-zero): ' +
+    `${DELIVER_LIFT_CONFLICT_MARKER} — lifting the run's work onto origin/main (f57069d) would conflict in: ` +
+    'testid-inventory.json. The worktree was left exactly as verified (base 1432c96); nothing was rebased and ' +
+    "nothing was pushed. Resolve on the branch (rebase onto origin/main, regenerate any generated files, re-run the repository's checks) " +
+    'and approve to retry the deliver phase.';
+  /** The engine's RE-VERIFY failing after a lift: the worktree holds a lifted tree nobody verified. */
+  const engineReverifyFailed =
+    'Worker FAILED on unit 5 (triage: the deliver step exited non-zero): ' +
+    "deliver: the lift changed the tree, and the repository's own checks FAILED on it: typecheck: exit 2. " +
+    'Nothing was pushed — the deliver gate never pushes a tree that was not verified. Fix the worktree (or ' +
+    'reject the run) and approve to retry; the checks run again until the tree passes.';
+  const withDeliver = (denial: string): WorkUnit[] => [
+    unit({ id: `${RUN_ID}:build`, ord: 3, status: 'done' }),
+    unit({
+      id: `${RUN_ID}:deliver`,
+      ord: 5,
+      status: 'rejected',
+      denial_reason: denial,
+      tool_cmd: ['bash', '-lc', 'gh pr create --head "$B" --fill'],
+    }),
+  ];
+
+  it('an engine-authored LIFT-CONFLICT reads completed + stranded — the worktree was left exactly as verified', async () => {
+    const app = buildApp([view({ status: 'failed', units: withDeliver(engineConflict) })]);
+    apps.push(app);
+    await app.ready();
+    const body = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+      run: { session: Record<string, unknown>; units: WorkUnit[] };
+    };
+    expect(body.run.session['status']).toBe('completed');
+    expect(body.run.session['delivery']).toBe('stranded');
+    expect(body.run.units.find((u) => u.id.endsWith(':deliver'))!.denial_reason).toContain('lifting the run');
+  });
+
+  it('an engine re-verify FAILURE on the lifted tree stays failed — an unverified tree is never offered a post-hoc push', async () => {
+    const app = buildApp([view({ status: 'failed', units: withDeliver(engineReverifyFailed) })]);
+    apps.push(app);
+    await app.ready();
+    const body = (await app.inject({ method: 'GET', url: `/api/v1/runs/${RUN_ID}` })).json() as {
+      run: { session: Record<string, unknown> };
+    };
+    expect(body.run.session['status']).toBe('failed');
+    expect(body.run.session['delivery']).toBe('none');
+  });
 });

@@ -17,6 +17,7 @@ import { CoreAdapter } from '../../src/core/adapter.js';
 import { createServer } from '../../src/api/server.js';
 import type { EvidenceBundle } from '../../src/api/evidence.js';
 import { removeScratch } from '../setup/scratch.js';
+import { baseSkillOff } from '../setup/base-skill-off.js';
 
 interface Frame {
   type: string;
@@ -64,6 +65,7 @@ const RUN_ID = 'it-evidence-1';
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'crew-evidence-'));
   adapter = new CoreAdapter({ dbPath: join(dir, 'core.db'), stub: true });
+  baseSkillOff(); // run mechanics, not grounding — no published generation here (see tests/setup/base-skill-off.ts)
   app = await createServer(adapter);
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
@@ -137,8 +139,10 @@ describe('GET /runs/:id/evidence', () => {
     expect(bundle.session.problem).toBe('Do step one. Do step two');
 
     // Units in `ord` order, carrying the full unit DTO (not a trimmed projection).
-    expect(bundle.units.length).toBe(2);
-    expect(bundle.units.map((u) => u.ord)).toEqual([1, 2]);
+    // Engine-version-tolerant (wicked-core D-11, core-ts 0.7.27): free text plans ONE unit from
+    // 0.7.27 and one per sentence before it — pin "≥ 1 unit, ords 1..n in order", not the count.
+    expect(bundle.units.length).toBeGreaterThanOrEqual(1);
+    expect(bundle.units.map((u) => u.ord)).toEqual(bundle.units.map((_, i) => i + 1));
     const [first] = bundle.units;
     expect(first?.id).toBe(`${RUN_ID}:u1`);
     expect(first?.session_id).toBe(RUN_ID);
