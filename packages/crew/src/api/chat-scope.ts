@@ -43,9 +43,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync,
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { CoreAdapter } from '../core/adapter.js';
+import { execCapped } from '../core/exec.js';
 import { codeGraphDb } from '../core/repoPaths.js';
 import type { ChatScope, ChatScopeRepo, RepoEntry } from '../core/types.js';
-import { resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
+import { estateExe, parseEstateTotals, resolveProjectGraphBinding, type ProjectGraphBindingDecision } from '../projects/graph.js';
 import type { ChatRefusalSource } from './seat-standing.js';
 
 /** The engine's per-seat answer to `chatOpen` (`ChatSeatOutcome` on the wire). */
@@ -97,6 +98,17 @@ export interface ChatScopeDeps {
   /** Where a registered root the daemon cannot resolve — and that is NOT in this chat's scope nor
    *  lexically near the base — is noted instead of refusing the open (hardening, W7). */
   log?: (msg: string) => void;
+  /**
+   * Entity count in a repo graph database — `nodes > 0` means indexed, anything else means
+   * schema-only, never indexed, or unreadable. Omitted = {@link estateEntityCount}, which probes
+   * `wicked-estate stats --db`; injectable so tests never shell out. A probe failure counts as 0
+   * (ungrounded — the gate fails CLOSED). crew#642.
+   *
+   * The default is applied by `ownGraph` itself, not only by {@link chatScopeDeps}: a constructor
+   * that omits this must not silently skip the liveness gate and report a schema-only database as
+   * grounded, which is the very defect crew#642 fixed (review of #651).
+   */
+  entityCount?: (dbPath: string) => Promise<number>;
 }
 
 let processScratchBase: string | undefined;
@@ -219,7 +231,27 @@ export function chatScopeDeps(adapter: CoreAdapter): ChatScopeDeps {
     // reading the scoped roots — never "this repo-less run gets no code graph".
     bindProjectGraph: (projectId, repoRef) =>
       resolveProjectGraphBinding(adapter, projectId, repoRef, process.env, { subject: 'chat' }),
+    entityCount: estateEntityCount,
   };
+}
+
+/**
+ * crew#642 — the production entity-count probe: `wicked-estate stats --db <path>` parsed for its
+ * `nodes` count. `nodes > 0` means indexed; anything else means schema-only, never indexed, or
+ * unreadable. A probe failure (missing binary, timeout, unparseable output) counts as 0, so the
+ * liveness gate fails CLOSED — an unanswerable graph reads ungrounded, never grounded.
+ *
+ * Exported and used as `ownGraph`'s DEFAULT (review of #651): the contract on
+ * `ChatScopeDeps.entityCount` promises this behaviour when the dep is omitted, so the promise is
+ * kept where the value is USED rather than only where the deps happen to be built.
+ */
+export async function estateEntityCount(dbPath: string): Promise<number> {
+  try {
+    const { stdout } = await execCapped(estateExe(process.env), ['stats', '--db', dbPath], { timeout: 15_000 });
+    return parseEstateTotals(stdout)?.nodes ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** The route's own id rule, re-applied here: the id becomes ONE path segment under the base. */
@@ -426,14 +458,14 @@ async function graphForRepos(
     // no-project path takes — rather than hand the engine no graph behind a reason that promises
     // one (Copilot, #518). Both reasons are kept: why the project graph was declined, and what
     // the chat actually got.
-    const own = ownGraph(repos[0]!);
+    const own = await ownGraph(repos[0]!, deps.entityCount);
     return {
       wire: { bound: own.wire.bound, reason: `${decision.reason} ${own.wire.reason}` },
       dbPath: own.dbPath,
     };
   }
   if (repos.length === 1) {
-    return ownGraph(repos[0]!);
+    return ownGraph(repos[0]!, deps.entityCount);
   }
   return {
     wire: {
@@ -447,8 +479,13 @@ async function graphForRepos(
   };
 }
 
-/** A single repo's OWN graph — bound only when the registered graph file exists. */
-function ownGraph(only: RepoEntry): { wire: ChatScope['graph']; dbPath: string | null } {
+/** A single repo's OWN graph — bound only when the registered graph file exists AND holds entities.
+ *  crew#642: a zero-byte or schema-only estate.db is not grounded. The probe DEFAULTS to
+ *  {@link estateEntityCount} (review of #651): omitting the dep must not skip the gate. */
+async function ownGraph(
+  only: RepoEntry,
+  entityCount: (dbPath: string) => Promise<number> = estateEntityCount,
+): Promise<{ wire: ChatScope['graph']; dbPath: string | null }> {
   try {
   const dbPath = codeGraphDb(only);
     // The registry field says WHERE the repo's graph lives, not that it was ever built
@@ -461,6 +498,23 @@ function ownGraph(only: RepoEntry): { wire: ChatScope['graph']; dbPath: string |
           bound: false,
           reason:
             `'${only.name}' has no code graph built yet (nothing at its registered graph path); ` +
+            'index the repo (wicked-estate index / onboarding) to ground this chat. This chat gets none.',
+        },
+        dbPath: null,
+      };
+    }
+    // crew#642: existence is necessary but not sufficient — a schema-only or never-indexed
+    // estate.db holds no entities. The seat would fall back to grep and burn its whole turn budget.
+    // Grounded is the NARROW case (a finite count above zero); every other answer — 0, a negative
+    // count, NaN from an unparseable probe — is ungrounded, because this gate fails closed.
+    const nodes = await entityCount(dbPath);
+    if (nodes <= 0 || !Number.isFinite(nodes)) {
+      return {
+        wire: {
+          bound: false,
+          reason:
+            `'${only.name}' has a code graph file but it holds no entities ` +
+            '(a schema-only or never-indexed estate.db); ' +
             'index the repo (wicked-estate index / onboarding) to ground this chat. This chat gets none.',
         },
         dbPath: null,
